@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-orchestrator.local/schemas/task-state.schema.json",
+  "title": "AgentOrchestrator single-task state",
+  "description": "Structural contract for a single orchestrated task (contract version 1). Generated from the Zod schema in src/core/task-state.ts by `npm run schema:generate` — do not edit by hand. State-dependent invariants (blockedAgent/resumeFrom consistency, review-budget bounds, terminal-state settlement) are NOT expressible in JSON Schema and are enforced only by TaskStateSchema at runtime.",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repositoryId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repositoryRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worktreePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "CREATED",
+        "REPOSITORY_RESOLVED",
+        "CONFIG_VALIDATED",
+        "AUTH_PREFLIGHT",
+        "GIT_PREFLIGHT",
+        "WORKTREE_READY",
+        "CONTEXT_LOADING",
+        "IMPLEMENTING",
+        "VERIFYING",
+        "REVIEWING",
+        "REMEDIATING",
+        "READY_FOR_PR",
+        "BLOCKED_AUTH",
+        "BLOCKED_USAGE_LIMIT",
+        "BLOCKED_VERIFY",
+        "SCOPE_VIOLATION",
+        "RESUME_STATE_DIVERGED",
+        "HUMAN_DECISION_REQUIRED",
+        "ABORTED"
+      ]
+    },
+    "stateEnteredAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+    },
+    "baseBranch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "basePinnedCommit": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "workBranch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "currentCommit": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reviewRound": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "maxReviewRounds": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "blockedAgent": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resumeFrom": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "phase": {
+              "type": "string",
+              "enum": [
+                "IMPLEMENT",
+                "VERIFY",
+                "REVIEW",
+                "REMEDIATE"
+              ]
+            },
+            "round": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "phase",
+            "round"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reportedResetAt": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "worktreeCleanAtCheckpoint": {
+      "type": "boolean"
+    },
+    "findingHistory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "round": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "fingerprint": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "round",
+          "severity",
+          "fingerprint"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "taskId",
+    "repositoryId",
+    "repositoryRoot",
+    "worktreePath",
+    "state",
+    "stateEnteredAt",
+    "baseBranch",
+    "basePinnedCommit",
+    "workBranch",
+    "currentCommit",
+    "reviewRound",
+    "maxReviewRounds",
+    "blockedAgent",
+    "resumeFrom",
+    "reportedResetAt",
+    "worktreeCleanAtCheckpoint",
+    "findingHistory"
+  ],
+  "additionalProperties": false
+}

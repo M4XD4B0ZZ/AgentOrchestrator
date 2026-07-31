@@ -1,0 +1,5 @@
+# Normalise to LF in the index and in the working tree on every platform.
+# The schema-drift test compares schemas/task-state.schema.json byte-for-byte
+# against freshly generated content, which always uses LF — a CRLF checkout
+# would fail that test on Windows.
+* text=auto eol=lf

@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Diagnostics produced by `agent-loop doctor` — never commit these.
+.diagnostics/
+
+# Test / coverage output
+coverage/
+.vitest/
+*.lcov
+
+# Environment files — never commit these.
+.env
+.env.*
+!.env.example
+
+# Local temporary files
+tmp/
+temp/
+*.tmp
+*.log
+
+# Local orchestrator runtime state (should live outside the repo, but be safe)
+.agent-orchestrator/
+
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE / editor local files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
