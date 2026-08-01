@@ -22,6 +22,12 @@
  *    one variable with two values, and choosing between them would be choosing
  *    by insertion order. That case is refused rather than resolved
  *    (AO-FOUNDATION-REM-003A-RR-01): see {@link ProbeEnvironmentCollisionError}.
+ *  - **Read once, decide afterwards.** The source is enumerated a single time
+ *    and only its own enumerable string-named properties are taken, through
+ *    their descriptors. No getter in the source ever runs, so nothing the source
+ *    does while being read can remove a collision or change a value
+ *    (AO-FOUNDATION-REM-003A-R1-REVIEW-01/-02): see
+ *    {@link ProbeEnvironmentUnreadableError}.
  *
  * Hard rules:
  *  - Pure. Neither `process.env`, nor the caller's map, nor a previously
@@ -222,6 +228,41 @@ const POLICY_ALLOWLIST: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = Ob
 /** Thrown when a caller asks for a policy that does not exist. */
 export class UnknownProbeEnvPolicyError extends Error {}
 
+/** The one text the unreadable-source error ever carries. No name, no value. */
+export const PROBE_ENV_UNREADABLE_MESSAGE =
+  'The source environment could not be read as a stable set of plain variables, so no probe ' +
+  'environment was built. Details are withheld because they would be environment data.';
+
+/** The one code the unreadable-source error ever carries. */
+export const PROBE_ENV_UNREADABLE_CODE = 'PROBE_ENV_UNREADABLE';
+
+/**
+ * Thrown when the source environment cannot be reduced to a stable set of plain
+ * variables (AO-FOUNDATION-REM-003A-R1-REVIEW-01).
+ *
+ * An environment is a set of names and string values. A source that only answers
+ * through code — an accessor under an allow-listed name, a proxy trap that
+ * throws, a key that is listed but has no descriptor — is not that, and there is
+ * no safe way to turn it into one: running the code would let the source observe
+ * which variables a policy asks for and change its own shape while it is being
+ * read. So it is refused instead, before any of it is used.
+ *
+ * Like {@link ProbeEnvironmentCollisionError} this carries a static message and
+ * nothing else: it is raised *while* reading an environment, so any further
+ * detail — the name, the value, the text a getter or trap threw — would be
+ * environment data in an error object. The foreign error is dropped entirely
+ * rather than attached as a `cause`.
+ */
+export class ProbeEnvironmentUnreadableError extends Error {
+  /** Fixed, allow-listed code. Never derived from an environment. */
+  readonly code = PROBE_ENV_UNREADABLE_CODE;
+
+  constructor() {
+    super(PROBE_ENV_UNREADABLE_MESSAGE);
+    this.name = 'ProbeEnvironmentUnreadableError';
+  }
+}
+
 /** The one text the collision error ever carries. Contains no name, no value. */
 export const PROBE_ENV_COLLISION_MESSAGE =
   'The source environment holds more than one spelling of the same variable, so the ' +
@@ -271,60 +312,120 @@ function rejectUnknownPolicy(): never {
 }
 
 /**
- * Reads one variable out of a caller-supplied environment.
+ * What one own, enumerable, string-named property of the source turned out to
+ * be, captured once and never looked up again.
  *
- * On Windows the real environment block is case-insensitive, so `Node_Options`
- * and `NODE_OPTIONS` are the same variable and a policy must not be evadable by
- * changing the spelling. A plain object — which is what a caller or a test hands
- * in — does not have that behaviour, so it is applied here. On POSIX, where
- * `path` and `PATH` genuinely are two different variables, the match stays
- * exact: matching case-insensitively there would *add* a variable the caller
- * never set, so no Windows collision logic runs there at all.
- *
- * ── Why a second spelling is a hard error (AO-FOUNDATION-REM-003A-RR-01) ─────
- *
- * A plain object can hold `Path` **and** `pAtH`, which the Windows environment
- * block itself could never do. Picking one of them means picking by insertion
- * order — `Object.entries` enumerates string keys in insertion order — so the
- * same two variables in the other order would start the probe with the other
- * value. That is not a policy decision, it is an accident of how the caller
- * happened to build its map, so every ambiguous case fails closed instead:
- *
- *  - no case-insensitive match  → the variable is simply not forwarded;
- *  - exactly one                → forwarded under the canonical allow-list name;
- *  - more than one              → {@link ProbeEnvironmentCollisionError}.
- *
- * The exactly-canonical spelling gets no precedence either: `{ PATH, Path }` is
- * as ambiguous as `{ Path, pAtH }`, because on Windows those are one variable
- * with two values and this process cannot know which one the caller meant.
- * Counting is done over the source's **own enumerable keys** and never over a
- * direct property read, so a case-insensitive host object (`process.env` on
- * Windows) is counted once rather than twice.
- *
- * An empty value counts as absent, exactly as {@link presenceOf} treats it: it
- * can neither locate a program nor authenticate anything. It is still a *key*,
- * though, so `{ PATH: '', Path: 'x' }` is a collision and not a tie-break.
- *
- * @throws ProbeEnvironmentCollisionError on Windows, when the source holds two
- * or more keys that name this variable.
+ * An accessor is recorded as *the fact that it is one*, without its value: the
+ * getter is not run (see {@link snapshotAllowlistProperties}).
  */
-function lookupEnvValue(source: NodeJS.ProcessEnv, name: string): string | undefined {
-  if (process.platform !== 'win32') {
-    // POSIX: `PATH`, `Path` and `path` are three variables. Exact match only.
-    const direct = source[name];
-    return direct !== undefined && direct !== '' ? direct : undefined;
+type EnvProperty =
+  | { readonly kind: 'data'; readonly value: unknown }
+  | { readonly kind: 'accessor' };
+
+/**
+ * Takes the one snapshot of the source this module ever works from
+ * (AO-FOUNDATION-REM-003A-R1-REVIEW-01/-02).
+ *
+ * ── Why a snapshot, and why exactly one ────────────────────────────────────
+ *
+ * The environment a probe receives must be a function of what the source *was*,
+ * not of the order in which this module happened to ask about it. Reading the
+ * source repeatedly — once per allow-listed name, as this used to — makes the
+ * result depend on what the source does between two reads, and a source can do
+ * things: an own enumerable getter under `Path` may delete `pAtH` when it is
+ * read, and the case-insensitive collision that existed at the start of the call
+ * is gone by the time the next name is looked at. That was observable: with the
+ * getter defined first the collision disappeared and a `PATH` was forwarded;
+ * with the alias defined first the same two variables were refused.
+ *
+ * So the source is enumerated **once**, each relevant key's descriptor is read
+ * **once**, and every later decision — collisions, values — is made against the
+ * captured result. Nothing the source does afterwards can reach the outcome,
+ * because nothing is asked of it afterwards.
+ *
+ * ── What counts as a variable ──────────────────────────────────────────────
+ *
+ * Only the source's **own, enumerable, string-named** properties. That is
+ * exactly what a real environment block is, and it is what the caller can see in
+ * its own map:
+ *
+ *  - inherited properties are ignored — `Object.create({ PATH })` describes a
+ *    prototype, not an environment, and forwarding it would hand a probe a
+ *    variable the caller never set (this used to happen on POSIX, where the
+ *    lookup was a plain `source[name]` read);
+ *  - non-enumerable properties are ignored, for the same reason: they are not
+ *    part of what the object presents as its contents;
+ *  - symbol-keyed properties are ignored — an environment variable has a name.
+ *
+ * ── Why getters are never run ──────────────────────────────────────────────
+ *
+ * A property is captured through its descriptor, so a data property yields its
+ * value and an accessor yields only the knowledge that it is an accessor. Its
+ * getter is not called here and is not called later either: an accessor under an
+ * allow-listed name is refused by {@link createProbeEnv}. Code that runs while
+ * the environment is being read could delete a colliding alias, alter another
+ * value, throw a secret, or make the answer depend on iteration order — and none
+ * of that has to be reasoned about if it never runs.
+ *
+ * Anything that makes the source unreadable as a plain set of variables — a
+ * throwing `ownKeys` or `getOwnPropertyDescriptor` trap, or a key that is listed
+ * but has no descriptor — fails closed as
+ * {@link ProbeEnvironmentUnreadableError}, with the foreign error dropped rather
+ * than wrapped.
+ *
+ * Only keys the policy could actually forward are captured. A credential
+ * variable is not merely dropped from the output — its value is never held here
+ * at all.
+ *
+ * @param caseInsensitive `true` on Windows, where the environment block folds
+ * case and `Path` and `pAtH` are one variable; `false` on POSIX, where they are
+ * two and only an exact name matches.
+ * @returns canonical allow-list name → every own enumerable property of the
+ * source that names it. More than one entry is the Windows collision case.
+ */
+function snapshotAllowlistProperties(
+  source: NodeJS.ProcessEnv,
+  allowlist: readonly string[],
+  caseInsensitive: boolean,
+): ReadonlyMap<string, readonly EnvProperty[]> {
+  const wanted = new Map<string, string>();
+  for (const name of allowlist) wanted.set(caseInsensitive ? name.toUpperCase() : name, name);
+
+  let ownKeys: readonly (string | symbol)[];
+  try {
+    ownKeys = Reflect.ownKeys(source as object);
+  } catch {
+    // The thrown value is deliberately not inspected, rethrown or attached: it
+    // comes from the source and may be anything, including a secret.
+    throw new ProbeEnvironmentUnreadableError();
   }
 
-  const wanted = name.toUpperCase();
-  let matches = 0;
-  let value: string | undefined;
-  for (const [key, candidate] of Object.entries(source)) {
-    if (key.toUpperCase() !== wanted) continue;
-    matches += 1;
-    if (matches > 1) throw new ProbeEnvironmentCollisionError();
-    if (candidate !== undefined && candidate !== '') value = candidate;
+  const found = new Map<string, EnvProperty[]>();
+  for (const key of ownKeys) {
+    // A symbol is not a variable name.
+    if (typeof key !== 'string') continue;
+    const canonical = wanted.get(caseInsensitive ? key.toUpperCase() : key);
+    // Nothing a policy could forward, so nothing worth reading.
+    if (canonical === undefined) continue;
+
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(source, key);
+    } catch {
+      throw new ProbeEnvironmentUnreadableError();
+    }
+    // Enumerated as own, yet has no own descriptor: the source contradicts
+    // itself, so there is no stable set of variables to build from.
+    if (descriptor === undefined) throw new ProbeEnvironmentUnreadableError();
+    if (descriptor.enumerable !== true) continue;
+
+    const property: EnvProperty =
+      'value' in descriptor ? { kind: 'data', value: descriptor.value } : { kind: 'accessor' };
+    const matches = found.get(canonical);
+    if (matches === undefined) found.set(canonical, [property]);
+    else matches.push(property);
   }
-  return value;
+  return found;
 }
 
 /**
@@ -334,16 +435,55 @@ function lookupEnvValue(source: NodeJS.ProcessEnv, name: string): string | undef
  * canonical spelling, and is a new frozen object on every call. The source map
  * is read for nothing else and is never modified.
  *
+ * ── The two phases ─────────────────────────────────────────────────────────
+ *
+ * The source is snapshotted once (see {@link snapshotAllowlistProperties}), and
+ * then:
+ *
+ *  1. **every** allow-listed name is checked for ambiguity, before a single
+ *     value is used;
+ *  2. only then is each unambiguous name's value taken, out of the one
+ *     descriptor captured for it.
+ *
+ * The order matters: it is what makes a collision on the seventh name refuse the
+ * whole environment rather than the first six values already having been read
+ * out of a source that was watching.
+ *
+ * ── Why a second spelling is a hard error (AO-FOUNDATION-REM-003A-RR-01) ────
+ *
+ * On Windows the environment block is case-insensitive, so `Node_Options` and
+ * `NODE_OPTIONS` are one variable and a policy must not be evadable by changing
+ * the spelling. A plain object can hold `Path` **and** `pAtH`, which the Windows
+ * block itself could never do, and picking one of them would be picking by
+ * insertion order. That is not a policy decision, so every ambiguous case fails
+ * closed instead:
+ *
+ *  - no case-insensitive match  → the variable is simply not forwarded;
+ *  - exactly one                → forwarded under the canonical allow-list name;
+ *  - more than one              → {@link ProbeEnvironmentCollisionError}.
+ *
+ * The exactly-canonical spelling gets no precedence either: `{ PATH, Path }` is
+ * as ambiguous as `{ Path, pAtH }`. On POSIX `path` and `PATH` genuinely are two
+ * variables, so the match is exact and the ambiguity cannot arise: matching
+ * case-insensitively there would *add* a variable the caller never set.
+ *
+ * An empty value counts as absent, exactly as {@link presenceOf} treats it: it
+ * can neither locate a program nor authenticate anything. It is still a *key*,
+ * though, so `{ PATH: '', Path: 'x' }` is a collision and not a tie-break. A
+ * value that is not a string is not an environment value and is likewise not
+ * forwarded — while still counting as a key.
+ *
  * Either the whole environment is built or none of it is. The map under
  * construction is local to this call and is only ever reachable through the
- * `return`, so a collision on the fifth allow-listed name discards the four
- * values already resolved rather than handing back a partial environment
- * (AO-FOUNDATION-REM-003A-RR-01).
+ * `return`, so a refusal discards whatever was already resolved rather than
+ * handing back a partial environment.
  *
  * @throws UnknownProbeEnvPolicyError for a name outside
  * {@link PROBE_ENV_POLICIES}.
  * @throws ProbeEnvironmentCollisionError when the source holds two spellings of
  * one allow-listed variable on Windows. Nothing is returned in that case.
+ * @throws ProbeEnvironmentUnreadableError when the source cannot be read as a
+ * plain set of variables, or answers an allow-listed name with an accessor.
  */
 export function createProbeEnv(
   policy: ProbeEnvPolicy,
@@ -351,13 +491,31 @@ export function createProbeEnv(
 ): NodeJS.ProcessEnv {
   if (!isProbeEnvPolicy(policy)) rejectUnknownPolicy();
 
+  const allowlist = POLICY_ALLOWLIST[policy];
+  const properties = snapshotAllowlistProperties(
+    source,
+    allowlist,
+    process.platform === 'win32',
+  );
+
+  // Phase 1. Driven by the allow-list rather than by the source, so the verdict
+  // covers every name a policy could forward before any of them is used. On
+  // POSIX a name has at most one exact key, so this can only ever pass there.
+  for (const name of allowlist) {
+    const matches = properties.get(name);
+    if (matches !== undefined && matches.length > 1) throw new ProbeEnvironmentCollisionError();
+  }
+
+  // Phase 2. Every value comes out of the single descriptor captured for its
+  // key; the source is not consulted again, so no prototype fallback and no
+  // late mutation can change what a probe is started with.
   const env: NodeJS.ProcessEnv = {};
-  // Driven by the allow-list rather than by the source, so the output can only
-  // ever hold canonical names and two spellings of one variable cannot both
-  // survive into it.
-  for (const name of POLICY_ALLOWLIST[policy]) {
-    const value = lookupEnvValue(source, name);
-    if (value !== undefined) env[name] = value;
+  for (const name of allowlist) {
+    const property = properties.get(name)?.[0];
+    if (property === undefined) continue;
+    if (property.kind !== 'data') throw new ProbeEnvironmentUnreadableError();
+    const value = property.value;
+    if (typeof value === 'string' && value !== '') env[name] = value;
   }
   return Object.freeze(env);
 }
