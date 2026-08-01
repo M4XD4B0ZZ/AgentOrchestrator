@@ -12,6 +12,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { PROBE_ENV_POLICIES } from '../src/auth/env-guard.js';
 import {
   CAPABILITY_PROBES,
   classifyProbe,
@@ -36,6 +37,7 @@ const probe: CapabilityProbe = {
   program: 'claude',
   args: ['auth', 'status', '--help'],
   required: true,
+  envPolicy: 'capability:claude',
 };
 
 const RUN_ID = '20260801T123456789Z-3f2a0c11-1111-2222-3333-444455556666';
@@ -73,6 +75,33 @@ describe('the probe list stays static and allow-listed', () => {
 
   it('is frozen, so no caller can append a probe of its own', () => {
     expect(Object.isFrozen(CAPABILITY_PROBES)).toBe(true);
+  });
+
+  /**
+   * AO-FOUNDATION-REM-003A. Every probe states the environment it is started
+   * with, at the place it is defined. A probe without a policy would have to
+   * fall back to some default block, which is exactly the shared child
+   * environment this remediation removed.
+   */
+  it('declares an explicit capability environment policy for every probe', () => {
+    for (const p of CAPABILITY_PROBES) {
+      expect(PROBE_ENV_POLICIES).toContain(p.envPolicy);
+      // A capability probe reports what a program *is*, never who is logged
+      // into it, so an auth policy here would be a category error.
+      expect(p.envPolicy.startsWith('capability:')).toBe(true);
+    }
+  });
+
+  it('gives each provider its own policy rather than one shared block', () => {
+    const policyOf = (program: string): string[] => [
+      ...new Set(CAPABILITY_PROBES.filter((p) => p.program === program).map((p) => p.envPolicy)),
+    ];
+
+    expect(policyOf('node')).toEqual(['capability:generic']);
+    expect(policyOf('npm')).toEqual(['capability:generic']);
+    expect(policyOf('git')).toEqual(['capability:generic']);
+    expect(policyOf('claude')).toEqual(['capability:claude']);
+    expect(policyOf('codex')).toEqual(['capability:codex']);
   });
 });
 
@@ -199,7 +228,13 @@ describe('version extraction is probe-specific and fully anchored', () => {
     expect(record.facts.version).toBeNull();
 
     const facts = deriveCapabilityFacts(
-      { id: 'node.version', program: 'node', args: ['--version'], required: true },
+      {
+        id: 'node.version',
+        program: 'node',
+        args: ['--version'],
+        required: true,
+        envPolicy: 'capability:generic',
+      },
       commandResult({ stdout: '', stderr: 'v24.18.1\n' }),
     );
     expect(facts.version).toBeNull();

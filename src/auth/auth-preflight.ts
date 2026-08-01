@@ -13,8 +13,11 @@
  *  - Credential stores (`~/.codex/auth.json`, `.claude/.credentials.json`, the
  *    OS keychain, …) are **never** read. Only the CLIs' own status commands
  *    are consulted.
- *  - Status commands run in the sanitised child environment, so an API key in
- *    the parent environment cannot make a check pass.
+ *  - Each status command runs in its **own** environment, built from that
+ *    provider's policy (AO-FOUNDATION-REM-003A). The two probes never share a
+ *    map, neither carries a credential variable, and neither carries the other
+ *    provider's variables — so no value in the parent environment can make a
+ *    check pass, and the Claude probe cannot answer for Codex or vice versa.
  *  - The status command to use is not guessed: it is confirmed against the
  *    capability dump first.
  *
@@ -72,7 +75,7 @@
  *    matching is therefore the only locally proven option.
  */
 
-import { createSanitizedChildEnv } from './env-guard.js';
+import { createProbeEnv } from './env-guard.js';
 import { runCommand, type CommandResult, type RunOptions } from '../doctor/exec.js';
 import { findRecord, probeSupportsFlag, type CapabilityRecord } from '../doctor/capabilities.js';
 import type { AgentId } from '../core/states.js';
@@ -416,22 +419,21 @@ export interface AuthAssessment {
 }
 
 /**
- * Runs both auth status checks in the sanitised child environment.
+ * Runs both auth status checks, each in its own purpose-built environment.
  *
  * The status commands are only executed once the capability dump has *proven*
  * that they exist in the installed versions.
+ *
+ * `parentEnv` is a source to derive from, never something that is forwarded:
+ * it is read only by {@link createProbeEnv}, once per provider, and neither
+ * resulting map is shared, reused or mutated.
  */
 export async function runAuthPreflight(
   capabilities: readonly CapabilityRecord[],
   parentEnv: NodeJS.ProcessEnv,
   timeoutMs?: number,
 ): Promise<AuthAssessment> {
-  const childEnv = createSanitizedChildEnv(parentEnv);
-  const options: RunOptions = {
-    env: childEnv,
-    ...(timeoutMs === undefined ? {} : { timeoutMs }),
-  };
-
+  const timeout = timeoutMs === undefined ? {} : { timeoutMs };
   const checks: AuthCheckResult[] = [];
 
   // --- Claude ---
@@ -454,7 +456,11 @@ export async function runAuthPreflight(
         fail('claude', 'UNVERIFIABLE', 'CLAUDE_JSON_MODE_UNAVAILABLE', 'claude auth status', null),
       );
     } else {
-      const result = await runCommand('claude', ['auth', 'status', '--json'], options);
+      // Built here, for this one command: the Claude auth policy is the only
+      // one that carries the profile roots the stored login lives under, and it
+      // carries no credential and nothing belonging to Codex.
+      const claudeOptions: RunOptions = { env: createProbeEnv('auth:claude', parentEnv), ...timeout };
+      const result = await runCommand('claude', ['auth', 'status', '--json'], claudeOptions);
       checks.push(evaluateClaudeAuthStatus(result));
     }
   }
@@ -466,7 +472,10 @@ export async function runAuthPreflight(
       fail('codex', 'STATUS_COMMAND_UNAVAILABLE', 'STATUS_COMMAND_UNAVAILABLE', null, null),
     );
   } else {
-    const result = await runCommand('codex', ['login', 'status'], options);
+    // A separate map from a separate policy: Codex reads its own login under
+    // the profile root and must never see an Anthropic/Claude variable.
+    const codexOptions: RunOptions = { env: createProbeEnv('auth:codex', parentEnv), ...timeout };
+    const result = await runCommand('codex', ['login', 'status'], codexOptions);
     checks.push(evaluateCodexLoginStatus(result));
   }
 

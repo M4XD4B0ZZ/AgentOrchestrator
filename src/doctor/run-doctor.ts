@@ -30,7 +30,7 @@
 import { join } from 'node:path';
 
 import { runAuthPreflight } from '../auth/auth-preflight.js';
-import { assessEnvironment, createSanitizedChildEnv } from '../auth/env-guard.js';
+import { assessEnvironment } from '../auth/env-guard.js';
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import {
   doctorDiagnosticsDir,
@@ -188,10 +188,12 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
   }
 
   // --- A. Environment guard ------------------------------------------------
-  // The child environment is derived once and reused for every probe, so no
-  // diagnostic process can ever see an API key. The parent environment and the
-  // machine's global environment are left untouched.
-  const childEnv = createSanitizedChildEnv(options.env);
+  // No child environment is derived here (AO-FOUNDATION-REM-003A). `options.env`
+  // is passed on as a *source* only: every probe builds its own minimal map from
+  // its own policy, at the point it is started. There is deliberately no shared
+  // "sanitised env" for the whole run any more, because a single block is what
+  // let one probe's credentials reach every other program. The parent
+  // environment and the machine's global environment are left untouched.
   const environmentAssessment = assessEnvironment(options.env);
 
   if (environmentAssessment.warnedCredentialVars.length > 0) {
@@ -199,13 +201,13 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
       id: 'env:credential-vars',
       title: 'API-key environment variables',
       status: 'WARN',
-      // Not execution-relevant: these four are stripped from every child
-      // environment by createSanitizedChildEnv, which is unit-tested. They are
-      // reported so the operator knows metered credentials exist here.
+      // Not execution-relevant: no probe environment can contain them at all —
+      // each one is built from a closed allow-list that names no credential.
+      // They are reported so the operator knows metered credentials exist here.
       mandatory: false,
       detail:
         `SET in the parent environment: ${environmentAssessment.warnedCredentialVars.join(', ')}. ` +
-        'Removed from every child environment, so agents cannot reach them. Values are never read or logged.',
+        'Never copied into any probe environment, so agents cannot reach them. Values are never read or logged.',
     });
   } else {
     checks.push({
@@ -214,7 +216,7 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
       status: 'PASS',
       mandatory: false,
       detail:
-        'None of the four API-key variables are set. Child environments are sanitised regardless.',
+        'None of the four API-key variables are set. No probe environment could carry them regardless.',
     });
   }
 
@@ -240,20 +242,24 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
   }
 
   checks.push({
-    id: 'env:oauth-token-preserved',
+    id: 'env:oauth-token-withheld',
     title: 'CLAUDE_CODE_OAUTH_TOKEN handling',
     status: 'PASS',
     mandatory: false,
     detail:
-      `Presence: ${environmentAssessment.preservedAuthVars[0]?.presence ?? 'NOT_SET'}. ` +
-      'This variable is deliberately preserved in child environments: it is a subscription OAuth path, not an API key.',
+      `Presence: ${environmentAssessment.withheldAuthVars[0]?.presence ?? 'NOT_SET'}. ` +
+      'It is a credential, so no diagnostic process receives it — not node, npm, git or codex, and not ' +
+      'the Claude probes either: a login check that is handed a token would only be proving its own input. ' +
+      'The value is never read or logged.',
   });
 
   // --- B. CLI capability probes -------------------------------------------
   // `runCapabilityDump` consumes each probe's raw output and returns facts
-  // only; no stdout or stderr survives this call (AO-002-R1).
+  // only; no stdout or stderr survives this call (AO-002-R1). It receives the
+  // parent environment as a source and derives a separate, policy-bound child
+  // environment per probe (AO-FOUNDATION-REM-003A).
   const capabilityOptions = {
-    env: childEnv,
+    env: options.env,
     ...(options.commandTimeoutMs === undefined ? {} : { timeoutMs: options.commandTimeoutMs }),
   };
   const capabilities = await runCapabilityDump(capabilityOptions);

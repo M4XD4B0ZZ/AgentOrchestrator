@@ -2,11 +2,16 @@ import { describe, expect, it } from 'vitest';
 
 import {
   assessEnvironment,
-  createSanitizedChildEnv,
+  createProbeEnv,
   FORBIDDEN_CHILD_ENV_VARS,
+  LOADER_INJECTION_ENV_VARS,
   OBSERVED_PROVIDER_ENV_VARS,
   presenceOf,
-  PRESERVED_AUTH_ENV_VARS,
+  probeEnvAllowlist,
+  PROBE_ENV_POLICIES,
+  UnknownProbeEnvPolicyError,
+  WITHHELD_AUTH_ENV_VARS,
+  type ProbeEnvPolicy,
 } from '../src/auth/env-guard.js';
 
 const SECRET_VALUES: Record<string, string> = {
@@ -21,57 +26,124 @@ function pollutedEnv(): NodeJS.ProcessEnv {
   return { ...SECRET_VALUES, PATH: '/usr/bin', LANG: 'en_US.UTF-8' };
 }
 
-describe('createSanitizedChildEnv', () => {
-  it('removes every forbidden API-key variable', () => {
-    const sanitized = createSanitizedChildEnv(pollutedEnv());
-    for (const name of FORBIDDEN_CHILD_ENV_VARS) {
-      expect(sanitized).not.toHaveProperty(name);
-      expect(sanitized[name]).toBeUndefined();
+describe('createProbeEnv builds, rather than cleans, an environment', () => {
+  it.each(PROBE_ENV_POLICIES)('gives %s no credential variable at all', (policy) => {
+    const env = createProbeEnv(policy, pollutedEnv());
+    for (const name of [...FORBIDDEN_CHILD_ENV_VARS, ...WITHHELD_AUTH_ENV_VARS]) {
+      expect(env).not.toHaveProperty(name);
+      expect(env[name]).toBeUndefined();
+    }
+    expect(JSON.stringify(env)).not.toContain('secret');
+  });
+
+  it.each(PROBE_ENV_POLICIES)('drops every unlisted variable for %s', (policy) => {
+    const env = createProbeEnv(policy, { ...pollutedEnv(), LANG: 'en_US.UTF-8', AO_UNKNOWN_ENV: 'x' });
+    expect(env['LANG']).toBeUndefined();
+    expect(env['AO_UNKNOWN_ENV']).toBeUndefined();
+    // Only names the policy itself allows survive.
+    for (const name of Object.keys(env)) {
+      expect(probeEnvAllowlist(policy)).toContain(name);
     }
   });
 
-  it('preserves CLAUDE_CODE_OAUTH_TOKEN, which is a subscription OAuth path', () => {
-    const sanitized = createSanitizedChildEnv(pollutedEnv());
-    expect(sanitized['CLAUDE_CODE_OAUTH_TOKEN']).toBe(SECRET_VALUES['CLAUDE_CODE_OAUTH_TOKEN']);
-    for (const name of PRESERVED_AUTH_ENV_VARS) {
-      expect(sanitized[name]).toBeDefined();
-    }
-  });
-
-  it('keeps every unrelated variable untouched', () => {
-    const sanitized = createSanitizedChildEnv(pollutedEnv());
-    expect(sanitized['PATH']).toBe('/usr/bin');
-    expect(sanitized['LANG']).toBe('en_US.UTF-8');
+  it.each(PROBE_ENV_POLICIES)('keeps %s startable by forwarding the exec contract', (policy) => {
+    const env = createProbeEnv(policy, { PATH: '/usr/bin', PATHEXT: '.CMD', COMSPEC: 'C:\\cmd.exe' });
+    expect(env['PATH']).toBe('/usr/bin');
   });
 
   it('does not mutate the input object', () => {
     const source = pollutedEnv();
     const snapshot = { ...source };
-    createSanitizedChildEnv(source);
+    for (const policy of PROBE_ENV_POLICIES) createProbeEnv(policy, source);
     expect(source).toEqual(snapshot);
-    for (const name of FORBIDDEN_CHILD_ENV_VARS) {
+    for (const name of Object.keys(SECRET_VALUES)) {
       expect(source[name]).toBe(SECRET_VALUES[name]);
     }
   });
 
-  it('returns a new object rather than the input', () => {
-    const source = pollutedEnv();
-    expect(createSanitizedChildEnv(source)).not.toBe(source);
-  });
-
   it('does not modify the real process environment', () => {
     const before = { ...process.env };
-    createSanitizedChildEnv(process.env);
+    for (const policy of PROBE_ENV_POLICIES) createProbeEnv(policy, process.env);
     expect({ ...process.env }).toEqual(before);
   });
 
-  it('is idempotent', () => {
-    const once = createSanitizedChildEnv(pollutedEnv());
-    expect(createSanitizedChildEnv(once)).toEqual(once);
+  it('returns a new, independent, frozen object every time', () => {
+    const source = pollutedEnv();
+    const first = createProbeEnv('capability:generic', source);
+    const second = createProbeEnv('capability:generic', source);
+
+    expect(first).not.toBe(source);
+    expect(first).not.toBe(second);
+    expect(first).toEqual(second);
+    expect(Object.isFrozen(first)).toBe(true);
   });
 
-  it('copes with an environment that has none of the variables', () => {
-    expect(createSanitizedChildEnv({ PATH: '/bin' })).toEqual({ PATH: '/bin' });
+  it('treats an empty value as absent rather than forwarding it', () => {
+    expect(createProbeEnv('capability:generic', { PATH: '' })).toEqual({});
+  });
+
+  it('is idempotent: re-applying a policy to its own output changes nothing', () => {
+    const once = createProbeEnv('auth:claude', pollutedEnv());
+    expect(createProbeEnv('auth:claude', once)).toEqual(once);
+  });
+
+  it('fails closed on a policy name it does not know', () => {
+    for (const unknown of ['', 'capability', 'auth:openai', 'CAPABILITY:GENERIC', 'default']) {
+      expect(() => createProbeEnv(unknown as ProbeEnvPolicy, pollutedEnv())).toThrow(
+        UnknownProbeEnvPolicyError,
+      );
+      expect(() => probeEnvAllowlist(unknown as ProbeEnvPolicy)).toThrow(UnknownProbeEnvPolicyError);
+    }
+  });
+
+  it('puts no environment data into the fail-closed error', () => {
+    let message = '';
+    try {
+      createProbeEnv('nope' as ProbeEnvPolicy, pollutedEnv());
+    } catch (error) {
+      message = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error);
+    }
+    expect(message).not.toBe('');
+    for (const value of Object.values(SECRET_VALUES)) expect(message).not.toContain(value);
+    // Not even the rejected name is echoed back.
+    expect(message).not.toContain('nope');
+  });
+
+  it('offers no way to loosen a policy at runtime', () => {
+    const allowlist = probeEnvAllowlist('capability:generic');
+    // The returned list is the policy's own array; mutating it must not be a
+    // path to a wider environment on the next call.
+    expect(() => {
+      (allowlist as string[]).push('CLAUDE_CODE_OAUTH_TOKEN');
+    }).toThrow();
+    expect(createProbeEnv('capability:generic', pollutedEnv())['CLAUDE_CODE_OAUTH_TOKEN']).toBeUndefined();
+  });
+});
+
+describe('loader and injection variables', () => {
+  const injected = (): NodeJS.ProcessEnv => ({
+    PATH: '/usr/bin',
+    NODE_OPTIONS: '--require=/tmp/evil.cjs',
+    NODE_PATH: '/tmp/evil-modules',
+    npm_config_node_options: '--require=/tmp/evil.cjs',
+    NPM_CONFIG_NODE_OPTIONS: '--require=/tmp/evil.cjs',
+  });
+
+  it.each(PROBE_ENV_POLICIES)('reaches %s with none of them', (policy) => {
+    const env = createProbeEnv(policy, injected());
+    for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'npm_config_node_options', 'NPM_CONFIG_NODE_OPTIONS']) {
+      expect(env[name]).toBeUndefined();
+    }
+    expect(JSON.stringify(env)).not.toContain('--require');
+    expect(env['PATH']).toBe('/usr/bin');
+  });
+
+  it('names no loader variable in any policy allow-list', () => {
+    for (const policy of PROBE_ENV_POLICIES) {
+      for (const allowed of probeEnvAllowlist(policy)) {
+        expect(LOADER_INJECTION_ENV_VARS).not.toContain(allowed.toUpperCase());
+      }
+    }
   });
 });
 
@@ -109,6 +181,17 @@ describe('assessEnvironment', () => {
     expect(assessment.blockingProviderFlags).toHaveLength(0);
   });
 
+  it('reports the OAuth token as observed-but-withheld, never as preserved', () => {
+    const assessment = assessEnvironment(pollutedEnv());
+    expect(assessment.withheldAuthVars).toEqual([
+      { name: 'CLAUDE_CODE_OAUTH_TOKEN', presence: 'SET' },
+    ]);
+    // Reporting its presence must not be a route to forwarding it.
+    for (const policy of PROBE_ENV_POLICIES) {
+      expect(createProbeEnv(policy, pollutedEnv())['CLAUDE_CODE_OAUTH_TOKEN']).toBeUndefined();
+    }
+  });
+
   it('reports a clean environment as clean', () => {
     const assessment = assessEnvironment({ PATH: '/bin' });
     expect(assessment.warnedCredentialVars).toHaveLength(0);
@@ -121,12 +204,14 @@ describe('assessEnvironment', () => {
     expect(assessment.blockingProviderFlags).toContain(name);
   });
 
-  it('observes provider flags without stripping them from the child env', () => {
+  it('observes provider flags without ever forwarding them to a probe', () => {
     const source = { CLAUDE_CODE_USE_BEDROCK: '1', ANTHROPIC_BASE_URL: 'https://gateway.invalid' };
-    const sanitized = createSanitizedChildEnv(source);
-    expect(sanitized['CLAUDE_CODE_USE_BEDROCK']).toBe('1');
-    expect(sanitized['ANTHROPIC_BASE_URL']).toBe('https://gateway.invalid');
     expect(assessEnvironment(source).blockingProviderFlags).toHaveLength(2);
+    for (const policy of PROBE_ENV_POLICIES) {
+      const env = createProbeEnv(policy, source);
+      expect(env['CLAUDE_CODE_USE_BEDROCK']).toBeUndefined();
+      expect(env['ANTHROPIC_BASE_URL']).toBeUndefined();
+    }
   });
 
   it('reports every observed provider flag with a presence value', () => {

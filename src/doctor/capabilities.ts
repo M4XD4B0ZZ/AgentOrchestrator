@@ -41,6 +41,7 @@
  * are `UNKNOWN` rather than a guessed `NO`.
  */
 
+import { createProbeEnv, type ProbeEnvPolicy } from '../auth/env-guard.js';
 import { runCommand, type CommandFailureCode, type CommandOutcome, type CommandResult, type RunOptions } from './exec.js';
 
 /** Programs the doctor is allowed to probe. Fixed labels, never user input. */
@@ -53,6 +54,14 @@ export interface CapabilityProbe {
   readonly args: readonly string[];
   /** Probes whose absence is a hard problem rather than just information. */
   readonly required: boolean;
+  /**
+   * The environment this probe is started with (AO-FOUNDATION-REM-003A).
+   *
+   * Declared per probe rather than derived from `program`, so the environment
+   * a process receives is visible at the place the process is configured and
+   * cannot be widened by a mapping table somewhere else.
+   */
+  readonly envPolicy: ProbeEnvPolicy;
 }
 
 /**
@@ -65,22 +74,27 @@ export interface CapabilityProbe {
  * `claude auth …` and `codex login …` sub-command help is probed rather than
  * assumed. `--help` is used throughout: it is inert and cannot start a login
  * flow, an interactive session or a model request.
+ *
+ * Every probe here is a *capability* probe: it reports what the installed
+ * program is, never who is logged into it. None of them therefore carries an
+ * auth policy — the two auth probes live in `auth-preflight.ts` and use their
+ * own, provider-specific policies.
  */
 export const CAPABILITY_PROBES: readonly CapabilityProbe[] = Object.freeze([
-  { id: 'node.version', program: 'node', args: ['--version'], required: true },
-  { id: 'npm.version', program: 'npm', args: ['--version'], required: true },
-  { id: 'git.version', program: 'git', args: ['--version'], required: true },
+  { id: 'node.version', program: 'node', args: ['--version'], required: true, envPolicy: 'capability:generic' },
+  { id: 'npm.version', program: 'npm', args: ['--version'], required: true, envPolicy: 'capability:generic' },
+  { id: 'git.version', program: 'git', args: ['--version'], required: true, envPolicy: 'capability:generic' },
 
-  { id: 'claude.version', program: 'claude', args: ['--version'], required: true },
-  { id: 'claude.help', program: 'claude', args: ['--help'], required: false },
-  { id: 'claude.auth.help', program: 'claude', args: ['auth', '--help'], required: false },
-  { id: 'claude.auth.login.help', program: 'claude', args: ['auth', 'login', '--help'], required: false },
-  { id: 'claude.auth.status.help', program: 'claude', args: ['auth', 'status', '--help'], required: true },
+  { id: 'claude.version', program: 'claude', args: ['--version'], required: true, envPolicy: 'capability:claude' },
+  { id: 'claude.help', program: 'claude', args: ['--help'], required: false, envPolicy: 'capability:claude' },
+  { id: 'claude.auth.help', program: 'claude', args: ['auth', '--help'], required: false, envPolicy: 'capability:claude' },
+  { id: 'claude.auth.login.help', program: 'claude', args: ['auth', 'login', '--help'], required: false, envPolicy: 'capability:claude' },
+  { id: 'claude.auth.status.help', program: 'claude', args: ['auth', 'status', '--help'], required: true, envPolicy: 'capability:claude' },
 
-  { id: 'codex.version', program: 'codex', args: ['--version'], required: true },
-  { id: 'codex.help', program: 'codex', args: ['--help'], required: false },
-  { id: 'codex.login.help', program: 'codex', args: ['login', '--help'], required: false },
-  { id: 'codex.login.status.help', program: 'codex', args: ['login', 'status', '--help'], required: true },
+  { id: 'codex.version', program: 'codex', args: ['--version'], required: true, envPolicy: 'capability:codex' },
+  { id: 'codex.help', program: 'codex', args: ['--help'], required: false, envPolicy: 'capability:codex' },
+  { id: 'codex.login.help', program: 'codex', args: ['login', '--help'], required: false, envPolicy: 'capability:codex' },
+  { id: 'codex.login.status.help', program: 'codex', args: ['login', 'status', '--help'], required: true, envPolicy: 'capability:codex' },
 ] as const);
 
 export type ProbeAvailability =
@@ -403,17 +417,39 @@ export function deriveCapabilityFacts(
   });
 }
 
+export interface CapabilityDumpOptions {
+  /**
+   * The environment to derive each probe's environment **from**.
+   *
+   * It is never forwarded as-is: every probe gets its own map, built by
+   * {@link createProbeEnv} from the probe's own policy. The object is only read.
+   */
+  readonly env: NodeJS.ProcessEnv;
+  readonly timeoutMs?: number;
+}
+
 /**
  * Runs every probe and returns facts only.
  *
  * The raw `CommandResult` is consumed inside the loop and never stored, so
  * there is no object graph anywhere in the doctor that still holds a probe's
  * stdout or stderr.
+ *
+ * Each iteration builds a fresh environment for exactly one probe from that
+ * probe's declared policy (AO-FOUNDATION-REM-003A). There is no shared child
+ * environment: a map is never reused between two probes, so nothing one probe
+ * is allowed to see can reach the next one.
  */
-export async function runCapabilityDump(options: RunOptions): Promise<readonly CapabilityRecord[]> {
+export async function runCapabilityDump(
+  options: CapabilityDumpOptions,
+): Promise<readonly CapabilityRecord[]> {
   const records: CapabilityRecord[] = [];
   for (const probe of CAPABILITY_PROBES) {
-    const result = await runCommand(probe.program, probe.args, options);
+    const runOptions: RunOptions = {
+      env: createProbeEnv(probe.envPolicy, options.env),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    };
+    const result = await runCommand(probe.program, probe.args, runOptions);
     records.push(
       Object.freeze({
         probe,
