@@ -6,7 +6,15 @@
  * the fixed write root in `paths.test.ts`.
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -94,7 +102,7 @@ describe('link detection', () => {
 
 describe('writeRunArtifact reports failures as fixed codes', () => {
   it.runIf(process.platform !== 'win32')(
-    'cleans up and reports when the directory is not writable',
+    'reports a fixed code when the directory is not writable',
     () => {
       const dir = makeTempDir();
       chmodSync(dir, 0o500);
@@ -104,9 +112,11 @@ describe('writeRunArtifact reports failures as fixed codes', () => {
           fileName: 'doctor-report.json',
           contents: 'x',
         });
-        expect(write.code).toBe('WRITE_FAILED');
-        expect(write.temporaryFileRemoved).toBe(true);
+        expect(write.code).toBe('OPEN_FAILED');
+        expect(write.written).toBe(false);
         expect(write.errnoCode).toMatch(/^[A-Z][A-Z0-9_]*$/);
+        // Nothing was created, so nothing has to be cleaned up.
+        expect(readdirSync(dir)).toEqual([]);
       } finally {
         chmodSync(dir, 0o700);
       }

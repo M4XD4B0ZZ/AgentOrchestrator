@@ -19,6 +19,13 @@
  * an attacker very much does. If the variable is set, its value is ignored and
  * never printed — see {@link homeOverrideWarningCode}.
  *
+ * There is no productive environment-configurable path in this module at all.
+ * `AGENT_LOOP_WORKTREES_ROOT` used to resolve here and was handed to a write
+ * probe, which made an environment value decide where the doctor created a
+ * file. It has been removed together with that probe (AO-007-R1-RR2); worktree
+ * roots return in the repository/worktree onboarding work, with their own
+ * validation, not as an unvalidated diagnostics side effect.
+ *
  * Tests point the root at a scratch directory through internal dependency
  * injection (`src/config/internal/path-provider.ts`), never through the
  * environment and never through a public CLI option.
@@ -87,18 +94,4 @@ export function homeOverrideWarningCode(
 ): typeof UNSUPPORTED_HOME_OVERRIDE_CODE | null {
   const value = env[UNSUPPORTED_HOME_OVERRIDE_VAR];
   return value !== undefined && value !== '' ? UNSUPPORTED_HOME_OVERRIDE_CODE : null;
-}
-
-/**
- * Root under which per-task Git worktrees will later be created.
- *
- * Unlike the orchestrator home this is not a write root for diagnostics — the
- * doctor only probes it — so it stays configurable.
- */
-export const DEFAULT_WORKTREES_ROOT = 'D:\\AgentWorktrees';
-
-export function worktreesRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env['AGENT_LOOP_WORKTREES_ROOT'];
-  if (override !== undefined && override.trim() !== '') return resolve(override);
-  return DEFAULT_WORKTREES_ROOT;
 }

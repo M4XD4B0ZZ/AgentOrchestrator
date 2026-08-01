@@ -18,6 +18,13 @@
  * Storage safety (AO-007): the write root is fixed to the OS user profile and
  * cannot be redirected, and each run writes into its own directory, which it
  * creates exclusively and never reuses.
+ *
+ * Run protocol (AO-007-R2-RR2): the run is append-only. Each artefact is
+ * created once, directly under its final name, through an exclusive handle —
+ * no temporary file, no rename, no hard link. When, and only when, every
+ * artefact is complete, the `COMPLETED` marker is written last. The doctor
+ * exits 0 only if that marker was created; a run without it is incomplete by
+ * definition and no consumer may read it.
  */
 
 import { join } from 'node:path';
@@ -31,7 +38,6 @@ import {
   homeOverrideWarningCode,
   orchestratorHome,
   UNSUPPORTED_HOME_OVERRIDE_VAR,
-  worktreesRoot,
 } from '../config/paths.js';
 import {
   deriveCapabilityAnswers,
@@ -41,7 +47,13 @@ import {
   type CapabilityAnswers,
   type CapabilityRecord,
 } from './capabilities.js';
-import { createRunDirectory, newRunId, removeRunDirectoryIfEmpty } from './run-directory.js';
+import {
+  completeRun,
+  COMPLETION_MARKER_FILE_NAME,
+  RUN_PROTOCOL_VERSION,
+  type RunCompletionResult,
+} from './run-completion.js';
+import { createRunDirectory, newRunId } from './run-directory.js';
 import { probeWriteAccess, type WriteAccessResult } from './write-access.js';
 import { writeRunArtifact, type RunArtifactResult } from './safe-write.js';
 import {
@@ -93,21 +105,37 @@ function artefactOf(write: RunArtifactResult): DiagnosticArtefact {
     path: write.path,
     writeCode: write.code,
     written: write.written,
-    temporaryFileRemoved: write.temporaryFileRemoved,
+    bytesWritten: write.bytesWritten,
+    synced: write.synced,
   };
 }
 
 function artefactCheck(id: string, title: string, write: RunArtifactResult): DoctorCheck {
-  const cleanupFailed = !write.temporaryFileRemoved;
   return {
     id,
     title,
-    status: write.written && !cleanupFailed ? 'PASS' : 'FAIL',
+    status: write.written ? 'PASS' : 'FAIL',
     mandatory: true,
     detail:
       `${write.code} at ${write.path}` +
       (write.errnoCode === null ? '' : ` (errno ${write.errnoCode})`) +
-      (cleanupFailed ? '; the temporary write file could not be removed.' : '.'),
+      `; ${write.bytesWritten} bytes, fsync ${write.synced ? 'applied' : 'not applied'}.`,
+  };
+}
+
+/** The closing check: the run is finished only if the marker was created. */
+function completionCheck(completion: RunCompletionResult): DoctorCheck {
+  return {
+    id: 'diagnostics:run-completed',
+    title: 'Run marked COMPLETED',
+    status: completion.completed ? 'PASS' : 'FAIL',
+    // Mandatory on purpose: without the marker the run is not consumable, so
+    // it must not exit 0 (AO-007-R2-RR2).
+    mandatory: true,
+    detail:
+      `${completion.code} at ${completion.markerPath}` +
+      (completion.errnoCode === null ? '' : ` (errno ${completion.errnoCode})`) +
+      `. Only a run carrying this marker with protocol ${completion.protocolVersion} may be consumed.`,
   };
 }
 
@@ -296,16 +324,19 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
 
   // Write probes. Reversible: each creates one uniquely named file and deletes
   // it immediately. Nothing sensitive is written.
+  //
+  // Both targets are inside the fixed orchestrator data root (or, in tests, the
+  // explicitly injected scratch root). The doctor writes nowhere else and takes
+  // no path from the environment: the former `AGENT_LOOP_WORKTREES_ROOT` probe
+  // let an environment variable name a directory the doctor would then create a
+  // file in, which is a write-anywhere primitive dressed as a diagnosis. It has
+  // been removed (AO-007-R1-RR2). Worktree roots return with the
+  // repository/worktree onboarding work, with their own validation.
   const writeAccessAssessment: WriteAccessResult[] = [
     probeWriteAccess({ label: 'diagnostics directory', path: diagDir, createIfMissing: true }),
     probeWriteAccess({
       label: 'orchestrator home',
       path: orchestratorHome(provider),
-      createIfMissing: false,
-    }),
-    probeWriteAccess({
-      label: 'worktrees root',
-      path: worktreesRoot(options.env),
       createIfMissing: false,
     }),
   ];
@@ -333,7 +364,7 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
         title: `Probe cleanup: ${probe.label}`,
         status: 'FAIL',
         mandatory: true,
-        detail: 'The temporary write-probe file could not be removed.',
+        detail: 'The write-probe file could not be removed.',
       });
     }
   }
@@ -376,7 +407,7 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
 
   // --- Assemble ------------------------------------------------------------
   const finishedAt = new Date().toISOString();
-  const reportPath = `${runDirectory.path}${runDirectory.created ? ` ` : ''}`;
+  const reportPath = join(runDirectory.path, DOCTOR_REPORT_FILE_NAME);
 
   const buildReport = (
     reportChecks: readonly DoctorCheck[],
@@ -397,47 +428,49 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
     writeAccessAssessment,
     diagnosticsDirectory: diagDir,
     runDirectory: runDirectory.path,
+    reportPath,
     diagnosticFiles,
+    runProtocolVersion: RUN_PROTOCOL_VERSION,
+    completionMarkerFile: COMPLETION_MARKER_FILE_NAME,
     todos,
   });
 
   if (!runDirectory.created) {
-    // Nothing was created, so there is nothing to clean up and nothing to
-    // persist. The failure is reported through the returned report.
+    // Nothing was created, so nothing can be persisted and no marker can be
+    // written. The mandatory run-directory check above already forces a
+    // non-zero exit; the detail is reported through the returned report.
     return buildReport(checks, artefacts);
   }
 
-  // The report references itself. The persisted copy records its own path with
-  // `written: true` because a reader can only ever see that file if the atomic
-  // finalisation succeeded; the *returned* report carries the real outcome.
-  const selfPath = join(runDirectory.path, DOCTOR_REPORT_FILE_NAME);
-  const selfReference: DiagnosticArtefact = {
-    path: selfPath,
-    writeCode: 'WRITTEN',
-    written: true,
-    temporaryFileRemoved: true,
-  };
-
+  // The persisted copy carries the checks known at the moment it is written and
+  // makes no claim about its own persistence or about the run being finished —
+  // it is written *before* the marker, so it cannot know either. The returned
+  // report, which drives the console and the exit code, gets the report-write
+  // and completion checks appended below (AO-007-R2-RR2).
   const reportWrite = writeRunArtifact({
     runDirectory: runDirectory.path,
     fileName: DOCTOR_REPORT_FILE_NAME,
-    contents: `${JSON.stringify(buildReport(checks, [...artefacts, selfReference]), null, 2)}\n`,
+    contents: `${JSON.stringify(buildReport(checks, artefacts), null, 2)}\n`,
   });
 
+  const finalChecks: DoctorCheck[] = [
+    ...checks,
+    artefactCheck('diagnostics:doctor-report', 'Doctor report written safely', reportWrite),
+  ];
   const finalArtefacts = [...artefacts, artefactOf(reportWrite)];
 
-  // If persisting the report failed, say so in the returned report (which the
-  // console renders) rather than pretending it was written.
-  if (!reportWrite.written || !reportWrite.temporaryFileRemoved) {
-    const withFailure: DoctorCheck[] = [
-      ...checks,
-      artefactCheck('diagnostics:doctor-report', 'Doctor report written safely', reportWrite),
-    ];
-    // Only this run's own leftovers are removed, and only while the directory
-    // is still empty — a directory holding an artefact is left untouched.
-    removeRunDirectoryIfEmpty(runDirectory.path);
-    return buildReport(withFailure, finalArtefacts);
+  if (!reportWrite.written) {
+    // No marker is attempted, so the run stays incomplete for good. Whatever
+    // was written is deliberately left in place for diagnosis; the missing
+    // marker is what keeps it from ever being consumed.
+    return buildReport(finalChecks, finalArtefacts);
   }
 
-  return buildReport(checks, finalArtefacts);
+  // The last step of the run, and the only thing that makes it consumable.
+  const completion = completeRun({
+    runDirectory: runDirectory.path,
+    expectedArtefacts: [CAPABILITY_SUMMARY_FILE_NAME, DOCTOR_REPORT_FILE_NAME],
+  });
+
+  return buildReport([...finalChecks, completionCheck(completion)], finalArtefacts);
 }

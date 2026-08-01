@@ -4,8 +4,9 @@
  * Every `agent-loop doctor` invocation gets its own directory:
  *
  *     <orchestrator home>/diagnostics/doctor/runs/<run-id>/
- *         doctor-report.json
  *         cli-capabilities.txt
+ *         doctor-report.json
+ *         COMPLETED              ← written last; see `run-completion.ts`
  *
  * Why this replaced the two fixed, overwritable files:
  *
@@ -24,16 +25,19 @@
  *  - the run directory is created **exclusively** (`mkdir` without `recursive`),
  *    so an already existing directory is an error, never a reuse;
  *  - links anywhere in the path abort the run before anything is created;
- *  - on failure only what *this* run created is removed: its temporary files
- *    and, if it is still empty, its own run directory. A non-empty directory is
- *    never removed, and no other run's directory is ever touched.
+ *  - **nothing is ever deleted.** The run protocol is append-only: a run
+ *    directory, once created, is never removed, emptied or reused — not even by
+ *    the run that created it and not even when it failed. An incomplete run is
+ *    left exactly as it is, as diagnostic evidence, and is excluded from
+ *    consumption by the absence of its `COMPLETED` marker rather than by
+ *    cleanup (AO-007-R2-RR2).
  *
  * Retention of completed runs is deliberately out of scope here; old runs are
  * left alone until a retention policy is implemented.
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, rmdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 import { safeErrnoCode } from '../core/safe-error.js';
@@ -157,27 +161,11 @@ export function createRunDirectory(request: RunDirectoryRequest): RunDirectoryRe
   }
 
   // The directory we just created must not be reachable through a link either.
+  // It is reported and abandoned, never removed: deleting through a link would
+  // itself be an operation at an attacker-chosen location.
   if (pathContainsLink(target)) {
-    removeRunDirectoryIfEmpty(target);
     return outcome('PATH_CONTAINS_LINK', runId, target, null);
   }
 
   return outcome('CREATED', runId, target, null);
-}
-
-/**
- * Removes the run directory if — and only if — it is still empty.
- *
- * Used to clean up after a run that created a directory but managed to write
- * nothing into it. `rmdir` without `recursive` is the point: a directory that
- * holds anything at all is left exactly as it is.
- */
-export function removeRunDirectoryIfEmpty(runDirectory: string): boolean {
-  try {
-    if (readdirSync(runDirectory).length > 0) return false;
-    rmdirSync(runDirectory);
-    return true;
-  } catch {
-    return false;
-  }
 }

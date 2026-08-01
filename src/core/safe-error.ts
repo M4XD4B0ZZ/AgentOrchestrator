@@ -8,31 +8,42 @@
  * error text can contain whatever that CLI decided to print. A global handler
  * that writes `error.message` republishes all of it.
  *
- * ── The rule (AO-002-R2) ───────────────────────────────────────────────────
+ * ── The rule (AO-002-R2-RR1) ───────────────────────────────────────────────
  *
- * Everything emitted from here comes from a **closed allow-list defined in
- * this repository**. There are exactly three sources:
+ * Everything emitted from here is a **string literal written in this
+ * repository**. There are exactly two sources:
  *
- *  1. An {@link OrchestratorError} — one of *our own* domain error classes,
- *     recognised by `instanceof` (with a globally registered symbol as a
- *     fallback for duplicate module instances, e.g. a test importing both
- *     `src` and `dist`). Its `safeMessage` is built only from the
- *     orchestrator's own vocabulary, and its class name is mapped through
- *     {@link ORCHESTRATOR_ERROR_NAMES} rather than read from `error.name`.
- *  2. An errno identifier that appears verbatim in {@link ALLOWED_ERRNO_CODES}.
- *  3. The fixed code {@link UNEXPECTED_ERROR_CODE} for everything else.
+ *  1. {@link DOMAIN_ERROR_TEXT} — a static table from a closed
+ *     {@link DomainErrorId} to a fixed sentence. The id is read from an
+ *     {@link OrchestratorError} recognised **only** by `instanceof`.
+ *  2. The fixed code {@link UNEXPECTED_ERROR_CODE} for everything else.
  *
- * What is deliberately **never** emitted:
+ * Nothing is read off the error object except that id, and the id is only used
+ * to *select* a literal from the table.
  *
+ * What is deliberately **never** emitted, in any form:
+ *
+ *  - a `safeMessage` property. The concept is gone: the earlier design let an
+ *    error supply its own display text, and recognised errors by a
+ *    `Symbol.for('agent-loop.safeMessage')` marker — a global key any object
+ *    can set on itself. Together those let a foreign object choose what the CLI
+ *    printed;
  *  - a foreign `error.name` — including `TypeError`, `SyntaxError` and friends.
  *    A name is a writable string property, so "it looks like an identifier" is
  *    not evidence of anything. Shape is never the criterion here;
  *  - a foreign `error.code`, unless the exact string is on the errno
  *    allow-list;
- *  - a foreign `error.message`, ever, in any form.
+ *  - a foreign `error.message`, ever.
+ *
+ * `instanceof` is the sole recognition test, with no duplicate-module fallback.
+ * If two copies of this package are loaded and an error crosses between them,
+ * it is reported as {@link UNEXPECTED_ERROR_CODE}. That is the intended
+ * fail-closed behaviour.
  */
 
-import { OrchestratorError, SAFE_MESSAGE } from './errors.js';
+import { isDomainErrorId, OrchestratorError, type DomainErrorId } from './errors.js';
+
+export type { DomainErrorId };
 
 /** Shown whenever an error is not positively recognised as safe to display. */
 export const WITHHELD_ERROR_TEXT =
@@ -43,59 +54,34 @@ export const WITHHELD_ERROR_TEXT =
 export const UNEXPECTED_ERROR_CODE = 'UNEXPECTED_ERROR';
 
 /**
- * The closed set of our own domain error class names.
+ * The static id → text table. This is the complete vocabulary of internal error
+ * text the orchestrator can display.
  *
- * Membership is decided by `instanceof`, never by comparing `error.name`
- * against this list: a foreign object may set any `name` it likes, but it
- * cannot make itself an instance of a class defined in this package.
+ * `Record<DomainErrorId, string>` makes the table exhaustive by construction:
+ * a new id in `DOMAIN_ERROR_IDS` does not compile until a sentence is added
+ * here, so there is no path to a missing entry at runtime.
  */
-export const ORCHESTRATOR_ERROR_NAMES = [
-  'OrchestratorError',
-  'IllegalTransitionError',
-  'InvalidResumePointError',
-] as const;
-
-export type OrchestratorErrorName = (typeof ORCHESTRATOR_ERROR_NAMES)[number];
-
-function isOrchestratorErrorName(value: unknown): value is OrchestratorErrorName {
-  return (
-    typeof value === 'string' &&
-    (ORCHESTRATOR_ERROR_NAMES as readonly string[]).includes(value)
-  );
-}
+export const DOMAIN_ERROR_TEXT: Readonly<Record<DomainErrorId, string>> = Object.freeze({
+  ORCHESTRATOR_INVARIANT_VIOLATED: 'An orchestrator invariant was violated.',
+  ILLEGAL_TRANSITION: 'The requested task-state transition is not allowed by the transition table.',
+  INVALID_RESUME_POINT:
+    'A resume point could not be parsed, or it violates the resume-point contract.',
+  TRUSTED_PROFILE_UNAVAILABLE:
+    'The trusted operating-system user profile directory could not be established, so no ' +
+    'persistent path could be resolved.',
+});
 
 /**
- * `true` for our own domain errors.
+ * The closed identity of one of *our* domain errors, or `null`.
  *
- * `instanceof` is the primary test. The symbol marker is a fallback for the one
- * case `instanceof` cannot cover — two copies of this package loaded at once —
- * and it is a `Symbol.for` key on the prototype chain of our own class, not a
- * value a plain thrown object is likely to carry by accident. Even when it
- * matches, nothing from the error is echoed except an allow-listed class name
- * and the author-provided `safeMessage`.
+ * A foreign value always yields `null`, whatever properties, symbols, names or
+ * codes it carries: the only test is `instanceof OrchestratorError`, and the id
+ * is read from a getter backed by a private field a foreign object cannot have.
  */
-function isOrchestratorError(error: unknown): error is OrchestratorError {
-  if (error instanceof OrchestratorError) return true;
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as Record<PropertyKey, unknown>)[SAFE_MESSAGE] === true &&
-    typeof (error as { safeMessage?: unknown }).safeMessage === 'string'
-  );
-}
-
-/**
- * The allow-listed class name of one of *our* domain errors, or `null`.
- *
- * A foreign error always yields `null`, whatever its `name` looks like.
- */
-export function safeErrorName(error: unknown): OrchestratorErrorName | null {
-  if (!isOrchestratorError(error)) return null;
-  const name = (error as { name?: unknown }).name;
-  // The name is only used to *select* a literal from the closed list; an
-  // unexpected value (a subclass we have not allow-listed, a tampered `name`)
-  // degrades to the base class name rather than being echoed.
-  return isOrchestratorErrorName(name) ? name : 'OrchestratorError';
+export function safeDomainErrorId(error: unknown): DomainErrorId | null {
+  if (!(error instanceof OrchestratorError)) return null;
+  const id: unknown = error.domainErrorId;
+  return isDomainErrorId(id) ? id : null;
 }
 
 /**
@@ -105,15 +91,9 @@ export function safeErrorName(error: unknown): OrchestratorErrorName | null {
  * string.
  */
 export function formatSafeError(error: unknown): string {
-  if (isOrchestratorError(error)) {
-    const safe = (error as OrchestratorError).safeMessage;
-    if (typeof safe === 'string' && safe.trim().length > 0) {
-      const name = safeErrorName(error);
-      return name === null ? safe : `[${name}] ${safe}`;
-    }
-  }
-
-  return `${WITHHELD_ERROR_TEXT} [${UNEXPECTED_ERROR_CODE}]`;
+  const id = safeDomainErrorId(error);
+  if (id === null) return `${WITHHELD_ERROR_TEXT} [${UNEXPECTED_ERROR_CODE}]`;
+  return `${DOMAIN_ERROR_TEXT[id]} [${id}]`;
 }
 
 /**
@@ -131,9 +111,10 @@ export const UNKNOWN_ERRNO_CODE = 'UNKNOWN';
  * Errno identifiers this tool can actually produce.
  *
  * Group 1 comes from the filesystem calls in `safe-write.ts`,
- * `run-directory.ts` and `write-access.ts` (`mkdir`, `open` with `wx`, `link`,
- * `rename`, `rm`, `lstat`, `readFile`). Group 2 comes from spawning diagnostic
- * child processes in `exec.ts`. Nothing else is expected, so nothing else is
+ * `run-directory.ts`, `run-completion.ts` and `write-access.ts` (`mkdir`,
+ * `open` with `wx`, `write`, `fsync`, `close`, `lstat`, `readdir`, `readFile`).
+ * Group 2 comes from spawning diagnostic child processes in `exec.ts` and in
+ * the trusted-profile resolver. Nothing else is expected, so nothing else is
  * reportable.
  */
 export const ALLOWED_ERRNO_CODES = [
@@ -142,6 +123,7 @@ export const ALLOWED_ERRNO_CODES = [
   'EBUSY',
   'EEXIST',
   'EINVAL',
+  'EIO',
   'EISDIR',
   'ELOOP',
   'EMFILE',

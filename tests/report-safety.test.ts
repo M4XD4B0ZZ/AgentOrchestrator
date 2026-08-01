@@ -22,6 +22,12 @@ import {
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import { doctorDiagnosticsDir, doctorRunsRoot } from '../src/config/paths.js';
 import { renderReportSummary } from '../src/doctor/render.js';
+import {
+  COMPLETION_MARKER_FILE_NAME,
+  inspectRun,
+  listCompletedRuns,
+  RUN_PROTOCOL_VERSION,
+} from '../src/doctor/run-completion.js';
 import { RUN_ID_PATTERN } from '../src/doctor/run-directory.js';
 import { runDoctor } from '../src/doctor/run-doctor.js';
 import { DOCTOR_REPORT_KIND, type DoctorReport, type DoctorCheck } from '../src/doctor/report.js';
@@ -75,7 +81,8 @@ describe('diagnostics land in a fresh per-run directory', () => {
     for (const artefact of report.diagnosticFiles) {
       expect(artefact.path.startsWith(report.runDirectory)).toBe(true);
       expect(artefact.writeCode).toBe('WRITTEN');
-      expect(artefact.temporaryFileRemoved).toBe(true);
+      expect(artefact.written).toBe(true);
+      expect(artefact.bytesWritten).toBeGreaterThan(0);
     }
   });
 
@@ -87,17 +94,67 @@ describe('diagnostics land in a fresh per-run directory', () => {
     const parsed = JSON.parse(reportJson) as DoctorReport;
     expect(parsed.runId).toBe(report.runId);
     expect(parsed.runDirectory).toBe(report.runDirectory);
+    expect(parsed.reportPath).toBe(join(report.runDirectory, 'doctor-report.json'));
   });
 
-  it('leaves no temporary write file behind', () => {
+  it('holds exactly the two artefacts plus the completion marker', () => {
     expect(readdirSync(report.runDirectory).sort()).toEqual([
+      COMPLETION_MARKER_FILE_NAME,
       'cli-capabilities.txt',
       'doctor-report.json',
+    ].sort());
+  });
+
+  /**
+   * AO-007-R2-RR2. The persisted report is written *before* the marker, so it
+   * cannot know whether the run finished — and must not pretend to. Before the
+   * remediation it carried a self-reference claiming `written: true` for its
+   * own file, which is a claim no document can make about itself.
+   */
+  it('makes no completion claim about itself in the persisted copy', () => {
+    const parsed = JSON.parse(reportJson) as DoctorReport;
+
+    // Its own file is not among the artefacts it reports as written.
+    for (const artefact of parsed.diagnosticFiles) {
+      expect(artefact.path).not.toBe(parsed.reportPath);
+    }
+    expect(parsed.diagnosticFiles.map((a) => a.path)).toEqual([
+      join(report.runDirectory, 'cli-capabilities.txt'),
     ]);
+
+    // No check inside the persisted copy asserts the report or the run itself
+    // completed — those are decided after it is written.
+    const ids = parsed.checks.map((c) => c.id);
+    expect(ids).not.toContain('diagnostics:doctor-report');
+    expect(ids).not.toContain('diagnostics:run-completed');
+
+    // It does name the protocol and the marker a consumer must look for.
+    expect(parsed.runProtocolVersion).toBe(RUN_PROTOCOL_VERSION);
+    expect(parsed.completionMarkerFile).toBe(COMPLETION_MARKER_FILE_NAME);
+  });
+
+  it('is recognised as a completed, consumable run', () => {
+    const inspection = inspectRun(report.runDirectory);
+    expect(inspection.code).toBe('COMPLETE');
+    expect(inspection.consumable).toBe(true);
+    expect(readFileSync(join(report.runDirectory, COMPLETION_MARKER_FILE_NAME), 'utf8').trim()).toBe(
+      RUN_PROTOCOL_VERSION,
+    );
+
+    // The returned report — the one the console and the exit code use — does
+    // carry the closing checks, and both pass.
+    expect(report.checks.find((c) => c.id === 'diagnostics:doctor-report')?.status).toBe('PASS');
+    expect(report.checks.find((c) => c.id === 'diagnostics:run-completed')?.status).toBe('PASS');
+    expect(report.overallStatus).toBe('PASS');
+    expect(summary).toContain('Run completed: yes');
   });
 
   it('gives a second run a different directory and touches neither file of the first', () => {
     const firstReport = readFileSync(join(report.runDirectory, 'doctor-report.json'), 'utf8');
+    const firstMarker = readFileSync(
+      join(report.runDirectory, COMPLETION_MARKER_FILE_NAME),
+      'utf8',
+    );
     return runDoctor({
       env: process.env,
       commandTimeoutMs: DOCTOR_TIMEOUT_MS,
@@ -106,13 +163,22 @@ describe('diagnostics land in a fresh per-run directory', () => {
       expect(second.runId).not.toBe(report.runId);
       expect(second.runDirectory).not.toBe(report.runDirectory);
       expect(second.diagnosticFiles.every((a) => a.writeCode === 'WRITTEN')).toBe(true);
+      expect(inspectRun(second.runDirectory).consumable).toBe(true);
 
-      // The first run's artefacts are untouched, byte for byte.
+      // The first run's artefacts and marker are untouched, byte for byte.
       expect(readFileSync(join(report.runDirectory, 'doctor-report.json'), 'utf8')).toBe(
         firstReport,
       );
+      expect(readFileSync(join(report.runDirectory, COMPLETION_MARKER_FILE_NAME), 'utf8')).toBe(
+        firstMarker,
+      );
       expect(readdirSync(runsRoot).length).toBeGreaterThanOrEqual(2);
       expect(readdirSync(second.runDirectory).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+
+      // Both runs are complete, so both are offered to a consumer.
+      expect(listCompletedRuns(runsRoot)).toEqual(
+        expect.arrayContaining([report.runId, second.runId]),
+      );
     });
   }, 180_000);
 
@@ -164,6 +230,56 @@ describe('AGENT_LOOP_HOME does not steer the real run', () => {
       expect(warning?.detail).toContain('UNSUPPORTED_HOME_OVERRIDE_IGNORED');
       // The value is never echoed.
       expect(JSON.stringify(run)).not.toContain(decoy);
+    } finally {
+      rmSync(realHome, { recursive: true, force: true });
+      rmSync(decoy, { recursive: true, force: true });
+    }
+  }, 180_000);
+});
+
+/**
+ * AO-007-R1-RR2: the doctor performs no environment-directed write probe.
+ *
+ * `AGENT_LOOP_WORKTREES_ROOT` used to name a directory that the doctor then
+ * created a probe file in — an environment variable deciding where the tool
+ * writes, which is the same class of defect as the removed `AGENT_LOOP_HOME`.
+ * Before the remediation this test found a probe file's directory entry
+ * created and removed, and a `write:worktrees-root` PASS in the report.
+ */
+describe('AGENT_LOOP_WORKTREES_ROOT triggers no write anywhere', () => {
+  it('never touches the named directory and never reports a worktree write', async () => {
+    const realHome = mkdtempSync(join(tmpdir(), 'agent-loop-home-wt-'));
+    const decoy = mkdtempSync(join(tmpdir(), 'agent-loop-worktrees-decoy-'));
+    const decoyBefore = readdirSync(decoy);
+    try {
+      const run = await runDoctor({
+        env: { ...process.env, AGENT_LOOP_WORKTREES_ROOT: decoy },
+        commandTimeoutMs: DOCTOR_TIMEOUT_MS,
+        ...scratchProvider(realHome),
+      });
+
+      // Nothing was created there — not a file, not a directory, not a probe
+      // file that was created and removed again (which would still prove the
+      // variable steered a write).
+      expect(readdirSync(decoy)).toEqual(decoyBefore);
+      expect(readdirSync(decoy)).toEqual([]);
+
+      // No check claims to have probed a worktree root.
+      const labels = run.writeAccessAssessment.map((p) => p.label);
+      expect(labels).toEqual(['diagnostics directory', 'orchestrator home']);
+      for (const probe of run.writeAccessAssessment) {
+        expect(probe.path.startsWith(realHome)).toBe(true);
+      }
+      expect(run.checks.map((c) => c.id)).not.toContain('write:worktrees-root');
+      for (const check of run.checks) {
+        expect(check.title.toLowerCase()).not.toContain('worktree');
+      }
+
+      // The value is never echoed — not in the report, not on the console.
+      const serialised = JSON.stringify(run);
+      expect(serialised).not.toContain(decoy);
+      expect(serialised).not.toContain('AGENT_LOOP_WORKTREES_ROOT');
+      expect(renderReportSummary(run)).not.toContain(decoy);
     } finally {
       rmSync(realHome, { recursive: true, force: true });
       rmSync(decoy, { recursive: true, force: true });

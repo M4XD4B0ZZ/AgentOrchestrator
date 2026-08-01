@@ -83,17 +83,32 @@ export function renderReportSummary(report: DoctorReport): string {
   // The exact, containment-checked run directory is named here, so the operator
   // does not have to guess where this run put anything (AO-007). Every run has
   // its own directory; nothing is ever written over a previous run.
-  lines.push('', `Run id       : ${report.runId}`, `Run directory: ${report.runDirectory}`);
+  lines.push(
+    '',
+    `Run id       : ${report.runId}`,
+    `Run directory: ${report.runDirectory}`,
+    `Run protocol : ${report.runProtocolVersion}`,
+  );
+
   lines.push('', 'Diagnostic artefacts:');
   if (report.diagnosticFiles.length === 0) {
     lines.push('  - none: no artefact could be persisted for this run.');
   }
   for (const file of report.diagnosticFiles) {
-    lines.push(`  - ${file.path}  [${file.writeCode}]`);
-    if (!file.temporaryFileRemoved) {
-      lines.push('    WARNING: a temporary write file could not be removed.');
-    }
+    lines.push(`  - ${file.path}  [${file.writeCode}, ${file.bytesWritten} bytes]`);
   }
+
+  // Completion is a fact about the directory, taken from the run's own closing
+  // check — never an assumption. A run without the marker is incomplete and
+  // must be ignored by every consumer (AO-007-R2-RR2).
+  const completion = report.checks.find((c) => c.id === 'diagnostics:run-completed');
+  lines.push(
+    '',
+    completion?.status === 'PASS'
+      ? `Run completed: yes — ${report.completionMarkerFile} written last, after every artefact.`
+      : `Run completed: NO — no valid ${report.completionMarkerFile} marker. This run is incomplete ` +
+        'and must not be consumed; its artefacts are left in place for diagnosis only.',
+  );
 
   if (report.overallStatus === 'FAIL') {
     lines.push(

@@ -18,13 +18,14 @@ import {
   deriveCapabilityAnswers,
   deriveCapabilityFacts,
   extractFlags,
+  extractProbeVersion,
   extractSubcommands,
-  extractVersion,
   KNOWN_PROGRAMS,
   probeSupportsFlag,
   RECOGNISED_FLAGS,
   RECOGNISED_SUBCOMMANDS,
   renderCapabilitySummary,
+  VERSION_PROBE_IDS,
   type CapabilityProbe,
   type CapabilityRecord,
 } from '../src/doctor/capabilities.js';
@@ -122,26 +123,110 @@ describe('token extraction is conservative', () => {
   });
 });
 
-describe('version extraction', () => {
+/**
+ * AO-002-R1-RR1: version extraction is per-probe and fully anchored.
+ *
+ * The previous implementation scanned the first non-empty line of *either*
+ * stream for anything shaped like a dotted number, for *every* probe. It
+ * therefore reported a version out of an account line, out of help prose, out
+ * of a banner and out of an unrelated tool's output. Each negative case below
+ * returned a version before the remediation; every one of them must now be
+ * `null`, which the callers surface as `UNKNOWN`.
+ */
+describe('version extraction is probe-specific and fully anchored', () => {
+  // Exactly the output of the locally installed CLIs, observed 2026-08-01.
   it.each([
-    ['v24.4.0', '24.4.0'],
-    ['codex-cli 0.146.0', '0.146.0'],
-    ['2.1.220 (Claude Code)', '2.1.220'],
-    ['git version 2.47.1.windows.1', '2.47.1'],
-    ['11.6.2', '11.6.2'],
-  ])('extracts the version from %j', (line, expected) => {
-    expect(extractVersion(line)).toBe(expected);
+    ['node.version', 'v24.18.1\n', '24.18.1'],
+    ['npm.version', '11.12.1\n', '11.12.1'],
+    ['git.version', 'git version 2.55.0.windows.3\n', '2.55.0'],
+    ['claude.version', '2.1.220 (Claude Code)\n', '2.1.220'],
+    ['codex.version', 'codex-cli 0.146.0\n', '0.146.0'],
+  ])('reads the observed %s output', (probeId, stdout, expected) => {
+    expect(extractProbeVersion(probeId, stdout)).toBe(expected);
   });
 
-  it('never copies a whole line into the report', () => {
-    expect(extractVersion(`some tool ${SENSITIVE_MARKER}`)).toBeNull();
-    expect(extractVersion(`1.2.3 ${SENSITIVE_MARKER}`)).toBe('1.2.3');
+  it('accepts the same lines with CRLF endings and surrounding blank lines', () => {
+    expect(extractProbeVersion('node.version', '\r\nv24.18.1\r\n\r\n')).toBe('24.18.1');
+    expect(extractProbeVersion('git.version', '  git version 2.43.0  \n')).toBe('2.43.0');
   });
 
-  it('returns null for empty or unrecognised output', () => {
-    expect(extractVersion('')).toBeNull();
-    expect(extractVersion('   \n  ')).toBeNull();
-    expect(extractVersion('no numbers here')).toBeNull();
+  it('extracts nothing at all from a --help probe', () => {
+    for (const probeId of [
+      'claude.help',
+      'claude.auth.help',
+      'claude.auth.login.help',
+      'claude.auth.status.help',
+      'codex.help',
+      'codex.login.help',
+      'codex.login.status.help',
+    ]) {
+      expect(VERSION_PROBE_IDS).not.toContain(probeId);
+      expect(extractProbeVersion(probeId, 'codex-cli 0.146.0\n')).toBeNull();
+      expect(extractProbeVersion(probeId, '  --json  Output as JSON (since 1.2.3)\n')).toBeNull();
+    }
+  });
+
+  it.each([
+    ['an account line carrying a version', 'node.version', `Account ${SENSITIVE_MARKER}@example.test plan 9.8.7\n`],
+    ['an account line on the claude probe', 'claude.version', 'Account marker@example.test plan 9.8.7\n'],
+    ['a help line carrying a version', 'node.version', '  -v, --version   print Node.js version v24.18.1\n'],
+    ['banner text before the version', 'claude.version', 'Claude Code CLI\n2.1.220 (Claude Code)\n'],
+    ['a banner glued in front of the version', 'codex.version', 'welcome! codex-cli 0.146.0\n'],
+    ['text after the version', 'node.version', 'v24.18.1 (unsupported build)\n'],
+    ['a marker after a formally valid version', 'npm.version', `11.12.1 ${SENSITIVE_MARKER}\n`],
+    ['a marker before a formally valid version', 'npm.version', `${SENSITIVE_MARKER} 11.12.1\n`],
+    ['several non-empty lines', 'npm.version', '11.12.1\nnotice: update available 12.0.0\n'],
+    ['a second line on the git probe', 'git.version', 'git version 2.55.0.windows.3\nextra 1.2.3\n'],
+    ['another probe id’s output format', 'node.version', 'git version 2.55.0.windows.3\n'],
+    ['yet another probe id’s output format', 'codex.version', '2.1.220 (Claude Code)\n'],
+    ['the npm format on the node probe', 'node.version', '24.18.1\n'],
+    ['a changed CLI output format', 'claude.version', 'claude-code version 2.1.220\n'],
+    ['a two-part version', 'node.version', 'v24.18\n'],
+    ['a four-part version', 'node.version', 'v24.18.1.2\n'],
+    ['a pre-release suffix', 'node.version', 'v24.18.1-nightly20260801\n'],
+    ['empty output', 'node.version', ''],
+    ['whitespace only', 'node.version', '   \n  \n'],
+    ['no numbers at all', 'node.version', 'command not found\n'],
+    ['an unregistered probe id', 'perl.version', 'v24.18.1\n'],
+  ])('yields null for %s', (_label, probeId, stdout) => {
+    expect(extractProbeVersion(probeId, stdout)).toBeNull();
+  });
+
+  it('ignores a version in stderr when stdout is what the probe should print', () => {
+    // `deriveCapabilityFacts` passes only stdout, and this is why: a version on
+    // stderr is not the expected output of these probes.
+    const record = recordFrom('', 'v24.18.1\n');
+    expect(record.facts.version).toBeNull();
+
+    const facts = deriveCapabilityFacts(
+      { id: 'node.version', program: 'node', args: ['--version'], required: true },
+      commandResult({ stdout: '', stderr: 'v24.18.1\n' }),
+    );
+    expect(facts.version).toBeNull();
+  });
+
+  it('reports only a bare numeric triple, never a word from the line', () => {
+    for (const probeId of VERSION_PROBE_IDS) {
+      for (const stdout of [
+        'v24.18.1\n',
+        '11.12.1\n',
+        'git version 2.55.0.windows.3\n',
+        '2.1.220 (Claude Code)\n',
+        'codex-cli 0.146.0\n',
+      ]) {
+        const version = extractProbeVersion(probeId, stdout);
+        if (version === null) continue;
+        expect(version).toMatch(/^\d{1,6}\.\d{1,6}\.\d{1,6}$/);
+        for (const word of ['git', 'version', 'codex', 'cli', 'Claude', 'Code', 'windows', 'v']) {
+          expect(version).not.toContain(word);
+        }
+      }
+    }
+  });
+
+  it('covers exactly the version probes in the probe list', () => {
+    const declared = CAPABILITY_PROBES.filter((p) => p.id.endsWith('.version')).map((p) => p.id);
+    expect([...VERSION_PROBE_IDS].sort()).toEqual(declared.sort());
   });
 });
 

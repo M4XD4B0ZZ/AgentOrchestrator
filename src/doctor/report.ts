@@ -13,7 +13,7 @@ import type { CapabilityAnswers, CapabilityFacts } from './capabilities.js';
 import type { WriteAccessResult } from './write-access.js';
 import type { RunArtifactResult } from './safe-write.js';
 
-export const DOCTOR_REPORT_SCHEMA_VERSION = 2;
+export const DOCTOR_REPORT_SCHEMA_VERSION = 3;
 
 /**
  * Document type discriminator, so a reader can tell what it is looking at.
@@ -51,12 +51,21 @@ export interface CliVersionInfo {
   readonly version: string | null;
 }
 
-/** One persistent artefact and the outcome of writing it. */
+/**
+ * One persistent artefact and the outcome of writing it.
+ *
+ * Only artefacts whose write has already *finished* appear here, so every entry
+ * states an observed fact. The report's own file cannot be one of them — a
+ * document cannot report the outcome of writing itself — so its intended
+ * location is carried separately in {@link DoctorReport.reportPath}, with no
+ * claim attached (AO-007-R2-RR2).
+ */
 export interface DiagnosticArtefact {
   readonly path: string;
   readonly writeCode: RunArtifactResult['code'];
   readonly written: boolean;
-  readonly temporaryFileRemoved: boolean;
+  readonly bytesWritten: number;
+  readonly synced: boolean;
 }
 
 export interface DoctorReport {
@@ -82,7 +91,28 @@ export interface DoctorReport {
   readonly diagnosticsDirectory: string;
   /** Absolute path of *this* run's own, exclusively created directory. */
   readonly runDirectory: string;
+  /**
+   * Where this report was *intended* to be written. A planned path, not a
+   * claim: a persisted copy is proof it was written, and the absence of a copy
+   * is proof it was not. Neither needs a field.
+   */
+  readonly reportPath: string;
+  /**
+   * Artefacts written before this report, with their real outcomes. The report
+   * file itself and the completion marker are never listed here.
+   */
   readonly diagnosticFiles: readonly DiagnosticArtefact[];
+  /**
+   * The run protocol this report was produced under, and the marker file whose
+   * presence — with exactly this version inside — makes the run consumable.
+   *
+   * This report says nothing about whether that marker exists. It is written
+   * before the marker, so it *cannot* know. A consumer must look at the
+   * directory (see `run-completion.ts`), never at this document, to decide
+   * whether the run finished (AO-007-R2-RR2).
+   */
+  readonly runProtocolVersion: string;
+  readonly completionMarkerFile: string;
   readonly todos: readonly string[];
 }
 

@@ -193,27 +193,95 @@ export function extractSubcommands(text: string): readonly RecognisedSubcommand[
   return [...found].sort();
 }
 
+// ── Version extraction ─────────────────────────────────────────────────────
+
 /**
- * The version number inside a `--version` line, or `null`.
+ * Per-probe, fully anchored `--version` formats (AO-002-R1-RR1).
  *
- * A version is not copied verbatim: only a dotted numeric core plus an optional
- * conventional pre-release suffix is extracted, and anything else yields
- * `null`. `codex-cli 0.146.0` becomes `0.146.0`; a line carrying an unexpected
- * marker yields either the version alone or nothing at all.
+ * The previous implementation searched *any* first non-empty line for anything
+ * that looked like a dotted number, which is not a parser but a scanner. It
+ * accepted a version out of an account line (`Account you@example.test plan
+ * 9.8.7`), out of help prose, out of a banner, out of `stderr` when `stdout`
+ * was expected, and out of a completely different probe's output — and the
+ * extracted digits were then reported as the installed version of a tool.
+ *
+ * What replaces it:
+ *
+ *  - **only** the probes listed here extract a version. A `--help` probe has no
+ *    entry, so it can never contribute one;
+ *  - the probe's whole normalised output must be exactly **one** non-empty
+ *    line, and that entire line must match the probe's own anchored pattern.
+ *    A prefix, a suffix, an extra line, a banner or an account marker means the
+ *    output is not the format we know, so the answer is `null` / `UNKNOWN`;
+ *  - only `stdout` is read. Each of these tools prints its version there, so a
+ *    version appearing in `stderr` is by definition not the expected output;
+ *  - the captured group is a bare numeric triple, re-validated against
+ *    {@link VERSION_VALUE}. Nothing textual from the line — not `git version`,
+ *    not `(Claude Code)`, not `codex-cli`, not a `.windows.N` build suffix —
+ *    can reach a report or an artefact.
+ *
+ * The patterns are derived from the output of the actually installed CLIs,
+ * observed locally on 2026-08-01:
+ *
+ *     node   --version  →  v24.18.1
+ *     npm    --version  →  11.12.1
+ *     git    --version  →  git version 2.55.0.windows.3
+ *     claude --version  →  2.1.220 (Claude Code)
+ *     codex  --version  →  codex-cli 0.146.0
+ *
+ * That makes them deliberately brittle: if a CLI changes its output format, the
+ * version becomes `UNKNOWN` rather than being guessed at. Fail-closed is the
+ * point — a wrong version silently reported is worse than an absent one.
  */
-// The leading context class lets `v24.4.0`, `codex-cli 0.146.0` and a bare
-// `2.1.220` all be recognised without ever capturing the surrounding words.
-const VERSION_PATTERN = /(?:^|[\s(\[v=,:/-])(\d{1,6}(?:\.\d{1,6}){1,3}(?:-[A-Za-z0-9.]{1,32})?)\b/;
+const NUMERIC_TRIPLE = String.raw`\d{1,6}\.\d{1,6}\.\d{1,6}`;
 
-/** Belt and braces: the extracted value must also stand on its own. */
-const VERSION_SHAPE = /^\d{1,6}(?:\.\d{1,6}){1,3}(?:-[A-Za-z0-9.]{1,32})?$/;
+const PROBE_VERSION_FORMATS: ReadonlyMap<string, RegExp> = new Map<string, RegExp>([
+  // `v24.18.1`
+  ['node.version', new RegExp(`^v(${NUMERIC_TRIPLE})$`)],
+  // `11.12.1`
+  ['npm.version', new RegExp(`^(${NUMERIC_TRIPLE})$`)],
+  // `git version 2.55.0.windows.3` — the Windows build suffix is matched so the
+  // line is fully anchored, but it is not part of the captured value.
+  ['git.version', new RegExp(`^git version (${NUMERIC_TRIPLE})(?:\\.windows\\.\\d{1,6})?$`)],
+  // `2.1.220 (Claude Code)`
+  ['claude.version', new RegExp(`^(${NUMERIC_TRIPLE}) \\(Claude Code\\)$`)],
+  // `codex-cli 0.146.0`
+  ['codex.version', new RegExp(`^codex-cli (${NUMERIC_TRIPLE})$`)],
+]);
 
-export function extractVersion(text: string): string | null {
-  const line = text.split(/\r?\n/).find((l) => l.trim().length > 0);
-  if (line === undefined) return null;
-  const match = VERSION_PATTERN.exec(line);
+/**
+ * The only syntax a reported version value may have: three dotted numbers.
+ *
+ * Applied to the captured group as a second, independent gate, so a future
+ * pattern edit cannot widen what a version is allowed to contain.
+ */
+const VERSION_VALUE = new RegExp(`^${NUMERIC_TRIPLE}$`);
+
+/** Probe ids that carry a version parser. Exported for tests and audits. */
+export const VERSION_PROBE_IDS: readonly string[] = Object.freeze([...PROBE_VERSION_FORMATS.keys()]);
+
+/**
+ * The version of one specific probe's `stdout`, or `null`.
+ *
+ * `null` means "this probe did not produce the exact output format we know",
+ * which every caller must treat as `UNKNOWN`, never as a defect-free absence.
+ */
+export function extractProbeVersion(probeId: string, stdout: string): string | null {
+  const format = PROBE_VERSION_FORMATS.get(probeId);
+  if (format === undefined) return null;
+
+  // Normalisation is whitespace only: leading/trailing blanks and line endings.
+  // It never removes content, so it cannot turn an unexpected line into an
+  // expected one.
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length !== 1) return null;
+
+  const match = format.exec(lines[0] ?? '');
   const version = match?.[1];
-  if (version === undefined || !VERSION_SHAPE.test(version)) return null;
+  if (version === undefined || !VERSION_VALUE.test(version)) return null;
   return version;
 }
 
@@ -307,7 +375,10 @@ export function deriveCapabilityFacts(
   const combined = `${result.stdout}\n${result.stderr}`;
   const flags = extractFlags(combined);
   const subcommands = extractSubcommands(combined);
-  const version = extractVersion(result.stdout) ?? extractVersion(result.stderr);
+  // Probe-specific and stdout-only: a `--help` probe has no parser at all, and
+  // a version appearing anywhere else than the one expected stdout line is not
+  // this probe's version (AO-002-R1-RR1).
+  const version = extractProbeVersion(probe.id, result.stdout);
 
   return Object.freeze({
     probeId: probe.id,

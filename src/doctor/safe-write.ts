@@ -1,8 +1,30 @@
 /**
- * Path safety primitives and exclusive, atomic artefact writing (AO-007).
+ * Path safety primitives and append-only artefact writing (AO-007-R2-RR1).
  *
- * Every persistent doctor artefact goes through {@link writeRunArtifact}. The
- * rules it enforces, all fail-closed:
+ * ── What changed, and why ──────────────────────────────────────────────────
+ *
+ * The previous implementation wrote each artefact to a uniquely named temporary
+ * file and then "finalised" it with `linkSync`, falling back to a
+ * `targetExists()` check followed by `renameSync`. Every part of that was a
+ * liability:
+ *
+ *  - the check-then-`rename` fallback is a textbook TOCTOU race: between the
+ *    existence check and the rename the target can appear, and `rename`
+ *    replaces it silently on both Windows and POSIX;
+ *  - the hard-link path needed `EXDEV`/`EPERM` handling and left a temporary
+ *    file that had to be unlinked on every path, including failure paths, so
+ *    "did the cleanup work?" became part of the success criterion;
+ *  - all of it existed to gain atomicity that a freshly, exclusively created
+ *    run directory already provides. Inside a directory only this run can write
+ *    to, there is nothing to be atomic *against*.
+ *
+ * The replacement is append-only and boring: each artefact is created **once**,
+ * directly under its final name, through a single exclusive handle.
+ *
+ * There is no `linkSync`, no `renameSync`, no temporary file and no unlink in
+ * this module any more, and nothing is ever replaced.
+ *
+ * The rules {@link writeRunArtifact} enforces, all fail-closed:
  *
  *  1. **Containment.** The file name must be a single plain segment, and the
  *     resolved target must still sit directly inside the run directory it was
@@ -11,35 +33,22 @@
  *     the run directory is `lstat`ed. A symbolic link or a Windows junction
  *     anywhere along it aborts the write — otherwise a link planted inside the
  *     application-data root would redirect the artefact somewhere else.
- *  3. **Nothing is ever replaced.** An existing target — regular file,
- *     directory, link, anything — aborts the write. There is no ownership
- *     check and no overwrite path, because there is nothing to overwrite: each
- *     run gets its own freshly created directory (see `run-directory.ts`).
- *
- *     This replaces the old content-marker ownership test (AO-007-R2). A marker
- *     that is written into a public artefact is not a secret, so anyone able to
- *     drop a file in the diagnostics directory could also put the marker in it
- *     and have the doctor overwrite their file. Immutable per-run directories
- *     make the question moot.
- *  4. **Exclusive create, atomic finalisation.** Content goes to a uniquely
- *     named temporary file in the *same* run directory, created with `wx`, and
- *     is then finalised by an atomic exclusive `link`. If the target appeared
- *     in the meantime, the link fails with `EEXIST` and the write is abandoned.
- *  5. **Temporary cleanup.** The temporary file is removed on every path,
- *     including every failure path, and the result says whether it is gone.
+ *  3. **Exclusive create, no existence check.** The file is opened with `wx`.
+ *     Whether something already occupies the name is answered by the kernel, in
+ *     the same syscall that would create it: `EEXIST` means abandon the write.
+ *     There is deliberately no `lstat`-then-open sequence, because that gap is
+ *     the race.
+ *  4. **Written, synced, closed — in that order, or not at all.** The content
+ *     goes out through the open handle, `fsync` is attempted, and the handle is
+ *     closed. A failure in any of those phases is reported as that phase and
+ *     never as success. A partially written file may remain in the run
+ *     directory as evidence; the run simply never gets its `COMPLETED` marker
+ *     (see `run-completion.ts`), so no consumer will read it.
  *
  * Failures are returned as fixed codes, never as exception messages (AO-002).
  */
 
-import { randomUUID } from 'node:crypto';
-import {
-  existsSync,
-  linkSync,
-  lstatSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { closeSync, fsyncSync, lstatSync, openSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse as parsePath, resolve, sep } from 'node:path';
 
 import { safeErrnoCode } from '../core/safe-error.js';
@@ -54,20 +63,27 @@ export type RunArtifactCode =
   | 'RUN_DIRECTORY_UNUSABLE'
   /** Something already occupies the target name. Never replaced. */
   | 'TARGET_EXISTS'
-  /** The temporary file could not be written. */
+  /** The exclusive handle could not be opened. Nothing was created. */
+  | 'OPEN_FAILED'
+  /** The content could not be written in full. The file stays incomplete. */
   | 'WRITE_FAILED'
-  /** The temporary file could not be finalised into the target. */
-  | 'FINALIZE_FAILED';
+  /** The content was written but could not be flushed to stable storage. */
+  | 'SYNC_FAILED'
+  /** The handle could not be closed cleanly, so completion is unproven. */
+  | 'CLOSE_FAILED';
 
 export interface RunArtifactResult {
   readonly code: RunArtifactCode;
+  /** `true` only after a complete write, a successful sync and a clean close. */
   readonly written: boolean;
   /** The intended target path. Always inside the run directory. */
   readonly path: string;
+  /** Number of content bytes actually handed to the OS. */
+  readonly bytesWritten: number;
+  /** Whether `fsync` ran. `false` when the filesystem does not support it. */
+  readonly synced: boolean;
   /** Allow-listed errno identifier, never a message. */
   readonly errnoCode: string | null;
-  /** `false` only if a temporary file was created and could not be removed. */
-  readonly temporaryFileRemoved: boolean;
 }
 
 export interface RunArtifactRequest {
@@ -148,32 +164,48 @@ function result(
   code: RunArtifactCode,
   path: string,
   errnoCode: string | null,
-  temporaryFileRemoved: boolean,
+  bytesWritten = 0,
+  synced = false,
 ): RunArtifactResult {
   return Object.freeze({
     code,
     written: code === 'WRITTEN',
     path,
+    bytesWritten,
+    synced,
     errnoCode,
-    temporaryFileRemoved,
   });
 }
 
 /**
- * Writes one artefact into a freshly created run directory, or explains
+ * `fsync` is not available on every filesystem or every handle type.
+ *
+ * `EINVAL` is the answer a filesystem gives when the operation is meaningless
+ * there; it is treated as "not supported" rather than as a failure, and the
+ * result records `synced: false` so the caller can see which happened. Every
+ * other errno is a genuine sync failure and fails the write.
+ */
+const FSYNC_UNSUPPORTED_CODES: ReadonlySet<string> = new Set(['EINVAL']);
+
+/**
+ * Creates one artefact in a freshly created run directory, or explains
  * precisely why it did not. Never throws.
+ *
+ * Success means: the file did not exist, was created exclusively, received all
+ * of its content, was flushed where the filesystem supports flushing, and its
+ * handle was closed without error. Anything less is not `WRITTEN`.
  */
 export function writeRunArtifact(request: RunArtifactRequest): RunArtifactResult {
   const runDirectory = resolve(request.runDirectory);
 
   if (!isPlainFileName(request.fileName)) {
-    return result('PATH_ESCAPES_RUN_DIRECTORY', join(runDirectory, request.fileName), null, true);
+    return result('PATH_ESCAPES_RUN_DIRECTORY', join(runDirectory, request.fileName), null);
   }
 
   const target = resolve(runDirectory, request.fileName);
   // Belt and braces: even with a validated name, prove the result is contained.
   if (!isContained(runDirectory, target) || !samePath(dirname(target), runDirectory)) {
-    return result('PATH_ESCAPES_RUN_DIRECTORY', target, null, true);
+    return result('PATH_ESCAPES_RUN_DIRECTORY', target, null);
   }
 
   // The run directory must already exist — this function never creates one, so
@@ -182,97 +214,77 @@ export function writeRunArtifact(request: RunArtifactRequest): RunArtifactResult
   try {
     runDirStats = lstatSync(runDirectory);
   } catch (error) {
-    return result('RUN_DIRECTORY_UNUSABLE', target, safeErrnoCode(error), true);
+    return result('RUN_DIRECTORY_UNUSABLE', target, safeErrnoCode(error));
   }
   if (!runDirStats.isDirectory() || runDirStats.isSymbolicLink()) {
-    return result('RUN_DIRECTORY_UNUSABLE', target, null, true);
+    return result('RUN_DIRECTORY_UNUSABLE', target, null);
   }
 
   if (pathContainsLink(runDirectory)) {
-    return result('PATH_CONTAINS_LINK', target, null, true);
+    return result('PATH_CONTAINS_LINK', target, null);
   }
 
-  // Nothing may already occupy the target name — not a file, not a directory,
-  // not a link. There is no ownership test, because nothing is ever replaced.
-  if (targetExists(target)) {
-    return result('TARGET_EXISTS', target, null, true);
-  }
-
-  const temporary = join(runDirectory, `.${request.fileName}.${randomUUID()}.tmp`);
-  let temporaryCreated = false;
-
+  // Exclusive create. No prior existence check: `wx` asks the kernel to create
+  // the file *or* fail, in one step, which is the only race-free way to ask.
+  let handle: number;
   try {
-    // `wx` guarantees we never adopt an existing file as our temporary.
-    writeFileSync(temporary, request.contents, { encoding: 'utf8', flag: 'wx' });
-    temporaryCreated = true;
+    handle = openSync(target, 'wx', 0o600);
   } catch (error) {
-    return result(
-      'WRITE_FAILED',
-      target,
-      safeErrnoCode(error),
-      removeTemporary(temporary, temporaryCreated),
-    );
+    const errnoCode = safeErrnoCode(error);
+    return result(errnoCode === 'EEXIST' ? 'TARGET_EXISTS' : 'OPEN_FAILED', target, errnoCode);
   }
 
-  return finalize(temporary, target);
-}
+  const buffer = Buffer.from(request.contents, 'utf8');
+  let offset = 0;
+  let synced = false;
+  let closed = false;
 
-/** `true` when anything at all occupies `target`. */
-function targetExists(target: string): boolean {
   try {
-    lstatSync(target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Turns the temporary file into the target atomically and exclusively.
- *
- * `link` is the primitive that gives both properties at once: it either creates
- * the target in one step or fails with `EEXIST`, so a concurrent run can never
- * be clobbered. `rename` would silently replace an existing target on both
- * Windows and POSIX and is therefore only used as a fallback for filesystems
- * without hard links — and then only after proving the target is absent.
- */
-function finalize(temporary: string, target: string): RunArtifactResult {
-  try {
-    linkSync(temporary, target);
-    return result('WRITTEN', target, null, removeTemporary(temporary, true));
+    // `writeSync` may write fewer bytes than asked for; loop until the whole
+    // buffer is out, so a short write is never mistaken for a complete one.
+    while (offset < buffer.length) {
+      const written = writeSync(handle, buffer, offset, buffer.length - offset);
+      if (written <= 0) break;
+      offset += written;
+    }
+    if (offset !== buffer.length) {
+      closeSync(handle);
+      closed = true;
+      return result('WRITE_FAILED', target, null, offset);
+    }
   } catch (error) {
-    const code = safeErrnoCode(error);
-    if (code === 'EEXIST') {
-      return result('TARGET_EXISTS', target, code, removeTemporary(temporary, true));
-    }
-
-    // No hard-link support (or not permitted): fall back to rename, but only
-    // when the target still does not exist, so nothing is replaced.
-    if (targetExists(target)) {
-      return result('TARGET_EXISTS', target, code, removeTemporary(temporary, true));
-    }
-    try {
-      renameSync(temporary, target);
-      // The rename consumed the temporary file.
-      return result('WRITTEN', target, null, true);
-    } catch (renameError) {
-      return result(
-        'FINALIZE_FAILED',
-        target,
-        safeErrnoCode(renameError),
-        removeTemporary(temporary, true),
-      );
-    }
+    const errnoCode = safeErrnoCode(error);
+    closeQuietly(handle);
+    return result('WRITE_FAILED', target, errnoCode, offset);
   }
+
+  try {
+    fsyncSync(handle);
+    synced = true;
+  } catch (error) {
+    const errnoCode = safeErrnoCode(error);
+    if (!FSYNC_UNSUPPORTED_CODES.has(errnoCode)) {
+      closeQuietly(handle);
+      return result('SYNC_FAILED', target, errnoCode, offset);
+    }
+    // Not supported here. Recorded as `synced: false`, not as success-by-silence.
+  }
+
+  try {
+    closeSync(handle);
+    closed = true;
+  } catch (error) {
+    return result('CLOSE_FAILED', target, safeErrnoCode(error), offset, synced);
+  }
+
+  return closed ? result('WRITTEN', target, null, offset, synced) : result('CLOSE_FAILED', target, null, offset, synced);
 }
 
-/** Removes the temporary file if it exists; reports whether it is gone. */
-function removeTemporary(temporary: string, created: boolean): boolean {
-  if (!created) return true;
+/** Best-effort close on a failure path. The failure code is already decided. */
+function closeQuietly(handle: number): void {
   try {
-    rmSync(temporary, { force: true });
+    closeSync(handle);
   } catch {
-    // Fall through to the existence check.
+    // Nothing to add: the caller is already returning a failure.
   }
-  return !existsSync(temporary);
 }

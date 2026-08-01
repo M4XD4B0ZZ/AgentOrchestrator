@@ -28,7 +28,6 @@ import {
   createRunDirectory,
   isValidRunId,
   newRunId,
-  removeRunDirectoryIfEmpty,
   RUN_ID_PATTERN,
 } from '../src/doctor/run-directory.js';
 import { writeRunArtifact } from '../src/doctor/safe-write.js';
@@ -188,7 +187,7 @@ describe('writing artefacts into a run directory', () => {
     return created.path;
   }
 
-  it('writes the file and leaves no temporary behind', () => {
+  it('creates the file directly under its final name, with no temporary', () => {
     const runDirectory = freshRun();
     const write = writeRunArtifact({
       runDirectory,
@@ -198,18 +197,19 @@ describe('writing artefacts into a run directory', () => {
 
     expect(write.code).toBe('WRITTEN');
     expect(write.written).toBe(true);
-    expect(write.temporaryFileRemoved).toBe(true);
+    expect(write.bytesWritten).toBe(Buffer.byteLength('{"run":1}\n', 'utf8'));
     expect(readFileSync(write.path, 'utf8')).toBe('{"run":1}\n');
+    // Exactly one entry at every point: no temporary name ever existed.
     expect(entries(runDirectory)).toEqual(['doctor-report.json']);
   });
 
-  it('finalises atomically: the target appears complete or not at all', () => {
+  it('writes a large payload in full through the one exclusive handle', () => {
     const runDirectory = freshRun();
     const contents = `${'x'.repeat(200_000)}\n`;
     const write = writeRunArtifact({ runDirectory, fileName: 'big.txt', contents });
 
     expect(write.code).toBe('WRITTEN');
-    // Exactly one entry: the temporary is gone, the target is whole.
+    expect(write.bytesWritten).toBe(Buffer.byteLength(contents, 'utf8'));
     expect(entries(runDirectory)).toEqual(['big.txt']);
     expect(readFileSync(write.path, 'utf8')).toBe(contents);
   });
@@ -313,7 +313,7 @@ describe('writing artefacts into a run directory', () => {
     expect(write.written).toBe(false);
   });
 
-  it('leaves no temporary file behind on any path', () => {
+  it('creates no temporary file on any path, successful or not', () => {
     const runDirectory = freshRun();
     writeFileSync(join(runDirectory, 'doctor-report.json'), 'foreign\n', 'utf8');
 
@@ -322,30 +322,46 @@ describe('writing artefacts into a run directory', () => {
     writeRunArtifact({ runDirectory, fileName: '../escape.txt', contents: 'z' });
 
     expect(entries(runDirectory).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+    expect(entries(runDirectory).filter((n) => n.startsWith('.'))).toEqual([]);
     expect(entries(runDirectory)).toEqual(['cli-capabilities.txt', 'doctor-report.json']);
   });
 });
 
-describe('failure cleanup', () => {
-  it('removes an empty run directory and nothing else', () => {
-    const runsRoot = makeRunsRoot();
-    const empty = createRunDirectory({ runsRoot, runId: newRunId() });
-    const used = createRunDirectory({ runsRoot, runId: newRunId() });
-    writeRunArtifact({ runDirectory: used.path, fileName: 'kept.txt', contents: 'k' });
-
-    expect(removeRunDirectoryIfEmpty(empty.path)).toBe(true);
-    expect(existsSync(empty.path)).toBe(false);
-
-    expect(removeRunDirectoryIfEmpty(used.path)).toBe(false);
-    expect(existsSync(join(used.path, 'kept.txt'))).toBe(true);
+/**
+ * AO-007-R2-RR2: the run protocol is append-only. A run directory, once
+ * created, is never removed, emptied or reused — not even by the run that
+ * created it, and not even when that run failed. Incomplete runs are excluded
+ * from consumption by the absent `COMPLETED` marker, not by deletion.
+ */
+describe('nothing is ever deleted', () => {
+  it('offers no removal function at all any more', async () => {
+    const runDirectoryModule = await import('../src/doctor/run-directory.js');
+    for (const key of Object.keys(runDirectoryModule)) {
+      expect(key.toLowerCase()).not.toContain('remove');
+      expect(key.toLowerCase()).not.toContain('delete');
+      expect(key.toLowerCase()).not.toContain('cleanup');
+    }
   });
 
-  it('does not touch a run directory that holds a foreign file', () => {
+  it('leaves a run directory that received nothing exactly where it is', () => {
+    const runsRoot = makeRunsRoot();
+    const run = createRunDirectory({ runsRoot, runId: newRunId() });
+
+    expect(run.created).toBe(true);
+    expect(existsSync(run.path)).toBe(true);
+    expect(entries(run.path)).toEqual([]);
+    // A later run neither adopts nor removes it.
+    const next = createRunDirectory({ runsRoot, runId: newRunId() });
+    expect(existsSync(run.path)).toBe(true);
+    expect(next.path).not.toBe(run.path);
+  });
+
+  it('leaves a run directory holding a foreign file untouched', () => {
     const runsRoot = makeRunsRoot();
     const run = createRunDirectory({ runsRoot, runId: newRunId() });
     writeFileSync(join(run.path, 'someone-elses.txt'), 'keep me\n', 'utf8');
 
-    expect(removeRunDirectoryIfEmpty(run.path)).toBe(false);
+    createRunDirectory({ runsRoot, runId: newRunId() });
     expect(readFileSync(join(run.path, 'someone-elses.txt'), 'utf8')).toBe('keep me\n');
   });
 });
