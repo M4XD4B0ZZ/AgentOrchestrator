@@ -167,6 +167,50 @@ but carries no completion or cleanup status, and does not list itself among the
 artefacts it reports as written. Completion is a fact about the directory, not
 a statement in the document.
 
+#### The protocol is fixed, and binds only to `(runsRoot, runId)`
+
+The two artefact names and the marker name are **not configurable**. There is
+no parameter anywhere in `src/doctor/run-completion.ts`'s public functions
+through which a caller can name a different or additional required file — the
+three-entry shape a completed run must have is a single internal constant, not
+an argument.
+
+`completeRun(runsRoot, runId)` and `inspectRun(runsRoot, runId)` take exactly
+that: a trusted runs root and a run id, never a `runDirectory` path a caller
+could point anywhere. The run directory is always computed internally as
+`join(runsRoot, runId)`, after `runId` is validated against the same schema
+the run directory was created with. The result must then be a *lexical and
+canonical* direct child of `runsRoot` — both checked independently, with no
+symlink or Windows junction anywhere between them — before either function
+reads a byte from it. A validly-named run directory living under a different
+parent, reached through a nested path, or sitting behind a junction is
+rejected before it is ever inspected.
+
+Producer and consumer — `completeRun` and `inspectRun` — run through the
+*same* internal validators, not two independently maintained copies. Every
+path segment that this process cannot conclusively `lstat` (a permission
+error, for instance, on an intermediate directory) is treated exactly as
+suspiciously as a segment proven to be a link: neither is ever accepted as
+"probably fine".
+
+After creating the marker, `completeRun` does not simply trust its own write.
+It re-runs the *entire* completed-run validation — the same one `inspectRun`
+uses — before reporting success, and reports failure (never `COMPLETED`,
+never `completed: true`) if anything about the run no longer validates at
+that point, including a mutation an external process made in the instant
+between the marker write and that re-check.
+
+None of this claims a stronger atomicity guarantee than Node and the
+filesystem actually provide. The orchestrator is built for a local,
+single-writer doctor run: it does not defend against a second process racing
+the same run directory concurrently. What it does guarantee is narrower: a
+successful `completeRun` return means the full contract held at the moment
+that call returned, and every later reader of a run directory — `inspectRun`,
+`listCompletedRuns`, any future consumer — re-validates the complete contract
+from scratch rather than trusting a past success. A writer that modifies the
+directory *after* `completeRun` has already returned is not something this
+module can prevent; it is something the next `inspectRun` call catches.
+
 Retention of old completed runs is not implemented yet — they are left alone.
 
 ### What the artefacts may contain

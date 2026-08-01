@@ -1,6 +1,6 @@
 /**
  * The `COMPLETED` marker: the only thing that makes a run consumable
- * (AO-007-R2-RR2).
+ * (AO-007-R2-RR2, AO-007-R2-RR2-REVIEW-01-C1).
  *
  * ── The problem it solves ──────────────────────────────────────────────────
  *
@@ -18,58 +18,88 @@
  * own successful persistence. A document cannot attest to the success of
  * writing itself.
  *
- * ── The protocol ───────────────────────────────────────────────────────────
+ * ── The protocol is fixed, not caller-configurable ─────────────────────────
  *
- * A run is complete if and only if its directory contains exactly three
- * direct entries — {@link REQUIRED_ARTEFACT_NAMES} plus the marker — and the
- * marker holds exactly {@link COMPLETION_MARKER_CONTENTS}, byte for byte. The
- * marker is:
+ * There used to be a `completeRun({ runDirectory, expectedArtefacts })` API:
+ * any caller could name any set of "required" artefacts, which made the
+ * run's own shape a parameter rather than a fact. That is gone. The protocol
+ * is exactly:
  *
- *  - written **last**, after every artefact is fully written, synced and
- *    closed;
- *  - written only once all of {@link completeRun}'s closing checks pass —
- *    the directory must contain exactly the expected artefacts, no more and no
- *    fewer, and in particular no partial file, no symlink and no junction;
- *  - re-checked once more, together with the whole three-entry structure,
- *    immediately after being written — a run is never reported successful on
- *    the strength of the write call alone;
- *  - created with exclusive `wx` semantics, so it is never replaced. An
- *    existing marker means somebody else's run, and that is a hard failure;
- *  - free of anything run-specific. It carries a fixed format version and
- *    nothing else: no path, no timestamp, no host, no user, no status.
+ *  - before completion: {@link REQUIRED_ARTEFACT_NAMES} and nothing else;
+ *  - after completion: {@link REQUIRED_ARTEFACT_NAMES} plus
+ *    {@link COMPLETION_MARKER_FILE_NAME}, and nothing else.
  *
- * ── Producer and consumer share one contract (AO-007-R2-RR2-REVIEW-01) ─────
+ * Both lists are derived, once, from {@link REQUIRED_ARTEFACT_NAMES} — the
+ * single internal source of truth for artefact names — so there is no second,
+ * looser copy anywhere, in this module or in `run-doctor.ts`. Nothing in this
+ * module's public surface accepts an alternative artefact list; TypeScript
+ * gives {@link completeRun} no parameter through which one could be supplied.
  *
- * {@link completeRun} (producer) and {@link inspectRun} (consumer) both
- * validate the run id against the single schema in `run-directory.ts`
- * ({@link isValidRunId}), both reject a run reached through a symlink or a
- * Windows junction — checked with `lstat`, never `stat`, and never by trusting
- * `realpath` alone, since `realpath` has already resolved the link by the time
- * containment could be checked — and both apply the exact same three-entry
- * structure rule from {@link checkExactEntries}. There is no second, looser
- * copy of any of these rules.
+ * ── completeRun is bound to (runsRoot, runId), not to an arbitrary path ────
  *
- * {@link inspectRun} additionally binds every lookup to a trusted
- * `runsRoot`: the run path is computed *only* as `join(runsRoot, runId)`,
- * never taken as an arbitrary caller-supplied path, and the result must be a
- * lexical and canonical direct child of `runsRoot` with no link anywhere
- * between them. This is what stops a validly named Windows junction under
- * `runsRoot`, pointing at an external directory that holds nothing but a
- * planted marker, from ever being treated as a completed run.
+ * {@link completeRun} takes a trusted `runsRoot` and a `runId`, exactly like
+ * {@link inspectRun}. There is no `runDirectory` parameter a caller could
+ * point anywhere: the run directory is always computed internally as
+ * `join(runsRoot, runId)`, `runId` is validated before that join ever
+ * happens, and the result must be a lexical *and* canonical direct child of
+ * `runsRoot` — see {@link validateRunPath}. A validly named run directory
+ * living under any other parent, reached through a nested path, named by an
+ * absolute path passed off as an id, or sitting behind a Windows junction, is
+ * rejected before anything is read from it.
  *
- * Consumers **must** ignore a run directory that fails any of these checks.
- * The run may still be inspected by a human for diagnosis — incomplete or
- * malformed artefacts are left in place on purpose — but it is not data.
- * {@link listCompletedRuns} is the supported way to enumerate runs and
- * implements exactly that rule.
+ * ── Producer and consumer share one validator, not two ─────────────────────
+ *
+ * {@link completeRun} (producer) and {@link inspectRun} (consumer) run
+ * through the same internal checks: the same run-id schema
+ * ({@link isValidRunId} in `run-directory.ts`), the same root binding
+ * ({@link validateRunPath}), the same fail-closed link inspection
+ * ({@link inspectLinkChain} in `safe-write.ts`), and the same fixed
+ * three-or-two-entry structure check. `completeRun` additionally re-runs the
+ * *entire* completed-run validation — the one `inspectRun` uses — immediately
+ * after creating the marker, and only reports success if that second pass
+ * also comes back clean (AO-007-R2-RR2-REVIEW-01-C1-F2). A run that already
+ * looks broken the instant after its own marker was written is never reported
+ * as a success.
+ *
+ * ── Every unproven path segment fails closed ───────────────────────────────
+ *
+ * The link check used here is tri-state
+ * ({@link import('./safe-write.js').LinkChainResult}): `CLEAR`, `LINK_FOUND`,
+ * or `INSPECTION_FAILED`. An `lstat` failure this process cannot explain is
+ * never treated as "nothing there" — it is treated exactly as suspiciously as
+ * a confirmed link, because neither can be ruled out as a redirection
+ * (AO-007-R2-RR2-REVIEW-01-C1-F4). The one exception — a path segment that
+ * simply does not exist yet — only applies where that is an expected state;
+ * every check in this module inspects a run that has already been created, so
+ * none of them tolerate a missing segment.
+ *
+ * ── What this module does not promise ──────────────────────────────────────
+ *
+ * This is a local, single-writer orchestrator: nothing here defends against a
+ * second, adversarial writer racing the same run directory from another
+ * process at the same time as the one legitimate doctor run. What it does
+ * promise, even so, is narrower and cheaper: `completeRun` never *reports*
+ * success for a state that is already invalid by the time its own write
+ * returns, and every later reader — `inspectRun`, `listCompletedRuns`, a
+ * future CLI command — re-validates the full contract from scratch rather
+ * than trusting a prior success. A writer that modifies the directory *after*
+ * `completeRun` has already returned `completed: true` is not preventable by
+ * anything Node or the filesystem offers here; the next `inspectRun` call is
+ * what catches that, not a stronger atomicity guarantee this module does not
+ * have and does not claim to have.
  */
 
-import { type Dirent, lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { lstatSync, readdirSync, readFileSync, realpathSync, type Dirent } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 import { safeErrnoCode } from '../core/safe-error.js';
 import { isValidRunId } from './run-directory.js';
-import { isContained, isPlainFileName, pathContainsLink, samePath, writeRunArtifact } from './safe-write.js';
+import {
+  inspectLinkChain,
+  isContained,
+  samePath,
+  writeRunArtifact,
+} from './safe-write.js';
 
 /** The marker file name. A plain segment, like every artefact name. */
 export const COMPLETION_MARKER_FILE_NAME = 'COMPLETED';
@@ -90,34 +120,60 @@ const COMPLETION_MARKER_BYTES = Buffer.from(COMPLETION_MARKER_CONTENTS, 'utf8');
 
 /**
  * The two artefacts every run writes, and the only ones — besides the marker
- * — a completed run may hold. Fixed here, in the one module both the producer
- * ({@link completeRun}) and the consumer ({@link inspectRun}) read the run's
- * shape from, so the two can never drift apart.
+ * — a completed run may hold. This is the single internal source of truth for
+ * the fixed artefact set: {@link completeRun}, {@link inspectRun} and
+ * `run-doctor.ts` (via its own re-exported names) all read the run's required
+ * shape from here, and from nowhere else. There is no parameter, on this
+ * module's public API, through which a caller could add to, remove from, or
+ * replace this list.
  */
 export const REQUIRED_ARTEFACT_NAMES = ['cli-capabilities.txt', 'doctor-report.json'] as const;
+
+/** The fixed set of direct entries a *completed* run holds — and no others. */
+const COMPLETED_ENTRY_NAMES: readonly string[] = [
+  ...REQUIRED_ARTEFACT_NAMES,
+  COMPLETION_MARKER_FILE_NAME,
+];
+
+// ── Shared result vocabulary ────────────────────────────────────────────────
+
+/** Failures that concern the run's *path*, shared by producer and consumer. */
+export type RunPathCode =
+  /** `runId` is not a valid single path segment. */
+  | 'INVALID_RUN_ID'
+  /** `runsRoot` itself is not a canonical, existing, link-free directory. */
+  | 'RUNS_ROOT_INVALID'
+  /** The computed run path would not sit directly inside `runsRoot`. */
+  | 'RUN_OUTSIDE_ROOT'
+  /** The run path, or something on the way to it, is a symlink or junction. */
+  | 'RUN_PATH_IS_LINK'
+  /** A path segment could not be conclusively inspected. Never "probably fine". */
+  | 'PATH_INSPECTION_FAILED';
+
+/** Failures that concern the run directory's *shape*, shared likewise. */
+export type RunStructureCode =
+  /** The directory holds something beyond the fixed expected set. */
+  | 'RUN_STRUCTURE_INVALID'
+  /** A required artefact is missing from the run directory. */
+  | 'REQUIRED_ARTIFACT_MISSING'
+  /** A required artefact exists but is not a regular file. */
+  | 'REQUIRED_ARTIFACT_NOT_REGULAR'
+  /** A required artefact exists but is itself a symlink or junction. */
+  | 'REQUIRED_ARTIFACT_IS_LINK'
+  /** A required artefact exists as a regular file but is empty. */
+  | 'REQUIRED_ARTIFACT_EMPTY';
 
 export type RunCompletionCode =
   /** The marker was created and the closing re-validation passed. */
   | 'COMPLETED'
-  /** The run directory's own name is not a valid run id. */
-  | 'INVALID_RUN_ID'
-  /** The run directory, or something on its path, is a symlink or junction. */
-  | 'RUN_PATH_IS_LINK'
-  /** An expected artefact is missing from the run directory, empty, or not a file. */
-  | 'ARTEFACTS_MISSING'
-  /** An expected artefact exists but is itself a symlink or junction. */
-  | 'ARTEFACT_IS_LINK'
-  /** The directory holds something that is not an expected artefact. */
-  | 'UNEXPECTED_DIRECTORY_CONTENTS'
-  /** An expected artefact name is not a plain single segment. Caller bug. */
-  | 'INVALID_ARTEFACT_NAME'
-  /** The run directory could not be inspected. */
-  | 'RUN_DIRECTORY_UNREADABLE'
+  | RunPathCode
+  | RunStructureCode
   /** A marker is already there. Never replaced; the run is not adopted. */
-  | 'MARKER_EXISTS'
+  | 'COMPLETION_MARKER_ALREADY_EXISTS'
   /** The marker could not be written. The run stays incomplete. */
   | 'MARKER_WRITE_FAILED'
-  /** The structure no longer validated immediately after the marker was written. */
+  /** The full completed-run contract no longer holds right after the marker
+   *  write. The run is reported as failed, not as successful. */
   | 'POST_COMPLETION_VALIDATION_FAILED';
 
 export interface RunCompletionResult {
@@ -127,16 +183,6 @@ export interface RunCompletionResult {
   readonly protocolVersion: string;
   /** Allow-listed errno identifier, never a message. */
   readonly errnoCode: string | null;
-}
-
-export interface RunCompletionRequest {
-  readonly runDirectory: string;
-  /**
-   * Exactly the artefact names this run wrote. The directory must contain
-   * these and nothing else — that is what proves no partial or unexpected
-   * file was left behind.
-   */
-  readonly expectedArtefacts: readonly string[];
 }
 
 function completion(
@@ -153,191 +199,10 @@ function completion(
   });
 }
 
-// ── Shared structural check ─────────────────────────────────────────────────
-
-/** What lives at a path, decided with `lstat` — the link itself is never followed. */
-function classifyEntry(path: string): 'MISSING' | 'LINK' | 'FILE' | 'OTHER' {
-  let stats;
-  try {
-    stats = lstatSync(path);
-  } catch {
-    return 'MISSING';
-  }
-  if (stats.isSymbolicLink()) return 'LINK';
-  if (stats.isFile()) return 'FILE';
-  return 'OTHER';
-}
-
-interface ExactEntriesCheck {
-  /** `true` only when `readdir` itself failed; every other field is then empty. */
-  readonly unreadable: boolean;
-  readonly errnoCode: string | null;
-  readonly missing: readonly string[];
-  /** Present, but neither a regular file nor a link (a directory, typically). */
-  readonly notRegular: readonly string[];
-  readonly links: readonly string[];
-  /** Directory entries that are not part of the expected set at all. */
-  readonly unexpected: readonly string[];
-}
-
-/**
- * The exact-structure rule shared by producer and consumer: the directory
- * must hold precisely `expectedNames`, each a direct, non-empty, regular file
- * — checked with `lstat`, so a symlink or junction sharing the right name is
- * never mistaken for the entry it claims to be.
- */
-function checkExactEntries(directory: string, expectedNames: readonly string[]): ExactEntriesCheck {
-  let names: string[];
-  try {
-    names = readdirSync(directory);
-  } catch (error) {
-    return {
-      unreadable: true,
-      errnoCode: safeErrnoCode(error),
-      missing: [],
-      notRegular: [],
-      links: [],
-      unexpected: [],
-    };
-  }
-
-  const expected = new Set(expectedNames);
-  const present = new Set(names);
-  const unexpected = names.filter((name) => !expected.has(name));
-
-  const missing: string[] = [];
-  const notRegular: string[] = [];
-  const links: string[] = [];
-
-  for (const name of expectedNames) {
-    if (!present.has(name)) {
-      missing.push(name);
-      continue;
-    }
-    const kind = classifyEntry(join(directory, name));
-    if (kind === 'MISSING') missing.push(name);
-    else if (kind === 'LINK') links.push(name);
-    else if (kind === 'OTHER') notRegular.push(name);
-  }
-
-  return { unreadable: false, errnoCode: null, missing, notRegular, links, unexpected };
-}
-
-// ── Producer side ───────────────────────────────────────────────────────────
-
-/**
- * Runs the closing checks and, only if they all pass, creates the marker.
- *
- * Never throws. A `false` in {@link RunCompletionResult.completed} always means
- * the run must be treated as incomplete, whatever else is on disk.
- */
-export function completeRun(request: RunCompletionRequest): RunCompletionResult {
-  const runDirectory = resolve(request.runDirectory);
-  const markerPath = join(runDirectory, COMPLETION_MARKER_FILE_NAME);
-
-  for (const name of request.expectedArtefacts) {
-    if (!isPlainFileName(name)) return completion('INVALID_ARTEFACT_NAME', markerPath, null);
-  }
-
-  // The run id is the directory's own name. Re-validated here against the
-  // same schema the producer used to create it (AO-007-R2-RR2-REVIEW-01):
-  // nothing downstream of this point trusts the caller's path alone.
-  if (!isValidRunId(basename(runDirectory))) {
-    return completion('INVALID_RUN_ID', markerPath, null);
-  }
-
-  // Every segment on the way to the run directory, and the run directory
-  // itself, must be link-free before it is read or written to at all.
-  if (pathContainsLink(runDirectory)) {
-    return completion('RUN_PATH_IS_LINK', markerPath, null);
-  }
-
-  let runDirStats;
-  try {
-    runDirStats = lstatSync(runDirectory);
-  } catch (error) {
-    return completion('RUN_DIRECTORY_UNREADABLE', markerPath, safeErrnoCode(error));
-  }
-  if (runDirStats.isSymbolicLink()) return completion('RUN_PATH_IS_LINK', markerPath, null);
-  if (!runDirStats.isDirectory()) return completion('RUN_DIRECTORY_UNREADABLE', markerPath, null);
-
-  const before = checkExactEntries(runDirectory, request.expectedArtefacts);
-  if (before.unreadable) {
-    return completion('RUN_DIRECTORY_UNREADABLE', markerPath, before.errnoCode);
-  }
-  if (before.unexpected.includes(COMPLETION_MARKER_FILE_NAME)) {
-    // Somebody — or some earlier attempt — already closed this directory. It is
-    // never re-opened and never re-marked.
-    return completion('MARKER_EXISTS', markerPath, null);
-  }
-  if (before.unexpected.length > 0) {
-    // Anything beyond the expected set — a leftover, a partial write under
-    // another name, a planted file — blocks completion.
-    return completion('UNEXPECTED_DIRECTORY_CONTENTS', markerPath, null);
-  }
-  if (before.links.length > 0) return completion('ARTEFACT_IS_LINK', markerPath, null);
-  if (before.missing.length > 0 || before.notRegular.length > 0) {
-    return completion('ARTEFACTS_MISSING', markerPath, null);
-  }
-
-  // Every expected entry is confirmed to be a direct, non-linked regular
-  // file. It must also be non-empty, which `checkExactEntries` does not test.
-  for (const name of request.expectedArtefacts) {
-    let stats;
-    try {
-      stats = lstatSync(join(runDirectory, name));
-    } catch (error) {
-      return completion('ARTEFACTS_MISSING', markerPath, safeErrnoCode(error));
-    }
-    if (stats.size === 0) return completion('ARTEFACTS_MISSING', markerPath, null);
-  }
-
-  const write = writeRunArtifact({
-    runDirectory,
-    fileName: COMPLETION_MARKER_FILE_NAME,
-    contents: COMPLETION_MARKER_CONTENTS,
-  });
-
-  if (write.code === 'TARGET_EXISTS') return completion('MARKER_EXISTS', markerPath, write.errnoCode);
-  if (!write.written) return completion('MARKER_WRITE_FAILED', markerPath, write.errnoCode);
-
-  // The closing word: re-validate the exact three-entry structure with the
-  // marker now in place. The run is reported successful only if this passes
-  // too — never on the strength of the write call alone.
-  const after = checkExactEntries(runDirectory, [...request.expectedArtefacts, COMPLETION_MARKER_FILE_NAME]);
-  const afterOk =
-    !after.unreadable &&
-    after.unexpected.length === 0 &&
-    after.missing.length === 0 &&
-    after.notRegular.length === 0 &&
-    after.links.length === 0;
-  if (!afterOk) {
-    return completion('POST_COMPLETION_VALIDATION_FAILED', markerPath, after.errnoCode);
-  }
-
-  return completion('COMPLETED', markerPath, null);
-}
-
-// ── Consumer side ──────────────────────────────────────────────────────────
-
 export type RunInspectionCode =
   | 'COMPLETE'
-  /** The run id is not a valid single path segment. */
-  | 'INVALID_RUN_ID'
-  /** `runsRoot` itself is not a canonical, existing, link-free directory. */
-  | 'RUNS_ROOT_INVALID'
-  /** The computed run path would not sit directly inside `runsRoot`. */
-  | 'RUN_OUTSIDE_ROOT'
-  /** The run path, or something on the way to it, is a symlink or junction. */
-  | 'RUN_PATH_IS_LINK'
-  /** The run directory holds something other than exactly the expected entries. */
-  | 'RUN_STRUCTURE_INVALID'
-  /** A required artefact is missing from the run directory. */
-  | 'REQUIRED_ARTIFACT_MISSING'
-  /** A required artefact exists but is not a regular file. */
-  | 'REQUIRED_ARTIFACT_NOT_REGULAR'
-  /** A required artefact exists but is itself a symlink or junction. */
-  | 'REQUIRED_ARTIFACT_IS_LINK'
+  | RunPathCode
+  | RunStructureCode
   /** No marker: the run never finished, or is still running. Ignore it. */
   | 'COMPLETION_MARKER_MISSING'
   /** The marker exists but is not a regular file. Ignore it. */
@@ -371,28 +236,40 @@ function inspection(
   });
 }
 
+// ── Shared path/root binding (producer and consumer alike) ─────────────────
+
+interface RunPathValidation {
+  readonly code: 'OK' | RunPathCode;
+  readonly runDirectory: string;
+  readonly errnoCode: string | null;
+}
+
 /**
- * Decides whether a run may be consumed.
+ * Validates that `runId` names a run directory directly, lexically *and*
+ * canonically, inside the trusted `runsRoot` — with no link anywhere on the
+ * way — before anything downstream is allowed to read from or write to it.
  *
  * `runsRoot` is the caller's trusted, canonical diagnostics root — never a
  * value read back from an untrusted source — and `runId` is validated
  * independently before it is ever joined onto it. The run path is computed
  * *only* as `join(runsRoot, runId)`; nothing else this function is given can
- * influence which directory gets inspected (AO-007-R2-RR2-REVIEW-01).
+ * influence which directory gets inspected.
  *
- * A run is consumable if and only if:
+ * Two independent containment checks both have to pass:
  *
- *  - `runId` matches the shared run-id schema;
- *  - `runsRoot` itself is a canonical, existing, link-free directory;
- *  - the computed run path is a direct child of `runsRoot`, lexically and
- *    canonically, with no symlink or junction anywhere between them;
- *  - the run directory holds exactly {@link REQUIRED_ARTEFACT_NAMES} plus the
- *    marker, each a direct, non-linked regular file, and nothing else;
- *  - the marker's content is byte-for-byte {@link COMPLETION_MARKER_CONTENTS}.
+ *  - **lexical**: `dirname(join(runsRoot, runId))` must equal `runsRoot` as a
+ *    plain string;
+ *  - **canonical**: `dirname(realpath(join(runsRoot, runId)))` must equal
+ *    `realpath(runsRoot)`.
+ *
+ * The canonical check is additional, not a replacement for the lexical one or
+ * for the `lstat`-based link walk below: by the time `realpath` has resolved
+ * a junction, containment can no longer be checked against the external
+ * target it points at, which is exactly why the link walk exists as well.
  */
-export function inspectRun(runsRoot: string, runId: string): RunInspection {
+function validateRunPath(runsRoot: string, runId: string): RunPathValidation {
   if (!isValidRunId(runId)) {
-    return inspection('INVALID_RUN_ID', resolve(runsRoot), runId, null);
+    return { code: 'INVALID_RUN_ID', runDirectory: resolve(runsRoot), errnoCode: null };
   }
 
   const root = resolve(runsRoot);
@@ -400,92 +277,303 @@ export function inspectRun(runsRoot: string, runId: string): RunInspection {
   try {
     rootStats = lstatSync(root);
   } catch (error) {
-    return inspection('RUNS_ROOT_INVALID', root, runId, safeErrnoCode(error));
+    return { code: 'RUNS_ROOT_INVALID', runDirectory: root, errnoCode: safeErrnoCode(error) };
   }
-  if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) {
-    return inspection('RUNS_ROOT_INVALID', root, runId, null);
+  if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
+    return { code: 'RUNS_ROOT_INVALID', runDirectory: root, errnoCode: null };
   }
 
   const runDirectory = join(root, runId);
+  // Lexical direct-child check: the run directory's own parent, as a plain
+  // string, must be exactly `runsRoot` — not two levels down, not a sibling
+  // that merely shares a prefix.
   if (!isContained(root, runDirectory) || !samePath(dirname(runDirectory), root)) {
-    return inspection('RUN_OUTSIDE_ROOT', runDirectory, runId, null);
+    return { code: 'RUN_OUTSIDE_ROOT', runDirectory, errnoCode: null };
   }
 
   // Every segment from the filesystem root down to and including the run
-  // directory must be link-free. This, not `realpath`, is what catches a
-  // validly named junction under `runsRoot`: `realpath` would already have
-  // resolved it to whatever external directory it points at, by which point
-  // containment can no longer be checked against that external target.
-  if (pathContainsLink(runDirectory)) {
-    return inspection('RUN_PATH_IS_LINK', runDirectory, runId, null);
+  // directory must be link-free. Every one of them is expected to already
+  // exist — this function is only ever called on a run that was already
+  // created — so a missing segment is itself a failure, never "nothing to
+  // redirect through" (AO-007-R2-RR2-REVIEW-01-C1-F4).
+  const chain = inspectLinkChain(runDirectory, { allowMissing: false });
+  if (chain === 'LINK_FOUND') return { code: 'RUN_PATH_IS_LINK', runDirectory, errnoCode: null };
+  if (chain === 'INSPECTION_FAILED') {
+    return { code: 'PATH_INSPECTION_FAILED', runDirectory, errnoCode: null };
   }
 
   let runStats;
   try {
     runStats = lstatSync(runDirectory);
   } catch (error) {
-    return inspection('RUN_STRUCTURE_INVALID', runDirectory, runId, safeErrnoCode(error));
+    return { code: 'PATH_INSPECTION_FAILED', runDirectory, errnoCode: safeErrnoCode(error) };
   }
-  if (runStats.isSymbolicLink()) return inspection('RUN_PATH_IS_LINK', runDirectory, runId, null);
-  if (!runStats.isDirectory()) return inspection('RUN_STRUCTURE_INVALID', runDirectory, runId, null);
+  if (runStats.isSymbolicLink()) return { code: 'RUN_PATH_IS_LINK', runDirectory, errnoCode: null };
+  if (!runStats.isDirectory()) return { code: 'PATH_INSPECTION_FAILED', runDirectory, errnoCode: null };
 
-  const expectedEntries = [...REQUIRED_ARTEFACT_NAMES, COMPLETION_MARKER_FILE_NAME];
-  const structure = checkExactEntries(runDirectory, expectedEntries);
-  if (structure.unreadable) {
-    return inspection('RUN_STRUCTURE_INVALID', runDirectory, runId, structure.errnoCode);
+  let realRoot: string;
+  let realRunDirectory: string;
+  try {
+    realRoot = realpathSync(root);
+    realRunDirectory = realpathSync(runDirectory);
+  } catch (error) {
+    return { code: 'PATH_INSPECTION_FAILED', runDirectory, errnoCode: safeErrnoCode(error) };
   }
-  if (structure.unexpected.length > 0) {
-    return inspection('RUN_STRUCTURE_INVALID', runDirectory, runId, null);
+  if (!samePath(dirname(realRunDirectory), realRoot)) {
+    return { code: 'RUN_PATH_IS_LINK', runDirectory, errnoCode: null };
   }
 
-  for (const name of REQUIRED_ARTEFACT_NAMES) {
-    if (structure.missing.includes(name)) {
-      return inspection('REQUIRED_ARTIFACT_MISSING', runDirectory, runId, null);
+  return { code: 'OK', runDirectory, errnoCode: null };
+}
+
+// ── Shared structural checks (producer and consumer alike) ─────────────────
+
+type EntryKind = 'MISSING' | 'LINK' | 'FILE' | 'OTHER';
+
+interface EntryClassification {
+  readonly kind: EntryKind;
+  readonly size: number;
+  readonly errnoCode: string | null;
+}
+
+/** What lives at a path, decided with `lstat` — the link itself is never followed. */
+function classifyEntry(path: string): EntryClassification {
+  let stats;
+  try {
+    stats = lstatSync(path);
+  } catch (error) {
+    return { kind: 'MISSING', size: 0, errnoCode: safeErrnoCode(error) };
+  }
+  if (stats.isSymbolicLink()) return { kind: 'LINK', size: stats.size, errnoCode: null };
+  if (stats.isFile()) return { kind: 'FILE', size: stats.size, errnoCode: null };
+  return { kind: 'OTHER', size: stats.size, errnoCode: null };
+}
+
+interface StructureCheck {
+  readonly code: 'OK' | RunStructureCode;
+  readonly errnoCode: string | null;
+}
+
+/** The directory must hold precisely `expectedNames` — nothing more. */
+function checkExactEntries(runDirectory: string, expectedNames: readonly string[]): StructureCheck {
+  let names: string[];
+  try {
+    names = readdirSync(runDirectory);
+  } catch (error) {
+    return { code: 'RUN_STRUCTURE_INVALID', errnoCode: safeErrnoCode(error) };
+  }
+
+  const expected = new Set(expectedNames);
+  if (names.some((name) => !expected.has(name))) {
+    return { code: 'RUN_STRUCTURE_INVALID', errnoCode: null };
+  }
+  return { code: 'OK', errnoCode: null };
+}
+
+/**
+ * Every name in `names` must be a direct, non-linked, non-empty regular file
+ * — checked with `lstat`, so a symlink or junction sharing the right name is
+ * never mistaken for the entry it claims to be.
+ */
+function checkArtefacts(runDirectory: string, names: readonly string[]): StructureCheck {
+  for (const name of names) {
+    const entry = classifyEntry(join(runDirectory, name));
+    if (entry.kind === 'MISSING') {
+      return { code: 'REQUIRED_ARTIFACT_MISSING', errnoCode: entry.errnoCode };
     }
-    if (structure.links.includes(name)) {
-      return inspection('REQUIRED_ARTIFACT_IS_LINK', runDirectory, runId, null);
-    }
-    if (structure.notRegular.includes(name)) {
-      return inspection('REQUIRED_ARTIFACT_NOT_REGULAR', runDirectory, runId, null);
-    }
+    if (entry.kind === 'LINK') return { code: 'REQUIRED_ARTIFACT_IS_LINK', errnoCode: null };
+    if (entry.kind === 'OTHER') return { code: 'REQUIRED_ARTIFACT_NOT_REGULAR', errnoCode: null };
+    if (entry.size === 0) return { code: 'REQUIRED_ARTIFACT_EMPTY', errnoCode: null };
   }
+  return { code: 'OK', errnoCode: null };
+}
 
-  if (structure.missing.includes(COMPLETION_MARKER_FILE_NAME)) {
-    return inspection('COMPLETION_MARKER_MISSING', runDirectory, runId, null);
-  }
-  if (structure.links.includes(COMPLETION_MARKER_FILE_NAME)) {
-    return inspection('COMPLETION_MARKER_IS_LINK', runDirectory, runId, null);
-  }
-  if (structure.notRegular.includes(COMPLETION_MARKER_FILE_NAME)) {
-    return inspection('COMPLETION_MARKER_NOT_REGULAR', runDirectory, runId, null);
-  }
+type MarkerCheckCode =
+  | 'OK'
+  | 'COMPLETION_MARKER_MISSING'
+  | 'COMPLETION_MARKER_NOT_REGULAR'
+  | 'COMPLETION_MARKER_IS_LINK'
+  | 'COMPLETION_MARKER_INVALID';
 
-  // The structural check confirms the marker is a direct, non-linked regular
-  // file. What remains is its exact byte content — no `trim`, no encoding
-  // normalisation, a plain buffer comparison. The size is checked first so an
-  // oversized planted file is rejected without ever being read in full.
+interface MarkerCheck {
+  readonly code: MarkerCheckCode;
+  readonly errnoCode: string | null;
+}
+
+/**
+ * The marker must be a direct, non-linked regular file whose content is
+ * byte-for-byte {@link COMPLETION_MARKER_CONTENTS} — no `trim`, no encoding
+ * normalisation, a plain buffer comparison. Size is checked before content is
+ * ever read, so an oversized planted file is rejected without being read in
+ * full.
+ */
+function checkCompletionMarker(runDirectory: string): MarkerCheck {
   const markerPath = join(runDirectory, COMPLETION_MARKER_FILE_NAME);
-  let markerStats;
-  try {
-    markerStats = lstatSync(markerPath);
-  } catch (error) {
-    return inspection('COMPLETION_MARKER_MISSING', runDirectory, runId, safeErrnoCode(error));
+  const entry = classifyEntry(markerPath);
+  if (entry.kind === 'MISSING') {
+    return { code: 'COMPLETION_MARKER_MISSING', errnoCode: entry.errnoCode };
   }
-  if (markerStats.size !== COMPLETION_MARKER_BYTES.length) {
-    return inspection('COMPLETION_MARKER_INVALID', runDirectory, runId, null);
-  }
-
-  let markerBuffer: Buffer;
-  try {
-    markerBuffer = readFileSync(markerPath);
-  } catch (error) {
-    return inspection('COMPLETION_MARKER_NOT_REGULAR', runDirectory, runId, safeErrnoCode(error));
-  }
-  if (!markerBuffer.equals(COMPLETION_MARKER_BYTES)) {
-    return inspection('COMPLETION_MARKER_INVALID', runDirectory, runId, null);
+  if (entry.kind === 'LINK') return { code: 'COMPLETION_MARKER_IS_LINK', errnoCode: null };
+  if (entry.kind === 'OTHER') return { code: 'COMPLETION_MARKER_NOT_REGULAR', errnoCode: null };
+  if (entry.size !== COMPLETION_MARKER_BYTES.length) {
+    return { code: 'COMPLETION_MARKER_INVALID', errnoCode: null };
   }
 
-  return inspection('COMPLETE', runDirectory, runId, null);
+  let contents: Buffer;
+  try {
+    contents = readFileSync(markerPath);
+  } catch (error) {
+    return { code: 'COMPLETION_MARKER_NOT_REGULAR', errnoCode: safeErrnoCode(error) };
+  }
+  if (!contents.equals(COMPLETION_MARKER_BYTES)) {
+    return { code: 'COMPLETION_MARKER_INVALID', errnoCode: null };
+  }
+  return { code: 'OK', errnoCode: null };
+}
+
+// ── The two shared, fixed protocol validators ───────────────────────────────
+
+type PreCompletionCode = 'OK' | RunPathCode | RunStructureCode | 'COMPLETION_MARKER_ALREADY_EXISTS';
+
+interface ProtocolValidation<C extends string> {
+  readonly code: C;
+  readonly runDirectory: string;
+  readonly errnoCode: string | null;
+}
+
+/**
+ * Everything {@link completeRun} must confirm *before* it is allowed to write
+ * the marker: a validated, root-bound, link-free run directory holding
+ * exactly {@link REQUIRED_ARTEFACT_NAMES} — each a direct, non-linked,
+ * non-empty regular file — and no {@link COMPLETION_MARKER_FILE_NAME} yet.
+ */
+function validateRunBeforeCompletion(
+  runsRoot: string,
+  runId: string,
+): ProtocolValidation<PreCompletionCode> {
+  const pathCheck = validateRunPath(runsRoot, runId);
+  if (pathCheck.code !== 'OK') return pathCheck;
+  const { runDirectory } = pathCheck;
+
+  const markerEntry = classifyEntry(join(runDirectory, COMPLETION_MARKER_FILE_NAME));
+  if (markerEntry.kind !== 'MISSING') {
+    return { code: 'COMPLETION_MARKER_ALREADY_EXISTS', runDirectory, errnoCode: null };
+  }
+
+  const entries = checkExactEntries(runDirectory, REQUIRED_ARTEFACT_NAMES);
+  if (entries.code !== 'OK') {
+    return { code: entries.code, runDirectory, errnoCode: entries.errnoCode };
+  }
+
+  const artefacts = checkArtefacts(runDirectory, REQUIRED_ARTEFACT_NAMES);
+  if (artefacts.code !== 'OK') {
+    return { code: artefacts.code, runDirectory, errnoCode: artefacts.errnoCode };
+  }
+
+  return { code: 'OK', runDirectory, errnoCode: null };
+}
+
+type CompletedRunCode = 'OK' | RunPathCode | RunStructureCode | MarkerCheckCode;
+
+/**
+ * Everything that makes a run consumable: the same root-bound, link-free run
+ * directory, holding exactly {@link REQUIRED_ARTEFACT_NAMES} plus
+ * {@link COMPLETION_MARKER_FILE_NAME} and nothing else, every artefact a
+ * direct non-linked non-empty regular file, and the marker byte-exact.
+ *
+ * {@link inspectRun} uses this directly. {@link completeRun} uses it twice:
+ * implicitly (its own pre-checks are a strict subset, minus the marker) and
+ * explicitly, immediately after writing the marker, as the closing
+ * re-validation (AO-007-R2-RR2-REVIEW-01-C1-F2).
+ */
+function validateCompletedRun(runsRoot: string, runId: string): ProtocolValidation<CompletedRunCode> {
+  const pathCheck = validateRunPath(runsRoot, runId);
+  if (pathCheck.code !== 'OK') return pathCheck;
+  const { runDirectory } = pathCheck;
+
+  const entries = checkExactEntries(runDirectory, COMPLETED_ENTRY_NAMES);
+  if (entries.code !== 'OK') {
+    return { code: entries.code, runDirectory, errnoCode: entries.errnoCode };
+  }
+
+  const artefacts = checkArtefacts(runDirectory, REQUIRED_ARTEFACT_NAMES);
+  if (artefacts.code !== 'OK') {
+    return { code: artefacts.code, runDirectory, errnoCode: artefacts.errnoCode };
+  }
+
+  const marker = checkCompletionMarker(runDirectory);
+  if (marker.code !== 'OK') {
+    return { code: marker.code, runDirectory, errnoCode: marker.errnoCode };
+  }
+
+  return { code: 'OK', runDirectory, errnoCode: null };
+}
+
+// ── Producer ────────────────────────────────────────────────────────────────
+
+/**
+ * Runs the fixed closing checks and, only if they all pass, creates the
+ * marker — then re-runs the full completed-run validation before reporting
+ * success.
+ *
+ * `runId` is validated, and the run directory is derived *only* as
+ * `join(runsRoot, runId)`, exactly as {@link inspectRun} does: there is no
+ * parameter through which a caller can name a different directory, and no
+ * parameter through which a caller can name a different artefact contract.
+ *
+ * Never throws. A `false` in {@link RunCompletionResult.completed} always
+ * means the run must be treated as incomplete, whatever else is on disk —
+ * including when the marker itself was successfully written: if the
+ * immediate re-validation after that write finds anything wrong, this still
+ * reports failure.
+ */
+export function completeRun(runsRoot: string, runId: string): RunCompletionResult {
+  const before = validateRunBeforeCompletion(runsRoot, runId);
+  const markerPathFor = (dir: string): string => join(dir, COMPLETION_MARKER_FILE_NAME);
+
+  if (before.code !== 'OK') {
+    return completion(before.code, markerPathFor(before.runDirectory), before.errnoCode);
+  }
+
+  const { runDirectory } = before;
+  const markerPath = markerPathFor(runDirectory);
+
+  const write = writeRunArtifact({
+    runDirectory,
+    fileName: COMPLETION_MARKER_FILE_NAME,
+    contents: COMPLETION_MARKER_CONTENTS,
+  });
+
+  if (write.code === 'TARGET_EXISTS') {
+    return completion('COMPLETION_MARKER_ALREADY_EXISTS', markerPath, write.errnoCode);
+  }
+  if (!write.written) {
+    return completion('MARKER_WRITE_FAILED', markerPath, write.errnoCode);
+  }
+
+  // The closing word: re-run the exact same completed-run validation a
+  // consumer would apply, now that the marker exists. The run is reported
+  // successful only if this passes too — never on the strength of the write
+  // call alone (AO-007-R2-RR2-REVIEW-01-C1-F2).
+  const after = validateCompletedRun(runsRoot, runId);
+  if (after.code !== 'OK') {
+    return completion('POST_COMPLETION_VALIDATION_FAILED', markerPath, after.errnoCode);
+  }
+
+  return completion('COMPLETED', markerPath, null);
+}
+
+// ── Consumer ────────────────────────────────────────────────────────────────
+
+/**
+ * Decides whether a run may be consumed. A thin, code-translating wrapper
+ * around {@link validateCompletedRun} — the same validator {@link completeRun}
+ * re-applies to itself after writing the marker.
+ */
+export function inspectRun(runsRoot: string, runId: string): RunInspection {
+  const validated = validateCompletedRun(runsRoot, runId);
+  const code: RunInspectionCode = validated.code === 'OK' ? 'COMPLETE' : validated.code;
+  return inspection(code, validated.runDirectory, runId, validated.errnoCode);
 }
 
 /**

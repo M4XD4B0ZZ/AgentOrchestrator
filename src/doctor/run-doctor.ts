@@ -471,10 +471,10 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
   }
 
   // The last step of the run, and the only thing that makes it consumable.
-  const completion = completeRun({
-    runDirectory: runDirectory.path,
-    expectedArtefacts: REQUIRED_ARTEFACT_NAMES,
-  });
+  // Only the canonical runs root and the already-validated run id are passed
+  // through — never the run directory path itself and never an artefact list
+  // (AO-007-R2-RR2-REVIEW-01-C1).
+  const completion = completeRun(runsRoot, runId);
 
   return buildReport([...finalChecks, completionCheck(completion)], finalArtefacts);
 }

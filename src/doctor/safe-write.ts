@@ -141,23 +141,69 @@ export function pathChain(target: string): readonly string[] {
 }
 
 /**
- * `true` when any existing segment of `target`'s path is a link.
+ * The tri-state answer to "is there a link on this path chain?"
+ * (AO-007-R2-RR2-REVIEW-01-C1-F4).
  *
- * `lstatSync` does not follow the final component, and Node reports Windows
- * junctions as symbolic links, so both cases are covered. Segments that do not
- * exist yet are skipped — they cannot be links.
+ *  - `CLEAR`: every segment was inspected and none is a link.
+ *  - `LINK_FOUND`: a symbolic link or Windows junction sits on the chain.
+ *  - `INSPECTION_FAILED`: at least one segment could not be conclusively
+ *    classified. This is not "probably fine" — a segment this process cannot
+ *    even `lstat` is, for path-safety purposes, exactly as dangerous as one it
+ *    can prove is a link, because neither can be ruled out as a redirection.
  */
-export function pathContainsLink(target: string): boolean {
+export type LinkChainResult = 'CLEAR' | 'LINK_FOUND' | 'INSPECTION_FAILED';
+
+export interface LinkChainOptions {
+  /**
+   * `true` when a segment that does not exist yet is an expected, benign
+   * state (e.g. checking the path down to a directory this call is about to
+   * create). `false` when every segment is expected to already exist, so a
+   * missing one is itself suspicious rather than "nothing to redirect
+   * through" — the shared run-completion validators always pass `false`,
+   * because by the time they run, the run directory has already been
+   * created.
+   */
+  readonly allowMissing: boolean;
+}
+
+/**
+ * Classifies every existing segment of `target`'s path with `lstat`, never
+ * `stat` — a symbolic link or a Windows junction must never be silently
+ * followed and reported as "just a directory".
+ *
+ * Every `lstat` failure is mapped through the closed errno allow-list before
+ * it can influence the result: an unrecognised or unexpected error is never
+ * treated as "the component is absent". Only `ENOENT`, and only when
+ * `allowMissing` is `true`, is treated as "nothing here yet, keep looking" —
+ * every other errno, including `ENOENT` when `allowMissing` is `false`,
+ * yields `INSPECTION_FAILED`.
+ */
+export function inspectLinkChain(target: string, options: LinkChainOptions): LinkChainResult {
   for (const segment of pathChain(target)) {
     let stats;
     try {
       stats = lstatSync(segment);
-    } catch {
-      continue; // Not present (or not inspectable): nothing to redirect through.
+    } catch (error) {
+      const errnoCode = safeErrnoCode(error);
+      if (options.allowMissing && errnoCode === 'ENOENT') continue;
+      return 'INSPECTION_FAILED';
     }
-    if (stats.isSymbolicLink()) return true;
+    if (stats.isSymbolicLink()) return 'LINK_FOUND';
   }
-  return false;
+  return 'CLEAR';
+}
+
+/**
+ * `true` when any existing segment of `target`'s path is a link, *or* when a
+ * segment could not be conclusively inspected at all. Both cases fail closed:
+ * the caller must treat `true` as "do not proceed", never as "probably a
+ * link, probably not".
+ *
+ * Segments that do not exist yet are tolerated — this helper is used before a
+ * directory has been created, when a not-yet-existing component is expected.
+ */
+export function pathContainsLink(target: string): boolean {
+  return inspectLinkChain(target, { allowMissing: true }) !== 'CLEAR';
 }
 
 function result(

@@ -25,12 +25,13 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -56,27 +57,89 @@ const fault = vi.hoisted(() => ({
   current: null as null | { readonly call: string; readonly code: string; readonly short?: boolean },
 }));
 
+/**
+ * The phase-hook injector (AO-007-R2-RR2-REVIEW-01-C1). Purely test-side
+ * wiring around `node:fs`: production code never sees this, imports it, or
+ * exposes any parameter that could reach it — it exists only because this
+ * `vi.mock('node:fs')` factory intercepts every `node:fs` import in this test
+ * file, including the ones the modules under test perform themselves.
+ *
+ * A hook fires when its `fn` and `when(args)` match a real call:
+ *
+ *  - `before`: runs, then the real call proceeds normally;
+ *  - `after`: the real call proceeds, then runs with the real result visible;
+ *  - `throw`: the real call never happens; a fixed errno is thrown instead;
+ *  - `replace`: the real call never happens; `value(args)` is returned instead
+ *    (used to simulate a `realpath` that resolves outside its lexical parent
+ *    without any symlink ever being involved, e.g. a `subst`-mounted drive).
+ */
+interface HookContext {
+  readonly args: readonly unknown[];
+  readonly result?: unknown;
+}
+interface Hook {
+  readonly fn: 'openSync' | 'writeSync' | 'fsyncSync' | 'closeSync' | 'lstatSync' | 'readdirSync' | 'readFileSync' | 'realpathSync';
+  readonly action: 'before' | 'after' | 'throw' | 'replace';
+  readonly when: (args: readonly unknown[]) => boolean;
+  readonly code?: string;
+  readonly run?: (ctx: HookContext) => void;
+  readonly value?: (args: readonly unknown[]) => unknown;
+}
+const hooks = vi.hoisted(() => ({ list: [] as Hook[] }));
+
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  const faulted =
-    <K extends 'openSync' | 'writeSync' | 'fsyncSync' | 'closeSync'>(name: K) =>
+
+  const wrap =
+    <K extends Hook['fn']>(name: K) =>
     (...args: Parameters<(typeof actual)[K]>): unknown => {
+      for (const hook of hooks.list) {
+        if (hook.fn === name && hook.action === 'before' && hook.when(args)) hook.run?.({ args });
+      }
+
+      const throwHook = hooks.list.find(
+        (hook) => hook.fn === name && hook.action === 'throw' && hook.when(args),
+      );
+      if (throwHook) {
+        const error: NodeJS.ErrnoException = new Error(`injected ${name} failure`);
+        if (throwHook.code !== undefined) error.code = throwHook.code;
+        throw error;
+      }
+
+      const replaceHook = hooks.list.find(
+        (hook) => hook.fn === name && hook.action === 'replace' && hook.when(args),
+      );
+      if (replaceHook) return replaceHook.value?.(args);
+
       if (fault.current?.call === name) {
         if (fault.current.short === true) return 0; // a short write, not a throw
         const error: NodeJS.ErrnoException = new Error(`injected ${name} failure`);
         error.code = fault.current.code;
         throw error;
       }
-      return (actual[name] as (...a: unknown[]) => unknown)(...args);
+
+      const result = (actual[name] as (...a: unknown[]) => unknown)(...args);
+
+      for (const hook of hooks.list) {
+        if (hook.fn === name && hook.action === 'after' && hook.when(args)) {
+          hook.run?.({ args, result });
+        }
+      }
+
+      return result;
     };
 
   return {
     ...actual,
     default: actual,
-    openSync: faulted('openSync'),
-    writeSync: faulted('writeSync'),
-    fsyncSync: faulted('fsyncSync'),
-    closeSync: faulted('closeSync'),
+    openSync: wrap('openSync'),
+    writeSync: wrap('writeSync'),
+    fsyncSync: wrap('fsyncSync'),
+    closeSync: wrap('closeSync'),
+    lstatSync: wrap('lstatSync'),
+    readdirSync: wrap('readdirSync'),
+    readFileSync: wrap('readFileSync'),
+    realpathSync: wrap('realpathSync'),
   };
 });
 
@@ -116,12 +179,12 @@ function writeArtefacts(runDirectory: string): void {
   }
 }
 
-/** `completeRun` for a run directory produced by `freshRun`. */
-function complete(
-  runDirectory: string,
-  expectedArtefacts: readonly string[] = ARTEFACTS,
-): RunCompletionResult {
-  return completeRun({ runDirectory, expectedArtefacts });
+/**
+ * `completeRun` under the `(runsRoot, runId)` contract, recovered from a
+ * concrete run directory path the same way `inspect()` below does.
+ */
+function complete(runDirectory: string): RunCompletionResult {
+  return completeRun(dirname(runDirectory), basename(runDirectory));
 }
 
 /**
@@ -133,12 +196,44 @@ function inspect(runDirectory: string): RunInspection {
   return inspectRun(dirname(runDirectory), basename(runDirectory));
 }
 
+/** `true` when an `openSync` call is the run protocol's exclusive marker create. */
+function isMarkerWxOpen(args: readonly unknown[]): boolean {
+  return typeof args[0] === 'string' && basename(args[0]) === COMPLETION_MARKER_FILE_NAME && args[1] === 'wx';
+}
+
+/**
+ * Arms `mutate` to run exactly once, right after the `COMPLETED` marker's file
+ * handle has been written, synced and closed — i.e. after marker *creation*
+ * is fully done, not merely after the exclusive handle was opened. This is
+ * done by correlating the marker's own file descriptor: the `openSync` that
+ * creates it is caught first, and only *that* descriptor's later `closeSync`
+ * triggers the mutation (AO-007-R2-RR2-REVIEW-01-C1-F2).
+ */
+function armAfterMarkerCreated(mutate: () => void): void {
+  hooks.list.push({
+    fn: 'openSync',
+    action: 'after',
+    when: isMarkerWxOpen,
+    run: (ctx) => {
+      const fd = ctx.result;
+      hooks.list.push({
+        fn: 'closeSync',
+        action: 'after',
+        when: (args) => args[0] === fd,
+        run: () => mutate(),
+      });
+    },
+  });
+}
+
 beforeEach(() => {
   fault.current = null;
+  hooks.list = [];
 });
 
 afterEach(() => {
   fault.current = null;
+  hooks.list = [];
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
@@ -226,7 +321,7 @@ describe('nothing existing is ever replaced', () => {
 
     const completion = complete(runDirectory);
 
-    expect(completion.code).toBe('MARKER_EXISTS');
+    expect(completion.code).toBe('COMPLETION_MARKER_ALREADY_EXISTS');
     expect(completion.completed).toBe(false);
     expect(readFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), 'utf8')).toBe('planted\n');
     // And a planted marker with the wrong content does not make the run usable.
@@ -365,7 +460,7 @@ describe('the closing checks gate the marker', () => {
     writeRunArtifact({ runDirectory, fileName: 'cli-capabilities.txt', contents: 'a\n' });
 
     const completion = complete(runDirectory);
-    expect(completion.code).toBe('ARTEFACTS_MISSING');
+    expect(completion.code).toBe('REQUIRED_ARTIFACT_MISSING');
     expect(existsSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
 
@@ -376,7 +471,7 @@ describe('the closing checks gate the marker', () => {
     writeFileSync(join(runDirectory, '.doctor-report.json.abc.tmp'), 'leftover\n', 'utf8');
 
     const completion = complete(runDirectory);
-    expect(completion.code).toBe('UNEXPECTED_DIRECTORY_CONTENTS');
+    expect(completion.code).toBe('RUN_STRUCTURE_INVALID');
     expect(existsSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
 
@@ -384,12 +479,12 @@ describe('the closing checks gate the marker', () => {
     const empty = freshRun();
     writeRunArtifact({ runDirectory: empty, fileName: 'cli-capabilities.txt', contents: '' });
     writeRunArtifact({ runDirectory: empty, fileName: 'doctor-report.json', contents: 'x\n' });
-    expect(complete(empty).code).toBe('ARTEFACTS_MISSING');
+    expect(complete(empty).code).toBe('REQUIRED_ARTIFACT_EMPTY');
 
     const shadowed = freshRun();
     writeRunArtifact({ runDirectory: shadowed, fileName: 'cli-capabilities.txt', contents: 'a\n' });
     mkdirSync(join(shadowed, 'doctor-report.json'));
-    expect(complete(shadowed).code).toBe('ARTEFACTS_MISSING');
+    expect(complete(shadowed).code).toBe('REQUIRED_ARTIFACT_NOT_REGULAR');
   });
 
   it('refuses a run whose directory name is not a valid run id', () => {
@@ -404,18 +499,22 @@ describe('the closing checks gate the marker', () => {
     expect(existsSync(join(notARunId, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
 
-  it('refuses an unreadable run directory and an unsafe artefact name', () => {
+  it('refuses a run id for which no directory was ever created', () => {
     const runsRoot = makeTempDir();
-    expect(
-      completeRun({
-        runDirectory: join(runsRoot, newRunId()),
-        expectedArtefacts: [...ARTEFACTS],
-      }).code,
-    ).toBe('RUN_DIRECTORY_UNREADABLE');
+    expect(completeRun(runsRoot, newRunId()).code).toBe('PATH_INSPECTION_FAILED');
+  });
 
-    expect(
-      completeRun({ runDirectory: freshRun(), expectedArtefacts: ['../escape.txt'] }).code,
-    ).toBe('INVALID_ARTEFACT_NAME');
+  it('offers no parameter through which a caller could name a different artefact contract', () => {
+    // The whole point of removing `expectedArtefacts`: `completeRun` takes
+    // exactly two positional string arguments now.
+    expect(completeRun.length).toBe(2);
+
+    // @ts-expect-error — there is no overload of `completeRun` accepting an
+    // object with a caller-defined artefact list any more; this line must
+    // fail to type-check. Forcing the call past the type system does not
+    // recover the old contract either: `runsRoot` is no longer a string, so
+    // path resolution itself rejects the call outright.
+    expect(() => completeRun({ runDirectory: freshRun(), expectedArtefacts: ['x'] })).toThrow();
   });
 });
 
@@ -520,7 +619,10 @@ describe('containment still holds under the new protocol', () => {
   it('refuses a run directory reached through a symlink or Windows junction', () => {
     const base = makeTempDir();
     const real = join(base, 'real-run');
-    const link = join(base, 'link-run');
+    // A validly *named* run id, so `completeRun` gets past id validation and
+    // exercises the link check itself, not merely the id schema.
+    const runId = newRunId();
+    const link = join(base, runId);
     mkdirSync(real, { recursive: true });
 
     try {
@@ -539,9 +641,9 @@ describe('containment still holds under the new protocol', () => {
     expect(existsSync(join(real, 'doctor-report.json'))).toBe(false);
 
     // And no marker can be planted through the link either.
-    expect(completeRun({ runDirectory: link, expectedArtefacts: [...ARTEFACTS] }).completed).toBe(
-      false,
-    );
+    const completed = completeRun(base, runId);
+    expect(completed.completed).toBe(false);
+    expect(completed.code).toBe('RUN_PATH_IS_LINK');
     expect(existsSync(join(real, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
 
@@ -749,7 +851,7 @@ describe('completeRun refuses a link wherever one appears (AO-007-R2-RR2-REVIEW-
 
     const completion = complete(runDirectory);
     expect(completion.completed).toBe(false);
-    expect(completion.code).toBe('ARTEFACT_IS_LINK');
+    expect(completion.code).toBe('REQUIRED_ARTIFACT_IS_LINK');
     expect(existsSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
 
@@ -766,8 +868,9 @@ describe('completeRun refuses a link wherever one appears (AO-007-R2-RR2-REVIEW-
     const junctionPath = join(runsRoot, runId);
     symlinkSync(external, junctionPath, 'junction');
 
-    const completion = completeRun({ runDirectory: junctionPath, expectedArtefacts: [...ARTEFACTS] });
+    const completion = completeRun(runsRoot, runId);
     expect(completion.completed).toBe(false);
+    expect(completion.code).toBe('RUN_PATH_IS_LINK');
     expect(existsSync(join(external, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
 });
@@ -839,6 +942,349 @@ describe('listCompletedRuns across a heavily mixed runs root', () => {
     writeArtefacts(wrongMarker);
     writeFileSync(join(wrongMarker, COMPLETION_MARKER_FILE_NAME), 'not-the-marker\n', 'utf8');
 
+    // A genuinely completed run whose *current* inspection is blocked by an
+    // lstat failure on one of its own artefacts.
+    const lstatBlocked = freshRun(runsRoot);
+    writeArtefacts(lstatBlocked);
+    expect(complete(lstatBlocked).completed).toBe(true);
+    hooks.list.push({
+      fn: 'lstatSync',
+      action: 'throw',
+      code: 'EPERM',
+      when: (args) => resolve(String(args[0])) === resolve(join(lstatBlocked, ARTEFACTS[0])),
+    });
+
+    // A genuinely completed run whose *current* inspection is blocked by a
+    // realpath failure.
+    const realpathBlocked = freshRun(runsRoot);
+    writeArtefacts(realpathBlocked);
+    expect(complete(realpathBlocked).completed).toBe(true);
+    hooks.list.push({
+      fn: 'realpathSync',
+      action: 'throw',
+      code: 'EIO',
+      when: (args) => resolve(String(args[0])) === resolve(realpathBlocked),
+    });
+
     expect(listCompletedRuns(runsRoot)).toEqual([goodRunId]);
+  });
+});
+
+/**
+ * AO-007-R2-RR2-REVIEW-01-C1-F3: `completeRun`/`inspectRun` are bound to
+ * `(runsRoot, runId)`, never to an arbitrary caller-supplied path. Every shape
+ * of "a validly named run id, but not genuinely a direct child of this
+ * `runsRoot`" must be rejected, fail-closed, at every layer.
+ */
+describe('root binding rejects every wrong-parent shape (AO-007-R2-RR2-REVIEW-01-C1-F3)', () => {
+  it('rejects a validly named run id whose real directory lives under a different runsRoot', () => {
+    const runsRootA = makeRunsRoot();
+    mkdirSync(runsRootA, { recursive: true });
+    const runsRootB = makeRunsRoot();
+    mkdirSync(runsRootB, { recursive: true });
+
+    const runId = newRunId();
+    const wrongDirectory = join(runsRootB, runId);
+    mkdirSync(wrongDirectory, { recursive: true });
+    writeFileSync(join(wrongDirectory, ARTEFACTS[0]), 'a\n', 'utf8');
+    writeFileSync(join(wrongDirectory, ARTEFACTS[1]), 'b\n', 'utf8');
+    writeFileSync(join(wrongDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    // Genuinely complete under B; asked for under A, where it does not exist.
+    expect(inspectRun(runsRootA, runId).consumable).toBe(false);
+    expect(completeRun(runsRootA, runId).completed).toBe(false);
+    expect(listCompletedRuns(runsRootA)).toEqual([]);
+    // It is exactly where it should be under its real root, though.
+    expect(inspectRun(runsRootB, runId).consumable).toBe(true);
+  });
+
+  it('rejects a run nested one level deeper than a direct child of runsRoot', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+    const wrapper = join(runsRoot, 'wrapper');
+    const runId = newRunId();
+    const nested = join(wrapper, runId);
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(nested, ARTEFACTS[0]), 'a\n', 'utf8');
+    writeFileSync(join(nested, ARTEFACTS[1]), 'b\n', 'utf8');
+    writeFileSync(join(nested, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+    expect(completeRun(runsRoot, runId).completed).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+
+  it('rejects an absolute directory path handed in as if it were a run id', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+    const runId = newRunId();
+    const real = join(runsRoot, runId);
+    mkdirSync(real, { recursive: true });
+    writeFileSync(join(real, ARTEFACTS[0]), 'a\n', 'utf8');
+    writeFileSync(join(real, ARTEFACTS[1]), 'b\n', 'utf8');
+    writeFileSync(join(real, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    expect(inspectRun(runsRoot, real).code).toBe('INVALID_RUN_ID');
+    expect(completeRun(runsRoot, real).code).toBe('INVALID_RUN_ID');
+  });
+
+  it("rejects a run reached only through a junction standing in for runsRoot's own ancestry", () => {
+    const base = makeTempDir();
+    const real = join(base, 'real');
+    const link = join(base, 'link');
+    mkdirSync(real, { recursive: true });
+    try {
+      symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      return; // Link creation not permitted here; nothing to assert.
+    }
+
+    const runsRoot = join(link, 'runs');
+    mkdirSync(join(real, 'runs'), { recursive: true });
+    const runId = newRunId();
+    const runDirectory = join(real, 'runs', runId);
+    mkdirSync(runDirectory, { recursive: true });
+    writeFileSync(join(runDirectory, ARTEFACTS[0]), 'a\n', 'utf8');
+    writeFileSync(join(runDirectory, ARTEFACTS[1]), 'b\n', 'utf8');
+    writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+    expect(completeRun(runsRoot, runId).completed).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+
+  it('rejects a run whose canonical path resolves outside runsRoot even with no symlink anywhere on the lexical chain', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+    const runId = newRunId();
+    const runDirectory = join(runsRoot, runId);
+    mkdirSync(runDirectory, { recursive: true });
+    writeFileSync(join(runDirectory, ARTEFACTS[0]), 'a\n', 'utf8');
+    writeFileSync(join(runDirectory, ARTEFACTS[1]), 'b\n', 'utf8');
+    writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    // No symlink or junction exists anywhere here — `lstat` would find every
+    // segment perfectly ordinary. `realpath` is faked, for this exact
+    // directory only, to simulate the one class of redirection `lstat` cannot
+    // see: a `subst`-mounted drive or equivalent canonical aliasing.
+    const outside = makeTempDir();
+    hooks.list.push({
+      fn: 'realpathSync',
+      action: 'replace',
+      when: (args) => resolve(String(args[0])) === resolve(runDirectory),
+      value: () => join(outside, runId),
+    });
+
+    expect(inspectRun(runsRoot, runId).code).toBe('RUN_PATH_IS_LINK');
+    expect(completeRun(runsRoot, runId).completed).toBe(false);
+  });
+});
+
+/**
+ * AO-007-R2-RR2-REVIEW-01-C1-F4, the exact review reproduction: a *real*
+ * Windows junction sits on a relevant intermediate component, but its own
+ * `lstat` is blocked with `EPERM` rather than succeeding — which would
+ * otherwise have revealed it as a link anyway. The path is otherwise fully
+ * traversable. The old `pathContainsLink` treated any `lstat` failure as
+ * "nothing here, keep looking", which would have let this through.
+ */
+describe('a blocked lstat on a real junction intermediate fails closed (AO-007-R2-RR2-REVIEW-01-C1-F4)', () => {
+  it('never treats the run as COMPLETE, never as consumable, and never lists it', () => {
+    const base = makeTempDir();
+    const external = join(base, 'external-target');
+    mkdirSync(external, { recursive: true });
+    const junction = join(base, 'junction-parent');
+    symlinkSync(external, junction, 'junction');
+
+    const runsRoot = join(junction, 'runs');
+    mkdirSync(join(external, 'runs'), { recursive: true });
+    const runId = newRunId();
+    const runDirectory = join(external, 'runs', runId);
+    mkdirSync(runDirectory, { recursive: true });
+    writeFileSync(join(runDirectory, ARTEFACTS[0]), 'a\n', 'utf8');
+    writeFileSync(join(runDirectory, ARTEFACTS[1]), 'b\n', 'utf8');
+    writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    hooks.list.push({
+      fn: 'lstatSync',
+      action: 'throw',
+      code: 'EPERM',
+      when: (args) => resolve(String(args[0])) === resolve(junction),
+    });
+
+    const inspection = inspectRun(runsRoot, runId);
+    expect(inspection.code).not.toBe('COMPLETE');
+    expect(inspection.consumable).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+});
+
+/**
+ * AO-007-R2-RR2-REVIEW-01-C1-F2: `completeRun` must not report success for a
+ * state that is already invalid the instant after its own marker write. Each
+ * mutation below is injected deterministically, immediately after the marker
+ * has been written, synced and closed — before `completeRun`'s own
+ * post-completion re-validation runs — via the phase hook defined above, not
+ * through any parameter `completeRun` exposes.
+ */
+describe('post-completion re-validation catches every immediate mutation (AO-007-R2-RR2-REVIEW-01-C1-F2)', () => {
+  it('control case: an unmutated run completes and reads back as COMPLETE', () => {
+    const runsRoot = makeRunsRoot();
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    expect(created.created).toBe(true);
+    writeArtefacts(created.path);
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(true);
+    expect(result.code).toBe('COMPLETED');
+    expect(inspectRun(runsRoot, runId).consumable).toBe(true);
+  });
+
+  it('catches an artefact replaced by an empty regular file', () => {
+    const runsRoot = makeRunsRoot();
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    writeArtefacts(created.path);
+
+    armAfterMarkerCreated(() => {
+      writeFileSync(join(created.path, ARTEFACTS[0]), '', 'utf8');
+    });
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(false);
+    expect(result.code).toBe('POST_COMPLETION_VALIDATION_FAILED');
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+  });
+
+  it('catches a marker replaced by equal-length wrong bytes', () => {
+    const runsRoot = makeRunsRoot();
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    writeArtefacts(created.path);
+
+    armAfterMarkerCreated(() => {
+      const wrong = `${'X'.repeat(COMPLETION_MARKER_CONTENTS.length - 1)}\n`;
+      expect(wrong.length).toBe(COMPLETION_MARKER_CONTENTS.length);
+      writeFileSync(join(created.path, COMPLETION_MARKER_FILE_NAME), wrong, 'utf8');
+    });
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(false);
+    expect(result.code).toBe('POST_COMPLETION_VALIDATION_FAILED');
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+  });
+
+  it('catches the run directory itself being swapped for a real Windows junction', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    writeArtefacts(created.path);
+
+    const movedAside = `${created.path}.moved`;
+    armAfterMarkerCreated(() => {
+      renameSync(created.path, movedAside);
+      symlinkSync(movedAside, created.path, 'junction');
+    });
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(false);
+    expect(result.code).toBe('POST_COMPLETION_VALIDATION_FAILED');
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+  });
+
+  it('catches an extra file planted alongside the fixed three entries', () => {
+    const runsRoot = makeRunsRoot();
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    writeArtefacts(created.path);
+
+    armAfterMarkerCreated(() => {
+      writeFileSync(join(created.path, 'extra.txt'), 'x\n', 'utf8');
+    });
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(false);
+    expect(result.code).toBe('POST_COMPLETION_VALIDATION_FAILED');
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+  });
+
+  it('catches an artefact replaced by a directory', () => {
+    const runsRoot = makeRunsRoot();
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    writeArtefacts(created.path);
+
+    armAfterMarkerCreated(() => {
+      rmSync(join(created.path, ARTEFACTS[1]));
+      mkdirSync(join(created.path, ARTEFACTS[1]));
+    });
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(false);
+    expect(result.code).toBe('POST_COMPLETION_VALIDATION_FAILED');
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+  });
+
+  it('catches an EPERM lstat failure on a relevant intermediate component', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    writeArtefacts(created.path);
+
+    armAfterMarkerCreated(() => {
+      hooks.list.push({
+        fn: 'lstatSync',
+        action: 'throw',
+        code: 'EPERM',
+        when: (args) => resolve(String(args[0])) === resolve(runsRoot),
+      });
+    });
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(false);
+    expect(result.code).toBe('POST_COMPLETION_VALIDATION_FAILED');
+    // Still inside the same fault window: a fresh consumer must not accept it either.
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+  });
+
+  it('catches a realpath failure right after marker creation', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    writeArtefacts(created.path);
+
+    armAfterMarkerCreated(() => {
+      hooks.list.push({ fn: 'realpathSync', action: 'throw', code: 'EIO', when: () => true });
+    });
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(false);
+    expect(result.code).toBe('POST_COMPLETION_VALIDATION_FAILED');
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
+  });
+
+  it('refuses a marker planted by a foreign writer immediately before the exclusive create', () => {
+    const runsRoot = makeRunsRoot();
+    const runId = newRunId();
+    const created = createRunDirectory({ runsRoot, runId });
+    writeArtefacts(created.path);
+
+    hooks.list.push({
+      fn: 'openSync',
+      action: 'before',
+      when: isMarkerWxOpen,
+      run: () => {
+        writeFileSync(join(created.path, COMPLETION_MARKER_FILE_NAME), 'foreign\n', 'utf8');
+      },
+    });
+
+    const result = completeRun(runsRoot, runId);
+    expect(result.completed).toBe(false);
+    expect(result.code).toBe('COMPLETION_MARKER_ALREADY_EXISTS');
+    expect(inspectRun(runsRoot, runId).consumable).toBe(false);
   });
 });
