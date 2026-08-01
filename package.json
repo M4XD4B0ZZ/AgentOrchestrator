@@ -24,7 +24,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "build": "tsc -p tsconfig.build.json",
-    "schema:generate": "tsx scripts/generate-schema.ts"
+    "schema:generate": "tsx scripts/generate-schema.ts",
+    "verify:dist-doctor": "npm run build && node tests/dist-artifact/run-completion-dist-artifact.mjs"
   },
   "keywords": [],
   "author": "",

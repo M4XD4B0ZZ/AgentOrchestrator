@@ -39,6 +39,9 @@ npm run schema:generate   # regenerate schemas/task-state.schema.json from Zod
 npm run typecheck         # tsc --noEmit, strict
 npm test                  # vitest
 npm run build             # emit dist/ (Node-executable CLI)
+npm run verify:dist-doctor  # build, then check the *built* doctor run-completion
+                             # artefact (dist/doctor/run-completion.js) in a
+                             # separate Node process — not the TypeScript source
 ```
 
 `schemas/task-state.schema.json` is **generated**. Do not edit it by hand — a

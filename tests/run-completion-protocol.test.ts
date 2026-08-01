@@ -5,9 +5,18 @@
  * catch a missing artefact rather than relying on a later per-artefact check
  * to notice.
  *
- * Everything here runs against the actually built behaviour of
- * `run-completion.ts`: no mock of `node:fs` is installed, so these probes
- * exercise the real module exports and the real filesystem.
+ * This test imports `src/doctor/run-completion.ts` directly (via vitest's
+ * TypeScript module resolution) and exercises its real exports against the
+ * real filesystem — no mock of `node:fs` is installed. That makes it a check
+ * of source/module semantics, not of the compiled build: it says nothing
+ * about what `tsc` actually emits into `dist/`.
+ *
+ * The separate check against the literal built artefact —
+ * `dist/doctor/run-completion.js`, imported by an explicit `file://` URL in
+ * a standalone Node process, never through src or through vitest's module
+ * resolution — lives in `tests/run-completion-dist.test.ts` and
+ * `tests/dist-artifact/run-completion-dist-artifact.mjs`
+ * (AO-FOUNDATION-REM-002C4 / AO-FOUNDATION-REM-002C3-REREVIEW-01).
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
