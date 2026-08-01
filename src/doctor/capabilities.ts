@@ -12,6 +12,7 @@
  */
 
 import { runCommand, type CommandResult, type RunOptions } from './exec.js';
+import { CAPABILITY_DUMP_KIND } from './report.js';
 import { redact } from '../auth/redaction.js';
 
 export interface CapabilityProbe {
@@ -67,7 +68,13 @@ export interface CapabilityRecord {
  */
 export function classifyProbe(result: CommandResult): ProbeAvailability {
   if (result.outcome === 'NOT_FOUND') return 'EXECUTABLE_NOT_FOUND';
-  if (result.outcome === 'SPAWN_FAILED' || result.outcome === 'TIMED_OUT') return 'PROBE_FAILED';
+  if (
+    result.outcome === 'SPAWN_FAILED' ||
+    result.outcome === 'TIMED_OUT' ||
+    result.outcome === 'OUTPUT_LIMIT_EXCEEDED'
+  ) {
+    return 'PROBE_FAILED';
+  }
 
   if (result.exitCode === 0) {
     // A zero exit with no output at all is not usable evidence of anything.
@@ -97,10 +104,30 @@ export function findRecord(
   return records.find((r) => r.probe.id === id);
 }
 
-/** First line of stdout, redacted — used for version reporting. */
+/** First non-empty line, redacted — used for the human-readable dump only. */
 export function firstLine(text: string): string {
   const line = text.split(/\r?\n/).find((l) => l.trim().length > 0);
   return line === undefined ? '' : redact(line.trim());
+}
+
+/**
+ * The version number inside a `--version` line, or `null`.
+ *
+ * The machine-readable report must not carry arbitrary CLI text (AO-002), so a
+ * version is not copied verbatim: only a dotted numeric core plus an optional
+ * conventional pre-release/build suffix is extracted, and anything else yields
+ * `null`. `codex-cli 0.146.0` becomes `0.146.0`; a line carrying an unexpected
+ * marker yields either the version alone or nothing at all.
+ */
+// The leading context class lets `v24.4.0`, `codex-cli 0.146.0` and a bare
+// `2.1.220` all be recognised without ever capturing the surrounding words.
+const VERSION_PATTERN = /(?:^|[\s(\[v=,:/-])(\d{1,6}(?:\.\d{1,6}){1,3}(?:-[A-Za-z0-9.]{1,32})?)\b/;
+
+export function extractVersion(text: string): string | null {
+  const line = text.split(/\r?\n/).find((l) => l.trim().length > 0);
+  if (line === undefined) return null;
+  const match = VERSION_PATTERN.exec(line);
+  return match?.[1] ?? null;
 }
 
 const SEPARATOR = '='.repeat(78);
@@ -119,6 +146,9 @@ export function renderCapabilityDump(
   const lines: string[] = [
     SEPARATOR,
     'agent-loop doctor — CLI capability dump',
+    // Ownership marker: `writeDiagnosticFile` refuses to replace a file that
+    // does not carry it, so the doctor can only overwrite its own artefacts.
+    `kind: ${CAPABILITY_DUMP_KIND}`,
     `generated at: ${generatedAt}`,
     '',
     'Read-only `--version` / `--help` probes of the locally installed CLIs.',
@@ -142,9 +172,13 @@ export function renderCapabilityDump(
     lines.push(`STARTED AT : ${result.startedAt}`);
     lines.push(`FINISHED AT: ${result.finishedAt}`);
     lines.push(`DURATION   : ${result.durationMs} ms`);
-    if (result.spawnError !== undefined) {
-      lines.push(`SPAWN ERROR: ${redact(result.spawnError)}`);
-    }
+    // Fixed codes only — an exception message would republish untrusted text.
+    lines.push(`FAILURE    : ${result.failureCode ?? '<none>'}`);
+    lines.push(`ERRNO      : ${result.errnoCode ?? '<none>'}`);
+    lines.push(
+      `TRUNCATED  : stdout=${result.stdoutTruncated ? 'yes' : 'no'}, ` +
+        `stderr=${result.stderrTruncated ? 'yes' : 'no'}`,
+    );
     lines.push(SEPARATOR);
     lines.push('--- stdout ---');
     lines.push(result.stdout.trim().length > 0 ? redact(result.stdout.trimEnd()) : '<empty>');

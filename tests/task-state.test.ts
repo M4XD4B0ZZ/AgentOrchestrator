@@ -1,12 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
+import { BLOCKING_STATES, RESUME_PHASES } from '../src/core/states.js';
+import { allowedResumePhases } from '../src/core/resume-policy.js';
+import { MAX_ROUND } from '../src/core/resume-point.js';
 import {
   listMissingPreferredEvidence,
   parseTaskState,
   safeParseTaskState,
   TASK_STATE_SCHEMA_VERSION,
 } from '../src/core/task-state.js';
-import { SHA_A, SHA_B, validCreatedState, validUsageLimitState } from './fixtures.js';
+import {
+  SHA_A,
+  SHA_B,
+  validCreatedState,
+  validReadyForPrState,
+  validUsageLimitState,
+} from './fixtures.js';
 
 function issuePaths(result: ReturnType<typeof safeParseTaskState>): string[] {
   return result.success ? [] : result.error.issues.map((i) => i.path.join('.'));
@@ -27,11 +36,8 @@ describe('valid task states', () => {
 
   it('accepts a settled READY_FOR_PR state', () => {
     const parsed = parseTaskState(
-      validCreatedState({
-        state: 'READY_FOR_PR',
+      validReadyForPrState({
         reviewRound: 2,
-        basePinnedCommit: SHA_A,
-        currentCommit: SHA_B,
         findingHistory: [{ round: 1, severity: 'medium', fingerprint: 'abc123' }],
       }),
     );
@@ -135,19 +141,14 @@ describe('ISO-8601 timestamps', () => {
 });
 
 describe('git commit fields', () => {
-  it.each([
-    'abc1234',
-    'not-a-sha',
-    'A'.repeat(40),
-    '0'.repeat(39),
-    '0'.repeat(41),
-    'g'.repeat(40),
-    '',
-  ])('rejects basePinnedCommit = %j', (value) => {
-    const result = safeParseTaskState(validCreatedState({ basePinnedCommit: value }));
-    expect(result.success).toBe(false);
-    expect(issuePaths(result)).toContain('basePinnedCommit');
-  });
+  it.each(['abc1234', 'not-a-sha', 'A'.repeat(40), '0'.repeat(39), '0'.repeat(41), 'g'.repeat(40), ''])(
+    'rejects basePinnedCommit = %j',
+    (value) => {
+      const result = safeParseTaskState(validCreatedState({ basePinnedCommit: value }));
+      expect(result.success).toBe(false);
+      expect(issuePaths(result)).toContain('basePinnedCommit');
+    },
+  );
 
   it('rejects an abbreviated currentCommit', () => {
     expect(safeParseTaskState(validCreatedState({ currentCommit: 'deadbee' })).success).toBe(false);
@@ -183,7 +184,7 @@ describe('blockedAgent consistency', () => {
       validCreatedState({
         state: 'BLOCKED_VERIFY',
         blockedAgent: 'claude',
-        resumeFrom: { phase: 'VERIFY', round: 1 },
+        resumeFrom: { phase: 'REMEDIATE', round: 1 },
       }),
     );
     expect(result.success).toBe(false);
@@ -196,7 +197,7 @@ describe('blockedAgent consistency', () => {
         validCreatedState({
           state: 'BLOCKED_VERIFY',
           blockedAgent: null,
-          resumeFrom: { phase: 'VERIFY', round: 1 },
+          resumeFrom: { phase: 'REMEDIATE', round: 1 },
         }),
       ).success,
     ).toBe(true);
@@ -239,6 +240,16 @@ describe('resumeFrom invariants', () => {
     expect(issuePaths(result)).toContain('resumeFrom.round');
   });
 
+  it('rejects a round above the absolute ceiling', () => {
+    const result = safeParseTaskState(
+      validUsageLimitState({
+        maxReviewRounds: MAX_ROUND,
+        resumeFrom: { phase: 'REVIEW', round: MAX_ROUND + 1 },
+      }),
+    );
+    expect(result.success).toBe(false);
+  });
+
   it('rejects an unstructured string resumeFrom', () => {
     const result = safeParseTaskState(
       validUsageLimitState({ resumeFrom: 'IMPLEMENT_ROUND_1' as never }),
@@ -255,10 +266,132 @@ describe('resumeFrom invariants', () => {
 
   it('rejects a pending resumeFrom on READY_FOR_PR', () => {
     const result = safeParseTaskState(
-      validCreatedState({ state: 'READY_FOR_PR', resumeFrom: { phase: 'REVIEW', round: 1 } }),
+      validReadyForPrState({ resumeFrom: { phase: 'REVIEW', round: 1 } }),
     );
     expect(result.success).toBe(false);
     expect(issuePaths(result)).toContain('resumeFrom');
+  });
+});
+
+// ── AO-004: the schema accepts only reachable resume phases ────────────────
+
+describe('resume phases per blocking state', () => {
+  /** A minimally valid state in `state`, with the given resume point. */
+  function stateWithResume(state: (typeof BLOCKING_STATES)[number], phase: string) {
+    const needsAgent = state === 'BLOCKED_AUTH' || state === 'BLOCKED_USAGE_LIMIT';
+    return validCreatedState({
+      state,
+      reviewRound: 1,
+      basePinnedCommit: SHA_A,
+      currentCommit: SHA_B,
+      blockedAgent: needsAgent ? 'claude' : null,
+      resumeFrom: { phase: phase as never, round: 1 },
+      ...(state === 'BLOCKED_USAGE_LIMIT' ? { reportedResetAt: '2026-07-31T14:00:00.000Z' } : {}),
+    });
+  }
+
+  for (const state of BLOCKING_STATES) {
+    const allowed = allowedResumePhases(state);
+
+    for (const phase of RESUME_PHASES) {
+      const shouldPass = allowed.includes(phase);
+      it(`${shouldPass ? 'accepts' : 'rejects'} resumeFrom.phase ${phase} in ${state}`, () => {
+        const result = safeParseTaskState(stateWithResume(state, phase));
+        expect(result.success).toBe(shouldPass);
+        if (!shouldPass) {
+          // Either the phase is unreachable, or the state forbids any point.
+          expect(issuePaths(result).some((p) => p.startsWith('resumeFrom'))).toBe(true);
+        }
+      });
+    }
+  }
+
+  it('rejects a VERIFY resume point for BLOCKED_USAGE_LIMIT', () => {
+    const result = safeParseTaskState(
+      validUsageLimitState({ resumeFrom: { phase: 'VERIFY', round: 1 } }),
+    );
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain('resumeFrom.phase');
+  });
+
+  it.each(['SCOPE_VIOLATION', 'RESUME_STATE_DIVERGED'] as const)(
+    'rejects any resume point on the non-continuable state %s',
+    (state) => {
+      const result = safeParseTaskState(stateWithResume(state, 'IMPLEMENT'));
+      expect(result.success).toBe(false);
+      expect(issuePaths(result)).toContain('resumeFrom');
+    },
+  );
+
+  it.each(['SCOPE_VIOLATION', 'RESUME_STATE_DIVERGED'] as const)(
+    'accepts %s without a resume point',
+    (state) => {
+      const result = safeParseTaskState(
+        validCreatedState({ state, blockedAgent: null, resumeFrom: null }),
+      );
+      expect(result.success).toBe(true);
+    },
+  );
+
+  it('keeps a REVIEW resume point across a BLOCKED_AUTH block', () => {
+    const result = safeParseTaskState(
+      validCreatedState({
+        state: 'BLOCKED_AUTH',
+        blockedAgent: 'codex',
+        reviewRound: 1,
+        resumeFrom: { phase: 'REVIEW', round: 1 },
+      }),
+    );
+    expect(result.success).toBe(true);
+  });
+});
+
+// ── AO-006: READY_FOR_PR must be fully settled and provable ────────────────
+
+describe('READY_FOR_PR invariants', () => {
+  it('accepts the fully settled reference state', () => {
+    expect(safeParseTaskState(validReadyForPrState()).success).toBe(true);
+  });
+
+  it.each([
+    ['an unresolved basePinnedCommit', { basePinnedCommit: null }, 'basePinnedCommit'],
+    ['an unresolved currentCommit', { currentCommit: null }, 'currentCommit'],
+    ['a dirty worktree', { worktreeCleanAtCheckpoint: false }, 'worktreeCleanAtCheckpoint'],
+    ['a recorded blocked agent', { blockedAgent: 'claude' as const }, 'blockedAgent'],
+    [
+      'a pending resume point',
+      { resumeFrom: { phase: 'IMPLEMENT' as const, round: 1 } },
+      'resumeFrom',
+    ],
+    ['a pending quota reset', { reportedResetAt: '2026-08-01T00:00:00.000Z' }, 'reportedResetAt'],
+    ['no completed review round', { reviewRound: 0 }, 'reviewRound'],
+  ])('rejects READY_FOR_PR with %s', (_label, overrides, path) => {
+    const result = safeParseTaskState(validReadyForPrState(overrides));
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain(path);
+  });
+
+  it.each(['abc1234', '0'.repeat(39), 'A'.repeat(40), 'not-a-sha'])(
+    'rejects READY_FOR_PR with the malformed base SHA %j',
+    (sha) => {
+      const result = safeParseTaskState(validReadyForPrState({ basePinnedCommit: sha }));
+      expect(result.success).toBe(false);
+      expect(issuePaths(result)).toContain('basePinnedCommit');
+    },
+  );
+
+  it('rejects READY_FOR_PR with a reviewRound beyond the budget', () => {
+    const result = safeParseTaskState(
+      validReadyForPrState({ reviewRound: 4, maxReviewRounds: 3 }),
+    );
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain('reviewRound');
+  });
+
+  it('accepts reviewRound exactly at the budget', () => {
+    expect(
+      safeParseTaskState(validReadyForPrState({ reviewRound: 3, maxReviewRounds: 3 })).success,
+    ).toBe(true);
   });
 });
 
@@ -270,9 +403,9 @@ describe('review budget', () => {
   });
 
   it('accepts reviewRound equal to maxReviewRounds', () => {
-    expect(safeParseTaskState(validCreatedState({ reviewRound: 3, maxReviewRounds: 3 })).success).toBe(
-      true,
-    );
+    expect(
+      safeParseTaskState(validCreatedState({ reviewRound: 3, maxReviewRounds: 3 })).success,
+    ).toBe(true);
   });
 
   it('rejects a negative reviewRound', () => {
@@ -281,6 +414,12 @@ describe('review budget', () => {
 
   it('rejects maxReviewRounds of 0', () => {
     expect(safeParseTaskState(validCreatedState({ maxReviewRounds: 0 })).success).toBe(false);
+  });
+
+  it('rejects maxReviewRounds above the absolute ceiling', () => {
+    expect(
+      safeParseTaskState(validCreatedState({ maxReviewRounds: MAX_ROUND + 1 })).success,
+    ).toBe(false);
   });
 
   it('rejects a finding recorded beyond maxReviewRounds', () => {

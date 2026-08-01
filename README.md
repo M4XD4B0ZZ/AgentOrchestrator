@@ -67,10 +67,20 @@ A read-only local diagnosis. It:
   child environment** with those four removed. `CLAUDE_CODE_OAUTH_TOKEN` is
   deliberately preserved — it is a subscription OAuth path, not an API key;
 - probes the locally installed CLIs with `--version` / `--help` and records
-  argv, exit code, stdout, stderr, start/end time, duration and whether the
-  process started at all;
+  argv, exit code, start/end time, duration, a fixed failure code and whether
+  the process started at all. Every probe runs with a wall-clock timeout **and**
+  a hard byte budget per stream, both enforced while the output streams; a
+  child that exceeds either is terminated together with its whole process tree
+  (on Windows via `taskkill /T /F` with a validated numeric PID, so a `.cmd`
+  shim cannot leave the real program running);
 - checks that Claude Code reports a **Claude subscription** login and that
-  Codex reports a **ChatGPT** login, using a fail-closed allow-list;
+  Codex reports a **ChatGPT** login, using a fail-closed allow-list. The Codex
+  check accepts *only* a command whose total normalised output — stdout and
+  stderr together — is exactly the single line `Logged in using ChatGPT`. (The
+  installed Codex CLI 0.146.0 writes that line to stderr and leaves stdout
+  empty, which is why both streams are evaluated as one.) Extra words, an extra
+  line, a mixed "ChatGPT and API key" message, a plan suffix, a warning, a
+  banner or a localised wording all fail closed;
 - probes Node/npm/Git/Claude/Codex versions and write access to the
   orchestrator home and worktrees root, using reversible probe files that are
   deleted immediately.
@@ -81,12 +91,51 @@ reads a credential store.
 
 ### Artefacts
 
-Written under `.diagnostics/` (git-ignored):
+The orchestrator is repository-agnostic, so **nothing is ever written relative
+to the current working directory**. Persistent diagnostics go to the per-user
+application-data root:
+
+```
+%USERPROFILE%\.agent-orchestrator\diagnostics\doctor\      (Windows)
+$HOME/.agent-orchestrator/diagnostics/doctor/              (POSIX)
+```
 
 | File | Contents |
 | --- | --- |
 | `cli-capabilities.txt` | Full, redacted capability dump, one block per probe |
 | `doctor-report.json` | Machine-readable report |
+
+The console summary prints the actual paths it used. Both files are written
+through a containment-checked, atomic path:
+
+- the target must resolve inside the application-data root; separators, `..`
+  and absolute names are refused;
+- a symbolic link or Windows junction anywhere in the directory path aborts the
+  write, as does a target that is not a regular file;
+- an existing file is only replaced when it carries this tool's own ownership
+  marker, so a foreign file of the same name is never overwritten;
+- content is written to a uniquely named temporary file and renamed over the
+  target, and the temporary file is removed on every failure path too.
+
+### What the report may contain
+
+The report is built from a closed vocabulary. Raw CLI `stdout`/`stderr`,
+exception messages and unknown status output are **not representable** in it:
+
+- auth checks carry a fixed reason code, its static description, the constant
+  argv, the numeric exit code, and — only on PASS — typed allow-list evidence.
+  For Claude that is exactly `loggedIn`, `authMethod`, `apiProvider` and
+  `subscriptionType`; account email, organisation id and organisation name are
+  never copied, on success or failure;
+- CLI versions are reported as an extracted dotted number, never as a whole
+  output line;
+- filesystem failures are reported as a fixed code plus an `errno` identifier
+  such as `EACCES`;
+- every error a user ever sees goes through one central safe formatter, so the
+  CLI's top-level handler cannot republish an exception message.
+
+Redaction still runs over the human-readable capability dump, but it is defence
+in depth only — the boundary is that unknown text is never copied at all.
 
 ### Exit codes
 
@@ -134,14 +183,43 @@ transitions. Every other state has at least one documented way out.
 Which blocking states can be continued, and how, is declared in
 `src/core/resume-policy.ts`:
 
-| State | Resumable | Unattended resume | Human decision |
-| --- | --- | --- | --- |
-| `BLOCKED_AUTH` | yes | no | yes |
-| `BLOCKED_USAGE_LIMIT` | yes | **yes** | no |
-| `BLOCKED_VERIFY` | yes | no | yes |
-| `SCOPE_VIOLATION` | no | no | yes |
-| `RESUME_STATE_DIVERGED` | no | no | yes |
-| `HUMAN_DECISION_REQUIRED` | yes | no | yes |
+| State | Resumable | Unattended resume eligible | Human decision | Allowed resume phases |
+| --- | --- | --- | --- | --- |
+| `BLOCKED_AUTH` | yes | no | yes | `IMPLEMENT`, `REVIEW`, `REMEDIATE` |
+| `BLOCKED_USAGE_LIMIT` | yes | **yes** | no | `IMPLEMENT`, `REVIEW`, `REMEDIATE` |
+| `BLOCKED_VERIFY` | yes | no | yes | `REMEDIATE` |
+| `SCOPE_VIOLATION` | no | no | yes | *(none)* |
+| `RESUME_STATE_DIVERGED` | no | no | yes | *(none)* |
+| `HUMAN_DECISION_REQUIRED` | yes | no | yes | all four |
+
+The **allowed resume phases are derived from the transition table**, not
+maintained by hand, and the schema validates against that same derived set. So
+the contract cannot accept a re-entry point the loop could never reach — for
+example `VERIFY` after a usage-limit block, when `VERIFYING` is not a successor
+of `BLOCKED_USAGE_LIMIT` at all. A state that cannot be continued must not carry
+a resume point either.
+
+`BLOCKED_AUTH` re-enters through `AUTH_PREFLIGHT` and **preserves the stored
+resume point**: a review interrupted by an expired token resumes at `REVIEW`,
+not at `IMPLEMENT`.
+
+### Unattended resume
+
+"Eligible" is not "permitted". `automaticResumeEligible` only says a state may
+be *considered*; the decision is made per task by the pure function
+
+```ts
+evaluateAutomaticResume(state, evidence)  // → { allowed, reasonCodes, missingChecks }
+```
+
+which grants a resume only when every check produced positive evidence: the
+reported quota reset time exists, is a valid timestamp and has demonstrably
+passed; the auth preflight passed again; repository id, canonical repository
+root, canonical worktree path, pinned base commit and current commit all still
+match; the worktree exists and is clean; and no divergence was reported.
+Without a reliable reset timestamp, no unattended resume is ever granted.
+
+There is still no resume runner — this build only decides and validates.
 
 ### Resume points
 
@@ -151,9 +229,28 @@ Which blocking states can be continued, and how, is declared in
 { "phase": "IMPLEMENT", "round": 1 }
 ```
 
-Phases: `IMPLEMENT`, `VERIFY`, `REVIEW`, `REMEDIATE`. The round is validated
-against `maxReviewRounds`. `formatResumePoint()` renders the `IMPLEMENT_ROUND_1`
-shorthand for display only.
+Phases: `IMPLEMENT`, `VERIFY`, `REVIEW`, `REMEDIATE`. The round must lie in
+`1..maxReviewRounds` and additionally within an absolute ceiling, so a parsed
+value can never be `Infinity`, `NaN` or an unsafe integer.
+`formatResumePoint()` renders the `IMPLEMENT_ROUND_1` shorthand for display
+only, and `parseResumePoint()` validates everything it produces against
+`ResumePointSchema` itself.
+
+### `READY_FOR_PR`
+
+The terminal success state must be fully settled and provable. The contract
+requires a resolved full-SHA `basePinnedCommit` and `currentCommit`,
+`worktreeCleanAtCheckpoint === true`, `blockedAgent`, `resumeFrom` and
+`reportedResetAt` all `null`, and a `reviewRound` between 1 and
+`maxReviewRounds` — the state is only reachable through a real `REVIEWING` pass.
+
+### Runtime API
+
+`TaskStateSchema`, `parseTaskState()` and `safeParseTaskState()` are the only
+public runtime entry points. The weaker *structural* schema lives in
+`src/core/internal/` and exists solely for JSON-Schema generation: it accepts
+states the contract rejects, so it is deliberately not exported from any public
+module, and a test fails if that ever changes.
 
 ### Transitions
 

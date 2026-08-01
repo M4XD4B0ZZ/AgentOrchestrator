@@ -10,6 +10,11 @@
   "bin": {
     "agent-loop": "./dist/cli/index.js"
   },
+  "//exports": "Only the CLI entry point and the generated contract are public. Deep imports of dist/core/** — in particular the internal structural task-state schema — are deliberately not offered as API (AO-009).",
+  "exports": {
+    ".": "./dist/cli/index.js",
+    "./schemas/task-state.schema.json": "./schemas/task-state.schema.json"
+  },
   "files": [
     "dist",
     "schemas",

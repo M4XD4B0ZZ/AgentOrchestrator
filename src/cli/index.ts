@@ -9,6 +9,7 @@
 
 import { Command } from 'commander';
 
+import { formatSafeError } from '../core/safe-error.js';
 import { registerDoctorCommand } from './doctor-command.js';
 
 const DESCRIPTION = [
@@ -44,8 +45,11 @@ async function main(): Promise<void> {
   await program.parseAsync(process.argv);
 }
 
+// The global handler never prints `error.message`. Exception texts routinely
+// embed untrusted CLI output, file contents and full paths, and a top-level
+// handler is exactly the place where all of them converge. Everything goes
+// through the central safe formatter instead (AO-002).
 main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`agent-loop: ${message}\n`);
+  process.stderr.write(`agent-loop: ${formatSafeError(error)}\n`);
   process.exitCode = 1;
 });

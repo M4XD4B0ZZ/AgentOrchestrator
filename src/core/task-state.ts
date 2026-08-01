@@ -1,117 +1,38 @@
 /**
- * The binding single-task state contract.
+ * The binding single-task state contract — the public runtime entry point.
  *
  * Zod is the single source of truth. `schemas/task-state.schema.json` is
- * *generated* from this file by `npm run schema:generate` and must never be
- * edited by hand — a test fails if the two drift apart.
+ * *generated* from the internal structural schema by `npm run schema:generate`
+ * and must never be edited by hand — a test fails if the two drift apart.
  *
- * Two schemas are exported:
- *   - {@link TaskStateObjectSchema} — the plain object shape. This is what the
- *     JSON Schema is generated from, because cross-field invariants are not
- *     expressible in JSON Schema.
- *   - {@link TaskStateSchema} — the object shape *plus* the state-dependent
- *     invariants. This is what runtime validation must use.
+ * Public runtime API of this module:
+ *   - {@link TaskStateSchema}      — the shape *plus* every state-dependent
+ *                                    invariant. The only schema callers may
+ *                                    validate against.
+ *   - {@link parseTaskState}       — throwing validator.
+ *   - {@link safeParseTaskState}   — non-throwing validator.
+ *
+ * The weaker structural schema is deliberately **not** exported from here; it
+ * lives in `core/internal/task-state-object-schema.ts` and is reachable only by
+ * the JSON-Schema generator (AO-009).
  */
 
 import { z } from 'zod';
 
-import {
-  AGENT_IDS,
-  ALL_STATES,
-  FINDING_SEVERITIES,
-  RESUME_PHASES,
-  getStateKind,
-  isBlockingState,
-} from './states.js';
+import { getStateKind, isBlockingState } from './states.js';
+import { TaskStateObjectSchema } from './internal/task-state-object-schema.js';
 import { BLOCKED_STATE_POLICIES } from './resume-policy.js';
+
+export {
+  FindingRecordSchema,
+  GitShaSchema,
+  IsoDateTimeSchema,
+} from './internal/task-state-object-schema.js';
+export { MAX_ROUND, ResumePointSchema } from './resume-point.js';
+export type { ResumePoint } from './resume-point.js';
 
 /** Current version of this contract. Bump on any breaking shape change. */
 export const TASK_STATE_SCHEMA_VERSION = 1;
-
-/**
- * A full Git object name. Accepts SHA-1 (40 hex) and SHA-256 (64 hex) so the
- * contract does not break on `objectFormat=sha256` repositories.
- * Abbreviated SHAs are rejected on purpose: pinning must be unambiguous.
- */
-const GIT_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-
-export const GitShaSchema = z
-  .string()
-  .regex(GIT_SHA_PATTERN, 'Must be a full lowercase hex Git object name (40 or 64 characters).');
-
-/** ISO-8601 timestamp; a UTC `Z` suffix or a numeric offset are both accepted. */
-export const IsoDateTimeSchema = z.iso.datetime({ offset: true });
-
-/** Non-empty, non-blank identifier. */
-const NonBlankString = (label: string) =>
-  z
-    .string()
-    .min(1, `${label} must not be empty.`)
-    .refine((value) => value.trim().length > 0, `${label} must not be blank.`);
-
-/**
- * A structured re-entry point. `IMPLEMENT_ROUND_1` and friends are expressible
- * as `{ phase: "IMPLEMENT", round: 1 }`; the round is a number, never a
- * substring, so it can be compared against `maxReviewRounds`.
- */
-export const ResumePointSchema = z
-  .object({
-    phase: z.enum(RESUME_PHASES),
-    round: z.int().min(1, 'Resume round must be at least 1.'),
-  })
-  .strict();
-
-export const FindingRecordSchema = z
-  .object({
-    round: z.int().min(1, 'Finding round must be at least 1.'),
-    severity: z.enum(FINDING_SEVERITIES),
-    /**
-     * Stable identity of a finding across review rounds, used later to detect
-     * repeat findings. The actual fingerprint computation is intentionally not
-     * part of this foundation — only the field contract is fixed here.
-     */
-    fingerprint: NonBlankString('fingerprint'),
-  })
-  .strict();
-
-/** Plain object shape, without cross-field invariants. */
-export const TaskStateObjectSchema = z
-  .object({
-    schemaVersion: z.int().positive('schemaVersion must be a positive integer.'),
-
-    taskId: NonBlankString('taskId'),
-    repositoryId: NonBlankString('repositoryId'),
-
-    /**
-     * Filesystem locations. No drive letter, platform or existence assumption
-     * is made here — existence is a preflight concern, not a schema concern.
-     */
-    repositoryRoot: NonBlankString('repositoryRoot'),
-    worktreePath: NonBlankString('worktreePath'),
-
-    state: z.enum(ALL_STATES),
-    stateEnteredAt: IsoDateTimeSchema,
-
-    baseBranch: NonBlankString('baseBranch'),
-    /** Full SHA the work is pinned to, or `null` before it has been resolved. */
-    basePinnedCommit: GitShaSchema.nullable(),
-    workBranch: NonBlankString('workBranch'),
-    /** Head of the work branch, or `null` before the first commit exists. */
-    currentCommit: GitShaSchema.nullable(),
-
-    reviewRound: z.int().min(0, 'reviewRound must be 0 or greater.'),
-    maxReviewRounds: z.int().positive('maxReviewRounds must be a positive integer.'),
-
-    blockedAgent: z.enum(AGENT_IDS).nullable(),
-    resumeFrom: ResumePointSchema.nullable(),
-    /** Quota reset time reported by an agent CLI, never invented by us. */
-    reportedResetAt: IsoDateTimeSchema.nullable(),
-
-    worktreeCleanAtCheckpoint: z.boolean(),
-
-    findingHistory: z.array(FindingRecordSchema),
-  })
-  .strict();
 
 export type TaskStateInput = z.input<typeof TaskStateObjectSchema>;
 export type TaskState = z.infer<typeof TaskStateObjectSchema>;
@@ -165,16 +86,67 @@ export const TaskStateSchema = TaskStateObjectSchema.superRefine((value, ctx) =>
     }
   });
 
-  // --- 4. Terminal success state must be fully settled --------------------
-  if (value.state === 'READY_FOR_PR' && value.resumeFrom !== null) {
-    ctx.addIssue({
-      code: 'custom',
-      path: ['resumeFrom'],
-      message: 'READY_FOR_PR is terminal and must not carry a pending resumeFrom.',
-    });
+  // --- 3. READY_FOR_PR is a terminal *success* state ----------------------
+  // Everything a pull request needs must already be settled and provable; a
+  // task that still carries block evidence or an unresolved pin never reached
+  // this state legitimately (AO-006).
+  if (value.state === 'READY_FOR_PR') {
+    if (value.basePinnedCommit === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['basePinnedCommit'],
+        message: 'READY_FOR_PR requires a resolved basePinnedCommit (full Git object name).',
+      });
+    }
+    if (value.currentCommit === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['currentCommit'],
+        message: 'READY_FOR_PR requires a resolved currentCommit (full Git object name).',
+      });
+    }
+    if (value.worktreeCleanAtCheckpoint !== true) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['worktreeCleanAtCheckpoint'],
+        message:
+          'READY_FOR_PR requires worktreeCleanAtCheckpoint === true: uncommitted work must not be ' +
+          'declared ready for a pull request.',
+      });
+    }
+    if (value.blockedAgent !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['blockedAgent'],
+        message: 'READY_FOR_PR is terminal and must not record a blocked agent.',
+      });
+    }
+    if (value.resumeFrom !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['resumeFrom'],
+        message: 'READY_FOR_PR is terminal and must not carry a pending resumeFrom.',
+      });
+    }
+    if (value.reportedResetAt !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['reportedResetAt'],
+        message: 'READY_FOR_PR is terminal and must not carry a pending quota reset time.',
+      });
+    }
+    if (value.reviewRound < 1) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['reviewRound'],
+        message:
+          `READY_FOR_PR requires at least one completed review round (got ${value.reviewRound}); ` +
+          'the state is only reachable through REVIEWING.',
+      });
+    }
   }
 
-  // --- 3 + 5. blockedAgent may only appear in blocking states, and each
+  // --- 4 + 5. blockedAgent may only appear in blocking states, and each
   //            blocking state has its own evidence requirements.
   const stateName = value.state;
   if (!isBlockingState(stateName)) {
@@ -219,6 +191,30 @@ export const TaskStateSchema = TaskStateObjectSchema.superRefine((value, ctx) =>
           `(e.g. { "phase": "IMPLEMENT", "round": 1 }).`,
       });
     }
+
+    // --- 6. The resume point must be one the loop can actually reach ------
+    // `allowedResumePhases` is derived from the transition table, so the
+    // contract and the transition model cannot drift apart (AO-004).
+    if (value.resumeFrom !== null) {
+      const allowed = policy.allowedResumePhases;
+      if (allowed.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['resumeFrom'],
+          message:
+            `State ${value.state} cannot be continued, so it must not carry a resumeFrom point: ` +
+            'a stored re-entry point there would be misleading.',
+        });
+      } else if (!allowed.includes(value.resumeFrom.phase)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['resumeFrom', 'phase'],
+          message:
+            `resumeFrom.phase "${value.resumeFrom.phase}" is not reachable from ${value.state}. ` +
+            `Allowed phases: ${allowed.join(', ')}.`,
+        });
+      }
+    }
   }
 });
 
@@ -236,6 +232,9 @@ export function safeParseTaskState(value: unknown) {
  * `BLOCKED_USAGE_LIMIT` should carry a reported reset time, but not every CLI
  * reports one and we never invent timestamps. This helper surfaces such
  * "preferred but missing" evidence without making the state invalid.
+ *
+ * Note that a missing `reportedResetAt` does make an *unattended* resume
+ * impossible — see `evaluateAutomaticResume()`.
  */
 export function listMissingPreferredEvidence(state: TaskState): readonly string[] {
   const stateName = state.state;

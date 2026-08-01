@@ -80,9 +80,14 @@ export function renderReportSummary(report: DoctorReport): string {
     }
   }
 
-  lines.push('', 'Diagnostic artefacts:');
+  // The real, containment-checked location is named here, so the operator does
+  // not have to guess where the doctor put anything (AO-007).
+  lines.push('', `Diagnostic artefacts (${report.diagnosticsDirectory}):`);
   for (const file of report.diagnosticFiles) {
-    lines.push(`  - ${file}`);
+    lines.push(`  - ${file.path}  [${file.writeCode}]`);
+    if (!file.temporaryFileRemoved) {
+      lines.push('    WARNING: a temporary write file could not be removed.');
+    }
   }
 
   if (report.overallStatus === 'FAIL') {

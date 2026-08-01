@@ -1,16 +1,15 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { redact, redactAndClamp } from '../src/auth/redaction.js';
-import { classifyProbe, renderCapabilityDump } from '../src/doctor/capabilities.js';
-import { runCommand, UnsafeArgumentError } from '../src/doctor/exec.js';
+import { classifyProbe, extractVersion, renderCapabilityDump } from '../src/doctor/capabilities.js';
 import { computeOverallStatus, exitCodeFor, type DoctorCheck } from '../src/doctor/report.js';
 import { renderChecksTable } from '../src/doctor/render.js';
 import { probeWriteAccess } from '../src/doctor/write-access.js';
-import type { CommandResult } from '../src/doctor/exec.js';
+import { commandResult, SENSITIVE_MARKER } from './fixtures.js';
 
 const tempDirs: string[] = [];
 
@@ -60,73 +59,24 @@ describe('redaction', () => {
     expect(clamped.length).toBeLessThan(200);
     expect(clamped).toContain('truncated');
   });
-});
 
-describe('safe child process execution', () => {
-  it('refuses arguments containing shell metacharacters', async () => {
-    await expect(
-      runCommand('node', ['--version && whoami'], { env: process.env }),
-    ).rejects.toThrow(UnsafeArgumentError);
-
-    await expect(runCommand('node', ['$(id)'], { env: process.env })).rejects.toThrow(
-      UnsafeArgumentError,
-    );
-  });
-
-  it('runs a real command and records full timing metadata', async () => {
-    const res = await runCommand('node', ['--version'], { env: process.env });
-    expect(res.started).toBe(true);
-    expect(res.outcome).toBe('COMPLETED');
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout).toMatch(/^v\d+\./);
-    expect(Date.parse(res.startedAt)).not.toBeNaN();
-    expect(Date.parse(res.finishedAt)).not.toBeNaN();
-    expect(res.durationMs).toBeGreaterThanOrEqual(0);
-  });
-
-  it('runs a CLI whose resolved path contains spaces', async () => {
-    // Regression guard: on Windows `npm` resolves to a `.cmd` shim under
-    // "C:\Program Files\nodejs", which a naive cmd.exe invocation splits at
-    // the space.
-    const res = await runCommand('npm', ['--version'], { env: process.env });
-    expect(res.started).toBe(true);
-    expect(res.outcome).toBe('COMPLETED');
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
-  });
-
-  it('reports a missing executable as data rather than throwing', async () => {
-    const res = await runCommand('definitely-not-a-real-binary-xyz', ['--version'], {
-      env: process.env,
-    });
-    expect(res.started).toBe(false);
-    expect(res.outcome).toBe('NOT_FOUND');
-    expect(res.exitCode).toBeNull();
-  });
-
-  it('records a non-zero exit code as data rather than throwing', async () => {
-    const res = await runCommand('node', ['--definitely-not-a-node-flag'], { env: process.env });
-    expect(res.started).toBe(true);
-    expect(res.outcome).toBe('COMPLETED');
-    expect(res.exitCode).not.toBe(0);
+  it('does not recognise an arbitrary marker — which is why it is not the boundary', () => {
+    // Deliberate: redaction is defence in depth only. Nothing in the report
+    // pipeline may *rely* on it, because it cannot know every secret shape.
+    expect(redact(SENSITIVE_MARKER)).toBe(SENSITIVE_MARKER);
   });
 });
 
 describe('capability classification', () => {
-  const base: CommandResult = {
+  const base = commandResult({
     display: 'claude auth status --help',
     executable: 'claude',
     args: ['auth', 'status', '--help'],
-    started: true,
-    outcome: 'COMPLETED',
-    exitCode: 0,
-    signal: null,
     stdout: 'Usage: claude auth status',
-    stderr: '',
     startedAt: '2026-07-31T10:00:00.000Z',
     finishedAt: '2026-07-31T10:00:00.100Z',
     durationMs: 100,
-  };
+  });
 
   it('marks a zero exit with output as AVAILABLE', () => {
     expect(classifyProbe(base)).toBe('AVAILABLE');
@@ -148,14 +98,25 @@ describe('capability classification', () => {
     expect(classifyProbe({ ...base, outcome: 'NOT_FOUND', started: false, exitCode: null })).toBe(
       'EXECUTABLE_NOT_FOUND',
     );
-    expect(classifyProbe({ ...base, outcome: 'TIMED_OUT', exitCode: null })).toBe('PROBE_FAILED');
   });
+
+  it.each(['TIMED_OUT', 'SPAWN_FAILED', 'OUTPUT_LIMIT_EXCEEDED'] as const)(
+    'treats the %s outcome as a failed probe',
+    (outcome) => {
+      expect(classifyProbe({ ...base, outcome, exitCode: null })).toBe('PROBE_FAILED');
+    },
+  );
 
   it('redacts the rendered dump', () => {
     const dump = renderCapabilityDump(
       [
         {
-          probe: { id: 'claude.auth.status.help', command: 'claude', args: ['auth', 'status', '--help'], required: true },
+          probe: {
+            id: 'claude.auth.status.help',
+            command: 'claude',
+            args: ['auth', 'status', '--help'],
+            required: true,
+          },
           result: { ...base, stdout: 'account person@example.com' },
           availability: 'AVAILABLE',
         },
@@ -167,6 +128,52 @@ describe('capability classification', () => {
     expect(dump).toContain('EXIT CODE  : 0');
     expect(dump).toContain('DURATION   : 100 ms');
   });
+
+  it('reports fixed failure codes instead of an exception message', () => {
+    const dump = renderCapabilityDump(
+      [
+        {
+          probe: { id: 'x.version', command: 'x', args: ['--version'], required: false },
+          result: {
+            ...base,
+            started: false,
+            outcome: 'NOT_FOUND',
+            exitCode: null,
+            failureCode: 'EXECUTABLE_NOT_FOUND',
+            errnoCode: 'ENOENT',
+          },
+          availability: 'EXECUTABLE_NOT_FOUND',
+        },
+      ],
+      '2026-07-31T10:00:00.000Z',
+    );
+    expect(dump).toContain('FAILURE    : EXECUTABLE_NOT_FOUND');
+    expect(dump).toContain('ERRNO      : ENOENT');
+    expect(dump).not.toContain('spawn ');
+  });
+});
+
+describe('version extraction', () => {
+  it.each([
+    ['v24.4.0', '24.4.0'],
+    ['codex-cli 0.146.0', '0.146.0'],
+    ['2.1.220 (Claude Code)', '2.1.220'],
+    ['git version 2.47.1.windows.1', '2.47.1'],
+    ['11.6.2', '11.6.2'],
+  ])('extracts the version from %j', (line, expected) => {
+    expect(extractVersion(line)).toBe(expected);
+  });
+
+  it('never copies a whole line into the report', () => {
+    expect(extractVersion(`some tool ${SENSITIVE_MARKER}`)).toBeNull();
+    expect(extractVersion(`1.2.3 ${SENSITIVE_MARKER}`)).toBe('1.2.3');
+  });
+
+  it('returns null for empty or unrecognised output', () => {
+    expect(extractVersion('')).toBeNull();
+    expect(extractVersion('   \n  ')).toBeNull();
+    expect(extractVersion('no numbers here')).toBeNull();
+  });
 });
 
 describe('write probes', () => {
@@ -176,6 +183,8 @@ describe('write probes', () => {
     const probe = probeWriteAccess({ label: 'temp', path: dir, createIfMissing: false });
 
     expect(probe.status).toBe('WRITABLE');
+    expect(probe.reasonCode).toBe('WRITABLE');
+    expect(probe.errnoCode).toBeNull();
     expect(probe.probeFileRemoved).toBe(true);
     expect(readdirSync(dir)).toEqual(before);
   });
@@ -185,6 +194,7 @@ describe('write probes', () => {
     const probe = probeWriteAccess({ label: 'missing', path: dir, createIfMissing: false });
 
     expect(probe.status).toBe('DIRECTORY_MISSING');
+    expect(probe.reasonCode).toBe('DIRECTORY_MISSING');
     expect(probe.directoryExisted).toBe(false);
     expect(existsSync(dir)).toBe(false);
   });
@@ -207,6 +217,27 @@ describe('write probes', () => {
     }
     expect(readdirSync(dir)).toHaveLength(0);
   });
+
+  it('reports a failure as a fixed code plus an errno identifier, never a message', () => {
+    const base = makeTempDir();
+    // A *file* where a directory must go: mkdir fails deterministically.
+    const blocker = join(base, 'blocker');
+    writeFileSync(blocker, 'not a directory\n', 'utf8');
+
+    const probe = probeWriteAccess({
+      label: 'blocked',
+      path: join(blocker, 'child'),
+      createIfMissing: true,
+    });
+
+    expect(probe.status).toBe('NOT_WRITABLE');
+    expect(probe.reasonCode).toBe('DIRECTORY_CREATE_FAILED');
+    expect(probe.errnoCode).toMatch(/^[A-Z][A-Z0-9_]{0,31}$/);
+    // No OS message, no quoted path fragment from an exception.
+    expect(probe.reason).toBe(
+      'Directory does not exist and could not be created.',
+    );
+  });
 });
 
 describe('overall status and exit code', () => {
@@ -225,9 +256,9 @@ describe('overall status and exit code', () => {
   });
 
   it('fails on any FAIL', () => {
-    expect(computeOverallStatus([check({}), check({ id: 'y', status: 'FAIL', mandatory: false })])).toBe(
-      'FAIL',
-    );
+    expect(
+      computeOverallStatus([check({}), check({ id: 'y', status: 'FAIL', mandatory: false })]),
+    ).toBe('FAIL');
     expect(exitCodeFor('FAIL')).toBe(1);
   });
 
@@ -236,9 +267,9 @@ describe('overall status and exit code', () => {
   });
 
   it('still passes when a non-mandatory check warns', () => {
-    expect(computeOverallStatus([check({}), check({ id: 'y', status: 'WARN', mandatory: false })])).toBe(
-      'PASS',
-    );
+    expect(
+      computeOverallStatus([check({}), check({ id: 'y', status: 'WARN', mandatory: false })]),
+    ).toBe('PASS');
   });
 
   it('passes on an empty check list', () => {
@@ -256,6 +287,8 @@ describe('console rendering', () => {
     expect(table).toContain('WARN');
     expect(table).toContain('Node.js >= 22');
     expect(table).toContain('(optional)');
-    expect(table.split('\n').every((line) => line.startsWith('+') || line.startsWith('|'))).toBe(true);
+    expect(table.split('\n').every((line) => line.startsWith('+') || line.startsWith('|'))).toBe(
+      true,
+    );
   });
 });

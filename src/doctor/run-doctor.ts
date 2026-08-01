@@ -2,31 +2,40 @@
  * `agent-loop doctor` — read-only local diagnosis.
  *
  * What it does: starts read-only diagnostic child processes, writes artefacts
- * under `.diagnostics/`, and performs reversible write probes.
+ * into the per-user application-data root, and performs reversible write
+ * probes.
  *
  * What it never does: run agent tasks, modify any repository, modify global
- * environment variables, perform a login, read a credential store, or change
- * any configuration.
+ * environment variables, perform a login, read a credential store, change any
+ * configuration, or write anything relative to the current working directory.
+ *
+ * Report safety (AO-002): nothing in the produced report is copied from CLI
+ * stdout, CLI stderr or an exception message. Checks carry fixed vocabulary
+ * plus numbers; auth carries typed allow-list evidence; versions carry an
+ * extracted dotted number; write failures carry errno identifiers.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 
 import { runAuthPreflight } from '../auth/auth-preflight.js';
 import { assessEnvironment, createSanitizedChildEnv } from '../auth/env-guard.js';
-import { diagnosticsDir, orchestratorHome, worktreesRoot } from '../config/paths.js';
+import { doctorDiagnosticsDir, orchestratorHome, worktreesRoot } from '../config/paths.js';
 import {
+  extractVersion,
   findRecord,
-  firstLine,
   renderCapabilityDump,
   runCapabilityDump,
   type CapabilityRecord,
 } from './capabilities.js';
 import { probeWriteAccess, type WriteAccessResult } from './write-access.js';
+import { writeDiagnosticFile, type DiagnosticWriteResult } from './safe-write.js';
 import {
+  CAPABILITY_DUMP_KIND,
   computeOverallStatus,
+  DOCTOR_REPORT_KIND,
   DOCTOR_REPORT_SCHEMA_VERSION,
   type CliVersionInfo,
+  type DiagnosticArtefact,
   type DoctorCheck,
   type DoctorReport,
 } from './report.js';
@@ -34,8 +43,10 @@ import {
 /** Node version the orchestrator requires. */
 export const MINIMUM_NODE_MAJOR = 22;
 
+export const DOCTOR_REPORT_FILE_NAME = 'doctor-report.json';
+export const CAPABILITY_DUMP_FILE_NAME = 'cli-capabilities.txt';
+
 export interface RunDoctorOptions {
-  readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly commandTimeoutMs?: number;
 }
@@ -53,8 +64,35 @@ function versionFrom(records: readonly CapabilityRecord[], id: string): CliVersi
   if (record.availability === 'EXECUTABLE_NOT_FOUND') {
     return { name, found: false, version: null };
   }
-  const text = firstLine(record.result.stdout) || firstLine(record.result.stderr);
-  return { name, found: true, version: text.length > 0 ? text : null };
+  return {
+    name,
+    found: true,
+    version: extractVersion(record.result.stdout) ?? extractVersion(record.result.stderr),
+  };
+}
+
+/** Turns a write outcome into a check plus a report entry. */
+function artefactOf(path: string, write: DiagnosticWriteResult): DiagnosticArtefact {
+  return {
+    path,
+    writeCode: write.code,
+    written: write.written,
+    temporaryFileRemoved: write.temporaryFileRemoved,
+  };
+}
+
+function artefactCheck(id: string, title: string, write: DiagnosticWriteResult): DoctorCheck {
+  const cleanupFailed = !write.temporaryFileRemoved;
+  return {
+    id,
+    title,
+    status: write.written && !cleanupFailed ? 'PASS' : 'FAIL',
+    mandatory: true,
+    detail:
+      `${write.code} at ${write.path}` +
+      (write.errnoCode === null ? '' : ` (errno ${write.errnoCode})`) +
+      (cleanupFailed ? '; the temporary write file could not be removed.' : '.'),
+  };
 }
 
 export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport> {
@@ -63,8 +101,8 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
   const todos: string[] = [];
 
   // --- 0. Diagnostics directory -------------------------------------------
-  const diagDir = diagnosticsDir(options.cwd);
-  mkdirSync(diagDir, { recursive: true });
+  // Always the per-user application-data root, never process.cwd() (AO-007).
+  const diagDir = doctorDiagnosticsDir(options.env);
 
   // --- A. Environment guard ------------------------------------------------
   // The child environment is derived once and reused for every probe, so no
@@ -92,7 +130,8 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
       title: 'API-key environment variables',
       status: 'PASS',
       mandatory: false,
-      detail: 'None of the four API-key variables are set. Child environments are sanitised regardless.',
+      detail:
+        'None of the four API-key variables are set. Child environments are sanitised regardless.',
     });
   }
 
@@ -134,8 +173,15 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
   };
   const capabilities = await runCapabilityDump(capabilityOptions);
 
-  const capabilitiesFile = join(diagDir, 'cli-capabilities.txt');
-  writeFileSync(capabilitiesFile, renderCapabilityDump(capabilities, startedAt), 'utf8');
+  const capabilityWrite = writeDiagnosticFile({
+    root: diagDir,
+    fileName: CAPABILITY_DUMP_FILE_NAME,
+    contents: renderCapabilityDump(capabilities, startedAt),
+    ownershipMarker: CAPABILITY_DUMP_KIND,
+  });
+  checks.push(
+    artefactCheck('diagnostics:capability-dump', 'Capability dump written safely', capabilityWrite),
+  );
 
   for (const record of capabilities) {
     const available = record.availability === 'AVAILABLE';
@@ -152,13 +198,20 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
       detail:
         `${record.availability}; outcome=${record.result.outcome}, ` +
         `exit=${record.result.exitCode === null ? 'none' : record.result.exitCode}, ` +
+        `failure=${record.result.failureCode ?? 'none'}, ` +
         `${record.result.durationMs} ms.`,
     });
   }
 
   // --- D. Local environment ------------------------------------------------
   const cliVersions: CliVersionInfo[] = [];
-  for (const id of ['node.version', 'npm.version', 'git.version', 'claude.version', 'codex.version']) {
+  for (const id of [
+    'node.version',
+    'npm.version',
+    'git.version',
+    'claude.version',
+    'codex.version',
+  ]) {
     const info = versionFrom(capabilities, id);
     if (info !== null) cliVersions.push(info);
   }
@@ -206,7 +259,9 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
       // Not mandatory-to-PASS: a missing directory is a WARN that the setup
       // step will resolve. NOT_WRITABLE still yields FAIL, which fails the run.
       mandatory: false,
-      detail: `${probe.path} — ${probe.reason}`,
+      detail:
+        `${probe.path} — ${probe.reason}` +
+        (probe.errnoCode === null ? '' : ` (errno ${probe.errnoCode})`),
     });
     if (probe.status === 'WRITABLE' && !probe.probeFileRemoved) {
       checks.push({
@@ -220,11 +275,7 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
   }
 
   // --- C. Auth preflight ---------------------------------------------------
-  const authAssessment = await runAuthPreflight(
-    capabilities,
-    options.env,
-    options.commandTimeoutMs,
-  );
+  const authAssessment = await runAuthPreflight(capabilities, options.env, options.commandTimeoutMs);
 
   for (const check of authAssessment.checks) {
     checks.push({
@@ -232,14 +283,15 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
       title: `${check.agent} subscription login`,
       status: check.passed ? 'PASS' : 'FAIL',
       mandatory: true,
-      detail: `${check.status} — ${check.reason}`,
+      // Both parts are fixed vocabulary: a status code and a static sentence.
+      detail: `${check.status} [${check.reasonCode}] — ${check.reason}`,
     });
 
     if (check.status === 'UNVERIFIABLE' || check.status === 'STATUS_COMMAND_UNAVAILABLE') {
       todos.push(
         `auth/${check.agent}: the installed CLI did not yield output that reliably distinguishes a ` +
-          `subscription login from API-key auth (${check.status}). Additional official or local ` +
-          `evidence is needed before this check can pass. Reason: ${check.reason}`,
+          `subscription login from API-key auth (${check.status}/${check.reasonCode}). Additional ` +
+          `official or local evidence is needed before this check can pass.`,
       );
     }
   }
@@ -254,36 +306,65 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
   if (codexStatusHelp !== undefined && !/--json|--format/.test(codexStatusHelp.result.stdout)) {
     todos.push(
       'auth/codex: `codex login status` offers no machine-readable output format in the installed ' +
-        'version, so the check relies on the exact observed English phrase "Logged in using ChatGPT". ' +
-        'A localised or reworded build would fail closed. Re-evaluate when a JSON output mode ships.',
+        'version, so the check requires its output to be exactly the one observed English line. ' +
+        'A localised or reworded build fails closed. Re-evaluate when a JSON output mode ships.',
     );
   }
 
   // --- Assemble ------------------------------------------------------------
   const finishedAt = new Date().toISOString();
-  const reportFile = join(diagDir, 'doctor-report.json');
 
-  // Auth output is only retained when a check did not pass — a passing check
-  // needs no forensic trail, and its output contains account identifiers.
-  const sanitizedAuth = {
-    ...authAssessment,
-    checks: authAssessment.checks.map((c) => (c.passed ? { ...c, redactedOutput: '' } : c)),
-  };
+  const capabilityArtefact = artefactOf(capabilityWrite.path, capabilityWrite);
 
+  // The report references itself. The persisted copy records its own path with
+  // `written: true` because a reader can only ever see that file if the atomic
+  // rename succeeded; the *returned* report carries the real write outcome.
+  const reportPath = join(diagDir, DOCTOR_REPORT_FILE_NAME);
+
+  const preliminaryChecks = [...checks];
   const report: DoctorReport = {
+    reportKind: DOCTOR_REPORT_KIND,
     schemaVersion: DOCTOR_REPORT_SCHEMA_VERSION,
     startedAt,
     finishedAt,
-    overallStatus: computeOverallStatus(checks),
-    checks,
+    overallStatus: computeOverallStatus(preliminaryChecks),
+    checks: preliminaryChecks,
     cliVersions,
-    authAssessment: sanitizedAuth,
+    authAssessment,
     environmentAssessment,
     writeAccessAssessment,
-    diagnosticFiles: [relative(options.cwd, capabilitiesFile), relative(options.cwd, reportFile)],
+    diagnosticsDirectory: diagDir,
+    diagnosticFiles: [
+      capabilityArtefact,
+      { path: reportPath, writeCode: 'WRITTEN', written: true, temporaryFileRemoved: true },
+    ],
     todos,
   };
 
-  writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  return report;
+  const reportWrite = writeDiagnosticFile({
+    root: diagDir,
+    fileName: DOCTOR_REPORT_FILE_NAME,
+    contents: `${JSON.stringify(report, null, 2)}\n`,
+    ownershipMarker: DOCTOR_REPORT_KIND,
+  });
+
+  // If persisting the report failed, say so in the returned report (which the
+  // console renders) rather than pretending it was written.
+  if (!reportWrite.written || !reportWrite.temporaryFileRemoved) {
+    const withFailure: DoctorCheck[] = [
+      ...preliminaryChecks,
+      artefactCheck('diagnostics:doctor-report', 'Doctor report written safely', reportWrite),
+    ];
+    return {
+      ...report,
+      checks: withFailure,
+      overallStatus: computeOverallStatus(withFailure),
+      diagnosticFiles: [capabilityArtefact, artefactOf(reportWrite.path, reportWrite)],
+    };
+  }
+
+  return {
+    ...report,
+    diagnosticFiles: [capabilityArtefact, artefactOf(reportWrite.path, reportWrite)],
+  };
 }

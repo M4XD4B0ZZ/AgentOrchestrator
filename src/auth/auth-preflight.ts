@@ -18,6 +18,22 @@
  *  - The status command to use is not guessed: it is confirmed against the
  *    capability dump first.
  *
+ * ── No raw CLI output ever leaves this module (AO-002) ─────────────────────
+ *
+ * A check result carries **no** stdout, no stderr, no exception text and no
+ * "redacted output" blob. It carries:
+ *
+ *  - a fixed internal {@link AuthReasonCode} and its static description,
+ *  - the constant argv of the status command,
+ *  - the numeric exit code,
+ *  - and, on PASS only, typed allow-list evidence whose every value comes from
+ *    a closed set.
+ *
+ * That means an unknown marker, a new token format or a localised error
+ * sentence in the CLI's output has no path into the doctor report or the
+ * console. Redaction still exists as defence in depth, but it is not the
+ * boundary — the boundary is that unknown text is never copied at all.
+ *
  * ── Evidence baseline (captured on this machine while implementing) ────────
  *
  * Claude Code 2.1.220:
@@ -32,8 +48,17 @@
  *   `authMethod` genuinely distinguishes subscription from API billing.
  *
  * Codex CLI 0.146.0:
- *   `codex login status` emits a single human-readable line. A ChatGPT login
- *   was observed as exactly: `Logged in using ChatGPT`.
+ *   `codex login status` exits 0 and emits **one** human-readable line and
+ *   nothing else. Measured on this machine, that line is written to *stderr*
+ *   and stdout is empty (0 bytes):
+ *       stdout: <empty>
+ *       stderr: "Logged in using ChatGPT\n"   (24 bytes, one line)
+ *   The check therefore evaluates the command's *total* output — stdout and
+ *   stderr together — and demands that it consist of exactly one non-empty
+ *   line equal to that phrase. Which stream carries it is a formatting detail
+ *   of the CLI; the security property is that the whole output is that one
+ *   line and nothing more. An API-key hint, a warning, a banner or a second
+ *   result line all add a line and therefore fail closed.
  *   `codex login --help` documents `--with-api-key`, confirming an API-key
  *   login path exists and must be distinguished.
  *
@@ -43,13 +68,11 @@
  *    and none was fabricated. The allow-list is positive-only, so an unknown
  *    `authMethod` fails closed; the *negative* case is simply unverified.
  *  - `codex login status` in 0.146.0 offers no machine-readable output format
- *    (`--help` lists only `-c/--config`, `--enable`, `--disable`). Text
- *    matching is therefore the only locally proven option, and it is anchored
- *    to the exact observed phrase.
+ *    (`--help` lists only `-c/--config`, `--enable`, `--disable`). Exact text
+ *    matching is therefore the only locally proven option.
  */
 
 import { createSanitizedChildEnv } from './env-guard.js';
-import { redactAndClamp } from './redaction.js';
 import { runCommand, type CommandResult, type RunOptions } from '../doctor/exec.js';
 import { findRecord, type CapabilityRecord } from '../doctor/capabilities.js';
 import type { AgentId } from '../core/states.js';
@@ -64,26 +87,88 @@ export type AuthStatusCode =
   /** No locally proven status command exists in the installed version. */
   | 'STATUS_COMMAND_UNAVAILABLE';
 
-export interface AuthCheckResult {
-  readonly agent: AgentId;
-  readonly status: AuthStatusCode;
-  readonly passed: boolean;
-  /** The command actually used, or null if none could be determined. */
-  readonly statusCommand: string | null;
-  readonly exitCode: number | null;
-  readonly reason: string;
-  /**
-   * Non-sensitive facts extracted from the status output. Populated from an
-   * explicit allow-list of fields — account email, organisation id and
-   * organisation name are never copied here.
-   */
-  readonly evidence: Readonly<Record<string, string | boolean>>;
-  /** Redacted, otherwise unmodified status output, for human inspection. */
-  readonly redactedOutput: string;
-}
+/**
+ * The closed set of outcomes this module can report.
+ *
+ * Every user-visible sentence about auth is looked up from
+ * {@link AUTH_REASON_TEXT} by one of these codes. Nothing is ever interpolated
+ * into it from CLI output.
+ */
+export type AuthReasonCode =
+  // PASS
+  | 'CLAUDE_SUBSCRIPTION_CONFIRMED'
+  | 'CODEX_CHATGPT_CONFIRMED'
+  // Shared failures
+  | 'STATUS_COMMAND_NOT_COMPLETED'
+  | 'STATUS_COMMAND_NONZERO_EXIT'
+  | 'STATUS_OUTPUT_EMPTY'
+  | 'STATUS_COMMAND_UNAVAILABLE'
+  // Claude
+  | 'CLAUDE_OUTPUT_NOT_JSON'
+  | 'CLAUDE_OUTPUT_NOT_JSON_OBJECT'
+  | 'CLAUDE_NOT_LOGGED_IN'
+  | 'CLAUDE_AUTH_FIELDS_MISSING'
+  | 'CLAUDE_AUTH_METHOD_NOT_ACCEPTED'
+  | 'CLAUDE_API_PROVIDER_NOT_ACCEPTED'
+  | 'CLAUDE_JSON_MODE_UNAVAILABLE'
+  // Codex
+  | 'CODEX_OUTPUT_NOT_SINGLE_LINE'
+  | 'CODEX_PHRASE_NOT_RECOGNISED';
 
-/** Fields we are willing to copy out of Claude's auth status JSON. */
-const CLAUDE_ALLOWED_EVIDENCE_FIELDS = [
+/**
+ * Static descriptions. These strings are the *only* auth prose that ever
+ * reaches a console or a report.
+ */
+export const AUTH_REASON_TEXT: Readonly<Record<AuthReasonCode, string>> = Object.freeze({
+  CLAUDE_SUBSCRIPTION_CONFIRMED:
+    'Claude subscription login confirmed: the status JSON reports the accepted authMethod and ' +
+    'first-party api provider.',
+  CODEX_CHATGPT_CONFIRMED:
+    'Codex ChatGPT login confirmed: the status output is exactly the single recognised line.',
+
+  STATUS_COMMAND_NOT_COMPLETED:
+    'The status command did not complete (missing executable, spawn failure, timeout or output ' +
+    'limit), so no login can be proven.',
+  STATUS_COMMAND_NONZERO_EXIT:
+    'The status command exited with a non-zero code. A login that cannot be reported is not a ' +
+    'login we may rely on.',
+  STATUS_OUTPUT_EMPTY:
+    'The status command produced no output, so a subscription login cannot be proven.',
+  STATUS_COMMAND_UNAVAILABLE:
+    'The installed CLI does not expose the status command this check depends on.',
+
+  CLAUDE_OUTPUT_NOT_JSON:
+    'The status output is not valid JSON, so subscription and API-key auth cannot be told apart.',
+  CLAUDE_OUTPUT_NOT_JSON_OBJECT: 'The status output is JSON but not an object.',
+  CLAUDE_NOT_LOGGED_IN: 'Claude Code does not report a logged-in account.',
+  CLAUDE_AUTH_FIELDS_MISSING:
+    'The status JSON lacks the string fields authMethod/apiProvider that distinguish a ' +
+    'subscription login from API-key billing.',
+  CLAUDE_AUTH_METHOD_NOT_ACCEPTED:
+    'The reported authMethod is not the accepted Claude subscription method. Only the locally ' +
+    'observed subscription value is accepted; every other value fails closed.',
+  CLAUDE_API_PROVIDER_NOT_ACCEPTED:
+    'The reported apiProvider is not first-party, which indicates a third-party or gateway route.',
+  CLAUDE_JSON_MODE_UNAVAILABLE:
+    'The installed `claude auth status` does not advertise --json; its text format is not a proven ' +
+    'basis for distinguishing subscription from API-key auth.',
+
+  CODEX_OUTPUT_NOT_SINGLE_LINE:
+    'The status output, stdout and stderr taken together, is not exactly one non-empty line. Any ' +
+    'additional line — a warning, a banner or an API-key hint — means this is not the recognised ' +
+    'ChatGPT login output.',
+  CODEX_PHRASE_NOT_RECOGNISED:
+    'The single output line is not exactly the confirmed ChatGPT login phrase. Any extra, missing ' +
+    'or reworded text fails closed.',
+});
+
+/**
+ * Fields we are willing to copy out of Claude's auth status JSON.
+ *
+ * Account email, organisation id and organisation name are deliberately absent
+ * and are never copied, neither on PASS nor on FAIL.
+ */
+export const CLAUDE_ALLOWED_EVIDENCE_FIELDS = [
   'loggedIn',
   'authMethod',
   'apiProvider',
@@ -94,236 +179,232 @@ const CLAUDE_ALLOWED_EVIDENCE_FIELDS = [
  * The only `authMethod` value accepted as a Claude subscription login.
  * Observed value on a `--claudeai` login of Claude Code 2.1.220.
  */
-const CLAUDE_ACCEPTED_AUTH_METHODS: readonly string[] = ['claude.ai'];
+export const CLAUDE_ACCEPTED_AUTH_METHOD = 'claude.ai';
 
 /** The only accepted `apiProvider`. Anything else means a third-party route. */
-const CLAUDE_ACCEPTED_API_PROVIDERS: readonly string[] = ['firstParty'];
+export const CLAUDE_ACCEPTED_API_PROVIDER = 'firstParty';
 
 /**
- * The only accepted `codex login status` phrasing. Anchored to the start of a
- * line and to the exact observed wording; anything else fails closed.
+ * Subscription tiers we have positively observed. `subscriptionType` is an
+ * allow-listed *reporting* field, so like every other field it is mapped onto a
+ * closed set rather than copied through: an unrecognised tier is recorded as
+ * `UNRECOGNIZED` instead of carrying arbitrary CLI text into the report.
+ *
+ * This never affects the verdict — the verdict rests on `authMethod` and
+ * `apiProvider` alone.
  */
-const CODEX_CHATGPT_LOGIN_PATTERN = /^\s*Logged in using ChatGPT\b/im;
+export const OBSERVED_SUBSCRIPTION_TYPES = ['pro'] as const;
+export type SubscriptionTypeEvidence =
+  | (typeof OBSERVED_SUBSCRIPTION_TYPES)[number]
+  | 'UNRECOGNIZED'
+  | 'ABSENT';
 
-/**
- * Phrases that positively indicate a rejected method. Used only to produce a
- * *better error message* — a status never passes by failing to match these.
- */
-const REJECTED_HINT_PATTERNS: readonly { pattern: RegExp; reason: string }[] = [
-  { pattern: /api[ _-]?key/i, reason: 'output mentions an API key' },
-  { pattern: /console/i, reason: 'output mentions Anthropic Console / API billing' },
-  { pattern: /not logged in|logged out|no credentials|please (run )?login/i, reason: 'not logged in' },
-];
-
-function describeRejection(output: string): string | null {
-  for (const hint of REJECTED_HINT_PATTERNS) {
-    if (hint.pattern.test(output)) return hint.reason;
+function normaliseSubscriptionType(value: unknown): SubscriptionTypeEvidence {
+  if (value === undefined || value === null) return 'ABSENT';
+  for (const known of OBSERVED_SUBSCRIPTION_TYPES) {
+    if (value === known) return known;
   }
-  return null;
+  return 'UNRECOGNIZED';
+}
+
+/**
+ * Typed allow-list evidence for a passing Claude check.
+ * Every value is from a closed set, so nothing here can carry CLI text.
+ */
+export interface ClaudeAuthEvidence {
+  readonly loggedIn: true;
+  readonly authMethod: typeof CLAUDE_ACCEPTED_AUTH_METHOD;
+  readonly apiProvider: typeof CLAUDE_ACCEPTED_API_PROVIDER;
+  readonly subscriptionType: SubscriptionTypeEvidence;
+}
+
+/** Typed allow-list evidence for a passing Codex check. */
+export interface CodexAuthEvidence {
+  readonly loginMethod: 'ChatGPT';
+}
+
+export type AuthEvidence = ClaudeAuthEvidence | CodexAuthEvidence;
+
+export interface AuthCheckResult {
+  readonly agent: AgentId;
+  readonly status: AuthStatusCode;
+  readonly passed: boolean;
+  /** Fixed internal code; the stable machine-readable outcome. */
+  readonly reasonCode: AuthReasonCode;
+  /** Static description of {@link reasonCode}. Never contains CLI output. */
+  readonly reason: string;
+  /** The command actually used, or null if none could be determined. */
+  readonly statusCommand: string | null;
+  readonly exitCode: number | null;
+  /**
+   * Typed allow-list evidence, present only on PASS. A failing check carries no
+   * evidence at all: there is nothing about a rejected login we need to keep,
+   * and anything we did keep would be attacker-influenced text.
+   */
+  readonly evidence: AuthEvidence | null;
+}
+
+function fail(
+  agent: AgentId,
+  status: Exclude<AuthStatusCode, 'PASS'>,
+  reasonCode: AuthReasonCode,
+  statusCommand: string | null,
+  exitCode: number | null,
+): AuthCheckResult {
+  return {
+    agent,
+    status,
+    passed: false,
+    reasonCode,
+    reason: AUTH_REASON_TEXT[reasonCode],
+    statusCommand,
+    exitCode,
+    evidence: null,
+  };
 }
 
 // ── Claude ─────────────────────────────────────────────────────────────────
 
 export function evaluateClaudeAuthStatus(result: CommandResult): AuthCheckResult {
-  const combined = `${result.stdout}\n${result.stderr}`;
-  const base = {
-    agent: 'claude' as const,
-    statusCommand: result.display,
-    exitCode: result.exitCode,
-    redactedOutput: redactAndClamp(combined.trim()),
-  };
+  const command = result.display;
+  const failClaude = (
+    status: Exclude<AuthStatusCode, 'PASS'>,
+    reasonCode: AuthReasonCode,
+  ): AuthCheckResult => fail('claude', status, reasonCode, command, result.exitCode);
 
   if (result.outcome !== 'COMPLETED') {
-    return {
-      ...base,
-      status: 'UNVERIFIABLE',
-      passed: false,
-      reason: `Status command did not complete (${result.outcome}).`,
-      evidence: {},
-    };
+    return failClaude('UNVERIFIABLE', 'STATUS_COMMAND_NOT_COMPLETED');
   }
-
   if (result.exitCode !== 0) {
-    return {
-      ...base,
-      status: 'AUTH_METHOD_REJECTED',
-      passed: false,
-      reason:
-        `Status command exited with code ${result.exitCode}` +
-        (describeRejection(combined) !== null ? `; ${describeRejection(combined)}` : '') +
-        '.',
-      evidence: {},
-    };
+    return failClaude('AUTH_METHOD_REJECTED', 'STATUS_COMMAND_NONZERO_EXIT');
   }
 
   const raw = result.stdout.trim();
   if (raw.length === 0) {
-    return {
-      ...base,
-      status: 'UNVERIFIABLE',
-      passed: false,
-      reason: 'Status command produced empty output; a subscription login cannot be proven.',
-      evidence: {},
-    };
+    return failClaude('UNVERIFIABLE', 'STATUS_OUTPUT_EMPTY');
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return {
-      ...base,
-      status: 'UNVERIFIABLE',
-      passed: false,
-      reason:
-        'Status output is not valid JSON, so subscription and API-key auth cannot be told apart.',
-      evidence: {},
-    };
+    // The exception text quotes the offending input, so it is discarded here
+    // rather than carried into the result.
+    return failClaude('UNVERIFIABLE', 'CLAUDE_OUTPUT_NOT_JSON');
   }
 
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return {
-      ...base,
-      status: 'UNVERIFIABLE',
-      passed: false,
-      reason: 'Status output is JSON but not an object.',
-      evidence: {},
-    };
+    return failClaude('UNVERIFIABLE', 'CLAUDE_OUTPUT_NOT_JSON_OBJECT');
   }
 
   const record = parsed as Record<string, unknown>;
-
-  // Copy only allow-listed, non-identifying fields.
-  const evidence: Record<string, string | boolean> = {};
-  for (const field of CLAUDE_ALLOWED_EVIDENCE_FIELDS) {
-    const value = record[field];
-    if (typeof value === 'string' || typeof value === 'boolean') {
-      evidence[field] = value;
-    }
-  }
-
   const loggedIn = record['loggedIn'];
   const authMethod = record['authMethod'];
   const apiProvider = record['apiProvider'];
 
   if (loggedIn !== true) {
-    return {
-      ...base,
-      status: 'AUTH_METHOD_REJECTED',
-      passed: false,
-      reason: 'Claude Code reports that no account is logged in.',
-      evidence,
-    };
+    return failClaude('AUTH_METHOD_REJECTED', 'CLAUDE_NOT_LOGGED_IN');
   }
-
   if (typeof authMethod !== 'string' || typeof apiProvider !== 'string') {
-    return {
-      ...base,
-      status: 'UNVERIFIABLE',
-      passed: false,
-      reason:
-        'Status JSON lacks the string fields authMethod/apiProvider that distinguish a ' +
-        'subscription login from API-key billing.',
-      evidence,
-    };
+    return failClaude('UNVERIFIABLE', 'CLAUDE_AUTH_FIELDS_MISSING');
+  }
+  if (authMethod !== CLAUDE_ACCEPTED_AUTH_METHOD) {
+    return failClaude('AUTH_METHOD_REJECTED', 'CLAUDE_AUTH_METHOD_NOT_ACCEPTED');
+  }
+  if (apiProvider !== CLAUDE_ACCEPTED_API_PROVIDER) {
+    return failClaude('AUTH_METHOD_REJECTED', 'CLAUDE_API_PROVIDER_NOT_ACCEPTED');
   }
 
-  if (!CLAUDE_ACCEPTED_AUTH_METHODS.includes(authMethod)) {
-    return {
-      ...base,
-      status: 'AUTH_METHOD_REJECTED',
-      passed: false,
-      reason:
-        `authMethod "${authMethod}" is not an accepted Claude subscription method ` +
-        `(accepted: ${CLAUDE_ACCEPTED_AUTH_METHODS.join(', ')}).`,
-      evidence,
-    };
-  }
-
-  if (!CLAUDE_ACCEPTED_API_PROVIDERS.includes(apiProvider)) {
-    return {
-      ...base,
-      status: 'AUTH_METHOD_REJECTED',
-      passed: false,
-      reason:
-        `apiProvider "${apiProvider}" indicates a non-first-party route ` +
-        `(accepted: ${CLAUDE_ACCEPTED_API_PROVIDERS.join(', ')}).`,
-      evidence,
-    };
-  }
-
+  // Only reachable with the two accepted constants, so the evidence below is
+  // literal, not copied text.
   return {
-    ...base,
+    agent: 'claude',
     status: 'PASS',
     passed: true,
-    reason: `Claude subscription login confirmed (authMethod=${authMethod}, apiProvider=${apiProvider}).`,
-    evidence,
+    reasonCode: 'CLAUDE_SUBSCRIPTION_CONFIRMED',
+    reason: AUTH_REASON_TEXT['CLAUDE_SUBSCRIPTION_CONFIRMED'],
+    statusCommand: command,
+    exitCode: result.exitCode,
+    evidence: {
+      loggedIn: true,
+      authMethod: CLAUDE_ACCEPTED_AUTH_METHOD,
+      apiProvider: CLAUDE_ACCEPTED_API_PROVIDER,
+      subscriptionType: normaliseSubscriptionType(record['subscriptionType']),
+    },
   };
 }
 
 // ── Codex ──────────────────────────────────────────────────────────────────
 
+/**
+ * The one accepted `codex login status` output, verbatim.
+ *
+ * This is the whole allow-list: the command's normalised output must consist of
+ * exactly this one non-empty line. Not a prefix, not a substring, not a line
+ * anchor — an exact single-line equality (AO-001). `Logged in using ChatGPT and
+ * API key`, `Logged in using ChatGPT (plus)`, a second line, or any leading or
+ * trailing sentence all fail closed, because a mixed or extended message is
+ * precisely the case where we cannot tell which credential would actually be
+ * used.
+ */
+export const CODEX_CHATGPT_LOGIN_LINE = 'Logged in using ChatGPT';
+
+/**
+ * Splits the command's whole output into non-empty, whitespace-trimmed lines.
+ *
+ * Both streams are considered, because the installed CLI reports its result on
+ * stderr (see the module header). Leading/trailing whitespace and blank lines
+ * are normalised away — that is a formatting difference, not a semantic one.
+ * Everything else is preserved, so any additional word or line survives into
+ * the comparison and fails it.
+ */
+export function normaliseCodexStatusLines(
+  stdout: string,
+  stderr = '',
+): readonly string[] {
+  return `${stdout}\n${stderr}`
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
 export function evaluateCodexLoginStatus(result: CommandResult): AuthCheckResult {
-  const combined = `${result.stdout}\n${result.stderr}`;
-  const base = {
-    agent: 'codex' as const,
-    statusCommand: result.display,
-    exitCode: result.exitCode,
-    redactedOutput: redactAndClamp(combined.trim()),
-  };
+  const command = result.display;
+  const failCodex = (
+    status: Exclude<AuthStatusCode, 'PASS'>,
+    reasonCode: AuthReasonCode,
+  ): AuthCheckResult => fail('codex', status, reasonCode, command, result.exitCode);
 
   if (result.outcome !== 'COMPLETED') {
-    return {
-      ...base,
-      status: 'UNVERIFIABLE',
-      passed: false,
-      reason: `Status command did not complete (${result.outcome}).`,
-      evidence: {},
-    };
+    return failCodex('UNVERIFIABLE', 'STATUS_COMMAND_NOT_COMPLETED');
   }
-
-  if (combined.trim().length === 0) {
-    return {
-      ...base,
-      status: 'UNVERIFIABLE',
-      passed: false,
-      reason: 'Status command produced empty output; a ChatGPT login cannot be proven.',
-      evidence: {},
-    };
-  }
-
   if (result.exitCode !== 0) {
-    const hint = describeRejection(combined);
-    return {
-      ...base,
-      status: 'AUTH_METHOD_REJECTED',
-      passed: false,
-      reason:
-        `Status command exited with code ${result.exitCode}` + (hint !== null ? `; ${hint}` : '') + '.',
-      evidence: {},
-    };
+    return failCodex('AUTH_METHOD_REJECTED', 'STATUS_COMMAND_NONZERO_EXIT');
   }
 
-  if (CODEX_CHATGPT_LOGIN_PATTERN.test(combined)) {
-    return {
-      ...base,
-      status: 'PASS',
-      passed: true,
-      reason: 'Codex reports a ChatGPT login.',
-      evidence: { loginMethod: 'ChatGPT' },
-    };
+  // stdout and stderr together must amount to that one line and nothing else.
+  // Any diagnostic — an API-key hint, a deprecation warning, a localisation
+  // notice — adds a line here and is therefore rejected.
+  const lines = normaliseCodexStatusLines(result.stdout, result.stderr);
+  if (lines.length === 0) {
+    return failCodex('UNVERIFIABLE', 'STATUS_OUTPUT_EMPTY');
+  }
+  if (lines.length !== 1) {
+    return failCodex('AUTH_METHOD_REJECTED', 'CODEX_OUTPUT_NOT_SINGLE_LINE');
+  }
+  if (lines[0] !== CODEX_CHATGPT_LOGIN_LINE) {
+    return failCodex('AUTH_METHOD_REJECTED', 'CODEX_PHRASE_NOT_RECOGNISED');
   }
 
-  const hint = describeRejection(combined);
   return {
-    ...base,
-    status: 'AUTH_METHOD_REJECTED',
-    passed: false,
-    reason:
-      'Status output does not match the confirmed ChatGPT login phrasing' +
-      (hint !== null ? `; ${hint}` : '') +
-      '. Failing closed.',
-    evidence: {},
+    agent: 'codex',
+    status: 'PASS',
+    passed: true,
+    reasonCode: 'CODEX_CHATGPT_CONFIRMED',
+    reason: AUTH_REASON_TEXT['CODEX_CHATGPT_CONFIRMED'],
+    statusCommand: command,
+    exitCode: result.exitCode,
+    evidence: { loginMethod: 'ChatGPT' },
   };
 }
 
@@ -332,19 +413,6 @@ export function evaluateCodexLoginStatus(result: CommandResult): AuthCheckResult
 export interface AuthAssessment {
   readonly checks: readonly AuthCheckResult[];
   readonly allPassed: boolean;
-}
-
-function unavailable(agent: AgentId, reason: string): AuthCheckResult {
-  return {
-    agent,
-    status: 'STATUS_COMMAND_UNAVAILABLE',
-    passed: false,
-    statusCommand: null,
-    exitCode: null,
-    reason,
-    evidence: {},
-    redactedOutput: '',
-  };
 }
 
 /**
@@ -370,41 +438,27 @@ export async function runAuthPreflight(
   const claudeStatusHelp = findRecord(capabilities, 'claude.auth.status.help');
   if (claudeStatusHelp === undefined || claudeStatusHelp.availability !== 'AVAILABLE') {
     checks.push(
-      unavailable(
-        'claude',
-        'The installed Claude Code does not expose a usable `claude auth status` command ' +
-          `(probe: ${claudeStatusHelp?.availability ?? 'MISSING'}).`,
-      ),
+      fail('claude', 'STATUS_COMMAND_UNAVAILABLE', 'STATUS_COMMAND_UNAVAILABLE', null, null),
     );
   } else {
     // `--json` is documented as the default by the probed help text; passing it
     // explicitly makes the format independent of any future default change.
     const supportsJson = /--json/.test(claudeStatusHelp.result.stdout);
-    const args = supportsJson ? ['auth', 'status', '--json'] : ['auth', 'status'];
-    const result = await runCommand('claude', args, options);
-    checks.push(
-      supportsJson
-        ? evaluateClaudeAuthStatus(result)
-        : {
-            ...evaluateClaudeAuthStatus(result),
-            status: 'UNVERIFIABLE',
-            passed: false,
-            reason:
-              'The installed `claude auth status` does not advertise --json; the text format ' +
-              'is not a proven basis for distinguishing subscription from API-key auth.',
-          },
-    );
+    if (!supportsJson) {
+      checks.push(
+        fail('claude', 'UNVERIFIABLE', 'CLAUDE_JSON_MODE_UNAVAILABLE', 'claude auth status', null),
+      );
+    } else {
+      const result = await runCommand('claude', ['auth', 'status', '--json'], options);
+      checks.push(evaluateClaudeAuthStatus(result));
+    }
   }
 
   // --- Codex ---
   const codexStatusHelp = findRecord(capabilities, 'codex.login.status.help');
   if (codexStatusHelp === undefined || codexStatusHelp.availability !== 'AVAILABLE') {
     checks.push(
-      unavailable(
-        'codex',
-        'The installed Codex CLI does not expose a usable `codex login status` command ' +
-          `(probe: ${codexStatusHelp?.availability ?? 'MISSING'}).`,
-      ),
+      fail('codex', 'STATUS_COMMAND_UNAVAILABLE', 'STATUS_COMMAND_UNAVAILABLE', null, null),
     );
   } else {
     const result = await runCommand('codex', ['login', 'status'], options);

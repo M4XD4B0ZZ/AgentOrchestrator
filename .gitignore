@@ -5,7 +5,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Diagnostics produced by `agent-loop doctor` — never commit these.
+# Diagnostics produced by `agent-loop doctor` now live in the per-user
+# application-data root (%USERPROFILE%\.agent-orchestrator\diagnostics\doctor\)
+# and never inside a repository. This rule stays as a guard against stale or
+# hand-made copies — never commit diagnostics.
 .diagnostics/
 
 # Test / coverage output
