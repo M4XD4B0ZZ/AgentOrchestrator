@@ -12,8 +12,10 @@ import { z } from 'zod';
 // cannot express the cross-field invariants, so the document is generated from
 // the plain shape. This module is the only consumer outside `task-state.ts`
 // (AO-009) — the weaker schema stays unreachable from the public API.
-import { TaskStateObjectSchema } from './internal/task-state-object-schema.js';
-import { TASK_STATE_SCHEMA_VERSION } from './task-state.js';
+import {
+  TASK_STATE_SCHEMA_VERSION,
+  TaskStateObjectSchema,
+} from './internal/task-state-object-schema.js';
 
 export const TASK_STATE_SCHEMA_ID =
   'https://agent-orchestrator.local/schemas/task-state.schema.json';

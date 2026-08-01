@@ -66,9 +66,12 @@ A read-only local diagnosis. It:
   (never their values, lengths, prefixes or hashes) and builds a **sanitised
   child environment** with those four removed. `CLAUDE_CODE_OAUTH_TOKEN` is
   deliberately preserved — it is a subscription OAuth path, not an API key;
-- probes the locally installed CLIs with `--version` / `--help` and records
-  argv, exit code, start/end time, duration, a fixed failure code and whether
-  the process started at all. Every probe runs with a wall-clock timeout **and**
+- probes the locally installed CLIs with `--version` / `--help` from a static
+  allow-list of commands, and records argv, exit code, start/end time,
+  duration, a fixed failure code and whether the process started at all. The
+  probes' `stdout`/`stderr` are **discarded**: only an extracted version
+  number and allow-listed flag/subcommand names survive (see
+  [Artefacts](#artefacts)). Every probe runs with a wall-clock timeout **and**
   a hard byte budget per stream, both enforced while the output streams; a
   child that exceeds either is terminated together with its whole process tree
   (on Windows via `taskkill /T /F` with a validated numeric PID, so a `.cmd`
@@ -93,49 +96,81 @@ reads a credential store.
 
 The orchestrator is repository-agnostic, so **nothing is ever written relative
 to the current working directory**. Persistent diagnostics go to the per-user
-application-data root:
+application-data root, and **every run gets its own immutable directory**:
 
 ```
-%USERPROFILE%\.agent-orchestrator\diagnostics\doctor\      (Windows)
-$HOME/.agent-orchestrator/diagnostics/doctor/              (POSIX)
+%USERPROFILE%\.agent-orchestrator\diagnostics\doctor\runs\<run-id>\   (Windows)
+$HOME/.agent-orchestrator/diagnostics/doctor/runs/<run-id>/           (POSIX)
 ```
+
+`<run-id>` is a UTC timestamp plus a cryptographically random UUID, validated
+as a single path segment, e.g. `20260801T121500123Z-<uuid>`.
 
 | File | Contents |
 | --- | --- |
-| `cli-capabilities.txt` | Full, redacted capability dump, one block per probe |
-| `doctor-report.json` | Machine-readable report |
+| `cli-capabilities.txt` | Structured capability summary — facts only, no process output |
+| `doctor-report.json` | Machine-readable report, carrying its own run id and run path |
 
-The console summary prints the actual paths it used. Both files are written
-through a containment-checked, atomic path:
+The console summary prints the exact run directory it used. The write path is
+containment-checked, exclusive and atomic:
 
-- the target must resolve inside the application-data root; separators, `..`
-  and absolute names are refused;
+- the run directory is created with `mkdir` **without** `recursive`, so an
+  already existing directory is an error and never a reuse;
+- the file name must resolve directly inside that run directory; separators,
+  `..` and absolute names are refused;
 - a symbolic link or Windows junction anywhere in the directory path aborts the
-  write, as does a target that is not a regular file;
-- an existing file is only replaced when it carries this tool's own ownership
-  marker, so a foreign file of the same name is never overwritten;
-- content is written to a uniquely named temporary file and renamed over the
-  target, and the temporary file is removed on every failure path too.
+  write;
+- **nothing is ever overwritten.** Anything already occupying a target name —
+  file, directory or link — aborts the write. There is no ownership check,
+  because there is nothing to take ownership of: the earlier scheme proved
+  ownership by looking for a marker string *inside* the existing file, and that
+  marker is printed into every artefact, so anyone could plant it;
+- content is written to a temporary file in the same run directory and
+  finalised with an atomic, exclusive `link`, so a concurrent run fails with
+  `EEXIST` instead of clobbering anything. The temporary file is removed on
+  every path, including every failure path;
+- on failure only what *this* run created is cleaned up: its temporary files
+  and, if it is still empty, its own run directory.
 
-### What the report may contain
+Retention of old completed runs is not implemented yet — they are left alone.
 
-The report is built from a closed vocabulary. Raw CLI `stdout`/`stderr`,
-exception messages and unknown status output are **not representable** in it:
+### What the artefacts may contain
 
-- auth checks carry a fixed reason code, its static description, the constant
-  argv, the numeric exit code, and — only on PASS — typed allow-list evidence.
-  For Claude that is exactly `loggedIn`, `authMethod`, `apiProvider` and
-  `subscriptionType`; account email, organisation id and organisation name are
-  never copied, on success or failure;
-- CLI versions are reported as an extracted dotted number, never as a whole
+Both artefacts are built from a closed vocabulary. Raw CLI `stdout`/`stderr`,
+exception messages and unknown status output are **not representable** in
+them:
+
+- **capability probes** contribute only: the probe id, the program as a fixed
+  known label, the statically configured argv, start status, exit code,
+  timestamps, duration, a fixed timeout/spawn/output-limit code, an allow-listed
+  `errno` identifier, a strictly extracted version number, allow-listed
+  subcommand and flag names, boolean capability answers, and a flag recording
+  that the raw output was discarded. **The former raw `--help`/`--version` dump
+  in `cli-capabilities.txt` was removed for security reasons:** pattern-based
+  redaction cannot recognise unknown sensitive content, so process output is
+  discarded rather than sanitised. Token recognition is conservative — a token
+  must match a strict syntactic pattern *and* appear in a closed vocabulary, so
+  a probe cannot introduce a new string into an artefact; output that yields no
+  recognised token leaves the capability `UNKNOWN`, which fails closed;
+- **auth checks** carry a fixed reason code, its static description, the
+  constant argv, the numeric exit code, and — only on PASS — typed allow-list
+  evidence. For Claude that is exactly `loggedIn`, `authMethod`, `apiProvider`
+  and `subscriptionType`; account email, organisation id and organisation name
+  are never copied, on success or failure;
+- **CLI versions** are reported as an extracted dotted number, never as a whole
   output line;
-- filesystem failures are reported as a fixed code plus an `errno` identifier
-  such as `EACCES`;
-- every error a user ever sees goes through one central safe formatter, so the
-  CLI's top-level handler cannot republish an exception message.
+- **filesystem failures** are reported as a fixed code plus an `errno`
+  identifier drawn from a closed allow-list (`ENOENT`, `EACCES`, `EPERM`, …);
+  anything else becomes `UNKNOWN`;
+- **every error** a user ever sees goes through one central safe formatter. It
+  emits only our own domain errors' `safeMessage` (recognised by `instanceof`,
+  never by a name string) or the fixed code `UNEXPECTED_ERROR`. A foreign
+  `error.name`, `error.code` or `error.message` is never printed, however
+  well-formed it looks.
 
-Redaction still runs over the human-readable capability dump, but it is defence
-in depth only — the boundary is that unknown text is never copied at all.
+`src/auth/redaction.ts` remains as a defence-in-depth helper for future
+free-form text. It is deliberately *not* the boundary and is not applied to any
+persisted artefact — the boundary is that unknown text is never copied at all.
 
 ### Exit codes
 
@@ -159,8 +194,25 @@ machine, not a defect in the tool.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `AGENT_LOOP_HOME` | Per-user orchestrator home probed for write access | `%USERPROFILE%\.agent-orchestrator` |
-| `AGENT_LOOP_WORKTREES_ROOT` | Root for future per-task worktrees | `D:\AgentWorktrees` |
+| `AGENT_LOOP_WORKTREES_ROOT` | Root for future per-task worktrees (probed only, never written to) | `D:\AgentWorktrees` |
+
+The persistent write root is **not configurable**:
+
+```
+%USERPROFILE%\.agent-orchestrator\      (Windows)
+$HOME/.agent-orchestrator/              (POSIX)
+```
+
+It is derived from the OS user identity, and no CLI flag, environment variable
+or repository file can move it. `AGENT_LOOP_HOME` used to relocate it and has
+been **removed**: a variable that redirects where a diagnostics run writes its
+files is a privilege the diagnosis does not need. If it is still set, the value
+is ignored and never read or printed; the doctor reports a non-blocking warning
+carrying only the fixed code `UNSUPPORTED_HOME_OVERRIDE_IGNORED`.
+
+Tests redirect the root through internal dependency injection
+(`src/config/internal/path-provider.ts`), which is not exported from the
+package and not reachable from the CLI.
 
 ## The task-state contract
 
@@ -246,11 +298,28 @@ requires a resolved full-SHA `basePinnedCommit` and `currentCommit`,
 
 ### Runtime API
 
-`TaskStateSchema`, `parseTaskState()` and `safeParseTaskState()` are the only
-public runtime entry points. The weaker *structural* schema lives in
-`src/core/internal/` and exists solely for JSON-Schema generation: it accepts
-states the contract rejects, so it is deliberately not exported from any public
-module, and a test fails if that ever changes.
+`src/core/task-state.ts` exports exactly three runtime values:
+
+```ts
+TaskStateSchema        // the contract: shape + every cross-field invariant
+parseTaskState()       // throwing validator
+safeParseTaskState()   // non-throwing validator
+```
+
+plus the two TypeScript types needed to use them, `TaskState` and
+`TaskStateInput`. Types are erased at build time and add nothing to the runtime
+surface. `tests/public-state-api.test.ts` pins that set exactly, so adding to it
+has to be a deliberate decision.
+
+Nothing else is public. The weaker *structural* schema
+(`TaskStateObjectSchema`), the field-level schemas (`GitShaSchema`,
+`IsoDateTimeSchema`, `FindingRecordSchema`), `ResumePointSchema`, `MAX_ROUND`,
+the contract-version constant and the evidence helper all live in their own
+modules and are used internally only. Three of them are *weaker* validators:
+handing them to a caller would offer a way to validate a state while bypassing
+the invariants that make it trustworthy. `package.json#exports` publishes only
+the CLI entry point and the generated JSON Schema, so `dist/core/**` has no
+deep-import path either.
 
 ### Transitions
 

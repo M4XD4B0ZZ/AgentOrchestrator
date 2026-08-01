@@ -8,17 +8,28 @@
  * error text can contain whatever that CLI decided to print. A global handler
  * that writes `error.message` republishes all of it.
  *
- * The rule enforced here is a positive allow-list, exactly like the auth
- * checks:
+ * ── The rule (AO-002-R2) ───────────────────────────────────────────────────
  *
- *  - An {@link OrchestratorError} carries an explicit `safeMessage` that its
- *    author guaranteed is built only from the orchestrator's own vocabulary.
- *    That text — and only that text — is shown.
- *  - Everything else yields a fixed sentence plus, at most, the error's
- *    constructor name, and only when that name is a plain identifier.
+ * Everything emitted from here comes from a **closed allow-list defined in
+ * this repository**. There are exactly three sources:
  *
- * Redaction is *not* used as the boundary here. It is defence in depth
- * elsewhere; the boundary is that unknown text is never emitted at all.
+ *  1. An {@link OrchestratorError} — one of *our own* domain error classes,
+ *     recognised by `instanceof` (with a globally registered symbol as a
+ *     fallback for duplicate module instances, e.g. a test importing both
+ *     `src` and `dist`). Its `safeMessage` is built only from the
+ *     orchestrator's own vocabulary, and its class name is mapped through
+ *     {@link ORCHESTRATOR_ERROR_NAMES} rather than read from `error.name`.
+ *  2. An errno identifier that appears verbatim in {@link ALLOWED_ERRNO_CODES}.
+ *  3. The fixed code {@link UNEXPECTED_ERROR_CODE} for everything else.
+ *
+ * What is deliberately **never** emitted:
+ *
+ *  - a foreign `error.name` — including `TypeError`, `SyntaxError` and friends.
+ *    A name is a writable string property, so "it looks like an identifier" is
+ *    not evidence of anything. Shape is never the criterion here;
+ *  - a foreign `error.code`, unless the exact string is on the errno
+ *    allow-list;
+ *  - a foreign `error.message`, ever, in any form.
  */
 
 import { OrchestratorError, SAFE_MESSAGE } from './errors.js';
@@ -28,13 +39,43 @@ export const WITHHELD_ERROR_TEXT =
   'An unexpected internal error occurred. Details are withheld because they may ' +
   'contain untrusted command output.';
 
-/** A constructor name is only echoed when it is a plain JS identifier. */
-const SAFE_ERROR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+/** The one code any unrecognised thrown value is reduced to. */
+export const UNEXPECTED_ERROR_CODE = 'UNEXPECTED_ERROR';
 
+/**
+ * The closed set of our own domain error class names.
+ *
+ * Membership is decided by `instanceof`, never by comparing `error.name`
+ * against this list: a foreign object may set any `name` it likes, but it
+ * cannot make itself an instance of a class defined in this package.
+ */
+export const ORCHESTRATOR_ERROR_NAMES = [
+  'OrchestratorError',
+  'IllegalTransitionError',
+  'InvalidResumePointError',
+] as const;
+
+export type OrchestratorErrorName = (typeof ORCHESTRATOR_ERROR_NAMES)[number];
+
+function isOrchestratorErrorName(value: unknown): value is OrchestratorErrorName {
+  return (
+    typeof value === 'string' &&
+    (ORCHESTRATOR_ERROR_NAMES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * `true` for our own domain errors.
+ *
+ * `instanceof` is the primary test. The symbol marker is a fallback for the one
+ * case `instanceof` cannot cover — two copies of this package loaded at once —
+ * and it is a `Symbol.for` key on the prototype chain of our own class, not a
+ * value a plain thrown object is likely to carry by accident. Even when it
+ * matches, nothing from the error is echoed except an allow-listed class name
+ * and the author-provided `safeMessage`.
+ */
 function isOrchestratorError(error: unknown): error is OrchestratorError {
   if (error instanceof OrchestratorError) return true;
-  // Survives duplicate module instances (e.g. a test importing both `src` and
-  // `dist`): the marker symbol is registered globally.
   return (
     typeof error === 'object' &&
     error !== null &&
@@ -43,12 +84,18 @@ function isOrchestratorError(error: unknown): error is OrchestratorError {
   );
 }
 
-/** The error class name, if it is a plain identifier; otherwise `null`. */
-export function safeErrorName(error: unknown): string | null {
-  if (typeof error !== 'object' || error === null) return null;
+/**
+ * The allow-listed class name of one of *our* domain errors, or `null`.
+ *
+ * A foreign error always yields `null`, whatever its `name` looks like.
+ */
+export function safeErrorName(error: unknown): OrchestratorErrorName | null {
+  if (!isOrchestratorError(error)) return null;
   const name = (error as { name?: unknown }).name;
-  if (typeof name !== 'string' || !SAFE_ERROR_NAME_PATTERN.test(name)) return null;
-  return name;
+  // The name is only used to *select* a literal from the closed list; an
+  // unexpected value (a subclass we have not allow-listed, a tampered `name`)
+  // degrades to the base class name rather than being echoed.
+  return isOrchestratorErrorName(name) ? name : 'OrchestratorError';
 }
 
 /**
@@ -60,28 +107,67 @@ export function safeErrorName(error: unknown): string | null {
 export function formatSafeError(error: unknown): string {
   if (isOrchestratorError(error)) {
     const safe = (error as OrchestratorError).safeMessage;
-    if (typeof safe === 'string' && safe.trim().length > 0) return safe;
+    if (typeof safe === 'string' && safe.trim().length > 0) {
+      const name = safeErrorName(error);
+      return name === null ? safe : `[${name}] ${safe}`;
+    }
   }
 
-  const name = safeErrorName(error);
-  return name === null ? WITHHELD_ERROR_TEXT : `${WITHHELD_ERROR_TEXT} (${name})`;
+  return `${WITHHELD_ERROR_TEXT} [${UNEXPECTED_ERROR_CODE}]`;
 }
 
 /**
  * A short, allow-listed error *code* for structured reports.
  *
- * Node's `ErrnoException.code` values (`ENOENT`, `EACCES`, `EPERM`, …) are
- * screaming-snake identifiers and carry no payload, which makes them the one
- * piece of an exception that can be persisted. Anything that does not look like
- * such a code is reduced to `UNKNOWN`.
+ * Node's `ErrnoException.code` values carry no payload, which makes them the
+ * one piece of an exception that can be persisted — but only the ones we have
+ * a reason to expect. Matching the screaming-snake *shape* is not enough: any
+ * library may set `error.code` to any string it likes, so the value has to
+ * appear in the list below verbatim. Anything else becomes `UNKNOWN`.
  */
 export const UNKNOWN_ERRNO_CODE = 'UNKNOWN';
 
-const ERRNO_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,31}$/;
+/**
+ * Errno identifiers this tool can actually produce.
+ *
+ * Group 1 comes from the filesystem calls in `safe-write.ts`,
+ * `run-directory.ts` and `write-access.ts` (`mkdir`, `open` with `wx`, `link`,
+ * `rename`, `rm`, `lstat`, `readFile`). Group 2 comes from spawning diagnostic
+ * child processes in `exec.ts`. Nothing else is expected, so nothing else is
+ * reportable.
+ */
+export const ALLOWED_ERRNO_CODES = [
+  // Filesystem
+  'EACCES',
+  'EBUSY',
+  'EEXIST',
+  'EINVAL',
+  'EISDIR',
+  'ELOOP',
+  'EMFILE',
+  'ENAMETOOLONG',
+  'ENOENT',
+  'ENOSPC',
+  'ENOTDIR',
+  'ENOTEMPTY',
+  'EPERM',
+  'EROFS',
+  'EXDEV',
+  // Process spawn
+  'E2BIG',
+  'EAGAIN',
+  'ENFILE',
+  'ENOMEM',
+  'ETIMEDOUT',
+] as const;
 
-export function safeErrnoCode(error: unknown): string {
+export type AllowedErrnoCode = (typeof ALLOWED_ERRNO_CODES)[number];
+
+const ALLOWED_ERRNO_SET: ReadonlySet<string> = new Set<string>(ALLOWED_ERRNO_CODES);
+
+export function safeErrnoCode(error: unknown): AllowedErrnoCode | typeof UNKNOWN_ERRNO_CODE {
   if (typeof error !== 'object' || error === null) return UNKNOWN_ERRNO_CODE;
   const code = (error as NodeJS.ErrnoException).code;
-  if (typeof code !== 'string' || !ERRNO_CODE_PATTERN.test(code)) return UNKNOWN_ERRNO_CODE;
-  return code;
+  if (typeof code !== 'string' || !ALLOWED_ERRNO_SET.has(code)) return UNKNOWN_ERRNO_CODE;
+  return code as AllowedErrnoCode;
 }

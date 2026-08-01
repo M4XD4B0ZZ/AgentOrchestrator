@@ -80,9 +80,14 @@ export function renderReportSummary(report: DoctorReport): string {
     }
   }
 
-  // The real, containment-checked location is named here, so the operator does
-  // not have to guess where the doctor put anything (AO-007).
-  lines.push('', `Diagnostic artefacts (${report.diagnosticsDirectory}):`);
+  // The exact, containment-checked run directory is named here, so the operator
+  // does not have to guess where this run put anything (AO-007). Every run has
+  // its own directory; nothing is ever written over a previous run.
+  lines.push('', `Run id       : ${report.runId}`, `Run directory: ${report.runDirectory}`);
+  lines.push('', 'Diagnostic artefacts:');
+  if (report.diagnosticFiles.length === 0) {
+    lines.push('  - none: no artefact could be persisted for this run.');
+  }
   for (const file of report.diagnosticFiles) {
     lines.push(`  - ${file.path}  [${file.writeCode}]`);
     if (!file.temporaryFileRemoved) {

@@ -9,20 +9,21 @@
 
 import type { AuthAssessment } from '../auth/auth-preflight.js';
 import type { EnvironmentAssessment } from '../auth/env-guard.js';
+import type { CapabilityAnswers, CapabilityFacts } from './capabilities.js';
 import type { WriteAccessResult } from './write-access.js';
-import type { DiagnosticWriteResult } from './safe-write.js';
+import type { RunArtifactResult } from './safe-write.js';
 
-export const DOCTOR_REPORT_SCHEMA_VERSION = 1;
+export const DOCTOR_REPORT_SCHEMA_VERSION = 2;
 
 /**
- * Ownership marker. It is written into every report and required to be present
- * before an existing file is replaced, so the doctor can only ever overwrite
- * its own artefacts.
+ * Document type discriminator, so a reader can tell what it is looking at.
+ *
+ * It is **not** a proof of ownership and must never be used as one (AO-007-R2).
+ * The value is published in every report, so anybody can put it in any file.
+ * Ownership comes from the fact that each run writes into a directory it just
+ * created exclusively — see `run-directory.ts`.
  */
 export const DOCTOR_REPORT_KIND = 'agent-loop-doctor-report';
-
-/** Ownership marker of the human-readable capability dump. */
-export const CAPABILITY_DUMP_KIND = 'agent-loop-doctor-capability-dump';
 
 export type CheckStatus = 'PASS' | 'WARN' | 'FAIL';
 
@@ -53,7 +54,7 @@ export interface CliVersionInfo {
 /** One persistent artefact and the outcome of writing it. */
 export interface DiagnosticArtefact {
   readonly path: string;
-  readonly writeCode: DiagnosticWriteResult['code'];
+  readonly writeCode: RunArtifactResult['code'];
   readonly written: boolean;
   readonly temporaryFileRemoved: boolean;
 }
@@ -61,16 +62,26 @@ export interface DiagnosticArtefact {
 export interface DoctorReport {
   readonly reportKind: typeof DOCTOR_REPORT_KIND;
   readonly schemaVersion: number;
+  /** Identifies this run and names its directory. Generated per run. */
+  readonly runId: string;
   readonly startedAt: string;
   readonly finishedAt: string;
   readonly overallStatus: 'PASS' | 'FAIL';
   readonly checks: readonly DoctorCheck[];
   readonly cliVersions: readonly CliVersionInfo[];
+  /**
+   * Allow-listed probe facts. Raw process output is not representable here:
+   * see `capabilities.ts` (AO-002-R1).
+   */
+  readonly capabilityFacts: readonly CapabilityFacts[];
+  readonly capabilityAnswers: CapabilityAnswers;
   readonly authAssessment: AuthAssessment;
   readonly environmentAssessment: EnvironmentAssessment;
   readonly writeAccessAssessment: readonly WriteAccessResult[];
-  /** Absolute, containment-checked location of the diagnostics directory. */
+  /** Absolute, containment-checked root of all doctor diagnostics. */
   readonly diagnosticsDirectory: string;
+  /** Absolute path of *this* run's own, exclusively created directory. */
+  readonly runDirectory: string;
   readonly diagnosticFiles: readonly DiagnosticArtefact[];
   readonly todos: readonly string[];
 }

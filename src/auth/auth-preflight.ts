@@ -74,7 +74,7 @@
 
 import { createSanitizedChildEnv } from './env-guard.js';
 import { runCommand, type CommandResult, type RunOptions } from '../doctor/exec.js';
-import { findRecord, type CapabilityRecord } from '../doctor/capabilities.js';
+import { findRecord, probeSupportsFlag, type CapabilityRecord } from '../doctor/capabilities.js';
 import type { AgentId } from '../core/states.js';
 
 export type AuthStatusCode =
@@ -443,8 +443,13 @@ export async function runAuthPreflight(
   } else {
     // `--json` is documented as the default by the probed help text; passing it
     // explicitly makes the format independent of any future default change.
-    const supportsJson = /--json/.test(claudeStatusHelp.result.stdout);
-    if (!supportsJson) {
+    //
+    // The answer comes from the capability facts, not from the probe's raw
+    // output — that output no longer exists by this point (AO-002-R1). Both
+    // `NO` and `UNKNOWN` fail closed: an unparseable help text is not evidence
+    // that a machine-readable status format exists.
+    const supportsJson = probeSupportsFlag(claudeStatusHelp, '--json');
+    if (supportsJson !== 'YES') {
       checks.push(
         fail('claude', 'UNVERIFIABLE', 'CLAUDE_JSON_MODE_UNAVAILABLE', 'claude auth status', null),
       );

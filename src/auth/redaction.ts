@@ -1,11 +1,21 @@
 /**
- * Redaction applied to every piece of CLI output that reaches a diagnostics
- * file or the console.
+ * Pattern-based redaction of free-form text.
  *
- * This is a safety net, not the primary control. The primary control is that
- * the doctor only ever stores an explicit allow-list of fields from auth
- * status output (see `auth-preflight.ts`). Redaction catches whatever slips
- * through free-form text.
+ * This is a safety net, never the boundary — and as of AO-002-R1 it is applied
+ * to **no persisted artefact at all**, because no persisted artefact contains
+ * free-form text any more. The capability summary used to route raw probe
+ * output through here; that dump was removed rather than redacted harder,
+ * precisely because these rules can only mask the secret shapes they already
+ * know (`tests/doctor.test.ts` asserts that an arbitrary marker survives
+ * redaction untouched — that is the point).
+ *
+ * The real control is that the doctor stores only an explicit allow-list of
+ * values: closed-vocabulary tokens from capability probes (`capabilities.ts`)
+ * and typed evidence fields from auth status output (`auth-preflight.ts`).
+ *
+ * Kept for future free-form paths — a log line, an operator note — where a
+ * safety net is better than nothing. Anything reaching for it should first ask
+ * whether the text needs to be persisted at all.
  */
 
 interface RedactionRule {

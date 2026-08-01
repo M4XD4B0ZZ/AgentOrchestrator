@@ -3,12 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { BLOCKING_STATES, RESUME_PHASES } from '../src/core/states.js';
 import { allowedResumePhases } from '../src/core/resume-policy.js';
 import { MAX_ROUND } from '../src/core/resume-point.js';
-import {
-  listMissingPreferredEvidence,
-  parseTaskState,
-  safeParseTaskState,
-  TASK_STATE_SCHEMA_VERSION,
-} from '../src/core/task-state.js';
+// Internal modules, imported from where they live. They are deliberately not
+// re-exported from the public state entry point (AO-009-R1).
+import { listMissingPreferredEvidence } from '../src/core/internal/state-evidence.js';
+import { TASK_STATE_SCHEMA_VERSION } from '../src/core/internal/task-state-object-schema.js';
+import { parseTaskState, safeParseTaskState } from '../src/core/task-state.js';
 import {
   SHA_A,
   SHA_B,

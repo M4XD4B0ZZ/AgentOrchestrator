@@ -5,9 +5,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Diagnostics produced by `agent-loop doctor` now live in the per-user
-# application-data root (%USERPROFILE%\.agent-orchestrator\diagnostics\doctor\)
-# and never inside a repository. This rule stays as a guard against stale or
+# Diagnostics produced by `agent-loop doctor` now live in a per-run directory
+# under the per-user application-data root
+# (%USERPROFILE%\.agent-orchestrator\diagnostics\doctor\runs\<run-id>\) and
+# never inside a repository. This rule stays as a guard against stale or
 # hand-made copies — never commit diagnostics.
 .diagnostics/
 
@@ -34,6 +35,11 @@ temp/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Local Claude Code settings. Only this one file — `.claude/` itself is NOT
+# ignored, because deliberately versioned repository configuration may live
+# there later.
+.claude/settings.local.json
 
 # IDE / editor local files
 .vscode/*

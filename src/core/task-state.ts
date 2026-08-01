@@ -5,34 +5,41 @@
  * *generated* from the internal structural schema by `npm run schema:generate`
  * and must never be edited by hand — a test fails if the two drift apart.
  *
- * Public runtime API of this module:
+ * ── The public runtime surface (AO-009-R1) ─────────────────────────────────
+ *
+ * This module exports exactly three runtime values:
+ *
  *   - {@link TaskStateSchema}      — the shape *plus* every state-dependent
  *                                    invariant. The only schema callers may
  *                                    validate against.
  *   - {@link parseTaskState}       — throwing validator.
  *   - {@link safeParseTaskState}   — non-throwing validator.
  *
- * The weaker structural schema is deliberately **not** exported from here; it
- * lives in `core/internal/task-state-object-schema.ts` and is reachable only by
- * the JSON-Schema generator (AO-009).
+ * …plus the two TypeScript types a caller needs to *use* those three:
+ * {@link TaskState} (what comes out) and {@link TaskStateInput} (what goes in).
+ * Types are erased at build time and add nothing to the runtime surface.
+ *
+ * Everything else stays internal and is not re-exported from here: the weaker
+ * structural schema, the field-level schemas (`GitShaSchema`,
+ * `IsoDateTimeSchema`, `FindingRecordSchema`), `ResumePointSchema`,
+ * `MAX_ROUND`, the contract-version constant and the evidence helper.
+ * Internal modules import them from their own modules directly.
+ *
+ * The reason is not tidiness. Every value exported here becomes a promise:
+ * a caller that validates with a *field* schema, or with the structural schema,
+ * bypasses the cross-field invariants that make a state trustworthy — and once
+ * that is public API it can never be changed. `tests/public-state-api.test.ts`
+ * pins the exact export set.
  */
 
 import { z } from 'zod';
 
 import { getStateKind, isBlockingState } from './states.js';
-import { TaskStateObjectSchema } from './internal/task-state-object-schema.js';
-import { BLOCKED_STATE_POLICIES } from './resume-policy.js';
-
-export {
-  FindingRecordSchema,
-  GitShaSchema,
-  IsoDateTimeSchema,
+import {
+  TASK_STATE_SCHEMA_VERSION,
+  TaskStateObjectSchema,
 } from './internal/task-state-object-schema.js';
-export { MAX_ROUND, ResumePointSchema } from './resume-point.js';
-export type { ResumePoint } from './resume-point.js';
-
-/** Current version of this contract. Bump on any breaking shape change. */
-export const TASK_STATE_SCHEMA_VERSION = 1;
+import { BLOCKED_STATE_POLICIES } from './resume-policy.js';
 
 export type TaskStateInput = z.input<typeof TaskStateObjectSchema>;
 export type TaskState = z.infer<typeof TaskStateObjectSchema>;
@@ -226,27 +233,4 @@ export function parseTaskState(value: unknown): TaskState {
 /** Non-throwing variant of {@link parseTaskState}. */
 export function safeParseTaskState(value: unknown) {
   return TaskStateSchema.safeParse(value);
-}
-
-/**
- * `BLOCKED_USAGE_LIMIT` should carry a reported reset time, but not every CLI
- * reports one and we never invent timestamps. This helper surfaces such
- * "preferred but missing" evidence without making the state invalid.
- *
- * Note that a missing `reportedResetAt` does make an *unattended* resume
- * impossible — see `evaluateAutomaticResume()`.
- */
-export function listMissingPreferredEvidence(state: TaskState): readonly string[] {
-  const stateName = state.state;
-  if (!isBlockingState(stateName)) return [];
-  const policy = BLOCKED_STATE_POLICIES[stateName];
-  const missing: string[] = [];
-
-  if (policy.reportedResetAtRequirement !== 'NOT_APPLICABLE' && state.reportedResetAt === null) {
-    missing.push('reportedResetAt');
-  }
-  if (policy.blockedAgentRequirement === 'PREFERRED' && state.blockedAgent === null) {
-    missing.push('blockedAgent');
-  }
-  return missing;
 }

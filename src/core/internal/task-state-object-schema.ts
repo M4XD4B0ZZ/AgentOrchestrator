@@ -25,6 +25,16 @@ import { AGENT_IDS, ALL_STATES, FINDING_SEVERITIES } from '../states.js';
 import { ResumePointSchema, RoundSchema } from '../resume-point.js';
 
 /**
+ * Current version of the state contract. Bump on any breaking shape change.
+ *
+ * INTERNAL: it lives here, next to the shape it versions, and is consumed by
+ * `core/task-state.ts` and the JSON-Schema generator. It is not part of the
+ * public runtime surface — a consumer reads the version off a parsed state's
+ * `schemaVersion` field, which the contract already validates (AO-009-R1).
+ */
+export const TASK_STATE_SCHEMA_VERSION = 1;
+
+/**
  * A full Git object name. Accepts SHA-1 (40 hex) and SHA-256 (64 hex) so the
  * contract does not break on `objectFormat=sha256` repositories.
  * Abbreviated SHAs are rejected on purpose: pinning must be unambiguous.

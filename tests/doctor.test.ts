@@ -5,11 +5,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { redact, redactAndClamp } from '../src/auth/redaction.js';
-import { classifyProbe, extractVersion, renderCapabilityDump } from '../src/doctor/capabilities.js';
 import { computeOverallStatus, exitCodeFor, type DoctorCheck } from '../src/doctor/report.js';
 import { renderChecksTable } from '../src/doctor/render.js';
 import { probeWriteAccess } from '../src/doctor/write-access.js';
-import { commandResult, SENSITIVE_MARKER } from './fixtures.js';
+import { SENSITIVE_MARKER } from './fixtures.js';
 
 const tempDirs: string[] = [];
 
@@ -67,114 +66,8 @@ describe('redaction', () => {
   });
 });
 
-describe('capability classification', () => {
-  const base = commandResult({
-    display: 'claude auth status --help',
-    executable: 'claude',
-    args: ['auth', 'status', '--help'],
-    stdout: 'Usage: claude auth status',
-    startedAt: '2026-07-31T10:00:00.000Z',
-    finishedAt: '2026-07-31T10:00:00.100Z',
-    durationMs: 100,
-  });
-
-  it('marks a zero exit with output as AVAILABLE', () => {
-    expect(classifyProbe(base)).toBe('AVAILABLE');
-  });
-
-  it('marks a non-zero exit as unavailable in the installed version', () => {
-    expect(classifyProbe({ ...base, exitCode: 1, stdout: '', stderr: 'unknown command' })).toBe(
-      'UNAVAILABLE_IN_INSTALLED_VERSION',
-    );
-  });
-
-  it('does not accept a silent success as proof of availability', () => {
-    expect(classifyProbe({ ...base, stdout: '', stderr: '' })).toBe(
-      'UNAVAILABLE_IN_INSTALLED_VERSION',
-    );
-  });
-
-  it('distinguishes a missing executable from a missing subcommand', () => {
-    expect(classifyProbe({ ...base, outcome: 'NOT_FOUND', started: false, exitCode: null })).toBe(
-      'EXECUTABLE_NOT_FOUND',
-    );
-  });
-
-  it.each(['TIMED_OUT', 'SPAWN_FAILED', 'OUTPUT_LIMIT_EXCEEDED'] as const)(
-    'treats the %s outcome as a failed probe',
-    (outcome) => {
-      expect(classifyProbe({ ...base, outcome, exitCode: null })).toBe('PROBE_FAILED');
-    },
-  );
-
-  it('redacts the rendered dump', () => {
-    const dump = renderCapabilityDump(
-      [
-        {
-          probe: {
-            id: 'claude.auth.status.help',
-            command: 'claude',
-            args: ['auth', 'status', '--help'],
-            required: true,
-          },
-          result: { ...base, stdout: 'account person@example.com' },
-          availability: 'AVAILABLE',
-        },
-      ],
-      '2026-07-31T10:00:00.000Z',
-    );
-    expect(dump).not.toContain('person@example.com');
-    expect(dump).toContain('<redacted:email>');
-    expect(dump).toContain('EXIT CODE  : 0');
-    expect(dump).toContain('DURATION   : 100 ms');
-  });
-
-  it('reports fixed failure codes instead of an exception message', () => {
-    const dump = renderCapabilityDump(
-      [
-        {
-          probe: { id: 'x.version', command: 'x', args: ['--version'], required: false },
-          result: {
-            ...base,
-            started: false,
-            outcome: 'NOT_FOUND',
-            exitCode: null,
-            failureCode: 'EXECUTABLE_NOT_FOUND',
-            errnoCode: 'ENOENT',
-          },
-          availability: 'EXECUTABLE_NOT_FOUND',
-        },
-      ],
-      '2026-07-31T10:00:00.000Z',
-    );
-    expect(dump).toContain('FAILURE    : EXECUTABLE_NOT_FOUND');
-    expect(dump).toContain('ERRNO      : ENOENT');
-    expect(dump).not.toContain('spawn ');
-  });
-});
-
-describe('version extraction', () => {
-  it.each([
-    ['v24.4.0', '24.4.0'],
-    ['codex-cli 0.146.0', '0.146.0'],
-    ['2.1.220 (Claude Code)', '2.1.220'],
-    ['git version 2.47.1.windows.1', '2.47.1'],
-    ['11.6.2', '11.6.2'],
-  ])('extracts the version from %j', (line, expected) => {
-    expect(extractVersion(line)).toBe(expected);
-  });
-
-  it('never copies a whole line into the report', () => {
-    expect(extractVersion(`some tool ${SENSITIVE_MARKER}`)).toBeNull();
-    expect(extractVersion(`1.2.3 ${SENSITIVE_MARKER}`)).toBe('1.2.3');
-  });
-
-  it('returns null for empty or unrecognised output', () => {
-    expect(extractVersion('')).toBeNull();
-    expect(extractVersion('   \n  ')).toBeNull();
-    expect(extractVersion('no numbers here')).toBeNull();
-  });
-});
+// Capability classification, token extraction and the rendered summary are
+// covered in `capabilities.test.ts` (AO-002-R1).
 
 describe('write probes', () => {
   it('writes and immediately removes the probe file', () => {
