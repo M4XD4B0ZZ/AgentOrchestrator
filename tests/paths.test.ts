@@ -27,10 +27,7 @@ import { Command } from 'commander';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { fixedPathProvider, OS_PATH_PROVIDER } from '../src/config/internal/path-provider.js';
-import {
-  HELPER_OUTPUT_PREFIX,
-  trustedProfileDirectory,
-} from '../src/config/internal/trusted-profile.js';
+import { trustedProfileDirectory } from '../src/config/internal/trusted-profile.js';
 import {
   diagnosticsRoot,
   doctorDiagnosticsDir,
@@ -199,11 +196,14 @@ describe('the test seam is internal only', () => {
 });
 
 /**
- * AO-007-R1-RR1: the trusted profile resolver.
+ * AO-007-R1-RR1 / AO-WINPROFILE-001: the trusted profile resolver, as seen from
+ * the path layer.
  *
- * `os.homedir()` is not called in this process. The profile path comes from a
- * child started with an **empty** environment map, where the OS has no variable
- * to consult and must answer from the process token / passwd database.
+ * `os.homedir()` is not called anywhere in the productive path resolution. The
+ * profile path comes from `os.userInfo()`, which reads no environment at all.
+ * The resolver's own contract — validation, fail-closed behaviour, memoisation
+ * and the environment-spoofing proofs — is covered in `trusted-profile.test.ts`;
+ * what matters here is only that the path layer consumes it correctly.
  */
 describe('the trusted profile resolver', () => {
   it('returns an absolute, canonical, existing directory', () => {
@@ -226,31 +226,31 @@ describe('the trusted profile resolver', () => {
       expect(codeOnly(source)).not.toContain('homedir');
     }
 
-    // The resolver itself names it only inside the fixed child helper source,
-    // which runs in a process with no environment at all.
+    // The resolver names the profile directory only as the field it reads off
+    // the `os.userInfo()` result — never as the `os.homedir()` function, and
+    // never as an environment variable.
     const trusted = readFileSync(
       join(PACKAGE_ROOT, 'src', 'config', 'internal', 'trusted-profile.ts'),
       'utf8',
     );
     expect(trusted).not.toMatch(/^\s*import\s*\{[^}]*homedir/m);
-    expect(trusted).toContain('env: {}');
+    expect(codeOnly(trusted)).not.toContain('homedir()');
   });
 
-  it('spawns the resolver with an empty environment and a fixed helper', () => {
+  it('starts no process and reads no environment to answer', () => {
     const trusted = readFileSync(
       join(PACKAGE_ROOT, 'src', 'config', 'internal', 'trusted-profile.ts'),
       'utf8',
     );
-    expect(trusted).toContain('process.execPath');
-    expect(trusted).toContain('shell: false');
-    // No environment fallback of any kind on the failure paths. Comments are
-    // allowed to name the variables this module defends against — the doc
-    // header explains exactly why they cannot decide the answer — but no
-    // code line may read one.
+    // Comments are allowed to name the variables and the removed PowerShell
+    // mechanism this module defends against — the doc header explains exactly
+    // why neither can decide the answer — but no code line may reach for one.
     const code = codeOnly(trusted);
     expect(code).not.toMatch(/USERPROFILE|HOMEDRIVE|HOMEPATH|LOCALAPPDATA|APPDATA/);
     expect(code).not.toContain('process.env');
-    expect(trusted).toContain(HELPER_OUTPUT_PREFIX);
+    expect(code).not.toContain('child_process');
+    expect(code).not.toContain('execPath');
+    expect(code).toContain('userInfo');
   });
 });
 

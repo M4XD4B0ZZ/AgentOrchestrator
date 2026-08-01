@@ -11,8 +11,9 @@
  * "The operating system's own notion" is load-bearing and is *not*
  * `os.homedir()` in this process: on Windows that function returns
  * `%USERPROFILE%` whenever the variable is set. The real answer comes from
- * `trusted-profile.ts`, which asks a child process running with an empty
- * environment (AO-007-R1-RR1).
+ * `trusted-profile.ts`, which reads the profile directory from `os.userInfo()`
+ * — the process token on Windows, the passwd entry on POSIX — and so consults
+ * no environment variable at all (AO-007-R1-RR1, AO-WINPROFILE-001).
  *
  * Tests still need to run against a scratch directory. That is solved by
  * dependency injection *inside* the package — this module is not referenced
@@ -33,7 +34,7 @@ export interface PathProvider {
  * The value is resolved on access rather than at import time, and the resolver
  * throws rather than guessing if the OS cannot be asked — see
  * `trusted-profile.ts`. It memoises internally, so repeated access does not
- * spawn repeatedly.
+ * re-query the operating system.
  */
 export const OS_PATH_PROVIDER: PathProvider = Object.freeze({
   get homeDirectory(): string {

@@ -27,8 +27,10 @@
     "schema:generate": "tsx scripts/generate-schema.ts",
     "test:dist-doctor": "node tests/dist-artifact/run-completion-dist-artifact.mjs",
     "verify:dist-doctor": "npm run build && npm run test:dist-doctor",
+    "test:dist-trusted-profile": "node tests/dist-artifact/trusted-profile-dist-artifact.mjs",
+    "verify:dist-trusted-profile": "npm run build && npm run test:dist-trusted-profile",
     "test:foundation-safe": "vitest run --exclude tests/exec.test.ts",
-    "verify": "npm run schema:generate && npm run typecheck && npm run build && npm run test:dist-doctor && npm run test:foundation-safe"
+    "verify": "npm run schema:generate && npm run typecheck && npm run build && npm run test:dist-doctor && npm run test:dist-trusted-profile && npm run test:foundation-safe"
   },
   "keywords": [],
   "author": "",

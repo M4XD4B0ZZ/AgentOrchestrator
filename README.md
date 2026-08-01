@@ -40,9 +40,16 @@ npm run verify
 
 `verify` is the canonical full Foundation verify command. It runs, in this
 order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
-`test:foundation-safe`. `build` runs immediately before `test:dist-doctor`,
-so the dist artefact check always runs against a fresh build, never a stale
-or missing one.
+`test:dist-trusted-profile`, `test:foundation-safe`. `build` runs immediately
+before the two dist artefact checks, so both always run against a fresh build,
+never a stale or missing one, and there is only ever one build per `verify`
+run.
+
+`test:dist-trusted-profile` checks the *built* trusted-profile module
+(`dist/config/internal/trusted-profile.js`): that it resolves the OS user
+profile through `os.userInfo()`, that a child process with spoofed profile
+environment variables gets the identical answer, and that no remnant of the
+removed PowerShell resolver survives in the shipped artefact.
 
 **`test:foundation-safe` is not "all tests".** It runs every vitest file
 except `tests/exec.test.ts`, which is deliberately excluded (via vitest's
@@ -74,12 +81,17 @@ npm run test:dist-doctor     # run only the dist-artefact child check
 npm run verify:dist-doctor   # build, then check the *built* doctor run-completion
                               # artefact (dist/doctor/run-completion.js) in a
                               # separate Node process — not the TypeScript source
+npm run test:dist-trusted-profile   # run only the built trusted-profile check
+                              # (tests/dist-artifact/trusted-profile-dist-artifact.mjs),
+                              # against whatever dist/ already exists — no build
+npm run verify:dist-trusted-profile # build, then check the *built* trusted-profile
+                              # module (dist/config/internal/trusted-profile.js)
 ```
 
-The dist artefact check is a plain Node script, not a vitest test file, so it
-is never picked up by vitest's default `tests/**/*.test.ts` glob and a plain
-`npm test` on a clean checkout (no `dist/` yet) does not depend on a prior
-build.
+Both dist artefact checks are plain Node scripts, not vitest test files, so
+they are never picked up by vitest's default `tests/**/*.test.ts` glob and a
+plain `npm test` on a clean checkout (no `dist/` yet) does not depend on a
+prior build.
 
 `schemas/task-state.schema.json` is **generated**. Do not edit it by hand — a
 test fails if it no longer matches the Zod schema in `src/core/task-state.ts`.
