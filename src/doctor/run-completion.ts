@@ -20,10 +20,10 @@
  *
  * ── The protocol is fixed, not caller-configurable ─────────────────────────
  *
- * There used to be a `completeRun({ runDirectory, expectedArtefacts })` API:
- * any caller could name any set of "required" artefacts, which made the
- * run's own shape a parameter rather than a fact. That is gone. The protocol
- * is exactly:
+ * There used to be a `completeRun({ runDirectory, ...a caller-supplied list
+ * of required artefact names })` API: any caller could name any set of
+ * "required" artefacts, which made the run's own shape a parameter rather
+ * than a fact. That is gone. The protocol is exactly:
  *
  *  - before completion: {@link REQUIRED_ARTEFACT_NAMES} and nothing else;
  *  - after completion: {@link REQUIRED_ARTEFACT_NAMES} plus
@@ -31,9 +31,14 @@
  *
  * Both lists are derived, once, from {@link REQUIRED_ARTEFACT_NAMES} — the
  * single internal source of truth for artefact names — so there is no second,
- * looser copy anywhere, in this module or in `run-doctor.ts`. Nothing in this
- * module's public surface accepts an alternative artefact list; TypeScript
- * gives {@link completeRun} no parameter through which one could be supplied.
+ * looser copy anywhere, in this module or in `run-doctor.ts`.
+ * {@link REQUIRED_ARTEFACT_NAMES} itself is module-private and runtime-frozen:
+ * `run-doctor.ts` reaches the two names only through
+ * {@link requiredArtefactFileNames}, which hands back a fresh frozen copy, so
+ * nothing outside this module can add to, remove from, reorder or replace the
+ * contract. Nothing in this module's public surface accepts an alternative
+ * artefact list either; TypeScript gives {@link completeRun} no parameter
+ * through which one could be supplied.
  *
  * ── completeRun is bound to (runsRoot, runId), not to an arbitrary path ────
  *
@@ -121,19 +126,32 @@ const COMPLETION_MARKER_BYTES = Buffer.from(COMPLETION_MARKER_CONTENTS, 'utf8');
 /**
  * The two artefacts every run writes, and the only ones — besides the marker
  * — a completed run may hold. This is the single internal source of truth for
- * the fixed artefact set: {@link completeRun}, {@link inspectRun} and
- * `run-doctor.ts` (via its own re-exported names) all read the run's required
- * shape from here, and from nowhere else. There is no parameter, on this
- * module's public API, through which a caller could add to, remove from, or
- * replace this list.
+ * the fixed artefact set: {@link completeRun} and {@link inspectRun} read the
+ * run's required shape from here, and from nowhere else. It is module-private
+ * and `Object.freeze`d at runtime — `as const` alone only constrains the
+ * type, not the array a caller would actually hold at runtime — so nothing
+ * outside this module can add to, remove from, reorder or replace it
+ * (AO-FOUNDATION-REM-002C2-REREVIEW-01). Code elsewhere that needs these
+ * names (`run-doctor.ts`) goes through {@link requiredArtefactFileNames},
+ * which hands back a fresh frozen copy, never this reference.
  */
-export const REQUIRED_ARTEFACT_NAMES = ['cli-capabilities.txt', 'doctor-report.json'] as const;
+const REQUIRED_ARTEFACT_NAMES = Object.freeze(['cli-capabilities.txt', 'doctor-report.json'] as const);
+
+/**
+ * The exact two artefact file names every run writes, as a fresh, frozen
+ * pair — never this module's own array reference. Mutating the returned
+ * value, or attempting to, can never affect the internal protocol contract
+ * {@link completeRun} and {@link inspectRun} enforce.
+ */
+export function requiredArtefactFileNames(): readonly [string, string] {
+  return Object.freeze([REQUIRED_ARTEFACT_NAMES[0], REQUIRED_ARTEFACT_NAMES[1]]);
+}
 
 /** The fixed set of direct entries a *completed* run holds — and no others. */
-const COMPLETED_ENTRY_NAMES: readonly string[] = [
+const COMPLETED_ENTRY_NAMES = Object.freeze([
   ...REQUIRED_ARTEFACT_NAMES,
   COMPLETION_MARKER_FILE_NAME,
-];
+] as const);
 
 // ── Shared result vocabulary ────────────────────────────────────────────────
 
@@ -354,20 +372,82 @@ interface StructureCheck {
   readonly errnoCode: string | null;
 }
 
-/** The directory must hold precisely `expectedNames` — nothing more. */
-function checkExactEntries(runDirectory: string, expectedNames: readonly string[]): StructureCheck {
+/**
+ * Exact-membership check between what is actually on disk and one of the
+ * fixed internal protocol stages — checked independently in both directions,
+ * so this never relies on a later per-artefact check (such as
+ * {@link checkArtefacts}) to notice a name that is missing entirely
+ * (AO-FOUNDATION-REM-002C2-REREVIEW-02).
+ *
+ * `mustBePresent` and `allowed` are always one of this module's own frozen
+ * constants — never a value a caller could supply or mutate — and
+ * `mustBePresent` is always a subset of `allowed`:
+ *
+ *  - a name present on disk but not in `allowed` → `RUN_STRUCTURE_INVALID`
+ *    (an extra, unexpected entry);
+ *  - a name in `mustBePresent` absent from disk → `REQUIRED_ARTIFACT_MISSING`;
+ *  - a duplicate reported by `readdirSync` itself → `RUN_STRUCTURE_INVALID`,
+ *    since it would otherwise let a set-based comparison silently under-count.
+ *
+ * `allowed` can be a strict superset of `mustBePresent` — the completed-run
+ * stage allows (but does not, here, require) the `COMPLETED` marker itself,
+ * since that file's presence and exact byte content are independently and
+ * exclusively decided by {@link checkCompletionMarker}, not by this
+ * structural check. A marker that is absent is not a structural defect the
+ * way an absent artefact is: it is the ordinary, expected shape of a run that
+ * has not finished yet, reported by its own dedicated code
+ * (`COMPLETION_MARKER_MISSING`) rather than folded into this one.
+ */
+function checkEntriesMatch(
+  actualNames: readonly string[],
+  mustBePresent: readonly string[],
+  allowed: readonly string[],
+): StructureCheck {
+  const allowedSet = new Set(allowed);
+  const actual = new Set(actualNames);
+
+  if (actual.size !== actualNames.length) {
+    return { code: 'RUN_STRUCTURE_INVALID', errnoCode: null };
+  }
+  for (const name of actual) {
+    if (!allowedSet.has(name)) return { code: 'RUN_STRUCTURE_INVALID', errnoCode: null };
+  }
+  for (const name of mustBePresent) {
+    if (!actual.has(name)) return { code: 'REQUIRED_ARTIFACT_MISSING', errnoCode: null };
+  }
+  return { code: 'OK', errnoCode: null };
+}
+
+/**
+ * The directory must hold exactly {@link REQUIRED_ARTEFACT_NAMES} — nothing
+ * more, nothing missing — checked against the internal frozen contract only.
+ * There is no parameter through which this could be pointed at a different
+ * expected set.
+ */
+function checkPreCompletionEntries(runDirectory: string): StructureCheck {
   let names: string[];
   try {
     names = readdirSync(runDirectory);
   } catch (error) {
     return { code: 'RUN_STRUCTURE_INVALID', errnoCode: safeErrnoCode(error) };
   }
+  return checkEntriesMatch(names, REQUIRED_ARTEFACT_NAMES, REQUIRED_ARTEFACT_NAMES);
+}
 
-  const expected = new Set(expectedNames);
-  if (names.some((name) => !expected.has(name))) {
-    return { code: 'RUN_STRUCTURE_INVALID', errnoCode: null };
+/**
+ * The directory must hold, at most, exactly {@link REQUIRED_ARTEFACT_NAMES}
+ * plus {@link COMPLETION_MARKER_FILE_NAME} — nothing beyond those three — and
+ * must always, independently of any other check, already hold both required
+ * artefacts. Checked against the internal frozen contract only.
+ */
+function checkCompletedEntries(runDirectory: string): StructureCheck {
+  let names: string[];
+  try {
+    names = readdirSync(runDirectory);
+  } catch (error) {
+    return { code: 'RUN_STRUCTURE_INVALID', errnoCode: safeErrnoCode(error) };
   }
-  return { code: 'OK', errnoCode: null };
+  return checkEntriesMatch(names, REQUIRED_ARTEFACT_NAMES, COMPLETED_ENTRY_NAMES);
 }
 
 /**
@@ -460,7 +540,7 @@ function validateRunBeforeCompletion(
     return { code: 'COMPLETION_MARKER_ALREADY_EXISTS', runDirectory, errnoCode: null };
   }
 
-  const entries = checkExactEntries(runDirectory, REQUIRED_ARTEFACT_NAMES);
+  const entries = checkPreCompletionEntries(runDirectory);
   if (entries.code !== 'OK') {
     return { code: entries.code, runDirectory, errnoCode: entries.errnoCode };
   }
@@ -491,7 +571,7 @@ function validateCompletedRun(runsRoot: string, runId: string): ProtocolValidati
   if (pathCheck.code !== 'OK') return pathCheck;
   const { runDirectory } = pathCheck;
 
-  const entries = checkExactEntries(runDirectory, COMPLETED_ENTRY_NAMES);
+  const entries = checkCompletedEntries(runDirectory);
   if (entries.code !== 'OK') {
     return { code: entries.code, runDirectory, errnoCode: entries.errnoCode };
   }

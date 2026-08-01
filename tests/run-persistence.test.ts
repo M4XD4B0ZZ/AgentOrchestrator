@@ -505,8 +505,8 @@ describe('the closing checks gate the marker', () => {
   });
 
   it('offers no parameter through which a caller could name a different artefact contract', () => {
-    // The whole point of removing `expectedArtefacts`: `completeRun` takes
-    // exactly two positional string arguments now.
+    // The whole point of removing the old caller-configurable artefact list:
+    // `completeRun` takes exactly two positional string arguments now.
     expect(completeRun.length).toBe(2);
 
     // @ts-expect-error — there is no overload of `completeRun` accepting an
@@ -514,7 +514,7 @@ describe('the closing checks gate the marker', () => {
     // fail to type-check. Forcing the call past the type system does not
     // recover the old contract either: `runsRoot` is no longer a string, so
     // path resolution itself rejects the call outright.
-    expect(() => completeRun({ runDirectory: freshRun(), expectedArtefacts: ['x'] })).toThrow();
+    expect(() => completeRun({ runDirectory: freshRun(), legacyArtefactList: ['x'] })).toThrow();
   });
 });
 
