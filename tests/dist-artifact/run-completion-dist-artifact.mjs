@@ -4,8 +4,9 @@
  *
  * Standalone Node script — deliberately not a vitest test file, and
  * deliberately plain JavaScript rather than TypeScript. It is spawned as its
- * own child process by `tests/run-completion-dist.test.ts` (and directly by
- * the `verify:dist-doctor` npm script), and it imports exactly one module:
+ * own child process directly by the `test:dist-doctor` npm script (and
+ * transitively by `verify:dist-doctor` and `verify`), and it imports exactly
+ * one module:
  *
  *     dist/doctor/run-completion.js
  *
@@ -13,6 +14,11 @@
  * location. There is no TypeScript compilation, no vitest module resolution,
  * and no `tsconfig`/`nodenext` path mapping involved in reaching that file,
  * so nothing here can be silently redirected back to `src/doctor/run-completion.ts`.
+ * There used to also be a thin vitest wrapper, `tests/run-completion-dist.test.ts`,
+ * that did nothing but spawn this same script; it was removed because vitest's
+ * default `tests/**\/*.test.ts` glob picked it up, which made a plain `npm test`
+ * on a clean checkout (no `dist/` yet) fail for a reason unrelated to the tests
+ * vitest is meant to run. This script is the sole dist integration check now.
  *
  * Contract: exit code 0 means every check below passed. Any nonzero exit code
  * means at least one did not. Parsing stdout/stderr is never required to know
@@ -23,7 +29,6 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
@@ -118,13 +123,15 @@ check(
 void replaced;
 
 // ── 4. Reproduce the original JavaScript-level attack against dist ──────────
-function freshRunId() {
-  const stamp = new Date().toISOString().replace(/[-:.]/g, '');
-  return `${stamp.slice(0, 8)}T${stamp.slice(9, 18)}Z-${randomUUID()}`;
-}
+// Two fixed, schema-valid run ids (see RUN_ID_PATTERN in
+// src/doctor/run-directory.ts, deliberately not imported here — this script
+// only ever exercises the built completion module). One fresh temporary
+// runsRoot per script invocation already gives every run its own directory,
+// so there is no need to generate a fresh id per call as well.
+const ONE_ARTEFACT_RUN_ID = '20260101T000000000Z-00000000-0000-4000-8000-000000000001';
+const CONTROL_RUN_ID = '20260101T000000001Z-00000000-0000-4000-8000-000000000002';
 
-function makeRun(runsRoot, fileNames) {
-  const runId = freshRunId();
+function makeRun(runsRoot, runId, fileNames) {
   const runDirectory = join(runsRoot, runId);
   mkdirSync(runDirectory);
   for (const name of fileNames) {
@@ -136,7 +143,7 @@ function makeRun(runsRoot, fileNames) {
 const runsRoot = mkdtempSync(join(tmpdir(), 'ao-dist-doctor-'));
 try {
   // Negative case: a run holding only one of the two required artefacts.
-  const oneArtefactRunId = makeRun(runsRoot, ['cli-capabilities.txt']);
+  const oneArtefactRunId = makeRun(runsRoot, ONE_ARTEFACT_RUN_ID, ['cli-capabilities.txt']);
 
   const oneArtefactCompletion = completeRun(runsRoot, oneArtefactRunId);
   check(oneArtefactCompletion.code !== 'COMPLETED', 'one-artefact run was reported COMPLETED by completeRun');
@@ -155,7 +162,7 @@ try {
   );
 
   // Control case: a separate, fully valid run with both required artefacts.
-  const fullRunId = makeRun(runsRoot, ['cli-capabilities.txt', 'doctor-report.json']);
+  const fullRunId = makeRun(runsRoot, CONTROL_RUN_ID, ['cli-capabilities.txt', 'doctor-report.json']);
 
   const fullCompletion = completeRun(runsRoot, fullRunId);
   check(fullCompletion.code === 'COMPLETED', `control run did not complete (got ${fullCompletion.code})`);

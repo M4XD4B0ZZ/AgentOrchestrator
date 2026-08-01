@@ -35,14 +35,51 @@ npm install
 ## Build and verify
 
 ```powershell
-npm run schema:generate   # regenerate schemas/task-state.schema.json from Zod
-npm run typecheck         # tsc --noEmit, strict
-npm test                  # vitest
-npm run build             # emit dist/ (Node-executable CLI)
-npm run verify:dist-doctor  # build, then check the *built* doctor run-completion
-                             # artefact (dist/doctor/run-completion.js) in a
-                             # separate Node process — not the TypeScript source
+npm run verify
 ```
+
+`verify` is the canonical full Foundation verify command. It runs, in this
+order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
+`test:foundation-safe`. `build` runs immediately before `test:dist-doctor`,
+so the dist artefact check always runs against a fresh build, never a stale
+or missing one.
+
+**`test:foundation-safe` is not "all tests".** It runs every vitest file
+except `tests/exec.test.ts`, which is deliberately excluded (via vitest's
+`--exclude` flag) because of the open **AO-008** process-tree blocker in that
+suite. This exclusion is temporary: once AO-008 is closed, `tests/exec.test.ts`
+must be added back into the canonical `verify` contract — either back into an
+unrestricted `npm test`-based step, or by dropping the exclusion here. Do not
+call `test:foundation-safe` "all tests" or "the full suite" while that
+exclusion stands.
+
+There is currently no CI workflow in this repository (no `.github/workflows`);
+`npm run verify` is the complete local contract until one is added, and any
+future CI must call it, or run an equivalent, non-optional dist-doctor step
+(and must revisit the AO-008 exclusion once it no longer applies).
+
+The individual steps remain available on their own:
+
+```powershell
+npm run schema:generate     # regenerate schemas/task-state.schema.json from Zod
+npm run typecheck           # tsc --noEmit, strict
+npm test                    # vitest, unrestricted (includes tests/exec.test.ts,
+                             # the AO-008 process-tree suite)
+npm run test:foundation-safe  # vitest, excluding only tests/exec.test.ts —
+                               # the set `verify` actually runs
+npm run build                # emit dist/ (Node-executable CLI)
+npm run test:dist-doctor     # run only the dist-artefact child check
+                              # (tests/dist-artifact/run-completion-dist-artifact.mjs),
+                              # against whatever dist/ already exists — no build
+npm run verify:dist-doctor   # build, then check the *built* doctor run-completion
+                              # artefact (dist/doctor/run-completion.js) in a
+                              # separate Node process — not the TypeScript source
+```
+
+The dist artefact check is a plain Node script, not a vitest test file, so it
+is never picked up by vitest's default `tests/**/*.test.ts` glob and a plain
+`npm test` on a clean checkout (no `dist/` yet) does not depend on a prior
+build.
 
 `schemas/task-state.schema.json` is **generated**. Do not edit it by hand — a
 test fails if it no longer matches the Zod schema in `src/core/task-state.ts`.

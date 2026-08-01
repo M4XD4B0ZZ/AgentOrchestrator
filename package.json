@@ -25,7 +25,10 @@
     "test": "vitest run",
     "build": "tsc -p tsconfig.build.json",
     "schema:generate": "tsx scripts/generate-schema.ts",
-    "verify:dist-doctor": "npm run build && node tests/dist-artifact/run-completion-dist-artifact.mjs"
+    "test:dist-doctor": "node tests/dist-artifact/run-completion-dist-artifact.mjs",
+    "verify:dist-doctor": "npm run build && npm run test:dist-doctor",
+    "test:foundation-safe": "vitest run --exclude tests/exec.test.ts",
+    "verify": "npm run schema:generate && npm run typecheck && npm run build && npm run test:dist-doctor && npm run test:foundation-safe"
   },
   "keywords": [],
   "author": "",
