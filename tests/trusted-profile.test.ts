@@ -1,27 +1,34 @@
 /**
- * AO-WINPROFILE-001 (closes AO-007-R1-RR1-REVIEW-01): the trusted profile
- * resolver reads the operating system directly.
+ * AO-WINPROFILE-001 / AO-WINPROFILE-001-R1: the trusted profile resolver reads
+ * the operating system directly, in this process, and validates fail-closed.
  *
- * Three generations of defect converge on this module.
+ * Two properties are under test here.
  *
- * First, `AGENT_LOOP_HOME` relocated the persistent write root outright.
- * Second, the replacement called `os.homedir()`, which on Windows *is* the
- * profile environment variable whenever it is set — the environment read had
- * simply moved one layer down. Third, the fix for that spawned a helper
- * process, and located Windows PowerShell by taking the drive letter of
- * `process.execPath`: a Node install on a non-system volume made the resolver
- * build a path that does not exist and fail closed, taking the whole doctor
- * command with it.
+ * The first is provenance: the profile directory comes from `os.userInfo()`,
+ * which consults no environment block, so no variable a caller can set moves
+ * the persistent write root. The environment probes at the bottom of this file
+ * are the regression tests for that.
  *
- * The resolver now calls `os.userInfo()` in-process. That function reads no
- * environment at all — on Windows it resolves from the process token, on POSIX
- * from the passwd entry — so there is no helper to locate, no shell, no PATH,
- * and no spawn that can fail. The environment probes at the bottom of this file
- * are the regression tests for all three generations at once.
+ * The second is the safety boundary (AO-WINPROFILE-001-R1). Every value the
+ * resolver takes from outside — the dependency slots themselves, the query
+ * result, its `homedir` field, the canonical answer, the file-status object and
+ * that object's directory predicate — may be an accessor that throws, an absent
+ * member, a non-callable value or a method that throws. None of those may
+ * produce a native error or carry foreign text outward: each must be reduced to
+ * the one closed domain failure. The fixtures below are deliberately hostile,
+ * and each carries a conspicuous marker string that must never appear in any
+ * message, formatted text or stack.
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 
@@ -40,19 +47,61 @@ import { PACKAGE_ROOT } from '../src/config/paths.js';
 /**
  * Deliberately conspicuous values. Every one of them is fed into the resolver
  * on a failing path, and no failure is allowed to carry any of them outward.
+ *
+ * Each hostile fixture gets its own marker, so a leak names the exact boundary
+ * that failed rather than leaving it to be guessed.
  */
 const SECRET_RAW_PATH = 'Z:\\ao-secret-raw-profile-must-not-leak';
 const SECRET_CANONICAL_PATH = 'Z:\\ao-secret-canonical-profile-must-not-leak';
 const SECRET_EXCEPTION_TEXT = 'ao-secret-exception-message-must-not-leak';
 const SECRET_USERNAME = 'ao-secret-username-must-not-leak';
+
+// REV-01 — one marker per hostile external operation.
+const SECRET_HOMEDIR_GETTER = 'ao-secret-homedir-getter-must-not-leak';
+const SECRET_HOMEDIR_PROXY = 'ao-secret-homedir-proxy-trap-must-not-leak';
+const SECRET_ISDIRECTORY_GETTER = 'ao-secret-isdirectory-getter-must-not-leak';
+const SECRET_ISDIRECTORY_PROXY = 'ao-secret-isdirectory-proxy-trap-must-not-leak';
+const SECRET_ISDIRECTORY_CALL = 'ao-secret-isdirectory-call-must-not-leak';
+const SECRET_ISDIRECTORY_ABSENT = 'ao-secret-isdirectory-absent-must-not-leak';
+const SECRET_ISDIRECTORY_NOT_CALLABLE = 'ao-secret-isdirectory-not-callable-must-not-leak';
+const SECRET_ISDIRECTORY_TRUTHY = 'ao-secret-isdirectory-truthy-must-not-leak';
+
+// REV-01 — one marker per malformed dependency container.
+const SECRET_DEPENDENCY_ABSENT = 'ao-secret-dependency-slot-absent-must-not-leak';
+const SECRET_DEPENDENCY_NOT_CALLABLE = 'ao-secret-dependency-slot-not-callable-must-not-leak';
+const SECRET_DEPENDENCY_GETTER = 'ao-secret-dependency-slot-getter-must-not-leak';
+const SECRET_DEPENDENCY_PRIMITIVE = 'ao-secret-dependency-primitive-container-must-not-leak';
+
+// REV-04 — the two non-directory shapes, told apart by their own markers.
+const SECRET_REGULAR_FILE = 'ao-secret-regular-file-content-must-not-leak';
+const SECRET_OTHER_TYPE = 'ao-secret-other-file-type-must-not-leak';
+
 const SECRETS = [
   SECRET_RAW_PATH,
   SECRET_CANONICAL_PATH,
   SECRET_EXCEPTION_TEXT,
   SECRET_USERNAME,
+  SECRET_HOMEDIR_GETTER,
+  SECRET_HOMEDIR_PROXY,
+  SECRET_ISDIRECTORY_GETTER,
+  SECRET_ISDIRECTORY_PROXY,
+  SECRET_ISDIRECTORY_CALL,
+  SECRET_ISDIRECTORY_ABSENT,
+  SECRET_ISDIRECTORY_NOT_CALLABLE,
+  SECRET_ISDIRECTORY_TRUTHY,
+  SECRET_DEPENDENCY_ABSENT,
+  SECRET_DEPENDENCY_NOT_CALLABLE,
+  SECRET_DEPENDENCY_GETTER,
+  SECRET_DEPENDENCY_PRIMITIVE,
+  SECRET_REGULAR_FILE,
+  SECRET_OTHER_TYPE,
 ];
 
 const NUL = '\u0000';
+
+/** Native error text that must never be what a caller sees. */
+const NATIVE_ERROR_TEXT =
+  /TypeError|is not a function|Cannot read propert|of undefined|of null|Reflect\.apply/i;
 
 const tempDirs: string[] = [];
 
@@ -71,20 +120,6 @@ afterEach(() => {
   resetTrustedProfileCacheForTests();
 });
 
-/**
- * A source file with comment lines removed.
- *
- * This module's doc comments deliberately name the APIs and variables it
- * defends against, to explain why. Assertions about what the *code* does must
- * not trip over that prose.
- */
-function codeOnly(source: string): string {
-  return source
-    .split('\n')
-    .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
-    .join('\n');
-}
-
 interface DependencyCalls {
   userInfo: number;
   realpath: number;
@@ -92,29 +127,35 @@ interface DependencyCalls {
   realpathArgs: string[];
 }
 
-/** Builds a closed dependency set plus a call ledger, with no global mocking. */
+/**
+ * Builds a closed dependency set plus a call ledger, with no global mocking.
+ *
+ * The override signatures return `unknown` on purpose: a fail-closed test has
+ * to be able to hand the resolver a value the declaration says is impossible,
+ * because the declaration is exactly what the resolver refuses to trust.
+ */
 function makeDependencies(overrides: {
   userInfo?: () => unknown;
-  realpath?: (path: string) => string;
-  stat?: (path: string) => { isDirectory: () => boolean };
+  realpath?: (path: string) => unknown;
+  stat?: (path: string) => unknown;
 }): { dependencies: TrustedProfileDependencies; calls: DependencyCalls } {
   const calls: DependencyCalls = { userInfo: 0, realpath: 0, stat: 0, realpathArgs: [] };
   // Presence of an override is tested explicitly rather than with `??`, so an
   // override that legitimately returns `null` or `''` is not silently replaced
   // by the valid default — which would turn a fail-closed case into a pass.
   const dependencies: TrustedProfileDependencies = {
-    userInfo: () => {
+    userInfo: (): unknown => {
       calls.userInfo += 1;
       if (overrides.userInfo !== undefined) return overrides.userInfo();
       return { homedir: SECRET_RAW_PATH };
     },
-    realpath: (path: string) => {
+    realpath: (path: string): unknown => {
       calls.realpath += 1;
       calls.realpathArgs.push(path);
       if (overrides.realpath !== undefined) return overrides.realpath(path);
       return path;
     },
-    stat: (path: string) => {
+    stat: (path: string): unknown => {
       calls.stat += 1;
       if (overrides.stat !== undefined) return overrides.stat(path);
       return { isDirectory: (): boolean => true };
@@ -149,6 +190,12 @@ function expectSafeFailure(run: () => unknown): void {
   expect(developerText).not.toMatch(/ENOENT|EACCES|EPERM|ENOTDIR|errno/i);
   expect(safeText).not.toMatch(/ENOENT|EACCES|EPERM|ENOTDIR|errno/i);
   expect(safeText).not.toMatch(/[A-Za-z]:\\/);
+  expect(developerText).not.toMatch(/[A-Za-z]:\\/);
+  // And no native error text: a `TypeError` reaching a caller would mean the
+  // boundary was crossed rather than closed.
+  expect(developerText).not.toMatch(NATIVE_ERROR_TEXT);
+  expect(safeText).not.toMatch(NATIVE_ERROR_TEXT);
+  expect(caught instanceof Error ? caught.name : '').toBe('TrustedProfileUnavailableError');
 }
 
 // ── 8.1 The valid provider case ────────────────────────────────────────────
@@ -242,6 +289,46 @@ describe('the isolated resolver accepts a valid operating-system answer', () => 
     expect(calls.realpathArgs).toEqual([padded]);
     expect(calls.realpathArgs[0]).not.toBe(scratch);
   });
+
+  it('accepts a homedir delivered through a getter that does not throw', () => {
+    const scratch = makeTempDir();
+    const canonical = realpathSync.native(scratch);
+
+    const { dependencies } = makeDependencies({
+      userInfo: () => ({
+        get homedir(): unknown {
+          return scratch;
+        },
+      }),
+      realpath: () => canonical,
+    });
+
+    expect(createTrustedProfileResolverForTests(dependencies)()).toBe(canonical);
+  });
+
+  it('calls isDirectory with the file-status object as its receiver', () => {
+    const scratch = makeTempDir();
+    const canonical = realpathSync.native(scratch);
+
+    // The predicate answers from `this`. Detached — the classic mistake of
+    // pulling the method off and calling it bare — it would answer `false` and
+    // this resolution would fail, so a pass here proves the receiver is right.
+    const stats = {
+      directory: true,
+      isDirectory(this: unknown): boolean {
+        return (this as { directory?: unknown } | undefined)?.directory === true;
+      },
+    };
+
+    const { dependencies } = makeDependencies({
+      userInfo: () => ({ homedir: scratch }),
+      realpath: () => canonical,
+      stat: () => stats,
+    });
+
+    expect(stats.isDirectory.call(undefined)).toBe(false);
+    expect(createTrustedProfileResolverForTests(dependencies)()).toBe(canonical);
+  });
 });
 
 // ── 8.2 Fail-closed cases ──────────────────────────────────────────────────
@@ -266,6 +353,31 @@ describe('the isolated resolver fails closed on every invalid answer', () => {
     ['homedir is whitespace only', { userInfo: () => ({ homedir: '   \t  ' }) }],
     ['homedir carries an embedded NUL', { userInfo: () => ({ homedir: `C:\\ao${NUL}test` }) }],
     ['homedir is relative', { userInfo: () => ({ homedir: 'relative\\profile' }) }],
+    // ── REV-01: the homedir read itself is hostile ──────────────────────────
+    [
+      'the homedir getter throws',
+      {
+        userInfo: () => ({
+          get homedir(): unknown {
+            throw new Error(SECRET_HOMEDIR_GETTER);
+          },
+        }),
+      },
+    ],
+    [
+      'the userInfo result is a proxy whose get trap throws',
+      {
+        userInfo: () =>
+          new Proxy(
+            {},
+            {
+              get(): never {
+                throw new Error(SECRET_HOMEDIR_PROXY);
+              },
+            },
+          ),
+      },
+    ],
     [
       'realpath throws',
       {
@@ -292,18 +404,94 @@ describe('the isolated resolver fails closed on every invalid answer', () => {
         },
       },
     ],
+    ['stat returns null', { realpath: () => SECRET_CANONICAL_PATH, stat: () => null }],
+    // ── REV-01: the isDirectory read, and the isDirectory call, are hostile ─
     [
-      'the canonical target is a file',
+      'the isDirectory getter throws',
       {
         realpath: () => SECRET_CANONICAL_PATH,
-        stat: () => ({ isDirectory: (): boolean => false }),
+        stat: () => ({
+          get isDirectory(): unknown {
+            throw new Error(SECRET_ISDIRECTORY_GETTER);
+          },
+        }),
       },
     ],
     [
-      'the canonical target is neither file nor directory',
+      'the file-status object is a proxy whose get trap throws',
       {
         realpath: () => SECRET_CANONICAL_PATH,
-        stat: () => ({ isDirectory: (): boolean => false }),
+        stat: () =>
+          new Proxy(
+            {},
+            {
+              get(): never {
+                throw new Error(SECRET_ISDIRECTORY_PROXY);
+              },
+            },
+          ),
+      },
+    ],
+    [
+      'isDirectory throws when called',
+      {
+        realpath: () => SECRET_CANONICAL_PATH,
+        stat: () => ({
+          isDirectory: (): never => {
+            throw new Error(SECRET_ISDIRECTORY_CALL);
+          },
+        }),
+      },
+    ],
+    [
+      'isDirectory is absent',
+      {
+        realpath: () => SECRET_CANONICAL_PATH,
+        stat: () => ({ marker: SECRET_ISDIRECTORY_ABSENT }),
+      },
+    ],
+    [
+      'isDirectory is not a function',
+      {
+        realpath: () => SECRET_CANONICAL_PATH,
+        stat: () => ({ isDirectory: SECRET_ISDIRECTORY_NOT_CALLABLE }),
+      },
+    ],
+    [
+      'isDirectory returns a truthy non-boolean',
+      {
+        realpath: () => SECRET_CANONICAL_PATH,
+        stat: () => ({ isDirectory: (): unknown => SECRET_ISDIRECTORY_TRUTHY }),
+      },
+    ],
+    [
+      'isDirectory returns undefined',
+      {
+        realpath: () => SECRET_CANONICAL_PATH,
+        stat: () => ({ isDirectory: (): unknown => undefined }),
+      },
+    ],
+    [
+      'isDirectory returns null',
+      {
+        realpath: () => SECRET_CANONICAL_PATH,
+        stat: () => ({ isDirectory: (): unknown => null }),
+      },
+    ],
+    // ── REV-04: a non-directory type that is explicitly not a regular file ──
+    [
+      'the canonical target is neither a directory nor a regular file',
+      {
+        realpath: () => SECRET_CANONICAL_PATH,
+        stat: () => ({
+          marker: SECRET_OTHER_TYPE,
+          isDirectory: (): boolean => false,
+          isFile: (): boolean => false,
+          isSymbolicLink: (): boolean => false,
+          isFIFO: (): boolean => false,
+          isBlockDevice: (): boolean => false,
+          isCharacterDevice: (): boolean => false,
+        }),
       },
     ],
   ];
@@ -319,6 +507,115 @@ describe('the isolated resolver fails closed on every invalid answer', () => {
     for (const [, overrides] of cases) {
       const { dependencies } = makeDependencies(overrides);
       const resolve = createTrustedProfileResolverForTests(dependencies);
+      expect(() => resolve()).toThrow(TrustedProfileUnavailableError);
+    }
+    expect(Object.keys(process.env).sort()).toEqual(Object.keys(before).sort());
+  });
+
+  /**
+   * REV-04 — the regular-file case is a *real* regular file, not a stats-like
+   * literal. It has its own realpath and its own `statSync` evaluation, so it
+   * shares no fixture with the "some other type" case above and can never pass
+   * for the same reason.
+   */
+  it('rejects a canonical target that is a real regular file on disk', () => {
+    const directory = makeTempDir();
+    const file = join(directory, 'ao-regular-file');
+    writeFileSync(file, SECRET_REGULAR_FILE, 'utf8');
+    const canonicalFile = realpathSync.native(file);
+
+    // The fixture really is a regular file, established by the OS, not claimed.
+    expect(statSync(canonicalFile).isFile()).toBe(true);
+    expect(statSync(canonicalFile).isDirectory()).toBe(false);
+
+    const { dependencies, calls } = makeDependencies({
+      userInfo: () => ({ homedir: file }),
+      realpath: () => canonicalFile,
+      // The real filesystem call, not a stand-in for it.
+      stat: (path: string) => statSync(path),
+    });
+
+    expectSafeFailure(() => createTrustedProfileResolverForTests(dependencies)());
+    expect(calls.stat).toBeGreaterThan(0);
+  });
+});
+
+// ── 8.2b REV-01: a malformed dependency container is refused, not thrown at ─
+
+describe('the test factory refuses a malformed dependency container', () => {
+  const workingSlots = {
+    userInfo: (): unknown => ({ homedir: SECRET_RAW_PATH }),
+    realpath: (path: string): unknown => path,
+    stat: (): unknown => ({ isDirectory: (): boolean => true }),
+  };
+
+  /** A container missing exactly one slot, carrying a marker in its place. */
+  function without(slot: 'userInfo' | 'realpath' | 'stat'): unknown {
+    const container: Record<string, unknown> = { ...workingSlots, absentSlotMarker: SECRET_DEPENDENCY_ABSENT };
+    delete container[slot];
+    return container;
+  }
+
+  /** A container whose slot holds a marker string instead of a function. */
+  function notCallable(slot: 'userInfo' | 'realpath' | 'stat'): unknown {
+    return { ...workingSlots, [slot]: SECRET_DEPENDENCY_NOT_CALLABLE };
+  }
+
+  /** A container whose slot is an accessor that throws when it is read. */
+  function throwingGetter(slot: 'userInfo' | 'realpath' | 'stat'): unknown {
+    const container: Record<string, unknown> = { ...workingSlots };
+    delete container[slot];
+    Object.defineProperty(container, slot, {
+      configurable: true,
+      enumerable: true,
+      get(): never {
+        throw new Error(SECRET_DEPENDENCY_GETTER);
+      },
+    });
+    return container;
+  }
+
+  const containers: ReadonlyArray<readonly [string, unknown]> = [
+    ['the container is null', null],
+    ['the container is undefined', undefined],
+    ['the container is a string carrying a marker', SECRET_DEPENDENCY_PRIMITIVE],
+    ['the container is a number', 42],
+    ['the container is a boolean', true],
+    ['userInfo is absent', without('userInfo')],
+    ['realpath is absent', without('realpath')],
+    ['stat is absent', without('stat')],
+    ['userInfo is not a function', notCallable('userInfo')],
+    ['realpath is not a function', notCallable('realpath')],
+    ['stat is not a function', notCallable('stat')],
+    ['the userInfo slot is a throwing getter', throwingGetter('userInfo')],
+    ['the realpath slot is a throwing getter', throwingGetter('realpath')],
+    ['the stat slot is a throwing getter', throwingGetter('stat')],
+    [
+      'the container is a proxy whose get trap throws',
+      new Proxy(
+        {},
+        {
+          get(): never {
+            throw new Error(SECRET_DEPENDENCY_GETTER);
+          },
+        },
+      ),
+    ],
+  ];
+
+  it.each(containers)('fails closed when %s', (_label, container) => {
+    const resolve = createTrustedProfileResolverForTests(
+      container as unknown as TrustedProfileDependencies,
+    );
+    expectSafeFailure(() => resolve());
+  });
+
+  it('leaks nothing from a malformed container into the environment either', () => {
+    const before = { ...process.env };
+    for (const [, container] of containers) {
+      const resolve = createTrustedProfileResolverForTests(
+        container as unknown as TrustedProfileDependencies,
+      );
       expect(() => resolve()).toThrow(TrustedProfileUnavailableError);
     }
     expect(Object.keys(process.env).sort()).toEqual(Object.keys(before).sort());
@@ -398,6 +695,7 @@ describe('the productive resolver', () => {
     expect(isAbsolute(profile)).toBe(true);
     expect(profile).toBe(realpathSync.native(profile));
     expect(profile.includes(NUL)).toBe(false);
+    expect(statSync(profile).isDirectory()).toBe(true);
   });
 
   it('is stable across calls and across a cache reset', () => {
@@ -551,43 +849,53 @@ describe('no environment variable can move the trusted profile', () => {
 
 // ── 8.5 No subprocess, no shell, no environment in the resolver ────────────
 
+/**
+ * These assertions run against the **whole** source file, comments included.
+ *
+ * There used to be a line-based comment filter here so that the module's
+ * historical prose — which named the removed mechanism — would not trip the
+ * scan. That filter was the weakness: a line filter cannot tell a comment from
+ * a string, a template literal, or executable code that happens to follow a
+ * closing delimiter on the same line (AO-WINPROFILE-001-R1, REV-02). The prose
+ * was rewritten to describe only what the module does now, so no filter is
+ * needed and none is used.
+ */
 describe('the resolver module starts no process and reads no environment', () => {
   const source = readFileSync(
     join(PACKAGE_ROOT, 'src', 'config', 'internal', 'trusted-profile.ts'),
     'utf8',
   );
-  const code = codeOnly(source);
 
   it('imports no process-spawning module', () => {
-    expect(code).not.toContain('child_process');
-    expect(code).not.toContain('spawnSync');
-    expect(code).not.toContain('execFileSync');
-    expect(code).not.toContain('runCommand');
-    expect(code).not.toContain('doctor/exec');
+    expect(source).not.toContain('child_process');
+    expect(source).not.toContain('spawnSync');
+    expect(source).not.toContain('execFileSync');
+    expect(source).not.toContain('runCommand');
+    expect(source).not.toContain('doctor/exec');
   });
 
   it('names no shell or interpreter', () => {
-    expect(code).not.toMatch(/powershell/i);
-    expect(code).not.toMatch(/pwsh/i);
-    expect(code).not.toMatch(/\bcmd\b/i);
-    expect(code).not.toMatch(/System32/i);
+    expect(source).not.toMatch(/powershell/i);
+    expect(source).not.toMatch(/pwsh/i);
+    expect(source).not.toMatch(/\bcmd\b/i);
+    expect(source).not.toMatch(/System32/i);
   });
 
-  it('derives nothing from the running Node binary or from PATH', () => {
-    expect(code).not.toContain('execPath');
-    expect(code).not.toContain('process.env');
-    expect(code).not.toMatch(/\bPATH\b/);
+  it('derives nothing from the running Node binary or from the search list', () => {
+    expect(source).not.toContain('execPath');
+    expect(source).not.toContain('process.env');
+    expect(source).not.toMatch(/\bPATH\b/);
   });
 
-  it('names no profile environment variable in code', () => {
-    expect(code).not.toMatch(/USERPROFILE|HOMEDRIVE|HOMEPATH|LOCALAPPDATA|APPDATA/);
+  it('names no profile environment variable anywhere in the file', () => {
+    expect(source).not.toMatch(/USERPROFILE|HOMEDRIVE|HOMEPATH|LOCALAPPDATA|APPDATA/);
   });
 
   it('does not import os.homedir', () => {
-    expect(code).not.toMatch(/^\s*import\s*\{[^}]*homedir/m);
-    expect(code).not.toContain('homedir()');
+    expect(source).not.toMatch(/^\s*import\s*\{[^}]*homedir/m);
+    expect(source).not.toContain('homedir()');
     // The one permitted reading of the name: the field of the userInfo result.
-    expect(code).toContain('userInfo');
+    expect(source).toContain('userInfo');
   });
 
   it('carries none of the removed helper constants', () => {

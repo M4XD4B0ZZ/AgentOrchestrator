@@ -24,7 +24,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -84,22 +84,25 @@ const emittedFiles = [
 check(emittedFiles.includes(distEntry), 'the built JavaScript module was not among the emitted files');
 
 /**
- * A view of an emitted file with comment lines removed.
+ * ── The scan strategy (AO-WINPROFILE-001-R1, REV-02) ────────────────────────
  *
- * `tsc` preserves comments, and this module's header deliberately documents the
- * PowerShell mechanism that was removed and the environment variables that must
- * never decide the answer — naming them is how a future reader learns why. The
- * contract is that no *executable* remnant survives, so the scan below runs
- * against code lines only. Runtime exports are checked separately above, and
- * those are what a caller could actually reach.
+ * There used to be a line-based comment filter here: every line beginning with
+ * `//`, a block-comment opener or `*` was dropped before scanning, so the
+ * module's historical prose could name the mechanism it had removed. That
+ * filter was unsound — a line filter cannot tell a comment from code, and two
+ * shapes walked straight through it:
+ *
+ *   - executable code following a block-comment terminator on the same line,
+ *     because the line starts with `*` and was therefore dropped whole;
+ *   - a line of a template literal that happens to start with `*`, which is
+ *     ordinary program data and not a comment at all.
+ *
+ * Both are reproduced as self-tests below. The fix is not a cleverer filter:
+ * the emitted files are scanned as complete text, with no filtering of any
+ * kind, and the module's prose was rewritten to describe only what it does
+ * today. No comment parser is needed, and none is used.
  */
-const codeOnly = (source) =>
-  source
-    .split('\n')
-    .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
-    .join('\n');
-
-const FORBIDDEN_IN_EMITTED_CODE = [
+const FORBIDDEN_TOKENS = [
   ...REMOVED_NAMES,
   'powershell',
   'pwsh',
@@ -117,24 +120,92 @@ const FORBIDDEN_IN_EMITTED_CODE = [
   'process.env',
 ];
 
+/**
+ * Every forbidden token occurring anywhere in `text`, matched
+ * case-insensitively over the whole input. No line handling, no filtering, no
+ * comment awareness — that is the entire point.
+ *
+ * @param {string} text
+ * @returns {string[]}
+ */
+const forbiddenTokensIn = (text) => {
+  const haystack = String(text).toLowerCase();
+  return FORBIDDEN_TOKENS.filter((token) => haystack.includes(token.toLowerCase()));
+};
+
+// ── Scanner self-tests ──────────────────────────────────────────────────────
+// The first two are the bypasses the review reproduced against the old filter.
+// A misclassification here is a failure like any other, so the whole check
+// exits non-zero rather than silently scanning with a broken scanner.
+const SCANNER_MUST_REJECT = [
+  [
+    'executable code directly after a block-comment terminator',
+    `/* removed helper documentation
+*/ function helperInvocation() { return spawnSync; }`,
+  ],
+  [
+    'an old helper call in a template literal, on a line beginning with *',
+    `const payload = \`
+* spawnSync('powershell')
+\`;`,
+  ],
+  ['a plain executable line naming an old token', `void "spawnSync";`],
+];
+
+for (const [label, sample] of SCANNER_MUST_REJECT) {
+  check(
+    forbiddenTokensIn(sample).length > 0,
+    `the emitted-artefact scanner failed to flag ${label}`,
+  );
+}
+
+// A harmless, current code sample must not be flagged, or the scan would be a
+// tautology that proves nothing about the artefact.
+const SCANNER_MUST_ACCEPT = `export function trustedProfileDirectory() {
+  const info = userInfo();
+  return realpathSync.native(info.homedir);
+}`;
+check(
+  forbiddenTokensIn(SCANNER_MUST_ACCEPT).length === 0,
+  `the emitted-artefact scanner flagged a harmless current code sample: ${forbiddenTokensIn(SCANNER_MUST_ACCEPT).join(', ')}`,
+);
+
+// ── The real artefacts: JavaScript and declarations, scanned in full ─────────
 for (const file of emittedFiles.filter((f) => !f.endsWith('.map'))) {
-  const code = codeOnly(readFileSync(file, 'utf8'));
-  for (const needle of FORBIDDEN_IN_EMITTED_CODE) {
-    check(
-      !code.toLowerCase().includes(needle.toLowerCase()),
-      `${file.slice(repoRoot.length + 1)} still contains "${needle}" in shipped code`,
-    );
+  for (const token of forbiddenTokensIn(readFileSync(file, 'utf8'))) {
+    failures.push(`${file.slice(repoRoot.length + 1)} still contains "${token}"`);
   }
 }
 
-// A source map may legitimately carry the explanatory header prose, but must
-// not carry executable remnants of the old resolver.
+/**
+ * A source map is scanned as complete text as well, with exactly one documented
+ * exclusion: the `mappings` field. That field is not text — it is a base64 VLQ
+ * encoding of integer positions over the alphabet [A-Za-z0-9+/], so a short
+ * token can occur inside it by arithmetic coincidence and would mean nothing.
+ * Every field that can actually carry source text — `sources`,
+ * `sourcesContent`, `names`, `file` and anything else the map declares — is
+ * scanned in full. A map that cannot be parsed as JSON is scanned raw rather
+ * than skipped.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+const scannableMapText = (raw) => {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== 'object') return raw;
+    const withoutMappings = { ...parsed };
+    delete withoutMappings.mappings;
+    return JSON.stringify(withoutMappings);
+  } catch {
+    return raw;
+  }
+};
+
 for (const file of emittedFiles.filter((f) => f.endsWith('.map'))) {
-  const contents = readFileSync(file, 'utf8');
-  for (const needle of ['spawnSync(', 'GetFolderPath(', 'windowsPowerShellPath', 'helperInvocation']) {
-    check(
-      !contents.includes(needle),
-      `${file.slice(repoRoot.length + 1)} still carries old resolver code: "${needle}"`,
+  for (const token of forbiddenTokensIn(scannableMapText(readFileSync(file, 'utf8')))) {
+    failures.push(
+      `${file.slice(repoRoot.length + 1)} still carries the old resolver token "${token}"`,
     );
   }
 }
@@ -195,17 +266,51 @@ try {
   // Throwing at construction time is equally acceptable.
 }
 
+/** The one character no filesystem path may contain. */
+const NUL = String.fromCharCode(0);
+
+/**
+ * The full acceptance contract for a resolved profile path, checked against the
+ * real filesystem (AO-WINPROFILE-001-R1, REV-03).
+ *
+ * The last step is the one that matters most: `realpathSync.native` must both
+ * succeed and return a value **identical** to what the resolver returned. The
+ * comparison is a strict `===` between the exact strings — no case folding, no
+ * separator normalisation, no trimming — because each of those would hide
+ * precisely the non-canonical answer this check exists to catch. A `realpath`
+ * that throws is a failure, never a skipped check.
+ *
+ * @param {string} label
+ * @param {unknown} value
+ */
+const checkCanonicalDirectory = (label, value) => {
+  check(typeof value === 'string', `${label}: resolved a non-string value`);
+  if (typeof value !== 'string') return;
+
+  check(value.length > 0, `${label}: resolved an empty path`);
+  check(isAbsolute(value), `${label}: the resolved path is not absolute`);
+  check(!value.includes(NUL), `${label}: the resolved path carries an embedded NUL`);
+  check(existsSync(value), `${label}: the resolved path does not exist`);
+
+  try {
+    check(statSync(value).isDirectory() === true, `${label}: the resolved path is not a directory`);
+  } catch {
+    failures.push(`${label}: the resolved path could not be stat-ed`);
+  }
+
+  let canonical = null;
+  try {
+    canonical = realpathSync.native(value);
+  } catch {
+    failures.push(`${label}: realpathSync.native failed on the resolved path`);
+  }
+  check(canonical !== null, `${label}: the resolved path could not be canonicalised`);
+  check(canonical === value, `${label}: the resolved path is not its own canonical form`);
+};
+
 // ── 3. The real resolver answers from the operating system ──────────────────
 const profile = trustedProfileDirectory();
-check(typeof profile === 'string' && profile.length > 0, 'the resolver returned no profile path');
-check(isAbsolute(profile), 'the resolved profile path is not absolute');
-check(!profile.includes('\u0000'), 'the resolved profile path carries an embedded NUL');
-check(existsSync(profile), 'the resolved profile path does not exist');
-try {
-  check(statSync(profile).isDirectory(), 'the resolved profile path is not a directory');
-} catch {
-  failures.push('the resolved profile path could not be stat-ed');
-}
+checkCanonicalDirectory('the productive resolver', profile);
 
 // Memoisation and the reset seam behave as contracted.
 check(trustedProfileDirectory() === profile, 'a second call returned a different profile path');
@@ -265,6 +370,8 @@ check(
   childProfile === profile,
   'a child process with spoofed profile variables resolved a different profile path',
 );
+// The child's answer earns no exemption: it faces the same canonical contract.
+if (childProfile !== null) checkCanonicalDirectory('the spoofed child probe', childProfile);
 for (const decoy of Object.values(SPOOFED)) {
   check(
     childProfile === null || !String(childProfile).startsWith(decoy),

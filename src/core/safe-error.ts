@@ -113,9 +113,11 @@ export const UNKNOWN_ERRNO_CODE = 'UNKNOWN';
  * Group 1 comes from the filesystem calls in `safe-write.ts`,
  * `run-directory.ts`, `run-completion.ts` and `write-access.ts` (`mkdir`,
  * `open` with `wx`, `write`, `fsync`, `close`, `lstat`, `readdir`, `readFile`).
- * Group 2 comes from spawning diagnostic child processes in `exec.ts` and in
- * the trusted-profile resolver. Nothing else is expected, so nothing else is
- * reportable.
+ * Group 2 comes from spawning diagnostic child processes, which happens in
+ * `exec.ts` and nowhere else. In particular the trusted profile resolver is not
+ * a producer here: it answers in-process and starts no child, and its failures
+ * are reported as the `TRUSTED_PROFILE_UNAVAILABLE` domain error rather than as
+ * an errno. Nothing else is expected, so nothing else is reportable.
  */
 export const ALLOWED_ERRNO_CODES = [
   // Filesystem
