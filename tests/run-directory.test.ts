@@ -84,8 +84,29 @@ describe('run ids', () => {
     '20260801T123456789Z-not-a-uuid',
     `20260801T123456789Z-${'f'.repeat(36)}`,
     '20260801T123456789Z-3F2A0C11-1111-2222-3333-444455556666',
+    // UNC path.
+    '\\\\server\\share\\20260801T123456789Z-aaaaaaaa-1111-4111-8111-111111111111',
+    // Wrong UUID version: the third group must start with `4`.
+    '20260801T123456789Z-aaaaaaaa-1111-1111-8111-111111111111',
+    // Wrong UUID variant: the fourth group must start with 8/9/a/b.
+    '20260801T123456789Z-aaaaaaaa-1111-4111-1111-111111111111',
+    // Extra prefix / suffix around an otherwise valid id.
+    'x20260801T123456789Z-aaaaaaaa-1111-4111-8111-111111111111',
+    '20260801T123456789Z-aaaaaaaa-1111-4111-8111-111111111111x',
+    // Leading / trailing whitespace, and an embedded control character.
+    ' 20260801T123456789Z-aaaaaaaa-1111-4111-8111-111111111111',
+    '20260801T123456789Z-aaaaaaaa-1111-4111-8111-111111111111 ',
+    '20260801T123456789Z-aaaaaaaa-1111-4111-8111-11111111111\u0000',
+    '20260801T123456789Z-aaaaaaaa\t1111-4111-8111-111111111111',
   ])('rejects the run id %j', (candidate) => {
     expect(isValidRunId(candidate)).toBe(false);
+  });
+
+  it('accepts a well-formed run id with a correctly versioned UUID v4', () => {
+    expect(isValidRunId('20260801T123456789Z-aaaaaaaa-1111-4111-8111-111111111111')).toBe(true);
+    expect(isValidRunId('20260801T123456789Z-aaaaaaaa-1111-4111-9111-111111111111')).toBe(true);
+    expect(isValidRunId('20260801T123456789Z-aaaaaaaa-1111-4111-a111-111111111111')).toBe(true);
+    expect(isValidRunId('20260801T123456789Z-aaaaaaaa-1111-4111-b111-111111111111')).toBe(true);
   });
 });
 

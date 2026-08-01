@@ -134,7 +134,7 @@ describe('diagnostics land in a fresh per-run directory', () => {
   });
 
   it('is recognised as a completed, consumable run', () => {
-    const inspection = inspectRun(report.runDirectory);
+    const inspection = inspectRun(runsRoot, report.runId);
     expect(inspection.code).toBe('COMPLETE');
     expect(inspection.consumable).toBe(true);
     expect(readFileSync(join(report.runDirectory, COMPLETION_MARKER_FILE_NAME), 'utf8').trim()).toBe(
@@ -163,7 +163,7 @@ describe('diagnostics land in a fresh per-run directory', () => {
       expect(second.runId).not.toBe(report.runId);
       expect(second.runDirectory).not.toBe(report.runDirectory);
       expect(second.diagnosticFiles.every((a) => a.writeCode === 'WRITTEN')).toBe(true);
-      expect(inspectRun(second.runDirectory).consumable).toBe(true);
+      expect(inspectRun(runsRoot, second.runId).consumable).toBe(true);
 
       // The first run's artefacts and marker are untouched, byte for byte.
       expect(readFileSync(join(report.runDirectory, 'doctor-report.json'), 'utf8')).toBe(

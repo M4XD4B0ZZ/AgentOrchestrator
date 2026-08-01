@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -41,6 +41,8 @@ import {
   COMPLETION_MARKER_FILE_NAME,
   inspectRun,
   listCompletedRuns,
+  type RunCompletionResult,
+  type RunInspection,
   RUN_PROTOCOL_VERSION,
 } from '../src/doctor/run-completion.js';
 import { createRunDirectory, newRunId } from '../src/doctor/run-directory.js';
@@ -114,6 +116,23 @@ function writeArtefacts(runDirectory: string): void {
   }
 }
 
+/** `completeRun` for a run directory produced by `freshRun`. */
+function complete(
+  runDirectory: string,
+  expectedArtefacts: readonly string[] = ARTEFACTS,
+): RunCompletionResult {
+  return completeRun({ runDirectory, expectedArtefacts });
+}
+
+/**
+ * `inspectRun` under the new `(runsRoot, runId)` contract, recovered from a
+ * concrete run directory path the way `createRunDirectory` built it: as
+ * `join(resolve(runsRoot), runId)`. `dirname`/`basename` invert that exactly.
+ */
+function inspect(runDirectory: string): RunInspection {
+  return inspectRun(dirname(runDirectory), basename(runDirectory));
+}
+
 beforeEach(() => {
   fault.current = null;
 });
@@ -133,18 +152,18 @@ describe('a normal run', () => {
     // The marker does not exist while the artefacts are being written.
     expect(existsSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME))).toBe(false);
 
-    const completion = completeRun({ runDirectory, expectedArtefacts: [...ARTEFACTS] });
+    const completion = complete(runDirectory);
 
     expect(completion.code).toBe('COMPLETED');
     expect(completion.completed).toBe(true);
     expect(entries(runDirectory)).toEqual([...ARTEFACTS, COMPLETION_MARKER_FILE_NAME].sort());
-    expect(inspectRun(runDirectory).consumable).toBe(true);
+    expect(inspect(runDirectory).consumable).toBe(true);
   });
 
   it('puts nothing but the fixed protocol version in the marker', () => {
     const runDirectory = freshRun();
     writeArtefacts(runDirectory);
-    completeRun({ runDirectory, expectedArtefacts: [...ARTEFACTS] });
+    complete(runDirectory);
 
     const contents = readFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), 'utf8');
     expect(contents).toBe(COMPLETION_MARKER_CONTENTS);
@@ -166,7 +185,7 @@ describe('a normal run', () => {
 
     for (const runDirectory of [first, second]) {
       writeArtefacts(runDirectory);
-      expect(completeRun({ runDirectory, expectedArtefacts: [...ARTEFACTS] }).completed).toBe(true);
+      expect(complete(runDirectory).completed).toBe(true);
     }
 
     expect(readdirSync(runsRoot)).toHaveLength(2);
@@ -205,13 +224,13 @@ describe('nothing existing is ever replaced', () => {
     writeArtefacts(runDirectory);
     writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), 'planted\n', 'utf8');
 
-    const completion = completeRun({ runDirectory, expectedArtefacts: [...ARTEFACTS] });
+    const completion = complete(runDirectory);
 
     expect(completion.code).toBe('MARKER_EXISTS');
     expect(completion.completed).toBe(false);
     expect(readFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), 'utf8')).toBe('planted\n');
     // And a planted marker with the wrong content does not make the run usable.
-    expect(inspectRun(runDirectory).code).toBe('MARKER_VERSION_MISMATCH');
+    expect(inspect(runDirectory).code).toBe('COMPLETION_MARKER_INVALID');
   });
 });
 
@@ -249,9 +268,9 @@ describe('write failure paths never report success', () => {
     fault.current = null;
     // The partial artefact stays for diagnosis, and there is no marker.
     expect(entries(runDirectory)).toEqual([fileName]);
-    const completion = completeRun({ runDirectory, expectedArtefacts: [...ARTEFACTS] });
+    const completion = complete(runDirectory);
     expect(completion.completed).toBe(false);
-    expect(inspectRun(runDirectory).consumable).toBe(false);
+    expect(inspect(runDirectory).consumable).toBe(false);
   });
 
   it('treats a short write as a failure, not as a complete write', () => {
@@ -319,7 +338,7 @@ describe('write failure paths never report success', () => {
     writeArtefacts(runDirectory);
     fault.current = { call: 'openSync', code: 'EACCES' };
 
-    const completion = completeRun({ runDirectory, expectedArtefacts: [...ARTEFACTS] });
+    const completion = complete(runDirectory);
 
     expect(completion.code).toBe('MARKER_WRITE_FAILED');
     expect(completion.completed).toBe(false);
@@ -327,7 +346,7 @@ describe('write failure paths never report success', () => {
 
     fault.current = null;
     expect(existsSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME))).toBe(false);
-    expect(inspectRun(runDirectory).code).toBe('MARKER_MISSING');
+    expect(inspect(runDirectory).code).toBe('COMPLETION_MARKER_MISSING');
   });
 
   it('carries an errno identifier and never an exception message', () => {
@@ -345,7 +364,7 @@ describe('the closing checks gate the marker', () => {
     const runDirectory = freshRun();
     writeRunArtifact({ runDirectory, fileName: 'cli-capabilities.txt', contents: 'a\n' });
 
-    const completion = completeRun({ runDirectory, expectedArtefacts: [...ARTEFACTS] });
+    const completion = complete(runDirectory);
     expect(completion.code).toBe('ARTEFACTS_MISSING');
     expect(existsSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
@@ -356,7 +375,7 @@ describe('the closing checks gate the marker', () => {
     // Exactly what a temporary-file scheme would leave behind.
     writeFileSync(join(runDirectory, '.doctor-report.json.abc.tmp'), 'leftover\n', 'utf8');
 
-    const completion = completeRun({ runDirectory, expectedArtefacts: [...ARTEFACTS] });
+    const completion = complete(runDirectory);
     expect(completion.code).toBe('UNEXPECTED_DIRECTORY_CONTENTS');
     expect(existsSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
@@ -365,22 +384,31 @@ describe('the closing checks gate the marker', () => {
     const empty = freshRun();
     writeRunArtifact({ runDirectory: empty, fileName: 'cli-capabilities.txt', contents: '' });
     writeRunArtifact({ runDirectory: empty, fileName: 'doctor-report.json', contents: 'x\n' });
-    expect(completeRun({ runDirectory: empty, expectedArtefacts: [...ARTEFACTS] }).code).toBe(
-      'ARTEFACTS_MISSING',
-    );
+    expect(complete(empty).code).toBe('ARTEFACTS_MISSING');
 
     const shadowed = freshRun();
     writeRunArtifact({ runDirectory: shadowed, fileName: 'cli-capabilities.txt', contents: 'a\n' });
     mkdirSync(join(shadowed, 'doctor-report.json'));
-    expect(completeRun({ runDirectory: shadowed, expectedArtefacts: [...ARTEFACTS] }).code).toBe(
-      'ARTEFACTS_MISSING',
-    );
+    expect(complete(shadowed).code).toBe('ARTEFACTS_MISSING');
+  });
+
+  it('refuses a run whose directory name is not a valid run id', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+    const notARunId = join(runsRoot, 'not-a-run-id');
+    mkdirSync(notARunId);
+    writeRunArtifact({ runDirectory: notARunId, fileName: 'cli-capabilities.txt', contents: 'a\n' });
+    writeRunArtifact({ runDirectory: notARunId, fileName: 'doctor-report.json', contents: 'b\n' });
+
+    expect(complete(notARunId).code).toBe('INVALID_RUN_ID');
+    expect(existsSync(join(notARunId, COMPLETION_MARKER_FILE_NAME))).toBe(false);
   });
 
   it('refuses an unreadable run directory and an unsafe artefact name', () => {
+    const runsRoot = makeTempDir();
     expect(
       completeRun({
-        runDirectory: join(makeTempDir(), 'never-created'),
+        runDirectory: join(runsRoot, newRunId()),
         expectedArtefacts: [...ARTEFACTS],
       }).code,
     ).toBe('RUN_DIRECTORY_UNREADABLE');
@@ -397,8 +425,11 @@ describe('consumers ignore incomplete runs', () => {
     const partial = freshRun(runsRoot);
     writeRunArtifact({ runDirectory: partial, fileName: 'cli-capabilities.txt', contents: 'a\n' });
 
-    expect(inspectRun(partial).code).toBe('MARKER_MISSING');
-    expect(inspectRun(partial).consumable).toBe(false);
+    // The missing second artefact is reported before the marker is even
+    // looked at — the structure check runs in one pass over everything the
+    // run is missing, not just the marker.
+    expect(inspect(partial).code).toBe('REQUIRED_ARTIFACT_MISSING');
+    expect(inspect(partial).consumable).toBe(false);
     expect(listCompletedRuns(runsRoot)).toEqual([]);
   });
 
@@ -408,7 +439,7 @@ describe('consumers ignore incomplete runs', () => {
     writeArtefacts(unmarked);
 
     expect(existsSync(join(unmarked, 'doctor-report.json'))).toBe(true);
-    expect(inspectRun(unmarked).consumable).toBe(false);
+    expect(inspect(unmarked).consumable).toBe(false);
     expect(listCompletedRuns(runsRoot)).toEqual([]);
   });
 
@@ -422,7 +453,7 @@ describe('consumers ignore incomplete runs', () => {
       'utf8',
     );
 
-    expect(inspectRun(wrong).code).toBe('MARKER_VERSION_MISMATCH');
+    expect(inspect(wrong).code).toBe('COMPLETION_MARKER_INVALID');
     expect(listCompletedRuns(runsRoot)).toEqual([]);
   });
 
@@ -435,24 +466,25 @@ describe('consumers ignore incomplete runs', () => {
     const runDirectory = freshRun();
     writeArtefacts(runDirectory);
     writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), contents, 'utf8');
-    expect(inspectRun(runDirectory).consumable).toBe(false);
+    expect(inspect(runDirectory).consumable).toBe(false);
   });
 
   it('rejects a marker that is a directory or is absurdly large', () => {
     const asDirectory = freshRun();
+    writeArtefacts(asDirectory);
     mkdirSync(join(asDirectory, COMPLETION_MARKER_FILE_NAME));
-    expect(inspectRun(asDirectory).code).toBe('MARKER_UNREADABLE');
+    expect(inspect(asDirectory).code).toBe('COMPLETION_MARKER_NOT_REGULAR');
 
     const huge = freshRun();
     writeFileSync(join(huge, COMPLETION_MARKER_FILE_NAME), 'x'.repeat(4096), 'utf8');
-    expect(inspectRun(huge).consumable).toBe(false);
+    expect(inspect(huge).consumable).toBe(false);
   });
 
   it('returns only the completed runs from a mixed runs root', () => {
     const runsRoot = makeRunsRoot();
     const good = freshRun(runsRoot);
     writeArtefacts(good);
-    completeRun({ runDirectory: good, expectedArtefacts: [...ARTEFACTS] });
+    complete(good);
 
     const bad = freshRun(runsRoot);
     writeArtefacts(bad);
@@ -612,5 +644,201 @@ describe('the removed primitives are gone from the product code', () => {
     const text = code(join('src', 'doctor', 'safe-write.ts'));
     expect(text).not.toContain('reportKind');
     expect(text).not.toContain('readFileSync');
+  });
+});
+
+/**
+ * AO-007-R2-RR2-REVIEW-01: producer and consumer must apply the exact same
+ * run-id schema, the exact same link/containment checks, and the exact same
+ * three-entry structure rule — a run directory that only *looks* complete
+ * because it holds the right file names must never be treated as one.
+ */
+describe('exact three-entry structure (AO-007-R2-RR2-REVIEW-01)', () => {
+  it('rejects a run holding only the COMPLETED marker', () => {
+    const runsRoot = makeRunsRoot();
+    const runDirectory = freshRun(runsRoot);
+    writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    expect(inspect(runDirectory).consumable).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+
+  it('rejects a run holding the marker and only one artefact', () => {
+    const runsRoot = makeRunsRoot();
+    const runDirectory = freshRun(runsRoot);
+    writeFileSync(join(runDirectory, ARTEFACTS[0]), 'a\n', 'utf8');
+    writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    expect(inspect(runDirectory).consumable).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+
+  it('rejects an otherwise-valid run carrying a fourth, unexpected entry', () => {
+    const runsRoot = makeRunsRoot();
+    const runDirectory = freshRun(runsRoot);
+    writeArtefacts(runDirectory);
+    writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+    writeFileSync(join(runDirectory, 'extra.txt'), 'x\n', 'utf8');
+
+    const inspection = inspect(runDirectory);
+    expect(inspection.code).toBe('RUN_STRUCTURE_INVALID');
+    expect(inspection.consumable).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+
+  it('rejects a run where an artefact is a symlink to an external file', () => {
+    const runsRoot = makeRunsRoot();
+    const runDirectory = freshRun(runsRoot);
+    const target = join(makeTempDir(), 'external-artefact.txt');
+    writeFileSync(target, 'external\n', 'utf8');
+    writeFileSync(join(runDirectory, ARTEFACTS[0]), 'a\n', 'utf8');
+
+    try {
+      symlinkSync(target, join(runDirectory, ARTEFACTS[1]), 'file');
+    } catch {
+      return; // Symlink creation not permitted here; nothing to assert.
+    }
+    writeFileSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    const inspection = inspect(runDirectory);
+    expect(inspection.code).toBe('REQUIRED_ARTIFACT_IS_LINK');
+    expect(inspection.consumable).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+
+  it('rejects a run where COMPLETED itself is a symlink to a byte-exact marker', () => {
+    const runsRoot = makeRunsRoot();
+    const runDirectory = freshRun(runsRoot);
+    const target = join(makeTempDir(), 'external-marker');
+    writeFileSync(target, COMPLETION_MARKER_CONTENTS, 'utf8');
+    writeArtefacts(runDirectory);
+
+    try {
+      symlinkSync(target, join(runDirectory, COMPLETION_MARKER_FILE_NAME), 'file');
+    } catch {
+      return;
+    }
+
+    const inspection = inspect(runDirectory);
+    expect(inspection.code).toBe('COMPLETION_MARKER_IS_LINK');
+    expect(inspection.consumable).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+
+  it('never lists an invalidly named directory entry under runsRoot', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+    mkdirSync(join(runsRoot, 'not-a-run-id'));
+
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+});
+
+describe('completeRun refuses a link wherever one appears (AO-007-R2-RR2-REVIEW-01)', () => {
+  it('never creates a marker when an artefact is a symlink', () => {
+    const runDirectory = freshRun();
+    const target = join(makeTempDir(), 'external-artefact.txt');
+    writeFileSync(target, 'external\n', 'utf8');
+    writeFileSync(join(runDirectory, ARTEFACTS[0]), 'a\n', 'utf8');
+
+    try {
+      symlinkSync(target, join(runDirectory, ARTEFACTS[1]), 'file');
+    } catch {
+      return; // Symlink creation not permitted here; nothing to assert.
+    }
+
+    const completion = complete(runDirectory);
+    expect(completion.completed).toBe(false);
+    expect(completion.code).toBe('ARTEFACT_IS_LINK');
+    expect(existsSync(join(runDirectory, COMPLETION_MARKER_FILE_NAME))).toBe(false);
+  });
+
+  it('never creates a marker when the run directory itself is a junction', () => {
+    const base = makeTempDir();
+    const runsRoot = join(base, 'runs');
+    mkdirSync(runsRoot, { recursive: true });
+    const external = join(base, 'external-run');
+    mkdirSync(external, { recursive: true });
+    writeFileSync(join(external, ARTEFACTS[0]), 'a\n', 'utf8');
+    writeFileSync(join(external, ARTEFACTS[1]), 'b\n', 'utf8');
+
+    const runId = newRunId();
+    const junctionPath = join(runsRoot, runId);
+    symlinkSync(external, junctionPath, 'junction');
+
+    const completion = completeRun({ runDirectory: junctionPath, expectedArtefacts: [...ARTEFACTS] });
+    expect(completion.completed).toBe(false);
+    expect(existsSync(join(external, COMPLETION_MARKER_FILE_NAME))).toBe(false);
+  });
+});
+
+/**
+ * The exact regression this finding closes: a validly *named* junction under
+ * `runsRoot`, pointing at an external directory that holds nothing but a
+ * planted, byte-exact `COMPLETED` marker, must never read as a completed run
+ * — at `inspectRun`, and therefore never at `listCompletedRuns` either. This
+ * must run for real on Windows, not be skipped: junction creation needs no
+ * elevated privilege here, unlike a plain symbolic link.
+ */
+describe('the Windows junction reproduction (AO-007-R2-RR2-REVIEW-01)', () => {
+  it('never treats a validly named junction to an external marker-only directory as a completed run', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+
+    // 1. An external directory, entirely outside runsRoot.
+    const external = join(makeTempDir(), 'external-run-target');
+    mkdirSync(external, { recursive: true });
+
+    // 2. Only a valid COMPLETED marker inside it — nothing else.
+    writeFileSync(join(external, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    // 3. A validly named junction under runsRoot pointing at that external directory.
+    const runId = newRunId();
+    const junctionPath = join(runsRoot, runId);
+    symlinkSync(external, junctionPath, 'junction');
+
+    // 4. The rejection must hold at every layer.
+    const inspection = inspectRun(runsRoot, runId);
+    expect(inspection.code).not.toBe('COMPLETE');
+    expect(inspection.consumable).toBe(false);
+    expect(listCompletedRuns(runsRoot)).toEqual([]);
+  });
+});
+
+describe('listCompletedRuns across a heavily mixed runs root', () => {
+  it('lists only the one genuinely valid, completed run', () => {
+    const runsRoot = makeRunsRoot();
+    mkdirSync(runsRoot, { recursive: true });
+
+    const good = freshRun(runsRoot);
+    writeArtefacts(good);
+    expect(complete(good).completed).toBe(true);
+    const goodRunId = basename(good);
+
+    // A run holding only the marker.
+    const markerOnly = freshRun(runsRoot);
+    writeFileSync(join(markerOnly, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+    // An invalidly named directory entry.
+    mkdirSync(join(runsRoot, 'not-a-run-id'));
+
+    // A validly named junction to an external directory holding only a marker.
+    const external = join(makeTempDir(), 'external-mixed');
+    mkdirSync(external, { recursive: true });
+    writeFileSync(join(external, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+    symlinkSync(external, join(runsRoot, newRunId()), 'junction');
+
+    // A run with an extra, unexpected file alongside an otherwise valid structure.
+    const extra = freshRun(runsRoot);
+    writeArtefacts(extra);
+    writeFileSync(join(extra, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+    writeFileSync(join(extra, 'extra.txt'), 'x\n', 'utf8');
+
+    // A run with a byte-wrong marker.
+    const wrongMarker = freshRun(runsRoot);
+    writeArtefacts(wrongMarker);
+    writeFileSync(join(wrongMarker, COMPLETION_MARKER_FILE_NAME), 'not-the-marker\n', 'utf8');
+
+    expect(listCompletedRuns(runsRoot)).toEqual([goodRunId]);
   });
 });

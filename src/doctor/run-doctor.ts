@@ -50,6 +50,7 @@ import {
 import {
   completeRun,
   COMPLETION_MARKER_FILE_NAME,
+  REQUIRED_ARTEFACT_NAMES,
   RUN_PROTOCOL_VERSION,
   type RunCompletionResult,
 } from './run-completion.js';
@@ -69,8 +70,11 @@ import {
 /** Node version the orchestrator requires. */
 export const MINIMUM_NODE_MAJOR = 22;
 
-export const DOCTOR_REPORT_FILE_NAME = 'doctor-report.json';
-export const CAPABILITY_SUMMARY_FILE_NAME = 'cli-capabilities.txt';
+// Both names come from the single run-protocol source of truth
+// (`REQUIRED_ARTEFACT_NAMES` in `run-completion.ts`), so the producer here and
+// the consumer's structure check can never drift apart.
+export const CAPABILITY_SUMMARY_FILE_NAME = REQUIRED_ARTEFACT_NAMES[0];
+export const DOCTOR_REPORT_FILE_NAME = REQUIRED_ARTEFACT_NAMES[1];
 
 export interface RunDoctorOptions {
   readonly env: NodeJS.ProcessEnv;
@@ -469,7 +473,7 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
   // The last step of the run, and the only thing that makes it consumable.
   const completion = completeRun({
     runDirectory: runDirectory.path,
-    expectedArtefacts: [CAPABILITY_SUMMARY_FILE_NAME, DOCTOR_REPORT_FILE_NAME],
+    expectedArtefacts: REQUIRED_ARTEFACT_NAMES,
   });
 
   return buildReport([...finalChecks, completionCheck(completion)], finalArtefacts);

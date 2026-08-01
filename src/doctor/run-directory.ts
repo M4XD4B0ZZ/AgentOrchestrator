@@ -50,9 +50,16 @@ import { isContained, pathContainsLink, samePath } from './safe-write.js';
  * makes the name unguessable and collision-free. Both parts are produced by
  * this process — no part of a run id ever comes from the environment, the
  * command line or a probed program.
+ *
+ * The UUID half is constrained to version 4 / RFC 4122 variant (the version
+ * nibble is `4`, the variant nibble is one of `8`/`9`/`a`/`b`), matching
+ * exactly what `crypto.randomUUID()` produces. This is the single schema both
+ * the producer and the consumer of a run id validate against
+ * (AO-007-R2-RR2-REVIEW-01) — there is no second, looser regex anywhere else
+ * in the run protocol.
  */
 export const RUN_ID_PATTERN =
-  /^\d{8}T\d{9}Z-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  /^\d{8}T\d{9}Z-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** `true` when the value is a run id *and* a safe single path segment. */
 export function isValidRunId(runId: string): boolean {
