@@ -30,6 +30,7 @@ import {
   createProbeEnv,
   probeEnvAllowlist,
   PROBE_ENV_POLICIES,
+  ProbeEnvironmentCollisionError,
   type ProbeEnvPolicy,
 } from '../src/auth/env-guard.js';
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
@@ -169,19 +170,12 @@ const EXPECTED_KEYS: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = {
   'capability:generic': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC'],
   'capability:claude': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC'],
   'capability:codex': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC'],
-  'auth:claude': [
-    'PATH',
-    'PATHEXT',
-    'SystemRoot',
-    'windir',
-    'COMSPEC',
-    'HOME',
-    'USERPROFILE',
-    'APPDATA',
-    'LOCALAPPDATA',
-  ],
+  'auth:claude': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC', 'HOME', 'USERPROFILE'],
   'auth:codex': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC', 'HOME', 'USERPROFILE'],
 };
+
+/** Roots no policy has a demonstrated need for (AO-FOUNDATION-REM-003A-RR-02). */
+const APP_DATA_ROOTS = ['APPDATA', 'LOCALAPPDATA'] as const;
 
 describe('the policy matrix is exact', () => {
   it('covers every declared policy and nothing else', () => {
@@ -214,20 +208,46 @@ describe('the policy matrix is exact', () => {
   it('gives profile roots to the auth probes only', () => {
     for (const policy of ['capability:generic', 'capability:claude', 'capability:codex'] as const) {
       const env = createProbeEnv(policy, sourceEnv());
-      for (const name of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA']) {
+      for (const name of ['HOME', 'USERPROFILE', ...APP_DATA_ROOTS]) {
         expect(env[name]).toBeUndefined();
       }
     }
 
-    const claude = createProbeEnv('auth:claude', sourceEnv());
-    expect(claude['USERPROFILE']).toBe(OPERATIONAL.USERPROFILE);
-    expect(claude['LOCALAPPDATA']).toBe(OPERATIONAL.LOCALAPPDATA);
+    // Each auth probe reads a login under the profile root — `~/.claude` and
+    // `~/.codex` — so that is what each gets, and nothing wider.
+    for (const policy of ['auth:claude', 'auth:codex'] as const) {
+      const env = createProbeEnv(policy, sourceEnv());
+      expect(env['HOME']).toBe(OPERATIONAL.HOME);
+      expect(env['USERPROFILE']).toBe(OPERATIONAL.USERPROFILE);
+    }
+  });
 
-    // Codex reads `~/.codex`; it has no stated need for the app-data roots.
-    const codex = createProbeEnv('auth:codex', sourceEnv());
-    expect(codex['USERPROFILE']).toBe(OPERATIONAL.USERPROFILE);
-    expect(codex['APPDATA']).toBeUndefined();
-    expect(codex['LOCALAPPDATA']).toBeUndefined();
+  /** AO-FOUNDATION-REM-003A-RR-02. */
+  it('withholds the app-data roots from every policy, including auth:claude', () => {
+    for (const policy of PROBE_ENV_POLICIES) {
+      const env = createProbeEnv(policy, sourceEnv());
+      const upper = keysUpper(env);
+      for (const name of APP_DATA_ROOTS) {
+        expect(env[name]).toBeUndefined();
+        expect(upper).not.toContain(name);
+        expect(probeEnvAllowlist(policy).map((n) => n.toUpperCase())).not.toContain(name);
+      }
+      const serialised = JSON.stringify(env);
+      expect(serialised).not.toContain(OPERATIONAL.APPDATA);
+      expect(serialised).not.toContain(OPERATIONAL.LOCALAPPDATA);
+    }
+  });
+
+  it('keeps the two auth policies stated separately rather than shared', () => {
+    // They currently coincide. That must be two identical statements, not one
+    // list two policies point at: widening one must not widen the other.
+    const claude = probeEnvAllowlist('auth:claude');
+    const codex = probeEnvAllowlist('auth:codex');
+    expect([...claude]).toEqual([...codex]);
+    expect(claude).not.toBe(codex);
+    expect(createProbeEnv('auth:claude', sourceEnv())).not.toBe(
+      createProbeEnv('auth:codex', sourceEnv()),
+    );
   });
 
   it('mutates neither the input map nor a previous result', () => {
@@ -299,18 +319,27 @@ describe('a different spelling does not evade a policy', () => {
     },
   );
 
+  /**
+   * AO-FOUNDATION-REM-003A-RR-01. This used to resolve to the first spelling
+   * inserted, which made the environment a probe was started with a property of
+   * how the caller happened to build its map. It is now refused outright; the
+   * full rule, including the POSIX half, is pinned in `env-guard.test.ts`.
+   */
   it.runIf(process.platform === 'win32')(
-    'emits one canonical key even when the source holds several spellings',
+    'refuses to choose when the source holds several spellings of one variable',
     () => {
-      const env = createProbeEnv('capability:generic', {
-        PATH: OPERATIONAL.PATH,
-        Path: 'C:\\other',
-        path: 'C:\\other-still',
-      });
-      expect(Object.keys(env)).toEqual(['PATH']);
-      expect(env['PATH']).toBe(OPERATIONAL.PATH);
-      // No semantically duplicated key survives, in any spelling.
-      expect(keysUpper(env).filter((k) => k === 'PATH')).toHaveLength(1);
+      expect(() =>
+        createProbeEnv('capability:generic', {
+          PATH: OPERATIONAL.PATH,
+          Path: 'C:\\other',
+          path: 'C:\\other-still',
+        }),
+      ).toThrow(ProbeEnvironmentCollisionError);
+
+      // The other insertion order reaches the same verdict, which is the point.
+      expect(() =>
+        createProbeEnv('capability:generic', { Path: 'C:\\other', PATH: OPERATIONAL.PATH }),
+      ).toThrow(ProbeEnvironmentCollisionError);
     },
   );
 });
@@ -424,9 +453,29 @@ describe('every real call site uses its own policy', () => {
     const claude = envOf('claude auth status --json');
     const codex = envOf('codex login status');
 
+    // Two environments built independently, not one map handed to both.
     expect(claude).not.toBe(codex);
-    expect(claude['LOCALAPPDATA']).toBe(OPERATIONAL.LOCALAPPDATA);
-    expect(codex['LOCALAPPDATA']).toBeUndefined();
+    expect(Object.keys(claude).sort()).toEqual([...EXPECTED_KEYS['auth:claude']].sort());
+    expect(Object.keys(codex).sort()).toEqual([...EXPECTED_KEYS['auth:codex']].sort());
+  });
+
+  /** AO-FOUNDATION-REM-003A-RR-02: no probe is started with an app-data root. */
+  it('starts the Claude auth probe without APPDATA or LOCALAPPDATA', () => {
+    const claude = envOf('claude auth status --json');
+    for (const name of APP_DATA_ROOTS) {
+      expect(claude[name]).toBeUndefined();
+      expect(keysUpper(claude)).not.toContain(name);
+    }
+    expect(claude['USERPROFILE']).toBe(OPERATIONAL.USERPROFILE);
+    expect(claude['HOME']).toBe(OPERATIONAL.HOME);
+
+    for (const call of recorder.calls) {
+      const upper = keysUpper(call.env);
+      const serialised = JSON.stringify(call.env);
+      for (const name of APP_DATA_ROOTS) expect(upper).not.toContain(name);
+      expect(serialised).not.toContain(OPERATIONAL.APPDATA);
+      expect(serialised).not.toContain(OPERATIONAL.LOCALAPPDATA);
+    }
   });
 
   it('gives a version probe strictly less than the auth probe of the same provider', () => {

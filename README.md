@@ -115,9 +115,14 @@ agent-loop doctor
 A read-only local diagnosis. It:
 
 - reports which of four API-key environment variables are `SET` / `NOT_SET`
-  (never their values, lengths, prefixes or hashes) and builds a **sanitised
-  child environment** with those four removed. `CLAUDE_CODE_OAUTH_TOKEN` is
-  deliberately preserved — it is a subscription OAuth path, not an API key;
+  (never their values, lengths, prefixes or hashes) and builds each probe's
+  child environment from a **per-probe allow-list** rather than by cleaning a
+  copy of the caller's environment. `CLAUDE_CODE_OAUTH_TOKEN` is **not**
+  forwarded to any probe — not to `node`/`npm`/`git`, and not to the Claude auth
+  probe either: a login check handed a token out of the environment would only
+  prove its own input, while the doctor has to verify the *stored* login that
+  will really be used. Its presence is reported as `SET`/`NOT_SET` and its value
+  is never read or logged;
 - probes the locally installed CLIs with `--version` / `--help` from a static
   allow-list of commands, and records argv, exit code, start/end time,
   duration, a fixed failure code and whether the process started at all. The
@@ -218,6 +223,24 @@ its own intended path, the protocol version and the marker file to look for —
 but carries no completion or cleanup status, and does not list itself among the
 artefacts it reports as written. Completion is a fact about the directory, not
 a statement in the document.
+
+#### Report schema version
+
+`doctor-report.json` carries its own `schemaVersion`. **The current format is
+v4**, and every report this version writes states `"schemaVersion": 4`.
+
+v4 replaces two v3 names, both because `CLAUDE_CODE_OAUTH_TOKEN` is now withheld
+from every probe rather than forwarded:
+
+| v3 (historical) | v4 (current) |
+| --- | --- |
+| `environmentAssessment.preservedAuthVars` | `environmentAssessment.withheldAuthVars` |
+| check id `env:oauth-token-preserved` | check id `env:oauth-token-withheld` |
+
+The field and the check say the opposite of what their v3 names claimed, so a
+consumer written against v3 must not read a v4 document: check `schemaVersion`
+before anything else. v3 is only the previous format — nothing writes it any
+more, and existing v3 files are never rewritten, migrated or reinterpreted.
 
 #### The protocol is fixed, and binds only to `(runsRoot, runId)`
 

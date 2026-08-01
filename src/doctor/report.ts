@@ -13,7 +13,27 @@ import type { CapabilityAnswers, CapabilityFacts } from './capabilities.js';
 import type { WriteAccessResult } from './write-access.js';
 import type { RunArtifactResult } from './safe-write.js';
 
-export const DOCTOR_REPORT_SCHEMA_VERSION = 3;
+/**
+ * Version of the `doctor-report.json` contract. Bump on any breaking change to
+ * the document a consumer reads.
+ *
+ * v3 → v4 (AO-FOUNDATION-REM-003A-RR-03) is breaking in two places, both of
+ * them renames a v3 reader would silently miss rather than fail on:
+ *
+ *  - `environmentAssessment.preservedAuthVars` → `withheldAuthVars`;
+ *  - check id `env:oauth-token-preserved` → `env:oauth-token-withheld`.
+ *
+ * Both follow the same substantive change: `CLAUDE_CODE_OAUTH_TOKEN` is no
+ * longer forwarded to any diagnostic or auth probe, so a field and a check that
+ * announced it as *preserved* now state that it is *withheld*. A consumer that
+ * looked for the old names would read a report claiming the opposite of what it
+ * says, which is exactly what the version number exists to prevent.
+ *
+ * Nothing here reads a persisted report, so there is no migration path and none
+ * is invented: historical v3 artefacts keep their own version number, are never
+ * rewritten, and are not reinterpreted under the v4 vocabulary.
+ */
+export const DOCTOR_REPORT_SCHEMA_VERSION = 4;
 
 /**
  * Document type discriminator, so a reader can tell what it is looking at.

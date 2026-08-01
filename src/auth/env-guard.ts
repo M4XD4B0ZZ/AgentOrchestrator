@@ -18,6 +18,10 @@
  *    and a provider auth probe do not need the same access, so they do not get
  *    the same environment. Profile roots are scoped to the one probe that has a
  *    stated reason for them, and no probe gets a credential at all.
+ *  - **Unambiguous, or nothing.** On Windows two spellings of one variable are
+ *    one variable with two values, and choosing between them would be choosing
+ *    by insertion order. That case is refused rather than resolved
+ *    (AO-FOUNDATION-REM-003A-RR-01): see {@link ProbeEnvironmentCollisionError}.
  *
  * Hard rules:
  *  - Pure. Neither `process.env`, nor the caller's map, nor a previously
@@ -191,20 +195,21 @@ const POLICY_ALLOWLIST: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = Ob
   /**
    * `claude auth status --json`. This probe's whole purpose is to read the
    * existing Claude subscription login, which lives under the per-user profile
-   * (`~/.claude`, plus the app-data roots the Windows build keeps its per-user
-   * state in). Those roots are therefore a stated provider need for this one
-   * probe, and are withheld from every capability probe.
+   * (`~/.claude`). The profile root is therefore a stated provider need for this
+   * one probe, and is withheld from every capability probe.
+   *
+   * `APPDATA` and `LOCALAPPDATA` used to be listed here as well, on the
+   * assumption that the Windows build keeps per-user login state under the
+   * app-data roots (AO-FOUNDATION-REM-003A-RR-02). They are gone: the login this
+   * probe has to read lives under the profile root, no observed `claude auth
+   * status` run needed either variable, and an allow-list entry is only
+   * justified by a demonstrated need. Two variables that name writable
+   * directories are not carried on a guess.
    *
    * It receives no credential variable — see {@link WITHHELD_AUTH_ENV_VARS} —
    * and no OpenAI/Codex variable of any kind.
    */
-  'auth:claude': Object.freeze([
-    ...EXEC_CONTRACT_VARS,
-    'HOME',
-    'USERPROFILE',
-    'APPDATA',
-    'LOCALAPPDATA',
-  ]),
+  'auth:claude': Object.freeze([...EXEC_CONTRACT_VARS, 'HOME', 'USERPROFILE']),
 
   /**
    * `codex login status`. Codex keeps its login under `~/.codex`, so it needs
@@ -216,6 +221,41 @@ const POLICY_ALLOWLIST: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = Ob
 
 /** Thrown when a caller asks for a policy that does not exist. */
 export class UnknownProbeEnvPolicyError extends Error {}
+
+/** The one text the collision error ever carries. Contains no name, no value. */
+export const PROBE_ENV_COLLISION_MESSAGE =
+  'The source environment holds more than one spelling of the same variable, so the ' +
+  'environment a probe would receive depends on insertion order. No probe environment ' +
+  'was built. Details are withheld because they would be environment data.';
+
+/** The one code the collision error ever carries. */
+export const PROBE_ENV_COLLISION_CODE = 'PROBE_ENV_COLLISION';
+
+/**
+ * Thrown when the source environment holds more than one spelling of the same
+ * Windows variable (AO-FOUNDATION-REM-003A-RR-01).
+ *
+ * Windows treats the environment block case-insensitively, so `Path` and `pAtH`
+ * are one variable there — but a plain JavaScript object can hold both, and then
+ * *which* of the two a probe is started with would be decided by insertion
+ * order. An order-dependent environment is not a policy, so this is refused
+ * instead of resolved: there is no first-wins, last-wins, exact-spelling-wins or
+ * sorted rule to reason about, and no probe is started with a value that a
+ * differently ordered map would have changed.
+ *
+ * The message is static and the error carries nothing else. A collision is
+ * detected *by* reading the environment, so any detail beyond "it happened"
+ * would be environment data in an error object.
+ */
+export class ProbeEnvironmentCollisionError extends Error {
+  /** Fixed, allow-listed code. Never derived from an environment. */
+  readonly code = PROBE_ENV_COLLISION_CODE;
+
+  constructor() {
+    super(PROBE_ENV_COLLISION_MESSAGE);
+    this.name = 'ProbeEnvironmentCollisionError';
+  }
+}
 
 function isProbeEnvPolicy(value: unknown): value is ProbeEnvPolicy {
   return typeof value === 'string' && (PROBE_ENV_POLICIES as readonly string[]).includes(value);
@@ -239,21 +279,52 @@ function rejectUnknownPolicy(): never {
  * in — does not have that behaviour, so it is applied here. On POSIX, where
  * `path` and `PATH` genuinely are two different variables, the match stays
  * exact: matching case-insensitively there would *add* a variable the caller
- * never set.
+ * never set, so no Windows collision logic runs there at all.
+ *
+ * ── Why a second spelling is a hard error (AO-FOUNDATION-REM-003A-RR-01) ─────
+ *
+ * A plain object can hold `Path` **and** `pAtH`, which the Windows environment
+ * block itself could never do. Picking one of them means picking by insertion
+ * order — `Object.entries` enumerates string keys in insertion order — so the
+ * same two variables in the other order would start the probe with the other
+ * value. That is not a policy decision, it is an accident of how the caller
+ * happened to build its map, so every ambiguous case fails closed instead:
+ *
+ *  - no case-insensitive match  → the variable is simply not forwarded;
+ *  - exactly one                → forwarded under the canonical allow-list name;
+ *  - more than one              → {@link ProbeEnvironmentCollisionError}.
+ *
+ * The exactly-canonical spelling gets no precedence either: `{ PATH, Path }` is
+ * as ambiguous as `{ Path, pAtH }`, because on Windows those are one variable
+ * with two values and this process cannot know which one the caller meant.
+ * Counting is done over the source's **own enumerable keys** and never over a
+ * direct property read, so a case-insensitive host object (`process.env` on
+ * Windows) is counted once rather than twice.
  *
  * An empty value counts as absent, exactly as {@link presenceOf} treats it: it
- * can neither locate a program nor authenticate anything.
+ * can neither locate a program nor authenticate anything. It is still a *key*,
+ * though, so `{ PATH: '', Path: 'x' }` is a collision and not a tie-break.
+ *
+ * @throws ProbeEnvironmentCollisionError on Windows, when the source holds two
+ * or more keys that name this variable.
  */
 function lookupEnvValue(source: NodeJS.ProcessEnv, name: string): string | undefined {
-  const direct = source[name];
-  if (direct !== undefined && direct !== '') return direct;
-  if (process.platform !== 'win32') return undefined;
+  if (process.platform !== 'win32') {
+    // POSIX: `PATH`, `Path` and `path` are three variables. Exact match only.
+    const direct = source[name];
+    return direct !== undefined && direct !== '' ? direct : undefined;
+  }
 
   const wanted = name.toUpperCase();
-  for (const [key, value] of Object.entries(source)) {
-    if (key.toUpperCase() === wanted && value !== undefined && value !== '') return value;
+  let matches = 0;
+  let value: string | undefined;
+  for (const [key, candidate] of Object.entries(source)) {
+    if (key.toUpperCase() !== wanted) continue;
+    matches += 1;
+    if (matches > 1) throw new ProbeEnvironmentCollisionError();
+    if (candidate !== undefined && candidate !== '') value = candidate;
   }
-  return undefined;
+  return value;
 }
 
 /**
@@ -263,8 +334,16 @@ function lookupEnvValue(source: NodeJS.ProcessEnv, name: string): string | undef
  * canonical spelling, and is a new frozen object on every call. The source map
  * is read for nothing else and is never modified.
  *
+ * Either the whole environment is built or none of it is. The map under
+ * construction is local to this call and is only ever reachable through the
+ * `return`, so a collision on the fifth allow-listed name discards the four
+ * values already resolved rather than handing back a partial environment
+ * (AO-FOUNDATION-REM-003A-RR-01).
+ *
  * @throws UnknownProbeEnvPolicyError for a name outside
  * {@link PROBE_ENV_POLICIES}.
+ * @throws ProbeEnvironmentCollisionError when the source holds two spellings of
+ * one allow-listed variable on Windows. Nothing is returned in that case.
  */
 export function createProbeEnv(
   policy: ProbeEnvPolicy,

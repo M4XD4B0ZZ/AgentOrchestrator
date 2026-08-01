@@ -32,7 +32,12 @@ import {
 } from '../src/doctor/run-completion.js';
 import { RUN_ID_PATTERN } from '../src/doctor/run-directory.js';
 import { runDoctor } from '../src/doctor/run-doctor.js';
-import { DOCTOR_REPORT_KIND, type DoctorReport, type DoctorCheck } from '../src/doctor/report.js';
+import {
+  DOCTOR_REPORT_KIND,
+  DOCTOR_REPORT_SCHEMA_VERSION,
+  type DoctorReport,
+  type DoctorCheck,
+} from '../src/doctor/report.js';
 import { commandResult, SENSITIVE_MARKER } from './fixtures.js';
 
 /**
@@ -401,6 +406,68 @@ describe('AGENT_LOOP_WORKTREES_ROOT triggers no write anywhere', () => {
       rmSync(decoy, { recursive: true, force: true });
     }
   }, 180_000);
+});
+
+/**
+ * AO-FOUNDATION-REM-003A-RR-03 — the machine-readable report contract.
+ *
+ * v4 renamed two things that a v3 reader would not fail on, but would
+ * misinterpret: `preservedAuthVars` became `withheldAuthVars`, and the check id
+ * `env:oauth-token-preserved` became `env:oauth-token-withheld`. Both announce
+ * the opposite of what they used to, so the structure and the version number
+ * have to move together — a report carrying the new vocabulary under version 3
+ * would tell a consumer that the OAuth token is forwarded.
+ */
+describe('the report states schema version 4 and the withhold vocabulary', () => {
+  it('stamps version 4 on the returned and the persisted report alike', () => {
+    expect(DOCTOR_REPORT_SCHEMA_VERSION).toBe(4);
+    expect(report.schemaVersion).toBe(4);
+    expect((JSON.parse(reportJson) as DoctorReport).schemaVersion).toBe(4);
+    expect(reportJson).toContain('"schemaVersion": 4');
+    expect(reportJson).not.toContain('"schemaVersion": 3');
+  });
+
+  it('carries withheldAuthVars and no preservedAuthVars anywhere', () => {
+    const persisted = JSON.parse(reportJson) as DoctorReport;
+    for (const assessment of [report.environmentAssessment, persisted.environmentAssessment]) {
+      expect(assessment).toHaveProperty('withheldAuthVars');
+      expect(assessment).not.toHaveProperty('preservedAuthVars');
+      expect(assessment.withheldAuthVars.map((v) => v.name)).toEqual(['CLAUDE_CODE_OAUTH_TOKEN']);
+      for (const observation of assessment.withheldAuthVars) {
+        expect(['SET', 'NOT_SET']).toContain(observation.presence);
+        // Presence only — never the value, and never a length or a hash.
+        expect(Object.keys(observation).sort()).toEqual(['name', 'presence']);
+      }
+    }
+    expect(reportJson).toContain('withheldAuthVars');
+    expect(reportJson).not.toContain('preservedAuthVars');
+  });
+
+  it('uses the withheld check id and no longer the preserved one', () => {
+    const ids = report.checks.map((c) => c.id);
+    expect(ids).toContain('env:oauth-token-withheld');
+    expect(ids).not.toContain('env:oauth-token-preserved');
+
+    const persisted = JSON.parse(reportJson) as DoctorReport;
+    expect(persisted.checks.map((c) => c.id)).toContain('env:oauth-token-withheld');
+    expect(reportJson).not.toContain('env:oauth-token-preserved');
+    expect(summary).not.toContain('env:oauth-token-preserved');
+
+    const check = report.checks.find((c) => c.id === 'env:oauth-token-withheld');
+    expect(check?.status).toBe('PASS');
+    expect(check?.detail).not.toContain('preserved');
+  });
+
+  it('never emits the new structure under the old version number', () => {
+    // The two are one decision: whichever way a future change goes, the
+    // vocabulary and the version must not drift apart again.
+    const persisted = JSON.parse(reportJson) as DoctorReport;
+    const usesNewVocabulary =
+      'withheldAuthVars' in persisted.environmentAssessment &&
+      persisted.checks.some((c) => c.id === 'env:oauth-token-withheld');
+    expect(usesNewVocabulary).toBe(true);
+    expect(persisted.schemaVersion).toBeGreaterThanOrEqual(4);
+  });
 });
 
 describe('the persisted report carries no raw output', () => {
