@@ -70,7 +70,8 @@ for (const name of ALLOWED_EXPORTS) {
   check(actualExports.has(name), `dist module is missing expected export: ${name}`);
 }
 
-const { completeRun, inspectRun, requiredArtefactFileNames } = distModule;
+const { completeRun, inspectRun, requiredArtefactFileNames, COMPLETION_MARKER_FILE_NAME, COMPLETION_MARKER_CONTENTS } =
+  distModule;
 
 // ── 3. Freeze and copy semantics, against the real dist module ──────────────
 const CANONICAL = ['cli-capabilities.txt', 'doctor-report.json'];
@@ -159,6 +160,55 @@ try {
   check(
     oneArtefactInspection.code === 'REQUIRED_ARTIFACT_MISSING',
     `one-artefact inspectRun did not report a missing-artefact code (got ${oneArtefactInspection.code})`,
+  );
+
+  // ── AO-FOUNDATION-REM-002C4-FINAL-01 ───────────────────────────────────────
+  // A pre-existing, byte-valid COMPLETED marker must never authorise a run
+  // that is still missing a required artefact. Plant the exact marker bytes by
+  // hand — bypassing completeRun entirely — directly in the one-artefact run's
+  // own directory, then re-check both inspectRun and completeRun against it.
+  const oneArtefactRunDirectory = join(runsRoot, oneArtefactRunId);
+  writeFileSync(join(oneArtefactRunDirectory, COMPLETION_MARKER_FILE_NAME), COMPLETION_MARKER_CONTENTS, 'utf8');
+
+  const plantedInspectionBefore = inspectRun(runsRoot, oneArtefactRunId);
+  check(
+    plantedInspectionBefore.code === 'REQUIRED_ARTIFACT_MISSING',
+    `inspectRun with a planted marker but a missing artefact did not report REQUIRED_ARTIFACT_MISSING ` +
+      `(got ${plantedInspectionBefore.code})`,
+  );
+  check(
+    plantedInspectionBefore.code !== 'COMPLETE',
+    'inspectRun reported COMPLETE for a run with a planted marker but a missing required artefact',
+  );
+  check(
+    plantedInspectionBefore.consumable === false,
+    'inspectRun reported consumable:true for a run with a planted marker but a missing required artefact',
+  );
+
+  const plantedCompletion = completeRun(runsRoot, oneArtefactRunId);
+  check(
+    plantedCompletion.code === 'COMPLETION_MARKER_ALREADY_EXISTS',
+    `completeRun against a pre-existing marker did not report COMPLETION_MARKER_ALREADY_EXISTS ` +
+      `(got ${plantedCompletion.code})`,
+  );
+  check(
+    plantedCompletion.code !== 'COMPLETED',
+    'completeRun reported COMPLETED for a run whose marker it never wrote and whose artefact is still missing',
+  );
+  check(
+    plantedCompletion.completed === false,
+    'completeRun reported completed:true for a run with a planted marker but a missing required artefact',
+  );
+
+  const plantedInspectionAfter = inspectRun(runsRoot, oneArtefactRunId);
+  check(
+    plantedInspectionAfter.code === 'REQUIRED_ARTIFACT_MISSING',
+    `inspectRun after the completeRun attempt no longer reports REQUIRED_ARTIFACT_MISSING ` +
+      `(got ${plantedInspectionAfter.code})`,
+  );
+  check(
+    plantedInspectionAfter.consumable === false,
+    'inspectRun reported consumable:true after the completeRun attempt against a planted marker',
   );
 
   // Control case: a separate, fully valid run with both required artefacts.

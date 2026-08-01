@@ -12,15 +12,17 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   AUTH_REASON_TEXT,
   evaluateClaudeAuthStatus,
   evaluateCodexLoginStatus,
 } from '../src/auth/auth-preflight.js';
+import { FORBIDDEN_CHILD_ENV_VARS, OBSERVED_PROVIDER_ENV_VARS } from '../src/auth/env-guard.js';
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import { doctorDiagnosticsDir, doctorRunsRoot } from '../src/config/paths.js';
+import type { CommandResult } from '../src/doctor/exec.js';
 import { renderReportSummary } from '../src/doctor/render.js';
 import {
   COMPLETION_MARKER_FILE_NAME,
@@ -33,7 +35,121 @@ import { runDoctor } from '../src/doctor/run-doctor.js';
 import { DOCTOR_REPORT_KIND, type DoctorReport, type DoctorCheck } from '../src/doctor/report.js';
 import { commandResult, SENSITIVE_MARKER } from './fixtures.js';
 
+/**
+ * AO-FOUNDATION-REM-002C4-FINAL-02.
+ *
+ * This suite's `overallStatus === 'PASS'` assertions used to depend on real,
+ * unstated host state: `runDoctor` shells out for real to `node`/`npm`/`git`
+ * `--version` and to `claude`/`codex`'s own auth status commands, so the run
+ * only came back PASS on a machine that happened to have all five CLIs
+ * installed *and* both agents logged into an accepted subscription. On any
+ * other machine — a fresh checkout, a sandboxed reviewer, CI without those
+ * CLIs — the same assertions fail for a reason that has nothing to do with
+ * the property under test (report safety, redaction, persistence,
+ * completion).
+ *
+ * The fix is not to mock `runDoctor` — that would stop exercising the real
+ * report-assembly, redaction, artefact-write and completion-protocol code
+ * this suite exists to check. Instead, only the one real I/O boundary those
+ * probes ultimately go through — `runCommand` in `../src/doctor/exec.js` — is
+ * replaced with deterministic, fixed fixtures below. Every module built on
+ * top of it (`capabilities.ts`'s `runCapabilityDump`/`deriveCapabilityFacts`,
+ * `auth-preflight.ts`'s `runAuthPreflight`/`evaluateClaudeAuthStatus`/
+ * `evaluateCodexLoginStatus`, and `run-doctor.ts` itself) still runs for
+ * real, against these fixed inputs instead of whatever this host happens to
+ * have installed.
+ *
+ * The fixture shapes are exactly the ones `capabilities.ts` and
+ * `auth-preflight.ts` document as having been observed locally (see their
+ * module doc comments), so this is not a fabricated success path — it is the
+ * one real success path, pinned instead of left to chance.
+ */
+const commandFixtures = vi.hoisted(() => {
+  const outputs = new Map<string, { stdout?: string; stderr?: string }>([
+    ['node --version', { stdout: 'v24.18.1\n' }],
+    ['npm --version', { stdout: '11.12.1\n' }],
+    ['git --version', { stdout: 'git version 2.55.0.windows.3\n' }],
+
+    ['claude --version', { stdout: '2.1.220 (Claude Code)\n' }],
+    ['claude --help', { stdout: 'Commands:\n  auth\n  config\n  doctor\n  mcp\n  update\n' }],
+    ['claude auth --help', { stdout: 'Commands:\n  login\n  logout\n  status\n' }],
+    ['claude auth login --help', { stdout: 'Usage: claude auth login [--claudeai] [--console]\n' }],
+    ['claude auth status --help', { stdout: 'Usage: claude auth status [--json]\n' }],
+    [
+      'claude auth status --json',
+      {
+        stdout: JSON.stringify({
+          loggedIn: true,
+          authMethod: 'claude.ai',
+          apiProvider: 'firstParty',
+          subscriptionType: 'pro',
+        }),
+      },
+    ],
+
+    ['codex --version', { stdout: 'codex-cli 0.146.0\n' }],
+    ['codex --help', { stdout: 'Commands:\n  login\n  exec\n  mcp\n  resume\n  update\n' }],
+    ['codex login --help', { stdout: 'Usage: codex login [--with-api-key]\n' }],
+    [
+      'codex login status --help',
+      { stdout: 'Usage: codex login status [-c/--config] [--enable] [--disable]\n' },
+    ],
+    ['codex login status', { stderr: 'Logged in using ChatGPT\n' }],
+  ]);
+  return { outputs };
+});
+
+vi.mock('../src/doctor/exec.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/doctor/exec.js')>();
+  return {
+    ...actual,
+    async runCommand(command: string, args: readonly string[]): Promise<CommandResult> {
+      const key = [command, ...args].join(' ');
+      const fixture = commandFixtures.outputs.get(key);
+      if (fixture === undefined) {
+        throw new Error(
+          `report-safety.test.ts: no hermetic command fixture registered for "${key}". ` +
+            'Every argv runDoctor can issue must be listed in commandFixtures.',
+        );
+      }
+      return {
+        display: key,
+        executable: command,
+        args,
+        started: true,
+        outcome: 'COMPLETED',
+        exitCode: 0,
+        signal: null,
+        stdout: fixture.stdout ?? '',
+        stderr: fixture.stderr ?? '',
+        startedAt: '2026-08-01T00:00:00.000Z',
+        finishedAt: '2026-08-01T00:00:00.010Z',
+        durationMs: 10,
+        failureCode: null,
+        errnoCode: null,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        processTreeKilled: false,
+      };
+    },
+  };
+});
+
 const DOCTOR_TIMEOUT_MS = 25_000;
+
+/**
+ * A real environment with this repository's own credential/provider
+ * variables (see `env-guard.ts`) removed, so a report this suite expects to
+ * come back `PASS` can never silently depend on whether this machine's shell
+ * happens to export one of them. Everything else about the host environment
+ * passes through unchanged.
+ */
+const HERMETIC_ENV: NodeJS.ProcessEnv = (() => {
+  const env = { ...process.env };
+  for (const name of FORBIDDEN_CHILD_ENV_VARS) delete env[name];
+  for (const name of OBSERVED_PROVIDER_ENV_VARS) delete env[name];
+  return env;
+})();
 
 let home: string;
 let runsRoot: string;
@@ -51,7 +167,7 @@ beforeAll(async () => {
   runsRoot = doctorRunsRoot(fixedPathProvider(home));
 
   report = await runDoctor({
-    env: process.env,
+    env: HERMETIC_ENV,
     commandTimeoutMs: DOCTOR_TIMEOUT_MS,
     ...scratchProvider(home),
   });
@@ -156,7 +272,7 @@ describe('diagnostics land in a fresh per-run directory', () => {
       'utf8',
     );
     return runDoctor({
-      env: process.env,
+      env: HERMETIC_ENV,
       commandTimeoutMs: DOCTOR_TIMEOUT_MS,
       ...scratchProvider(home),
     }).then((second) => {
@@ -186,7 +302,7 @@ describe('diagnostics land in a fresh per-run directory', () => {
     const otherHome = mkdtempSync(join(tmpdir(), 'agent-loop-home-foreign-'));
     try {
       const third = await runDoctor({
-        env: process.env,
+        env: HERMETIC_ENV,
         commandTimeoutMs: DOCTOR_TIMEOUT_MS,
         ...scratchProvider(otherHome),
       });
@@ -196,7 +312,7 @@ describe('diagnostics land in a fresh per-run directory', () => {
       writeFileSync(planted, `{"reportKind":"${DOCTOR_REPORT_KIND}"}\n`, 'utf8');
 
       const fourth = await runDoctor({
-        env: process.env,
+        env: HERMETIC_ENV,
         commandTimeoutMs: DOCTOR_TIMEOUT_MS,
         ...scratchProvider(otherHome),
       });
@@ -215,7 +331,7 @@ describe('AGENT_LOOP_HOME does not steer the real run', () => {
     const decoy = mkdtempSync(join(tmpdir(), 'agent-loop-home-decoy-'));
     try {
       const run = await runDoctor({
-        env: { ...process.env, AGENT_LOOP_HOME: decoy },
+        env: { ...HERMETIC_ENV, AGENT_LOOP_HOME: decoy },
         commandTimeoutMs: DOCTOR_TIMEOUT_MS,
         ...scratchProvider(realHome),
       });
@@ -253,7 +369,7 @@ describe('AGENT_LOOP_WORKTREES_ROOT triggers no write anywhere', () => {
     const decoyBefore = readdirSync(decoy);
     try {
       const run = await runDoctor({
-        env: { ...process.env, AGENT_LOOP_WORKTREES_ROOT: decoy },
+        env: { ...HERMETIC_ENV, AGENT_LOOP_WORKTREES_ROOT: decoy },
         commandTimeoutMs: DOCTOR_TIMEOUT_MS,
         ...scratchProvider(realHome),
       });
@@ -454,7 +570,7 @@ describe('the doctor still fails closed on real problems', () => {
     const otherHome = mkdtempSync(join(tmpdir(), 'agent-loop-home-blocked-'));
     try {
       const blocked = await runDoctor({
-        env: { ...process.env, CLAUDE_CODE_USE_BEDROCK: '1' },
+        env: { ...HERMETIC_ENV, CLAUDE_CODE_USE_BEDROCK: '1' },
         commandTimeoutMs: DOCTOR_TIMEOUT_MS,
         ...scratchProvider(otherHome),
       });
