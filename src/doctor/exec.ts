@@ -309,6 +309,30 @@ const UNSUPPORTED_BATCH_ARGUMENT_MESSAGE =
   'which has no round-trip-safe encoding through cmd.exe. Details are withheld.';
 
 /**
+ * Static, safe message for an explicit `.cmd`/`.bat` target path containing a
+ * literal double quote. Never carries the path: an embedded `"` is outside
+ * the supported input range regardless of whether the path exists.
+ */
+const UNSAFE_BATCH_PATH_MESSAGE =
+  'Refusing to spawn a diagnostic process: an explicit .cmd/.bat target path contains a ' +
+  'literal double quote, which is outside the supported input range. Details are withheld.';
+
+/**
+ * True when `command` names a `.cmd`/`.bat` target explicitly — an absolute
+ * path, or one containing a path separator — as opposed to a bare name left
+ * to PATH/PATHEXT resolution. Purely syntactic: no filesystem access, no
+ * environment lookup, no canonicalisation. This is what lets the caller
+ * reject an embedded quote in the target path *before* any resolution is
+ * attempted, so the refusal never depends on whether the path exists.
+ */
+function isExplicitWindowsBatchPath(command: string): boolean {
+  return (
+    (isAbsolute(command) || hasPathSeparator(command)) &&
+    WINDOWS_BATCH_EXTENSIONS.has(extname(command).toLowerCase())
+  );
+}
+
+/**
  * Picks the spawn plan from exactly the **first** resolved PATH/PATHEXT
  * candidate — never a global search for a preferred extension — and builds
  * it.
@@ -335,6 +359,13 @@ function planSpawn(
   env: NodeJS.ProcessEnv,
   cwd: string | undefined,
 ): SpawnPlan | null {
+  // Checked first, before any resolution: an explicit batch path with an
+  // embedded quote is fail-closed regardless of whether it exists, so
+  // existence can never mask this refusal behind a NOT_FOUND result.
+  if (isExplicitWindowsBatchPath(command) && command.includes('"')) {
+    throw new UnsafeArgumentError(UNSAFE_BATCH_PATH_MESSAGE);
+  }
+
   const candidates = resolveOnPath(command, env, effectiveSpawnCwd(cwd));
   const first = candidates[0];
   if (first === undefined) return null;

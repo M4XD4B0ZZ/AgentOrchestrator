@@ -302,10 +302,14 @@ describe.runIf(IS_WINDOWS)('Windows .cmd shims', () => {
     expect(res.stdout).toContain('HELLO-FROM-CMD');
   });
 
-  it('passes inert arguments through the cmd.exe shim unchanged', async () => {
+  it('passes the semantic value of an inert argument through the cmd.exe shim unchanged', async () => {
+    // `%1` would echo the encoder's own quoting syntax (`"--json"`), not the
+    // argument's semantic value. `%~1` strips that batch-parameter quoting,
+    // which is the value a real .cmd shim's own logic would actually see —
+    // matching the oracle convention in tests/windows-batch-command.test.ts.
     const dir = makeTempDir();
     const script = join(dir, 'echoarg.cmd');
-    writeFileSync(script, '@echo off\r\necho ARG=%1\r\n', 'utf8');
+    writeFileSync(script, '@echo off\r\necho ARG=%~1\r\n', 'utf8');
 
     const res = await runCommand(script, ['--json'], { env: process.env, timeoutMs: 15_000 });
     expect(res.outcome).toBe('COMPLETED');
