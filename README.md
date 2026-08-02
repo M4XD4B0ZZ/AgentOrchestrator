@@ -131,9 +131,15 @@ A read-only local diagnosis. It:
   [Artefacts](#artefacts) and [Version detection](#version-detection)). Every
   probe runs with a wall-clock timeout **and**
   a hard byte budget per stream, both enforced while the output streams; a
-  child that exceeds either is terminated together with its whole process tree
-  (on Windows via `taskkill /T /F` with a validated numeric PID, so a `.cmd`
-  shim cannot leave the real program running);
+  child that exceeds either has termination **attempted, best-effort** — on
+  Windows via `taskkill /T /F` with a validated numeric PID, so a `.cmd`
+  shim's real program is targeted too, not just the shim, falling back to a
+  direct kill of the immediate child if `taskkill` cannot be established or
+  fails. The module then waits, with a bound, for the tree to actually
+  disappear, reporting a distinct failure code if it does not. Neither a
+  successful `taskkill` call nor the direct-kill fallback proves every
+  descendant is gone; a verified process-tree guarantee is **AO-008**, still
+  open;
 - checks that Claude Code reports a **Claude subscription** login and that
   Codex reports a **ChatGPT** login, using a fail-closed allow-list. The Codex
   check accepts *only* a command whose total normalised output — stdout and
@@ -408,24 +414,28 @@ Two removed overrides, and why:
 
 #### How the profile directory is determined
 
-Not by `os.homedir()` in this process. On Windows that function returns
-`%USERPROFILE%` whenever the variable is set, so calling it would make the write
-root environment-controlled with extra steps. Instead
+Not by `os.homedir()`. On Windows that function returns `%USERPROFILE%`
+whenever the variable is set, so calling it would make the write root
+environment-controlled with extra steps. Instead
 (`src/config/internal/trusted-profile.ts`):
 
-- a child process is started from `process.execPath` (absolute, no `PATH`
-  lookup, no shell) running a fixed helper string;
-- its environment map is **empty** — no `USERPROFILE`, `HOME`, `HOMEDRIVE`,
-  `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `AGENT_LOOP_HOME`, `NODE_OPTIONS` or
-  `NODE_PATH` is inherited;
-- with no home variable in scope, the child's `os.homedir()` is forced onto the
-  OS itself: the profile directory of the process token on Windows, the passwd
-  entry on POSIX;
-- it prints one structured line, which must parse, and the resulting path must
-  be absolute, exist, be a directory and canonicalise.
+- `os.userInfo()` is called directly, in this process — no child process, no
+  shell, no interpreter, no search list, no output to parse and no
+  environment consulted. On Windows it resolves the profile directory from
+  the process token; on POSIX, from the passwd entry for the real uid;
+- the call itself, the returned value, and that value's `homedir` field are
+  each validated behind their own narrow boundary: an unusable dependency, a
+  query that throws, a non-object result or a throwing `homedir` accessor are
+  all refused fail-closed, never surfaced as a foreign exception;
+- the `homedir` value must be a non-empty, non-whitespace string with no
+  embedded NUL, and must be absolute;
+- it is then canonicalised and the canonical path must, on re-validation,
+  `stat` as an existing directory.
 
-**There is no fallback.** A spawn, parse or validation failure fails closed with
-`TRUSTED_PROFILE_UNAVAILABLE`; it never degrades to an environment value.
+**There is no fallback.** A query, validation or canonicalisation failure
+fails closed with `TRUSTED_PROFILE_UNAVAILABLE`; it never degrades to an
+environment value, and the static error text carries no path, user name,
+errno or foreign exception detail.
 
 Tests redirect the root through internal dependency injection
 (`src/config/internal/path-provider.ts`), which is not exported from the

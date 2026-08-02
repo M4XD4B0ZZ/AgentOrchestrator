@@ -11,12 +11,15 @@
  *  - Every process gets a timeout **and** a hard byte budget per stream. Both
  *    are enforced while the output streams, not after the process ends, so a
  *    runaway child can neither hang the doctor nor exhaust its memory.
- *  - Terminating a child terminates its whole process tree. On Windows a `.cmd`
- *    shim runs under `cmd.exe`, and killing only that shim leaves the real
- *    program running forever; `taskkill /T /F` with a validated numeric PID is
- *    used instead. After a kill, the module waits — with a bound — for the
- *    process to actually be gone, and reports a distinct failure code if it is
- *    not.
+ *  - Terminating a child attempts to terminate its whole process tree,
+ *    best-effort. On Windows a `.cmd` shim runs under `cmd.exe`, and killing
+ *    only that shim leaves the real program running forever; `taskkill /T /F`
+ *    with a validated numeric PID is used instead, falling back to a direct
+ *    kill of the immediate child if that cannot be established or fails.
+ *    After a kill, the module waits — with a bound — for the process to
+ *    actually be gone, and reports a distinct failure code if it is not.
+ *    Neither path proves every descendant is gone; a verified process-tree
+ *    guarantee is AO-008, still open.
  *  - Failures are *data*, never exceptions, and every failure carries a fixed
  *    status code rather than an exception message: a missing program, a spawn
  *    error, a timeout, an exceeded output limit and a failed kill are all
