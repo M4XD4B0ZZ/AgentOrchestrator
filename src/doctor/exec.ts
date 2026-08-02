@@ -28,9 +28,11 @@
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { extname, isAbsolute, join } from 'node:path';
+import { statSync } from 'node:fs';
+import { delimiter as pathDelimiter, extname, isAbsolute, join } from 'node:path';
 
 import { safeErrnoCode } from '../core/safe-error.js';
+import { windowsSystemTool } from './internal/windows-system-tools.js';
 
 /** Default per-command wall-clock budget. */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
@@ -126,38 +128,91 @@ export interface RunOptions {
   readonly killGraceMs?: number;
 }
 
-/** Absolute path of a Windows system tool, so PATH cannot be used to shadow it. */
-function systemTool(name: string, env: NodeJS.ProcessEnv): string {
-  const root = env['SystemRoot'] ?? env['windir'] ?? 'C:\\Windows';
-  return join(root, 'System32', name);
+/**
+ * The extensions Windows resolves a bare (no explicit extension) command
+ * name against when `PATHEXT` is absent from the given environment. Only the
+ * four this module's own {@link planSpawn} distinguishes: `.EXE`/`.COM`
+ * (spawned directly) and `.BAT`/`.CMD` (spawned through the trusted `cmd.exe`
+ * below). A wider default list would only ever fall into `planSpawn`'s
+ * generic "spawn the first candidate" branch, so it would change nothing
+ * observable — this keeps the default itself easy to audit.
+ */
+const DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD';
+
+function isRegularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** `env['PATH']`, split on the platform delimiter. Never throws. */
+function pathDirectories(env: NodeJS.ProcessEnv): readonly string[] {
+  const raw = env['PATH'];
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  // An empty segment (`"C:\\a;;C:\\b"`) is skipped rather than treated as the
+  // current directory: that legacy DOS convention is a current-directory
+  // hijack primitive in disguise, and nothing here relies on it — a
+  // deliberate, tested hardening over a literal reproduction of `where.exe`.
+  return raw.split(pathDelimiter).filter((entry) => entry.length > 0);
+}
+
+/** `env['PATHEXT']` on Windows, split and trimmed; the fixed default if absent. */
+function pathextEntries(env: NodeJS.ProcessEnv): readonly string[] {
+  const raw = env['PATHEXT'];
+  const source = typeof raw === 'string' && raw.length > 0 ? raw : DEFAULT_PATHEXT;
+  return source
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 /**
- * Resolves a command name to a concrete file on PATH.
- * Returns every candidate, most-specific first, or an empty array.
+ * Resolves a command name to every matching file on PATH, most-specific
+ * first — a direct, in-process replacement for spawning `where.exe`
+ * (Windows) or `which` (POSIX), neither of which this module starts any
+ * more (AO-FOUNDATION-REM-003B). `PATH` and, on Windows, `PATHEXT` are read
+ * as plain data from the given environment; nothing here spawns a process,
+ * consults a shell, or reads `SystemRoot`/`windir`/`COMSPEC`.
+ *
+ * The resolved candidate is the object of the capability/auth probe this
+ * command *is* — it is never treated as a trusted Windows system tool. That
+ * separate, higher trust tier is `./internal/windows-system-tools.js`.
+ *
+ * An absolute `command` is validated the same way every other candidate is
+ * (existing, regular file) rather than trusted verbatim: the caller still
+ * decides *which* absolute path to probe, this only confirms there is a
+ * file there before a spawn attempt is made.
  */
 export function resolveOnPath(command: string, env: NodeJS.ProcessEnv): readonly string[] {
-  if (isAbsolute(command)) return [command];
-
-  try {
-    const onWindows = process.platform === 'win32';
-    const finder = onWindows ? systemTool('where.exe', env) : 'which';
-    const args = onWindows ? [command] : ['-a', command];
-    const out = execFileSync(finder, args, {
-      encoding: 'utf8',
-      env,
-      timeout: 5_000,
-      windowsHide: true,
-      maxBuffer: 256 * 1024,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    return out
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-  } catch {
-    return [];
+  if (isAbsolute(command)) {
+    return isRegularFile(command) ? [command] : [];
   }
+
+  const directories = pathDirectories(env);
+  const candidates: string[] = [];
+
+  if (process.platform === 'win32') {
+    // A name that already carries an extension (`node.exe`, `my.tool`) is
+    // resolved exactly as given, in every PATH directory, with no PATHEXT
+    // looping — matching how Windows itself treats a dotted command name.
+    const hasExplicitExtension = extname(command) !== '';
+    const extensions = hasExplicitExtension ? [''] : pathextEntries(env);
+    for (const dir of directories) {
+      for (const ext of extensions) {
+        const candidate = join(dir, command + ext);
+        if (isRegularFile(candidate)) candidates.push(candidate);
+      }
+    }
+  } else {
+    for (const dir of directories) {
+      const candidate = join(dir, command);
+      if (isRegularFile(candidate)) candidates.push(candidate);
+    }
+  }
+
+  return candidates;
 }
 
 /** Windows batch shims cannot be spawned directly by Node (CVE-2024-27980). */
@@ -209,7 +264,10 @@ function planSpawn(
         `Refusing to run ${JSON.stringify(batch)} through cmd.exe: the path contains a quote.`,
       );
     }
-    const comspec = env['COMSPEC'] ?? systemTool('cmd.exe', env);
+    // The trusted, environment-independent cmd.exe only: COMSPEC is never
+    // read, so a caller-controlled COMSPEC cannot substitute the interpreter
+    // (AO-FOUNDATION-REM-003B).
+    const comspec = windowsSystemTool('cmd.exe');
     const inner = [`"${batch}"`, ...args].join(' ');
     return { file: comspec, args: ['/d', '/s', '/c', `"${inner}"`], verbatim: true };
   }
@@ -267,25 +325,36 @@ class BoundedSink {
  * shim that is `cmd.exe`, and the actual tool keeps running — which is exactly
  * how a "timed out" diagnostic can leave a live process behind. `taskkill /T
  * /F` walks the tree instead. The PID is validated as a positive integer before
- * it is stringified, and `taskkill.exe` is addressed by absolute System32 path
- * so PATH cannot shadow it.
+ * it is stringified, and `taskkill.exe` comes from the trusted, environment-
+ * independent resolver (AO-FOUNDATION-REM-003B) — never from `PATH`,
+ * `SystemRoot` or `windir` — so neither can shadow or redirect it.
+ *
+ * This is still the pre-AO-008 best-effort behaviour: a successful `taskkill
+ * /T /F` is the tree-kill signal, and the direct `child.kill()` fallback below
+ * terminates the immediate child only. Neither branch guarantees every
+ * descendant is gone; a bounded process-tree guarantee is AO-008's, not this
+ * module's.
  *
  * @returns whether a tree kill was successfully issued.
  */
-function killProcessTree(child: ChildProcess, env: NodeJS.ProcessEnv): boolean {
+function killProcessTree(child: ChildProcess): boolean {
   const pid = child.pid;
   if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return false;
 
   if (process.platform === 'win32') {
     try {
-      execFileSync(systemTool('taskkill.exe', env), ['/PID', String(pid), '/T', '/F'], {
+      const taskkillPath = windowsSystemTool('taskkill.exe');
+      execFileSync(taskkillPath, ['/PID', String(pid), '/T', '/F'], {
         stdio: 'ignore',
         windowsHide: true,
         timeout: 5_000,
       });
       return true;
     } catch {
-      // Fall through to the direct kill below; the caller still bounds the wait.
+      // Either the trusted taskkill.exe boundary could not be established, or
+      // it ran and failed. Either way: fall through to the direct kill below,
+      // never to an environment- or PATH-supplied taskkill (AO-FOUNDATION-REM-003B).
+      // The caller still bounds the wait.
     }
     try {
       return child.kill('SIGKILL');
@@ -359,7 +428,30 @@ export async function runCommand(
     };
   };
 
-  const plan = planSpawn(command, args, options.env);
+  let plan: SpawnPlan | null;
+  try {
+    plan = planSpawn(command, args, options.env);
+  } catch (error) {
+    // UnsafeArgumentError is a programming error and must keep propagating as
+    // an exception (documented above). Anything else here can only be
+    // WindowsSystemToolUnavailableError — the trusted cmd.exe boundary could
+    // not be established for a resolved `.cmd`/`.bat` target — and that is a
+    // runtime condition, reported as data like every other failure to start.
+    if (error instanceof UnsafeArgumentError) throw error;
+    return finish({
+      started: false,
+      outcome: 'SPAWN_FAILED',
+      exitCode: null,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      failureCode: 'SPAWN_FAILED',
+      errnoCode: null,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      processTreeKilled: false,
+    });
+  }
   if (plan === null) {
     return finish({
       started: false,
@@ -411,7 +503,7 @@ export async function runCommand(
       if (killIssued) return;
       killIssued = true;
       termination = reason;
-      treeKilled = killProcessTree(child, options.env);
+      treeKilled = killProcessTree(child);
 
       graceTimer = setTimeout(() => {
         // The tree outlived the kill: report that distinctly rather than

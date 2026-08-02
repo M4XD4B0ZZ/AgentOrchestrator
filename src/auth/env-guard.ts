@@ -56,9 +56,20 @@
  * it does not weaken the properties this module exists for. It does mean
  * "withheld by policy" must be read as "not supplied by us" rather than
  * "unreachable by the child" for those eleven names — `TEMP` and `USERPROFILE`
- * in particular still arrive. Closing that gap means not inheriting them in the
- * orchestrator process either, which belongs to the exec-provenance work
- * (AO-FOUNDATION-FULL-REV-02 / AO-FOUNDATION-REM-003B), not here.
+ * in particular still arrive. Closing that residual informational-leak gap
+ * means not inheriting them in the orchestrator process either, which remains
+ * separate follow-up work, not this module's remit.
+ *
+ * This is distinct from — and narrower than — the executable-*selection*
+ * provenance defect AO-FOUNDATION-FULL-REV-02 tracked: whether a
+ * caller-controlled `SystemRoot`/`windir`/`COMSPEC` could choose *which
+ * binary* answered PATH resolution, ran a `.cmd`/`.bat` target, or terminated
+ * a process tree. That is closed as of AO-FOUNDATION-REM-003B — those three
+ * names are no longer part of {@link EXEC_CONTRACT_VARS} or any policy below,
+ * and the tools themselves come from a fixed, environment-independent
+ * boundary (`src/doctor/internal/windows-system-tools.ts`). The back-fill
+ * described here plays no part in that: it only affects what a child's *own*
+ * environment shows it, never what this process chooses to execute.
  */
 
 import { types } from 'node:util';
@@ -154,25 +165,22 @@ export const PROBE_ENV_POLICIES = [
 export type ProbeEnvPolicy = (typeof PROBE_ENV_POLICIES)[number];
 
 /**
- * The variables `exec.ts` needs to locate and start a program at all.
+ * The variables `exec.ts` needs to locate and start a *target* program at
+ * all: `PATH` and, on Windows, `PATHEXT` resolve the command via a direct
+ * filesystem walk (no subprocess, no `where.exe`).
  *
- * `PATH`/`PATHEXT` resolve the command, `SystemRoot`/`windir` build the
- * absolute path of the Windows system tools, and `COMSPEC` names the
- * interpreter for a `.cmd` shim.
- *
- * Their **trustworthiness is not asserted here**: they still come from the
- * caller's environment, which is exactly the provenance defect tracked as
- * AO-FOUNDATION-FULL-REV-02 and remediated separately in
- * AO-FOUNDATION-REM-003B. They are listed because the current exec contract
- * cannot start a process without them, not because they are trusted.
+ * `SystemRoot`, `windir` and `COMSPEC` used to be listed here as well, to
+ * build the absolute path of the Windows system tools (`where.exe`,
+ * `cmd.exe`, `taskkill.exe`) and to name the `.cmd` interpreter. That was the
+ * provenance defect tracked as AO-FOUNDATION-FULL-REV-02: a caller-controlled
+ * value here directly chose which binary answered PATH resolution, ran a
+ * resolved `.cmd`/`.bat` target, or terminated a process tree. As of
+ * AO-FOUNDATION-REM-003B those three tools are resolved from a fixed,
+ * environment-independent Windows system boundary
+ * (`src/doctor/internal/windows-system-tools.ts`) and are no longer part of
+ * any probe's supplied environment at all.
  */
-const EXEC_CONTRACT_VARS = Object.freeze([
-  'PATH',
-  'PATHEXT',
-  'SystemRoot',
-  'windir',
-  'COMSPEC',
-] as const);
+const EXEC_CONTRACT_VARS = Object.freeze(['PATH', 'PATHEXT'] as const);
 
 /**
  * Per-policy allow-lists. Every policy is stated separately, including where

@@ -253,13 +253,26 @@ describe('two spellings of one Windows variable are refused, not resolved', () =
       createProbeEnv('auth:claude', {
         Path: FIRST,
         PathExt: '.CMD',
-        systemroot: 'C:\\ao-windows',
         UserProfile: SECOND,
       }),
     );
-    expect(Object.keys(env)).toEqual(['PATH', 'PATHEXT', 'SystemRoot', 'USERPROFILE']);
+    expect(Object.keys(env)).toEqual(['PATH', 'PATHEXT', 'USERPROFILE']);
     expect(env['PATH']).toBe(FIRST);
     expect(env['USERPROFILE']).toBe(SECOND);
+  });
+
+  /** AO-FOUNDATION-REM-003B: these are no longer part of any policy at all. */
+  it('never canonicalises SystemRoot, windir or COMSPEC into any policy output', () => {
+    const env = onWindows(() =>
+      createProbeEnv('auth:claude', {
+        Path: FIRST,
+        systemroot: 'C:\\ao-windows',
+        WinDir: 'C:\\ao-windows',
+        comspec: 'C:\\ao-windows\\System32\\cmd.exe',
+        UserProfile: SECOND,
+      }),
+    );
+    expect(Object.keys(env)).toEqual(['PATH', 'USERPROFILE']);
   });
 
   // ── 7: POSIX stays case-sensitive ────────────────────────────────────────
@@ -341,9 +354,10 @@ describe('two spellings of one Windows variable are refused, not resolved', () =
   });
 
   it('returns nothing at all — not a partial environment — after a collision', () => {
-    // PATH, PATHEXT, SystemRoot, windir and COMSPEC all resolve cleanly; the
-    // collision is on USERPROFILE, the *last* name auth:claude asks for. If the
-    // map under construction could escape, this is where it would.
+    // PATH and PATHEXT resolve cleanly (SystemRoot/windir/COMSPEC are not part
+    // of any policy as of AO-FOUNDATION-REM-003B and are simply ignored here);
+    // the collision is on USERPROFILE, the *last* name auth:claude asks for. If
+    // the map under construction could escape, this is where it would.
     let result: NodeJS.ProcessEnv | undefined;
     let thrown: unknown;
     try {

@@ -167,12 +167,19 @@ function keysUpper(env: NodeJS.ProcessEnv): string[] {
 // ── 1. The pure policy matrix ──────────────────────────────────────────────
 
 const EXPECTED_KEYS: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = {
-  'capability:generic': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC'],
-  'capability:claude': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC'],
-  'capability:codex': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC'],
-  'auth:claude': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC', 'HOME', 'USERPROFILE'],
-  'auth:codex': ['PATH', 'PATHEXT', 'SystemRoot', 'windir', 'COMSPEC', 'HOME', 'USERPROFILE'],
+  'capability:generic': ['PATH', 'PATHEXT'],
+  'capability:claude': ['PATH', 'PATHEXT'],
+  'capability:codex': ['PATH', 'PATHEXT'],
+  'auth:claude': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
+  'auth:codex': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
 };
+
+/**
+ * SystemRoot/windir/COMSPEC used to be part of the exec contract every
+ * policy forwarded — the provenance defect closed by AO-FOUNDATION-REM-003B.
+ * They must no longer appear in any policy's output at all.
+ */
+const REMOVED_SYSTEM_TOOL_VARS = ['SystemRoot', 'windir', 'COMSPEC'] as const;
 
 /** Roots no policy has a demonstrated need for (AO-FOUNDATION-REM-003A-RR-02). */
 const APP_DATA_ROOTS = ['APPDATA', 'LOCALAPPDATA'] as const;
@@ -235,6 +242,24 @@ describe('the policy matrix is exact', () => {
       const serialised = JSON.stringify(env);
       expect(serialised).not.toContain(OPERATIONAL.APPDATA);
       expect(serialised).not.toContain(OPERATIONAL.LOCALAPPDATA);
+    }
+  });
+
+  /** AO-FOUNDATION-REM-003B, the executable-selection provenance defect. */
+  it('withholds SystemRoot, windir and COMSPEC from every policy', () => {
+    for (const policy of PROBE_ENV_POLICIES) {
+      const env = createProbeEnv(policy, sourceEnv());
+      const upper = keysUpper(env);
+      for (const name of REMOVED_SYSTEM_TOOL_VARS) {
+        expect(env[name]).toBeUndefined();
+        expect(upper).not.toContain(name.toUpperCase());
+        expect(probeEnvAllowlist(policy).map((n) => n.toUpperCase())).not.toContain(
+          name.toUpperCase(),
+        );
+      }
+      const serialised = JSON.stringify(env);
+      expect(serialised).not.toContain(OPERATIONAL.SystemRoot);
+      expect(serialised).not.toContain(OPERATIONAL.COMSPEC);
     }
   });
 
@@ -315,7 +340,8 @@ describe('a different spelling does not evade a policy', () => {
       });
       expect(env['PATH']).toBe(OPERATIONAL.PATH);
       expect(env['PATHEXT']).toBe(OPERATIONAL.PATHEXT);
-      expect(env['SystemRoot']).toBe(OPERATIONAL.SystemRoot);
+      // SystemRoot is no longer part of any policy (AO-FOUNDATION-REM-003B).
+      expect(env['SystemRoot']).toBeUndefined();
     },
   );
 
@@ -583,12 +609,12 @@ describe('a NODE_OPTIONS preload does not reach a real probe', () => {
       npm_config_node_options: `--require=${loader}`,
       ...DUMMY,
       AO_UNKNOWN_ENV: 'AO_SENTINEL_UNKNOWN',
-      // Only what the exec contract needs to find and start node at all.
+      // Only what the exec contract needs to find `node` on PATH at all
+      // (AO-FOUNDATION-REM-003B reduced this to PATH/PATHEXT — the Windows
+      // system tools node itself is spawned by, `cmd.exe`/`taskkill.exe`, are
+      // resolved from a fixed internal boundary, never from this map).
       PATH: process.env['PATH'] ?? '',
       PATHEXT: process.env['PATHEXT'] ?? '',
-      SystemRoot: process.env['SystemRoot'] ?? '',
-      windir: process.env['windir'] ?? '',
-      COMSPEC: process.env['COMSPEC'] ?? '',
     };
 
     const result = await runCommand('node', [script], {

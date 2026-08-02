@@ -25,7 +25,7 @@
  * which — the exit code alone is the contract.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -236,12 +236,211 @@ try {
   }
 }
 
+// ── 6. AO-FOUNDATION-REM-003B: Windows system tool provenance in the built
+//      dist/doctor/exec.js, against the trusted internal resolver ─────────
+//
+// Added alongside the run-completion checks above rather than as a second
+// dist script (see this file's own header comment on why a separate vitest
+// wrapper around a dist script is avoided): `test:dist-doctor` is the one
+// place a fresh build's *shipped* artefact — not `src/`, not anything
+// vitest's module resolution could quietly redirect back to `src/doctor/
+// exec.ts` — is exercised at all.
+
+const execDistEntry = join(repoRoot, 'dist', 'doctor', 'exec.js');
+const windowsSystemToolsDistEntry = join(repoRoot, 'dist', 'doctor', 'internal', 'windows-system-tools.js');
+const reportDistEntry = join(repoRoot, 'dist', 'doctor', 'report.js');
+
+if (!existsSync(execDistEntry)) {
+  console.error('dist/doctor/exec.js does not exist. Run "npm run build" before this check.');
+  process.exit(1);
+}
+if (!existsSync(windowsSystemToolsDistEntry)) {
+  console.error(
+    'dist/doctor/internal/windows-system-tools.js does not exist. Run "npm run build" before this check.',
+  );
+  process.exit(1);
+}
+
+const execSource = readFileSync(execDistEntry, 'utf8');
+
+// ── 6a. Static evidence, against the shipped file's own text ───────────────
+
+// The removed vulnerable pattern: `env['SystemRoot'] ?? env['windir']`, in
+// every quoting style a bundler/tsc could emit.
+for (const pattern of [
+  "env['SystemRoot']",
+  'env["SystemRoot"]',
+  "env['windir']",
+  'env["windir"]',
+  "env['COMSPEC']",
+  'env["COMSPEC"]',
+  "env['ComSpec']",
+  'env["ComSpec"]',
+]) {
+  check(!execSource.includes(pattern), `dist/doctor/exec.js still contains the removed pattern ${pattern}`);
+}
+
+// The removed function itself. Case-sensitive and lower-case `s`, so this
+// does not false-positive on `windowsSystemTool(` (capital `S`), which is
+// exactly what should be present instead.
+check(
+  !execSource.includes('systemTool('),
+  'dist/doctor/exec.js still defines or calls the removed env-based systemTool() helper',
+);
+check(
+  execSource.includes('windowsSystemTool'),
+  'dist/doctor/exec.js does not reference the trusted windowsSystemTool resolver at all',
+);
+check(
+  execSource.includes("from './internal/windows-system-tools.js'"),
+  'dist/doctor/exec.js does not import the trusted resolver from ./internal/windows-system-tools.js',
+);
+
+// resolveOnPath's own body, isolated textually, must not spawn anything.
+const resolveOnPathStart = execSource.indexOf('export function resolveOnPath');
+check(resolveOnPathStart !== -1, 'dist/doctor/exec.js does not export resolveOnPath');
+if (resolveOnPathStart !== -1) {
+  const nextTopLevelBoundary = execSource.indexOf('\nfunction ', resolveOnPathStart + 1);
+  const resolveOnPathBody = execSource.slice(
+    resolveOnPathStart,
+    nextTopLevelBoundary === -1 ? undefined : nextTopLevelBoundary,
+  );
+  check(
+    !resolveOnPathBody.includes('execFileSync') && !resolveOnPathBody.includes('spawn('),
+    'dist/doctor/exec.js resolveOnPath() body still spawns a process (where.exe/which)',
+  );
+  check(
+    !resolveOnPathBody.toLowerCase().includes('where.exe'),
+    'dist/doctor/exec.js resolveOnPath() body still references where.exe',
+  );
+}
+
+// ── 6b. Dynamic evidence, against the actually-imported dist modules ───────
+
+const execModule = await import(pathToFileURL(execDistEntry).href);
+const windowsSystemToolsModule = await import(pathToFileURL(windowsSystemToolsDistEntry).href);
+
+check(
+  typeof execModule.resolveOnPath === 'function',
+  'dist/doctor/exec.js does not export resolveOnPath as a function',
+);
+check(
+  typeof windowsSystemToolsModule.windowsSystemTool === 'function',
+  'dist/doctor/internal/windows-system-tools.js does not export windowsSystemTool as a function',
+);
+check(
+  typeof windowsSystemToolsModule.createWindowsSystemToolResolverForTests === 'function',
+  'dist/doctor/internal/windows-system-tools.js does not export the internal test resolver',
+);
+check(
+  typeof windowsSystemToolsModule.WindowsSystemToolUnavailableError === 'function',
+  'dist/doctor/internal/windows-system-tools.js does not export WindowsSystemToolUnavailableError',
+);
+
+// PATH resolution is unaffected by SystemRoot/windir/COMSPEC: build a
+// harmless temporary directory tree, spoof all three to nonsense, and
+// confirm the target program is still found via PATH alone.
+const distProbeRoot = mkdtempSync(join(tmpdir(), 'ao-dist-doctor-exec-'));
+try {
+  const targetDir = join(distProbeRoot, 'bin');
+  mkdirSync(targetDir, { recursive: true });
+  const targetName = process.platform === 'win32' ? 'ao-dist-probe.exe' : 'ao-dist-probe';
+  writeFileSync(join(targetDir, targetName), 'not a real executable, existence only\n', 'utf8');
+
+  const spoofedEnv = {
+    PATH: targetDir,
+    PATHEXT: '.EXE',
+    SystemRoot: join(distProbeRoot, 'does-not-exist-should-not-matter'),
+    windir: join(distProbeRoot, 'does-not-exist-should-not-matter'),
+    COMSPEC: join(distProbeRoot, 'does-not-exist-should-not-matter', 'evil.exe'),
+  };
+  const resolved = execModule.resolveOnPath('ao-dist-probe', spoofedEnv);
+  check(
+    Array.isArray(resolved) && resolved.length > 0,
+    'dist/doctor/exec.js resolveOnPath() failed to find a PATH target under spoofed SystemRoot/windir/COMSPEC',
+  );
+
+  // The inverse: pointing SystemRoot/windir at a directory that *does* hold a
+  // same-named `where.exe` must change nothing — it is never consulted.
+  const fakeSystem32 = join(distProbeRoot, 'FakeWindows', 'System32');
+  mkdirSync(fakeSystem32, { recursive: true });
+  writeFileSync(join(fakeSystem32, 'where.exe'), 'not a real executable\n', 'utf8');
+  const resolvedAgain = execModule.resolveOnPath('ao-dist-probe', {
+    ...spoofedEnv,
+    SystemRoot: join(distProbeRoot, 'FakeWindows'),
+    windir: join(distProbeRoot, 'FakeWindows'),
+  });
+  check(
+    JSON.stringify(resolvedAgain) === JSON.stringify(resolved),
+    'dist/doctor/exec.js resolveOnPath() result changed when a fake where.exe was planted at a spoofed SystemRoot',
+  );
+} finally {
+  rmSync(distProbeRoot, { recursive: true, force: true });
+}
+
+// The trusted system tools themselves: resolved on this Windows runtime, and
+// stable under a full environment spoof. Individual keys are restored
+// (never a wholesale `process.env = {...}` reassignment) — that corrupts
+// Node's own internal environment block on Windows and breaks a
+// subsequently spawned child's CSPRNG initialisation, unrelated to anything
+// under test here.
+if (process.platform === 'win32') {
+  const cmdBefore = windowsSystemToolsModule.windowsSystemTool('cmd.exe');
+  const taskkillBefore = windowsSystemToolsModule.windowsSystemTool('taskkill.exe');
+  check(
+    typeof cmdBefore === 'string' && cmdBefore.toLowerCase().endsWith('\\cmd.exe'),
+    'dist windowsSystemTool("cmd.exe") did not resolve to a cmd.exe path',
+  );
+  check(
+    typeof taskkillBefore === 'string' && taskkillBefore.toLowerCase().endsWith('\\taskkill.exe'),
+    'dist windowsSystemTool("taskkill.exe") did not resolve to a taskkill.exe path',
+  );
+
+  const spoofedNames = ['SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR', 'COMSPEC', 'ComSpec', 'PATH', 'PATHEXT'];
+  const originalValues = new Map(spoofedNames.map((name) => [name, process.env[name]]));
+  try {
+    for (const name of spoofedNames) process.env[name] = 'C:\\ao-dist-spoofed-should-not-matter';
+    // A fresh resolver instance over real dependencies, so this is not merely
+    // reading back the already-memoised productive singleton.
+    const freshResolve = windowsSystemToolsModule.createWindowsSystemToolResolverForTests({
+      realpath: (await import('node:fs')).realpathSync.native,
+      stat: (await import('node:fs')).statSync,
+    });
+    check(
+      freshResolve('cmd.exe') === cmdBefore,
+      'dist trusted cmd.exe path changed under a full SystemRoot/windir/COMSPEC/PATH spoof',
+    );
+    check(
+      freshResolve('taskkill.exe') === taskkillBefore,
+      'dist trusted taskkill.exe path changed under a full SystemRoot/windir/COMSPEC/PATH spoof',
+    );
+  } finally {
+    for (const [name, value] of originalValues) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+// ── 6c. Report schema stays v4 ──────────────────────────────────────────────
+if (!existsSync(reportDistEntry)) {
+  console.error('dist/doctor/report.js does not exist. Run "npm run build" before this check.');
+  process.exit(1);
+}
+const reportModule = await import(pathToFileURL(reportDistEntry).href);
+check(
+  reportModule.DOCTOR_REPORT_SCHEMA_VERSION === 4,
+  `dist/doctor/report.js DOCTOR_REPORT_SCHEMA_VERSION is not 4 (got ${reportModule.DOCTOR_REPORT_SCHEMA_VERSION})`,
+);
+
 // ── Result ────────────────────────────────────────────────────────────────
 if (failures.length > 0) {
-  console.error(`dist/doctor/run-completion.js integration check FAILED (${failures.length} issue(s)):`);
+  console.error(`dist-doctor integration check FAILED (${failures.length} issue(s)):`);
   for (const message of failures) console.error(` - ${message}`);
   process.exit(1);
 }
 
-console.log('dist/doctor/run-completion.js integration check passed.');
+console.log(
+  'dist-doctor integration check passed (run-completion.js, exec.js, internal/windows-system-tools.js, report.js).',
+);
 process.exit(0);
