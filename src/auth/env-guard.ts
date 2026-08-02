@@ -28,6 +28,12 @@
  *    does while being read can remove a collision or change a value
  *    (AO-FOUNDATION-REM-003A-R1-REVIEW-01/-02): see
  *    {@link ProbeEnvironmentUnreadableError}.
+ *  - **A source that answers through code is not read at all.** Reading once is
+ *    only worth anything if the answers are the object's own. A proxy can make
+ *    the same object describe itself differently to `ownKeys` than to
+ *    `getOwnPropertyDescriptor`, so a proxied source is refused before any of it
+ *    is touched (AO-FOUNDATION-REM-003A-R2-REVIEW-01): see
+ *    {@link requireNonProxySource}.
  *
  * Hard rules:
  *  - Pure. Neither `process.env`, nor the caller's map, nor a previously
@@ -54,6 +60,8 @@
  * orchestrator process either, which belongs to the exec-provenance work
  * (AO-FOUNDATION-FULL-REV-02 / AO-FOUNDATION-REM-003B), not here.
  */
+
+import { types } from 'node:util';
 
 /**
  * API-key style variables. Each of these can silently switch an agent CLI from
@@ -312,6 +320,64 @@ function rejectUnknownPolicy(): never {
 }
 
 /**
+ * Refuses a source whose answers are not its own, before a single question is
+ * asked of it (AO-FOUNDATION-REM-003A-R2-REVIEW-01).
+ *
+ * ── Why the snapshot alone is not enough ───────────────────────────────────
+ *
+ * {@link snapshotAllowlistProperties} reads the source through two separate
+ * operations — one `Reflect.ownKeys`, then one descriptor read per relevant key
+ * — and reasons about the result as if both described the same object. For a
+ * plain object they do. A proxy breaks that: the two operations are two trap
+ * calls, and the object is free to answer them differently. Two ways through
+ * were demonstrated:
+ *
+ *  - a key that is own **and enumerable** at `ownKeys` time is described as
+ *    non-enumerable when its descriptor is finally asked for. The alias is then
+ *    skipped, the Windows collision that existed at enumeration silently
+ *    disappears, and the canonical spelling is forwarded — the very
+ *    order-dependence {@link ProbeEnvironmentCollisionError} exists to refuse;
+ *  - a real accessor is described as a data property by the descriptor trap.
+ *    The `'value' in descriptor` classification then reports a plain value, and
+ *    the binding accessor refusal in {@link createProbeEnv} never triggers.
+ *
+ * Neither is fixable by reading more carefully: any check would itself be
+ * another trap call, answerable differently again. The only stable property is
+ * *that the source is a proxy at all*, so that is what is checked.
+ *
+ * ── Why `types.isProxy` and nothing else ───────────────────────────────────
+ *
+ * `node:util`'s `types.isProxy` asks the VM about the object's internal shape.
+ * It runs no trap — verified on the installed Node before this guard was
+ * written — so the source cannot observe the check, cannot answer it, and
+ * cannot throw out of it; a revoked proxy is still recognised as one rather
+ * than exploding. Every alternative would be worse by construction:
+ * `instanceof`, `constructor`, `getPrototypeOf` and `toStringTag` are all
+ * themselves trappable, and provoking a trap to see whether one exists would
+ * run the very code this module refuses to run.
+ *
+ * The check therefore has to come **before** `Reflect.ownKeys`, before any
+ * descriptor read, before any prototype or property access, and before any copy
+ * (`Object.assign`, spread, `Object.entries`, `structuredClone` — each one runs
+ * traps or getters). A proxy around an otherwise perfectly ordinary
+ * `process.env` is refused too: the wrapper, not the target, is what would be
+ * answering.
+ *
+ * A source that is not an object at all is refused here as well, for the same
+ * reason it was refused before: there is no set of own properties to read.
+ *
+ * @throws ProbeEnvironmentUnreadableError — the existing static error, carrying
+ * no name, no value and no foreign text. What kind of source was refused is
+ * itself something the source chose, so it is not reported either.
+ */
+function requireNonProxySource(source: unknown): void {
+  if (source === null || (typeof source !== 'object' && typeof source !== 'function')) {
+    throw new ProbeEnvironmentUnreadableError();
+  }
+  if (types.isProxy(source)) throw new ProbeEnvironmentUnreadableError();
+}
+
+/**
  * What one own, enumerable, string-named property of the source turned out to
  * be, captured once and never looked up again.
  *
@@ -368,10 +434,12 @@ type EnvProperty =
  * of that has to be reasoned about if it never runs.
  *
  * Anything that makes the source unreadable as a plain set of variables — a
- * throwing `ownKeys` or `getOwnPropertyDescriptor` trap, or a key that is listed
- * but has no descriptor — fails closed as
- * {@link ProbeEnvironmentUnreadableError}, with the foreign error dropped rather
- * than wrapped.
+ * throwing enumeration or descriptor read, or a key that is listed but has no
+ * descriptor — fails closed as {@link ProbeEnvironmentUnreadableError}, with the
+ * foreign error dropped rather than wrapped. A *proxied* source never gets this
+ * far: {@link requireNonProxySource} refuses it before this function is called,
+ * because a proxy can answer the enumeration and the descriptor reads below as
+ * if they described two different objects.
  *
  * Only keys the policy could actually forward are captured. A credential
  * variable is not merely dropped from the output — its value is never held here
@@ -482,14 +550,22 @@ function snapshotAllowlistProperties(
  * {@link PROBE_ENV_POLICIES}.
  * @throws ProbeEnvironmentCollisionError when the source holds two spellings of
  * one allow-listed variable on Windows. Nothing is returned in that case.
- * @throws ProbeEnvironmentUnreadableError when the source cannot be read as a
- * plain set of variables, or answers an allow-listed name with an accessor.
+ * @throws ProbeEnvironmentUnreadableError when the source is a proxy (see
+ * {@link requireNonProxySource}, checked before anything is read), when it
+ * cannot be read as a plain set of variables, or when it answers an allow-listed
+ * name with an accessor.
  */
 export function createProbeEnv(
   policy: ProbeEnvPolicy,
   source: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   if (!isProbeEnvPolicy(policy)) rejectUnknownPolicy();
+
+  // Before anything is asked of the source: a proxy would be free to answer the
+  // enumeration and the descriptor reads below inconsistently, and the snapshot
+  // is only meaningful for an object that answers as itself. Neither this check
+  // nor the policy check above touches the source, so nothing can have run yet.
+  requireNonProxySource(source);
 
   const allowlist = POLICY_ALLOWLIST[policy];
   const properties = snapshotAllowlistProperties(

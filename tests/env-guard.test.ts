@@ -1,3 +1,5 @@
+import { types } from 'node:util';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -393,7 +395,9 @@ describe('the source environment is snapshotted once, from its own enumerable pr
   const TRAP_SECRET = 'AO_SENTINEL_TRAP_THREW_THIS';
   const INHERITED = 'AO_SENTINEL_INHERITED_VALUE';
   const HIDDEN = 'AO_SENTINEL_NON_ENUMERABLE_VALUE';
-  const SENTINELS = [FIRST, SECOND, THIRD, GETTER_SECRET, TRAP_SECRET, INHERITED, HIDDEN];
+  /** The value a descriptor trap tries to pass off as a plain `PATH`. */
+  const MASKED = 'AO_SENTINEL_MASKED_ACCESSOR_VALUE';
+  const SENTINELS = [FIRST, SECOND, THIRD, GETTER_SECRET, TRAP_SECRET, INHERITED, HIDDEN, MASKED];
 
   /** Every way an error can be looked at, joined for a single leak assertion. */
   function rendered(error: unknown): string {
@@ -665,103 +669,444 @@ describe('the source environment is snapshotted once, from its own enumerable pr
     expect(error).toBeInstanceOf(ProbeEnvironmentCollisionError);
   });
 
-  // ── 8.4 A source that answers through traps fails closed ─────────────────
+  // ── 8.4 A source that answers through traps is refused before it is read ──
 
-  it('fails closed when the ownKeys trap throws, without echoing it', () => {
-    const source = new Proxy({} as NodeJS.ProcessEnv, {
-      ownKeys(): string[] {
-        throw new Error(TRAP_SECRET);
+  /**
+   * Every trap a source could answer through, each counted separately.
+   *
+   * A proxied source must be refused *before* any of these can run, so every
+   * counter staying at zero is the assertion — not just that the call failed,
+   * but that the source was never given a chance to speak.
+   */
+  interface TrapCounts {
+    defineProperty: number;
+    deleteProperty: number;
+    get: number;
+    getOwnPropertyDescriptor: number;
+    getPrototypeOf: number;
+    has: number;
+    isExtensible: number;
+    ownKeys: number;
+    preventExtensions: number;
+    set: number;
+    setPrototypeOf: number;
+  }
+
+  function trapCounts(): TrapCounts {
+    return {
+      defineProperty: 0,
+      deleteProperty: 0,
+      get: 0,
+      getOwnPropertyDescriptor: 0,
+      getPrototypeOf: 0,
+      has: 0,
+      isExtensible: 0,
+      ownKeys: 0,
+      preventExtensions: 0,
+      set: 0,
+      setPrototypeOf: 0,
+    };
+  }
+
+  const totalTraps = (counts: TrapCounts): number =>
+    Object.values(counts).reduce((sum, calls) => sum + calls, 0);
+
+  /**
+   * A handler that traps everything and otherwise behaves exactly like its
+   * target, so the proxy is refused for *being* one rather than for misbehaving.
+   */
+  function countingHandler(
+    counts: TrapCounts,
+    overrides: ProxyHandler<NodeJS.ProcessEnv> = {},
+  ): ProxyHandler<NodeJS.ProcessEnv> {
+    const base: ProxyHandler<NodeJS.ProcessEnv> = {
+      defineProperty(t, key, descriptor): boolean {
+        counts.defineProperty += 1;
+        return Reflect.defineProperty(t, key, descriptor);
       },
-    });
+      deleteProperty(t, key): boolean {
+        counts.deleteProperty += 1;
+        return Reflect.deleteProperty(t, key);
+      },
+      get(t, key, receiver): unknown {
+        counts.get += 1;
+        return Reflect.get(t, key, receiver);
+      },
+      getOwnPropertyDescriptor(t, key): PropertyDescriptor | undefined {
+        counts.getOwnPropertyDescriptor += 1;
+        return Reflect.getOwnPropertyDescriptor(t, key);
+      },
+      getPrototypeOf(t): object | null {
+        counts.getPrototypeOf += 1;
+        return Reflect.getPrototypeOf(t);
+      },
+      has(t, key): boolean {
+        counts.has += 1;
+        return Reflect.has(t, key);
+      },
+      isExtensible(t): boolean {
+        counts.isExtensible += 1;
+        return Reflect.isExtensible(t);
+      },
+      ownKeys(t): (string | symbol)[] {
+        counts.ownKeys += 1;
+        return Reflect.ownKeys(t);
+      },
+      preventExtensions(t): boolean {
+        counts.preventExtensions += 1;
+        return Reflect.preventExtensions(t);
+      },
+      set(t, key, value, receiver): boolean {
+        counts.set += 1;
+        return Reflect.set(t, key, value, receiver);
+      },
+      setPrototypeOf(t, prototype): boolean {
+        counts.setPrototypeOf += 1;
+        return Reflect.setPrototypeOf(t, prototype);
+      },
+    };
+    return { ...base, ...overrides };
+  }
 
-    const { result, error } = capture(() => onWindows(() => createProbeEnv('capability:generic', source)));
+  /** A plain data map shaped like a real environment block. */
+  const envShaped = (): NodeJS.ProcessEnv => ({
+    PATH: FIRST,
+    PATHEXT: '.CMD',
+    SystemRoot: 'C:\\Windows',
+    windir: 'C:\\Windows',
+    COMSPEC: 'C:\\Windows\\system32\\cmd.exe',
+  });
 
+  /** Asserts the one verdict every proxied source gets, whatever it wraps. */
+  function expectRefusedUnread(result: unknown, error: unknown): void {
     expect(error).toBeInstanceOf(ProbeEnvironmentUnreadableError);
+    expect((error as ProbeEnvironmentUnreadableError).code).toBe(PROBE_ENV_UNREADABLE_CODE);
+    // The one static text — identical for every proxy shape below, so it says
+    // nothing about which kind of source was refused.
+    expect((error as Error).message).toBe(PROBE_ENV_UNREADABLE_MESSAGE);
+    expect((error as { cause?: unknown }).cause).toBeUndefined();
+    // No environment at all, not even a partial one.
     expect(result).toBeUndefined();
     for (const sentinel of SENTINELS) expect(rendered(error)).not.toContain(sentinel);
+  }
+
+  const proxySources: readonly [string, (counts: TrapCounts) => NodeJS.ProcessEnv][] = [
+    // A proxy with no handler of its own still cannot be trusted to describe
+    // itself the same way twice, so transparency earns it nothing.
+    ['a transparent proxy with no traps of its own', () => new Proxy(envShaped(), {})],
+    ['a proxy that faithfully delegates every trap', (counts) => new Proxy(envShaped(), countingHandler(counts))],
+    [
+      'a proxy around a null-prototype object',
+      (counts) =>
+        new Proxy(
+          Object.assign(Object.create(null) as NodeJS.ProcessEnv, { PATH: FIRST }),
+          countingHandler(counts),
+        ),
+    ],
+    [
+      'a proxy around a process.env-shaped data map',
+      (counts) => new Proxy(envShaped(), countingHandler(counts)),
+    ],
+    [
+      'a proxy whose ownKeys trap throws',
+      (counts) =>
+        new Proxy(
+          envShaped(),
+          countingHandler(counts, {
+            ownKeys(): never {
+              counts.ownKeys += 1;
+              throw new Error(TRAP_SECRET);
+            },
+          }),
+        ),
+    ],
+    [
+      'a proxy whose descriptor trap throws',
+      (counts) =>
+        new Proxy(
+          envShaped(),
+          countingHandler(counts, {
+            getOwnPropertyDescriptor(): never {
+              counts.getOwnPropertyDescriptor += 1;
+              throw new Error(TRAP_SECRET);
+            },
+          }),
+        ),
+    ],
+    [
+      'a proxy whose getPrototypeOf trap throws',
+      (counts) =>
+        new Proxy(
+          envShaped(),
+          countingHandler(counts, {
+            getPrototypeOf(): never {
+              counts.getPrototypeOf += 1;
+              throw new Error(TRAP_SECRET);
+            },
+          }),
+        ),
+    ],
+    [
+      'a proxy whose get trap throws',
+      (counts) =>
+        new Proxy(
+          envShaped(),
+          countingHandler(counts, {
+            get(): never {
+              counts.get += 1;
+              throw new Error(TRAP_SECRET);
+            },
+          }),
+        ),
+    ],
+    [
+      'a proxy that contradicts itself about its own keys',
+      (counts) =>
+        new Proxy(
+          {} as NodeJS.ProcessEnv,
+          countingHandler(counts, {
+            ownKeys(): string[] {
+              counts.ownKeys += 1;
+              return ['PATH'];
+            },
+            getOwnPropertyDescriptor(): PropertyDescriptor | undefined {
+              counts.getOwnPropertyDescriptor += 1;
+              return undefined;
+            },
+          }),
+        ),
+    ],
+    [
+      'a proxy that answers with a getter instead of a value',
+      (counts) =>
+        new Proxy(
+          envShaped(),
+          countingHandler(counts, {
+            getOwnPropertyDescriptor(): PropertyDescriptor {
+              counts.getOwnPropertyDescriptor += 1;
+              return { enumerable: true, configurable: true, get: () => TRAP_SECRET };
+            },
+          }),
+        ),
+    ],
+  ];
+
+  it.each(proxySources)('refuses %s before asking it anything', (_label, build) => {
+    for (const [, on] of platforms) {
+      const counts = trapCounts();
+      const source = build(counts);
+
+      const { result, error } = capture(() => on(() => createProbeEnv('capability:generic', source)));
+
+      expectRefusedUnread(result, error);
+      // The whole point: not one trap ran. The refusal is decided from the
+      // object's internal shape, so the source never observed the question.
+      expect(totalTraps(counts)).toBe(0);
+      expect(counts).toEqual(trapCounts());
+    }
   });
 
-  it('fails closed when the descriptor trap throws, without echoing it', () => {
-    const source = new Proxy({ PATH: FIRST } as NodeJS.ProcessEnv, {
-      getOwnPropertyDescriptor(): PropertyDescriptor {
-        throw new Error(TRAP_SECRET);
-      },
-    });
+  it.each(PROBE_ENV_POLICIES)('refuses a proxied source under %s too', (policy) => {
+    const counts = trapCounts();
+    const source = new Proxy(envShaped(), countingHandler(counts));
 
-    const { result, error } = capture(() => onWindows(() => createProbeEnv('capability:generic', source)));
+    const { result, error } = capture(() => onWindows(() => createProbeEnv(policy, source)));
 
-    expect(error).toBeInstanceOf(ProbeEnvironmentUnreadableError);
-    expect(result).toBeUndefined();
-    for (const sentinel of SENTINELS) expect(rendered(error)).not.toContain(sentinel);
+    expectRefusedUnread(result, error);
+    expect(totalTraps(counts)).toBe(0);
   });
 
-  it('fails closed on a source that contradicts itself about its own keys', () => {
-    // Enumerated as an own key, yet it has no own descriptor.
-    const source = new Proxy({} as NodeJS.ProcessEnv, {
-      ownKeys: (): string[] => ['PATH'],
-      getOwnPropertyDescriptor: (): PropertyDescriptor | undefined => undefined,
-    });
+  it('refuses a revoked proxy safely, without leaking the revocation', () => {
+    const counts = trapCounts();
+    const { proxy, revoke } = Proxy.revocable(envShaped(), countingHandler(counts));
+    revoke();
 
-    const { result, error } = capture(() => onPosix(() => createProbeEnv('capability:generic', source)));
+    // A revoked proxy answers every reflective operation with a TypeError, so
+    // touching it at all would replace the module's own verdict with a foreign
+    // error carrying foreign text.
+    expect(() => Reflect.ownKeys(proxy)).toThrow(TypeError);
 
-    expect(error).toBeInstanceOf(ProbeEnvironmentUnreadableError);
-    expect(result).toBeUndefined();
+    const { result, error } = capture(() => onWindows(() => createProbeEnv('capability:generic', proxy)));
+
+    expectRefusedUnread(result, error);
+    expect(totalTraps(counts)).toBe(0);
+    expect(rendered(error)).not.toContain('revoked');
+    expect(rendered(error)).not.toContain('TypeError');
   });
 
-  it('fails closed when a trap answers with a getter instead of a value', () => {
-    const source = new Proxy({ PATH: FIRST } as NodeJS.ProcessEnv, {
-      getOwnPropertyDescriptor: (): PropertyDescriptor => ({
-        enumerable: true,
-        configurable: true,
-        get: () => SECOND,
+  it('refuses a proxy even when it wraps the real process environment', () => {
+    const counts = trapCounts();
+    const source = new Proxy(process.env, countingHandler(counts));
+
+    const { result, error } = capture(() => createProbeEnv('capability:generic', source));
+
+    expectRefusedUnread(result, error);
+    expect(totalTraps(counts)).toBe(0);
+  });
+
+  it.each(['not an object at all', null, 'PATH=/usr/bin', 42] as const)(
+    'refuses a source that is %s',
+    (source) => {
+      const { result, error } = capture(() =>
+        onWindows(() => createProbeEnv('capability:generic', source as unknown as NodeJS.ProcessEnv)),
+      );
+      expectRefusedUnread(result, error);
+    },
+  );
+
+  // ── 8.4.1 The two confirmed review bypasses (R2-REVIEW-01) ───────────────
+  //
+  // Both exploit the same gap: the snapshot asks the source twice — once for
+  // its own keys, once per key for a descriptor — and a proxy is free to answer
+  // the two questions as if they were about two different objects. Measured
+  // against the pre-fix logic, the first produced `{ PATH: FIRST }` where a
+  // plain object produced a collision refusal, and the second produced
+  // `{ PATH: MASKED }` where a plain object produced an accessor refusal.
+
+  it('cannot lose a Windows collision by turning an enumerable key non-enumerable', () => {
+    const counts = trapCounts();
+    // Both spellings are own and enumerable when the source is enumerated.
+    const target: NodeJS.ProcessEnv = { PATH: FIRST, Path: SECOND };
+    const source = new Proxy(
+      target,
+      countingHandler(counts, {
+        getOwnPropertyDescriptor(t, key): PropertyDescriptor | undefined {
+          counts.getOwnPropertyDescriptor += 1;
+          const descriptor = Reflect.getOwnPropertyDescriptor(t, key);
+          // The bypass: the alias that made this a collision is described as
+          // non-enumerable once it is actually asked about, so the collision
+          // present at enumeration time disappears and `PATH` wins silently.
+          if (key === 'Path' && descriptor !== undefined) return { ...descriptor, enumerable: false };
+          return descriptor;
+        },
       }),
+    );
+
+    const { result, error } = capture(() => onWindows(() => createProbeEnv('capability:generic', source)));
+
+    // Refused for being a proxy, before either question was asked — so the
+    // mutation never got to happen and no `PATH` was forwarded.
+    expectRefusedUnread(result, error);
+    expect(totalTraps(counts)).toBe(0);
+    expect(result).toBeUndefined();
+
+    // Control: the same two spellings on a plain object are still a collision.
+    const { error: plainError } = capture(() =>
+      onWindows(() => createProbeEnv('capability:generic', { PATH: FIRST, Path: SECOND })),
+    );
+    expect(plainError).toBeInstanceOf(ProbeEnvironmentCollisionError);
+  });
+
+  it('cannot pass an accessor off as a data property', () => {
+    const counts = trapCounts();
+    const getter = { calls: 0 };
+    const target: NodeJS.ProcessEnv = {};
+    Object.defineProperty(target, 'PATH', {
+      enumerable: true,
+      configurable: true,
+      get(): string {
+        getter.calls += 1;
+        return FIRST;
+      },
     });
 
-    const { error } = capture(() => onWindows(() => createProbeEnv('capability:generic', source)));
-    expect(error).toBeInstanceOf(ProbeEnvironmentUnreadableError);
+    const source = new Proxy(
+      target,
+      countingHandler(counts, {
+        getOwnPropertyDescriptor(t, key): PropertyDescriptor | undefined {
+          counts.getOwnPropertyDescriptor += 1;
+          // The bypass: a real accessor is described as a plain data property,
+          // so the binding accessor refusal never triggers.
+          if (key === 'PATH') {
+            return { value: MASKED, enumerable: true, configurable: true, writable: true };
+          }
+          return Reflect.getOwnPropertyDescriptor(t, key);
+        },
+      }),
+    );
+
+    const { result, error } = capture(() => onWindows(() => createProbeEnv('capability:generic', source)));
+
+    expectRefusedUnread(result, error);
+    expect(totalTraps(counts)).toBe(0);
+    // Neither the mask nor the getter behind it ever surfaced.
+    expect(getter.calls).toBe(0);
+    expect(JSON.stringify(result ?? {})).not.toContain(MASKED);
+    expect(rendered(error)).not.toContain(MASKED);
+
+    // Control: the same accessor on a plain object is still refused as one.
+    const { error: plainError } = capture(() =>
+      onWindows(() => createProbeEnv('capability:generic', target)),
+    );
+    expect(plainError).toBeInstanceOf(ProbeEnvironmentUnreadableError);
+    expect(getter.calls).toBe(0);
   });
 
   // ── 8.5 Each value comes from exactly one descriptor read ────────────────
+  //
+  // A proxied source is refused outright, so the reflection this module performs
+  // can no longer be counted from inside the object. It is counted from the
+  // operations instead: `Reflect.ownKeys` and `Object.getOwnPropertyDescriptor`
+  // are wrapped for the duration of the call, and only reads of *this* source
+  // are recorded. The source itself stays an ordinary plain object.
+
+  interface ReflectionLog {
+    readonly ownKeysCalls: number;
+    readonly descriptorReads: readonly string[];
+  }
+
+  function watchReflection<T>(
+    source: object,
+    run: () => T,
+    afterDescriptor?: (key: PropertyKey) => void,
+  ): { result: T | undefined; error: unknown; log: ReflectionLog } {
+    const originalOwnKeys = Reflect.ownKeys;
+    const originalDescriptor = Object.getOwnPropertyDescriptor;
+    let ownKeysCalls = 0;
+    const descriptorReads: string[] = [];
+
+    Reflect.ownKeys = function ownKeys(target: object): (string | symbol)[] {
+      if (target === source) ownKeysCalls += 1;
+      return originalOwnKeys(target);
+    };
+    Object.getOwnPropertyDescriptor = function getOwnPropertyDescriptor(
+      target: object,
+      key: PropertyKey,
+    ): PropertyDescriptor | undefined {
+      if (target !== source) return originalDescriptor(target, key);
+      descriptorReads.push(String(key));
+      const descriptor = originalDescriptor(target, key);
+      afterDescriptor?.(key);
+      return descriptor;
+    } as typeof Object.getOwnPropertyDescriptor;
+
+    try {
+      const { result, error } = capture(run as () => NodeJS.ProcessEnv);
+      return { result: result as T | undefined, error, log: { ownKeysCalls, descriptorReads } };
+    } finally {
+      Reflect.ownKeys = originalOwnKeys;
+      Object.getOwnPropertyDescriptor = originalDescriptor;
+    }
+  }
 
   it('enumerates once and reads each relevant descriptor exactly once', () => {
-    const target: NodeJS.ProcessEnv = {
+    const source: NodeJS.ProcessEnv = {
       PATH: FIRST,
       PATHEXT: '.CMD',
-      Path: undefined,
       AO_UNKNOWN_ENV: SECOND,
       ANTHROPIC_API_KEY: SECRET_VALUES['ANTHROPIC_API_KEY'] ?? '',
     };
-    delete target['Path'];
 
-    let ownKeysCalls = 0;
-    const descriptorReads: string[] = [];
-    const getReads: string[] = [];
-    const source = new Proxy(target, {
-      ownKeys(t): (string | symbol)[] {
-        ownKeysCalls += 1;
-        return Reflect.ownKeys(t);
-      },
-      getOwnPropertyDescriptor(t, key): PropertyDescriptor | undefined {
-        descriptorReads.push(String(key));
-        return Reflect.getOwnPropertyDescriptor(t, key);
-      },
-      get(t, key, receiver): unknown {
-        getReads.push(String(key));
-        return Reflect.get(t, key, receiver);
-      },
-    });
+    const { result, log } = watchReflection(source, () =>
+      onWindows(() => createProbeEnv('capability:generic', source)),
+    );
 
-    const env = onWindows(() => createProbeEnv('capability:generic', source));
-
-    expect(env).toEqual({ PATH: FIRST, PATHEXT: '.CMD' });
+    expect(result).toEqual({ PATH: FIRST, PATHEXT: '.CMD' });
     // One enumeration for the whole call, not one per allow-listed name.
-    expect(ownKeysCalls).toBe(1);
+    expect(log.ownKeysCalls).toBe(1);
     // Exactly one descriptor read per key a policy could forward, and no read at
     // all for the credential variable next to them.
-    expect(descriptorReads).toEqual(['PATH', 'PATHEXT']);
-    // No `source[name]`, no `Reflect.get`: nothing is resolved through the
-    // prototype chain, so a selected value can only be its own property's.
-    expect(getReads).toEqual([]);
+    expect(log.descriptorReads).toEqual(['PATH', 'PATHEXT']);
   });
 
   it('takes a selected value from its snapshot, not from a later lookup', () => {
@@ -769,46 +1114,84 @@ describe('the source environment is snapshotted once, from its own enumerable pr
     // prototype offers a different `PATHEXT` underneath. A second lookup — a
     // `source[name]` read, or `Reflect.get` — would therefore miss `PATH`
     // entirely and answer `PATHEXT` with the inherited value.
-    const prototype = { PATHEXT: INHERITED };
-    const target: NodeJS.ProcessEnv = Object.assign(Object.create(prototype) as NodeJS.ProcessEnv, {
-      PATH: FIRST,
-      PATHEXT: SECOND,
-    });
+    const source: NodeJS.ProcessEnv = Object.assign(
+      Object.create({ PATHEXT: INHERITED }) as NodeJS.ProcessEnv,
+      { PATH: FIRST, PATHEXT: SECOND },
+    );
 
-    const source = new Proxy(target, {
-      getOwnPropertyDescriptor(t, key): PropertyDescriptor | undefined {
-        const descriptor = Reflect.getOwnPropertyDescriptor(t, key);
-        delete (t as Record<string, unknown>)[key as string];
-        return descriptor;
+    const { result } = watchReflection(
+      source,
+      () => onWindows(() => createProbeEnv('capability:generic', source)),
+      (key) => {
+        delete (source as Record<string, unknown>)[key as string];
       },
-    });
+    );
 
-    const env = onWindows(() => createProbeEnv('capability:generic', source));
-
-    expect(env).toEqual({ PATH: FIRST, PATHEXT: SECOND });
-    expect(JSON.stringify(env)).not.toContain(INHERITED);
+    expect(result).toEqual({ PATH: FIRST, PATHEXT: SECOND });
+    expect(JSON.stringify(result)).not.toContain(INHERITED);
+    // Nothing own is left: any later lookup could only have answered from the
+    // prototype, and neither value above came from there.
+    expect(Object.keys(source)).toEqual([]);
   });
 
   it('fails closed when a property vanishes before it has been captured', () => {
     // The mirror image: the source removes a key that was enumerated but not yet
     // read. There is then no own property to take a value from, and the
     // inherited one underneath is not an answer, so nothing is built.
-    const target: NodeJS.ProcessEnv = Object.assign(
+    const source: NodeJS.ProcessEnv = Object.assign(
       Object.create({ PATHEXT: INHERITED }) as NodeJS.ProcessEnv,
       { PATH: FIRST, PATHEXT: SECOND },
     );
 
-    const source = new Proxy(target, {
-      getOwnPropertyDescriptor(t, key): PropertyDescriptor | undefined {
-        if (key === 'PATH') delete (t as Record<string, unknown>)['PATHEXT'];
-        return Reflect.getOwnPropertyDescriptor(t, key);
+    const { result, error } = watchReflection(
+      source,
+      () => onWindows(() => createProbeEnv('capability:generic', source)),
+      (key) => {
+        if (key === 'PATH') delete (source as Record<string, unknown>)['PATHEXT'];
       },
-    });
-
-    const { result, error } = capture(() => onWindows(() => createProbeEnv('capability:generic', source)));
+    );
 
     expect(error).toBeInstanceOf(ProbeEnvironmentUnreadableError);
     expect(result).toBeUndefined();
+  });
+});
+
+describe('the real process environment is read as itself, not through a wrapper', () => {
+  it('is not a proxy, so the guard lets the ordinary snapshot run', () => {
+    expect(types.isProxy(process.env)).toBe(false);
+  });
+
+  it.each(PROBE_ENV_POLICIES)('still builds a usable environment for %s', (policy) => {
+    const env = createProbeEnv(policy, process.env);
+    expect(Object.isFrozen(env)).toBe(true);
+    for (const name of Object.keys(env)) {
+      expect(probeEnvAllowlist(policy)).toContain(name);
+      // Only plain data values are ever carried out of the real environment.
+      expect(typeof env[name]).toBe('string');
+      const descriptor = Object.getOwnPropertyDescriptor(env, name);
+      expect(descriptor && 'value' in descriptor).toBe(true);
+    }
+  });
+
+  it.each(PROBE_ENV_POLICIES)('carries no credential or loader variable for %s', (policy) => {
+    const env = createProbeEnv(policy, process.env);
+    for (const name of [
+      ...FORBIDDEN_CHILD_ENV_VARS,
+      ...WITHHELD_AUTH_ENV_VARS,
+      ...LOADER_INJECTION_ENV_VARS,
+    ]) {
+      expect(env).not.toHaveProperty(name);
+    }
+  });
+
+  it('leaves the real process environment untouched', () => {
+    const before = Object.keys(process.env).sort();
+    const pathBefore = process.env['PATH'];
+
+    for (const policy of PROBE_ENV_POLICIES) createProbeEnv(policy, process.env);
+
+    expect(Object.keys(process.env).sort()).toEqual(before);
+    expect(process.env['PATH']).toBe(pathBefore);
   });
 });
 
