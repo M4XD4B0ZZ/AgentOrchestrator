@@ -550,17 +550,47 @@ export async function runCommand(
   }
 
   return await new Promise<CommandResult>((resolvePromise) => {
-    const child = spawn(plan.file, [...plan.args], {
-      env: options.env,
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-      shell: false,
-      windowsHide: true,
-      windowsVerbatimArguments: plan.verbatim,
-      // On POSIX this makes the child a process-group leader so the whole tree
-      // can be signalled. Windows uses taskkill /T instead.
-      detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let child: ChildProcess;
+    try {
+      child = spawn(plan.file, [...plan.args], {
+        env: options.env,
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        shell: false,
+        windowsHide: true,
+        windowsVerbatimArguments: plan.verbatim,
+        // On POSIX this makes the child a process-group leader so the whole tree
+        // can be signalled. Windows uses taskkill /T instead.
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (spawnError) {
+      // A resolved candidate that exists as a regular file but is not a valid
+      // executable for this platform/architecture can make `spawn()` throw
+      // synchronously instead of emitting the `'error'` event handled below —
+      // observed as `spawn UNKNOWN` on this runtime. Reported through the exact
+      // same result shape as that event, so a caller never has to distinguish
+      // "failed before starting" from "failed after starting", and no timer,
+      // listener or process-tree resource is ever registered for a child that
+      // was never created (AO-FOUNDATION-REM-003B-R3-RR).
+      const errnoCode = safeErrnoCode(spawnError);
+      const notFound = errnoCode === 'ENOENT';
+      resolvePromise(
+        finish({
+          started: false,
+          outcome: notFound ? 'NOT_FOUND' : 'SPAWN_FAILED',
+          exitCode: null,
+          signal: null,
+          stdout: '',
+          stderr: '',
+          failureCode: notFound ? 'EXECUTABLE_NOT_FOUND' : 'SPAWN_FAILED',
+          errnoCode,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          processTreeKilled: false,
+        }),
+      );
+      return;
+    }
 
     const stdout = new BoundedSink(maxStdoutBytes);
     const stderr = new BoundedSink(maxStderrBytes);
