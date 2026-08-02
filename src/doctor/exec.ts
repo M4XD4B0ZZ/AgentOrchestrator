@@ -16,10 +16,12 @@
  *    only that shim leaves the real program running forever; `taskkill /T /F`
  *    with a validated numeric PID is used instead, falling back to a direct
  *    kill of the immediate child if that cannot be established or fails.
- *    After a kill, the module waits — with a bound — for the process to
- *    actually be gone, and reports a distinct failure code if it is not.
- *    Neither path proves every descendant is gone; a verified process-tree
- *    guarantee is AO-008, still open.
+ *    After that best-effort termination attempt, the module waits — with a
+ *    bound — only for the immediate child's own `close` event, and reports a
+ *    distinct failure code if that event is not observed in time. Observing
+ *    that event confirms only that the immediate child has exited; it says
+ *    nothing about whether any descendant has exited. A verified, enumerated
+ *    process-tree termination is AO-008, still open.
  *  - Failures are *data*, never exceptions, and every failure carries a fixed
  *    status code rather than an exception message: a missing program, a spawn
  *    error, a timeout, an exceeded output limit and a failed kill are all
@@ -452,8 +454,11 @@ function killProcessTree(child: ChildProcess): boolean {
     }
   }
 
-  // POSIX: the child is spawned detached, so it leads its own process group and
-  // the negative PID reaches every descendant.
+  // POSIX: the child is spawned detached, so it leads its own process group.
+  // process.kill(-pid, 'SIGKILL') is a best-effort attempt to signal that
+  // process group; it is not an enumeration of descendants, and a descendant
+  // that has left the group (or session) is not demonstrably reached by it.
+  // Verified, enumerated process-tree coverage is AO-008, still open.
   try {
     process.kill(-pid, 'SIGKILL');
     return true;
