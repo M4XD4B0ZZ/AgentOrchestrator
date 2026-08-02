@@ -50,7 +50,7 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
  */
 export const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
 
-/** How long to wait for a killed process tree to actually disappear. */
+/** How long to wait for the immediate child's `close` event after a best-effort termination attempt. */
 export const DEFAULT_KILL_GRACE_MS = 5_000;
 
 /**
@@ -119,7 +119,10 @@ export interface CommandResult {
   /** Whether the stream hit its byte budget and was cut off. */
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
-  /** Whether a process-tree kill was issued and confirmed to have been sent. */
+  /**
+   * Whether the best-effort termination attempt (see {@link killProcessTree})
+   * reported success — not a verified absence of every descendant process.
+   */
   readonly processTreeKilled: boolean;
 }
 
@@ -131,7 +134,7 @@ export interface RunOptions {
   readonly maxStdoutBytes?: number;
   /** Hard byte budget for stderr. Defaults to {@link DEFAULT_MAX_OUTPUT_BYTES}. */
   readonly maxStderrBytes?: number;
-  /** How long to wait for a killed tree to disappear. */
+  /** How long to wait for the immediate child's `close` event after a termination attempt. */
   readonly killGraceMs?: number;
 }
 
@@ -403,7 +406,7 @@ class BoundedSink {
 }
 
 /**
- * Terminates a child **and everything it started**.
+ * Attempts, best-effort, to terminate a child and its known process tree.
  *
  * On Windows, `child.kill()` targets only the immediate process. For a `.cmd`
  * shim that is `cmd.exe`, and the actual tool keeps running — which is exactly
@@ -419,7 +422,9 @@ class BoundedSink {
  * descendant is gone; a bounded process-tree guarantee is AO-008's, not this
  * module's.
  *
- * @returns whether a tree kill was successfully issued.
+ * @returns whether the termination attempt reported success — via the
+ * tree-kill mechanism or the immediate-child fallback; not a verified
+ * absence of every descendant.
  */
 function killProcessTree(child: ChildProcess): boolean {
   const pid = child.pid;
@@ -612,7 +617,7 @@ export async function runCommand(
       resolvePromise(result);
     };
 
-    /** Terminates the tree once and starts the bounded wait for it to be gone. */
+    /** Runs the best-effort termination attempt once and starts the bounded wait for the immediate child's `close` event. */
     const terminate = (reason: Exclude<Termination, 'NONE'>): void => {
       if (killIssued) return;
       killIssued = true;
@@ -620,8 +625,10 @@ export async function runCommand(
       treeKilled = killProcessTree(child);
 
       graceTimer = setTimeout(() => {
-        // The tree outlived the kill: report that distinctly rather than
-        // pretending the command merely timed out.
+        // The immediate child's `close` event was not observed within the
+        // grace window: report that distinctly rather than pretending the
+        // command merely timed out. This does not confirm any descendant is
+        // still running; full process-tree verification remains AO-008.
         settle(
           finish({
             started: true,

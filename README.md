@@ -135,11 +135,12 @@ A read-only local diagnosis. It:
   Windows via `taskkill /T /F` with a validated numeric PID, so a `.cmd`
   shim's real program is targeted too, not just the shim, falling back to a
   direct kill of the immediate child if `taskkill` cannot be established or
-  fails. The module then waits, with a bound, for the tree to actually
-  disappear, reporting a distinct failure code if it does not. Neither a
-  successful `taskkill` call nor the direct-kill fallback proves every
-  descendant is gone; a verified process-tree guarantee is **AO-008**, still
-  open;
+  fails. The module then waits, with a bound, for the immediate child's
+  `close` event — not for a verified absence of the whole tree — reporting a
+  distinct failure code if that event is not observed within the grace
+  window. Neither a successful `taskkill` call nor the direct-kill fallback
+  proves every descendant is gone; a verified process-tree guarantee is
+  **AO-008**, still open;
 - checks that Claude Code reports a **Claude subscription** login and that
   Codex reports a **ChatGPT** login, using a fail-closed allow-list. The Codex
   check accepts *only* a command whose total normalised output — stdout and
