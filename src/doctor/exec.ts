@@ -28,10 +28,14 @@
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { statSync } from 'node:fs';
-import { delimiter as pathDelimiter, extname, isAbsolute, join } from 'node:path';
+import { realpathSync, statSync } from 'node:fs';
+import { delimiter as pathDelimiter, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import { safeErrnoCode } from '../core/safe-error.js';
+import {
+  encodeWindowsBatchArgument,
+  UnsupportedWindowsBatchArgumentError,
+} from './internal/windows-batch-command.js';
 import { windowsSystemTool } from './internal/windows-system-tools.js';
 
 /** Default per-command wall-clock budget. */
@@ -147,6 +151,36 @@ function isRegularFile(path: string): boolean {
   }
 }
 
+/**
+ * Resolves `path` to its canonical, absolute form and confirms it is still a
+ * regular file *after* canonicalisation — never before. Symlink/junction
+ * targets and 8.3-alias paths are followed by `realpathSync.native` first, so
+ * the value returned here (and only this value) is what every later
+ * consumer — validation, logging, the actual spawn — sees. Returns `null` for
+ * anything that does not resolve to an existing regular file: absent,
+ * unreadable, or a directory (AO-FOUNDATION-REM-003B-R1).
+ */
+function canonicalRegularFile(path: string): string | null {
+  let canonical: string;
+  try {
+    canonical = realpathSync.native(path);
+  } catch {
+    return null;
+  }
+  return isRegularFile(canonical) ? canonical : null;
+}
+
+/** A command containing a path separator names a file directly; PATH plays no role. */
+function hasPathSeparator(command: string): boolean {
+  return command.includes('/') || command.includes('\\');
+}
+
+/** `cwd`, absolutely resolved; `process.cwd()` at the moment this runs if `cwd` is absent. */
+function effectiveSpawnCwd(cwd: string | undefined): string {
+  if (cwd === undefined) return process.cwd();
+  return isAbsolute(cwd) ? cwd : resolvePath(cwd);
+}
+
 /** `env['PATH']`, split on the platform delimiter. Never throws. */
 function pathDirectories(env: NodeJS.ProcessEnv): readonly string[] {
   const raw = env['PATH'];
@@ -184,10 +218,35 @@ function pathextEntries(env: NodeJS.ProcessEnv): readonly string[] {
  * (existing, regular file) rather than trusted verbatim: the caller still
  * decides *which* absolute path to probe, this only confirms there is a
  * file there before a spawn attempt is made.
+ *
+ * Every candidate this function returns is the **absolute, canonical**
+ * result of {@link canonicalRegularFile} — never a raw joined or relative
+ * path. Relative PATH segments and a relative explicit `command` (one
+ * containing a path separator) are resolved against exactly `cwd` — the same
+ * effective spawn CWD `planSpawn` uses for the actual `spawn()` call, so
+ * lookup and execution can never disagree about which file was validated
+ * (AO-FOUNDATION-REM-003B-R1). `cwd` defaults to `process.cwd()` at call
+ * time when omitted, matching a caller that never passes `options.cwd`.
  */
-export function resolveOnPath(command: string, env: NodeJS.ProcessEnv): readonly string[] {
+export function resolveOnPath(
+  command: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string = process.cwd(),
+): readonly string[] {
+  const baseCwd = effectiveSpawnCwd(cwd);
+
   if (isAbsolute(command)) {
-    return isRegularFile(command) ? [command] : [];
+    const canonical = canonicalRegularFile(command);
+    return canonical === null ? [] : [canonical];
+  }
+
+  if (hasPathSeparator(command)) {
+    // An explicit relative program path is resolved directly against the
+    // effective spawn CWD, exactly once, and never searched on PATH — this
+    // mirrors Win32 CreateProcess semantics for a name containing a
+    // directory separator.
+    const canonical = canonicalRegularFile(resolvePath(baseCwd, command));
+    return canonical === null ? [] : [canonical];
   }
 
   const directories = pathDirectories(env);
@@ -200,15 +259,17 @@ export function resolveOnPath(command: string, env: NodeJS.ProcessEnv): readonly
     const hasExplicitExtension = extname(command) !== '';
     const extensions = hasExplicitExtension ? [''] : pathextEntries(env);
     for (const dir of directories) {
+      const dirAbsolute = isAbsolute(dir) ? dir : resolvePath(baseCwd, dir);
       for (const ext of extensions) {
-        const candidate = join(dir, command + ext);
-        if (isRegularFile(candidate)) candidates.push(candidate);
+        const canonical = canonicalRegularFile(join(dirAbsolute, command + ext));
+        if (canonical !== null) candidates.push(canonical);
       }
     }
   } else {
     for (const dir of directories) {
-      const candidate = join(dir, command);
-      if (isRegularFile(candidate)) candidates.push(candidate);
+      const dirAbsolute = isAbsolute(dir) ? dir : resolvePath(baseCwd, dir);
+      const canonical = canonicalRegularFile(join(dirAbsolute, command));
+      if (canonical !== null) candidates.push(canonical);
     }
   }
 
@@ -230,50 +291,70 @@ interface SpawnPlan {
 }
 
 /**
- * Picks the best resolved candidate and builds the spawn plan.
+ * Static, safe message for a batch argument this codec cannot encode. Never
+ * carries the argument's content (AO-FOUNDATION-REM-003B-R2/R3): see
+ * `./internal/windows-batch-command.js` for why an embedded `"` has no
+ * supported encoding through the trusted cmd.exe fallback.
+ */
+const UNSUPPORTED_BATCH_ARGUMENT_MESSAGE =
+  'Refusing to spawn a diagnostic process: a batch argument contains a literal double quote, ' +
+  'which has no round-trip-safe encoding through cmd.exe. Details are withheld.';
+
+/**
+ * Picks the spawn plan from exactly the **first** resolved PATH/PATHEXT
+ * candidate — never a global search for a preferred extension — and builds
+ * it.
  *
  * On Windows, npm installs both an extension-less shell script and a `.cmd`
- * shim, and Node refuses to execute either directly (CVE-2024-27980). A real
- * executable is therefore preferred, and a batch shim is run through
- * `cmd.exe /d /s /c ""<target>" <args>"`.
+ * shim, and Node refuses to execute either directly (CVE-2024-27980). The
+ * first candidate decides the shape: a `.cmd`/`.bat` hit is run through
+ * `cmd.exe /d /s /c ""<target>" <args>"`; anything else (`.exe`, `.com`, or
+ * a bare executable) is spawned directly. A later, lower-priority candidate
+ * of a different extension never overrides this (AO-FOUNDATION-REM-003B-R2)
+ * — resolution order alone decides, exactly as it would for a real Windows
+ * `CreateProcess` PATH search.
  *
  * That doubled-quote form is the shape `/s` is specified for: cmd strips the
  * outer pair and takes the rest verbatim, so a target path containing spaces —
- * `C:\Program Files\nodejs\npm.cmd` — stays a single token. Building it is safe
- * because the target is quoted and every argument has already passed
- * {@link assertSafeArgs}, which excludes spaces, quotes and every shell
- * metacharacter. A target path containing a quote is refused outright.
+ * `C:\Program Files\nodejs\npm.cmd` — stays a single token. Every batch
+ * argument is encoded by {@link encodeWindowsBatchArgument}
+ * (AO-FOUNDATION-REM-003B-R2/R3); a target path containing a quote is
+ * refused outright.
  */
 function planSpawn(
   command: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
+  cwd: string | undefined,
 ): SpawnPlan | null {
-  const candidates = resolveOnPath(command, env);
-  if (candidates.length === 0) return null;
+  const candidates = resolveOnPath(command, env, effectiveSpawnCwd(cwd));
+  const first = candidates[0];
+  if (first === undefined) return null;
 
-  const executable = candidates.find((c) => ['.exe', '.com'].includes(extname(c).toLowerCase()));
-  if (executable !== undefined) {
-    return { file: executable, args, verbatim: false };
-  }
-
-  const batch = candidates.find((c) => WINDOWS_BATCH_EXTENSIONS.has(extname(c).toLowerCase()));
-  if (batch !== undefined) {
-    if (batch.includes('"')) {
+  if (WINDOWS_BATCH_EXTENSIONS.has(extname(first).toLowerCase())) {
+    if (first.includes('"')) {
       throw new UnsafeArgumentError(
-        `Refusing to run ${JSON.stringify(batch)} through cmd.exe: the path contains a quote.`,
+        `Refusing to run ${JSON.stringify(first)} through cmd.exe: the path contains a quote.`,
       );
+    }
+    let encodedArgs: string[];
+    try {
+      encodedArgs = args.map(encodeWindowsBatchArgument);
+    } catch (error) {
+      if (error instanceof UnsupportedWindowsBatchArgumentError) {
+        throw new UnsafeArgumentError(UNSUPPORTED_BATCH_ARGUMENT_MESSAGE);
+      }
+      throw error;
     }
     // The trusted, environment-independent cmd.exe only: COMSPEC is never
     // read, so a caller-controlled COMSPEC cannot substitute the interpreter
     // (AO-FOUNDATION-REM-003B).
     const comspec = windowsSystemTool('cmd.exe');
-    const inner = [`"${batch}"`, ...args].join(' ');
+    const inner = [`"${first}"`, ...encodedArgs].join(' ');
     return { file: comspec, args: ['/d', '/s', '/c', `"${inner}"`], verbatim: true };
   }
 
-  const first = candidates[0];
-  return first === undefined ? null : { file: first, args, verbatim: false };
+  return { file: first, args, verbatim: false };
 }
 
 /**
@@ -430,7 +511,7 @@ export async function runCommand(
 
   let plan: SpawnPlan | null;
   try {
-    plan = planSpawn(command, args, options.env);
+    plan = planSpawn(command, args, options.env, options.cwd);
   } catch (error) {
     // UnsafeArgumentError is a programming error and must keep propagating as
     // an exception (documented above). Anything else here can only be

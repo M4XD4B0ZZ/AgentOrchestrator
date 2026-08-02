@@ -57,7 +57,7 @@
  */
 
 import { realpathSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 /**
  * The one environment-independent anchor this module ever reads from. An NT
@@ -115,6 +115,14 @@ export class WindowsSystemToolUnavailableError extends Error {
   constructor() {
     super(WINDOWS_SYSTEM_TOOL_UNAVAILABLE_MESSAGE);
     this.name = 'WindowsSystemToolUnavailableError';
+    // The default V8 stack trace names every frame's absolute file path —
+    // this module's own on-disk location, and (through the call chain) every
+    // caller's, which can include a local username or temp path. Overwriting
+    // it with the static name/message pair removes that leak while keeping
+    // `.stack` a string, exactly as callers of a normal `Error` expect
+    // (AO-FOUNDATION-REM-003B-R5). No `Error.captureStackTrace` call is made,
+    // so no frame is ever captured in the first place.
+    this.stack = `${this.name}: ${this.message}`;
   }
 }
 
@@ -151,8 +159,38 @@ function dependencySlot(container: unknown, slot: DependencySlot): ExternalFunct
   return read.value as ExternalFunction;
 }
 
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
+/**
+ * A normal Windows drive-absolute path (`X:\...`), and nothing else. This
+ * single check is what rejects every non-canonical shape a spoofed or
+ * malfunctioning `realpath` dependency could hand back: a relative path
+ * (`System32\cmd.exe`) does not start with a drive letter; a UNC path
+ * (`\\server\share\...`) and every device-namespace path (`\\?\GLOBALROOT\...`,
+ * `\\?\Volume{...}\...`, `\\.\...`) start with `\\`, never with a drive
+ * letter (AO-FOUNDATION-REM-003B-R4).
+ */
+const WINDOWS_DRIVE_ABSOLUTE_PATTERN = /^[A-Za-z]:\\/;
+
+function isCanonicalDriveAbsolutePath(value: unknown): value is string {
+  return typeof value === 'string' && WINDOWS_DRIVE_ABSOLUTE_PATTERN.test(value);
+}
+
+/**
+ * Fail-closed evaluation of one boolean `fs.Stats` predicate (`isFile`,
+ * `isDirectory`) on an already-`stat`ed value: reading the property, calling
+ * it, and every step of doing so are each behind their own {@link attempt},
+ * so a throwing accessor or a throwing method yields a refusal rather than a
+ * foreign exception.
+ */
+function statPredicateHolds(stats: unknown, predicateName: 'isFile' | 'isDirectory'): boolean {
+  if (typeof stats !== 'object' || stats === null) return false;
+
+  const predicate = attempt(() => (stats as Record<string, unknown>)[predicateName]);
+  if (!predicate.ok) return false;
+  if (typeof predicate.value !== 'function') return false;
+
+  const fn = predicate.value as ExternalFunction;
+  const verdict = attempt(() => Reflect.apply(fn, stats, []));
+  return verdict.ok && verdict.value === true;
 }
 
 /**
@@ -161,15 +199,21 @@ function isNonEmptyString(value: unknown): value is string {
  *
  * Steps, each behind its own {@link attempt}:
  *  1. the tool name must be a member of the closed union;
- *  2. the fixed anchor is canonicalised — this is what proves the boundary is
- *     reachable at all, independent of anything the tool-specific join below
- *     does;
- *  3. the raw `anchor/tool` path is canonicalised;
+ *  2. the fixed anchor is canonicalised, and the result must be a normal
+ *     Windows drive-absolute path — never relative, never the raw
+ *     `\\?\GLOBALROOT\...` namespace back again, never any other device
+ *     namespace or UNC path (AO-FOUNDATION-REM-003B-R4);
+ *  3. the raw `anchor/tool` path is canonicalised, under the same
+ *     drive-absolute constraint;
  *  4. the canonical path's parent must equal the canonical anchor exactly —
  *     a symlink or junction inside the anchor that redirects `tool` to a
  *     different directory is refused here, because its canonical parent would
  *     not match;
- *  5. the canonical path must `stat` as an existing regular file.
+ *  5. the canonical path's basename, compared case-insensitively, must equal
+ *     the requested tool name exactly — a redirection to a same-directory
+ *     `evil.exe` is refused here even though its parent matches;
+ *  6. the canonical anchor must `stat` as an existing directory;
+ *  7. the canonical tool path must `stat` as an existing regular file.
  */
 function resolveWindowsSystemToolPath(
   tool: string,
@@ -183,31 +227,26 @@ function resolveWindowsSystemToolPath(
 
   const anchorCanonical = attempt(() => Reflect.apply(canonicalise, container, [SYSTEM_NAMESPACE_ANCHOR]));
   if (!anchorCanonical.ok) fail();
-  if (!isNonEmptyString(anchorCanonical.value)) fail();
+  if (!isCanonicalDriveAbsolutePath(anchorCanonical.value)) fail();
 
   const rawToolPath = join(SYSTEM_NAMESPACE_ANCHOR, tool);
   const toolCanonical = attempt(() => Reflect.apply(canonicalise, container, [rawToolPath]));
   if (!toolCanonical.ok) fail();
-  if (!isNonEmptyString(toolCanonical.value)) fail();
+  if (!isCanonicalDriveAbsolutePath(toolCanonical.value)) fail();
 
   const canonicalPath = toolCanonical.value;
   const canonicalParent = dirname(canonicalPath);
   if (canonicalParent.toLowerCase() !== anchorCanonical.value.toLowerCase()) fail();
 
-  const described = attempt(() => Reflect.apply(describe, container, [canonicalPath]));
-  if (!described.ok) fail();
+  if (basename(canonicalPath).toLowerCase() !== tool.toLowerCase()) fail();
 
-  const stats = described.value;
-  if (typeof stats !== 'object' || stats === null) fail();
+  const anchorDescribed = attempt(() => Reflect.apply(describe, container, [anchorCanonical.value]));
+  if (!anchorDescribed.ok) fail();
+  if (!statPredicateHolds(anchorDescribed.value, 'isDirectory')) fail();
 
-  const predicate = attempt(() => (stats as { isFile?: unknown }).isFile);
-  if (!predicate.ok) fail();
-  if (typeof predicate.value !== 'function') fail();
-
-  const isFile = predicate.value as ExternalFunction;
-  const verdict = attempt(() => Reflect.apply(isFile, stats, []));
-  if (!verdict.ok) fail();
-  if (verdict.value !== true) fail();
+  const toolDescribed = attempt(() => Reflect.apply(describe, container, [canonicalPath]));
+  if (!toolDescribed.ok) fail();
+  if (!statPredicateHolds(toolDescribed.value, 'isFile')) fail();
 
   return canonicalPath;
 }

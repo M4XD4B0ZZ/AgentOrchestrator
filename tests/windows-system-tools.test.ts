@@ -181,9 +181,7 @@ describe.runIf(IS_WINDOWS)('windowsSystemTool, the productive singleton', () => 
 
 describe('resolver validation, over the injectable test seam', () => {
   /** Distinguishes the anchor call (1st) from the tool call (2nd), by order. */
-  function sequencedRealpath(
-    behaviors: readonly ((path: string) => unknown)[],
-  ): (path: string) => unknown {
+  function sequenced(behaviors: readonly ((path: string) => unknown)[]): (path: string) => unknown {
     let index = 0;
     return (path: string): unknown => {
       const behavior = behaviors[Math.min(index, behaviors.length - 1)];
@@ -192,8 +190,19 @@ describe('resolver validation, over the injectable test seam', () => {
       return behavior(path);
     };
   }
+  const sequencedRealpath = sequenced;
 
-  const workingStat: WindowsSystemToolDependencies['stat'] = () => ({ isFile: () => true });
+  const CANONICAL_SYSTEM32 = 'C:\\Windows\\System32';
+  const canonicalTool = (tool: string): string => `${CANONICAL_SYSTEM32}\\${tool}`;
+
+  /** A fresh anchor-then-tool stat sequence (isDirectory, then isFile), both succeeding. */
+  function freshWorkingStat(): WindowsSystemToolDependencies['stat'] {
+    return sequenced([() => ({ isDirectory: () => true }), () => ({ isFile: () => true })]);
+  }
+  const workingStat: WindowsSystemToolDependencies['stat'] = () => ({
+    isFile: () => true,
+    isDirectory: () => true,
+  });
 
   it('refuses a tool name outside the closed union, without touching any dependency', () => {
     let realpathCalls = 0;
@@ -233,7 +242,7 @@ describe('resolver validation, over the injectable test seam', () => {
   it('fails closed when the tool itself cannot be canonicalised ("Tool fehlt")', () => {
     const resolve = createWindowsSystemToolResolverForTests({
       realpath: sequencedRealpath([
-        (p) => p,
+        () => CANONICAL_SYSTEM32,
         () => {
           throw new Error('tool unreachable');
         },
@@ -255,7 +264,7 @@ describe('resolver validation, over the injectable test seam', () => {
 
   it('fails closed when stat throws ("stat wirft")', () => {
     const resolve = createWindowsSystemToolResolverForTests({
-      realpath: (p) => p,
+      realpath: sequencedRealpath([() => CANONICAL_SYSTEM32, () => canonicalTool('cmd.exe')]),
       stat: () => {
         throw new Error('boom');
       },
@@ -265,34 +274,101 @@ describe('resolver validation, over the injectable test seam', () => {
 
   it('fails closed when the canonical path is a directory, not a regular file ("Tool ist Verzeichnis")', () => {
     const resolve = createWindowsSystemToolResolverForTests({
-      realpath: (p) => p,
-      stat: () => ({ isFile: () => false }),
+      realpath: sequencedRealpath([() => CANONICAL_SYSTEM32, () => canonicalTool('cmd.exe')]),
+      stat: sequenced([() => ({ isDirectory: () => true }), () => ({ isFile: () => false })]),
+    });
+    expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
+  });
+
+  it('fails closed when the canonical System32 anchor does not stat as a directory ("System32 ist keine Directory")', () => {
+    const resolve = createWindowsSystemToolResolverForTests({
+      realpath: sequencedRealpath([() => CANONICAL_SYSTEM32, () => canonicalTool('cmd.exe')]),
+      stat: sequenced([() => ({ isDirectory: () => false }), () => ({ isFile: () => true })]),
     });
     expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
   });
 
   it('fails closed when isFile is missing or not callable', () => {
     const resolveMissing = createWindowsSystemToolResolverForTests({
-      realpath: (p) => p,
-      stat: () => ({}),
+      realpath: sequencedRealpath([() => CANONICAL_SYSTEM32, () => canonicalTool('cmd.exe')]),
+      stat: sequenced([() => ({ isDirectory: () => true }), () => ({})]),
     });
     expect(() => resolveMissing('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
 
     const resolveNotCallable = createWindowsSystemToolResolverForTests({
-      realpath: (p) => p,
-      stat: () => ({ isFile: 'not-a-function' }),
+      realpath: sequencedRealpath([() => CANONICAL_SYSTEM32, () => canonicalTool('cmd.exe')]),
+      stat: sequenced([() => ({ isDirectory: () => true }), () => ({ isFile: 'not-a-function' })]),
     });
     expect(() => resolveNotCallable('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
   });
 
   it('fails closed when isFile itself throws', () => {
     const resolve = createWindowsSystemToolResolverForTests({
+      realpath: sequencedRealpath([() => CANONICAL_SYSTEM32, () => canonicalTool('cmd.exe')]),
+      stat: sequenced([
+        () => ({ isDirectory: () => true }),
+        () => ({
+          isFile: () => {
+            throw new Error('boom');
+          },
+        }),
+      ]),
+    });
+    expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
+  });
+
+  // ── R4: fully fail-closed canonical-shape validation ─────────────────────
+
+  it('fails closed when the anchor canonicalises to a relative path', () => {
+    const resolve = createWindowsSystemToolResolverForTests({
+      realpath: sequencedRealpath([() => 'System32', () => 'System32\\cmd.exe']),
+      stat: freshWorkingStat(),
+    });
+    expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
+  });
+
+  it('fails closed when the tool canonicalises to a relative path', () => {
+    const resolve = createWindowsSystemToolResolverForTests({
+      realpath: sequencedRealpath([() => CANONICAL_SYSTEM32, () => 'System32\\cmd.exe']),
+      stat: freshWorkingStat(),
+    });
+    expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
+  });
+
+  it('fails closed when realpath is a no-op and the raw GLOBALROOT device path passes through unchanged', () => {
+    const resolve = createWindowsSystemToolResolverForTests({
       realpath: (p) => p,
-      stat: () => ({
-        isFile: () => {
-          throw new Error('boom');
-        },
-      }),
+      stat: freshWorkingStat(),
+    });
+    expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
+  });
+
+  it('fails closed when the canonical result is a different device namespace', () => {
+    const resolve = createWindowsSystemToolResolverForTests({
+      realpath: sequencedRealpath([
+        () => '\\\\?\\Volume{guid}\\Windows\\System32',
+        () => '\\\\?\\Volume{guid}\\Windows\\System32\\cmd.exe',
+      ]),
+      stat: freshWorkingStat(),
+    });
+    expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
+  });
+
+  it('fails closed when the canonical result is a UNC path', () => {
+    const resolve = createWindowsSystemToolResolverForTests({
+      realpath: sequencedRealpath([
+        () => '\\\\server\\share\\System32',
+        () => '\\\\server\\share\\System32\\cmd.exe',
+      ]),
+      stat: freshWorkingStat(),
+    });
+    expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
+  });
+
+  it('fails closed when the tool canonicalises to the wrong basename in the correct parent ("evil.exe")', () => {
+    const resolve = createWindowsSystemToolResolverForTests({
+      realpath: sequencedRealpath([() => CANONICAL_SYSTEM32, () => `${CANONICAL_SYSTEM32}\\evil.exe`]),
+      stat: freshWorkingStat(),
     });
     expect(() => resolve('cmd.exe')).toThrow(WindowsSystemToolUnavailableError);
   });
@@ -340,11 +416,17 @@ describe('resolver validation, over the injectable test seam', () => {
   it('memoises only a fully validated success ("Erfolg wird memoiziert")', () => {
     let realpathCalls = 0;
     const resolve = createWindowsSystemToolResolverForTests({
-      realpath: (p) => {
-        realpathCalls += 1;
-        return p;
-      },
-      stat: workingStat,
+      realpath: sequencedRealpath([
+        () => {
+          realpathCalls += 1;
+          return CANONICAL_SYSTEM32;
+        },
+        () => {
+          realpathCalls += 1;
+          return canonicalTool('cmd.exe');
+        },
+      ]),
+      stat: freshWorkingStat(),
     });
 
     const first = resolve('cmd.exe');
@@ -373,12 +455,20 @@ describe('resolver validation, over the injectable test seam', () => {
 
   it('recovers on the very next call once the dependency starts working ("Fehler-zu-Erfolg-Retry")', () => {
     let broken = true;
+    let realpathCallIndex = 0;
+    let statCallIndex = 0;
     const resolve = createWindowsSystemToolResolverForTests({
-      realpath: (p) => {
+      realpath: () => {
         if (broken) throw new Error('temporarily broken');
-        return p;
+        const isAnchorCall = realpathCallIndex % 2 === 0;
+        realpathCallIndex += 1;
+        return isAnchorCall ? CANONICAL_SYSTEM32 : canonicalTool('taskkill.exe');
       },
-      stat: workingStat,
+      stat: () => {
+        const isAnchorCall = statCallIndex % 2 === 0;
+        statCallIndex += 1;
+        return isAnchorCall ? { isDirectory: () => true } : { isFile: () => true };
+      },
     });
 
     expect(() => resolve('taskkill.exe')).toThrow(WindowsSystemToolUnavailableError);
@@ -426,6 +516,32 @@ describe('resolver validation, over the injectable test seam', () => {
     expect(rendered).not.toContain(SECRET_PATH);
     expect(rendered).not.toContain('C:\\ao-secret');
     expect((error as { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it('the stack is exactly the static name/message pair, with no local file path of any kind (AO-FOUNDATION-REM-003B-R5)', () => {
+    const resolve = createWindowsSystemToolResolverForTests({
+      realpath: () => {
+        throw new Error('boom, thrown from ' + process.cwd());
+      },
+      stat: workingStat,
+    });
+
+    let thrown: unknown;
+    try {
+      resolve('cmd.exe');
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(WindowsSystemToolUnavailableError);
+    const error = thrown as InstanceType<typeof WindowsSystemToolUnavailableError>;
+
+    expect(error.stack).toBe(`${error.name}: ${error.message}`);
+    const stack = error.stack ?? '';
+    // No drive-absolute Windows path segment of any kind — repo, temp, or user.
+    expect(stack).not.toMatch(/[A-Za-z]:\\/);
+    expect(stack).not.toContain('windows-system-tools');
+    expect(stack).not.toContain(process.cwd());
   });
 });
 
@@ -543,7 +659,10 @@ describe.runIf(IS_WINDOWS)('exec.ts uses only the trusted resolver, never PATH o
     // space, parentheses, ampersand, caret, percent, exclamation mark.
     const scriptName = "AO wst (test) & tool ^ 100% done!.cmd";
     const script = join(dir, scriptName);
-    writeFileSync(script, '@echo off\r\necho ARG1=%1\r\necho ARG2=%2\r\n', 'utf8');
+    // %~1/%~2 (not %1/%2): every argument is now quote-wrapped by
+    // encodeWindowsBatchArgument (AO-FOUNDATION-REM-003B-R2/R3), so the tilde
+    // form is needed to read back the dequoted value.
+    writeFileSync(script, '@echo off\r\necho ARG1=%~1\r\necho ARG2=%~2\r\n', 'utf8');
 
     const res = await runCommand(script, ['--json', 'plain-arg'], {
       env: { PATH: process.env['PATH'] ?? '', PATHEXT: process.env['PATHEXT'] ?? '' },
