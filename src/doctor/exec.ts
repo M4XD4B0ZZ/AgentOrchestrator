@@ -571,8 +571,12 @@ export async function runCommand(
         shell: false,
         windowsHide: true,
         windowsVerbatimArguments: plan.verbatim,
-        // On POSIX this makes the child a process-group leader so the whole tree
-        // can be signalled. Windows uses taskkill /T instead.
+        // On POSIX this starts the child as leader of its own process group;
+        // killProcessTree later makes a best-effort attempt to signal that group
+        // via the negative PID. This is not an enumeration of descendants, and
+        // processes outside the group or session are not guaranteed to be
+        // reached — verified process-tree coverage remains AO-008, still open.
+        // Windows uses taskkill /T instead.
         detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
