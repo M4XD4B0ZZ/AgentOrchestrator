@@ -39,6 +39,7 @@ function harness(options: {
   const removed: string[] = [];
   const read: string[] = [];
   const settled: number[] = [];
+  const checked: number[] = [];
 
   const registry = new ExecArtifactRegistry({
     readPidFile: (path: string): string => {
@@ -48,7 +49,10 @@ function harness(options: {
       if (entry instanceof Error) throw entry;
       return entry;
     },
-    isAlive: (pid: number): boolean => !(options.dead ?? []).includes(pid),
+    isAlive: (pid: number): boolean => {
+      checked.push(pid);
+      return !(options.dead ?? []).includes(pid);
+    },
     kill: (pid: number): void => {
       killed.push(pid);
       const failure = options.killFails?.[pid];
@@ -65,7 +69,10 @@ function harness(options: {
     settleMs: 0,
   });
 
-  return { registry, killed, removed, read, settled };
+  // `checked` is the liveness probe. A PID that reaches it has already been
+  // aimed at the outside world, so an empty `checked` is the proof that a
+  // refused value never left the registry at all.
+  return { registry, killed, removed, read, settled, checked };
 }
 
 /** The errors an `AggregateError` collected, or a failure if it is not one. */
@@ -150,6 +157,83 @@ describe('a rejected PID file never reaches the kill seam', () => {
     const h = harness({ pidFiles: { 'C:\\pid.txt': '17628.5' } });
     expect(h.registry.claimPid('C:\\pid.txt')).toBeNull();
     expect(h.registry.claimedPids()).toEqual([]);
+  });
+});
+
+/**
+ * AO-008-S1-R1-REREV-F1: a PID file is only one of the two ways a PID enters
+ * the registry. `registerPid` takes a number directly, and used to store
+ * whatever it was handed. `registerPid(-1)` therefore reached both `isAlive`
+ * and `kill` — where on POSIX a negative argument means "every process in that
+ * process group", the exact opposite of the owned-PID guarantee. The invariant
+ * belongs at that lowest common entry point, which the parser sits above rather
+ * than in front of.
+ */
+describe('a directly registered PID must be one this run could own', () => {
+  /** Every direct registration the registry must refuse, whoever hands it over. */
+  const REFUSED: readonly [string, number][] = [
+    ['a negative PID', -1], // A — a POSIX process-group signal, not a process
+    ['zero', 0], // B — POSIX: the caller's own process group
+    ['NaN', Number.NaN], // C
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['-Infinity', Number.NEGATIVE_INFINITY],
+    ['a fraction', 1.5], // D
+    ['a negative fraction', -1.5],
+    ['one past MAX_SAFE_INTEGER', Number.MAX_SAFE_INTEGER + 1], // E — no longer exact
+    ['one past MIN_SAFE_INTEGER', Number.MIN_SAFE_INTEGER - 1],
+    ['an absurdly large finite number', 1e308],
+    ['a negative safe integer', -17_628],
+  ];
+
+  it.each(REFUSED)('never stores %s', (_label, pid) => {
+    const h = harness({});
+    h.registry.registerPid(pid);
+    expect(h.registry.claimedPids()).toEqual([]);
+  });
+
+  it.each(REFUSED)('never aims cleanup at %s', async (_label, pid) => {
+    const h = harness({});
+    h.registry.registerPid(pid);
+    h.registry.registerTempDir('C:\\scratch');
+
+    // Refusing the value is not itself a teardown failure, and it does not cost
+    // the artefacts that *are* valid their cleanup.
+    await expect(h.registry.cleanUp()).resolves.toBeUndefined();
+
+    expect(h.checked).toEqual([]);
+    expect(h.killed).toEqual([]);
+    expect(h.removed).toEqual(['C:\\scratch']);
+  });
+
+  // F
+  it.each<[string, number]>([
+    ['the smallest PID', 1],
+    ['a plain PID', 17_628],
+    ['MAX_SAFE_INTEGER itself', Number.MAX_SAFE_INTEGER],
+  ])('stores %s once and acts on it once', async (_label, pid) => {
+    const h = harness({});
+    h.registry.registerPid(pid);
+    h.registry.registerPid(pid);
+
+    expect(h.registry.claimedPids()).toEqual([pid]);
+
+    await expect(h.registry.cleanUp()).resolves.toBeUndefined();
+    expect(h.checked).toEqual([pid]);
+    expect(h.killed).toEqual([pid]);
+  });
+
+  // G
+  it('keeps only the valid PID out of a mixed run of registrations', async () => {
+    const h = harness({});
+    for (const pid of [-1, 0, 17_628.5, 17_628, Number.NaN, 17_628, Number.MAX_SAFE_INTEGER + 1]) {
+      h.registry.registerPid(pid);
+    }
+
+    expect(h.registry.claimedPids()).toEqual([17_628]);
+
+    await expect(h.registry.cleanUp()).resolves.toBeUndefined();
+    expect(h.checked).toEqual([17_628]);
+    expect(h.killed).toEqual([17_628]);
   });
 });
 

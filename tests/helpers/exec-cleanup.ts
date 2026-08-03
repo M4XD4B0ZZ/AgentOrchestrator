@@ -35,6 +35,24 @@ import { readFileSync, rmSync } from 'node:fs';
 const POSITIVE_DECIMAL_INTEGER = /^[1-9][0-9]*$/;
 
 /**
+ * Whether a number is a PID this test run may act on at all.
+ *
+ * This is the whole numeric invariant, in one place: an exact positive integer.
+ * It rules out the values that are not process identifiers but that the OS
+ * would still happily interpret — `0` and negatives, which on POSIX address a
+ * process *group* rather than a process; `NaN` and the infinities; fractions;
+ * and anything past the safe-integer range, where the number no longer stands
+ * for the value it was built from.
+ *
+ * Both entry points go through here, so neither can drift from the other:
+ * {@link parseOwnedHelperPid} for text, and {@link ExecArtifactRegistry.registerPid}
+ * for a number handed over directly.
+ */
+export function isValidOwnedPid(pid: number): boolean {
+  return Number.isSafeInteger(pid) && pid > 0;
+}
+
+/**
  * Parses a PID file's contents into a PID this test run may act on.
  *
  * Surrounding whitespace from a normal PID file (a trailing newline, CRLF) is
@@ -52,8 +70,7 @@ export function parseOwnedHelperPid(raw: string): number | undefined {
   const normalized = raw.trim();
   if (!POSITIVE_DECIMAL_INTEGER.test(normalized)) return undefined;
   const pid = Number(normalized);
-  if (!Number.isSafeInteger(pid)) return undefined; // e.g. 2^53 and above, Infinity
-  if (pid <= 0) return undefined;
+  if (!isValidOwnedPid(pid)) return undefined; // e.g. 2^53 and above, Infinity
   return pid;
 }
 
@@ -148,8 +165,18 @@ export class ExecArtifactRegistry {
    * Registers a PID this test run owns, once. A PID already registered — by an
    * in-body claim or by an earlier sweep of the same file — is not added again,
    * so it is only ever acted on once.
+   *
+   * This is the lowest point every numeric registration passes through, so the
+   * {@link isValidOwnedPid} check belongs here rather than at any one caller: a
+   * value that is not a PID this run could own is dropped, and so never reaches
+   * the liveness check or the kill in {@link cleanUp}. No caller has to have
+   * validated first, and none can bypass it by not doing so
+   * (AO-008-S1-R1-REREV-F1). Dropping is silent by design — a value that was
+   * never a PID means there is nothing to clean up, which is not a teardown
+   * failure.
    */
   registerPid(pid: number): void {
+    if (!isValidOwnedPid(pid)) return;
     if (!this.pids.includes(pid)) this.pids.push(pid);
   }
 
