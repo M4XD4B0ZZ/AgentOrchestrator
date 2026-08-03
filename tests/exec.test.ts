@@ -6,7 +6,7 @@
  * platform.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,11 +24,49 @@ const IS_WINDOWS = process.platform === 'win32';
 
 const tempDirs: string[] = [];
 const stragglerPids: number[] = [];
+const helperPidFiles: string[] = [];
 
 function makeTempDir(prefix = 'agent-loop-exec-'): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+/**
+ * Names the file a helper will record its own PID in, and registers that path
+ * for the teardown sweep at the moment it is named — before the helper even
+ * starts. The sweep therefore reaches the helper on paths the test body never
+ * gets to run: a test timeout inside `runCommand`, or an early return.
+ */
+function helperPidFile(dir: string, name: string): string {
+  const path = join(dir, name);
+  helperPidFiles.push(path);
+  return path;
+}
+
+/**
+ * Reads a helper's PID file and registers the PID for cleanup.
+ *
+ * Call this *before* any assertion about the command's result. A wrong outcome
+ * must never strand the helper: while the registration sat after the first
+ * expectation, a failing assertion threw past it and left a live `sleep.cjs`
+ * behind that teardown had no PID for.
+ *
+ * Only a positive safe integer read from this test's own PID file is ever
+ * registered — never a PID parsed out of a child's stdout, and never anything
+ * matched by process name.
+ */
+function claimHelperPid(pidFile: string): number | null {
+  let raw: string;
+  try {
+    raw = readFileSync(pidFile, 'utf8').trim();
+  } catch {
+    return null; // The helper never got far enough to record a PID.
+  }
+  const pid = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (!stragglerPids.includes(pid)) stragglerPids.push(pid);
+  return pid;
 }
 
 /** A CommonJS script that runs until it is killed. */
@@ -61,6 +99,14 @@ async function waitUntilDead(pid: number, budgetMs = 8_000): Promise<boolean> {
 }
 
 afterEach(async () => {
+  // Last-resort claim: covers the paths where the test body itself never ran
+  // to the in-body registration (assertion thrown earlier, test timeout,
+  // early return). Reading the file again is harmless — claimHelperPid
+  // de-duplicates.
+  while (helperPidFiles.length > 0) {
+    const pidFile = helperPidFiles.pop();
+    if (pidFile !== undefined) claimHelperPid(pidFile);
+  }
   while (stragglerPids.length > 0) {
     const pid = stragglerPids.pop();
     if (pid !== undefined && isAlive(pid)) {
@@ -175,16 +221,18 @@ describe('timeout', () => {
 
   it('leaves no live process behind after a timeout', async () => {
     const dir = makeTempDir();
-    const pidFile = join(dir, 'pid.txt');
+    const pidFile = helperPidFile(dir, 'pid.txt');
     const script = writeSleepScript(dir, pidFile);
 
     const res = await runCommand('node', [script], { env: process.env, timeoutMs: 2_000 });
-    expect(res.outcome).toBe('TIMED_OUT');
 
-    expect(existsSync(pidFile)).toBe(true);
-    const pid = Number.parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
-    stragglerPids.push(pid);
-    expect(Number.isInteger(pid)).toBe(true);
+    // Before any assertion about `res`: an unexpected outcome must still leave
+    // teardown able to reach this helper.
+    const pid = claimHelperPid(pidFile);
+    expect(pid).not.toBeNull();
+    if (pid === null) return;
+
+    expect(res.outcome).toBe('TIMED_OUT');
     expect(await waitUntilDead(pid)).toBe(true);
   });
 });
@@ -318,21 +366,22 @@ describe.runIf(IS_WINDOWS)('Windows .cmd shims', () => {
 
   it('kills the whole process tree, not just the cmd.exe shim', async () => {
     const dir = makeTempDir();
-    const pidFile = join(dir, 'grandchild-pid.txt');
+    const pidFile = helperPidFile(dir, 'grandchild-pid.txt');
     const child = writeSleepScript(dir, pidFile);
     const script = join(dir, 'tree.cmd');
     writeFileSync(script, `@echo off\r\nnode "${child.replace(/\\/g, '/')}"\r\n`, 'utf8');
 
     const res = await runCommand(script, [], { env: process.env, timeoutMs: 4_000 });
 
+    // Claimed first: the outcome assertions below are exactly the ones that
+    // used to throw past the registration and strand this grandchild.
+    const grandchildPid = claimHelperPid(pidFile);
+    expect(grandchildPid).not.toBeNull();
+    if (grandchildPid === null) return;
+
     expect(res.outcome).toBe('TIMED_OUT');
     expect(res.failureCode).toBe('TIMEOUT');
     expect(res.processTreeKilled).toBe(true);
-
-    expect(existsSync(pidFile)).toBe(true);
-    const grandchildPid = Number.parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
-    stragglerPids.push(grandchildPid);
-    expect(Number.isInteger(grandchildPid)).toBe(true);
 
     // Without taskkill /T this grandchild would survive the "timeout" forever.
     expect(await waitUntilDead(grandchildPid)).toBe(true);
@@ -340,7 +389,7 @@ describe.runIf(IS_WINDOWS)('Windows .cmd shims', () => {
 
   it('kills the tree when a shim floods stdout past the budget', async () => {
     const dir = makeTempDir();
-    const pidFile = join(dir, 'noisy-pid.txt');
+    const pidFile = helperPidFile(dir, 'noisy-pid.txt');
     const child = join(dir, 'noisy.cjs');
     writeFileSync(
       child,
@@ -357,15 +406,15 @@ describe.runIf(IS_WINDOWS)('Windows .cmd shims', () => {
       maxStdoutBytes: 4_096,
     });
 
+    // Claimed before the outcome assertions, so a wrong failure code cannot
+    // leave the flooding helper running.
+    const pid = claimHelperPid(pidFile);
+
     expect(res.outcome).toBe('OUTPUT_LIMIT_EXCEEDED');
     expect(res.failureCode).toBe('OUTPUT_LIMIT_STDOUT');
     expect(Buffer.byteLength(res.stdout, 'utf8')).toBeLessThanOrEqual(4_096);
 
-    if (existsSync(pidFile)) {
-      const pid = Number.parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
-      stragglerPids.push(pid);
-      expect(await waitUntilDead(pid)).toBe(true);
-    }
+    if (pid !== null) expect(await waitUntilDead(pid)).toBe(true);
   });
 
   it('refuses a batch path containing a quote', async () => {
