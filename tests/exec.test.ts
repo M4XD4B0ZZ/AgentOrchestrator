@@ -6,7 +6,7 @@
  * platform.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,17 +19,19 @@ import {
   type CommandResult,
 } from '../src/doctor/exec.js';
 import { SENSITIVE_MARKER } from './fixtures.js';
+import { ExecArtifactRegistry } from './helpers/exec-cleanup.js';
 
 const IS_WINDOWS = process.platform === 'win32';
 
-const tempDirs: string[] = [];
-const stragglerPids: number[] = [];
-const helperPidFiles: string[] = [];
+/**
+ * Every scratch directory, PID file and PID this file creates. The registry
+ * owns both the claiming rules and the exhaustive teardown; its own contract is
+ * proven in `tests/exec-cleanup.test.ts`.
+ */
+const artifacts = new ExecArtifactRegistry();
 
 function makeTempDir(prefix = 'agent-loop-exec-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  tempDirs.push(dir);
-  return dir;
+  return artifacts.registerTempDir(mkdtempSync(join(tmpdir(), prefix)));
 }
 
 /**
@@ -39,9 +41,7 @@ function makeTempDir(prefix = 'agent-loop-exec-'): string {
  * gets to run: a test timeout inside `runCommand`, or an early return.
  */
 function helperPidFile(dir: string, name: string): string {
-  const path = join(dir, name);
-  helperPidFiles.push(path);
-  return path;
+  return artifacts.registerPidFile(join(dir, name));
 }
 
 /**
@@ -52,21 +52,12 @@ function helperPidFile(dir: string, name: string): string {
  * expectation, a failing assertion threw past it and left a live `sleep.cjs`
  * behind that teardown had no PID for.
  *
- * Only a positive safe integer read from this test's own PID file is ever
- * registered — never a PID parsed out of a child's stdout, and never anything
- * matched by process name.
+ * Only a PID read from this test's own PID file, whose contents are entirely a
+ * positive decimal integer, is ever registered — never a PID parsed out of a
+ * child's stdout, and never anything matched by process name.
  */
 function claimHelperPid(pidFile: string): number | null {
-  let raw: string;
-  try {
-    raw = readFileSync(pidFile, 'utf8').trim();
-  } catch {
-    return null; // The helper never got far enough to record a PID.
-  }
-  const pid = Number.parseInt(raw, 10);
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
-  if (!stragglerPids.includes(pid)) stragglerPids.push(pid);
-  return pid;
+  return artifacts.claimPid(pidFile);
 }
 
 /** A CommonJS script that runs until it is killed. */
@@ -99,30 +90,11 @@ async function waitUntilDead(pid: number, budgetMs = 8_000): Promise<boolean> {
 }
 
 afterEach(async () => {
-  // Last-resort claim: covers the paths where the test body itself never ran
-  // to the in-body registration (assertion thrown earlier, test timeout,
-  // early return). Reading the file again is harmless — claimHelperPid
-  // de-duplicates.
-  while (helperPidFiles.length > 0) {
-    const pidFile = helperPidFiles.pop();
-    if (pidFile !== undefined) claimHelperPid(pidFile);
-  }
-  while (stragglerPids.length > 0) {
-    const pid = stragglerPids.pop();
-    if (pid !== undefined && isAlive(pid)) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        // Already gone.
-      }
-    }
-  }
-  // Give Windows a moment to release handles before removing the directories.
-  await new Promise((r) => setTimeout(r, 50));
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop();
-    if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
-  }
+  // Sweeps the registered PID files a last time (covering a test that threw
+  // before its own in-body claim), kills this run's own helpers, then removes
+  // every scratch directory. Every artefact is attempted even if an earlier one
+  // failed; anything unexpected is reported once the sweep is complete.
+  await artifacts.cleanUp();
 });
 
 describe('argument validation stays conservative', () => {
