@@ -32,7 +32,7 @@
  * ever retried.
  */
 
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { realpathSync, statSync } from 'node:fs';
 import { delimiter as pathDelimiter, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
@@ -41,6 +41,11 @@ import {
   encodeWindowsBatchArgument,
   UnsupportedWindowsBatchArgumentError,
 } from './internal/windows-batch-command.js';
+import {
+  superviseWindowsTreeKill,
+  type WindowsTreeKillDependencies,
+  type WindowsTreeKillSupervisor,
+} from './internal/windows-process-tree-termination.js';
 import { windowsSystemTool } from './internal/windows-system-tools.js';
 
 /** Default per-command wall-clock budget. */
@@ -122,8 +127,11 @@ export interface CommandResult {
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
   /**
-   * Whether the best-effort termination attempt (see {@link killProcessTree})
-   * reported success — not a verified absence of every descendant process.
+   * Whether the best-effort termination attempt reported success — the
+   * supervised `taskkill /T /F` on Windows (see
+   * {@link windowsTreeKillDependencies}), the process group on POSIX (see
+   * {@link killPosixProcessGroup}). Unchanged in meaning: not kernel ownership
+   * of the tree, and not a verified absence of every descendant process.
    */
   readonly processTreeKilled: boolean;
 }
@@ -439,57 +447,23 @@ class BoundedSink {
 }
 
 /**
- * Attempts, best-effort, to terminate a child and its known process tree.
+ * The POSIX best-effort termination attempt. Unchanged by AO-008-S2, which is
+ * a Windows slice.
  *
- * On Windows, `child.kill()` targets only the immediate process. For a `.cmd`
- * shim that is `cmd.exe`, and the actual tool keeps running — which is exactly
- * how a "timed out" diagnostic can leave a live process behind. `taskkill /T
- * /F` walks the tree instead. The PID is validated as a positive integer before
- * it is stringified, and `taskkill.exe` comes from the trusted, environment-
- * independent resolver (AO-FOUNDATION-REM-003B) — never from `PATH`,
- * `SystemRoot` or `windir` — so neither can shadow or redirect it.
+ * The child is spawned detached, so it leads its own process group.
+ * `process.kill(-pid, 'SIGKILL')` is a best-effort attempt to signal that
+ * process group; it is not an enumeration of descendants, and a descendant
+ * that has left the group (or session) is not demonstrably reached by it.
+ * Verified, enumerated process-tree coverage is AO-008, still open.
  *
- * This is still the pre-AO-008 best-effort behaviour: a successful `taskkill
- * /T /F` is the tree-kill signal, and the direct `child.kill()` fallback below
- * terminates the immediate child only. Neither branch guarantees every
- * descendant is gone; a bounded process-tree guarantee is AO-008's, not this
- * module's.
- *
- * @returns whether the termination attempt reported success — via the
- * tree-kill mechanism or the immediate-child fallback; not a verified
- * absence of every descendant.
+ * @returns whether the termination attempt reported success — via the process
+ * group or the immediate-child fallback; not a verified absence of every
+ * descendant.
  */
-function killProcessTree(child: ChildProcess): boolean {
+function killPosixProcessGroup(child: ChildProcess): boolean {
   const pid = child.pid;
   if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return false;
 
-  if (process.platform === 'win32') {
-    try {
-      const taskkillPath = windowsSystemTool('taskkill.exe');
-      execFileSync(taskkillPath, ['/PID', String(pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-        timeout: 5_000,
-      });
-      return true;
-    } catch {
-      // Either the trusted taskkill.exe boundary could not be established, or
-      // it ran and failed. Either way: fall through to the direct kill below,
-      // never to an environment- or PATH-supplied taskkill (AO-FOUNDATION-REM-003B).
-      // The caller still bounds the wait.
-    }
-    try {
-      return child.kill('SIGKILL');
-    } catch {
-      return false;
-    }
-  }
-
-  // POSIX: the child is spawned detached, so it leads its own process group.
-  // process.kill(-pid, 'SIGKILL') is a best-effort attempt to signal that
-  // process group; it is not an enumeration of descendants, and a descendant
-  // that has left the group (or session) is not demonstrably reached by it.
-  // Verified, enumerated process-tree coverage is AO-008, still open.
   try {
     process.kill(-pid, 'SIGKILL');
     return true;
@@ -500,6 +474,52 @@ function killProcessTree(child: ChildProcess): boolean {
       return false;
     }
   }
+}
+
+/**
+ * The productive wiring of the Windows tree-kill supervisor
+ * (`internal/windows-process-tree-termination.ts`).
+ *
+ * On Windows, `child.kill()` targets only the immediate process. For a `.cmd`
+ * shim that is `cmd.exe`, and the actual tool keeps running — which is exactly
+ * how a "timed out" diagnostic can leave a live process behind. `taskkill /T
+ * /F` walks the tree instead. The root PID is the immediate child's and is
+ * validated as a positive safe integer before it is stringified, and
+ * `taskkill.exe` comes from the trusted, environment-independent resolver
+ * (AO-FOUNDATION-REM-003B) — never from `PATH`, `SystemRoot` or `windir` — so
+ * neither can shadow or redirect it.
+ *
+ * The meaning of a reported success is unchanged and still narrow: the
+ * best-effort mechanism said it worked. It is not kernel ownership of the
+ * tree, not a verified absence of descendants, and not an enumerated empty
+ * tree — nothing here enumerates anything.
+ *
+ * Every timer this creates is unref'd, exactly as the rest of `runCommand`'s
+ * are: a diagnostic must never hold the process open on its own.
+ */
+function windowsTreeKillDependencies(child: ChildProcess): WindowsTreeKillDependencies {
+  return {
+    resolveToolPath: () => windowsSystemTool('taskkill.exe'),
+    spawnTool: (file, args, options) => spawn(file, [...args], options),
+    killImmediateChild: () => {
+      // The one immediate-child fallback. It reaches the immediate child only,
+      // never a descendant, so it is deliberately *not* reported as a
+      // successful tree kill.
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* a failing kill is bounded by the caller's grace window, not reported */
+      }
+    },
+    setTimer: (callback, ms) => {
+      const handle = setTimeout(callback, ms);
+      handle.unref?.();
+      return handle;
+    },
+    clearTimer: (handle) => {
+      clearTimeout(handle as NodeJS.Timeout);
+    },
+  };
 }
 
 type Termination = 'NONE' | 'TIMEOUT' | 'LIMIT_STDOUT' | 'LIMIT_STDERR';
@@ -603,8 +623,8 @@ export async function runCommand(
         windowsHide: true,
         windowsVerbatimArguments: plan.verbatim,
         // On POSIX this starts the child as leader of its own process group;
-        // killProcessTree later makes a best-effort attempt to signal that group
-        // via the negative PID. This is not an enumeration of descendants, and
+        // killPosixProcessGroup later makes a best-effort attempt to signal that
+        // group via the negative PID. This is not an enumeration of descendants, and
         // processes outside the group or session are not guaranteed to be
         // reached — verified process-tree coverage remains AO-008, still open.
         // Windows uses taskkill /T instead.
@@ -648,21 +668,57 @@ export async function runCommand(
     let killIssued = false;
     let settled = false;
     let graceTimer: NodeJS.Timeout | undefined;
+    /** The single tree-kill attempt, while its outcome is still open. */
+    let treeKill: WindowsTreeKillSupervisor | undefined;
+    let treeKillPending = false;
+    /** A `close` seen while the tree-kill attempt was still open — held, not yet settled. */
+    let pendingClose: { readonly code: number | null; readonly signal: NodeJS.Signals | null } | null =
+      null;
 
     const settle = (result: CommandResult): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
+      // No `taskkill.exe` process may outlive the result it was started for.
+      // A no-op once the attempt has already resolved.
+      treeKill?.cancel();
       resolvePromise(result);
     };
 
-    /** Runs the best-effort termination attempt once and starts the bounded wait for the immediate child's `close` event. */
-    const terminate = (reason: Exclude<Termination, 'NONE'>): void => {
-      if (killIssued) return;
-      killIssued = true;
-      termination = reason;
-      treeKilled = killProcessTree(child);
+    const closeResult = (code: number | null, signal: NodeJS.Signals | null): CommandResult =>
+      finish({
+        started: true,
+        outcome: TERMINATION_OUTCOME[termination],
+        exitCode: code,
+        signal,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        failureCode: TERMINATION_FAILURE[termination],
+        errnoCode: null,
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
+        processTreeKilled: treeKilled,
+      });
+
+    /**
+     * Stage 2 of the termination deadline, entered once the tree-kill attempt
+     * is over. Total bound: the tool's own budget plus `killGraceMs`. There is
+     * no third wait, no retry and no restart of either stage.
+     */
+    const treeKillFinished = (reason: Exclude<Termination, 'NONE'>): void => {
+      treeKillPending = false;
+      if (settled) return;
+
+      // The synchronous predecessor blocked the event loop for the whole
+      // `taskkill` call, so a `close` arriving during it could not be processed
+      // until the attempt was over. That ordering is part of the observable
+      // contract, so it is preserved deliberately: a `close` held back below is
+      // released here, with the original termination reason intact.
+      if (pendingClose !== null) {
+        settle(closeResult(pendingClose.code, pendingClose.signal));
+        return;
+      }
 
       graceTimer = setTimeout(() => {
         // The immediate child's `close` event was not observed within the
@@ -686,6 +742,40 @@ export async function runCommand(
         );
       }, killGraceMs);
       graceTimer.unref?.();
+    };
+
+    /**
+     * Runs the best-effort termination attempt **once** and starts the bounded
+     * wait for the immediate child's `close` event.
+     *
+     * The first trigger wins: `killIssued` freezes the reason, so a second
+     * trigger (a stdout limit landing in the same tick as the timeout, say)
+     * neither changes the reported reason nor starts a second attempt.
+     */
+    const terminate = (reason: Exclude<Termination, 'NONE'>): void => {
+      if (killIssued) return;
+      killIssued = true;
+      termination = reason;
+
+      if (process.platform !== 'win32') {
+        treeKilled = killPosixProcessGroup(child);
+        treeKillFinished(reason);
+        return;
+      }
+
+      // Windows: supervised and asynchronous. The event loop stays free for the
+      // whole tool budget, so other timers, probes and microtasks keep running
+      // while this child's tree is being taken down.
+      treeKillPending = true;
+      treeKill = superviseWindowsTreeKill(child.pid, windowsTreeKillDependencies(child));
+      void treeKill.outcome.then((outcome) => {
+        if (settled) {
+          treeKillPending = false;
+          return;
+        }
+        treeKilled = outcome === 'TREE_KILLED';
+        treeKillFinished(reason);
+      });
     };
 
     const timer = setTimeout(() => terminate('TIMEOUT'), timeoutMs);
@@ -718,21 +808,15 @@ export async function runCommand(
     });
 
     child.on('close', (code, signal) => {
-      settle(
-        finish({
-          started: true,
-          outcome: TERMINATION_OUTCOME[termination],
-          exitCode: code,
-          signal,
-          stdout: stdout.text(),
-          stderr: stderr.text(),
-          failureCode: TERMINATION_FAILURE[termination],
-          errnoCode: null,
-          stdoutTruncated: stdout.truncated,
-          stderrTruncated: stderr.truncated,
-          processTreeKilled: treeKilled,
-        }),
-      );
+      if (treeKillPending) {
+        // Held, not dropped: `processTreeKilled` is not known yet, and the
+        // synchronous predecessor could never have reported a `close` ahead of
+        // the tree-kill outcome. `treeKillFinished` releases this immediately —
+        // no grace window is entered for a child that has already closed.
+        pendingClose = { code, signal };
+        return;
+      }
+      settle(closeResult(code, signal));
     });
   });
 }

@@ -645,7 +645,15 @@ describe.runIf(IS_WINDOWS)('exec.ts uses only the trusted resolver, never PATH o
 
     expect(res.outcome).toBe('TIMED_OUT');
     expect(existsSync(sentinel)).toBe(false);
-    const taskkillCalls = recorder.execFileSyncCalls.filter((f) => f.toLowerCase().endsWith('taskkill.exe'));
+    // AO-008-S2: the tree kill is supervised asynchronously, so the trusted
+    // taskkill.exe is reached through `spawn` — never again through the
+    // event-loop-blocking `execFileSync`. Both halves are asserted: the
+    // synchronous channel is unused, and whatever *is* executed is still the
+    // resolver's own path rather than the PATH-planted stand-in.
+    expect(recorder.execFileSyncCalls.some((f) => f.toLowerCase().endsWith('taskkill.exe'))).toBe(
+      false,
+    );
+    const taskkillCalls = recorder.spawnCalls.filter((f) => f.toLowerCase().endsWith('taskkill.exe'));
     expect(taskkillCalls.length).toBeGreaterThan(0);
     for (const call of taskkillCalls) {
       expect(call.toLowerCase()).toBe(windowsSystemTool('taskkill.exe').toLowerCase());
