@@ -680,8 +680,13 @@ export async function runCommand(
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
-      // No `taskkill.exe` process may outlive the result it was started for.
-      // A no-op once the attempt has already resolved.
+      // Abandons the tree-kill attempt under control: one best-effort kill is
+      // requested for the `taskkill.exe` process and its handle is released
+      // from the event loop, so a tool process that survives the request can
+      // neither hold this process open nor delay this settlement. It is not a
+      // guarantee that the tool process ended — see the four-state vocabulary
+      // in `internal/windows-process-tree-termination.ts`. A no-op once the
+      // attempt has already resolved.
       treeKill?.cancel();
       resolvePromise(result);
     };

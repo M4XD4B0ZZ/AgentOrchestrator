@@ -23,6 +23,10 @@
  *    late event;
  *  - the event loop keeps running for the whole tool budget — the defect this
  *    slice exists to remove;
+ *  - a tool process that refuses the kill request still leaves `runCommand`
+ *    bounded: one request, one handle release, one settlement, and every late
+ *    tool event inert (AO-008-S2-R1). The fake tool here models that honestly —
+ *    `kill()` emits nothing and ends nothing, because on Windows it need not;
  *  - no tool path, tool output or foreign error detail reaches a CommandResult.
  */
 
@@ -49,7 +53,13 @@ interface FakeChild extends EventEmitter {
 
 interface FakeTool extends EventEmitter {
   killCount: number;
+  unrefCount: number;
+  /** What `kill()` hands back. `false` models a request the OS refused. */
+  killReturnValue: boolean;
+  /** True once a kill was requested and the tool is *still* running. */
+  alive: boolean;
   kill(signal?: string): boolean;
+  unref(): void;
 }
 
 // Function declarations: hoisted, so the mock factory below may call them.
@@ -69,10 +79,24 @@ function makeFakeChild(): FakeChild {
 function makeFakeTool(): FakeTool {
   const tool = new EventEmitter() as FakeTool;
   tool.killCount = 0;
+  tool.unrefCount = 0;
+  tool.killReturnValue = true;
+  tool.alive = true;
+  // A kill request is *only* a request: it emits nothing and does not clear
+  // `alive`. Only an emitted `exit`/`close` ends this tool (AO-008-S2-F2).
   tool.kill = () => {
     tool.killCount += 1;
-    return true;
+    return tool.killReturnValue;
   };
+  tool.unref = () => {
+    tool.unrefCount += 1;
+  };
+  tool.on('exit', () => {
+    tool.alive = false;
+  });
+  tool.on('close', () => {
+    tool.alive = false;
+  });
   return tool;
 }
 
@@ -313,14 +337,82 @@ describe.runIf(IS_WINDOWS)('runCommand tree-kill races', () => {
     expect(result.errnoCode).toBe('UNKNOWN');
     expect(result.processTreeKilled).toBe(false);
 
-    // No taskkill process is left behind.
+    // The abandoned taskkill process had exactly one best-effort kill requested
+    // for it and its handle released — not a proof that it ended.
     expect(tool.killCount).toBe(1);
+    expect(tool.unrefCount).toBe(1);
 
     // Late events after the settlement change nothing.
     tool.emit('close', 0);
     child.emit('close', 0, null);
     await expect(promise).resolves.toBe(result);
   });
+
+  it('Race I — a cancel whose tool kill has no effect still lets runCommand finalise, bounded', async () => {
+    const child = makeFakeChild();
+    const promise = startRun(child, { timeoutMs: 15, killGraceMs: 30_000 });
+    const tool = await firstTool();
+
+    // The tool refuses the kill and keeps running: the case the supervisor may
+    // not wait on, because nothing will ever confirm a termination.
+    tool.killReturnValue = false;
+
+    const error = new Error('spawn UNKNOWN') as NodeJS.ErrnoException;
+    error.code = 'UNKNOWN';
+    child.emit('error', error);
+
+    const cancelledAt = Date.now();
+    const result = await promise;
+    // Bounded: no third wait phase was entered for a confirmation that never came.
+    expect(Date.now() - cancelledAt).toBeLessThan(1_000);
+
+    expect(result.outcome).toBe('SPAWN_FAILED');
+    expect(result.failureCode).toBe('SPAWN_FAILED');
+    expect(result.processTreeKilled).toBe(false);
+
+    // One request, one release — and the tool is still, honestly, alive.
+    expect(tool.killCount).toBe(1);
+    expect(tool.unrefCount).toBe(1);
+    expect(tool.alive).toBe(true);
+
+    // Every late tool event is inert, including an `error` — the supervisor's
+    // listener is still attached, so this cannot become an uncaught exception.
+    tool.emit('error', new Error('AO_S2_RACE_I_LATE_SENTINEL'));
+    tool.emit('exit', 1);
+    tool.emit('close', 1);
+    child.emit('close', null, 'SIGKILL');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const again = await promise;
+    expect(again).toBe(result);
+    expect(tool.killCount).toBe(1);
+    expect(tool.unrefCount).toBe(1);
+    expect(JSON.stringify(again)).not.toContain('AO_S2_RACE_I_LATE_SENTINEL');
+  });
+
+  it('Race J — a timeout whose tool kill has no effect ends in a bounded PROCESS_TREE_KILL_FAILED', async () => {
+    const child = makeFakeChild();
+    const promise = startRun(child, { timeoutMs: 15, killGraceMs: 60 });
+    const tool = await firstTool();
+
+    tool.killReturnValue = false;
+
+    // The tool never reports ending, so only its own budget can end the wait.
+    // `WINDOWS_TREE_KILL_TIMEOUT_MS` is 5s and `killGraceMs` 60ms: both stages
+    // together, and nothing more.
+    const result = await promise;
+
+    expect(result.outcome).toBe('TIMED_OUT');
+    expect(result.failureCode).toBe('PROCESS_TREE_KILL_FAILED');
+    expect(result.processTreeKilled).toBe(false);
+    // The tool budget was spent once, then one kill request and one release.
+    expect(tool.killCount).toBe(1);
+    expect(tool.unrefCount).toBe(1);
+    expect(tool.alive).toBe(true);
+    // Exactly one tree-kill attempt and exactly one immediate-child fallback.
+    expect(control.toolSpawns).toBe(1);
+    expect(child.killCount).toBe(1);
+  }, 20_000);
 
   it('Race H — a late close after settlement neither changes the result nor settles again', async () => {
     const child = makeFakeChild();

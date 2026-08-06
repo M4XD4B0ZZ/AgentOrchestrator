@@ -29,6 +29,33 @@
  * detail into a `CommandResult` or a domain error, because it is never given
  * any.
  *
+ * ── What "the tool process is dealt with" does and does not mean ────────────
+ *
+ * This module is a pure-Node supervisor over a foreign process it does not own
+ * at the kernel level. Four states are therefore kept strictly apart, in the
+ * code and in the tests (AO-008-S2-R1):
+ *
+ *  - **kill requested** — `kill()` was called on the tool handle, exactly once.
+ *    Neither a truthy return value nor the absence of a throw is evidence that
+ *    the process ended: the signal may be refused by policy, the handle may
+ *    already be stale, or the process may simply ignore it;
+ *  - **tool termination observed** — an `exit` or a `close` event actually
+ *    arrived. This, and only this, is evidence the tool process ended;
+ *  - **tool released** — the supervisor no longer holds an active event-loop
+ *    reference to the tool: its timer is cleared and the handle is `unref`'d,
+ *    so a still-running tool cannot keep the Node process alive and cannot
+ *    delay any caller. A release is *not* a termination;
+ *  - **tree kill succeeded** — `taskkill` itself terminated with exit code 0.
+ *    Only this produces `TREE_KILLED`, and hence `processTreeKilled: true`.
+ *
+ * Consequently: on timeout and on `cancel()` the supervisor requests exactly
+ * one best-effort kill and then releases the handle, bounded, whether or not a
+ * termination is ever observed. Under an OS or policy failure the `taskkill`
+ * process **may outlive** the settlement of the result it was started for.
+ * Nothing here — no comment, no test, no field — claims otherwise. Hard
+ * ownership of the tool and of the target tree needs a Windows Job Object,
+ * which is a separate architectural task and deliberately not in this module.
+ *
  * This module is internal. It is not re-exported from the package entry point,
  * it produces no result and no report data, and its only productive consumer is
  * `src/doctor/exec.ts`.
@@ -81,11 +108,23 @@ function isUsableRootPid(pid: unknown): pid is number {
  * The slice of a spawned tool process this supervisor uses. Deliberately
  * minimal: no `stdout`, no `stderr`, no `pid` — what is not named here cannot
  * be read, so it cannot leak.
+ *
+ * `exit` and `close` are subscribed separately and *both* count as an observed
+ * termination: `exit` marks the process actually ending, `close` may follow it,
+ * and with `stdio: 'ignore'` there is no pipe that could hold `close` back. The
+ * first of the two to arrive decides the outcome; the other is inert.
+ *
+ * `unref` is optional because a seam may omit it; on a real `ChildProcess` it
+ * is what detaches the handle from the event loop. Calling it releases the
+ * handle — it does not terminate anything and is never treated as evidence
+ * that it did.
  */
 export interface WindowsTreeKillToolProcess {
+  on(event: 'exit', listener: (code: number | null) => void): unknown;
   on(event: 'close', listener: (code: number | null) => void): unknown;
   on(event: 'error', listener: (error: unknown) => void): unknown;
   kill(): unknown;
+  unref?(): unknown;
 }
 
 export type WindowsTreeKillSpawn = (
@@ -121,11 +160,18 @@ export interface WindowsTreeKillSupervisor {
   /** Resolves exactly once. Never rejects. */
   readonly outcome: Promise<WindowsTreeKillOutcome>;
   /**
-   * Abandons the attempt: kills any running tool process and clears the tool
-   * timer. Used when the caller settled on an independent path (a child
-   * `error`, say) while the attempt was still open, so no tool process outlives
-   * the result it was started for. Does **not** run the immediate-child
-   * fallback — the caller is no longer waiting on this child at all.
+   * Abandons the attempt: requests one best-effort kill of a tool process whose
+   * termination has not been observed, clears the tool timer, and releases the
+   * tool handle from the event loop. Used when the caller settled on an
+   * independent path (a child `error`, say) while the attempt was still open.
+   *
+   * Bounded and unconditional: it never waits for a confirmation that may never
+   * come. A tool process that ignores or refuses the kill can outlive this
+   * call — what is guaranteed is only that the supervisor stops waiting on it
+   * and stops holding the event loop open for it.
+   *
+   * Does **not** run the immediate-child fallback — the caller is no longer
+   * waiting on this child at all.
    */
   cancel(): void;
 }
@@ -135,19 +181,28 @@ export interface WindowsTreeKillSupervisor {
  *
  * Distinguishes, and collapses into the two-value outcome:
  *
- *  - tool exit 0                → `TREE_KILLED`, no fallback;
+ *  - tool exit 0 (observed)     → `TREE_KILLED`, no fallback;
  *  - tool exit non-zero         → `NOT_TREE_KILLED`, one fallback;
  *  - synchronous start failure  → `NOT_TREE_KILLED`, one fallback;
- *  - asynchronous `error` event → `NOT_TREE_KILLED`, one fallback;
- *  - tool timeout               → `NOT_TREE_KILLED`, tool killed, one fallback;
- *  - {@link WindowsTreeKillSupervisor.cancel} → `NOT_TREE_KILLED`, tool killed,
- *    **no** fallback;
- *  - unusable root PID          → `NOT_TREE_KILLED`, nothing spawned, no
- *    fallback (exactly what the synchronous predecessor did).
+ *  - asynchronous `error` event → `NOT_TREE_KILLED`, one kill requested, one
+ *    fallback (an `error` is not a termination — a later `exit`/`close` may
+ *    still follow it);
+ *  - tool timeout               → `NOT_TREE_KILLED`, one kill requested, tool
+ *    handle released, one fallback;
+ *  - {@link WindowsTreeKillSupervisor.cancel} → `NOT_TREE_KILLED`, one kill
+ *    requested, tool handle released, **no** fallback;
+ *  - unusable root PID          → `NOT_TREE_KILLED`, nothing spawned, nothing
+ *    killed, no fallback (exactly what the synchronous predecessor did).
  *
- * Exactly one tool process is started, at most one fallback is run, and every
- * event arriving after the resolution — a late tool `close`, a late tool
- * `error`, a late `cancel()` — is a no-op.
+ * Exactly one tool process is started, at most one kill is requested for it, at
+ * most one `unref` is performed, at most one fallback is run, and every event
+ * arriving after the resolution — a late tool `exit`, `close` or `error`, a
+ * late `cancel()` — is a no-op that cannot resolve the outcome a second time
+ * and cannot surface as an unhandled error.
+ *
+ * Where no termination is observed, the outcome is still reached in bounded
+ * time and the tool process is left released rather than proven gone. See the
+ * four-state vocabulary in this module's header comment.
  */
 export function superviseWindowsTreeKill(
   rootPid: number | undefined,
@@ -162,6 +217,49 @@ export function superviseWindowsTreeKill(
   let fallbackRun = false;
   let timer: WindowsTreeKillTimer | undefined;
   let tool: WindowsTreeKillToolProcess | null = null;
+  /** Tool termination **observed**: an `exit` or a `close` actually arrived. */
+  let toolTerminationObserved = false;
+  /** Kill **requested**: `kill()` was called once. Not a termination. */
+  let killRequested = false;
+  /** Tool **released**: `unref()` was performed once. Not a termination either. */
+  let toolReleased = false;
+
+  /**
+   * The one best-effort kill request, plus the handle release that makes the
+   * supervisor's bound real.
+   *
+   * Deliberately *not* conditional on the kill working: `kill()` may return a
+   * falsy value, may throw, and may be silently ignored by the target, and none
+   * of those three is distinguishable from success without an `exit`/`close`
+   * that may never come. So the request is made at most once, its result is
+   * discarded, and the handle is then detached from the event loop so a tool
+   * process that survives cannot hold this process open or delay any caller.
+   *
+   * A tool whose termination has already been observed is neither signalled nor
+   * released: there is nothing left to signal, and nothing left to hold.
+   */
+  const releaseTool = (): void => {
+    const running = tool;
+    if (running === null || toolTerminationObserved) return;
+
+    if (!killRequested) {
+      killRequested = true;
+      try {
+        running.kill();
+      } catch {
+        /* best effort; a throw is no more a failure signal than `false` is */
+      }
+    }
+
+    if (!toolReleased) {
+      toolReleased = true;
+      try {
+        running.unref?.();
+      } catch {
+        /* a seam whose `unref` throws must not change the outcome */
+      }
+    }
+  };
 
   /**
    * The single resolution point. Every guard the exactly-once contract needs
@@ -181,15 +279,7 @@ export function superviseWindowsTreeKill(
       timer = undefined;
     }
 
-    if (tool !== null) {
-      const running = tool;
-      tool = null;
-      try {
-        running.kill();
-      } catch {
-        /* best effort; the outcome does not depend on it */
-      }
-    }
+    releaseTool();
 
     if (runFallback && !fallbackRun) {
       fallbackRun = true;
@@ -240,21 +330,37 @@ export function superviseWindowsTreeKill(
     // leave this timer behind, unowned and unclearable.
     timer = dependencies.setTimer(() => {
       // Consumed: `finish` must not clear an already-fired timer, but it must
-      // still kill the tool process this timeout is abandoning.
+      // still request the one best-effort kill for, and release, the tool
+      // process this timeout is abandoning.
       timer = undefined;
       finish('NOT_TREE_KILLED', true);
     }, dependencies.timeoutMs ?? WINDOWS_TREE_KILL_TIMEOUT_MS);
 
+    // Attached for the whole lifetime of the tool handle and never removed.
+    // A tool process that survives a kill request can still emit `error`,
+    // `exit` or `close` long after this supervisor resolved; leaving the
+    // listeners in place — inert behind the `resolved` guard — is what keeps a
+    // late `error` from becoming an unhandled `'error'` event, which on a real
+    // `EventEmitter` would throw. Removing them would trade a controlled no-op
+    // for an uncaught exception.
     tool.on('error', () => {
+      // An `error` says the tool failed, not that it ended: a process that
+      // errored may still be running, and may still emit `exit`/`close` later.
+      // So this deliberately does not count as an observed termination.
       finish('NOT_TREE_KILLED', true);
     });
 
-    tool.on('close', (code) => {
-      // Cleared first: a process that has already exited must not be signalled
-      // by `finish`, and must not be treated as still running.
-      tool = null;
+    // `exit` marks the actual end of the process; `close` may follow it (and,
+    // with `stdio: 'ignore'`, arrives with nothing buffered in between). Either
+    // one is an observed termination, so it is recorded *before* resolving: a
+    // tool that has already ended must not then be signalled or unref'd.
+    const observeTermination = (code: number | null): void => {
+      toolTerminationObserved = true;
       finish(code === 0 ? 'TREE_KILLED' : 'NOT_TREE_KILLED', code !== 0);
-    });
+    };
+
+    tool.on('exit', observeTermination);
+    tool.on('close', observeTermination);
   } catch {
     // `spawn`, `setTimer` or `on` can throw synchronously instead of emitting
     // `'error'`. Same controlled outcome, same single fallback, and no
