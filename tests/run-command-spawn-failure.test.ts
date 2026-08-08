@@ -23,14 +23,14 @@
  *    synchronous spawn failure.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { CommandResult } from '../src/doctor/exec.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -79,8 +79,14 @@ const { runCommand, UnsafeArgumentError } = await import('../src/doctor/exec.js'
 const { runCapabilityDump, CAPABILITY_PROBES } = await import('../src/doctor/capabilities.js');
 
 const tempDirs: string[] = [];
+/**
+ * Canonical by construction, which is what the spawn injections below depend
+ * on: `resolveOnPath` hands `spawn()` the `realpathSync.native` result, never
+ * the caller's spelling, so a `throwFor`/`asyncErrorFor` hook comparing `file`
+ * against a non-canonical target silently stops firing.
+ */
 function makeTempDir(prefix = 'ao-spawnfail-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = makeCanonicalTempDir(prefix);
   tempDirs.push(dir);
   return dir;
 }

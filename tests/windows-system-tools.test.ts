@@ -21,11 +21,12 @@
  * suite itself spawned.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -73,7 +74,7 @@ const { formatSafeError } = await import('../src/core/safe-error.js');
 
 const tempDirs: string[] = [];
 function makeTempDir(prefix = 'ao-wst-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = makeCanonicalTempDir(prefix);
   tempDirs.push(dir);
   return dir;
 }

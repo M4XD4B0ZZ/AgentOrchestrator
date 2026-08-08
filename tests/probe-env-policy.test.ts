@@ -39,6 +39,7 @@ import type { CommandResult, RunOptions } from '../src/doctor/exec.js';
 import { renderReportSummary } from '../src/doctor/render.js';
 import { runDoctor } from '../src/doctor/run-doctor.js';
 import type { DoctorReport } from '../src/doctor/report.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 // ── The recorder in place of the one external boundary ─────────────────────
 
@@ -571,7 +572,11 @@ describe('a NODE_OPTIONS preload does not reach a real probe', () => {
   let script: string;
 
   beforeAll(() => {
-    work = mkdtempSync(join(tmpdir(), 'agent-loop-loader-'));
+    // Canonical, not the raw `os.tmpdir()` spelling: `script` below is handed
+    // to `runCommand` as an argument, and `SAFE_ARG_PATTERN` excludes `~`, so
+    // an 8.3 temp alias (`C:\Users\RUNNER~1\…` on a GitHub Actions runner)
+    // would be refused before this probe ever starts.
+    work = makeCanonicalTempDir('agent-loop-loader-');
     sentinel = join(work, 'loader-sentinel.txt');
     loader = join(work, 'preload.cjs');
     reportFile = join(work, 'child-env.json');
