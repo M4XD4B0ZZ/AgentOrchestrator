@@ -2,12 +2,21 @@
  * Safe, bounded child-process execution for diagnostics.
  *
  * Guarantees:
- *  - Executable and arguments are always passed separately. There is no shell
- *    string concatenation anywhere in this module.
  *  - Every argument is validated against a conservative allow-list before a
- *    process starts, so even the Windows `cmd.exe` fallback (needed for npm's
- *    `.cmd` shims, which Node refuses to spawn directly) cannot be used to
- *    smuggle shell metacharacters.
+ *    process starts, and no caller-supplied command string is ever concatenated
+ *    and handed to a shell. There are exactly two execution paths:
+ *      · direct executables — executable and argument vector passed to `spawn`
+ *        structurally, `shell: false`, with no shell or command processor in
+ *        the chain and nothing re-parsed by one;
+ *      · `.cmd`/`.bat` targets — deliberately run through the trusted,
+ *        environment-independent `cmd.exe /d /s /c` (needed for npm's `.cmd`
+ *        shims, which Node refuses to spawn directly) with
+ *        `windowsVerbatimArguments`. `cmd.exe` does parse that command line;
+ *        what makes it safe is that the line is built only by the strict,
+ *        fail-closed codec in `./internal/windows-batch-command.ts` — one
+ *        quoted, caret-escaped token per argument, read back by the batch
+ *        target as `%~1`, `%~2`, … — and that a literal quote in an argument
+ *        or in the target path is refused outright rather than encoded.
  *  - Every process gets a timeout **and** a hard byte budget per stream. Both
  *    are enforced while the output streams, not after the process ends, so a
  *    runaway child can neither hang the doctor nor exhaust its memory.
@@ -20,8 +29,10 @@
  *    bound — only for the immediate child's own `close` event, and reports a
  *    distinct failure code if that event is not observed in time. Observing
  *    that event confirms only that the immediate child has exited; it says
- *    nothing about whether any descendant has exited. A verified, enumerated
- *    process-tree termination is AO-008, still open.
+ *    nothing about whether any descendant has exited. That narrowness is the
+ *    final contract, not a gap: verified, enumerated process-tree termination
+ *    would need kernel-enforced ownership (a Windows Job Object), which is a
+ *    separate architecture and deliberately not part of this module.
  *  - Failures are *data*, never exceptions, and every failure carries a fixed
  *    status code rather than an exception message: a missing program, a spawn
  *    error, a timeout, an exceeded output limit and a failed kill are all
@@ -454,7 +465,7 @@ class BoundedSink {
  * `process.kill(-pid, 'SIGKILL')` is a best-effort attempt to signal that
  * process group; it is not an enumeration of descendants, and a descendant
  * that has left the group (or session) is not demonstrably reached by it.
- * Verified, enumerated process-tree coverage is AO-008, still open.
+ * That limit is the contract here, not a pending refinement.
  *
  * @returns whether the termination attempt reported success — via the process
  * group or the immediate-child fallback; not a verified absence of every
@@ -626,7 +637,7 @@ export async function runCommand(
         // killPosixProcessGroup later makes a best-effort attempt to signal that
         // group via the negative PID. This is not an enumeration of descendants, and
         // processes outside the group or session are not guaranteed to be
-        // reached — verified process-tree coverage remains AO-008, still open.
+        // reached — that is the extent of the guarantee, by design.
         // Windows uses taskkill /T instead.
         detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -729,7 +740,7 @@ export async function runCommand(
         // The immediate child's `close` event was not observed within the
         // grace window: report that distinctly rather than pretending the
         // command merely timed out. This does not confirm any descendant is
-        // still running; full process-tree verification remains AO-008.
+        // still running: this path never verifies the whole tree, by design.
         settle(
           finish({
             started: true,

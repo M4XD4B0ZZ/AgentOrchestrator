@@ -3,8 +3,8 @@
  * `tests/exec.test.ts`.
  *
  * This is test-support code only. Nothing under `src/` imports it, and it makes
- * no claim about the product's own process lifecycle — the open AO-008 product
- * work (verified, enumerated process-tree coverage) is untouched by it. Its only
+ * no claim about the product's own process lifecycle: the product's termination
+ * contract is best-effort by design and is proven elsewhere, not here. Its only
  * job is that a test run cannot leave its own helper processes or scratch
  * directories behind, and cannot aim a kill at anything it did not itself start.
  *

@@ -57,9 +57,10 @@ removed PowerShell resolver survives in the shipped artefact.
 set.** It runs every vitest file except one:
 `tests/windows-tree-kill-tool-release.test.ts`. That file is excluded (via
 vitest's `--exclude` flag) not because it is unstable, but because it drives
-real `taskkill.exe` process churn, which intermittently destabilised unrelated
-files running in parallel beside it (AO-008-S2-R1-F1). It runs in its own
-serial gate, `test:windows-tree-kill-tool-release`, with
+real-process churn of its own — a child Node harness process per case plus a
+detached, deliberately surviving Node helper — which intermittently
+destabilised unrelated files running in parallel beside it (AO-008-S2-R1-F1).
+It runs in its own serial gate, `test:windows-tree-kill-tool-release`, with
 `--no-file-parallelism`, and never alongside the foundation set. Together the
 two gates cover every vitest file exactly once.
 
@@ -168,13 +169,53 @@ It never runs an agent task, never modifies a repository or any configuration,
 never changes global environment variables, never performs a login, and never
 reads a credential store.
 
+### How `runCommand` starts a process
+
+`runCommand` never assembles a free-form command string out of caller input.
+Every argument is first validated against a conservative allow-list
+(`SAFE_ARG_PATTERN` in `src/doctor/exec.ts`), which already excludes quotes and
+shell metacharacters. Beyond that there are exactly **two** execution paths, and
+they have deliberately different properties.
+
+**A. Direct executables.** The resolved executable and its arguments are handed
+to `spawn` structurally: a literal argument vector, `shell: false`, no shell and
+no command processor anywhere in the chain. Nothing on this path is re-parsed by
+a shell or an interpreter.
+
+**B. `.cmd` / `.bat` targets.** Node cannot spawn a batch file directly, so this
+path runs it through the trusted Windows command processor **on purpose**.
+`cmd.exe` therefore does perform its own parsing of the command line it is
+given, and this document does not claim otherwise. What is claimed is that the
+command line it parses is not freely constructed:
+
+- the interpreter is the trusted, environment-independent `cmd.exe` resolved
+  through `src/doctor/internal/windows-system-tools.ts`. `COMSPEC` is never
+  read, so a caller-controlled `COMSPEC` cannot substitute the interpreter;
+- it is invoked as `cmd.exe /d /s /c "<inner>"` with `shell: false` and
+  `windowsVerbatimArguments: true`, so Node performs no quoting of its own and
+  the string `cmd.exe` receives is exactly the one this module built;
+- every argument is encoded by the strict, fail-closed batch codec
+  (`src/doctor/internal/windows-batch-command.ts`): each one — including an
+  empty one — is wrapped in a matched quote pair so it produces exactly one
+  batch parameter, and every character that remains special *inside* quotes
+  (`(`, `)`, `%`, `!`, `^`, `<`, `>`, `&`, `|`) is caret-escaped. The batch
+  target reads those arguments back as `%~1`, `%~2`, …; that is part of the
+  contract, not an accident of the encoding;
+- a literal `"` has no encoding that round-trips through this transport, so an
+  argument or a target path containing one is **refused**, not guessed at. An
+  explicit batch path with an embedded quote is refused *before* any resolution
+  is attempted, so the refusal can never be masked by a "not found" result.
+
+The honest statement for path B is therefore not "no parsing happens" — it is
+that the batch command line is narrowly encoded and fail-closed, with no free,
+user-controlled command-string construction anywhere in it.
+
 ### Windows process-tree termination
 
 The termination path is deliberately small, and its guarantee is deliberately
-narrow. What is implemented is exactly this:
+narrow. It is a separate mechanism from the two execution paths above and shares
+none of their command-line construction. What is implemented is exactly this:
 
-- `runCommand` starts commands **without shell injection**: a literal argument
-  vector, never a command string that a shell re-parses.
 - Windows tree termination uses **only** the validated system-tool path for
   `taskkill.exe`, resolved through the trusted boundary
   (`src/doctor/internal/windows-system-tools.ts`). There is **no `PATH` and no
@@ -237,7 +278,17 @@ part of the current contract.
   (`tests/exec.test.ts`) and the deterministic supervisor and race suites.
 - The real-process tool-release probe
   (`tests/windows-tree-kill-tool-release.test.ts`) runs **separately and
-  serially**, in its own gate.
+  serially**, in its own gate. It starts real processes — a child Node harness
+  per case, which in turn spawns a detached, long-lived Node helper that stands
+  in for the tool process — but it does **not** start a real `taskkill.exe` for
+  this mechanism: the supervisor's tool seam is injected, so the tool path and
+  the tool's `kill()` are the harness's own. It exercises `kill()` returning
+  `false`, `kill()` throwing, an ignored `kill()` (the helper survives by
+  construction), both the timeout and the `cancel()` trigger, the `unref`-based
+  release, and a negative control without `unref` that must hang. What it proves
+  is that this Node process still resolves and exits while the tool process is
+  provably still alive — **not** that a real `taskkill.exe` can always be
+  terminated.
 - `verify` runs those gates sequentially, foundation set first.
 
 See [Build and verify](#build-and-verify) for the exact commands.

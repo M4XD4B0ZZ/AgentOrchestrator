@@ -1,11 +1,13 @@
 /**
  * AO-008-S1-R1: the teardown contract of `tests/exec.test.ts`, proven on its own.
  *
- * `tests/exec.test.ts` is excluded from `test:foundation-safe` because it starts
- * real, deliberately unkillable child processes. Its *teardown* has no such
- * excuse, so it lives in an injectable registry and is asserted here — with
- * mocked filesystem, process and timer seams, and never against a real foreign
- * PID. Two findings are locked down:
+ * `tests/exec.test.ts` starts real, deliberately unkillable child processes, and
+ * it is a regular part of `test:foundation-safe` (only
+ * `tests/windows-tree-kill-tool-release.test.ts` is excluded from that gate, and
+ * runs serially in its own). Its *teardown* is what makes that safe, so the
+ * teardown lives in an injectable registry and is asserted here — with mocked
+ * filesystem, process and timer seams, and never against a real foreign PID.
+ * Two findings are locked down:
  *
  *   F1 — a PID was claimed by `Number.parseInt`, which stops at the first
  *        non-digit. `"17628.5"` therefore became the live, unrelated PID 17628.
