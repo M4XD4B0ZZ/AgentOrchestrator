@@ -30,6 +30,8 @@ import { EventEmitter } from 'node:events';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { CommandResult } from '../src/doctor/exec.js';
+
 const IS_WINDOWS = process.platform === 'win32';
 
 // ── A controllable spawn(): delegates to the real implementation by default;
@@ -100,6 +102,70 @@ function syntheticSpawnUnknown(): NodeJS.ErrnoException {
   return error;
 }
 
+// ── The errno-leakage gate ─────────────────────────────────────────────────
+//
+// A raw libuv errno is a *negative integer* (`-4094` for UNKNOWN). Searching
+// the whole serialised result for that shape is not a sound test of the errno
+// contract: `display`, `executable` and `args` are a verbatim echo of what the
+// caller passed in, and a caller path is free to contain a digit run. mkdtemp
+// duly produced directories such as `ao-spawnfail-953HCn` and
+// `ao-spawnfail-601hZz`, failing the gate on the caller's own characters while
+// the product had sanitised the errno correctly (AO-008-S3, ~0.485 % of runs).
+//
+// The gate is therefore split into the two things it was conflating:
+//
+//  1. the errno *field* — the only place an errno can enter the contract — is
+//     checked directly, and must be a static, allow-listed token;
+//  2. the raw-errno *shape* is still hunted across the result, but over the
+//     fields that are not a caller echo. The three that are get pinned to the
+//     caller's input by identity instead, which is strictly stronger than "no
+//     digit run": a value equal to what the caller passed cannot simultaneously
+//     be something that escaped the thrown error object.
+
+/** A raw libuv errno as it would look if one ever reached a result field. */
+const RAW_LIBUV_ERRNO = /-\d{3,4}/;
+
+/** What a sanitised errno code may look like: `ENOENT`, `E2BIG`, `UNKNOWN`. */
+const SANITISED_ERRNO_TOKEN = /^[A-Z][A-Z0-9]*$/;
+
+/** The result fields that are, by contract, a verbatim echo of caller input. */
+const CALLER_ECHO_FIELDS: ReadonlySet<string> = new Set(['display', 'executable', 'args']);
+
+function serializeWithoutCallerEcho(result: CommandResult): string {
+  return JSON.stringify(result, (key: string, value: unknown) =>
+    CALLER_ECHO_FIELDS.has(key) ? undefined : value,
+  );
+}
+
+/**
+ * Asserts the errno contract where errno actually lives: an allow-listed,
+ * screaming-snake token and never a number in any encoding.
+ */
+function expectSanitisedErrnoCode(result: CommandResult, expected: string): void {
+  expect(result.errnoCode).toBe(expected);
+  expect(typeof result.errnoCode).toBe('string');
+  expect(String(result.errnoCode)).toMatch(SANITISED_ERRNO_TOKEN);
+  expect(String(result.errnoCode)).not.toMatch(RAW_LIBUV_ERRNO);
+}
+
+/**
+ * The full leakage gate for a contained spawn failure: the errno contract, the
+ * caller echo pinned by identity, and no raw errno, stack frame or module path
+ * anywhere else in the result.
+ */
+function expectNoErrorObjectLeak(result: CommandResult, callerTarget: string, errno: string): void {
+  expectSanitisedErrnoCode(result, errno);
+  expect(result.executable).toBe(callerTarget);
+  expect(result.display).toBe(callerTarget);
+  expect(serializeWithoutCallerEcho(result)).not.toMatch(RAW_LIBUV_ERRNO);
+
+  const serialized = JSON.stringify(result);
+  expect(serialized).not.toContain('node_modules');
+  expect(serialized).not.toContain('.spawn (');
+  expect((result as unknown as { stack?: unknown }).stack).toBeUndefined();
+  expect((result as unknown as { cause?: unknown }).cause).toBeUndefined();
+}
+
 // ── 10.1: real Windows runtime ──────────────────────────────────────────────
 
 describe.runIf(IS_WINDOWS)('real Windows runtime: synchronous spawn() failure is contained', () => {
@@ -120,16 +186,14 @@ describe.runIf(IS_WINDOWS)('real Windows runtime: synchronous spawn() failure is
     expect(result.processTreeKilled).toBe(false);
     expect(result.stdoutTruncated).toBe(false);
     expect(result.stderrTruncated).toBe(false);
-    expect(result.errnoCode).toBe('UNKNOWN');
 
     // `executable`/`display` legitimately echo the caller's own `target`
     // (exactly as every other CommandResult does) — what must NOT appear is
     // anything from the *thrown error object itself*: its stack trace, or the
     // raw negative libuv errno integer, neither of which the caller supplied.
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toMatch(/-\d{3,4}/); // no raw libuv errno like -4094
-    expect(serialized).not.toContain('node_modules');
-    expect(serialized).not.toContain('.spawn (');
+    // See the gate above for why the errno check reads the errno field rather
+    // than the caller's own path characters.
+    expectNoErrorObjectLeak(result, target, 'UNKNOWN');
   });
 
   it('a PATH/PATHEXT-resolved candidate that is not executable resolves to a controlled CommandResult', async () => {
@@ -223,6 +287,30 @@ describe('deterministic synchronous spawn() throw', () => {
     expect(result.outcome).toBe('NOT_FOUND');
     expect(result.failureCode).toBe('EXECUTABLE_NOT_FOUND');
     expect(result.errnoCode).toBe('ENOENT');
+  });
+
+  it('a caller path whose own name carries a raw-errno-shaped digit run is not a leak', async () => {
+    // The path here is exactly the shape mkdtemp produced by chance during
+    // AO-008-S3 (`ao-spawnfail-953HCn`, `ao-spawnfail-601hZz`), pinned so the
+    // case is tested every run instead of ~1 run in 200. Both digit runs are
+    // caller-chosen characters that `display`/`executable` must keep echoing.
+    const dir = makeTempDir('ao-spawnfail-953-valid-');
+    const target = join(dir, 'sentinel-601.exe');
+    writeFileSync(target, 'x', 'utf8');
+    expect(target).toMatch(RAW_LIBUV_ERRNO); // the caller path, not a leak
+    spawnControl.throwFor = (file) => (file === target ? syntheticSpawnUnknown() : null);
+
+    const result = await runCommand(target, [], { env: {}, timeoutMs: 10_000 });
+
+    expect(result.started).toBe(false);
+    expect(result.outcome).toBe('SPAWN_FAILED');
+    expect(result.failureCode).toBe('SPAWN_FAILED');
+    // The thrown error carried errno -4094; the result carries the sanitised
+    // token, the caller's path survives verbatim, and nothing outside that echo
+    // shows a raw errno. The whole-serialisation form of this gate failed here.
+    expectNoErrorObjectLeak(result, target, 'UNKNOWN');
+    expect(JSON.stringify(result)).not.toContain('-4094');
+    expect(JSON.stringify(result)).not.toContain('syscall');
   });
 
   it('settles immediately rather than waiting for the configured timeout (no leftover timer)', async () => {
