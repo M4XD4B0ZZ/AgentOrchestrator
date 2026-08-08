@@ -1,0 +1,53 @@
+# The canonical delivery gate for this repository.
+#
+# It runs `npm run verify` — the same command the README documents as the full
+# Foundation gate — and nothing weaker. There is deliberately no reduced
+# substitute and no Linux job: `verify` ends in
+# `test:windows-tree-kill-tool-release`, a real-process probe of the Windows
+# process-tree termination path, and `test:dist-trusted-profile` checks a
+# Windows profile resolver. A green Ubuntu run would not mean the same thing,
+# so this workflow does not offer one.
+name: verify
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# The gate only reads the repository. It publishes nothing, comments nowhere and
+# needs no secret.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (windows, node 22)
+    runs-on: windows-latest
+    # `verify` starts real processes, including a detached helper that survives
+    # on purpose, so a defect here can hang rather than fail. The whole gate
+    # takes about 30 seconds locally; this bound is not a performance budget,
+    # only a ceiling that stops a hung probe from holding a runner open
+    # indefinitely.
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The floor this project declares: package.json `engines.node` is
+          # ">=22" and MINIMUM_NODE_MAJOR in src/doctor/run-doctor.ts is 22.
+          # Gating on the floor is what makes that claim verified rather than
+          # assumed. No matrix: a second version would test a promise nobody
+          # made.
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify
+        run: npm run verify
