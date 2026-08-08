@@ -740,6 +740,34 @@ because `yaml` was already a dependency. It is parsed as plain YAML 1.2 core
 schema with merge keys disabled — no custom tags, so the document can only
 produce the JSON data model.
 
+`src/repo/profile-yaml.ts` owns that conversion, and two rules are established
+there rather than downstream:
+
+- **A document the parser warns about is refused**, with `PROFILE_PARSE_FAILED`.
+  A warning marks a construct outside the plain 1.2 core schema — an unresolved
+  tag, an ambiguous anchor or alias, a bad directive — so refusing it is what the
+  format rule already claimed. It also removes a leak: `YAML.parse()` routes
+  warnings to `process.emitWarning`, and those messages quote the offending
+  source line, which put profile text on stderr past every containment rule the
+  resolver observes for its own return value. No warning is handed to the
+  library's logger at all, and `logLevel: 'silent'` is set besides. Errors are
+  read from the parsed document rather than caught, because a silent log level
+  makes `YAML.parse()` *discard* `doc.errors` instead of throwing — silencing
+  the logger without that care would have turned malformed YAML into accepted
+  YAML. A profile stream of more than one document is refused for the same
+  reason: silently taking the first is what a single-document parse would do.
+- **A `__proto__` mapping key is refused at any depth**, with
+  `PROFILE_SCHEMA_INVALID`. The generated JSON Schema sets
+  `additionalProperties: false` everywhere and so rejects it like any other
+  unknown property, while Zod's `.strict()` treats `__proto__` as *not a key* and
+  drops it silently — the same document meant two different things to the shipped
+  schema and to the runtime. Nothing was polluted by that (Zod discards the
+  value, and the resolver rebuilds its result field by field), but V1-02+ would
+  have been built on the weaker half of a split contract. The check walks the
+  parsed document tree, over the mapping keys the parser actually read and
+  *before* any JavaScript object exists, because a check performed after the
+  conversion can only see keys the conversion chose to keep.
+
 ### What a profile declares
 
 ```yaml
@@ -782,6 +810,18 @@ command line at all. Paths are POSIX-shaped and repository-relative; an absolute
 path, a drive letter, a backslash, a `..` segment and a `.` segment are each
 refused by the schema, and containment is then re-checked against the canonical
 root at resolution time.
+
+**Default-branch names are limited in v1 to the safe ASCII-inert argument
+grammar of the execution layer.** The branch name becomes an argument to a real
+`git` process, and the hardened `runCommand` argument contract established in
+AO-008 accepts only that grammar; the profile schema enforces it on the way in
+rather than letting a value through that the execution layer would have to
+refuse later. The practical consequence is worth stating plainly, because it is a
+limit of this build and not of Git: a branch name Git accepts perfectly well —
+`feature/café`, `Ünicode` — **cannot currently be profiled as `defaultBranch`**,
+and such a profile is refused with `PROFILE_SCHEMA_INVALID`. Onboarding a
+repository whose default branch carries non-ASCII characters therefore needs the
+argument grammar widened first; V1-01 does not widen it.
 
 Cross-field invariants that JSON Schema cannot express — a supported
 `schemaVersion`, distinct verification phases, a mandatory `VERIFY` phase,
@@ -841,12 +881,27 @@ CodeGraph index?** — by looking for a real `.codegraph` directory at the
 canonical root, in-process, with no subprocess and no environment value. A
 symlink there is not followed and yields `UNKNOWN`.
 
-It does **not** claim that an MCP `codegraph_explore` tool is reachable: the
-orchestrator runtime is not the agent session that owns those tools and cannot
-call one, so asserting that would be a fabricated pass. The status vocabulary is
-`AVAILABLE | UNAVAILABLE | UNKNOWN`, and `UNKNOWN` never satisfies a
-requirement — "could not be determined" is representable rather than rounded to
-either answer.
+The status vocabulary is named after that evidence and nothing beyond it:
+
+| status | what was observed | what it does **not** claim |
+| --- | --- | --- |
+| `INDEX_PRESENT` | a real `.codegraph` directory at the canonical root | valid index contents, a *fresh* index, a configured MCP server, or a reachable `codegraph_explore` tool |
+| `UNAVAILABLE` | no local index there | — |
+| `UNKNOWN` | the probe could not conclude (a link, a permission failure, an I/O error) | — |
+
+The positive member is `INDEX_PRESENT` rather than `AVAILABLE` deliberately.
+`AVAILABLE` reads as "the capability can be used", and a consumer written
+against that reading would be relying on something no code in this build
+measures: the orchestrator runtime is not the agent session that owns the MCP
+tools and cannot call one, so asserting reachability would be a fabricated pass.
+The name was corrected before the first consumer existed, so nothing had to be
+migrated. When a later slice can actually prove tool reachability, it earns a
+second status of its own; it does not redefine this one.
+
+So `REQUIRED` in a profile means **this repository must carry a local CodeGraph
+index**, which is what the resolver can check. `UNKNOWN` never satisfies it —
+"could not be determined" is representable rather than rounded to either answer —
+and an `OPTIONAL` capability that is unavailable still resolves.
 
 ### Failure codes
 

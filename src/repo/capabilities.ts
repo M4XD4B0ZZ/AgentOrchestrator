@@ -15,14 +15,24 @@
  * repository, and it looks for it in-process — no subprocess, no PATH search,
  * no network, no environment value.
  *
- * It does **not** claim that an MCP `codegraph_explore` tool is reachable from
- * this process. The orchestrator runtime is not the agent session that owns
- * those tools and cannot call one, so asserting that would be a fabricated
- * pass. The status vocabulary says exactly this much and no more, and the
- * `UNKNOWN` member exists so that "could not be determined" is representable
- * rather than being rounded to either answer.
+ * That is the whole of the evidence, so it is also the whole of what the type
+ * says. The positive status is named `INDEX_PRESENT` rather than `AVAILABLE`
+ * because a local index directory is a fact about the filesystem and nothing
+ * more. It does **not** establish that the index has valid contents, that it is
+ * current with the working tree, that an MCP server is configured, or that a
+ * `codegraph_explore` tool is reachable from this process — the orchestrator
+ * runtime is not the agent session that owns those tools and cannot call one,
+ * so asserting any of it would be a fabricated pass.
  *
- * `UNKNOWN` never satisfies a requirement. Only `AVAILABLE` does.
+ * The naming is deliberate rather than cosmetic: `AVAILABLE` invites a consumer
+ * to read "the capability can be used", and V1-02 onwards would be written
+ * against that reading. `INDEX_PRESENT` can only be read as what was measured.
+ * When a later slice can prove tool reachability, it earns a *second* status of
+ * its own; it does not redefine this one.
+ *
+ * `UNKNOWN` exists so that "could not be determined" is representable rather
+ * than rounded to either answer, and it never satisfies a requirement. Only
+ * `INDEX_PRESENT` does.
  */
 
 import { lstatSync } from 'node:fs';
@@ -33,19 +43,23 @@ export const REPOSITORY_CAPABILITIES = ['codegraph'] as const;
 export type RepositoryCapability = (typeof REPOSITORY_CAPABILITIES)[number];
 
 /**
- * The closed answer set.
+ * The closed answer set, named after the evidence rather than after a
+ * conclusion drawn from it.
  *
- * `UNKNOWN` is not a soft `AVAILABLE`: it means the probe could not conclude,
- * and every caller must treat it as "not proven" — see {@link capabilitySatisfied}.
+ * - `INDEX_PRESENT` — a real local index directory was observed. Nothing about
+ *   its contents, its freshness or any tool's reachability is claimed.
+ * - `UNAVAILABLE` — no local index is there.
+ * - `UNKNOWN` — the probe could not conclude. Not a soft `INDEX_PRESENT`: every
+ *   caller must treat it as "not proven" — see {@link capabilitySatisfied}.
  */
-export type CapabilityStatus = 'AVAILABLE' | 'UNAVAILABLE' | 'UNKNOWN';
+export type CapabilityStatus = 'INDEX_PRESENT' | 'UNAVAILABLE' | 'UNKNOWN';
 
 /** Directory whose presence marks a repository as CodeGraph-indexed. */
 export const CODEGRAPH_INDEX_DIR_NAME = '.codegraph';
 
 /**
- * `AVAILABLE` only for a real directory — not a symlink, not a junction, not a
- * file — named `.codegraph` directly at `repositoryRoot`.
+ * `INDEX_PRESENT` only for a real directory — not a symlink, not a junction,
+ * not a file — named `.codegraph` directly at `repositoryRoot`.
  *
  * A link is refused rather than followed: the marker is supposed to say
  * something about *this* repository, and a link makes it say something about
@@ -67,21 +81,24 @@ export function probeCodegraphCapability(repositoryRoot: string): CapabilityStat
   }
 
   if (stats.isSymbolicLink()) return 'UNKNOWN';
-  return stats.isDirectory() ? 'AVAILABLE' : 'UNAVAILABLE';
+  return stats.isDirectory() ? 'INDEX_PRESENT' : 'UNAVAILABLE';
 }
 
 /**
  * Whether an observed status meets a declared requirement.
  *
  * `OPTIONAL` is met by every status, including `UNKNOWN`: the repository stated
- * that it can work without the capability. `REQUIRED` is met by `AVAILABLE`
- * alone.
+ * that it can work without the capability. `REQUIRED` is met by `INDEX_PRESENT`
+ * alone — that is, by the only status backed by evidence this build can gather.
+ * A profile declaring `REQUIRED` is therefore requiring a locally indexed
+ * repository, which is what the resolver is able to check; it is not being told
+ * that a CodeGraph tool answered.
  */
 export function capabilitySatisfied(
   requirement: 'REQUIRED' | 'OPTIONAL',
   status: CapabilityStatus,
 ): boolean {
-  return requirement === 'OPTIONAL' || status === 'AVAILABLE';
+  return requirement === 'OPTIONAL' || status === 'INDEX_PRESENT';
 }
 
 /** What the resolver records about one capability. */

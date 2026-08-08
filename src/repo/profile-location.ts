@@ -21,7 +21,9 @@
  *
  * YAML is the format because the profile is written and reviewed by humans and
  * because `yaml` is already a dependency of this package. The parser is used in
- * its safe, plain-document mode — see `resolve-repository.ts`.
+ * its safe, plain-document mode; the conversion from text to data — the mapping
+ * keys refused by name, and the warnings that never reach the process — belongs
+ * to `profile-yaml.ts`.
  */
 
 import { join } from 'node:path';

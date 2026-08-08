@@ -43,8 +43,6 @@
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
 
-import { parse as parseYaml } from 'yaml';
-
 import {
   capabilitySatisfied,
   probeCodegraphCapability,
@@ -53,6 +51,7 @@ import {
 } from './capabilities.js';
 import { isValidBranchName, localBranchRef } from './branch-name.js';
 import { gitQuery } from './git-query.js';
+import { loadProfileDocument } from './profile-yaml.js';
 import {
   repoProfileDirectory,
   repoProfilePath,
@@ -405,18 +404,20 @@ export async function resolveRepository(
   // --- 5. Parse ------------------------------------------------------------
   // Plain YAML 1.2 core schema: no custom tags, no merge keys, and the
   // library's own alias ceiling. The document may only produce the JSON data
-  // model, so nothing exotic reaches the validator.
-  let document: unknown;
-  try {
-    document = parseYaml(text, { version: '1.2', merge: false });
-  } catch {
-    // The exception quotes the offending source line. It is discarded here
-    // rather than carried into the result.
-    return failure('PROFILE_PARSE_FAILED');
+  // model, so nothing exotic reaches the validator. See `profile-yaml.ts` for
+  // why the mapping keys are inspected there, on the document tree, and why no
+  // parser warning reaches the process.
+  const loaded = loadProfileDocument(text);
+  if (loaded.outcome === 'MALFORMED') return failure('PROFILE_PARSE_FAILED');
+  if (loaded.outcome === 'FORBIDDEN_KEY') {
+    // A key the contract refuses by name is a contract violation, classified
+    // exactly as the generated JSON Schema classifies it: an unknown property.
+    // The count is a count — never the key, never its position.
+    return failure('PROFILE_SCHEMA_INVALID', loaded.count);
   }
 
   // --- 6. Validate against the contract ------------------------------------
-  const parsed = safeParseRepoProfile(document);
+  const parsed = safeParseRepoProfile(loaded.document);
   if (!parsed.success) {
     return failure('PROFILE_SCHEMA_INVALID', parsed.error.issues.length);
   }

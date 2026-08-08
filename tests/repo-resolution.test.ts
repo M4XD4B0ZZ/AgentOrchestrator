@@ -33,6 +33,8 @@ import {
   type RepositoryResolutionResult,
   type ResolvedRepository,
 } from '../src/repo/resolve-repository.js';
+import { capabilitySatisfied, probeCodegraphCapability } from '../src/repo/capabilities.js';
+import { buildRepoProfileJsonSchema } from '../src/repo/json-schema.js';
 import { REPO_PROFILE_RELATIVE_PATH } from '../src/repo/profile-location.js';
 
 afterAll(removeRepoFixtures);
@@ -122,7 +124,7 @@ describe('repository resolution', () => {
     expect(a.capabilities.codegraph.requirement).toBe('OPTIONAL');
     expect(b.capabilities.codegraph.requirement).toBe('REQUIRED');
     expect(a.capabilities.codegraph.status).toBe('UNAVAILABLE');
-    expect(b.capabilities.codegraph.status).toBe('AVAILABLE');
+    expect(b.capabilities.codegraph.status).toBe('INDEX_PRESENT');
     expect(a.taskSource.path).toBe('tasks');
     expect(b.taskSource.path).toBe('ops/work-items');
     expect(a.context.canonicalSources).toEqual(['README.md']);
@@ -252,7 +254,7 @@ describe('CodeGraph capability preflight', () => {
     expect(repository.capabilities.codegraph).toEqual({
       capability: 'codegraph',
       requirement: 'REQUIRED',
-      status: 'AVAILABLE',
+      status: 'INDEX_PRESENT',
       satisfied: true,
     });
   });
@@ -316,14 +318,24 @@ describe('default branch validation', () => {
     );
   });
 
+  // Each of these is refused by exactly one layer, and *which* layer is part of
+  // the contract rather than an implementation detail. The profile schema owns
+  // the character grammar — the shell-inert argument vocabulary the execution
+  // layer accepts — so a name carrying a character outside it never reaches the
+  // branch rules at all. The branch grammar owns the shape rules that apply to
+  // names built from otherwise legal characters. Pinning one code per case means
+  // a rule silently migrating between the two layers fails this test instead of
+  // passing it, which an `either code is fine` assertion could not detect.
   it.each([
-    ['a leading dash', '-force'],
-    ['a .lock suffix', 'feature.lock'],
-    ['a leading dot component', 'feature/.hidden'],
-    ['a double dot', 'feature..old'],
-    ['a reflog expression', 'main@{upstream}'],
-    ['a trailing slash', 'feature/'],
-  ])('refuses a default branch with %s', async (_label, branch) => {
+    ['a leading dash', '-force', 'DEFAULT_BRANCH_INVALID'],
+    ['a .lock suffix', 'feature.lock', 'DEFAULT_BRANCH_INVALID'],
+    ['a leading dot component', 'feature/.hidden', 'DEFAULT_BRANCH_INVALID'],
+    ['a double dot', 'feature..old', 'DEFAULT_BRANCH_INVALID'],
+    ['a trailing slash', 'feature/', 'DEFAULT_BRANCH_INVALID'],
+    // `{` and `}` are outside the schema's shell-inert character set, so the
+    // reflog expression is refused before the branch grammar sees it.
+    ['a reflog expression', 'main@{upstream}', 'PROFILE_SCHEMA_INVALID'],
+  ])('refuses a default branch with %s', async (_label, branch, expected) => {
     const root = createRepoFixture({
       defaultBranch: 'main',
       profile: profileWith({ defaultBranch: branch }),
@@ -332,9 +344,24 @@ describe('default branch validation', () => {
     const result = await resolveRepository({ repositoryPath: root });
 
     expect(result.ok).toBe(false);
-    // Either the profile schema refuses the characters outright or the branch
-    // grammar does; both are fail-closed, and neither reaches Git.
-    expect(['DEFAULT_BRANCH_INVALID', 'PROFILE_SCHEMA_INVALID']).toContain(result.code);
+    expect(result.code).toBe(expected);
+  });
+
+  it.each([
+    ['an accented segment', 'feature/café'],
+    ['a non-ASCII first character', 'Ünicode'],
+  ])('refuses %s Git itself would accept', async (_label, branch) => {
+    // Git accepts these names. This build does not, and the reason is the
+    // execution layer rather than Git: `runCommand` accepts only the ASCII-inert
+    // argument grammar (AO-008), and the profile schema enforces that grammar on
+    // every value that becomes a process argument. The limit is recorded here so
+    // that widening it later is a deliberate change to a pinned expectation.
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({ defaultBranch: branch }),
+    });
+
+    expect((await resolveRepository({ repositoryPath: root })).code).toBe('PROFILE_SCHEMA_INVALID');
   });
 
   it('accepts a slash-separated branch name that exists', async () => {
@@ -447,6 +474,314 @@ describe('profile discovery', () => {
     expect(result.detail).not.toContain(root);
     expect(result.detail).not.toContain('release');
     expect(result.detail).not.toMatch(/[A-Za-z]:\\|\/tmp|\/var/);
+  });
+});
+
+// ── Prototype-special mapping keys ─────────────────────────────────────────
+//
+// These profiles are written as *text*, never as object literals: the whole
+// question is what the YAML parser and the JavaScript object model do with a
+// key named `__proto__`, and an object literal in a test would have already
+// answered it. On the pre-fix build every case below resolved successfully —
+// Zod's `.strict()` drops `__proto__` instead of reporting it as unknown, while
+// the generated JSON Schema refuses it like any other additional property.
+
+describe('prototype-special mapping keys', () => {
+  it('refuses a top-level __proto__ key', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({ extraKey: '__proto__:\n  aoPollutionMarker: true\n' }),
+    });
+
+    const result = await resolveRepository({ repositoryPath: root });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('PROFILE_SCHEMA_INVALID');
+    expect(result.ok === false && result.issueCount).toBeGreaterThan(0);
+  });
+
+  it('refuses a nested repository.__proto__ key', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({}).replace(
+        '  defaultBranch: main\n',
+        '  defaultBranch: main\n  __proto__:\n    aoPollutionMarker: true\n',
+      ),
+    });
+
+    const result = await resolveRepository({ repositoryPath: root });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('PROFILE_SCHEMA_INVALID');
+  });
+
+  it('refuses a __proto__ key nested two levels down', async () => {
+    // The check walks the parsed document tree, so depth is not a special case.
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({}).replace(
+        '      command: [npm, run, verify]\n',
+        '      command: [npm, run, verify]\n      __proto__:\n        aoPollutionMarker: true\n',
+      ),
+    });
+
+    expect((await resolveRepository({ repositoryPath: root })).code).toBe('PROFILE_SCHEMA_INVALID');
+  });
+
+  it('still refuses an ordinary unknown nested key the same way', async () => {
+    // The contrast is the point: a normal unknown key was already fail-closed,
+    // and tightening `__proto__` did not move it to a different code.
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({}).replace(
+        '  defaultBranch: main\n',
+        '  defaultBranch: main\n  upstream: origin\n',
+      ),
+    });
+
+    expect((await resolveRepository({ repositoryPath: root })).code).toBe('PROFILE_SCHEMA_INVALID');
+  });
+
+  it('leaves Object.prototype untouched', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({ extraKey: '__proto__:\n  aoPollutionMarker: true\n' }),
+    });
+
+    await resolveRepository({ repositoryPath: root });
+
+    expect(Object.getOwnPropertyNames(Object.prototype)).not.toContain('aoPollutionMarker');
+    expect(({} as Record<string, unknown>)['aoPollutionMarker']).toBeUndefined();
+  });
+
+  it('refuses the same document the generated JSON Schema refuses', async () => {
+    // Runtime and shipped schema must agree about this class of key: the schema
+    // forbids additional properties at every level, so `__proto__` is an
+    // additional property there, and `PROFILE_SCHEMA_INVALID` is the runtime's
+    // word for exactly that.
+    const schema = buildRepoProfileJsonSchema() as { additionalProperties: unknown };
+    expect(schema.additionalProperties).toBe(false);
+
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({ extraKey: '__proto__:\n  aoPollutionMarker: true\n' }),
+    });
+    const withOrdinaryKey = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({ extraKey: 'aoUnknownSection:\n  value: true\n' }),
+    });
+
+    expect((await resolveRepository({ repositoryPath: root })).code).toBe(
+      (await resolveRepository({ repositoryPath: withOrdinaryKey })).code,
+    );
+  });
+});
+
+// ── Parser warnings stay inside the resolver ───────────────────────────────
+
+describe('YAML warning containment', () => {
+  /** Runs `body` while recording everything the process reports as a warning. */
+  async function recordingProcessWarnings<T>(
+    body: () => Promise<T>,
+  ): Promise<{ readonly value: T; readonly warnings: readonly string[] }> {
+    // A listener is added and removed — nothing global is replaced, so a
+    // parallel test file sharing this process is unaffected, and the assertions
+    // below only ever ask whether a *specific* marker appeared.
+    const warnings: string[] = [];
+    const listener = (warning: Error): void => {
+      warnings.push(`${warning.name}: ${warning.message}`);
+    };
+    process.on('warning', listener);
+    try {
+      const value = await body();
+      // `process.emitWarning` delivers on a later tick.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      return { value, warnings };
+    } finally {
+      process.off('warning', listener);
+    }
+  }
+
+  /** A tag no schema resolves, carrying a token that could only come from the file. */
+  const UNKNOWN_TAG_MARKER = 'AoProfileLeakMarker-4d19c7';
+
+  it('refuses a profile carrying an unresolvable custom tag', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({}).replace(
+        '  id: fixture-alpha\n',
+        `  id: !${UNKNOWN_TAG_MARKER} fixture-alpha\n`,
+      ),
+    });
+
+    const result = await resolveRepository({ repositoryPath: root });
+
+    // The contract is plain YAML 1.2 core schema. A construct outside it is
+    // refused rather than silently reinterpreted — suppressing the parser's
+    // warning must not be what makes such a document acceptable.
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('PROFILE_PARSE_FAILED');
+  });
+
+  it('emits no process warning carrying profile text', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({}).replace(
+        '  id: fixture-alpha\n',
+        `  id: !${UNKNOWN_TAG_MARKER} fixture-alpha\n`,
+      ),
+    });
+
+    const { value: result, warnings } = await recordingProcessWarnings(() =>
+      resolveRepository({ repositoryPath: root }),
+    );
+
+    expect(result.code).toBe('PROFILE_PARSE_FAILED');
+    expect(warnings.filter((warning) => warning.includes(UNKNOWN_TAG_MARKER))).toEqual([]);
+    expect(warnings.filter((warning) => warning.includes('fixture-alpha'))).toEqual([]);
+    expect(warnings.filter((warning) => warning.includes('YAMLWarning'))).toEqual([]);
+  });
+
+  it('keeps the failure detail static and free of the document', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({}).replace(
+        '  id: fixture-alpha\n',
+        `  id: !${UNKNOWN_TAG_MARKER} fixture-alpha\n`,
+      ),
+    });
+
+    const result = await resolveRepository({ repositoryPath: root });
+
+    if (result.ok) throw new Error('expected a failure');
+    expect(result.detail).toBe('The repository profile is not well-formed YAML.');
+    expect(result.detail).not.toContain(UNKNOWN_TAG_MARKER);
+    expect(result.detail).not.toContain(root);
+    expect(result.issueCount).toBeNull();
+  });
+
+  it('still classifies genuinely malformed YAML as a parse failure', async () => {
+    // Silencing the library's logger must not be allowed to silence its errors:
+    // `YAML.parse` under a silent log level *discards* them instead of throwing.
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: 'schemaVersion: 1\nrepository: { id: fixture-alpha\n',
+    });
+
+    expect((await resolveRepository({ repositoryPath: root })).code).toBe('PROFILE_PARSE_FAILED');
+  });
+
+  it('refuses a multi-document profile stream', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: `${profileWith({})}---\n${profileWith({ id: 'fixture-beta' })}`,
+    });
+
+    expect((await resolveRepository({ repositoryPath: root })).code).toBe('PROFILE_PARSE_FAILED');
+  });
+});
+
+// ── What the capability status is evidence of ──────────────────────────────
+
+describe('CodeGraph capability status names its evidence', () => {
+  it('reports INDEX_PRESENT for a real local index directory', () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: FIXTURE_A_PROFILE,
+      codegraphIndex: true,
+    });
+
+    expect(probeCodegraphCapability(root)).toBe('INDEX_PRESENT');
+  });
+
+  it('reports UNAVAILABLE when no index is there', () => {
+    const root = createRepoFixture({ defaultBranch: 'main', profile: FIXTURE_A_PROFILE });
+
+    expect(probeCodegraphCapability(root)).toBe('UNAVAILABLE');
+  });
+
+  it('reports UNAVAILABLE for a file named .codegraph', () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: FIXTURE_A_PROFILE,
+      files: { '.codegraph': 'not a directory' },
+    });
+
+    expect(probeCodegraphCapability(root)).toBe('UNAVAILABLE');
+  });
+
+  it('reports UNKNOWN for a linked .codegraph rather than following it', () => {
+    const root = createRepoFixture({ defaultBranch: 'main', profile: FIXTURE_A_PROFILE });
+    const elsewhere = createRepoFixture({
+      defaultBranch: 'main',
+      profile: FIXTURE_A_PROFILE,
+      codegraphIndex: true,
+    });
+
+    try {
+      symlinkSync(join(elsewhere, '.codegraph'), join(root, '.codegraph'), 'junction');
+    } catch {
+      // Link creation is privileged on some hosts; the resolver's check is not.
+      return;
+    }
+
+    expect(probeCodegraphCapability(root)).toBe('UNKNOWN');
+  });
+
+  it('satisfies REQUIRED from INDEX_PRESENT alone', () => {
+    expect(capabilitySatisfied('REQUIRED', 'INDEX_PRESENT')).toBe(true);
+    expect(capabilitySatisfied('REQUIRED', 'UNAVAILABLE')).toBe(false);
+    // An unresolved probe is never rounded up to a pass.
+    expect(capabilitySatisfied('REQUIRED', 'UNKNOWN')).toBe(false);
+  });
+
+  it('satisfies OPTIONAL from every status', () => {
+    for (const status of ['INDEX_PRESENT', 'UNAVAILABLE', 'UNKNOWN'] as const) {
+      expect(capabilitySatisfied('OPTIONAL', status)).toBe(true);
+    }
+  });
+
+  it('refuses a REQUIRED capability whose index cannot be determined', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: profileWith({ codegraph: 'REQUIRED' }),
+    });
+    const elsewhere = createRepoFixture({
+      defaultBranch: 'main',
+      profile: FIXTURE_A_PROFILE,
+      codegraphIndex: true,
+    });
+
+    try {
+      symlinkSync(join(elsewhere, '.codegraph'), join(root, '.codegraph'), 'junction');
+    } catch {
+      return;
+    }
+
+    expect((await resolveRepository({ repositoryPath: root })).code).toBe(
+      'REQUIRED_CAPABILITY_UNAVAILABLE',
+    );
+  });
+
+  it('claims nothing about tool or MCP reachability', () => {
+    // The status vocabulary is the contract V1-02+ will read. It must not offer
+    // a member a consumer could take as "a CodeGraph tool answered": the probe
+    // performs one `lstat` and starts no process, so nothing in this build could
+    // back such a claim. `INDEX_PRESENT` says only what was measured.
+    const source = readFileSync(join(PACKAGE_ROOT, 'src', 'repo', 'capabilities.ts'), 'utf8');
+    const declaration = /export type CapabilityStatus =([^;]+);/.exec(source)?.[1] ?? '';
+    const members = declaration.split('|').map((member) => member.trim().replaceAll("'", ''));
+
+    expect(members).toEqual(['INDEX_PRESENT', 'UNAVAILABLE', 'UNKNOWN']);
+    // `AVAILABLE` read as "the capability can be used"; that is the reading the
+    // evidence does not support. `UNAVAILABLE` stays: absence of a local index
+    // is exactly what it is measured on.
+    expect(members).not.toContain('AVAILABLE');
+    expect(members).not.toContain('REACHABLE');
+    // No probe in this module starts anything or talks to anything.
+    expect(source).not.toContain('child_process');
+    expect(source).not.toContain('runCommand');
   });
 });
 

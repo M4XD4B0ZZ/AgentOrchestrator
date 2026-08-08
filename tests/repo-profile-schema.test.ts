@@ -56,6 +56,29 @@ describe('repository-profile contract', () => {
     expect(safeParseRepoProfile(profile).success).toBe(false);
   });
 
+  it('does not see __proto__ as a key at all, which is why the YAML layer guards it', () => {
+    // Zod's `.strict()` drops `__proto__` silently instead of reporting it as an
+    // unknown key, while the generated JSON Schema — `additionalProperties:
+    // false` at every level — refuses it. This test pins that divergence as the
+    // reason `src/repo/profile-yaml.ts` refuses the key on the document tree,
+    // before any JavaScript object exists.
+    //
+    // If this ever fails because Zod started reporting the key, the YAML-level
+    // check has become redundant rather than wrong: re-evaluate it, do not
+    // weaken it.
+    const profile = validProfile();
+    Object.defineProperty(profile, '__proto__', {
+      value: { polluted: true },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+
+    expect(Object.getOwnPropertyNames(profile)).toContain('__proto__');
+    expect(safeParseRepoProfile(profile).success).toBe(true);
+    expect(Object.getOwnPropertyNames(Object.prototype)).not.toContain('polluted');
+  });
+
   it('refuses a missing section', () => {
     const profile = validProfile();
     delete profile['scope'];
