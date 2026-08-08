@@ -1,0 +1,509 @@
+/**
+ * Repository resolution: turning an explicit path into a typed, validated,
+ * frozen statement of *which repository this is and what contract governs it*.
+ *
+ * This is the orchestrator's first runtime layer. Everything after it — task
+ * discovery, worktrees, the writer, verification, review — reads the value this
+ * module produces and nothing else. It therefore contains no knowledge of any
+ * particular repository: the only project-specific facts in the system live in
+ * the target repository's own profile.
+ *
+ * ── Fail-closed, in both directions ────────────────────────────────────────
+ *
+ * A repository resolves only when *every* step succeeded: the path is real and
+ * canonical, it is the root of a Git repository (not a subdirectory of one), a
+ * profile exists at the one canonical location, it parses, it satisfies the
+ * contract, every path it declares is contained in the repository, its default
+ * branch is a legal branch name that exists locally, every required capability
+ * is positively available, and its remote expectation holds. A failure at any
+ * step returns a closed code and no repository at all — never a partially
+ * resolved value.
+ *
+ * ── What is deliberately absent ────────────────────────────────────────────
+ *
+ * **`process.cwd()`.** The caller states the repository; this module never
+ * guesses it. A resolution that depended on where the operator happened to
+ * stand would make the answer a property of the shell rather than of the input.
+ *
+ * **Environment overrides.** No variable names the repository, the profile
+ * path, the profile format or the default branch. The child Git processes
+ * receive `PATH`/`PATHEXT` and nothing else (see `git-query.ts`), so not even
+ * `GIT_DIR` can redirect which repository answers.
+ *
+ * **Writes.** Git is used read-only. Nothing is created, checked out, fetched
+ * or committed.
+ *
+ * **Exceptions across the boundary.** Failures are data. No `fs`, `git`, YAML
+ * or Zod exception text leaves this module — those messages quote paths,
+ * command lines and the offending input itself, which is exactly the class of
+ * value `core/safe-error.ts` exists to keep out of user-facing output. What a
+ * caller gets is a code from a closed set and a sentence written here.
+ */
+
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
+
+import { parse as parseYaml } from 'yaml';
+
+import {
+  capabilitySatisfied,
+  probeCodegraphCapability,
+  type CapabilityAssessment,
+  type CapabilityStatus,
+} from './capabilities.js';
+import { isValidBranchName, localBranchRef } from './branch-name.js';
+import { gitQuery } from './git-query.js';
+import {
+  repoProfileDirectory,
+  repoProfilePath,
+  REPO_PROFILE_RELATIVE_PATH,
+} from './profile-location.js';
+import { safeParseRepoProfile, type RepoProfile } from './repo-profile.js';
+
+// ── Failure vocabulary ─────────────────────────────────────────────────────
+
+/**
+ * Every way resolution can fail, as a closed set.
+ *
+ * These are the machine-readable outcome of the step: stable across builds,
+ * safe to log, safe to branch on, and carrying nothing from the host, the
+ * profile or an exception.
+ */
+export const REPOSITORY_RESOLUTION_FAILURE_CODES = [
+  /** The input is not a usable absolute repository path. */
+  'REPOSITORY_PATH_INVALID',
+  /** Nothing exists at the given path, or it could not be canonicalised. */
+  'REPOSITORY_NOT_FOUND',
+  /** The canonical path exists but is not a directory. */
+  'REPOSITORY_NOT_DIRECTORY',
+  /** A link, or a path escaping the repository root, was found where a
+   *  contained, link-free path is required. */
+  'REPOSITORY_PATH_UNSAFE',
+  /** Git could not be started, timed out, or exceeded its output budget. */
+  'GIT_UNAVAILABLE',
+  /** The path is not inside any Git repository. */
+  'NOT_A_GIT_REPOSITORY',
+  /** The path is inside a Git repository but is not its root. */
+  'REPOSITORY_ROOT_MISMATCH',
+  /** No profile at the one canonical location. */
+  'PROFILE_MISSING',
+  /** Something is at the profile path, but it is not a regular file. */
+  'PROFILE_NOT_REGULAR_FILE',
+  /** The profile exceeds the byte ceiling and is not read. */
+  'PROFILE_TOO_LARGE',
+  /** The profile exists but could not be read. */
+  'PROFILE_READ_FAILED',
+  /** The profile is not well-formed YAML. */
+  'PROFILE_PARSE_FAILED',
+  /** The profile is well-formed YAML but violates the contract. */
+  'PROFILE_SCHEMA_INVALID',
+  /** The declared default branch is not a legal Git branch name. */
+  'DEFAULT_BRANCH_INVALID',
+  /** The declared default branch does not exist locally. */
+  'DEFAULT_BRANCH_NOT_FOUND',
+  /** A capability the profile marks REQUIRED is not positively available. */
+  'REQUIRED_CAPABILITY_UNAVAILABLE',
+  /** The profile requires a remote and the repository has none. */
+  'REMOTE_REQUIRED_BUT_ABSENT',
+] as const;
+
+export type RepositoryResolutionFailureCode =
+  (typeof REPOSITORY_RESOLUTION_FAILURE_CODES)[number];
+
+export type RepositoryResolutionCode = 'RESOLVED' | RepositoryResolutionFailureCode;
+
+/**
+ * One static sentence per failure code.
+ *
+ * Nothing is interpolated: not the repository path, not the profile path, not
+ * the branch name, not a Zod issue message and not an exception's text. A
+ * failure must not become a channel for the value the caller was not allowed to
+ * learn, and a profile is repository-supplied input.
+ */
+const FAILURE_DETAIL: Readonly<Record<RepositoryResolutionFailureCode, string>> = Object.freeze({
+  REPOSITORY_PATH_INVALID:
+    'The repository path must be a non-empty absolute path with no embedded NUL character.',
+  REPOSITORY_NOT_FOUND: 'No filesystem object exists at the given repository path.',
+  REPOSITORY_NOT_DIRECTORY: 'The canonical repository path is not a directory.',
+  REPOSITORY_PATH_UNSAFE:
+    'A required path is a link, or resolves outside the canonical repository root.',
+  GIT_UNAVAILABLE: 'A read-only Git query could not be completed.',
+  NOT_A_GIT_REPOSITORY: 'The given path is not inside a Git repository.',
+  REPOSITORY_ROOT_MISMATCH:
+    'The given path is inside a Git repository but is not that repository\u2019s root.',
+  PROFILE_MISSING: `No repository profile exists at ${REPO_PROFILE_RELATIVE_PATH}.`,
+  PROFILE_NOT_REGULAR_FILE: 'The repository profile path does not hold a regular file.',
+  PROFILE_TOO_LARGE: 'The repository profile exceeds the maximum accepted size.',
+  PROFILE_READ_FAILED: 'The repository profile could not be read.',
+  PROFILE_PARSE_FAILED: 'The repository profile is not well-formed YAML.',
+  PROFILE_SCHEMA_INVALID: 'The repository profile does not satisfy the repository-profile contract.',
+  DEFAULT_BRANCH_INVALID: 'The declared default branch is not a legal Git branch name.',
+  DEFAULT_BRANCH_NOT_FOUND: 'The declared default branch does not exist in this repository.',
+  REQUIRED_CAPABILITY_UNAVAILABLE:
+    'A capability the profile declares as required could not be proven available.',
+  REMOTE_REQUIRED_BUT_ABSENT:
+    'The profile requires a configured remote and the repository has none.',
+});
+
+// ── Resolved value ─────────────────────────────────────────────────────────
+
+export interface ResolvedTaskSource {
+  readonly kind: RepoProfile['taskSource']['kind'];
+  /** Repository-relative, POSIX-shaped, verified to be contained in the root. */
+  readonly path: string;
+}
+
+export interface ResolvedContextPolicy {
+  readonly canonicalSources: readonly string[];
+}
+
+export interface ResolvedVerificationPhase {
+  readonly phase: RepoProfile['verification']['phases'][number]['phase'];
+  readonly command: readonly string[];
+}
+
+export interface ResolvedVerificationPolicy {
+  readonly phases: readonly ResolvedVerificationPhase[];
+}
+
+export interface ResolvedScopePolicy {
+  readonly allowedPaths: readonly string[];
+  /** Wins over {@link allowedPaths} where the two overlap. */
+  readonly protectedPaths: readonly string[];
+}
+
+export interface ResolvedCapabilities {
+  readonly codegraph: CapabilityAssessment;
+}
+
+export interface ResolvedRemote {
+  readonly required: boolean;
+  /**
+   * Whether the repository has at least one configured remote. Only the fact is
+   * recorded — never a remote name and never a URL, which would put a host and
+   * possibly a credential into a value that gets logged.
+   */
+  readonly present: boolean;
+}
+
+/**
+ * A repository the orchestrator may act on, and the contract governing it.
+ *
+ * Deeply frozen. Every later step reads this value; none of them may edit it,
+ * and none of them may re-derive a policy from the raw YAML — which is why no
+ * raw document is carried here at all.
+ */
+export interface ResolvedRepository {
+  /** Canonical, absolute, existing repository root. Never CWD-derived. */
+  readonly root: string;
+  /** Stable identity from the profile; suitable for `TaskState.repositoryId`. */
+  readonly id: string;
+  /** Validated, locally existing default branch. */
+  readonly defaultBranch: string;
+  /** Canonical absolute path of the profile that produced this value. */
+  readonly profilePath: string;
+  readonly schemaVersion: number;
+  readonly taskSource: ResolvedTaskSource;
+  readonly context: ResolvedContextPolicy;
+  readonly capabilities: ResolvedCapabilities;
+  readonly verification: ResolvedVerificationPolicy;
+  readonly scope: ResolvedScopePolicy;
+  readonly completion: { readonly maxReviewRounds: number };
+  readonly remote: ResolvedRemote;
+}
+
+export interface RepositoryResolutionSuccess {
+  readonly ok: true;
+  readonly code: 'RESOLVED';
+  readonly repository: ResolvedRepository;
+}
+
+export interface RepositoryResolutionFailure {
+  readonly ok: false;
+  readonly code: RepositoryResolutionFailureCode;
+  /** A sentence from {@link FAILURE_DETAIL}. Carries no host or input data. */
+  readonly detail: string;
+  /**
+   * How many contract violations were counted, for `PROFILE_SCHEMA_INVALID`
+   * only; `null` otherwise. A count, not the issues: an issue message quotes
+   * the offending key and value.
+   */
+  readonly issueCount: number | null;
+}
+
+export type RepositoryResolutionResult =
+  | RepositoryResolutionSuccess
+  | RepositoryResolutionFailure;
+
+export interface RepositoryResolutionInput {
+  /** Absolute path of the repository root. Required; never defaulted. */
+  readonly repositoryPath: string;
+}
+
+function failure(
+  code: RepositoryResolutionFailureCode,
+  issueCount: number | null = null,
+): RepositoryResolutionFailure {
+  return Object.freeze({ ok: false as const, code, detail: FAILURE_DETAIL[code], issueCount });
+}
+
+// ── Path helpers ───────────────────────────────────────────────────────────
+
+/** The one character no filesystem path may contain. */
+const NUL = '\u0000';
+
+/** Profiles are human-authored policy documents; 256 KiB is already generous. */
+const MAX_PROFILE_BYTES = 262_144;
+
+/**
+ * `true` when `candidate` is `root` itself or lies beneath it.
+ *
+ * `path.relative` is the comparison, so the platform's own rules apply —
+ * including case-insensitive matching on Windows, where treating `D:\Repo` and
+ * `D:\repo` as different roots would be a containment hole rather than rigour.
+ */
+function isContained(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  if (rel === '') return true;
+  return !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+/** `true` when the two canonical paths denote the same location. */
+function samePath(a: string, b: string): boolean {
+  return relative(a, b) === '';
+}
+
+type LinkFreeEntry =
+  | { readonly kind: 'DIRECTORY' }
+  | { readonly kind: 'FILE'; readonly size: number }
+  | { readonly kind: 'OTHER' }
+  | { readonly kind: 'ABSENT' }
+  | { readonly kind: 'LINK' }
+  | { readonly kind: 'UNREADABLE' };
+
+/**
+ * Classifies a path with `lstat`, so a link is *seen* rather than followed.
+ *
+ * Following the link first and asking questions afterwards is the classic
+ * escape: the answers would describe the target, while the path that gets used
+ * is still the link.
+ */
+function classify(path: string): LinkFreeEntry {
+  let stats;
+  try {
+    stats = lstatSync(path);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'ABSENT' };
+    return { kind: 'UNREADABLE' };
+  }
+  if (stats.isSymbolicLink()) return { kind: 'LINK' };
+  if (stats.isDirectory()) return { kind: 'DIRECTORY' };
+  if (stats.isFile()) return { kind: 'FILE', size: stats.size };
+  return { kind: 'OTHER' };
+}
+
+// ── Resolution ─────────────────────────────────────────────────────────────
+
+/**
+ * Resolves an explicit repository path into a validated {@link ResolvedRepository}.
+ *
+ * Never throws for an expected condition: every failure is a
+ * {@link RepositoryResolutionFailure} carrying a closed code.
+ */
+export async function resolveRepository(
+  input: RepositoryResolutionInput,
+): Promise<RepositoryResolutionResult> {
+  // --- 1. The input itself -------------------------------------------------
+  const given: unknown = input?.repositoryPath;
+  if (typeof given !== 'string' || given.trim().length === 0 || given.includes(NUL)) {
+    return failure('REPOSITORY_PATH_INVALID');
+  }
+  // An absolute path is required rather than resolved against `process.cwd()`:
+  // a relative input has no meaning without a working directory, and adopting
+  // one would reintroduce exactly the dependency this module refuses.
+  if (!isAbsolute(given)) return failure('REPOSITORY_PATH_INVALID');
+
+  // --- 2. Canonical root ---------------------------------------------------
+  let root: string;
+  try {
+    root = realpathSync.native(given);
+  } catch {
+    return failure('REPOSITORY_NOT_FOUND');
+  }
+  const rootEntry = classify(root);
+  if (rootEntry.kind === 'ABSENT') return failure('REPOSITORY_NOT_FOUND');
+  if (rootEntry.kind !== 'DIRECTORY') return failure('REPOSITORY_NOT_DIRECTORY');
+
+  // --- 3. It must be a Git repository, and its root ------------------------
+  const toplevel = await gitQuery(root, ['rev-parse', '--show-toplevel']);
+  if (toplevel.outcome === 'UNAVAILABLE') return failure('GIT_UNAVAILABLE');
+  if (toplevel.outcome === 'NONZERO_EXIT' || toplevel.stdout === '') {
+    return failure('NOT_A_GIT_REPOSITORY');
+  }
+
+  // Git answers with forward slashes on Windows; `resolve` restores the
+  // platform form before the paths are compared, and `realpath` settles case
+  // and 8.3 aliases so the comparison is between two canonical values.
+  let canonicalToplevel: string;
+  try {
+    canonicalToplevel = realpathSync.native(resolvePath(toplevel.stdout));
+  } catch {
+    return failure('NOT_A_GIT_REPOSITORY');
+  }
+  if (!samePath(root, canonicalToplevel)) return failure('REPOSITORY_ROOT_MISMATCH');
+
+  // A repository without a Git directory is not one, whatever `rev-parse` said.
+  const gitDir = await gitQuery(root, ['rev-parse', '--git-dir']);
+  if (gitDir.outcome === 'UNAVAILABLE') return failure('GIT_UNAVAILABLE');
+  if (gitDir.outcome === 'NONZERO_EXIT' || gitDir.stdout === '') {
+    return failure('NOT_A_GIT_REPOSITORY');
+  }
+
+  // --- 4. The profile, at the one canonical location -----------------------
+  const profileDir = repoProfileDirectory(root);
+  const profilePath = repoProfilePath(root);
+
+  // Containment is re-derived rather than assumed. The paths are built by
+  // joining onto a canonical root, so this holds by construction — which is
+  // precisely why it is cheap to state and worth stating.
+  if (!isContained(root, profileDir) || !isContained(root, profilePath)) {
+    return failure('REPOSITORY_PATH_UNSAFE');
+  }
+
+  const dirEntry = classify(profileDir);
+  if (dirEntry.kind === 'LINK') return failure('REPOSITORY_PATH_UNSAFE');
+  if (dirEntry.kind === 'UNREADABLE') return failure('PROFILE_READ_FAILED');
+  if (dirEntry.kind !== 'DIRECTORY') return failure('PROFILE_MISSING');
+
+  const fileEntry = classify(profilePath);
+  if (fileEntry.kind === 'LINK') return failure('REPOSITORY_PATH_UNSAFE');
+  if (fileEntry.kind === 'ABSENT') return failure('PROFILE_MISSING');
+  if (fileEntry.kind === 'UNREADABLE') return failure('PROFILE_READ_FAILED');
+  if (fileEntry.kind !== 'FILE') return failure('PROFILE_NOT_REGULAR_FILE');
+  if (fileEntry.size > MAX_PROFILE_BYTES) return failure('PROFILE_TOO_LARGE');
+
+  // Neither segment is a link, so the canonical path must be the joined one.
+  // A difference means something changed underneath us between the checks.
+  let canonicalProfilePath: string;
+  try {
+    canonicalProfilePath = realpathSync.native(profilePath);
+  } catch {
+    return failure('PROFILE_READ_FAILED');
+  }
+  if (!samePath(profilePath, canonicalProfilePath) || !isContained(root, canonicalProfilePath)) {
+    return failure('REPOSITORY_PATH_UNSAFE');
+  }
+
+  let text: string;
+  try {
+    text = readFileSync(canonicalProfilePath, 'utf8');
+  } catch {
+    return failure('PROFILE_READ_FAILED');
+  }
+
+  // --- 5. Parse ------------------------------------------------------------
+  // Plain YAML 1.2 core schema: no custom tags, no merge keys, and the
+  // library's own alias ceiling. The document may only produce the JSON data
+  // model, so nothing exotic reaches the validator.
+  let document: unknown;
+  try {
+    document = parseYaml(text, { version: '1.2', merge: false });
+  } catch {
+    // The exception quotes the offending source line. It is discarded here
+    // rather than carried into the result.
+    return failure('PROFILE_PARSE_FAILED');
+  }
+
+  // --- 6. Validate against the contract ------------------------------------
+  const parsed = safeParseRepoProfile(document);
+  if (!parsed.success) {
+    return failure('PROFILE_SCHEMA_INVALID', parsed.error.issues.length);
+  }
+  const profile = parsed.data;
+
+  // --- 7. Every declared path must stay inside this repository -------------
+  // The schema already forbids absolute paths, drive letters, backslashes and
+  // `..` segments, so a violation here should be unreachable. It is checked
+  // anyway, against the *canonical root*: the schema is a contract about
+  // strings, and containment is a fact about the filesystem.
+  const declaredPaths = [
+    profile.taskSource.path,
+    ...profile.context.canonicalSources,
+    ...profile.scope.allowedPaths,
+    ...profile.scope.protectedPaths,
+  ];
+  for (const declared of declaredPaths) {
+    const absolute = resolvePath(root, ...declared.split('/'));
+    if (!isContained(root, absolute) || samePath(root, absolute)) {
+      return failure('REPOSITORY_PATH_UNSAFE');
+    }
+  }
+
+  // --- 8. Default branch: legal name, and one that actually exists ---------
+  const defaultBranch = profile.repository.defaultBranch;
+  if (!isValidBranchName(defaultBranch)) return failure('DEFAULT_BRANCH_INVALID');
+
+  // `--verify` on a fully qualified ref: no revision expression is evaluated,
+  // no short-name disambiguation happens, and a missing ref is a non-zero exit
+  // rather than an error message. There is no fallback to `main` or `master` —
+  // a profile that names a branch means that branch.
+  const branch = await gitQuery(root, ['rev-parse', '--verify', '--quiet', localBranchRef(defaultBranch)]);
+  if (branch.outcome === 'UNAVAILABLE') return failure('GIT_UNAVAILABLE');
+  if (branch.outcome === 'NONZERO_EXIT' || branch.stdout === '') {
+    return failure('DEFAULT_BRANCH_NOT_FOUND');
+  }
+
+  // --- 9. Capability preflight --------------------------------------------
+  const codegraphRequirement = profile.capabilities.codegraph;
+  const codegraphStatus: CapabilityStatus = probeCodegraphCapability(root);
+  const codegraphSatisfied = capabilitySatisfied(codegraphRequirement, codegraphStatus);
+  if (!codegraphSatisfied) return failure('REQUIRED_CAPABILITY_UNAVAILABLE');
+
+  // --- 10. Remote expectation ---------------------------------------------
+  // A repository with no remote is an ordinary, valid target. Only a profile
+  // that explicitly requires one can fail here.
+  const remotes = await gitQuery(root, ['remote']);
+  if (remotes.outcome === 'UNAVAILABLE') return failure('GIT_UNAVAILABLE');
+  const remotePresent = remotes.outcome === 'OK' && remotes.stdout.length > 0;
+  if (profile.remote.required && !remotePresent) return failure('REMOTE_REQUIRED_BUT_ABSENT');
+
+  // --- 11. The frozen result ----------------------------------------------
+  const repository: ResolvedRepository = Object.freeze({
+    root,
+    id: profile.repository.id,
+    defaultBranch,
+    profilePath: canonicalProfilePath,
+    schemaVersion: profile.schemaVersion,
+    taskSource: Object.freeze({
+      kind: profile.taskSource.kind,
+      path: profile.taskSource.path,
+    }),
+    context: Object.freeze({
+      canonicalSources: Object.freeze([...profile.context.canonicalSources]),
+    }),
+    capabilities: Object.freeze({
+      codegraph: Object.freeze({
+        capability: 'codegraph' as const,
+        requirement: codegraphRequirement,
+        status: codegraphStatus,
+        satisfied: codegraphSatisfied,
+      }),
+    }),
+    verification: Object.freeze({
+      phases: Object.freeze(
+        profile.verification.phases.map((entry) =>
+          Object.freeze({ phase: entry.phase, command: Object.freeze([...entry.command]) }),
+        ),
+      ),
+    }),
+    scope: Object.freeze({
+      allowedPaths: Object.freeze([...profile.scope.allowedPaths]),
+      protectedPaths: Object.freeze([...profile.scope.protectedPaths]),
+    }),
+    completion: Object.freeze({ maxReviewRounds: profile.completion.maxReviewRounds }),
+    remote: Object.freeze({ required: profile.remote.required, present: remotePresent }),
+  });
+
+  return Object.freeze({ ok: true as const, code: 'RESOLVED' as const, repository });
+}

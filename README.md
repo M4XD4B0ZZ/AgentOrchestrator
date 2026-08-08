@@ -19,6 +19,10 @@ What *is* implemented:
 2. The binding **single-task state contract** (Zod → generated JSON Schema,
    plus an explicit state-transition table).
 3. The read-only diagnosis command `agent-loop doctor`.
+4. The **repository-profile contract and repository resolution** (Zod →
+   generated JSON Schema, plus a fail-closed resolver). This is a runtime
+   library layer with no command attached: it can tell you what contract
+   governs a repository, but nothing in this build acts on that answer.
 
 ## Requirements
 
@@ -526,6 +530,12 @@ machine, not a defect in the tool.
 **There is none.** No environment variable and no CLI flag influences any path
 this build reads or writes.
 
+That still holds now that repository profiles exist. A profile is *repository-side*
+configuration: it is found at one fixed path relative to a canonical repository
+root the caller stated explicitly, and no variable can name it, relocate it,
+rename it or supply a substitute — see
+[the repository-profile contract](#the-repository-profile-contract).
+
 The persistent write root is:
 
 ```
@@ -696,8 +706,173 @@ with the reason it can physically occur there. For example `VERIFYING` cannot
 enter `BLOCKED_USAGE_LIMIT`, because verification runs deterministic local
 commands and consumes no agent quota.
 
+## The repository-profile contract
+
+Source of truth: `src/repo/repo-profile.ts` (Zod 4).
+Generated artefact: `schemas/repo-profile.schema.json` (via `z.toJSONSchema()`).
+
+The orchestrator is repository-agnostic, which means the project-specific facts
+have to live somewhere else: in the target repository, in a file that repository
+reviews and owns. That file is the **repository profile**, and
+`resolveRepository()` is what turns a path plus a profile into a validated,
+frozen contract the rest of the system reads.
+
+**Repo-profile and resolution are implemented; the orchestration loop that would
+consume them is not.** Nothing in this build discovers a task, creates a
+worktree, runs a verification command or starts an agent.
+
+### Where the profile lives
+
+```
+<canonical repository root>/.agent-orchestrator/repo-profile.yaml
+```
+
+Exactly one location. There is no `.yml` spelling, no root-level alternative, no
+upward directory search and no environment override. That is deliberate: the
+profile declares which paths a writer agent may touch and which capabilities are
+mandatory, so every additional candidate location is another way to put a policy
+in force that nobody reviewed. A repository with no file at that exact path has
+no profile, and resolution fails with `PROFILE_MISSING` rather than falling back
+to a default the repository never agreed to.
+
+YAML is the format because the file is written and reviewed by humans, and
+because `yaml` was already a dependency. It is parsed as plain YAML 1.2 core
+schema with merge keys disabled — no custom tags, so the document can only
+produce the JSON data model.
+
+### What a profile declares
+
+```yaml
+schemaVersion: 1
+repository:
+  id: fixture-alpha          # stable slug; becomes TaskState.repositoryId
+  defaultBranch: main        # must exist locally; never guessed
+taskSource:                  # declared only — nothing is discovered in this build
+  kind: MARKDOWN_DIRECTORY
+  path: tasks
+context:                     # declared only — no file is opened in this build
+  canonicalSources:
+    - README.md
+capabilities:
+  codegraph: OPTIONAL        # or REQUIRED, which is fail-closed
+verification:                # declared only — nothing is executed in this build
+  phases:
+    - phase: BUILD
+      command: [npm, run, build]
+    - phase: VERIFY
+      command: [npm, run, verify]
+scope:                       # declared only — no scope is enforced in this build
+  allowedPaths: [src, tests]
+  protectedPaths: [dist]     # wins over allowedPaths where the two overlap
+completion:
+  maxReviewRounds: 3         # bounded by the same RoundSchema as the state contract
+remote:
+  required: false            # a repository with no remote is a valid target
+```
+
+Unknown keys are refused at every level, and the fields are limited to those
+with a concrete consumer. There is no UI, cloud-provider, CI-provider,
+GitHub-specific, PR-automation, merge-policy or parallel-worker configuration —
+a profile field that nothing reads is a promise the build cannot keep.
+
+Verification commands are **argv vectors, not shell strings**, and every token
+must be shell-inert, as must every path and the branch name. A repository
+profile is input: it must not be able to place a shell metacharacter into a
+command line at all. Paths are POSIX-shaped and repository-relative; an absolute
+path, a drive letter, a backslash, a `..` segment and a `.` segment are each
+refused by the schema, and containment is then re-checked against the canonical
+root at resolution time.
+
+Cross-field invariants that JSON Schema cannot express — a supported
+`schemaVersion`, distinct verification phases, a mandatory `VERIFY` phase,
+duplicate-free path lists — are enforced by `RepoProfileSchema` at runtime, and
+the *structural* schema that lacks them stays internal, exactly as it does for
+the task state.
+
+### How a repository is resolved
+
+`resolveRepository({ repositoryPath })` runs these steps and stops at the first
+failure:
+
+1. the input must be a non-empty **absolute** path with no NUL;
+2. it is canonicalised with `realpath` and must be an existing directory;
+3. `git rev-parse --show-toplevel` must succeed, and its canonical answer must
+   be *this* path — a subdirectory of a repository is `REPOSITORY_ROOT_MISMATCH`,
+   not a silent promotion to the root;
+4. `git rev-parse --git-dir` must succeed;
+5. the profile directory and file are classified with `lstat`, so a link is seen
+   rather than followed; either being a link is `REPOSITORY_PATH_UNSAFE`;
+6. the file must be a regular file within a 256 KiB ceiling, and its canonical
+   path must still be the joined one and still contained in the root;
+7. it must parse as YAML and satisfy the contract;
+8. every declared path is re-checked for containment against the canonical root;
+9. the default branch must be a legal Git branch name (`check-ref-format` rules,
+   implemented in-process) **and** must exist locally;
+10. every `REQUIRED` capability must be positively available;
+11. the remote expectation must hold.
+
+The result is a deeply frozen `ResolvedRepository`. No raw YAML object is
+carried through it, so no later step can re-derive a policy from the document.
+
+Git is used **read-only** — `rev-parse` and `remote`, nothing else. No branch,
+worktree, checkout, commit, fetch or push happens here. Execution goes through
+the same hardened `runCommand` the doctor uses, and the child environment is
+`createProbeEnv('capability:generic', …)`: `PATH` and `PATHEXT` and nothing
+else. That is what a `git` process needs to start, and it is also what keeps
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CEILING_DIRECTORIES`, `GIT_CONFIG_*` and every
+other `GIT_*` variable out of the child, so which repository answers is decided
+by the canonical path this module passes and by nothing in the environment.
+
+**`process.cwd()` is never consulted.** The caller states the repository; a
+relative or empty input is `REPOSITORY_PATH_INVALID` even when the working
+directory *is* a valid repository. `tests/repo-resolution.test.ts` resolves the
+same fixture from three different working directories and requires an identical
+answer.
+
+### CodeGraph capability
+
+The profile declares `REQUIRED` or `OPTIONAL`. `REQUIRED` is fail-closed:
+resolution refuses with `REQUIRED_CAPABILITY_UNAVAILABLE` unless the capability
+is *positively* proven. `OPTIONAL` records what was observed and resolves either
+way.
+
+The probe answers one question honestly — **does this repository carry a
+CodeGraph index?** — by looking for a real `.codegraph` directory at the
+canonical root, in-process, with no subprocess and no environment value. A
+symlink there is not followed and yields `UNKNOWN`.
+
+It does **not** claim that an MCP `codegraph_explore` tool is reachable: the
+orchestrator runtime is not the agent session that owns those tools and cannot
+call one, so asserting that would be a fabricated pass. The status vocabulary is
+`AVAILABLE | UNAVAILABLE | UNKNOWN`, and `UNKNOWN` never satisfies a
+requirement — "could not be determined" is representable rather than rounded to
+either answer.
+
+### Failure codes
+
+Failures are data, never exceptions. Every expected condition returns a code
+from a closed set together with a static sentence written in this repository:
+
+`REPOSITORY_PATH_INVALID`, `REPOSITORY_NOT_FOUND`, `REPOSITORY_NOT_DIRECTORY`,
+`REPOSITORY_PATH_UNSAFE`, `GIT_UNAVAILABLE`, `NOT_A_GIT_REPOSITORY`,
+`REPOSITORY_ROOT_MISMATCH`, `PROFILE_MISSING`, `PROFILE_NOT_REGULAR_FILE`,
+`PROFILE_TOO_LARGE`, `PROFILE_READ_FAILED`, `PROFILE_PARSE_FAILED`,
+`PROFILE_SCHEMA_INVALID`, `DEFAULT_BRANCH_INVALID`, `DEFAULT_BRANCH_NOT_FOUND`,
+`REQUIRED_CAPABILITY_UNAVAILABLE`, `REMOTE_REQUIRED_BUT_ABSENT`.
+
+Nothing is interpolated into those sentences: not the repository path, not the
+profile path, not the branch name, not a Zod issue message, not a YAML or `fs`
+exception. Those messages quote paths, command lines and the offending input
+itself, which is the class of value `src/core/safe-error.ts` exists to keep out
+of user-facing output. `PROFILE_SCHEMA_INVALID` additionally carries an
+`issueCount` — a count, not the issues.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: task creation, worktree setup, the implement/verify/review loop, resume
-handling, and finding-fingerprint computation.
+build: task discovery from a profile's `taskSource`, worktree setup, the
+implement/verify/review loop, resume handling, and finding-fingerprint
+computation. The repository profile *declares* the task source, the context
+sources, the verification phases and the write scope; no code in this build
+reads a task, opens a context file, runs a verification command or enforces a
+scope.

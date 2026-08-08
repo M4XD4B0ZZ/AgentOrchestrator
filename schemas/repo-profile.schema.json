@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-orchestrator.local/schemas/repo-profile.schema.json",
+  "title": "AgentOrchestrator repository profile",
+  "description": "Declarative contract between a target repository and the orchestrator (contract version 1). Lives at .agent-orchestrator/repo-profile.yaml inside the repository. Generated from the Zod schema in src/repo/repo-profile.ts by `npm run schema:generate` — do not edit by hand. Cross-field invariants (supported schemaVersion, distinct verification phases, a mandatory VERIFY phase, duplicate-free path lists) are NOT expressible in JSON Schema and are enforced only by RepoProfileSchema at runtime. Path containment against the canonical repository root, branch-name grammar and branch existence are enforced by the repository resolver.",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "repository": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"
+        },
+        "defaultBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9._:@=+\\\\/-]+$"
+        }
+      },
+      "required": [
+        "id",
+        "defaultBranch"
+      ],
+      "additionalProperties": false
+    },
+    "taskSource": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "MARKDOWN_DIRECTORY"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[A-Za-z0-9._:@=+\\\\/-]+$"
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "canonicalSources": {
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^[A-Za-z0-9._:@=+\\\\/-]+$"
+          }
+        }
+      },
+      "required": [
+        "canonicalSources"
+      ],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "codegraph": {
+          "type": "string",
+          "enum": [
+            "REQUIRED",
+            "OPTIONAL"
+          ]
+        }
+      },
+      "required": [
+        "codegraph"
+      ],
+      "additionalProperties": false
+    },
+    "verification": {
+      "type": "object",
+      "properties": {
+        "phases": {
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "BUILD",
+                  "TEST",
+                  "VERIFY"
+                ]
+              },
+              "command": {
+                "minItems": 1,
+                "maxItems": 32,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[A-Za-z0-9._:@=+\\\\/-]+$"
+                }
+              }
+            },
+            "required": [
+              "phase",
+              "command"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "phases"
+      ],
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "allowedPaths": {
+          "minItems": 1,
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^[A-Za-z0-9._:@=+\\\\/-]+$"
+          }
+        },
+        "protectedPaths": {
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^[A-Za-z0-9._:@=+\\\\/-]+$"
+          }
+        }
+      },
+      "required": [
+        "allowedPaths",
+        "protectedPaths"
+      ],
+      "additionalProperties": false
+    },
+    "completion": {
+      "type": "object",
+      "properties": {
+        "maxReviewRounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "required": [
+        "maxReviewRounds"
+      ],
+      "additionalProperties": false
+    },
+    "remote": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "required"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "repository",
+    "taskSource",
+    "context",
+    "capabilities",
+    "verification",
+    "scope",
+    "completion",
+    "remote"
+  ],
+  "additionalProperties": false
+}

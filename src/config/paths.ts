@@ -44,6 +44,16 @@ export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..
 export const SCHEMAS_DIR = join(PACKAGE_ROOT, 'schemas');
 export const TASK_STATE_SCHEMA_FILE = join(SCHEMAS_DIR, 'task-state.schema.json');
 
+/**
+ * The generated repository-profile contract, as shipped by this package.
+ *
+ * Note what this is *not*: it is not a location inside a target repository. A
+ * target repository's own profile is found relative to that repository's
+ * canonical root by `src/repo/profile-location.ts` and never through this
+ * module, which knows only about the orchestrator's own installation.
+ */
+export const REPO_PROFILE_SCHEMA_FILE = join(SCHEMAS_DIR, 'repo-profile.schema.json');
+
 /** Directory name of the orchestrator home inside the OS user profile. */
 export const ORCHESTRATOR_HOME_DIR_NAME = '.agent-orchestrator';
 
