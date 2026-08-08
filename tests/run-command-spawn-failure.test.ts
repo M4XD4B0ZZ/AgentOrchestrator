@@ -128,13 +128,23 @@ const RAW_LIBUV_ERRNO = /-\d{3,4}/;
 /** What a sanitised errno code may look like: `ENOENT`, `E2BIG`, `UNKNOWN`. */
 const SANITISED_ERRNO_TOKEN = /^[A-Z][A-Z0-9]*$/;
 
-/** The result fields that are, by contract, a verbatim echo of caller input. */
-const CALLER_ECHO_FIELDS: ReadonlySet<string> = new Set(['display', 'executable', 'args']);
+/**
+ * One shared empty argv, held by reference: `runCommand` hands the caller's
+ * own array straight through into the result (`base` in src/doctor/exec.ts),
+ * so the gate below can pin `args` by identity rather than by shape.
+ */
+const NO_ARGS: readonly string[] = [];
 
+/**
+ * Drops exactly the three **top-level** caller-echo fields and serialises what
+ * is left. Deliberately not a `JSON.stringify` replacer: a replacer matches by
+ * key at every depth, so a nested `display`/`executable`/`args` — somewhere the
+ * product never echoes the caller, and therefore somewhere a raw errno could
+ * hide — would silently drop out of the scan as well (AO-008-S3-R1-F1).
+ */
 function serializeWithoutCallerEcho(result: CommandResult): string {
-  return JSON.stringify(result, (key: string, value: unknown) =>
-    CALLER_ECHO_FIELDS.has(key) ? undefined : value,
-  );
+  const { display, executable, args, ...nonCallerEchoResult } = result;
+  return JSON.stringify(nonCallerEchoResult);
 }
 
 /**
@@ -153,10 +163,21 @@ function expectSanitisedErrnoCode(result: CommandResult, expected: string): void
  * caller echo pinned by identity, and no raw errno, stack frame or module path
  * anywhere else in the result.
  */
-function expectNoErrorObjectLeak(result: CommandResult, callerTarget: string, errno: string): void {
+function expectNoErrorObjectLeak(
+  result: CommandResult,
+  callerTarget: string,
+  callerArgs: readonly string[],
+  errno: string,
+): void {
   expectSanitisedErrnoCode(result, errno);
+  // All three caller-echo fields are pinned to the caller's own input *before*
+  // any of them is excluded from the raw-errno scan — otherwise the exclusion
+  // would be a hole rather than a refinement (AO-008-S3-R1-F1). `args` is
+  // pinned by identity: the product passes the caller's array through by
+  // reference and never copies it (`base`, src/doctor/exec.ts).
   expect(result.executable).toBe(callerTarget);
-  expect(result.display).toBe(callerTarget);
+  expect(result.args).toBe(callerArgs);
+  expect(result.display).toBe([callerTarget, ...callerArgs].join(' '));
   expect(serializeWithoutCallerEcho(result)).not.toMatch(RAW_LIBUV_ERRNO);
 
   const serialized = JSON.stringify(result);
@@ -174,7 +195,7 @@ describe.runIf(IS_WINDOWS)('real Windows runtime: synchronous spawn() failure is
     const target = join(dir, 'broken.exe');
     writeFileSync(target, 'not a real executable\n', 'utf8');
 
-    const result = await runCommand(target, [], { env: {}, timeoutMs: 10_000 });
+    const result = await runCommand(target, NO_ARGS, { env: {}, timeoutMs: 10_000 });
 
     expect(result.started).toBe(false);
     expect(result.outcome).toBe('SPAWN_FAILED');
@@ -193,7 +214,7 @@ describe.runIf(IS_WINDOWS)('real Windows runtime: synchronous spawn() failure is
     // raw negative libuv errno integer, neither of which the caller supplied.
     // See the gate above for why the errno check reads the errno field rather
     // than the caller's own path characters.
-    expectNoErrorObjectLeak(result, target, 'UNKNOWN');
+    expectNoErrorObjectLeak(result, target, NO_ARGS, 'UNKNOWN');
   });
 
   it('a PATH/PATHEXT-resolved candidate that is not executable resolves to a controlled CommandResult', async () => {
@@ -300,7 +321,7 @@ describe('deterministic synchronous spawn() throw', () => {
     expect(target).toMatch(RAW_LIBUV_ERRNO); // the caller path, not a leak
     spawnControl.throwFor = (file) => (file === target ? syntheticSpawnUnknown() : null);
 
-    const result = await runCommand(target, [], { env: {}, timeoutMs: 10_000 });
+    const result = await runCommand(target, NO_ARGS, { env: {}, timeoutMs: 10_000 });
 
     expect(result.started).toBe(false);
     expect(result.outcome).toBe('SPAWN_FAILED');
@@ -308,9 +329,34 @@ describe('deterministic synchronous spawn() throw', () => {
     // The thrown error carried errno -4094; the result carries the sanitised
     // token, the caller's path survives verbatim, and nothing outside that echo
     // shows a raw errno. The whole-serialisation form of this gate failed here.
-    expectNoErrorObjectLeak(result, target, 'UNKNOWN');
+    expectNoErrorObjectLeak(result, target, NO_ARGS, 'UNKNOWN');
     expect(JSON.stringify(result)).not.toContain('-4094');
     expect(JSON.stringify(result)).not.toContain('syscall');
+  });
+
+  it('a result whose args are not the caller\'s own fails the gate (AO-008-S3-R1-F1)', async () => {
+    const dir = makeTempDir();
+    const target = join(dir, 'sentinel-args.exe');
+    writeFileSync(target, 'x', 'utf8');
+    spawnControl.throwFor = (file) => (file === target ? syntheticSpawnUnknown() : null);
+
+    const result = await runCommand(target, NO_ARGS, { env: {}, timeoutMs: 10_000 });
+    expectNoErrorObjectLeak(result, target, NO_ARGS, 'UNKNOWN'); // the honest result passes
+
+    // The counterexample the gate used to accept: `errnoCode`, `display` and
+    // `executable` all still correct, only `args` swapped for the raw libuv
+    // errno. Excluding `args` from the raw-errno scan is sound *only* because
+    // the gate first proves it is the caller's own array — so this must fail.
+    const forgedArgs = { ...result, args: ['-4094'] } as CommandResult;
+    expect(forgedArgs.errnoCode).toBe('UNKNOWN');
+    expect(forgedArgs.display).toBe(target);
+    expect(forgedArgs.executable).toBe(target);
+    expect(() => expectNoErrorObjectLeak(forgedArgs, target, NO_ARGS, 'UNKNOWN')).toThrow();
+
+    // And the exclusion reaches the top level only: a nested property that
+    // merely shares a caller-echo name is still scanned for a raw errno.
+    const nestedEcho = { ...result, args: NO_ARGS, nested: { args: ['-4094'] } } as CommandResult;
+    expect(() => expectNoErrorObjectLeak(nestedEcho, target, NO_ARGS, 'UNKNOWN')).toThrow();
   });
 
   it('settles immediately rather than waiting for the configured timeout (no leftover timer)', async () => {
