@@ -40,10 +40,12 @@ npm run verify
 
 `verify` is the canonical full Foundation verify command. It runs, in this
 order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
-`test:dist-trusted-profile`, `test:foundation-safe`. `build` runs immediately
-before the two dist artefact checks, so both always run against a fresh build,
-never a stale or missing one, and there is only ever one build per `verify`
-run.
+`test:dist-trusted-profile`, `test:foundation-safe`,
+`test:windows-tree-kill-tool-release`. `build` runs immediately before the two
+dist artefact checks, so both always run against a fresh build, never a stale
+or missing one, and there is only ever one build per `verify` run. The two test
+gates run **sequentially**, in that order — the real-process harness never runs
+alongside the foundation set.
 
 `test:dist-trusted-profile` checks the *built* trusted-profile module
 (`dist/config/internal/trusted-profile.js`): that it resolves the OS user
@@ -51,29 +53,38 @@ profile through `os.userInfo()`, that a child process with spoofed profile
 environment variables gets the identical answer, and that no remnant of the
 removed PowerShell resolver survives in the shipped artefact.
 
-**`test:foundation-safe` is not "all tests".** It runs every vitest file
-except `tests/exec.test.ts`, which is deliberately excluded (via vitest's
-`--exclude` flag) because of the open **AO-008** process-tree blocker in that
-suite. This exclusion is temporary: once AO-008 is closed, `tests/exec.test.ts`
-must be added back into the canonical `verify` contract — either back into an
-unrestricted `npm test`-based step, or by dropping the exclusion here. Do not
-call `test:foundation-safe` "all tests" or "the full suite" while that
-exclusion stands.
+**`test:foundation-safe` is not "all tests", but it is the full regression
+set.** It runs every vitest file except one:
+`tests/windows-tree-kill-tool-release.test.ts`. That file is excluded (via
+vitest's `--exclude` flag) not because it is unstable, but because it drives
+real `taskkill.exe` process churn, which intermittently destabilised unrelated
+files running in parallel beside it (AO-008-S2-R1-F1). It runs in its own
+serial gate, `test:windows-tree-kill-tool-release`, with
+`--no-file-parallelism`, and never alongside the foundation set. Together the
+two gates cover every vitest file exactly once.
+
+`tests/exec.test.ts` — the real exec-lifecycle suite — is **no longer
+excluded**. It is a regular part of `test:foundation-safe`, and therefore of
+`verify`. The temporary AO-008 exclusion it used to carry was retired in
+AO-008-S3.
 
 There is currently no CI workflow in this repository (no `.github/workflows`);
 `npm run verify` is the complete local contract until one is added, and any
-future CI must call it, or run an equivalent, non-optional dist-doctor step
-(and must revisit the AO-008 exclusion once it no longer applies).
+future CI must call it, or run an equivalent, non-optional dist-doctor step.
 
 The individual steps remain available on their own:
 
 ```powershell
 npm run schema:generate     # regenerate schemas/task-state.schema.json from Zod
 npm run typecheck           # tsc --noEmit, strict
-npm test                    # vitest, unrestricted (includes tests/exec.test.ts,
-                             # the AO-008 process-tree suite)
-npm run test:foundation-safe  # vitest, excluding only tests/exec.test.ts —
-                               # the set `verify` actually runs
+npm test                    # vitest, unrestricted — every file, including the
+                             # real-process tool-release harness, in one run
+npm run test:foundation-safe  # vitest, excluding only the tool-release harness —
+                               # the set `verify` runs first
+npm run test:windows-tree-kill-tool-release
+                              # the real-process tool-release harness on its own,
+                              # serially (--no-file-parallelism); the gate
+                              # `verify` runs last
 npm run build                # emit dist/ (Node-executable CLI)
 npm run test:dist-doctor     # run only the dist-artefact child check
                               # (tests/dist-artifact/run-completion-dist-artifact.mjs),
@@ -133,14 +144,12 @@ A read-only local diagnosis. It:
   a hard byte budget per stream, both enforced while the output streams; a
   child that exceeds either has termination **attempted, best-effort** — on
   Windows via `taskkill /T /F` with a validated numeric PID, so a `.cmd`
-  shim's real program is targeted too, not just the shim, falling back to a
-  direct kill of the immediate child if `taskkill` cannot be established or
-  fails. The module then waits, with a bound, for the immediate child's
-  `close` event — not for a verified absence of the whole tree — reporting a
-  distinct failure code if that event is not observed within the grace
-  window. Neither a successful `taskkill` call nor the direct-kill fallback
-  proves every descendant is gone; a verified process-tree guarantee is
-  **AO-008**, still open;
+  shim's real program is targeted too, not just the shim. The module then
+  waits, with a bound, for the immediate child's `close` event — not for a
+  verified absence of the whole tree — reporting a distinct failure code
+  (`PROCESS_TREE_KILL_FAILED`) if that event is not observed within the grace
+  window. What that attempt does and does not guarantee is spelled out in
+  [Windows process-tree termination](#windows-process-tree-termination);
 - checks that Claude Code reports a **Claude subscription** login and that
   Codex reports a **ChatGPT** login, using a fail-closed allow-list. The Codex
   check accepts *only* a command whose total normalised output — stdout and
@@ -158,6 +167,80 @@ A read-only local diagnosis. It:
 It never runs an agent task, never modifies a repository or any configuration,
 never changes global environment variables, never performs a login, and never
 reads a credential store.
+
+### Windows process-tree termination
+
+The termination path is deliberately small, and its guarantee is deliberately
+narrow. What is implemented is exactly this:
+
+- `runCommand` starts commands **without shell injection**: a literal argument
+  vector, never a command string that a shell re-parses.
+- Windows tree termination uses **only** the validated system-tool path for
+  `taskkill.exe`, resolved through the trusted boundary
+  (`src/doctor/internal/windows-system-tools.ts`). There is **no `PATH` and no
+  `COMSPEC` fallback** of any kind.
+- The tool is invoked as `taskkill /PID <root pid> /T /F`, with
+  `shell: false`, `windowsHide: true` and `stdio: 'ignore'`.
+- **No process enumeration** is performed anywhere on this path: no WMI, no
+  `wmic`, no PowerShell, no `tasklist`.
+
+On POSIX the equivalent step targets the child's process group
+(`kill(-pid, SIGKILL)`), falling back to the immediate child — the same
+best-effort shape, with the same limits.
+
+#### The supervisor is asynchronous
+
+- The `taskkill` attempt is supervised **asynchronously**. The event loop is
+  never blocked synchronously waiting for the tool (there is no
+  `execFileSync`).
+- The tool attempt is **time-bounded** by its own timeout
+  (`WINDOWS_TREE_KILL_TIMEOUT_MS`, stage 1). The caller's existing child-grace
+  window (`killGraceMs`) follows it as stage 2.
+- **First termination reason wins**: a later event can never overwrite the
+  reason the result already settled on.
+- The tree-kill attempt and the settlement are each **exactly-once guarded**.
+- Every timer the supervisor arms is `unref`'d, so a diagnostic never holds the
+  process open on its own.
+
+#### What `processTreeKilled: true` does and does not mean
+
+`processTreeKilled: true` means **exactly one thing**: the best-effort
+tree-kill mechanism reported success.
+
+It does **not** mean:
+
+- kernel-level ownership of the process tree;
+- a verified absence of descendants;
+- a process tree observed to be empty.
+
+Two further honesties follow from that:
+
+- a `taskkill` tool process can, under OS or policy failures, **outlive the
+  settlement**. The supervisor then requests one bounded, best-effort kill of
+  that tool process and releases its handle from the event loop; it never waits
+  for a confirmation that may never come. What is guaranteed is only that the
+  supervisor stops waiting on it and stops holding the event loop open for it;
+- when the tool attempt does not succeed there is exactly one fallback: a
+  direct kill of the **immediate child**. It reaches the immediate child only,
+  never a descendant, and is therefore deliberately *not* reported as a
+  successful tree kill.
+
+**Windows Job Objects** would be the separate architecture for hard,
+kernel-enforced ownership — a child assigned to a job the kernel tears down
+with it, rather than a tool process asked to do the tearing down. That is not
+part of the current contract.
+
+#### Test gates for this path
+
+- `test:foundation-safe` carries the ordinary foundation and execution
+  regression set, including the real exec-lifecycle suite
+  (`tests/exec.test.ts`) and the deterministic supervisor and race suites.
+- The real-process tool-release probe
+  (`tests/windows-tree-kill-tool-release.test.ts`) runs **separately and
+  serially**, in its own gate.
+- `verify` runs those gates sequentially, foundation set first.
+
+See [Build and verify](#build-and-verify) for the exact commands.
 
 ### Artefacts
 
