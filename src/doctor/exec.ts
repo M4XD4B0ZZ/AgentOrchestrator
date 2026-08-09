@@ -26,13 +26,22 @@
  *    with a validated numeric PID is used instead, falling back to a direct
  *    kill of the immediate child if that cannot be established or fails.
  *    After that best-effort termination attempt, the module waits — with a
- *    bound — only for the immediate child's own `close` event, and reports a
- *    distinct failure code if that event is not observed in time. Observing
- *    that event confirms only that the immediate child has exited; it says
- *    nothing about whether any descendant has exited. That narrowness is the
- *    final contract, not a gap: verified, enumerated process-tree termination
- *    would need kernel-enforced ownership (a Windows Job Object), which is a
- *    separate architecture and deliberately not part of this module.
+ *    bound — for the immediate child to be observably gone, and reports a
+ *    distinct failure code if that is not confirmed in time. "Observably gone"
+ *    means its `exit` *or* its `close` was seen, and the distinction matters:
+ *    `close` additionally waits for every process still holding the inherited
+ *    stdio handles, so a descendant alone can hold it back indefinitely, while
+ *    `exit` is about the one process this module started. The confirmation is
+ *    therefore a statement about the immediate child only; it says nothing
+ *    about whether any descendant has exited. That narrowness is the final
+ *    contract, not a gap: verified, enumerated process-tree termination would
+ *    need kernel-enforced ownership (a Windows Job Object), which is a separate
+ *    architecture and deliberately not part of this module. Measured on the
+ *    installed runtime, a `taskkill /T` pass can miss a descendant created
+ *    while it walks its snapshot — the descendant is then orphaned holding the
+ *    pipes — so binding the failure code to `close` alone made
+ *    PROCESS_TREE_KILL_FAILED report a descendant condition this module
+ *    explicitly does not verify.
  *  - Failures are *data*, never exceptions, and every failure carries a fixed
  *    status code rather than an exception message: a missing program, a spawn
  *    error, a timeout, an exceeded output limit and a failed kill are all
@@ -68,7 +77,7 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
  */
 export const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
 
-/** How long to wait for the immediate child's `close` event after a best-effort termination attempt. */
+/** How long to wait for the immediate child to be observably gone after a best-effort termination attempt. */
 export const DEFAULT_KILL_GRACE_MS = 5_000;
 
 /**
@@ -169,7 +178,7 @@ export interface RunOptions {
   readonly maxStdoutBytes?: number;
   /** Hard byte budget for stderr. Defaults to {@link DEFAULT_MAX_OUTPUT_BYTES}. */
   readonly maxStderrBytes?: number;
-  /** How long to wait for the immediate child's `close` event after a termination attempt. */
+  /** How long to wait for the immediate child to be observably gone after a termination attempt. */
   readonly killGraceMs?: number;
 }
 
@@ -699,6 +708,23 @@ export async function runCommand(
     /** A `close` seen while the tree-kill attempt was still open — held, not yet settled. */
     let pendingClose: { readonly code: number | null; readonly signal: NodeJS.Signals | null } | null =
       null;
+    /**
+     * The immediate child's own `exit`, once observed.
+     *
+     * `exit` and `close` are different facts, and only `exit` is about the
+     * process this module started. `close` fires when the child has ended *and*
+     * its stdio streams have closed — and those streams stay open for as long as
+     * *any* process holds the inherited pipe write handles, which includes every
+     * descendant the child passed them to. So `close` is a statement about a
+     * descendant set this module explicitly does not own, while `exit` is a
+     * statement about the one process it does.
+     *
+     * That distinction is what the bounded confirmation below turns on. It is
+     * only ever read after a termination was issued; a normally completing
+     * command still settles on `close`, so its output is never cut short.
+     */
+    let childExit: { readonly code: number | null; readonly signal: NodeJS.Signals | null } | null =
+      null;
 
     const settle = (result: CommandResult): void => {
       if (settled) return;
@@ -751,10 +777,30 @@ export async function runCommand(
       }
 
       graceTimer = setTimeout(() => {
-        // The immediate child's `close` event was not observed within the
-        // grace window: report that distinctly rather than pretending the
-        // command merely timed out. This does not confirm any descendant is
-        // still running: this path never verifies the whole tree, by design.
+        if (childExit !== null) {
+          // The bounded confirmation succeeded on the fact it is actually
+          // about: the immediate child — the one process this module started
+          // and owns — is observably gone. Its streams are still open, which
+          // means some process that inherited the stdio handles outlived the
+          // best-effort tree kill. That is a statement about descendants, and
+          // this module has never claimed to verify them (see the header): the
+          // snapshot `taskkill /T` walks can miss a descendant created during
+          // the pass, which is then orphaned holding the pipes, and `close`
+          // never arrives at all. Reporting a failed *tree kill* for that would
+          // be asserting the very thing the contract disclaims — so the
+          // original termination reason is what is reported, unchanged.
+          //
+          // Nothing is swallowed: whether a descendant survived is a separate
+          // property, proven where it is actually asserted (the real-process
+          // cases in `tests/exec.test.ts` wait for the grandchild to be gone).
+          settle(closeResult(childExit.code, childExit.signal));
+          return;
+        }
+        // Neither `exit` nor `close` was observed within the grace window: the
+        // immediate child itself may still be running, so report that
+        // distinctly rather than pretending the command merely timed out. This
+        // does not confirm any descendant is still running: this path never
+        // verifies the whole tree, by design.
         settle(
           finish({
             started: true,
@@ -835,6 +881,14 @@ export async function runCommand(
           processTreeKilled: false,
         }),
       );
+    });
+
+    // Recorded, never settled on directly: a normally completing command must
+    // still wait for `close`, so that everything the child wrote is in the
+    // result. This only feeds the bounded confirmation above, which is reached
+    // exclusively after a termination was issued.
+    child.on('exit', (code, signal) => {
+      childExit = { code, signal };
     });
 
     child.on('close', (code, signal) => {
