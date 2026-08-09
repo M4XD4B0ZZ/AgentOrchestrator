@@ -320,6 +320,56 @@ describe.runIf(IS_WINDOWS)('runCommand tree-kill races', () => {
     expect(control.toolSpawns).toBe(1);
   });
 
+  it('Race K — the immediate child exits while a descendant holds the inherited pipes: the bounded confirmation settles on the child’s own exit', async () => {
+    const child = makeFakeChild();
+    const promise = startRun(child, { timeoutMs: 15, killGraceMs: 60 });
+    const tool = await firstTool();
+
+    tool.emit('close', 0);
+
+    // `exit` and `close` are different facts. `exit` is the immediate child's
+    // own end; `close` additionally waits for *every* process still holding the
+    // inherited stdio handles, which on Windows includes a descendant that a
+    // snapshot-based `taskkill /T` pass created too late to see and then
+    // orphaned. Measured on the installed runtime: such a descendant keeps the
+    // pipes open indefinitely, so `close` never arrives at all.
+    //
+    // The immediate child is observably gone, so the termination this module
+    // actually owns succeeded, and the original reason is what must be
+    // reported. Reporting PROCESS_TREE_KILL_FAILED here would be a claim about
+    // descendants that this module documents it never makes.
+    child.emit('exit', null, 'SIGKILL');
+
+    const result = await promise;
+    expect(result.outcome).toBe('TIMED_OUT');
+    expect(result.failureCode).toBe('TIMEOUT');
+    expect(result.signal).toBe('SIGKILL');
+    expect(result.processTreeKilled).toBe(true);
+    // No `close` ever arrived, and none is needed.
+    expect(child.killCount).toBe(0);
+  });
+
+  it('Race L — an exit observed only after the grace window has expired does not rewrite the settled failure', async () => {
+    const child = makeFakeChild();
+    const promise = startRun(child, { timeoutMs: 15, killGraceMs: 60 });
+    const tool = await firstTool();
+
+    tool.emit('close', 0);
+
+    // The exhausted-failure half of Race K: nothing at all was observed inside
+    // the bound, so the deterministic PROCESS_TREE_KILL_FAILED stands.
+    const result = await promise;
+    expect(result.failureCode).toBe('PROCESS_TREE_KILL_FAILED');
+    expect(result.exitCode).toBeNull();
+    expect(result.signal).toBeNull();
+
+    // And a late exit after the settlement is inert, exactly as a late close is.
+    child.emit('exit', 0, null);
+    child.emit('close', 0, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(promise).resolves.toBe(result);
+  });
+
   it('Race G — a child error during the open attempt cancels the supervisor and settles once', async () => {
     const child = makeFakeChild();
     const promise = startRun(child, { timeoutMs: 15, killGraceMs: 30_000 });

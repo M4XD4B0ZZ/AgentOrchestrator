@@ -386,7 +386,13 @@ describe.runIf(IS_WINDOWS)('Windows .cmd shims', () => {
     expect(res.failureCode).toBe('OUTPUT_LIMIT_STDOUT');
     expect(Buffer.byteLength(res.stdout, 'utf8')).toBeLessThanOrEqual(4_096);
 
-    if (pid !== null) expect(await waitUntilDead(pid)).toBe(true);
+    // Asserted, not skipped over: the helper flooded stdout, so it demonstrably
+    // ran and demonstrably recorded its PID. A `null` here would silently drop
+    // the leak check below — the only assertion in this file that proves the
+    // descendant is really gone, which is exactly the property the module's own
+    // termination contract deliberately does not verify.
+    expect(pid).not.toBeNull();
+    expect(await waitUntilDead(pid as number)).toBe(true);
   });
 
   it('refuses a batch path containing a quote', async () => {
