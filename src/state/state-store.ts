@@ -27,7 +27,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'node:fs';
 
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { safeErrnoCode } from '../core/safe-error.js';
@@ -198,6 +198,29 @@ export function saveTaskState(state: unknown, options: StateStoreOptions = {}): 
 
 /* ─────────────────────────────── loading ────────────────────────────────── */
 
+/**
+ * Read budget for one state document.
+ *
+ * A state file is untrusted input: whatever wrote it last, this process did not
+ * watch it being written. Reading it unbounded turns "someone put a large file
+ * where a state belongs" into this process's memory problem, so the size is
+ * taken from the open handle and checked *before* a single byte is read.
+ *
+ * 1 MiB matches the output budget `worktree/git-command.ts` already applies to
+ * the largest thing this codebase reads from a subprocess. A real state is a
+ * few kilobytes; anything near this ceiling is not a state.
+ */
+export const MAX_TASK_STATE_BYTES = 1_048_576;
+
+/**
+ * The three outcomes a caller must be able to tell apart, whatever the precise
+ * code. `STATE_INVALID` covers every "there is something there, and it is not
+ * usable as state" — unreadable, oversized, malformed, contract-violating or
+ * misplaced — because each of them ends the same way: nothing may be resumed,
+ * and nothing may be repaired.
+ */
+export type StateClassification = 'STATE_MISSING' | 'STATE_VALID' | 'STATE_INVALID';
+
 export type StateLoadFailureCode =
   /** Nothing has ever been persisted for this task. Not an error. */
   | 'NO_STATE'
@@ -205,6 +228,10 @@ export type StateLoadFailureCode =
   | 'LOCATION_UNSUITABLE'
   /** The file exists but could not be read. */
   | 'UNREADABLE'
+  /** The document is larger than {@link MAX_TASK_STATE_BYTES}. Never parsed. */
+  | 'STATE_TOO_LARGE'
+  /** The document is valid, but describes a different repository or task. */
+  | 'IDENTITY_MISMATCH'
   /** The file is not JSON. */
   | 'MALFORMED_JSON'
   /** Valid JSON written against a contract version this build does not know. */
@@ -215,6 +242,7 @@ export type StateLoadFailureCode =
 export interface StateLoadSuccess {
   readonly ok: true;
   readonly code: 'LOADED';
+  readonly classification: 'STATE_VALID';
   readonly state: TaskState;
   readonly path: string;
   /**
@@ -228,6 +256,7 @@ export interface StateLoadSuccess {
 export interface StateLoadFailure {
   readonly ok: false;
   readonly code: StateLoadFailureCode;
+  readonly classification: Exclude<StateClassification, 'STATE_VALID'>;
   readonly path: string | null;
   readonly detail: StateLocationFailureCode | null;
   readonly errnoCode: string | null;
@@ -241,7 +270,67 @@ function loadFailure(
   detail: StateLocationFailureCode | null = null,
   errnoCode: string | null = null,
 ): StateLoadFailure {
-  return Object.freeze({ ok: false as const, code, path, detail, errnoCode });
+  return Object.freeze({
+    ok: false as const,
+    code,
+    classification: code === 'NO_STATE' ? 'STATE_MISSING' : 'STATE_INVALID',
+    path,
+    detail,
+    errnoCode,
+  });
+}
+
+/** Best-effort close. The outcome is already decided by the caller. */
+function closeQuietly(handle: number): void {
+  try {
+    closeSync(handle);
+  } catch {
+    // Nothing to add.
+  }
+}
+
+type BoundedRead =
+  | { readonly ok: true; readonly contents: string }
+  | { readonly ok: false; readonly code: 'NO_STATE' | 'UNREADABLE' | 'STATE_TOO_LARGE'; readonly errnoCode: string | null };
+
+/**
+ * Reads a state document, refusing anything larger than the budget.
+ *
+ * The size is taken from the *open handle* rather than from a prior `stat` of
+ * the path, so there is no window in which the thing measured and the thing
+ * read are two different files.
+ */
+function readBounded(path: string): BoundedRead {
+  let handle: number;
+  try {
+    handle = openSync(path, 'r');
+  } catch (error) {
+    const errnoCode = safeErrnoCode(error);
+    if (errnoCode === 'ENOENT') return { ok: false, code: 'NO_STATE', errnoCode: null };
+    return { ok: false, code: 'UNREADABLE', errnoCode };
+  }
+
+  try {
+    const { size } = fstatSync(handle);
+    if (size > MAX_TASK_STATE_BYTES) {
+      return { ok: false, code: 'STATE_TOO_LARGE', errnoCode: null };
+    }
+
+    const buffer = Buffer.allocUnsafe(size);
+    let offset = 0;
+    while (offset < size) {
+      const read = readSync(handle, buffer, offset, size - offset, offset);
+      if (read <= 0) break;
+      offset += read;
+    }
+    if (offset !== size) return { ok: false, code: 'UNREADABLE', errnoCode: null };
+
+    return { ok: true, contents: buffer.toString('utf8') };
+  } catch (error) {
+    return { ok: false, code: 'UNREADABLE', errnoCode: safeErrnoCode(error) };
+  } finally {
+    closeQuietly(handle);
+  }
 }
 
 /**
@@ -277,15 +366,10 @@ export function loadTaskState(
   if (!location.ok) return loadFailure('LOCATION_UNSUITABLE', null, location.code);
   const { path }: TaskStateLocation = location;
 
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch (error) {
-    const errnoCode = safeErrnoCode(error);
-    // A task that was never started is a normal, expected answer.
-    if (errnoCode === 'ENOENT') return loadFailure('NO_STATE', path);
-    return loadFailure('UNREADABLE', path, null, errnoCode);
-  }
+  // A task that was never started is a normal, expected answer, not an error.
+  const read = readBounded(path);
+  if (!read.ok) return loadFailure(read.code, path, null, read.errnoCode);
+  const raw = read.contents;
 
   let document: unknown;
   try {
@@ -304,9 +388,18 @@ export function loadTaskState(
     );
   }
 
+  // The document was found *by* these identities, so a disagreement means its
+  // contents contradict its own location — a state copied or moved between
+  // repositories, not merely a stale one. Refused here rather than deferred to
+  // reconciliation, because this is provable without resolving anything.
+  if (parsed.data.repositoryId !== repositoryId || parsed.data.taskId !== taskId) {
+    return loadFailure('IDENTITY_MISMATCH', path);
+  }
+
   return Object.freeze({
     ok: true as const,
     code: 'LOADED' as const,
+    classification: 'STATE_VALID' as const,
     state: parsed.data,
     path,
     // Taken from the bytes actually read, not from the re-serialised value: a

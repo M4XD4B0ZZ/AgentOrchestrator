@@ -1315,13 +1315,34 @@ unlinked, so every failure before the rename could not have touched it. A
 failure removes the staging file; a *crash* may leave one, which is inert
 because readers open the target by name and never enumerate the directory.
 
+### Loading is validation
+
+A persisted file is untrusted input, whoever wrote it. Every load answers with
+one of three classifications — `STATE_MISSING`, `STATE_VALID`, `STATE_INVALID`
+— alongside a precise code.
+
+Rejected: a document larger than the 1 MiB read budget (measured from the open
+handle, before a byte is read, so the thing measured and the thing read cannot
+be two different files); malformed JSON; an unsupported `schemaVersion`; an
+unknown field, since the contract is `.strict()`; an invalid state enum;
+anything else the canonical `TaskStateSchema` rejects; and a document whose
+`repositoryId`/`taskId` contradict the location it was found at — that one is
+provable without resolving anything, so it is refused at load rather than
+deferred.
+
+No raw parser, JSON or filesystem text ever reaches a result. Only closed codes
+and allow-listed errno identifiers, per AO-002.
+
 ### Nothing is ever repaired
 
 `loadTaskState()` performs no writes on any path. A malformed, stale or
-unsupported state file is reported with a typed code — `NO_STATE`,
-`UNREADABLE`, `MALFORMED_JSON`, `SCHEMA_VERSION_UNSUPPORTED`,
-`CONTRACT_VIOLATION` — and left exactly as found. Not migrated, not truncated,
-not renamed aside, not deleted.
+unsupported state file is reported and left exactly as found. Not migrated, not
+truncated, not renamed aside, not deleted.
+
+The same restraint applies to the writer: a failed write removes *only* the
+staging file it created itself, by the exact path it constructed. The state
+directory is never enumerated and no other temporary file is ever touched — a
+concurrent writer's in-flight staging file is none of our business.
 
 That is a refusal, not an omission. Every repair is a guess about what the
 previous run meant, made when the evidence for it is weakest, and it destroys

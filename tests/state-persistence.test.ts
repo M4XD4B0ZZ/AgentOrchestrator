@@ -27,7 +27,7 @@ import {
   TASK_STATE_DIR_NAME,
 } from '../src/state/state-location.js';
 import { writeFileAtomically } from '../src/state/atomic-file.js';
-import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
+import { loadTaskState, MAX_TASK_STATE_BYTES, saveTaskState } from '../src/state/state-store.js';
 import { validCreatedState, validUsageLimitState } from './fixtures.js';
 
 const tempDirs: string[] = [];
@@ -210,6 +210,26 @@ describe('atomic file replacement', () => {
     });
 
     expect(readdirSync(dir)).toEqual(['state.json']);
+  });
+
+  it('deletes only the temporary file it created, never one it merely found', () => {
+    const dir = scratch();
+    writeFileSync(join(dir, 'state.json'), 'previous');
+    // Another writer's staging file, mid-flight. Not ours to tidy up.
+    writeFileSync(join(dir, 'state.json.tmp-someone-else'), 'their work');
+
+    writeFileAtomically({
+      directory: dir,
+      fileName: 'state.json',
+      contents: 'replacement',
+      replace: () => {
+        const error: NodeJS.ErrnoException = new Error('denied');
+        error.code = 'EACCES';
+        throw error;
+      },
+    });
+
+    expect(readFileSync(join(dir, 'state.json.tmp-someone-else'), 'utf8')).toBe('their work');
   });
 
   it('refuses a file name that is not a single plain segment', () => {
@@ -495,6 +515,83 @@ describe('loading task state', () => {
     loadTaskState('repo-alpha', 'task-0001', { provider });
 
     expect(treeSnapshot(home)).toEqual(before);
+  });
+});
+
+/**
+ * A persisted file is untrusted input, whoever wrote it. These are the
+ * rejections that stand between a tampered, truncated or merely stale document
+ * and a loop that acts on it.
+ */
+describe('loading is validation', () => {
+  function writeRaw(provider: ReturnType<typeof fixedPathProvider>, contents: string): void {
+    const location = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
+    if (!location.ok) throw new Error('unreachable');
+    mkdirSync(location.directory, { recursive: true });
+    writeFileSync(location.path, contents);
+  }
+
+  it('classifies a task that was never persisted as missing', () => {
+    const provider = fixedPathProvider(scratch());
+
+    expect(loadTaskState('repo-alpha', 'task-0001', { provider }).classification).toBe(
+      'STATE_MISSING',
+    );
+  });
+
+  it('classifies a state that satisfies the contract as valid', () => {
+    const provider = fixedPathProvider(scratch());
+    saveTaskState(validCreatedState(), { provider });
+
+    expect(loadTaskState('repo-alpha', 'task-0001', { provider }).classification).toBe(
+      'STATE_VALID',
+    );
+  });
+
+  it.each([
+    ['malformed JSON', '{ not json'],
+    ['an unknown field', JSON.stringify({ ...validCreatedState(), smuggled: 'value' })],
+    ['an invalid state enum', JSON.stringify({ ...validCreatedState(), state: 'NOT_A_STATE' })],
+    ['an unsupported schemaVersion', JSON.stringify({ ...validCreatedState(), schemaVersion: 99 })],
+  ])('classifies %s as invalid', (_label, contents) => {
+    const provider = fixedPathProvider(scratch());
+    writeRaw(provider, contents);
+
+    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+
+    expect(loaded.ok).toBe(false);
+    expect(loaded.classification).toBe('STATE_INVALID');
+  });
+
+  it('rejects a state document whose identity contradicts where it was found', () => {
+    const provider = fixedPathProvider(scratch());
+    // Valid in itself, but it describes a different repository.
+    writeRaw(provider, JSON.stringify(validCreatedState({ repositoryId: 'repo-beta' })));
+
+    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+
+    expect(loaded.ok).toBe(false);
+    expect(loaded.code).toBe('IDENTITY_MISMATCH');
+    expect(loaded.classification).toBe('STATE_INVALID');
+  });
+
+  it('rejects a state document that exceeds the read budget', () => {
+    const provider = fixedPathProvider(scratch());
+    writeRaw(provider, 'x'.repeat(MAX_TASK_STATE_BYTES + 1));
+
+    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+
+    expect(loaded.ok).toBe(false);
+    expect(loaded.code).toBe('STATE_TOO_LARGE');
+  });
+
+  it('never surfaces parser or filesystem text in a load result', () => {
+    const provider = fixedPathProvider(scratch());
+    writeRaw(provider, '{ "secret-marker-zz": ');
+
+    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+
+    expect(JSON.stringify(loaded)).not.toContain('secret-marker-zz');
   });
 });
 
