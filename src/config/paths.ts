@@ -83,6 +83,21 @@ export function diagnosticsRoot(provider: PathProvider = OS_PATH_PROVIDER): stri
   return join(orchestratorHome(provider), 'diagnostics');
 }
 
+/** Directory name of the runtime task-state root inside the orchestrator home. */
+export const TASK_STATE_DIR_NAME = 'state';
+
+/**
+ * Root of every persisted runtime task state (V1-04).
+ *
+ * Deliberately a sibling of {@link diagnosticsRoot} rather than a child: a
+ * diagnostics run is disposable evidence about one invocation, whereas a task
+ * state is the record a restart depends on. Nothing that prunes diagnostics may
+ * reach the states, so they do not live inside them.
+ */
+export function taskStateRoot(provider: PathProvider = OS_PATH_PROVIDER): string {
+  return join(orchestratorHome(provider), TASK_STATE_DIR_NAME);
+}
+
 /** Where `agent-loop doctor` keeps its diagnostics. Never CWD-relative. */
 export function doctorDiagnosticsDir(provider: PathProvider = OS_PATH_PROVIDER): string {
   return join(diagnosticsRoot(provider), 'doctor');

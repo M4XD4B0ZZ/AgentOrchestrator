@@ -1266,12 +1266,120 @@ added to `src/core/states.ts`: `WORKTREE_READY` was already in the vocabulary,
 and this slice produces the value a task in that state describes — it does not
 persist one. Nothing here opens a pull request, pushes, fetches, or reads CI.
 
+## The state-persistence and reconciliation contract
+
+V1-04 is the first slice that *writes down* what a run believed and then checks
+that belief against the world on the way back in. It answers one question: what
+did the orchestrator previously persist, what does Git actually look like now,
+and is it safe to continue?
+
+`TaskState` itself is unchanged. `TASK_STATE_SCHEMA_VERSION` is still `1` and
+`schemas/task-state.schema.json` is byte-identical — this slice persists the
+existing contract rather than extending it.
+
+### Where a state lives
+
+    <OS user profile>/.agent-orchestrator/state/<repositoryId>/<taskId>.json
+
+A sibling of `diagnostics/`, not a child: a diagnostics run is disposable
+evidence about one invocation, while a task state is the record a restart
+depends on, and nothing that prunes the former may reach the latter.
+
+Both path segments are *repository-authored text* — `repositoryId` comes from a
+profile, `taskId` from a task file — and V1-04 is the first place either is used
+as a path segment. Each is put through the same single-plain-segment test
+`doctor/safe-write.ts` applies to artefact names, and anything that fails is
+refused with `REPOSITORY_ID_UNSUITABLE` or `TASK_ID_UNSUITABLE`. Never
+slugified, never truncated: the location is re-derived on every run, so a silent
+rewrite would break the one property it exists to provide. Two repositories that
+declare the same task id therefore land in two different directories.
+
+### Writes are atomic; `doctor/safe-write.ts` is not reused for them
+
+`writeRunArtifact` is deliberately append-only — it opens each artefact `wx`
+under its final name and documents that nothing is ever replaced. That is right
+for a run artefact and wrong for a checkpoint, which is rewritten at every
+transition over a file whose previous contents are the only thing standing
+between a killed process and a lost task.
+
+So `src/state/atomic-file.ts` exists alongside it and *imports* the shared
+safety posture rather than restating it: `isPlainFileName`, `isContained`,
+`pathContainsLink` and `safeErrnoCode` all come from the existing modules.
+
+The guarantee is that after a write returns, the file holds **either** its
+previous complete contents **or** the new complete contents. Contents go to a
+temporary file *in the same directory* — `rename` is only atomic within a
+filesystem — which is flushed, closed, and only then moved onto the target in
+one step. The target is never opened for writing, never truncated and never
+unlinked, so every failure before the rename could not have touched it. A
+failure removes the staging file; a *crash* may leave one, which is inert
+because readers open the target by name and never enumerate the directory.
+
+### Nothing is ever repaired
+
+`loadTaskState()` performs no writes on any path. A malformed, stale or
+unsupported state file is reported with a typed code — `NO_STATE`,
+`UNREADABLE`, `MALFORMED_JSON`, `SCHEMA_VERSION_UNSUPPORTED`,
+`CONTRACT_VIOLATION` — and left exactly as found. Not migrated, not truncated,
+not renamed aside, not deleted.
+
+That is a refusal, not an omission. Every repair is a guess about what the
+previous run meant, made when the evidence for it is weakest, and it destroys
+that evidence in the process. The contract is applied on both sides of the disk:
+a state that violates it is never written, because a self-contradictory state
+that survives a restart is indistinguishable from a real one.
+
+### Reconciliation, and two ways to fail
+
+`observe-runtime.ts` asks Git and the filesystem what is true now and changes
+nothing; `reconcile.ts` is the only place those facts meet the persisted record.
+Splitting them is what keeps "we could not find out" from becoming "we found out
+that it is false".
+
+`DIVERGED` means the world contradicts the record — the worktree is
+unregistered or gone, another branch is checked out, HEAD moved, the base pin is
+no longer an ancestor, there is uncommitted work. `UNOBSERVABLE` means the world
+could not be read. Both refuse, so collapsing them would change no decision —
+which is exactly why they stay apart: they are shown to a human, and "your base
+commit was rewritten" is the wrong thing to say when the truth is that Git could
+not be run. A false reason is worse than none. In the same spirit, an unreadable
+registry is never reported as proof that the worktree is unregistered.
+
+The base pin is checked with `merge-base --is-ancestor`, whose exit status is
+its answer, on the protocol `remove-workspace.ts` already documents: `0` yes,
+`1` a genuine no, anything else a refusal to evaluate. The happy path costs one
+Git call; only an indeterminate answer pays for a second probe asking whether
+the pinned object still exists at all.
+
+### One deterministic decision
+
+`classifyResume()` returns exactly one classification, in a fixed order, with no
+clock and no I/O of its own: terminal states first (a finished task is not a
+resume question), then reconciliation, then the block. Judging the block first
+would grant "resume allowed" for a task whose worktree is gone and then need
+overriding — a decision made twice is one that can disagree with itself.
+
+`evaluateAutomaticResume()` remains the authority on unattended resumes and is
+fed, not re-implemented. Repository identity and auth arrive as supplied
+evidence because re-establishing them is an *execution*, and this slice performs
+none. `STATE_DIVERGED` is named for the existing `RESUME_STATE_DIVERGED` state
+rather than inventing a second vocabulary for the same condition.
+
+### What V1-04 is not
+
+It decides; it does not act. Nothing here transitions a task, writes a state as
+a side effect of reading one, runs an agent, or touches a repository. Performing
+the transition a classification implies belongs to the loop. `RR-F6` is
+unchanged: `repo/git-query.ts` still has no injection point, and this slice did
+not need one — it re-observes through V1-03's `GitRunner` seam and takes
+repository identity as evidence rather than resolving it.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: the implement/verify/review loop, resume handling, and
-finding-fingerprint computation. The repository profile *declares* the context
-sources, the verification phases and the write scope; no code in this build
-opens a context file, runs a verification command or enforces a scope. Task
-selection and workspace preparation exist as libraries and have no CLI command
-yet: nothing in `agent-loop` calls them.
+build: the implement/verify/review loop and finding-fingerprint computation. The
+repository profile *declares* the context sources, the verification phases and
+the write scope; no code in this build opens a context file, runs a verification
+command or enforces a scope. Task selection, workspace preparation and state
+persistence exist as libraries and have no CLI command yet: nothing in
+`agent-loop` calls them.
