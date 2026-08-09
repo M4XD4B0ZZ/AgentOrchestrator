@@ -1451,6 +1451,42 @@ its answer, on the protocol `remove-workspace.ts` already documents: `0` yes,
 Git call; only an indeterminate answer pays for a second probe asking whether
 the pinned object still exists at all.
 
+### Git reality is phase-sensitive
+
+Two of those checks have no phase-independent answer, and asking them globally
+is how a reconciler starts reporting the loop's own work as divergence.
+
+`HEAD == basePinnedCommit` is **not** a task-wide invariant. It is the truth for
+a worktree that has just been created and nothing more; from `IMPLEMENTING`
+onwards the writing agent legitimately commits into it. Uncommitted work is the
+same story: an interrupted `IMPLEMENTING` is *supposed* to have some, and
+refusing every dirty worktree would make the ordinary crash — the one this slice
+exists to survive — permanently unresumable.
+
+So both are asked against what the record claims, and fall back to a phase
+expectation only where the transition table proves no agent has run yet:
+
+| Phase | Expected `HEAD` | A dirty worktree is |
+| --- | --- | --- |
+| `WORKTREE_READY`, `CONTEXT_LOADING` | `currentCommit`, else `basePinnedCommit` | always divergence |
+| `IMPLEMENTING` and past it, incl. the blocking states | `currentCommit` when recorded; otherwise no exact expectation | divergence only when the checkpoint recorded a clean tree |
+
+Those two pre-work phases are read off `TRANSITION_TABLE`, not chosen:
+`WORKTREE_READY` is entered from `GIT_PREFLIGHT` the moment V1-03 created the
+worktree at the pin, and `CONTEXT_LOADING` has `WORKTREE_READY` as its sole
+predecessor and `IMPLEMENTING` as its sole work successor. The set is
+deliberately *not* derived by graph reachability: re-authenticating genuinely
+re-enters the setup chain through `BLOCKED_AUTH → AUTH_PREFLIGHT`, with commits
+already present, so reachability would classify nearly every phase as post-work
+and say nothing. The two direct-predecessor facts are pinned by a test instead,
+so a table change that invalidated them fails rather than drifts.
+
+What stays global is the invariant that actually holds everywhere: the work must
+still descend from the pinned base. And none of this widens autonomy —
+`evaluateAutomaticResume()` independently requires an exact recorded
+`currentCommit`, a clean tree *and* `worktreeCleanAtCheckpoint === true`, and is
+neither wrapped nor weakened by reconciliation.
+
 ### One closed outcome
 
 `reconcileTask()` composes load, observation and comparison into a single value

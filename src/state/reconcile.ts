@@ -25,9 +25,34 @@
  * A refusal to answer never masquerades as an answer in the other direction
  * either: when the registry cannot be read, this module does **not** report the
  * worktree as unregistered. It does not know that.
+ *
+ * ── Git reality is phase-sensitive ─────────────────────────────────────────
+ *
+ * Two of the checks below cannot be asked the same way in every phase, and
+ * asking them globally is how a reconciler starts reporting the loop's own
+ * work as divergence:
+ *
+ *  - **HEAD.** `HEAD === basePinnedCommit` is the truth for a worktree that has
+ *    just been created and nothing more. From `IMPLEMENTING` onwards the
+ *    writing agent legitimately commits, so a HEAD ahead of the pin is the
+ *    normal case, not a contradiction.
+ *  - **Cleanliness.** Uncommitted work is what an interrupted `IMPLEMENTING`
+ *    looks like. Refusing every dirty worktree would make the ordinary crash —
+ *    the one this slice exists to survive — permanently unresumable.
+ *
+ * So both are asked against what the *record* claims, and only fall back to a
+ * phase expectation where the transition table proves no agent has run yet
+ * ({@link PRE_WORK_STATES}). What stays global is the invariant that actually
+ * holds in every phase: the work must still descend from the pinned base.
+ *
+ * None of this loosens the unattended path. `evaluateAutomaticResume()` in
+ * `core/automatic-resume.ts` independently requires an exact recorded
+ * `currentCommit`, a clean tree *and* `worktreeCleanAtCheckpoint === true`, and
+ * it is neither wrapped nor weakened here.
  */
 
 import { canonicalPathsEqual } from '../core/automatic-resume.js';
+import type { TaskStateName } from '../core/states.js';
 import type { TaskState } from '../core/task-state.js';
 import { expectedWorkBranchRef, type ObservedRuntime } from './observe-runtime.js';
 
@@ -92,6 +117,42 @@ const DIVERGENCE_SET: ReadonlySet<string> = new Set<string>(DIVERGENCE_FINDING_C
  * See the module comment for why the two failures are not one.
  */
 export type ReconciliationVerdict = 'CONSISTENT' | 'DIVERGED' | 'UNOBSERVABLE';
+
+/**
+ * The phases in which the worktree exists but no agent has run in it yet.
+ *
+ * Read off `TRANSITION_TABLE` rather than chosen here:
+ *
+ *  - `WORKTREE_READY` is entered from `GIT_PREFLIGHT`, i.e. the moment V1-03
+ *    has created the worktree at the pinned base. Nothing has executed in it,
+ *    so its only legitimate HEAD is that pin and its only legitimate tree is a
+ *    clean one.
+ *  - `CONTEXT_LOADING` has `WORKTREE_READY` as its sole predecessor and
+ *    `IMPLEMENTING` as its sole work successor, so by construction no agent has
+ *    run by the time a task is recorded in it either.
+ *
+ * Every other non-terminal phase is at or past `IMPLEMENTING`, where the
+ * writing agent is *supposed* to produce commits and uncommitted work.
+ *
+ * The set is deliberately not derived by graph reachability. Forward
+ * reachability from `IMPLEMENTING` leads back through
+ * `BLOCKED_AUTH → AUTH_PREFLIGHT → GIT_PREFLIGHT → WORKTREE_READY`, because
+ * re-authenticating genuinely re-enters the setup chain with commits already
+ * present — so reachability would classify almost every phase as post-work and
+ * say nothing. `tests/state-reconciliation.test.ts` pins the two direct-
+ * predecessor facts above against the table instead, so a table change that
+ * invalidated them would fail rather than drift. On that re-auth path the
+ * recorded `currentCommit` takes precedence anyway (see step 4), so the phase
+ * expectation only applies when no commit was ever checkpointed.
+ */
+export const PRE_WORK_STATES = ['WORKTREE_READY', 'CONTEXT_LOADING'] as const;
+
+const PRE_WORK_SET: ReadonlySet<string> = new Set<string>(PRE_WORK_STATES);
+
+/** `true` for phases in which neither a commit nor uncommitted work is expected. */
+export function isPreWorkState(state: TaskStateName): boolean {
+  return PRE_WORK_SET.has(state);
+}
 
 export interface ReconciliationReport {
   readonly verdict: ReconciliationVerdict;
@@ -167,11 +228,21 @@ export function reconcileTaskState(
     }
   }
 
-  // --- 4. Is HEAD where we left it? ---------------------------------------
-  // Before the first commit exists the state carries no `currentCommit`, and
-  // the worktree's HEAD is legitimately the base pin. Expect that instead of
-  // treating a fresh, untouched worktree as divergence.
-  const expectedHead = state.currentCommit ?? state.basePinnedCommit;
+  // --- 4. Is HEAD where the record says it should be? ---------------------
+  // Asked per phase, because there is no phase-independent answer:
+  //
+  //  - A recorded `currentCommit` pins HEAD in *every* phase. The record made a
+  //    concrete claim about where the work was left, and the world contradicting
+  //    it is precisely what divergence means.
+  //  - Without one, only a pre-work phase has a legitimate exact HEAD: the base
+  //    pin its worktree was created at, with nothing having run since.
+  //  - At or past `IMPLEMENTING` the record simply does not say where HEAD
+  //    should be. Falling back to the base pin there would report every
+  //    legitimate task commit as `CURRENT_COMMIT_MOVED` and turn a working loop
+  //    into `RESUME_STATE_DIVERGED`. The invariant that does still hold is
+  //    ancestry, checked in step 3 above and left untouched.
+  const expectedHead =
+    state.currentCommit ?? (isPreWorkState(state.state) ? state.basePinnedCommit : null);
   if (expectedHead !== null) {
     if (observed.observedCurrentCommit === null) {
       findings.push('CURRENT_COMMIT_UNKNOWN');
@@ -180,10 +251,19 @@ export function reconcileTaskState(
     }
   }
 
-  // --- 5. Is there uncommitted work? --------------------------------------
+  // --- 5. Is there uncommitted work the record does not account for? ------
+  // A dirty worktree is only a *contradiction* when the record claimed a clean
+  // one, or when the phase is one in which nothing has run that could have made
+  // it dirty. An interrupted `IMPLEMENTING` whose checkpoint already recorded
+  // `worktreeCleanAtCheckpoint: false` is a task with work in progress, which is
+  // the normal thing to find and the case this slice exists to survive.
+  //
+  // Unreadability stays a refusal in every phase: "Git could not be asked"
+  // is not evidence that the tree is in the expected shape.
+  const dirtyContradictsRecord = state.worktreeCleanAtCheckpoint || isPreWorkState(state.state);
   if (observed.worktreeClean === null) {
     findings.push('WORKTREE_CLEANLINESS_UNKNOWN');
-  } else if (!observed.worktreeClean) {
+  } else if (!observed.worktreeClean && dirtyContradictsRecord) {
     findings.push('WORKTREE_DIRTY');
   }
 

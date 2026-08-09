@@ -23,10 +23,17 @@ import type { GitCommandResult, GitRunner } from '../src/worktree/git-command.js
 import { saveTaskState } from '../src/state/state-store.js';
 import { reconcileTask, RECONCILIATION_OUTCOMES } from '../src/state/reconcile-task.js';
 import { observeRuntime } from '../src/state/observe-runtime.js';
-import { reconcileTaskState } from '../src/state/reconcile.js';
+import {
+  isPreWorkState,
+  PRE_WORK_STATES,
+  reconcileTaskState,
+  type ReconciliationReport,
+} from '../src/state/reconcile.js';
 import { classifyResume } from '../src/state/resume-decision.js';
 import { SHA_A, SHA_B, validCreatedState, validUsageLimitState } from './fixtures.js';
-import { parseTaskState } from '../src/core/task-state.js';
+import { parseTaskState, type TaskState, type TaskStateInput } from '../src/core/task-state.js';
+import { ALL_STATES, type TaskStateName } from '../src/core/states.js';
+import { TRANSITION_TABLE } from '../src/core/transitions.js';
 
 const OK = (stdout = ''): GitCommandResult =>
   Object.freeze({ outcome: 'OK' as const, stdout, exitCode: 0 });
@@ -242,6 +249,174 @@ describe('reconciling state against Git', () => {
 
     expect(report.findings).not.toContain('CURRENT_COMMIT_MOVED');
     expect(report.findings).not.toContain('BASE_COMMIT_NOT_ANCESTOR');
+  });
+});
+
+/**
+ * Git reality is not the same question in every phase.
+ *
+ * A worktree that has just been created still stands on its pinned base; a task
+ * that reached `IMPLEMENTING` has a writing agent committing into it, and an
+ * interrupted one has uncommitted work by design. Asking either question
+ * globally would report the loop's own progress as divergence and make the
+ * ordinary crash — the case this slice exists to survive — unresumable.
+ */
+describe('phase-sensitive Git expectations', () => {
+  /** A commit that is neither the pinned base nor the recorded checkpoint. */
+  const COMMITTED = 'd'.repeat(40);
+
+  const stateAt = (overrides: Partial<TaskStateInput>): TaskState =>
+    parseTaskState(validCreatedState({ basePinnedCommit: SHA_A, ...overrides }));
+
+  async function reportFor(state: TaskState, script: GitScript): Promise<ReconciliationReport> {
+    const observed = await observeRuntime(scriptedGit(script), state, { exists: alwaysExists });
+    return reconcileTaskState(state, observed, EXPECTATION);
+  }
+
+  it('accepts a task commit made during IMPLEMENTING that no checkpoint recorded', async () => {
+    // The base pin is *not* a global expectation: this is the writing agent
+    // doing its job. Ancestry still holds, and still gets checked.
+    const report = await reportFor(stateAt({ state: 'IMPLEMENTING', currentCommit: null }), {
+      head: OK(COMMITTED),
+    });
+
+    expect(report.findings).not.toContain('CURRENT_COMMIT_MOVED');
+    expect(report.verdict).toBe('CONSISTENT');
+  });
+
+  it('still expects the pinned base at WORKTREE_READY, where nothing has run yet', async () => {
+    const report = await reportFor(stateAt({ state: 'WORKTREE_READY', currentCommit: null }), {
+      head: OK(COMMITTED),
+    });
+
+    expect(report.verdict).toBe('DIVERGED');
+    expect(report.findings).toContain('CURRENT_COMMIT_MOVED');
+  });
+
+  it('holds a recorded currentCommit in a work phase too', async () => {
+    // Loosening the *fallback* must not loosen the recorded claim: once the
+    // checkpoint says where HEAD was, the world contradicting it is divergence
+    // in every phase.
+    const report = await reportFor(stateAt({ state: 'IMPLEMENTING', currentCommit: SHA_B }), {
+      head: OK(COMMITTED),
+    });
+
+    expect(report.verdict).toBe('DIVERGED');
+    expect(report.findings).toContain('CURRENT_COMMIT_MOVED');
+  });
+
+  it('accepts uncommitted work the checkpoint already recorded', async () => {
+    const report = await reportFor(
+      stateAt({ state: 'IMPLEMENTING', currentCommit: SHA_B, worktreeCleanAtCheckpoint: false }),
+      { head: OK(SHA_B), status: OK(' M src/index.ts') },
+    );
+
+    expect(report.findings).not.toContain('WORKTREE_DIRTY');
+    expect(report.verdict).toBe('CONSISTENT');
+  });
+
+  it('refuses uncommitted work the checkpoint claimed was clean', async () => {
+    const report = await reportFor(
+      stateAt({ state: 'IMPLEMENTING', currentCommit: SHA_B, worktreeCleanAtCheckpoint: true }),
+      { head: OK(SHA_B), status: OK(' M src/index.ts') },
+    );
+
+    expect(report.verdict).toBe('DIVERGED');
+    expect(report.findings).toContain('WORKTREE_DIRTY');
+  });
+
+  it('refuses uncommitted work in a phase where nothing has run to create it', async () => {
+    // Even a record that claims the tree was dirty cannot make a dirty
+    // WORKTREE_READY legitimate: no agent has executed in that worktree.
+    const report = await reportFor(
+      stateAt({ state: 'WORKTREE_READY', currentCommit: null, worktreeCleanAtCheckpoint: false }),
+      { head: OK(SHA_A), status: OK(' M src/index.ts') },
+    );
+
+    expect(report.verdict).toBe('DIVERGED');
+    expect(report.findings).toContain('WORKTREE_DIRTY');
+  });
+
+  it('reports an unreadable cleanliness probe as unobservable in a work phase too', async () => {
+    const report = await reportFor(
+      stateAt({ state: 'IMPLEMENTING', currentCommit: SHA_B, worktreeCleanAtCheckpoint: false }),
+      { head: OK(SHA_B), status: UNAVAILABLE },
+    );
+
+    expect(report.verdict).toBe('UNOBSERVABLE');
+    expect(report.findings).toContain('WORKTREE_CLEANLINESS_UNKNOWN');
+  });
+
+  it('derives the pre-work phases from the transition table', () => {
+    const predecessorsOf = (to: TaskStateName): readonly TaskStateName[] =>
+      ALL_STATES.filter((from) => TRANSITION_TABLE[from].includes(to));
+
+    // The two facts the pre-work set rests on. If the table ever grew an edge
+    // from a work phase into either of these, the base-pin and cleanliness
+    // expectations below would stop being legitimate — and this fails first.
+    expect(predecessorsOf('WORKTREE_READY')).toEqual(['GIT_PREFLIGHT']);
+    expect(predecessorsOf('CONTEXT_LOADING')).toEqual(['WORKTREE_READY']);
+
+    // Quota is only consumed where an agent actually runs, which is the table's
+    // own definition of the phases that may commit.
+    const agentExecuting = ALL_STATES.filter((from) =>
+      TRANSITION_TABLE[from].includes('BLOCKED_USAGE_LIMIT'),
+    );
+    expect(agentExecuting).toEqual(['IMPLEMENTING', 'REVIEWING', 'REMEDIATING']);
+
+    for (const phase of PRE_WORK_STATES) {
+      expect(agentExecuting).not.toContain(phase);
+      expect(isPreWorkState(phase)).toBe(true);
+    }
+    expect(isPreWorkState('IMPLEMENTING')).toBe(false);
+  });
+
+  it('resumes an interrupted IMPLEMENTING that still has work in progress', async () => {
+    // The point of the whole correction: a crash mid-implementation is a
+    // resumable task, not a diverged one.
+    const state = stateAt({
+      state: 'IMPLEMENTING',
+      currentCommit: SHA_B,
+      worktreeCleanAtCheckpoint: false,
+    });
+    const observed = await observeRuntime(
+      scriptedGit({ head: OK(SHA_B), status: OK(' M src/index.ts') }),
+      state,
+      { exists: alwaysExists },
+    );
+
+    const decision = classifyResume(state, observed, {
+      now: '2026-07-31T15:00:00.000Z',
+      authPreflightPassed: true,
+      repository: REPOSITORY,
+      taskId: STATE.taskId,
+    });
+
+    expect(decision.classification).toBe('RESUME_READY');
+  });
+
+  it('does not let the loosened checks widen an unattended resume', async () => {
+    // `BLOCKED_USAGE_LIMIT` is the only state an unattended resume is even
+    // considered for. Reconciliation now accepts the dirty tree its checkpoint
+    // recorded — and `evaluateAutomaticResume()`, untouched, still denies.
+    const state = parseTaskState(validUsageLimitState({ worktreeCleanAtCheckpoint: false }));
+    const observed = await observeRuntime(
+      scriptedGit({ head: OK(SHA_B), status: OK(' M src/index.ts') }),
+      state,
+      { exists: alwaysExists },
+    );
+
+    expect(reconcileTaskState(state, observed, EXPECTATION).verdict).toBe('CONSISTENT');
+
+    const decision = classifyResume(state, observed, {
+      now: '2026-07-31T15:00:00.000Z',
+      authPreflightPassed: true,
+      repository: REPOSITORY,
+      taskId: STATE.taskId,
+    });
+
+    expect(decision.classification).toBe('AUTOMATIC_RESUME_REFUSED');
+    expect(decision.reasonCodes).toContain('WORKTREE_NOT_CLEAN');
   });
 });
 
