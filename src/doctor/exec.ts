@@ -83,6 +83,20 @@ export const DEFAULT_KILL_GRACE_MS = 5_000;
  */
 const SAFE_ARG_PATTERN = /^[A-Za-z0-9._:@=+\\/-]*$/;
 
+/**
+ * `true` when `value` may be passed to {@link runCommand} as an argument.
+ *
+ * Exported so a caller that *derives* an argument — a worktree path built from
+ * a repository root, say — can decide before spawning whether the value it
+ * produced is acceptable here, and fail closed with its own typed code instead
+ * of provoking the {@link UnsafeArgumentError} that this module documents as a
+ * programming error. A second copy of {@link SAFE_ARG_PATTERN} in a calling
+ * module would be free to drift from this one; a shared predicate cannot.
+ */
+export function isShellInertArgument(value: string): boolean {
+  return SAFE_ARG_PATTERN.test(value);
+}
+
 export class UnsafeArgumentError extends Error {}
 
 function assertSafeArgs(args: readonly string[]): void {

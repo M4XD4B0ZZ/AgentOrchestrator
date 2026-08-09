@@ -1131,12 +1131,147 @@ and an `issueCount` — a count, not the issues.
 `npm run schema:generate` and is drift-checked against it, exactly like the
 state and profile documents. The task-state schema was not touched.
 
+## The workspace-lifecycle contract
+
+V1-03 answers one question, for one selected task:
+
+> can this task be given a safe isolated workspace, and if so, what exact
+> branch, worktree and base commit belong to it?
+
+It takes a `ResolvedRepository` (V1-01) and a `TaskDefinition` (V1-02) and
+produces a `WORKTREE_READY` receipt describing a real `git worktree`. It writes
+no state file, loads no context, runs no verification, starts no agent and
+touches no forge. V1-04 persists and reconciles the receipt.
+
+### Identity is derived, never assigned
+
+`deriveTaskWorkspaceIdentity()` is a pure function of the repository root, the
+declared default branch and the task id. No timestamp, no counter, no random
+suffix, no `process.cwd()`:
+
+```
+branch     ao/task/<task id>
+worktree   <parent of root>/<name of root>.worktrees/<task id>
+```
+
+Determinism is what lets a later step *re-derive* a workspace instead of
+trusting a path someone wrote down, and it is what makes cleanup safe: removal
+recomputes the name and refuses anything that does not match, so there is no
+parameter for "the directory to delete".
+
+The workspace is a **sibling** of the repository, never a directory inside it.
+Inside would put a second checkout in the tree a writer agent is about to work
+in, where it would appear in `git status`, in every glob a verification command
+expands, and in the scope rules the profile declares.
+
+A task id is repository-authored text that already passed V1-02's grammar — but
+that grammar describes a *filename*, and a filename is not a branch name.
+`V1..03`, `spec.lock` and `release.` are all legal task ids and none of them is
+a legal Git branch. The derived name is therefore validated with the same
+`isValidBranchName` a profile's default branch must pass, and anything that
+fails is refused rather than slugified: a silent rewrite would break
+re-derivation, which is the whole point.
+
+The derived path must also be acceptable as a Git *argument* under the
+execution layer's shell-inert grammar (AO-008). A repository checked out under a
+path containing a space therefore cannot be given a workspace by this build, and
+says so with `WORKTREE_PATH_UNSAFE` rather than provoking the
+`UnsafeArgumentError` that `doctor/exec.ts` documents as a programming error.
+Git is not the limit here; this build is.
+
+### The base commit is pinned, and pinned first
+
+The default branch is read once, resolved to a full object name, and the
+worktree is created **at that object name** — not at the branch. Between the
+read and the create, a concurrent fetch, merge or reset can move the branch; a
+worktree created "at the branch" would silently start from wherever it had got
+to, and the receipt would name a commit the work is not based on. Post-create
+verification then confirms `HEAD` is exactly the pinned object, so a branch that
+moves mid-flight produces a refusal, never a wrong base.
+
+### Refusal means nothing happened
+
+Every check runs before anything is created, so a refusal always leaves the
+repository exactly as it was found. The one exception is post-create
+verification: if it fails, the worktree this call created is removed again — and
+if *that* removal fails, the outcome says `WORKTREE_ROLLBACK_INCOMPLETE` and
+sets `residue: true` rather than reporting a clean refusal over a half-built
+workspace.
+
+### Cleanup requires proof of ownership
+
+`removeTaskWorkspace()` deletes nothing until three things hold:
+
+1. the branch and path are **re-derived**, not supplied;
+2. Git registers a worktree at that exact path, with that exact task branch
+   checked out — a directory that merely sits at the right path, and a
+   registered worktree holding another branch, are both refused;
+3. nothing unsaved would be lost: the worktree must be clean, and the task
+   branch must contain no commit the base branch does not already have.
+
+`git worktree remove` is never given `--force` and `git branch -d` never becomes
+`-D`. There is deliberately no option to force: discarding real work is a
+decision for a human with Git, not an orchestrator primitive.
+
+The third proof reads an exit status, and it is the one place in this slice that
+does, so the protocol is stated rather than assumed. `git merge-base
+--is-ancestor` exits **0** for "yes", **1** for "no", and **anything else**
+(128 in practice) when it could not evaluate the question at all — a ref that no
+longer resolves, say. Only exit 1 is an answer. Collapsing every non-zero into
+one bucket would let "the base branch is gone" be reported as "your task branch
+holds unmerged work", which is not merely vaguer but false; a deleted base is
+therefore its own outcome, and an unevaluable probe is `GIT_UNAVAILABLE`.
+
+### Failure codes
+
+Failures are data and carry a static sentence, never an interpolated path, task
+id or Git output.
+
+Preparation: `TASK_ID_INVALID`, `REPOSITORY_ROOT_UNSUITABLE`,
+`BASE_BRANCH_INVALID`, `TASK_BRANCH_NAME_INVALID`, `WORKTREE_PATH_UNSAFE`,
+`GIT_UNAVAILABLE`, `REPOSITORY_ROOT_MISMATCH`, `SOURCE_BRANCH_UNEXPECTED`,
+`SOURCE_WORKTREE_DIRTY`, `BASE_BRANCH_NOT_FOUND`, `BASE_COMMIT_UNRESOLVED`,
+`TASK_BRANCH_EXISTS`, `WORKTREE_PATH_OCCUPIED`, `WORKTREE_ALREADY_REGISTERED`,
+`WORKTREE_PARENT_UNUSABLE`, `WORKTREE_CREATE_FAILED`,
+`WORKTREE_VERIFICATION_FAILED`, `WORKTREE_ROLLBACK_INCOMPLETE`.
+
+Removal: the five identity codes, plus `GIT_UNAVAILABLE`, `WORKTREE_NOT_OWNED`,
+`WORKTREE_DIRTY`, `TASK_BRANCH_HAS_UNMERGED_WORK`, `BASE_BRANCH_NOT_FOUND`,
+`WORKTREE_REMOVE_FAILED`. `BASE_BRANCH_NOT_FOUND` carries the same meaning it
+does during preparation — a code means one thing wherever it is read.
+Success is `WORKSPACE_REMOVED`, or `WORKSPACE_PARTIALLY_REMOVED` when the
+worktree went and the owned branch did not — reported as its own outcome so a
+leftover branch is never invisible.
+
+### The Git seam
+
+`src/worktree/git-command.ts` is the one place in this slice that may *change* a
+repository, and it is injectable. It is deliberately separate from
+`repo/git-query.ts`, which opens by promising it writes nothing — routing a
+`worktree add` through it would retract that promise for every existing caller.
+Both share the same posture: no shell, an argument vector, no inherited `GIT_*`
+environment, bounded output and wall clock, failures as data.
+
+This is the broader Git seam that V1-01's review item **RR-F6** was deferred
+against. It covers this slice's own Git access; `repo/git-query.ts` still has no
+injection point, so V1-01's `GIT_UNAVAILABLE` path remains without a
+deterministic test. Closing RR-F6 fully means threading an injectable runner
+through `resolveRepository`, which is a change to the V1-01 contract and is left
+as its own decision rather than folded into this slice.
+
+### What V1-03 is not
+
+`READY_FOR_PR` remains terminal and gained no outgoing transition. No state was
+added to `src/core/states.ts`: `WORKTREE_READY` was already in the vocabulary,
+and this slice produces the value a task in that state describes — it does not
+persist one. Nothing here opens a pull request, pushes, fetches, or reads CI.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: worktree setup, the implement/verify/review loop, resume handling, and
+build: the implement/verify/review loop, resume handling, and
 finding-fingerprint computation. The repository profile *declares* the context
 sources, the verification phases and the write scope; no code in this build
 opens a context file, runs a verification command or enforces a scope. Task
-selection exists as a library and has no CLI command yet: nothing in
-`agent-loop` calls it.
+selection and workspace preparation exist as libraries and have no CLI command
+yet: nothing in `agent-loop` calls them.
