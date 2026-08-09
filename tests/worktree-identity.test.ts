@@ -12,7 +12,7 @@
  * independent workspaces without either repository being known to the code.
  */
 
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
@@ -125,6 +125,15 @@ describe('identities that cannot exist are refused, never repaired', () => {
     const derived = deriveTaskWorkspaceIdentity(repository, taskId);
     expect(derived.ok).toBe(false);
     if (!derived.ok) expect(derived.code).toBe(expected);
+  });
+
+  it.each([
+    ['a drive root, which has no directory name of its own', `D:${sep}`],
+    ['a relative path', join('projects', 'alpha')],
+  ])('refuses %s as a repository root', (_label, root) => {
+    const derived = deriveTaskWorkspaceIdentity(repositoryAt(root), 'V1-03');
+    expect(derived.ok).toBe(false);
+    if (!derived.ok) expect(derived.code).toBe('REPOSITORY_ROOT_UNSUITABLE');
   });
 
   it('refuses a declared default branch that Git would not accept', () => {

@@ -15,7 +15,7 @@
  * refused to act on is still exactly as it was.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
@@ -271,6 +271,40 @@ describe('G — a worktree registration collision is refused', () => {
     }
     expect(existsSync(elsewhere)).toBe(true);
     expect(existsSync(identity.worktreePath)).toBe(false);
+  });
+
+  it('refuses a stale registration whose directory somebody deleted by hand', async () => {
+    const repository = await freshRepository();
+    const identity = identityFor(repository, 'V1-03');
+
+    // A worktree registered at exactly the derived path, on somebody else's
+    // branch, whose directory has since been removed without `git worktree
+    // prune`. The path is now free on disk while Git still owns the name — the
+    // one case where the filesystem and the registry disagree, and the case
+    // where trusting the filesystem alone would let two worktrees claim one
+    // location.
+    mkdirSync(identity.worktreeParent, { recursive: true });
+    git(repository.root, [
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'stale-branch',
+      identity.worktreePath,
+    ]);
+    rmSync(identity.worktreePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    expect(existsSync(identity.worktreePath)).toBe(false);
+
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('WORKTREE_ALREADY_REGISTERED');
+      expect(result.residue).toBe(false);
+    }
+    // The stale registration is left for a human to prune; nothing was adopted.
+    expect(git(repository.root, ['branch', '--list', 'stale-branch']).trim()).not.toBe('');
+    expect(git(repository.root, ['branch', '--list', identity.workBranch]).trim()).toBe('');
   });
 });
 

@@ -263,6 +263,100 @@ describe('Git that cannot answer', () => {
     if (!result.ok) expect(result.code).toBe('GIT_UNAVAILABLE');
   });
 
+  it.each([
+    [
+      'a root Git disagrees with',
+      (id: ReturnType<typeof identityFor>) => (cwd: string, args: readonly string[]) =>
+        cwd === id.repositoryRoot && startsWith(args, ['rev-parse', '--show-toplevel'])
+          ? OK('C:/somewhere/else')
+          : null,
+      'REPOSITORY_ROOT_MISMATCH',
+    ],
+    [
+      'a base branch that has vanished',
+      (id: ReturnType<typeof identityFor>) => (cwd: string, args: readonly string[]) =>
+        cwd === id.repositoryRoot && args[args.length - 1] === `refs/heads/${id.baseBranch}`
+          ? NONZERO
+          : null,
+      'BASE_BRANCH_NOT_FOUND',
+    ],
+    [
+      'a base that does not resolve to an object name',
+      (id: ReturnType<typeof identityFor>) => (cwd: string, args: readonly string[]) =>
+        cwd === id.repositoryRoot && args[args.length - 1] === `refs/heads/${id.baseBranch}`
+          ? OK('not-a-sha')
+          : null,
+      'BASE_COMMIT_UNRESOLVED',
+    ],
+  ])('fails closed on %s', async (_label, buildHook, expected) => {
+    const repository = await freshRepository();
+    const identity = identityFor(repository, 'V1-03');
+    const runner = intercepting(buildHook(identity));
+
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(expected);
+      expect(result.residue).toBe(false);
+    }
+    expect(existsSync(identity.worktreePath)).toBe(false);
+  });
+
+  it('reports WORKTREE_PARENT_UNUSABLE when the workspace directory cannot exist', async () => {
+    const repository = await freshRepository();
+    const identity = identityFor(repository, 'V1-03');
+    // A regular file sitting exactly where the workspace directory must go.
+    writeFileSync(identity.worktreeParent, 'not a directory\n', 'utf8');
+
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('WORKTREE_PARENT_UNUSABLE');
+      expect(result.residue).toBe(false);
+    }
+  });
+
+  it('reports WORKTREE_REMOVE_FAILED without deleting the branch', async () => {
+    const repository = await freshRepository();
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    expect(prepared.ok).toBe(true);
+    const identity = identityFor(repository, 'V1-03');
+
+    const runner = intercepting((_cwd, args) =>
+      startsWith(args, ['worktree', 'remove']) ? NONZERO : null,
+    );
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+
+    expect(removal.ok).toBe(false);
+    if (!removal.ok) {
+      expect(removal.code).toBe('WORKTREE_REMOVE_FAILED');
+      expect(removal.branchRemoved).toBe(false);
+    }
+    // The branch is still there: a failed removal must not half-delete.
+    expect(git(repository.root, ['branch', '--list', identity.workBranch]).trim()).not.toBe('');
+    expect(existsSync(identity.worktreePath)).toBe(true);
+  });
+
+  it('reports a partial removal rather than calling a leftover branch success', async () => {
+    const repository = await freshRepository();
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    expect(prepared.ok).toBe(true);
+
+    const runner = intercepting((_cwd, args) =>
+      startsWith(args, ['branch', '-d']) ? NONZERO : null,
+    );
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+
+    expect(removal.ok).toBe(true);
+    if (removal.ok) {
+      expect(removal.code).toBe('WORKSPACE_PARTIALLY_REMOVED');
+      expect(removal.worktreeRemoved).toBe(true);
+      expect(removal.branchRemoved).toBe(false);
+    }
+  });
+
   it('never reads a non-zero exit as a successful answer during removal', async () => {
     const repository = await freshRepository();
     const workspace = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
