@@ -1364,6 +1364,32 @@ that evidence in the process. The contract is applied on both sides of the disk:
 a state that violates it is never written, because a self-contradictory state
 that survives a restart is indistinguishable from a real one.
 
+### Creation and movement are different operations
+
+`saveTaskState()` validates a state *in isolation*. That is right for it — the
+first state a task ever has must be writable and has no predecessor — but it
+means it cannot see the one thing that makes a move legal: where the task came
+from. `TaskStateSchema` accepts a `CREATED` document and an `IMPLEMENTING`
+document equally; only the transition table knows the second may not directly
+follow the first.
+
+So the two are separate:
+
+- `saveTaskState()` — **creation**, a state with no predecessor;
+- `advanceTaskState()` — **movement**, which requires the state that was read
+  and consults `canTransition()` before writing anything, refusing an
+  undeclared edge with `ILLEGAL_TRANSITION`.
+
+The table is consulted, never restated: a new edge is added in
+`core/transitions.ts` or nowhere. Re-persisting the *same* state is a
+checkpoint rather than a move — no state lists itself as its own successor, so
+requiring a declared edge would make recording progress impossible — and only a
+genuine change is checked.
+
+This is the persistence primitive the runtime loop will call. It is not the
+loop: nothing here decides which state comes next, runs an agent, or reads a
+repository.
+
 ### Concurrent writers
 
 Two orchestrator processes may be pointed at the same task. Neither is expected

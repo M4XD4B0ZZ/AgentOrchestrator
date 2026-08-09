@@ -35,6 +35,7 @@ import {
 } from '../src/state/state-location.js';
 import { writeFileAtomically } from '../src/state/atomic-file.js';
 import { loadTaskState, MAX_TASK_STATE_BYTES, saveTaskState } from '../src/state/state-store.js';
+import { advanceTaskState } from '../src/state/advance-state.js';
 import { validCreatedState, validUsageLimitState } from './fixtures.js';
 
 const tempDirs: string[] = [];
@@ -548,6 +549,106 @@ describe('loading is validation', () => {
     loadTaskState(root, 'task-0001');
 
     expect(treeSnapshot(root)).toEqual(before);
+  });
+});
+
+/**
+ * The persistence primitive later runtime code calls to *move* a task.
+ *
+ * V1-04 implements no loop. What it owes V1-05 is a way to advance a task that
+ * cannot be used to invent an edge: the transition table stays the single
+ * authority on which states follow which, and this helper consults it rather
+ * than restating it.
+ */
+describe('advancing a task through the transition contract', () => {
+  it('persists a move along a declared edge', () => {
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const current = loadTaskState(root, 'task-0001');
+    if (!current.ok) throw new Error('unreachable');
+
+    const advanced = advanceTaskState(current, stateIn(root, { state: 'REPOSITORY_RESOLVED' }), {
+      repositoryRoot: root,
+    });
+
+    expect(advanced.code).toBe('SAVED');
+    const loaded = loadTaskState(root, 'task-0001');
+    if (!loaded.ok) throw new Error('unreachable');
+    expect(loaded.state.state).toBe('REPOSITORY_RESOLVED');
+  });
+
+  it('refuses an edge the transition table does not declare', () => {
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const current = loadTaskState(root, 'task-0001');
+    if (!current.ok) throw new Error('unreachable');
+
+    // CREATED does not reach IMPLEMENTING: the setup chain has to happen first.
+    const jumped = advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), {
+      repositoryRoot: root,
+    });
+
+    expect(jumped.ok).toBe(false);
+    expect(jumped.code).toBe('ILLEGAL_TRANSITION');
+  });
+
+  it('leaves the persisted state untouched when the edge is refused', () => {
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const current = loadTaskState(root, 'task-0001');
+    if (!current.ok) throw new Error('unreachable');
+
+    advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), { repositoryRoot: root });
+
+    const loaded = loadTaskState(root, 'task-0001');
+    if (!loaded.ok) throw new Error('unreachable');
+    expect(loaded.state.state).toBe('CREATED');
+  });
+
+  it('refuses to move out of a terminal state', () => {
+    const root = repoRoot();
+    saveTaskState(stateIn(root, { state: 'ABORTED' }), { repositoryRoot: root });
+    const current = loadTaskState(root, 'task-0001');
+    if (!current.ok) throw new Error('unreachable');
+
+    const revived = advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), {
+      repositoryRoot: root,
+    });
+
+    expect(revived.ok).toBe(false);
+    expect(revived.code).toBe('ILLEGAL_TRANSITION');
+  });
+
+  it('allows re-persisting the same state, which is a checkpoint and not a move', () => {
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const current = loadTaskState(root, 'task-0001');
+    if (!current.ok) throw new Error('unreachable');
+
+    const checkpoint = advanceTaskState(
+      current,
+      stateIn(root, { stateEnteredAt: '2026-07-31T11:00:00.000Z' }),
+      { repositoryRoot: root },
+    );
+
+    expect(checkpoint.code).toBe('SAVED');
+  });
+
+  it('still refuses a writer whose revision was overtaken', () => {
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const stale = loadTaskState(root, 'task-0001');
+    if (!stale.ok) throw new Error('unreachable');
+    advanceTaskState(stale, stateIn(root, { state: 'REPOSITORY_RESOLVED' }), {
+      repositoryRoot: root,
+    });
+
+    const overtaken = advanceTaskState(stale, stateIn(root, { state: 'ABORTED' }), {
+      repositoryRoot: root,
+    });
+
+    expect(overtaken.ok).toBe(false);
+    expect(overtaken.code).toBe('STATE_CONFLICT');
   });
 });
 

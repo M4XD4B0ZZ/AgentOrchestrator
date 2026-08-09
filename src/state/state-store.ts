@@ -87,6 +87,12 @@ export type StateSaveFailureCode =
   | 'DIRECTORY_CREATE_FAILED'
   /** Another writer has moved the state on. Nothing was written. */
   | 'STATE_CONFLICT'
+  /**
+   * The move is not declared by the transition table. Produced only by
+   * `advanceTaskState()`; `saveTaskState()` writes states without a
+   * predecessor and has no edge to judge.
+   */
+  | 'ILLEGAL_TRANSITION'
   /** The atomic replacement did not complete. The previous state survives. */
   | 'WRITE_FAILED';
 
