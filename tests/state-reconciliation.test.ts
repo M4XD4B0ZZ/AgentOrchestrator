@@ -13,9 +13,15 @@
  * cannot be asked to produce on demand.
  */
 
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it } from 'vitest';
 
 import type { GitCommandResult, GitRunner } from '../src/worktree/git-command.js';
+import { saveTaskState } from '../src/state/state-store.js';
+import { reconcileTask, RECONCILIATION_OUTCOMES } from '../src/state/reconcile-task.js';
 import { observeRuntime } from '../src/state/observe-runtime.js';
 import { reconcileTaskState } from '../src/state/reconcile.js';
 import { classifyResume } from '../src/state/resume-decision.js';
@@ -295,6 +301,135 @@ describe('reconciling state against resolved identity', () => {
 
     expect(report.verdict).toBe('DIVERGED');
     expect(report.findings).toContain('BASE_BRANCH_MISMATCH');
+  });
+});
+
+/**
+ * The composed entry point: load, observe, compare, and answer with one closed
+ * outcome. A caller must be able to branch on that single value without
+ * re-deriving it from findings.
+ */
+describe('reconciliation outcomes', () => {
+  const roots: string[] = [];
+
+  function repoRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ao-recon-'));
+    roots.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    while (roots.length > 0) {
+      const dir = roots.pop();
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** A persisted, self-consistent task in `root`, plus a Git that agrees. */
+  function persistedTask(root: string) {
+    const worktreePath = join(root, 'wt');
+    const state = validUsageLimitState({
+      repositoryRoot: root,
+      worktreePath,
+      taskId: 'task-0001',
+    });
+    const saved = saveTaskState(state, { repositoryRoot: root });
+    if (!saved.ok) throw new Error(`fixture did not persist: ${saved.code}`);
+
+    const registry = `worktree ${root}\nbranch refs/heads/main\n\nworktree ${worktreePath}\nbranch refs/heads/agent/task-0001\n`;
+    const expectation = {
+      repository: { id: 'repo-alpha', root, defaultBranch: 'main' },
+      taskId: 'task-0001',
+    };
+    return { state, worktreePath, registry, expectation };
+  }
+
+  it('reports a task that was never persisted', async () => {
+    const root = repoRoot();
+    const { registry, expectation } = persistedTask(root);
+    rmSync(join(root, '.agent-orchestrator'), { recursive: true, force: true });
+
+    const result = await reconcileTask(scriptedGit({ registry: OK(registry) }), expectation, {
+      exists: alwaysExists,
+    });
+
+    expect(result.outcome).toBe('NO_PERSISTED_STATE');
+    expect(result.state).toBeNull();
+  });
+
+  it('reports a persisted state that is not usable', async () => {
+    const root = repoRoot();
+    const { registry, expectation } = persistedTask(root);
+    writeFileSync(join(root, '.agent-orchestrator', 'runtime', 'task-0001.json'), '{ not json');
+
+    const result = await reconcileTask(scriptedGit({ registry: OK(registry) }), expectation, {
+      exists: alwaysExists,
+    });
+
+    expect(result.outcome).toBe('STATE_INVALID');
+    expect(result.report).toBeNull();
+  });
+
+  it('reconciles a persisted state that matches reality', async () => {
+    const root = repoRoot();
+    const { registry, expectation } = persistedTask(root);
+
+    const result = await reconcileTask(scriptedGit({ registry: OK(registry) }), expectation, {
+      exists: alwaysExists,
+    });
+
+    expect(result.outcome).toBe('RECONCILED');
+    expect(result.reasonCodes).toEqual([]);
+    expect(result.state?.taskId).toBe('task-0001');
+  });
+
+  it('separates a repository mismatch from ordinary divergence', async () => {
+    const root = repoRoot();
+    const { registry, expectation } = persistedTask(root);
+
+    const result = await reconcileTask(scriptedGit({ registry: OK(registry) }), {
+      ...expectation,
+      repository: { ...expectation.repository, id: 'some-other-repository' },
+    }, { exists: alwaysExists });
+
+    expect(result.outcome).toBe('STATE_REPOSITORY_MISMATCH');
+    expect(result.reasonCodes).toContain('REPOSITORY_ID_MISMATCH');
+  });
+
+  it('reports divergence when the world contradicts the record', async () => {
+    const root = repoRoot();
+    const { registry, expectation } = persistedTask(root);
+
+    const result = await reconcileTask(
+      scriptedGit({ registry: OK(registry), head: OK('c'.repeat(40)) }),
+      expectation,
+      { exists: alwaysExists },
+    );
+
+    expect(result.outcome).toBe('STATE_DIVERGED');
+    expect(result.reasonCodes).toContain('CURRENT_COMMIT_MOVED');
+  });
+
+  it('reports unobservability separately from divergence', async () => {
+    const root = repoRoot();
+    const { expectation } = persistedTask(root);
+
+    const result = await reconcileTask(scriptedGit({ registry: UNAVAILABLE }), expectation, {
+      exists: alwaysExists,
+    });
+
+    expect(result.outcome).toBe('STATE_UNOBSERVABLE');
+  });
+
+  it('always answers with an outcome from the closed set', async () => {
+    const root = repoRoot();
+    const { registry, expectation } = persistedTask(root);
+
+    const result = await reconcileTask(scriptedGit({ registry: OK(registry) }), expectation, {
+      exists: alwaysExists,
+    });
+
+    expect(RECONCILIATION_OUTCOMES).toContain(result.outcome);
   });
 });
 

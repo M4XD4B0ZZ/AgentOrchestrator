@@ -29,7 +29,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'node:fs';
 
-import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
+import { canonicalPathsEqual } from '../core/automatic-resume.js';
 import { safeErrnoCode } from '../core/safe-error.js';
 import { safeParseTaskState, type TaskState } from '../core/task-state.js';
 import { writeFileAtomically, type ReplaceFn, type TempSuffixFn } from './atomic-file.js';
@@ -40,8 +40,14 @@ import {
 } from './state-location.js';
 
 export interface StateStoreOptions {
-  /** INTERNAL test seam for the persistent root. Never environment-derived. */
-  readonly provider?: PathProvider;
+  /**
+   * The canonical repository root — `ResolvedRepository.root`.
+   *
+   * Required, and never defaulted: the one thing this must not do is fall back
+   * to `process.cwd()` and write a task's record into whatever checkout the
+   * operator happened to be standing in.
+   */
+  readonly repositoryRoot: string;
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
   /**
@@ -75,6 +81,8 @@ export type StateSaveFailureCode =
   | 'STATE_CONTRACT_VIOLATION'
   /** The identities in the state cannot be used as path segments. */
   | 'LOCATION_UNSUITABLE'
+  /** The state describes a different repository than the one being written to. */
+  | 'REPOSITORY_ROOT_MISMATCH'
   /** The per-repository state directory could not be created. */
   | 'DIRECTORY_CREATE_FAILED'
   /** Another writer has moved the state on. Nothing was written. */
@@ -156,16 +164,20 @@ function checkExpectedRevision(path: string, expected: string | undefined): stri
  * — not even the directory it would have lived in. The expected revision is
  * checked second, so a conflict likewise creates nothing.
  */
-export function saveTaskState(state: unknown, options: StateStoreOptions = {}): StateSaveResult {
-  const provider = options.provider ?? OS_PATH_PROVIDER;
-
+export function saveTaskState(state: unknown, options: StateStoreOptions): StateSaveResult {
   const parsed = safeParseTaskState(state);
   if (!parsed.success) {
     return saveFailure('STATE_CONTRACT_VIOLATION', null, parsed.error.issues[0]?.code ?? null);
   }
   const value: TaskState = parsed.data;
 
-  const location = deriveTaskStateLocation(value.repositoryId, value.taskId, provider);
+  // The path comes from the *resolved* root, and the state must agree with it.
+  // Without this, a state carrying one repository could be filed under another.
+  if (!canonicalPathsEqual(value.repositoryRoot, options.repositoryRoot)) {
+    return saveFailure('REPOSITORY_ROOT_MISMATCH', null);
+  }
+
+  const location = deriveTaskStateLocation(options.repositoryRoot, value.taskId);
   if (!location.ok) return saveFailure('LOCATION_UNSUITABLE', null, location.code);
 
   const conflict = checkExpectedRevision(location.path, options.expectedRevision);
@@ -356,13 +368,10 @@ function isUnsupportedVersion(value: unknown, issuePaths: readonly (readonly Pro
  * rather than being mistaken for a candidate state.
  */
 export function loadTaskState(
-  repositoryId: string,
+  repositoryRoot: string,
   taskId: string,
-  options: StateStoreOptions = {},
 ): StateLoadResult {
-  const provider = options.provider ?? OS_PATH_PROVIDER;
-
-  const location = deriveTaskStateLocation(repositoryId, taskId, provider);
+  const location = deriveTaskStateLocation(repositoryRoot, taskId);
   if (!location.ok) return loadFailure('LOCATION_UNSUITABLE', null, location.code);
   const { path }: TaskStateLocation = location;
 
@@ -392,7 +401,10 @@ export function loadTaskState(
   // contents contradict its own location — a state copied or moved between
   // repositories, not merely a stale one. Refused here rather than deferred to
   // reconciliation, because this is provable without resolving anything.
-  if (parsed.data.repositoryId !== repositoryId || parsed.data.taskId !== taskId) {
+  if (
+    !canonicalPathsEqual(parsed.data.repositoryRoot, repositoryRoot) ||
+    parsed.data.taskId !== taskId
+  ) {
     return loadFailure('IDENTITY_MISMATCH', path);
   }
 

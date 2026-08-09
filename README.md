@@ -1279,20 +1279,34 @@ existing contract rather than extending it.
 
 ### Where a state lives
 
-    <OS user profile>/.agent-orchestrator/state/<repositoryId>/<taskId>.json
+    <canonical repository root>/.agent-orchestrator/runtime/<taskId>.json
 
-A sibling of `diagnostics/`, not a child: a diagnostics run is disposable
-evidence about one invocation, while a task state is the record a restart
-depends on, and nothing that prunes the former may reach the latter.
+The same shape, and the same reasoning, as the repository profile: exactly one
+location, no fallback name, no fallback extension, no upward search and no
+environment override. The path is a pure function of `ResolvedRepository.root`
+and the task id, and is never derived from `process.cwd()`.
 
-Both path segments are *repository-authored text* — `repositoryId` comes from a
-profile, `taskId` from a task file — and V1-04 is the first place either is used
-as a path segment. Each is put through the same single-plain-segment test
-`doctor/safe-write.ts` applies to artefact names, and anything that fails is
-refused with `REPOSITORY_ID_UNSUITABLE` or `TASK_ID_UNSUITABLE`. Never
-slugified, never truncated: the location is re-derived on every run, so a silent
-rewrite would break the one property it exists to provide. Two repositories that
-declare the same task id therefore land in two different directories.
+State belongs to the repository it describes, so it sits under the directory
+that already holds the orchestrator's per-repository files. A checkout carries
+its own runtime record: copy the repository and it comes along, delete it and it
+goes, and two checkouts of one project never share a record. That is also why
+the path carries **no `repositoryId` segment** — the repository root *is* the
+identity, and an id in the path would be a second, weaker spelling of it that
+could disagree with the directory it sits in.
+
+`runtime/` rather than something beside `repo-profile.yaml` without
+distinction: the profile is authored and reviewed, this is machine-written
+per-run data, and the directory name says which is which. It is expected to be
+ignored by the repository's VCS — nothing here creates or edits an ignore rule.
+
+`taskId` is repository-authored text and this is where it becomes a path
+segment, so it goes through the same single-plain-segment test
+`doctor/safe-write.ts` applies to artefact names; a failure is refused with
+`TASK_ID_UNSUITABLE`, never slugified or truncated. A non-absolute root is
+refused with `REPOSITORY_ROOT_UNSUITABLE` rather than resolved, because
+resolving it is exactly the `process.cwd()` dependency this must not have. A
+save whose state describes a different repository than the root it is being
+filed under is refused with `REPOSITORY_ROOT_MISMATCH`.
 
 ### Writes are atomic; `doctor/safe-write.ts` is not reused for them
 
@@ -1410,6 +1424,27 @@ its answer, on the protocol `remove-workspace.ts` already documents: `0` yes,
 `1` a genuine no, anything else a refusal to evaluate. The happy path costs one
 Git call; only an indeterminate answer pays for a second probe asking whether
 the pinned object still exists at all.
+
+### One closed outcome
+
+`reconcileTask()` composes load, observation and comparison into a single value
+a caller can branch on without re-deriving it:
+
+| Outcome | Meaning |
+| --- | --- |
+| `RECONCILED` | the only outcome anything may continue from |
+| `NO_PERSISTED_STATE` | the task has never run — the normal start, not an error |
+| `STATE_INVALID` | something is there and it is not usable as state |
+| `STATE_REPOSITORY_MISMATCH` | well-formed, but about a *different* repository |
+| `STATE_DIVERGED` | the world contradicts the record |
+| `STATE_UNOBSERVABLE` | the world could not be read |
+
+The derivation is where mistakes live, which is why it happens once, here.
+"Nothing persisted" and "unreadable state" both invite the same `if (!loaded)`,
+and a wrong repository invites being folded in with "someone committed since we
+last looked". A repository mismatch therefore outranks every other finding: it
+is not a repository that drifted, it is the wrong repository, and continuing
+would apply one project's work to another.
 
 ### One deterministic decision
 

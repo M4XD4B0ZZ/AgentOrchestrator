@@ -3,8 +3,8 @@
  *
  * The properties under test are the ones a restart depends on:
  *
- *  - a state file is located deterministically from *validated* identity, never
- *    from `process.cwd()` and never from unvalidated repository-authored text;
+ *  - a state file is located deterministically from the *canonical repository
+ *    root* and a validated task id — never from `process.cwd()`;
  *  - a write either lands in full or leaves the previous state byte-for-byte
  *    intact — there is no window in which the file on disk is half a state;
  *  - loading validates against the binding contract and reports every way it
@@ -13,18 +13,25 @@
  *    repaired, never migrated, never deleted.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import { isContained } from '../src/doctor/safe-write.js';
 import {
   deriveTaskStateLocation,
-  taskStateRoot,
-  TASK_STATE_DIR_NAME,
+  taskRuntimeDirectory,
+  TASK_RUNTIME_DIR_NAME,
 } from '../src/state/state-location.js';
 import { writeFileAtomically } from '../src/state/atomic-file.js';
 import { loadTaskState, MAX_TASK_STATE_BYTES, saveTaskState } from '../src/state/state-store.js';
@@ -32,8 +39,9 @@ import { validCreatedState, validUsageLimitState } from './fixtures.js';
 
 const tempDirs: string[] = [];
 
-function scratch(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'ao-state-'));
+/** A scratch directory standing in for a canonical repository root. */
+function repoRoot(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-repo-'));
   tempDirs.push(dir);
   return dir;
 }
@@ -44,6 +52,11 @@ afterEach(() => {
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** A state that belongs to `root`. */
+function stateIn(root: string, overrides: Record<string, unknown> = {}) {
+  return validCreatedState({ repositoryRoot: root, ...overrides });
+}
 
 /** A snapshot of every entry under a directory tree, for no-write assertions. */
 function treeSnapshot(root: string): string[] {
@@ -66,55 +79,51 @@ function treeSnapshot(root: string): string[] {
   return out;
 }
 
+function locationIn(root: string, taskId = 'task-0001') {
+  const location = deriveTaskStateLocation(root, taskId);
+  if (!location.ok) throw new Error('unreachable');
+  return location;
+}
+
 describe('task-state location', () => {
-  it('places state under the orchestrator home, never relative to the CWD', () => {
-    const home = scratch();
-    const provider = fixedPathProvider(home);
+  it('places state inside the repository it describes', () => {
+    const root = repoRoot();
 
-    const root = taskStateRoot(provider);
+    const location = locationIn(root);
 
-    expect(isContained(home, root)).toBe(true);
-    expect(root.endsWith(TASK_STATE_DIR_NAME)).toBe(true);
+    expect(isContained(root, location.path)).toBe(true);
+    expect(location.directory).toBe(taskRuntimeDirectory(root));
+    expect(location.directory.endsWith(TASK_RUNTIME_DIR_NAME)).toBe(true);
   });
 
-  it('derives one deterministic file per repository and task', () => {
-    const provider = fixedPathProvider(scratch());
+  it('derives one deterministic file per task', () => {
+    const root = repoRoot();
 
-    const first = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    const again = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
+    const first = locationIn(root);
+    const again = locationIn(root);
 
-    expect(first.ok).toBe(true);
-    if (!first.ok || !again.ok) return;
     expect(first.path).toBe(again.path);
     expect(first.fileName).toBe('task-0001.json');
     expect(dirname(first.path)).toBe(first.directory);
   });
 
   it('separates the same task id in two different repositories', () => {
-    const provider = fixedPathProvider(scratch());
+    const alpha = locationIn(repoRoot());
+    const beta = locationIn(repoRoot());
 
-    const alpha = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    const beta = deriveTaskStateLocation('repo-beta', 'task-0001', provider);
-
-    expect(alpha.ok && beta.ok).toBe(true);
-    if (!alpha.ok || !beta.ok) return;
     expect(alpha.path).not.toBe(beta.path);
   });
 
-  it('refuses a repository id that is not a single plain path segment', () => {
-    const provider = fixedPathProvider(scratch());
+  it('refuses a repository root that is not absolute, rather than resolving it', () => {
+    const relative = deriveTaskStateLocation('some/relative/path', 'task-0001');
 
-    const escaped = deriveTaskStateLocation('../../etc', 'task-0001', provider);
-
-    expect(escaped.ok).toBe(false);
-    if (escaped.ok) return;
-    expect(escaped.code).toBe('REPOSITORY_ID_UNSUITABLE');
+    expect(relative.ok).toBe(false);
+    if (relative.ok) return;
+    expect(relative.code).toBe('REPOSITORY_ROOT_UNSUITABLE');
   });
 
   it('refuses a task id that is not a single plain path segment', () => {
-    const provider = fixedPathProvider(scratch());
-
-    const escaped = deriveTaskStateLocation('repo-alpha', 'a/b', provider);
+    const escaped = deriveTaskStateLocation(repoRoot(), '../../etc/passwd');
 
     expect(escaped.ok).toBe(false);
     if (escaped.ok) return;
@@ -124,7 +133,7 @@ describe('task-state location', () => {
 
 describe('atomic file replacement', () => {
   it('creates a file that did not exist', () => {
-    const dir = scratch();
+    const dir = repoRoot();
 
     const result = writeFileAtomically({ directory: dir, fileName: 'state.json', contents: 'one' });
 
@@ -134,7 +143,7 @@ describe('atomic file replacement', () => {
   });
 
   it('replaces an existing file, unlike the append-only run-artifact writer', () => {
-    const dir = scratch();
+    const dir = repoRoot();
     writeFileSync(join(dir, 'state.json'), 'old');
 
     const result = writeFileAtomically({
@@ -148,7 +157,7 @@ describe('atomic file replacement', () => {
   });
 
   it('leaves no temporary file behind on success', () => {
-    const dir = scratch();
+    const dir = repoRoot();
 
     writeFileAtomically({ directory: dir, fileName: 'state.json', contents: 'one' });
 
@@ -156,7 +165,7 @@ describe('atomic file replacement', () => {
   });
 
   it('stages the temporary file in the target directory, so the replace cannot cross devices', () => {
-    const dir = scratch();
+    const dir = repoRoot();
     const staged: string[] = [];
 
     writeFileAtomically({
@@ -175,7 +184,7 @@ describe('atomic file replacement', () => {
   });
 
   it('keeps the previous content byte-for-byte when the replace fails', () => {
-    const dir = scratch();
+    const dir = repoRoot();
     writeFileSync(join(dir, 'state.json'), 'previous');
 
     const result = writeFileAtomically({
@@ -195,7 +204,7 @@ describe('atomic file replacement', () => {
   });
 
   it('removes the temporary file when the replace fails, leaving no residue', () => {
-    const dir = scratch();
+    const dir = repoRoot();
     writeFileSync(join(dir, 'state.json'), 'previous');
 
     writeFileAtomically({
@@ -213,7 +222,7 @@ describe('atomic file replacement', () => {
   });
 
   it('deletes only the temporary file it created, never one it merely found', () => {
-    const dir = scratch();
+    const dir = repoRoot();
     writeFileSync(join(dir, 'state.json'), 'previous');
     // Another writer's staging file, mid-flight. Not ours to tidy up.
     writeFileSync(join(dir, 'state.json.tmp-someone-else'), 'their work');
@@ -233,7 +242,7 @@ describe('atomic file replacement', () => {
   });
 
   it('refuses a file name that is not a single plain segment', () => {
-    const dir = scratch();
+    const dir = repoRoot();
 
     const result = writeFileAtomically({
       directory: dir,
@@ -246,7 +255,7 @@ describe('atomic file replacement', () => {
   });
 
   it('refuses to write into a directory that does not exist', () => {
-    const dir = join(scratch(), 'absent');
+    const dir = join(repoRoot(), 'absent');
 
     const result = writeFileAtomically({ directory: dir, fileName: 'state.json', contents: 'x' });
 
@@ -257,81 +266,88 @@ describe('atomic file replacement', () => {
 
 describe('saving task state', () => {
   it('persists a valid state and reads it back unchanged', () => {
-    const provider = fixedPathProvider(scratch());
-    const state = validUsageLimitState();
+    const root = repoRoot();
+    const state = validUsageLimitState({ repositoryRoot: root });
 
-    const saved = saveTaskState(state, { provider });
+    const saved = saveTaskState(state, { repositoryRoot: root });
     expect(saved.code).toBe('SAVED');
 
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
     expect(loaded.code).toBe('LOADED');
     if (!loaded.ok) return;
     expect(loaded.state).toEqual(state);
   });
 
-  it('creates the state directory it needs', () => {
-    const home = scratch();
-    const provider = fixedPathProvider(home);
+  it('creates the runtime directory it needs', () => {
+    const root = repoRoot();
 
-    const saved = saveTaskState(validCreatedState(), { provider });
+    const saved = saveTaskState(stateIn(root), { repositoryRoot: root });
 
     expect(saved.ok).toBe(true);
     if (!saved.ok) return;
     expect(existsSync(saved.path)).toBe(true);
-    expect(isContained(taskStateRoot(provider), saved.path)).toBe(true);
+    expect(isContained(taskRuntimeDirectory(root), saved.path)).toBe(true);
   });
 
   it('refuses to persist a state that violates the contract', () => {
-    const provider = fixedPathProvider(scratch());
+    const root = repoRoot();
     // READY_FOR_PR with no resolved base commit is rejected by TaskStateSchema.
-    const invalid = validCreatedState({ state: 'READY_FOR_PR' });
+    const invalid = stateIn(root, { state: 'READY_FOR_PR' });
 
-    const saved = saveTaskState(invalid, { provider });
+    const saved = saveTaskState(invalid, { repositoryRoot: root });
 
     expect(saved.ok).toBe(false);
     expect(saved.code).toBe('STATE_CONTRACT_VIOLATION');
   });
 
   it('writes nothing at all when the state violates the contract', () => {
-    const home = scratch();
-    const provider = fixedPathProvider(home);
+    const root = repoRoot();
 
-    saveTaskState(validCreatedState({ state: 'READY_FOR_PR' }), { provider });
+    saveTaskState(stateIn(root, { state: 'READY_FOR_PR' }), { repositoryRoot: root });
 
-    expect(treeSnapshot(home)).toEqual([]);
+    expect(treeSnapshot(root)).toEqual([]);
+  });
+
+  it('refuses to file a state under a repository it does not describe', () => {
+    const alpha = repoRoot();
+    const beta = repoRoot();
+
+    const saved = saveTaskState(stateIn(alpha), { repositoryRoot: beta });
+
+    expect(saved.ok).toBe(false);
+    expect(saved.code).toBe('REPOSITORY_ROOT_MISMATCH');
+    expect(treeSnapshot(beta)).toEqual([]);
   });
 
   it('keeps two repositories that use the same task id apart', () => {
-    const provider = fixedPathProvider(scratch());
+    const alpha = repoRoot();
+    const beta = repoRoot();
 
-    saveTaskState(validCreatedState({ repositoryId: 'repo-alpha' }), { provider });
-    saveTaskState(
-      validCreatedState({ repositoryId: 'repo-beta', state: 'WORKTREE_READY' }),
-      { provider },
-    );
+    saveTaskState(stateIn(alpha), { repositoryRoot: alpha });
+    saveTaskState(stateIn(beta, { state: 'WORKTREE_READY' }), { repositoryRoot: beta });
 
-    const alpha = loadTaskState('repo-alpha', 'task-0001', { provider });
-    const beta = loadTaskState('repo-beta', 'task-0001', { provider });
+    const loadedAlpha = loadTaskState(alpha, 'task-0001');
+    const loadedBeta = loadTaskState(beta, 'task-0001');
 
-    expect(alpha.ok && beta.ok).toBe(true);
-    if (!alpha.ok || !beta.ok) return;
-    expect(alpha.state.state).toBe('CREATED');
-    expect(beta.state.state).toBe('WORKTREE_READY');
+    expect(loadedAlpha.ok && loadedBeta.ok).toBe(true);
+    if (!loadedAlpha.ok || !loadedBeta.ok) return;
+    expect(loadedAlpha.state.state).toBe('CREATED');
+    expect(loadedBeta.state.state).toBe('WORKTREE_READY');
   });
 
   it('advances a checkpoint when the writer proves which revision it read', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
-    const first = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const first = loadTaskState(root, 'task-0001');
     if (!first.ok) throw new Error('unreachable');
 
-    const advanced = saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
-      provider,
+    const advanced = saveTaskState(stateIn(root, { state: 'WORKTREE_READY' }), {
+      repositoryRoot: root,
       expectedRevision: first.revision,
     });
 
     expect(advanced.code).toBe('SAVED');
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
     expect(loaded.state.state).toBe('WORKTREE_READY');
@@ -342,16 +358,13 @@ describe('saving task state', () => {
  * Two orchestrator processes may be pointed at the same task. Neither is
  * expected to win a race — but the loser must *know* it lost, rather than
  * silently flattening the winner's work.
- *
- * The mechanism is optimistic compare-before-replace: a writer names the
- * revision it read, and the store refuses if the file has moved on.
  */
 describe('concurrent writers', () => {
   it('hands out a revision with every loaded state', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
 
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
 
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
@@ -360,45 +373,47 @@ describe('concurrent writers', () => {
   });
 
   it('changes the revision when the state changes', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
-    const first = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const first = loadTaskState(root, 'task-0001');
     if (!first.ok) throw new Error('unreachable');
 
-    saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
-      provider,
+    saveTaskState(stateIn(root, { state: 'WORKTREE_READY' }), {
+      repositoryRoot: root,
       expectedRevision: first.revision,
     });
-    const second = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const second = loadTaskState(root, 'task-0001');
 
     if (!second.ok) throw new Error('unreachable');
     expect(second.revision).not.toBe(first.revision);
   });
 
   it('refuses a blind write over a state that already exists', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
 
-    const blind = saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), { provider });
+    const blind = saveTaskState(stateIn(root, { state: 'WORKTREE_READY' }), {
+      repositoryRoot: root,
+    });
 
     expect(blind.ok).toBe(false);
     expect(blind.code).toBe('STATE_CONFLICT');
   });
 
   it('refuses a writer whose revision has been overtaken', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
-    const stale = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const stale = loadTaskState(root, 'task-0001');
     if (!stale.ok) throw new Error('unreachable');
 
     // A second writer advances the state in between.
-    saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
-      provider,
+    saveTaskState(stateIn(root, { state: 'WORKTREE_READY' }), {
+      repositoryRoot: root,
       expectedRevision: stale.revision,
     });
 
-    const overtaken = saveTaskState(validCreatedState({ state: 'CONFIG_VALIDATED' }), {
-      provider,
+    const overtaken = saveTaskState(stateIn(root, { state: 'CONFIG_VALIDATED' }), {
+      repositoryRoot: root,
       expectedRevision: stale.revision,
     });
 
@@ -407,114 +422,36 @@ describe('concurrent writers', () => {
   });
 
   it('leaves the winner’s state intact when a stale writer is refused', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
-    const stale = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const stale = loadTaskState(root, 'task-0001');
     if (!stale.ok) throw new Error('unreachable');
-    saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
-      provider,
+    saveTaskState(stateIn(root, { state: 'WORKTREE_READY' }), {
+      repositoryRoot: root,
       expectedRevision: stale.revision,
     });
 
-    saveTaskState(validCreatedState({ state: 'CONFIG_VALIDATED' }), {
-      provider,
+    saveTaskState(stateIn(root, { state: 'CONFIG_VALIDATED' }), {
+      repositoryRoot: root,
       expectedRevision: stale.revision,
     });
 
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
     expect(loaded.state.state).toBe('WORKTREE_READY');
   });
 
   it('refuses a revision-bearing write when no state exists at all', () => {
-    const provider = fixedPathProvider(scratch());
+    const root = repoRoot();
 
-    const orphaned = saveTaskState(validCreatedState(), {
-      provider,
+    const orphaned = saveTaskState(stateIn(root), {
+      repositoryRoot: root,
       expectedRevision: 'a-revision-that-never-existed',
     });
 
     expect(orphaned.ok).toBe(false);
     expect(orphaned.code).toBe('STATE_CONFLICT');
-  });
-});
-
-describe('loading task state', () => {
-  it('reports a task that was never persisted, rather than inventing one', () => {
-    const provider = fixedPathProvider(scratch());
-
-    const loaded = loadTaskState('repo-alpha', 'never-written', { provider });
-
-    expect(loaded.ok).toBe(false);
-    expect(loaded.code).toBe('NO_STATE');
-  });
-
-  it('reports a state file that is not JSON', () => {
-    const provider = fixedPathProvider(scratch());
-    const location = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    if (!location.ok) throw new Error('unreachable');
-    mkdirSync(location.directory, { recursive: true });
-    writeFileSync(location.path, '{ this is not json');
-
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
-
-    expect(loaded.ok).toBe(false);
-    expect(loaded.code).toBe('MALFORMED_JSON');
-  });
-
-  it('reports a state file that is JSON but violates the contract', () => {
-    const provider = fixedPathProvider(scratch());
-    const location = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    if (!location.ok) throw new Error('unreachable');
-    mkdirSync(location.directory, { recursive: true });
-    writeFileSync(location.path, JSON.stringify({ ...validCreatedState(), state: 'NOT_A_STATE' }));
-
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
-
-    expect(loaded.ok).toBe(false);
-    expect(loaded.code).toBe('CONTRACT_VIOLATION');
-  });
-
-  it('reports a state written by an unsupported contract version', () => {
-    const provider = fixedPathProvider(scratch());
-    const location = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    if (!location.ok) throw new Error('unreachable');
-    mkdirSync(location.directory, { recursive: true });
-    writeFileSync(location.path, JSON.stringify({ ...validCreatedState(), schemaVersion: 99 }));
-
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
-
-    expect(loaded.ok).toBe(false);
-    expect(loaded.code).toBe('SCHEMA_VERSION_UNSUPPORTED');
-  });
-
-  it('never repairs, migrates or deletes a corrupt state file', () => {
-    const home = scratch();
-    const provider = fixedPathProvider(home);
-    const location = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    if (!location.ok) throw new Error('unreachable');
-    mkdirSync(location.directory, { recursive: true });
-    writeFileSync(location.path, '{ this is not json');
-    const before = treeSnapshot(home);
-
-    loadTaskState('repo-alpha', 'task-0001', { provider });
-
-    expect(treeSnapshot(home)).toEqual(before);
-  });
-
-  it('never repairs a state that fails the contract', () => {
-    const home = scratch();
-    const provider = fixedPathProvider(home);
-    const location = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    if (!location.ok) throw new Error('unreachable');
-    mkdirSync(location.directory, { recursive: true });
-    writeFileSync(location.path, JSON.stringify({ ...validCreatedState(), schemaVersion: 99 }));
-    const before = treeSnapshot(home);
-
-    loadTaskState('repo-alpha', 'task-0001', { provider });
-
-    expect(treeSnapshot(home)).toEqual(before);
   });
 });
 
@@ -524,51 +461,50 @@ describe('loading task state', () => {
  * and a loop that acts on it.
  */
 describe('loading is validation', () => {
-  function writeRaw(provider: ReturnType<typeof fixedPathProvider>, contents: string): void {
-    const location = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    if (!location.ok) throw new Error('unreachable');
+  function writeRaw(root: string, contents: string): void {
+    const location = locationIn(root);
     mkdirSync(location.directory, { recursive: true });
     writeFileSync(location.path, contents);
   }
 
   it('classifies a task that was never persisted as missing', () => {
-    const provider = fixedPathProvider(scratch());
-
-    expect(loadTaskState('repo-alpha', 'task-0001', { provider }).classification).toBe(
-      'STATE_MISSING',
-    );
+    expect(loadTaskState(repoRoot(), 'task-0001').classification).toBe('STATE_MISSING');
   });
 
   it('classifies a state that satisfies the contract as valid', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
 
-    expect(loadTaskState('repo-alpha', 'task-0001', { provider }).classification).toBe(
-      'STATE_VALID',
-    );
+    expect(loadTaskState(root, 'task-0001').classification).toBe('STATE_VALID');
   });
 
   it.each([
-    ['malformed JSON', '{ not json'],
-    ['an unknown field', JSON.stringify({ ...validCreatedState(), smuggled: 'value' })],
-    ['an invalid state enum', JSON.stringify({ ...validCreatedState(), state: 'NOT_A_STATE' })],
-    ['an unsupported schemaVersion', JSON.stringify({ ...validCreatedState(), schemaVersion: 99 })],
-  ])('classifies %s as invalid', (_label, contents) => {
-    const provider = fixedPathProvider(scratch());
-    writeRaw(provider, contents);
+    ['malformed JSON', () => '{ not json'],
+    ['an unknown field', (root: string) => JSON.stringify({ ...stateIn(root), smuggled: 'x' })],
+    [
+      'an invalid state enum',
+      (root: string) => JSON.stringify({ ...stateIn(root), state: 'NOT_A_STATE' }),
+    ],
+    [
+      'an unsupported schemaVersion',
+      (root: string) => JSON.stringify({ ...stateIn(root), schemaVersion: 99 }),
+    ],
+  ])('classifies %s as invalid', (_label, build) => {
+    const root = repoRoot();
+    writeRaw(root, build(root));
 
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
 
     expect(loaded.ok).toBe(false);
     expect(loaded.classification).toBe('STATE_INVALID');
   });
 
   it('rejects a state document whose identity contradicts where it was found', () => {
-    const provider = fixedPathProvider(scratch());
+    const root = repoRoot();
     // Valid in itself, but it describes a different repository.
-    writeRaw(provider, JSON.stringify(validCreatedState({ repositoryId: 'repo-beta' })));
+    writeRaw(root, JSON.stringify(validCreatedState({ repositoryRoot: repoRoot() })));
 
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
 
     expect(loaded.ok).toBe(false);
     expect(loaded.code).toBe('IDENTITY_MISMATCH');
@@ -576,36 +512,55 @@ describe('loading is validation', () => {
   });
 
   it('rejects a state document that exceeds the read budget', () => {
-    const provider = fixedPathProvider(scratch());
-    writeRaw(provider, 'x'.repeat(MAX_TASK_STATE_BYTES + 1));
+    const root = repoRoot();
+    writeRaw(root, 'x'.repeat(MAX_TASK_STATE_BYTES + 1));
 
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
 
     expect(loaded.ok).toBe(false);
     expect(loaded.code).toBe('STATE_TOO_LARGE');
   });
 
   it('never surfaces parser or filesystem text in a load result', () => {
-    const provider = fixedPathProvider(scratch());
-    writeRaw(provider, '{ "secret-marker-zz": ');
+    const root = repoRoot();
+    writeRaw(root, '{ "secret-marker-zz": ');
 
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
 
     expect(JSON.stringify(loaded)).not.toContain('secret-marker-zz');
+  });
+
+  it('never repairs, migrates or deletes a corrupt state file', () => {
+    const root = repoRoot();
+    writeRaw(root, '{ this is not json');
+    const before = treeSnapshot(root);
+
+    loadTaskState(root, 'task-0001');
+
+    expect(treeSnapshot(root)).toEqual(before);
+  });
+
+  it('never repairs a state that fails the contract', () => {
+    const root = repoRoot();
+    writeRaw(root, JSON.stringify({ ...stateIn(root), schemaVersion: 99 }));
+    const before = treeSnapshot(root);
+
+    loadTaskState(root, 'task-0001');
+
+    expect(treeSnapshot(root)).toEqual(before);
   });
 });
 
 describe('crash safety', () => {
   it('still loads the last complete checkpoint after a crash left a temporary file', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
-    const location = deriveTaskStateLocation('repo-alpha', 'task-0001', provider);
-    if (!location.ok) throw new Error('unreachable');
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const location = locationIn(root);
 
     // What a process killed between "write temp" and "rename" leaves behind.
     writeFileSync(join(location.directory, 'task-0001.json.tmp-dead'), '{ half a stat');
 
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
 
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
@@ -613,13 +568,13 @@ describe('crash safety', () => {
   });
 
   it('keeps the last complete checkpoint when the next save fails to replace it', () => {
-    const provider = fixedPathProvider(scratch());
-    saveTaskState(validCreatedState(), { provider });
-    const first = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const root = repoRoot();
+    saveTaskState(stateIn(root), { repositoryRoot: root });
+    const first = loadTaskState(root, 'task-0001');
     if (!first.ok) throw new Error('unreachable');
 
-    const failed = saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
-      provider,
+    const failed = saveTaskState(stateIn(root, { state: 'WORKTREE_READY' }), {
+      repositoryRoot: root,
       expectedRevision: first.revision,
       replace: () => {
         const error: NodeJS.ErrnoException = new Error('denied');
@@ -629,7 +584,7 @@ describe('crash safety', () => {
     });
 
     expect(failed.ok).toBe(false);
-    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    const loaded = loadTaskState(root, 'task-0001');
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
     expect(loaded.state.state).toBe('CREATED');
