@@ -17,6 +17,29 @@
  * reconciler that cannot tell them apart will eventually report "your worktree
  * is dirty" about a repository it never managed to read.
  *
+ * ── Git's registry is the authority; the record is only a claim ────────────
+ *
+ * A persisted `worktreePath` is a sentence in a file. Running `git status`
+ * inside it — or `rev-parse`, or anything — before Git has confirmed that
+ * directory *is* this task's worktree means executing in a location nothing
+ * has vouched for: a stale record, a hand-edited file or a state copied from
+ * another machine would each be enough to point these probes at someone else's
+ * checkout.
+ *
+ * So the order is fixed, and every step gates the next:
+ *
+ *  1. read `git worktree list` for the repository;
+ *  2. the registry itself must be readable — an unreadable one authorises
+ *     nothing, and nothing below runs;
+ *  3. find the registration for the recorded path (a comparison, which is all
+ *     the recorded path is ever used for);
+ *  4. confirm that registration holds *this task's* work branch;
+ *  5. only then, and only using **the path Git printed**, ask the filesystem
+ *     and Git anything.
+ *
+ * Where any of those fails, the fields below stay `null`. `null` is "never
+ * established", and the reconciler is careful never to read it as "false".
+ *
  * ── The seams ──────────────────────────────────────────────────────────────
  *
  * Git goes through V1-03's read/write-shared {@link GitRunner}, which forwards
@@ -42,8 +65,16 @@ export interface ObservedRuntime {
   readonly registeredWorktreePath: string | null;
   /** Full ref checked out there (`refs/heads/…`), or `null`. */
   readonly observedWorkBranchRef: string | null;
-  /** Whether the recorded worktree directory exists on disk. */
-  readonly worktreeExists: boolean;
+  /**
+   * Whether the registered worktree directory exists on disk.
+   *
+   * `null` when the question was never asked, because Git had not authorised a
+   * path to ask it about — an unreadable registry, no registration for the
+   * recorded path, or a registration holding a different branch. A `false`
+   * here means Git named a directory and it is not there; `null` means nothing
+   * was established either way, and the reconciler must not read it as absence.
+   */
+  readonly worktreeExists: boolean | null;
   /** HEAD of the recorded worktree, or `null` when it could not be resolved. */
   readonly observedCurrentCommit: string | null;
   /**
@@ -98,6 +129,23 @@ async function classifyAncestry(
   return 'INDETERMINATE';
 }
 
+/**
+ * The one exit code `rev-parse --verify --quiet` uses to *answer* "no".
+ *
+ * The protocol, stated because this is a place that reads an exit status:
+ *
+ *  - **0** — the object resolved. It exists;
+ *  - **1** — `--quiet` suppressed the diagnostic and Git reports "does not
+ *    resolve". A real answer, and the only non-zero one that is;
+ *  - **anything else** (128 in practice) — Git could not evaluate the question:
+ *    a repository it cannot read, a refusal, a bad invocation. Never an answer.
+ *
+ * Same discipline as the ancestry probe above, and for the same reason. An
+ * indeterminate failure reported as "the commit is gone" sends an operator
+ * hunting for a force-push that never happened.
+ */
+const OBJECT_NOT_FOUND_EXIT = 1;
+
 /** `true`/`false` when Git resolved the object, `null` when it could not say. */
 async function commitObjectPresent(
   git: GitRunner,
@@ -112,7 +160,7 @@ async function commitObjectPresent(
     `${commit}^{commit}`,
   ]);
   if (probe.outcome === 'OK') return true;
-  if (probe.outcome === 'NONZERO_EXIT') return false;
+  if (probe.outcome === 'NONZERO_EXIT' && probe.exitCode === OBJECT_NOT_FOUND_EXIT) return false;
   return null;
 }
 
@@ -127,22 +175,46 @@ export async function observeRuntime(
 ): Promise<ObservedRuntime> {
   const exists = options.exists ?? existsSync;
 
+  // The registry is read from the repository root, which is not a persisted
+  // claim by the time this runs: `loadTaskState()` has already refused any
+  // state whose recorded root is not absolute *and* identical to the root the
+  // caller resolved, so the two are the same directory or there is no state.
   const registry = await listWorktrees(git, state.repositoryRoot);
   const registration = registry.ok ? findByPath(registry.entries, state.worktreePath) : null;
 
-  const worktreeExists = exists(state.worktreePath);
+  // The path everything below is allowed to touch — or `null`, meaning nothing
+  // may be touched at all.
+  //
+  // It is the path *Git printed*, and it exists only when Git both lists the
+  // recorded path and reports this task's own branch checked out there. The
+  // recorded `worktreePath` is used to look the registration up and is then
+  // done: it is evidence to match, never a directory to execute in. Judged on
+  // Git's answer rather than on a value derived here, exactly as
+  // `worktree/remove-workspace.ts` proves ownership before it deletes anything.
+  const authorisedPath =
+    registration !== null && registration.branchRef === expectedWorkBranchRef(state)
+      ? registration.path
+      : null;
 
-  // Every probe below runs *inside* the worktree. If the directory is gone,
-  // Git has no cwd to run in and would fail with an errno rather than an
-  // answer, so the questions are not asked at all — "unknown" here is a fact
-  // about the missing worktree, which the reconciler already reports.
+  // Every question below is about that authorised directory. Where there is
+  // none, they are not asked — and the answer stays `null`, "not established",
+  // rather than becoming a fact about a worktree nobody confirmed.
+  let worktreeExists: boolean | null = null;
   let observedCurrentCommit: string | null = null;
   let worktreeClean: boolean | null = null;
   let basePinnedCommitIsAncestor: boolean | null = null;
   let basePinnedCommitPresent: boolean | null = null;
 
-  if (worktreeExists) {
-    const head = await git(state.worktreePath, [
+  if (authorisedPath !== null) {
+    worktreeExists = exists(authorisedPath);
+  }
+
+  // If the directory is gone, Git has no cwd to run in and would fail with an
+  // errno rather than an answer, so the questions are not asked at all — that
+  // "unknown" is a fact about the missing worktree, which the reconciler
+  // already reports as divergence in its own right.
+  if (authorisedPath !== null && worktreeExists === true) {
+    const head = await git(authorisedPath, [
       'rev-parse',
       '--verify',
       '--quiet',
@@ -151,11 +223,11 @@ export async function observeRuntime(
     ]);
     observedCurrentCommit = head.outcome === 'OK' && head.stdout !== '' ? head.stdout : null;
 
-    const status = await git(state.worktreePath, ['status', '--porcelain']);
+    const status = await git(authorisedPath, ['status', '--porcelain']);
     worktreeClean = status.outcome === 'OK' ? status.stdout === '' : null;
 
     if (state.basePinnedCommit !== null) {
-      const verdict = await classifyAncestry(git, state.worktreePath, state.basePinnedCommit);
+      const verdict = await classifyAncestry(git, authorisedPath, state.basePinnedCommit);
       if (verdict === 'ANCESTOR') {
         basePinnedCommitIsAncestor = true;
         // It is an ancestor, therefore it exists. No second call on the happy path.
@@ -168,7 +240,7 @@ export async function observeRuntime(
         // pinned commit is gone" from "this repository could not be read".
         basePinnedCommitPresent = await commitObjectPresent(
           git,
-          state.worktreePath,
+          authorisedPath,
           state.basePinnedCommit,
         );
       }

@@ -22,13 +22,27 @@
  *     This module feeds it observed evidence; it does not re-implement any of
  *     its checks.
  *
+ * ── Two answers, because they are two questions ────────────────────────────
+ *
+ * {@link ResumeClassification} says *what the situation is* — including
+ * `STATE_DIVERGED`, which corresponds to the existing `RESUME_STATE_DIVERGED`
+ * task state rather than introducing a second vocabulary for the same
+ * condition. {@link ContinuationAuthority} says *what may be done about it*,
+ * and it is the only field that speaks to unattended execution.
+ *
+ * They are separate because the alternative has a failure mode: a single status
+ * meaning "everything checks out" invites a future caller to read it as "carry
+ * on", and the most common thing that checks out is an interrupted task with
+ * half-written work in its worktree. There is deliberately no classification
+ * whose name suggests a machine may continue on its own, and the one authority
+ * that grants it is `evaluateAutomaticResume()` — fed here, never
+ * re-implemented and never widened.
+ *
  * ── This module decides; it does not act ───────────────────────────────────
  *
  * Nothing here writes state, transitions a task or touches a repository.
- * {@link ResumeClassification} names what a caller should do — including
- * `STATE_DIVERGED`, which corresponds to the existing `RESUME_STATE_DIVERGED`
- * task state rather than introducing a second vocabulary for the same
- * condition. Performing that transition belongs to the loop, in V1-05.
+ * Performing the transition a classification implies belongs to the loop, in
+ * V1-05.
  */
 
 import {
@@ -81,14 +95,61 @@ export const RESUME_CLASSIFICATIONS = [
   'AUTOMATIC_RESUME_ALLOWED',
   /** Blocking and eligible, but at least one check denied it. */
   'AUTOMATIC_RESUME_REFUSED',
-  /** A regular in-flight state that reconciles cleanly. Continue the loop. */
-  'RESUME_READY',
+  /**
+   * A regular in-flight state whose record agrees with observed reality.
+   *
+   * This says the two *agree*. It says nothing about whether anything may be
+   * continued, and deliberately does not read as though it does — see
+   * {@link ContinuationAuthority}.
+   */
+  'RECONCILED_IN_FLIGHT',
 ] as const;
 
 export type ResumeClassification = (typeof RESUME_CLASSIFICATIONS)[number];
 
+/**
+ * What kind of continuation, if any, this result permits.
+ *
+ * ── Why this is not the classification ─────────────────────────────────────
+ *
+ * A classification answers "what is the situation". Whether a machine may act
+ * on it without a human is a different question with a different authority, and
+ * collapsing the two is how an interrupted, half-written worktree ends up being
+ * picked up unattended: a dirty `IMPLEMENTING` checkpoint *reconciles* — that is
+ * exactly what the phase-sensitive checks are for — and reconciling is not
+ * permission to run.
+ *
+ * So the permission is stated separately, in a closed vocabulary a caller can
+ * branch on without interpreting an English word:
+ *
+ *  - `TERMINAL` — the task is over. There is nothing to continue.
+ *  - `BLOCKED` — nothing may continue until something changes: the record and
+ *    reality disagree, or the unattended-resume authority denied it.
+ *  - `ATTENDED_ONLY` — a human may continue this. A machine may not do so on
+ *    its own.
+ *  - `AUTOMATIC_ALLOWED` — unattended execution is permitted.
+ *
+ * `AUTOMATIC_ALLOWED` has exactly one source: an `AutomaticResumeDecision` from
+ * `evaluateAutomaticResume()` with `allowed === true`. It is not derivable from
+ * a classification, from a `CONSISTENT` reconciliation, or from any combination
+ * of the two — see {@link continuationFor}.
+ */
+export const CONTINUATION_AUTHORITIES = [
+  'TERMINAL',
+  'BLOCKED',
+  'ATTENDED_ONLY',
+  'AUTOMATIC_ALLOWED',
+] as const;
+
+export type ContinuationAuthority = (typeof CONTINUATION_AUTHORITIES)[number];
+
 export interface ResumeDecision {
   readonly classification: ResumeClassification;
+  /**
+   * Whether, and how, this task may continue. The only field a caller should
+   * consult before running anything unattended.
+   */
+  readonly continuation: ContinuationAuthority;
   /** The comparison this decision rests on. Always present. */
   readonly reconciliation: ReconciliationReport;
   /** The unattended-resume verdict, or `null` when it was never reached. */
@@ -98,6 +159,38 @@ export interface ResumeDecision {
    * automatic-resume reason codes when the block was judged, empty otherwise.
    */
   readonly reasonCodes: readonly string[];
+}
+
+/**
+ * The single place a continuation authority is produced.
+ *
+ * `AUTOMATIC_ALLOWED` is read off the canonical decision object and nowhere
+ * else, so no classification and no reconciliation verdict can produce it on
+ * its own. Everything a machine may not do unattended lands in one of the other
+ * three — including a perfectly reconciled in-flight task, which is
+ * `ATTENDED_ONLY` precisely because "the record is accurate" and "carry on
+ * without me" are different statements.
+ */
+function continuationFor(
+  classification: ResumeClassification,
+  automaticResume: AutomaticResumeDecision | null,
+): ContinuationAuthority {
+  if (automaticResume !== null && automaticResume.allowed) return 'AUTOMATIC_ALLOWED';
+  switch (classification) {
+    case 'TASK_COMPLETE':
+    case 'TASK_ABORTED':
+      return 'TERMINAL';
+    case 'STATE_DIVERGED':
+    case 'AUTOMATIC_RESUME_REFUSED':
+      return 'BLOCKED';
+    case 'HUMAN_DECISION_REQUIRED':
+    case 'RECONCILED_IN_FLIGHT':
+      return 'ATTENDED_ONLY';
+    case 'AUTOMATIC_RESUME_ALLOWED':
+      // Only reachable with an `allowed` decision in hand, which the guard
+      // above already answered. Present so the switch stays exhaustive.
+      return 'AUTOMATIC_ALLOWED';
+  }
 }
 
 /**
@@ -132,7 +225,9 @@ function toEvidence(
     observedRepositoryId: context.repository.id,
     observedRepositoryRoot: context.repository.root,
     observedWorktreePath: observed.registeredWorktreePath,
-    worktreeExists: observed.worktreeExists,
+    // `null` is "never established", which denies — the evidence contract takes
+    // a boolean precisely so that an unasked question cannot pass for a yes.
+    worktreeExists: observed.worktreeExists === true,
     observedBasePinnedCommit:
       observed.basePinnedCommitIsAncestor === true ? state.basePinnedCommit : null,
     observedCurrentCommit: observed.observedCurrentCommit,
@@ -162,6 +257,7 @@ export function classifyResume(
   ): ResumeDecision =>
     Object.freeze({
       classification,
+      continuation: continuationFor(classification, automaticResume),
       reconciliation,
       automaticResume,
       reasonCodes: Object.freeze([...reasonCodes]),
@@ -177,9 +273,12 @@ export function classifyResume(
     return decision('STATE_DIVERGED', null, reconciliation.findings);
   }
 
-  // --- 3. A regular in-flight state simply continues -----------------------
+  // --- 3. A regular in-flight state is consistent, and that is all ---------
+  // It is *not* cleared for unattended execution: an interrupted IMPLEMENTING
+  // with uncommitted work reconciles exactly like a quiescent one, and only the
+  // automatic-resume authority may say a machine can pick either of them up.
   if (!isBlockingState(state.state)) {
-    return decision('RESUME_READY', null, []);
+    return decision('RECONCILED_IN_FLIGHT', null, []);
   }
 
   // --- 4. Blocking: is an unattended resume even considered? ---------------

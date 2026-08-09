@@ -41,9 +41,12 @@
  *    the one this slice exists to survive — permanently unresumable.
  *
  * So both are asked against what the *record* claims, and only fall back to a
- * phase expectation where the transition table proves no agent has run yet
- * ({@link PRE_WORK_STATES}). What stays global is the invariant that actually
- * holds in every phase: the work must still descend from the pinned base.
+ * phase expectation for a worktree that is both in a pre-work phase and carries
+ * no evidence of work behind it ({@link isVirginPreWorkState}). The phase alone
+ * is not enough, because `BLOCKED_AUTH → AUTH_PREFLIGHT → GIT_PREFLIGHT →
+ * WORKTREE_READY` is a declared path a long-running task genuinely walks. What
+ * stays global is the invariant that actually holds in every phase: the work
+ * must still descend from the pinned base.
  *
  * None of this loosens the unattended path. `evaluateAutomaticResume()` in
  * `core/automatic-resume.ts` independently requires an exact recorded
@@ -149,9 +152,55 @@ export const PRE_WORK_STATES = ['WORKTREE_READY', 'CONTEXT_LOADING'] as const;
 
 const PRE_WORK_SET: ReadonlySet<string> = new Set<string>(PRE_WORK_STATES);
 
-/** `true` for phases in which neither a commit nor uncommitted work is expected. */
+/** `true` for phases in which no agent has run *the first time through*. */
 export function isPreWorkState(state: TaskStateName): boolean {
   return PRE_WORK_SET.has(state);
+}
+
+/**
+ * Evidence, already recorded in the state, that this task has produced work.
+ *
+ * Each of these is written by the loop only after something happened, and each
+ * survives the setup chain a re-authentication walks back through:
+ *
+ *  - `resumeFrom` — where to continue. `BLOCKED_AUTH` requires one, and the
+ *    whole point of `VIA_AUTH_PREFLIGHT` re-entry is that the stored point is
+ *    carried through `AUTH_PREFLIGHT` and `GIT_PREFLIGHT` (see
+ *    `core/resume-policy.ts`). A worktree that was only just created has none.
+ *  - `currentCommit` — a checkpointed HEAD. Only a commit can produce one.
+ *  - `reviewRound > 0` — a review has completed.
+ *  - `findingHistory` — a reviewer has reported something.
+ *
+ * Deliberately *not* included: `worktreeCleanAtCheckpoint === false`. Using a
+ * dirty checkpoint as its own excuse would make "the record says it was dirty"
+ * sufficient to accept a dirty tree in a phase where nothing could have dirtied
+ * it, which is precisely the divergence a fresh `WORKTREE_READY` must keep.
+ *
+ * No new field, and no history: this reads what `TaskState` already carries.
+ */
+export function hasPriorWorkEvidence(state: TaskState): boolean {
+  return (
+    state.resumeFrom !== null ||
+    state.currentCommit !== null ||
+    state.reviewRound > 0 ||
+    state.findingHistory.length > 0
+  );
+}
+
+/**
+ * `true` only for a worktree that is in a pre-work phase **and** has no record
+ * of work behind it — the one situation in which "HEAD is the base pin and the
+ * tree is clean" is a fact rather than an assumption.
+ *
+ * The phase alone is not enough. `BLOCKED_AUTH → AUTH_PREFLIGHT →
+ * GIT_PREFLIGHT → WORKTREE_READY` is a declared path, and a task that walks it
+ * after days of implementation is recorded in `WORKTREE_READY` with commits and
+ * often uncommitted work. Judging it as freshly created would report the loop's
+ * own work as divergence at the exact moment an operator has just repaired the
+ * thing that blocked it.
+ */
+export function isVirginPreWorkState(state: TaskState): boolean {
+  return isPreWorkState(state.state) && !hasPriorWorkEvidence(state);
 }
 
 export interface ReconciliationReport {
@@ -211,7 +260,10 @@ export function reconcileTaskState(
   }
 
   // --- 2. Is it still on disk? --------------------------------------------
-  if (!observed.worktreeExists) {
+  // Only `false` is evidence of absence. `null` means the question was never
+  // asked, because the registry had not authorised a directory to ask it about
+  // — reported by step 1 above, and not a second time as a missing worktree.
+  if (observed.worktreeExists === false) {
     findings.push('WORKTREE_MISSING_ON_DISK');
   }
 
@@ -241,8 +293,12 @@ export function reconcileTaskState(
   //    legitimate task commit as `CURRENT_COMMIT_MOVED` and turn a working loop
   //    into `RESUME_STATE_DIVERGED`. The invariant that does still hold is
   //    ancestry, checked in step 3 above and left untouched.
+  //  - The pre-work fallback applies only to a *virgin* pre-work state. A
+  //    `WORKTREE_READY` reached again through the re-authentication chain
+  //    carries evidence of the work already done, and its HEAD is legitimately
+  //    a task commit rather than the pin.
   const expectedHead =
-    state.currentCommit ?? (isPreWorkState(state.state) ? state.basePinnedCommit : null);
+    state.currentCommit ?? (isVirginPreWorkState(state) ? state.basePinnedCommit : null);
   if (expectedHead !== null) {
     if (observed.observedCurrentCommit === null) {
       findings.push('CURRENT_COMMIT_UNKNOWN');
@@ -260,7 +316,12 @@ export function reconcileTaskState(
   //
   // Unreadability stays a refusal in every phase: "Git could not be asked"
   // is not evidence that the tree is in the expected shape.
-  const dirtyContradictsRecord = state.worktreeCleanAtCheckpoint || isPreWorkState(state.state);
+  //
+  // "Nothing has run" is again judged by evidence rather than by phase name: a
+  // worktree re-prepared after a `BLOCKED_AUTH` cycle may hold the very work
+  // that was interrupted, and its checkpoint saying so is the record accounting
+  // for the dirt, not contradicting it.
+  const dirtyContradictsRecord = state.worktreeCleanAtCheckpoint || isVirginPreWorkState(state);
   if (observed.worktreeClean === null) {
     findings.push('WORKTREE_CLEANLINESS_UNKNOWN');
   } else if (!observed.worktreeClean && dirtyContradictsRecord) {

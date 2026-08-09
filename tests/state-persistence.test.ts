@@ -22,19 +22,28 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { isContained } from '../src/doctor/safe-write.js';
+import { isValidTaskId, MAX_TASK_ID_LENGTH } from '../src/plan/task-id.js';
 import {
   deriveTaskStateLocation,
   taskRuntimeDirectory,
   TASK_RUNTIME_DIR_NAME,
 } from '../src/state/state-location.js';
 import { writeFileAtomically } from '../src/state/atomic-file.js';
-import { loadTaskState, MAX_TASK_STATE_BYTES, saveTaskState } from '../src/state/state-store.js';
+import {
+  loadTaskState,
+  MAX_TASK_STATE_BYTES,
+  saveTaskState,
+  STATE_LOAD_FAILURE_CODES,
+  type StateLoadFailureCode,
+  type StateLoadResult,
+} from '../src/state/state-store.js';
 import { advanceTaskState } from '../src/state/advance-state.js';
 import { validCreatedState, validUsageLimitState } from './fixtures.js';
 
@@ -129,6 +138,153 @@ describe('task-state location', () => {
     expect(escaped.ok).toBe(false);
     if (escaped.ok) return;
     expect(escaped.code).toBe('TASK_ID_UNSUITABLE');
+  });
+});
+
+/**
+ * Every task id V1-02's grammar admits must have somewhere to live.
+ *
+ * The storage layer may refuse a *shape* — a separator, a traversal segment, an
+ * absolute path — because those are not names at all. It may not refuse a
+ * *length* the canonical grammar allows: a task the planner can select and the
+ * worktree layer can prepare, but whose state cannot be written down, is a task
+ * the orchestrator can start and never recover.
+ */
+describe('every canonical task id is persistable', () => {
+  /** A canonical id of exactly `length` characters. */
+  const idOfLength = (length: number): string => `t${'a'.repeat(length - 1)}`;
+
+  it.each([
+    ['the longest canonical id', MAX_TASK_ID_LENGTH],
+    ['one below the longest', MAX_TASK_ID_LENGTH - 1],
+    ['a typical id', 10],
+  ])('derives a location for %s', (_label, length) => {
+    const taskId = idOfLength(length);
+    expect(isValidTaskId(taskId)).toBe(true);
+
+    const location = deriveTaskStateLocation(repoRoot(), taskId);
+
+    expect(location.ok).toBe(true);
+    if (!location.ok) return;
+    expect(location.fileName).toBe(`${taskId}.json`);
+  });
+
+  it('round-trips a state whose task id is the longest the grammar allows', () => {
+    const root = repoRoot();
+    const taskId = idOfLength(MAX_TASK_ID_LENGTH);
+
+    const saved = saveTaskState(stateIn(root, { taskId }), { repositoryRoot: root });
+
+    expect(saved.code).toBe('SAVED');
+    const loaded = loadTaskState(root, taskId);
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.state.taskId).toBe(taskId);
+  });
+
+  it('refuses an id one character longer than the canonical grammar allows', () => {
+    const tooLong = idOfLength(MAX_TASK_ID_LENGTH + 1);
+    expect(isValidTaskId(tooLong)).toBe(false);
+
+    const location = deriveTaskStateLocation(repoRoot(), tooLong);
+
+    expect(location.ok).toBe(false);
+    if (location.ok) return;
+    expect(location.code).toBe('TASK_ID_UNSUITABLE');
+  });
+
+  it.each([
+    ['a POSIX separator', 'tasks/task-0001'],
+    ['a Windows separator', 'tasks\\task-0001'],
+    ['a traversal segment', '..'],
+    ['a traversal prefix', '../task-0001'],
+    ['an absolute POSIX path', '/etc/passwd'],
+    ['an absolute Windows path', 'C:\\Windows\\system32'],
+    ['a trailing dot Windows would strip', 'task-0001.'],
+    ['a reserved device name', 'NUL'],
+    ['the empty string', ''],
+  ])('still refuses %s', (_label, taskId) => {
+    const location = deriveTaskStateLocation(repoRoot(), taskId);
+
+    expect(location.ok).toBe(false);
+    if (location.ok) return;
+    expect(location.code).toBe('TASK_ID_UNSUITABLE');
+  });
+
+  it('keeps a long id contained in the repository it belongs to', () => {
+    const root = repoRoot();
+
+    const location = deriveTaskStateLocation(root, idOfLength(MAX_TASK_ID_LENGTH));
+
+    expect(location.ok).toBe(true);
+    if (!location.ok) return;
+    expect(isContained(taskRuntimeDirectory(root), location.path)).toBe(true);
+  });
+});
+
+/**
+ * A persisted repository root is a *claim*, and a relative claim has no
+ * meaning of its own. Resolving one would answer "is this the right
+ * repository?" with "whichever directory the operator's shell was standing
+ * in", which is the single authority this whole slice refuses.
+ */
+describe('persisted repository roots must be absolute', () => {
+  /** Runs `body` with the process standing in `directory`. */
+  function inDirectory<T>(directory: string, body: () => T): T {
+    const previous = process.cwd();
+    process.chdir(directory);
+    try {
+      return body();
+    } finally {
+      process.chdir(previous);
+    }
+  }
+
+  it('refuses to save a state whose root is "." even when the cwd is that root', () => {
+    const root = repoRoot();
+
+    const saved = inDirectory(root, () =>
+      saveTaskState(validCreatedState({ repositoryRoot: '.' }), { repositoryRoot: root }),
+    );
+
+    expect(saved.ok).toBe(false);
+    expect(saved.code).toBe('REPOSITORY_ROOT_MISMATCH');
+    expect(treeSnapshot(root)).toEqual([]);
+  });
+
+  it('refuses to load a state whose root is "." even when the cwd is that root', () => {
+    const root = repoRoot();
+    const location = locationIn(root);
+    mkdirSync(location.directory, { recursive: true });
+    writeFileSync(location.path, JSON.stringify(validCreatedState({ repositoryRoot: '.' })));
+
+    const loaded = inDirectory(root, () => loadTaskState(root, 'task-0001'));
+
+    expect(loaded.ok).toBe(false);
+    if (loaded.ok) return;
+    expect(loaded.code).toBe('REPOSITORY_ROOT_NOT_ABSOLUTE');
+    expect(loaded.classification).toBe('STATE_INVALID');
+  });
+
+  it('refuses a relative persisted root that resolves somewhere else entirely', () => {
+    const root = repoRoot();
+
+    const saved = saveTaskState(validCreatedState({ repositoryRoot: 'somewhere/else' }), {
+      repositoryRoot: root,
+    });
+
+    expect(saved.ok).toBe(false);
+    expect(saved.code).toBe('REPOSITORY_ROOT_MISMATCH');
+    expect(treeSnapshot(root)).toEqual([]);
+  });
+
+  it('still accepts two absolute spellings of the same directory', () => {
+    const root = repoRoot();
+    const spelling = process.platform === 'win32' ? root.replace(/\\/g, '/') : `${root}/`;
+
+    const saved = saveTaskState(stateIn(root), { repositoryRoot: spelling });
+
+    expect(saved.code).toBe('SAVED');
   });
 });
 
@@ -500,7 +656,7 @@ describe('loading is validation', () => {
     expect(loaded.classification).toBe('STATE_INVALID');
   });
 
-  it('rejects a state document whose identity contradicts where it was found', () => {
+  it('rejects a state document that belongs to a different repository', () => {
     const root = repoRoot();
     // Valid in itself, but it describes a different repository.
     writeRaw(root, JSON.stringify(validCreatedState({ repositoryRoot: repoRoot() })));
@@ -508,8 +664,95 @@ describe('loading is validation', () => {
     const loaded = loadTaskState(root, 'task-0001');
 
     expect(loaded.ok).toBe(false);
-    expect(loaded.code).toBe('IDENTITY_MISMATCH');
-    expect(loaded.classification).toBe('STATE_INVALID');
+    if (loaded.ok) return;
+    expect(loaded.code).toBe('REPOSITORY_ROOT_MISMATCH');
+    // Not `STATE_INVALID`: the document is a perfectly well-formed state. What
+    // is wrong is *whose* it is, and an operator needs to be told which.
+    expect(loaded.classification).toBe('STATE_MISPLACED');
+  });
+
+  it('rejects a state document that belongs to a different task', () => {
+    const root = repoRoot();
+    writeRaw(root, JSON.stringify(validCreatedState({ repositoryRoot: root, taskId: 'task-0002' })));
+
+    const loaded = loadTaskState(root, 'task-0001');
+
+    expect(loaded.ok).toBe(false);
+    if (loaded.ok) return;
+    expect(loaded.code).toBe('TASK_ID_MISMATCH');
+    expect(loaded.classification).toBe('STATE_MISPLACED');
+  });
+
+  it('tells the two mismatches apart rather than collapsing them into one code', () => {
+    const wrongRepository = repoRoot();
+    writeRaw(
+      wrongRepository,
+      JSON.stringify(validCreatedState({ repositoryRoot: repoRoot() })),
+    );
+    const wrongTask = repoRoot();
+    writeRaw(
+      wrongTask,
+      JSON.stringify(validCreatedState({ repositoryRoot: wrongTask, taskId: 'task-0002' })),
+    );
+
+    const byRepository = loadTaskState(wrongRepository, 'task-0001');
+    const byTask = loadTaskState(wrongTask, 'task-0001');
+
+    expect(byRepository.code).not.toBe(byTask.code);
+  });
+
+  it('produces every declared load failure code from a real document', () => {
+    const produce: Readonly<Record<StateLoadFailureCode, () => StateLoadResult>> = {
+      NO_STATE: () => loadTaskState(repoRoot(), 'task-0001'),
+      LOCATION_UNSUITABLE: () => loadTaskState(repoRoot(), '../escape'),
+      UNREADABLE: () => {
+        const root = repoRoot();
+        // A directory where the state file should be: it exists, and it cannot
+        // be read as a document.
+        mkdirSync(locationIn(root).path, { recursive: true });
+        return loadTaskState(root, 'task-0001');
+      },
+      STATE_TOO_LARGE: () => {
+        const root = repoRoot();
+        writeRaw(root, 'x'.repeat(MAX_TASK_STATE_BYTES + 1));
+        return loadTaskState(root, 'task-0001');
+      },
+      REPOSITORY_ROOT_MISMATCH: () => {
+        const root = repoRoot();
+        writeRaw(root, JSON.stringify(validCreatedState({ repositoryRoot: repoRoot() })));
+        return loadTaskState(root, 'task-0001');
+      },
+      REPOSITORY_ROOT_NOT_ABSOLUTE: () => {
+        const root = repoRoot();
+        writeRaw(root, JSON.stringify(validCreatedState({ repositoryRoot: './somewhere' })));
+        return loadTaskState(root, 'task-0001');
+      },
+      TASK_ID_MISMATCH: () => {
+        const root = repoRoot();
+        writeRaw(root, JSON.stringify(stateIn(root, { taskId: 'task-0002' })));
+        return loadTaskState(root, 'task-0001');
+      },
+      MALFORMED_JSON: () => {
+        const root = repoRoot();
+        writeRaw(root, '{ not json');
+        return loadTaskState(root, 'task-0001');
+      },
+      SCHEMA_VERSION_UNSUPPORTED: () => {
+        const root = repoRoot();
+        writeRaw(root, JSON.stringify({ ...stateIn(root), schemaVersion: 99 }));
+        return loadTaskState(root, 'task-0001');
+      },
+      CONTRACT_VIOLATION: () => {
+        const root = repoRoot();
+        writeRaw(root, JSON.stringify({ ...stateIn(root), state: 'NOT_A_STATE' }));
+        return loadTaskState(root, 'task-0001');
+      },
+    };
+
+    expect(Object.keys(produce).sort()).toEqual([...STATE_LOAD_FAILURE_CODES].sort());
+    for (const code of STATE_LOAD_FAILURE_CODES) {
+      expect(produce[code]().code).toBe(code);
+    }
   });
 
   it('rejects a state document that exceeds the read budget', () => {
@@ -549,6 +792,176 @@ describe('loading is validation', () => {
     loadTaskState(root, 'task-0001');
 
     expect(treeSnapshot(root)).toEqual(before);
+  });
+});
+
+/**
+ * One bounded, raw-byte contract for the persisted document.
+ *
+ * Two properties, and they are the same property seen from either side of the
+ * disk:
+ *
+ *  - **nothing is written that could not be read back.** A schema-valid state
+ *    can serialise past the read budget, and writing one produces a file this
+ *    build refuses to load — a task checkpointed into permanent
+ *    unrecoverability. The budget is therefore checked against the exact bytes
+ *    that would be persisted, *before* any filesystem mutation.
+ *  - **a revision identifies bytes, not text.** Decoding a file and re-encoding
+ *    the decoded string collapses distinct byte sequences onto one digest,
+ *    because every invalid sequence decodes to the same replacement character.
+ *    Two files that differ on disk must never share a revision, or the compare-
+ *    and-swap that protects a concurrent writer silently stops protecting it.
+ */
+describe('bounded raw bytes', () => {
+  /** Writes exact bytes where `task-0001`'s state belongs. */
+  function writeStateBytes(root: string, bytes: Buffer): void {
+    const location = locationIn(root);
+    mkdirSync(location.directory, { recursive: true });
+    writeFileSync(location.path, bytes);
+  }
+
+  /** A schema-valid state whose serialised form exceeds the read budget. */
+  function oversizedState(root: string) {
+    return stateIn(root, {
+      maxReviewRounds: 3,
+      findingHistory: Array.from({ length: 1200 }, () => ({
+        round: 1,
+        severity: 'high',
+        fingerprint: 'f'.repeat(1000),
+      })),
+    });
+  }
+
+  /**
+   * Two byte sequences that decode to the *same* string.
+   *
+   * `C0 80` is an overlong encoding and `ED A0 80` a surrogate half; neither is
+   * valid UTF-8, so both decode to replacement characters — which is exactly
+   * why a digest taken over decoded text cannot tell them apart.
+   */
+  const OVERLONG = Buffer.from([0xc0, 0x80, 0xc0, 0x80]);
+  const SURROGATE_HALF = Buffer.from([0xed, 0xa0, 0x80, 0xed]);
+
+  /** The same document, with `marker` standing in for raw bytes. */
+  function documentWith(root: string, raw: Buffer): Buffer {
+    const text = JSON.stringify(
+      stateIn(root, {
+        maxReviewRounds: 3,
+        findingHistory: [{ round: 1, severity: 'high', fingerprint: '@@RAW@@' }],
+      }),
+      null,
+      2,
+    );
+    const [before, after] = text.split('@@RAW@@');
+    return Buffer.concat([
+      Buffer.from(before as string, 'utf8'),
+      raw,
+      Buffer.from(after as string, 'utf8'),
+    ]);
+  }
+
+  it('refuses to persist a schema-valid state that serialises past the budget', () => {
+    const root = repoRoot();
+
+    const saved = saveTaskState(oversizedState(root), { repositoryRoot: root });
+
+    expect(saved.ok).toBe(false);
+    expect(saved.code).toBe('STATE_TOO_LARGE');
+  });
+
+  it('writes nothing at all — not even a staging file — when the state is oversize', () => {
+    const root = repoRoot();
+
+    saveTaskState(oversizedState(root), { repositoryRoot: root });
+
+    expect(treeSnapshot(root)).toEqual([]);
+  });
+
+  it('never writes a state this build would then refuse to load', () => {
+    const root = repoRoot();
+
+    const saved = saveTaskState(oversizedState(root), { repositoryRoot: root });
+
+    expect(saved.ok).toBe(false);
+    expect(loadTaskState(root, 'task-0001').code).toBe('NO_STATE');
+  });
+
+  it('refuses a compare-and-swap against an oversize state instead of reading it', () => {
+    const root = repoRoot();
+    writeStateBytes(root, Buffer.alloc(MAX_TASK_STATE_BYTES + 1, 0x20));
+
+    const saved = saveTaskState(stateIn(root), {
+      repositoryRoot: root,
+      expectedRevision: 'a-revision-from-somewhere',
+    });
+
+    expect(saved.ok).toBe(false);
+    expect(saved.code).toBe('STATE_CONFLICT');
+    if (saved.ok) return;
+    expect(saved.detail).toBe('CURRENT_STATE_TOO_LARGE');
+  });
+
+  it('leaves an oversize state exactly where it was', () => {
+    const root = repoRoot();
+    writeStateBytes(root, Buffer.alloc(MAX_TASK_STATE_BYTES + 1, 0x20));
+    const before = treeSnapshot(root);
+
+    saveTaskState(stateIn(root), { repositoryRoot: root, expectedRevision: 'anything' });
+
+    expect(treeSnapshot(root)).toEqual(before);
+  });
+
+  it('gives two byte-distinct documents two distinct revisions', () => {
+    const first = repoRoot();
+    const second = repoRoot();
+    const a = documentWith(first, OVERLONG);
+    const b = documentWith(second, SURROGATE_HALF);
+    // The premise: different bytes on disk, identical once decoded.
+    expect(a.equals(b.subarray(0, a.length))).toBe(false);
+    writeStateBytes(first, a);
+    writeStateBytes(second, b);
+
+    const loadedA = loadTaskState(first, 'task-0001');
+    const loadedB = loadTaskState(second, 'task-0001');
+
+    expect(loadedA.ok && loadedB.ok).toBe(true);
+    if (!loadedA.ok || !loadedB.ok) return;
+    expect(loadedA.state.findingHistory[0]?.fingerprint).toBe(
+      loadedB.state.findingHistory[0]?.fingerprint,
+    );
+    expect(loadedA.revision).not.toBe(loadedB.revision);
+  });
+
+  it('refuses a writer whose revision came from bytes another writer replaced', () => {
+    const root = repoRoot();
+    writeStateBytes(root, documentWith(root, OVERLONG));
+    const held = loadTaskState(root, 'task-0001');
+    if (!held.ok) throw new Error('unreachable');
+
+    // A second writer lands bytes that decode to the very same state.
+    const landed = documentWith(root, SURROGATE_HALF);
+    writeStateBytes(root, landed);
+
+    const overtaken = saveTaskState(stateIn(root, { state: 'REPOSITORY_RESOLVED' }), {
+      repositoryRoot: root,
+      expectedRevision: held.revision,
+    });
+
+    expect(overtaken.ok).toBe(false);
+    expect(overtaken.code).toBe('STATE_CONFLICT');
+    expect(readFileSync(locationIn(root).path).equals(landed)).toBe(true);
+  });
+
+  it('hashes the bytes on disk, not the bytes it would have written', () => {
+    const root = repoRoot();
+    // Byte-identical content, spelled with different whitespace: a digest taken
+    // over a re-serialised value would call these the same revision.
+    const compact = Buffer.from(`${JSON.stringify(stateIn(root))}\n`, 'utf8');
+    writeStateBytes(root, compact);
+    const loaded = loadTaskState(root, 'task-0001');
+    if (!loaded.ok) throw new Error('unreachable');
+
+    expect(loaded.revision).toBe(createHash('sha256').update(compact).digest('hex'));
   });
 });
 

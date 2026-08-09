@@ -19,6 +19,11 @@
  *    different repository than the one just resolved. Kept apart from ordinary
  *    divergence because it is not a repository that drifted; it is the wrong
  *    repository, and continuing would apply one project's work to another.
+ *  - `STATE_TASK_MISMATCH` — the state is well-formed and about this
+ *    repository, but about a different task. A separate outcome from the one
+ *    above because the two have different causes and different repairs: a
+ *    copied checkout versus two tasks of one project crossed over. Neither is
+ *    `STATE_INVALID`, because in both cases the document itself is intact.
  *  - `STATE_DIVERGED` — the world contradicts the record.
  *  - `STATE_UNOBSERVABLE` — the world could not be read.
  *  - `RECONCILED` — the only outcome from which anything may continue.
@@ -35,13 +40,18 @@ import {
   type ReconciliationExpectation,
   type ReconciliationReport,
 } from './reconcile.js';
-import { loadTaskState, type StateLoadResult } from './state-store.js';
+import {
+  loadTaskState,
+  type StateLoadFailureCode,
+  type StateLoadResult,
+} from './state-store.js';
 
 export const RECONCILIATION_OUTCOMES = [
   'RECONCILED',
   'NO_PERSISTED_STATE',
   'STATE_INVALID',
   'STATE_REPOSITORY_MISMATCH',
+  'STATE_TASK_MISMATCH',
   'STATE_DIVERGED',
   'STATE_UNOBSERVABLE',
 ] as const;
@@ -85,12 +95,12 @@ export async function reconcileTask(
 
   if (!load.ok) {
     return Object.freeze({
-      outcome: load.classification === 'STATE_MISSING' ? 'NO_PERSISTED_STATE' : 'STATE_INVALID',
+      outcome: outcomeForLoadFailure(load.code),
       load,
       state: null,
       observed: null,
       report: null,
-      reasonCodes: load.classification === 'STATE_MISSING' ? [] : Object.freeze([load.code]),
+      reasonCodes: load.code === 'NO_STATE' ? [] : Object.freeze([load.code]),
     });
   }
 
@@ -108,12 +118,37 @@ export async function reconcileTask(
 }
 
 /**
+ * A load that failed still has to answer with a precise outcome.
+ *
+ * A well-formed state belonging to somewhere else keeps its own outcome rather
+ * than being flattened into `STATE_INVALID`: the document is not broken, and
+ * telling an operator it is sends them looking for corruption instead of for
+ * the copied checkout or the renamed task that actually happened.
+ */
+function outcomeForLoadFailure(code: StateLoadFailureCode): ReconciliationOutcome {
+  switch (code) {
+    case 'NO_STATE':
+      return 'NO_PERSISTED_STATE';
+    case 'REPOSITORY_ROOT_MISMATCH':
+      return 'STATE_REPOSITORY_MISMATCH';
+    case 'TASK_ID_MISMATCH':
+      return 'STATE_TASK_MISMATCH';
+    default:
+      return 'STATE_INVALID';
+  }
+}
+
+/**
  * A repository mismatch outranks every other finding: if this is not the right
  * repository, nothing else observed about it is worth reporting as the headline.
+ * A task mismatch comes next, for the same reason and one level down.
  */
 function outcomeFor(report: ReconciliationReport): ReconciliationOutcome {
   if (report.findings.some((code) => REPOSITORY_FINDINGS.has(code))) {
     return 'STATE_REPOSITORY_MISMATCH';
+  }
+  if (report.findings.includes('TASK_ID_MISMATCH')) {
+    return 'STATE_TASK_MISMATCH';
   }
   switch (report.verdict) {
     case 'CONSISTENT':

@@ -27,14 +27,15 @@
  */
 
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from 'node:fs';
+import { closeSync, fstatSync, mkdirSync, openSync, readSync } from 'node:fs';
 
-import { canonicalPathsEqual } from '../core/automatic-resume.js';
+import { comparePathIdentity } from '../core/path-identity.js';
 import { safeErrnoCode } from '../core/safe-error.js';
 import { safeParseTaskState, type TaskState } from '../core/task-state.js';
 import { writeFileAtomically, type ReplaceFn, type TempSuffixFn } from './atomic-file.js';
 import {
   deriveTaskStateLocation,
+  isStateFileName,
   type StateLocationFailureCode,
   type TaskStateLocation,
 } from './state-location.js';
@@ -69,9 +70,20 @@ export interface StateStoreOptions {
  * (which is canonical and unchanged), it cannot drift from the file it
  * describes, and two writers that independently produce byte-identical states
  * are correctly treated as not conflicting.
+ *
+ * ── Bytes, never decoded text ──────────────────────────────────────────────
+ *
+ * The digest is taken over the raw bytes read from disk, not over the string
+ * they decoded to. Decoding is lossy in exactly the direction that matters
+ * here: every invalid UTF-8 sequence — an overlong encoding, a surrogate half,
+ * a truncated multi-byte character — decodes to the same replacement
+ * character, so two files that differ on disk can decode to one identical
+ * string. Hashing that string would hand both files the same revision, and the
+ * compare-and-swap that exists to stop a stale writer from flattening someone
+ * else's work would wave it through.
  */
-function revisionOf(contents: string): string {
-  return createHash('sha256').update(contents, 'utf8').digest('hex');
+function revisionOfBytes(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 /* ─────────────────────────────── saving ─────────────────────────────────── */
@@ -87,6 +99,11 @@ export type StateSaveFailureCode =
   | 'DIRECTORY_CREATE_FAILED'
   /** Another writer has moved the state on. Nothing was written. */
   | 'STATE_CONFLICT'
+  /**
+   * The state serialises to more bytes than {@link MAX_TASK_STATE_BYTES}, so
+   * this build could never load it back. Refused before anything is touched.
+   */
+  | 'STATE_TOO_LARGE'
   /**
    * The move is not declared by the transition table. Produced only by
    * `advanceTaskState()`; `saveTaskState()` writes states without a
@@ -143,24 +160,28 @@ function saveFailure(
  * is minutes wide, and this closes it.
  */
 function checkExpectedRevision(path: string, expected: string | undefined): string | null {
-  let current: string | null;
-  try {
-    current = readFileSync(path, 'utf8');
-  } catch (error) {
-    if (safeErrnoCode(error) !== 'ENOENT') {
-      // A state that exists but cannot be read is not a state we may replace:
-      // there is no way to prove we are not destroying someone else's work.
-      return 'CURRENT_STATE_UNREADABLE';
-    }
-    current = null;
+  // The same bounded reader the loader uses, for the same reason: whatever is
+  // sitting where a state belongs is untrusted input, and reading it unbounded
+  // to decide whether we may replace it would make "someone put a large file
+  // there" this process's memory problem.
+  const current = readBounded(path);
+
+  if (!current.ok) {
+    // A state that exists but cannot be read — unreadable, or larger than a
+    // state may be — is not a state we may replace: there is no way to prove we
+    // are not destroying someone else's work.
+    if (current.code === 'STATE_TOO_LARGE') return 'CURRENT_STATE_TOO_LARGE';
+    if (current.code === 'UNREADABLE') return 'CURRENT_STATE_UNREADABLE';
   }
+
+  const bytes = current.ok ? current.bytes : null;
 
   if (expected === undefined) {
     // The creation case: the writer read nothing, so it expects nothing.
-    return current === null ? null : 'EXPECTED_ABSENT';
+    return bytes === null ? null : 'EXPECTED_ABSENT';
   }
-  if (current === null) return 'EXPECTED_PRESENT';
-  return revisionOf(current) === expected ? null : 'REVISION_MISMATCH';
+  if (bytes === null) return 'EXPECTED_PRESENT';
+  return revisionOfBytes(bytes) === expected ? null : 'REVISION_MISMATCH';
 }
 
 /**
@@ -179,12 +200,37 @@ export function saveTaskState(state: unknown, options: StateStoreOptions): State
 
   // The path comes from the *resolved* root, and the state must agree with it.
   // Without this, a state carrying one repository could be filed under another.
-  if (!canonicalPathsEqual(value.repositoryRoot, options.repositoryRoot)) {
-    return saveFailure('REPOSITORY_ROOT_MISMATCH', null);
+  //
+  // A relative recorded root is refused rather than resolved: `"."` would
+  // otherwise compare equal whenever the process happened to be standing in the
+  // repository, which is the `process.cwd()` authority this must not have.
+  const recordedRoot = comparePathIdentity(value.repositoryRoot, options.repositoryRoot);
+  if (recordedRoot !== 'EQUAL') {
+    return saveFailure(
+      'REPOSITORY_ROOT_MISMATCH',
+      null,
+      recordedRoot === 'NOT_ABSOLUTE' ? 'REPOSITORY_ROOT_NOT_ABSOLUTE' : null,
+    );
   }
 
   const location = deriveTaskStateLocation(options.repositoryRoot, value.taskId);
   if (!location.ok) return saveFailure('LOCATION_UNSUITABLE', null, location.code);
+
+  // Serialise, encode, and measure — all before the filesystem is touched at
+  // all. The bytes checked here are the exact bytes that would be persisted, so
+  // there is no second encoding step between the budget and the write.
+  //
+  // Trailing newline: the file is meant to be readable by a human debugging a
+  // stuck task, and every tool that shows it expects one.
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+
+  // A state larger than the read budget is one this build would refuse to load
+  // back, so persisting it would checkpoint a task into permanent
+  // unrecoverability. Refused with a typed code, and nothing is created —
+  // not the runtime directory, not a staging file, not the state itself.
+  if (bytes.byteLength > MAX_TASK_STATE_BYTES) {
+    return saveFailure('STATE_TOO_LARGE', location.path);
+  }
 
   const conflict = checkExpectedRevision(location.path, options.expectedRevision);
   if (conflict !== null) return saveFailure('STATE_CONFLICT', location.path, conflict);
@@ -198,9 +244,11 @@ export function saveTaskState(state: unknown, options: StateStoreOptions): State
   const written = writeFileAtomically({
     directory: location.directory,
     fileName: location.fileName,
-    // Trailing newline: the file is meant to be readable by a human debugging a
-    // stuck task, and every tool that shows it expects one.
-    contents: `${JSON.stringify(value, null, 2)}\n`,
+    contents: bytes,
+    // The staging step judges the name by the *state* contract, not by the
+    // artefact writer's shorter budget: every canonically valid task id must be
+    // writable, or a task the planner can select can never be checkpointed.
+    isAcceptableFileName: isStateFileName,
     // Spread rather than assigned: under `exactOptionalPropertyTypes`, passing
     // an explicit `undefined` is not the same as omitting the seam.
     ...(options.replace !== undefined ? { replace: options.replace } : {}),
@@ -231,31 +279,66 @@ export function saveTaskState(state: unknown, options: StateStoreOptions): State
 export const MAX_TASK_STATE_BYTES = 1_048_576;
 
 /**
- * The three outcomes a caller must be able to tell apart, whatever the precise
- * code. `STATE_INVALID` covers every "there is something there, and it is not
- * usable as state" — unreadable, oversized, malformed, contract-violating or
- * misplaced — because each of them ends the same way: nothing may be resumed,
- * and nothing may be repaired.
+ * The four outcomes a caller must be able to tell apart, whatever the precise
+ * code.
+ *
+ * `STATE_INVALID` covers every "there is something there, and it is not usable
+ * as state" — unreadable, oversized, malformed, contract-violating — because
+ * each of them ends the same way: nothing may be resumed, and nothing may be
+ * repaired.
+ *
+ * `STATE_MISPLACED` is deliberately *not* folded into it. A well-formed state
+ * that belongs to another repository or another task is not a broken document;
+ * it is an intact record of something else, found where this one should be.
+ * Reporting it as "invalid" would send an operator looking for corruption
+ * instead of for the copy or the rename that actually happened, and it would
+ * lose the distinction the composed outcome needs to keep "the wrong
+ * repository" apart from "this repository moved on".
  */
-export type StateClassification = 'STATE_MISSING' | 'STATE_VALID' | 'STATE_INVALID';
+export type StateClassification =
+  | 'STATE_MISSING'
+  | 'STATE_VALID'
+  | 'STATE_INVALID'
+  | 'STATE_MISPLACED';
 
-export type StateLoadFailureCode =
+/** Every way a load can fail to produce a state. A closed set. */
+export const STATE_LOAD_FAILURE_CODES = [
   /** Nothing has ever been persisted for this task. Not an error. */
-  | 'NO_STATE'
+  'NO_STATE',
   /** The identities cannot be used as path segments. */
-  | 'LOCATION_UNSUITABLE'
+  'LOCATION_UNSUITABLE',
   /** The file exists but could not be read. */
-  | 'UNREADABLE'
+  'UNREADABLE',
   /** The document is larger than {@link MAX_TASK_STATE_BYTES}. Never parsed. */
-  | 'STATE_TOO_LARGE'
-  /** The document is valid, but describes a different repository or task. */
-  | 'IDENTITY_MISMATCH'
+  'STATE_TOO_LARGE',
+  /** The document is valid, but describes a different repository. */
+  'REPOSITORY_ROOT_MISMATCH',
+  /**
+   * The recorded repository root is not an absolute path, so it cannot be
+   * compared with the resolved one at all — and must never be resolved against
+   * `process.cwd()` to make it comparable.
+   */
+  'REPOSITORY_ROOT_NOT_ABSOLUTE',
+  /** The document is valid, but describes a different task. */
+  'TASK_ID_MISMATCH',
   /** The file is not JSON. */
-  | 'MALFORMED_JSON'
+  'MALFORMED_JSON',
   /** Valid JSON written against a contract version this build does not know. */
-  | 'SCHEMA_VERSION_UNSUPPORTED'
+  'SCHEMA_VERSION_UNSUPPORTED',
   /** Valid JSON of this version that the contract nevertheless rejects. */
-  | 'CONTRACT_VIOLATION';
+  'CONTRACT_VIOLATION',
+] as const;
+
+export type StateLoadFailureCode = (typeof STATE_LOAD_FAILURE_CODES)[number];
+
+/**
+ * The codes that mean "a well-formed state, but not this one's". They carry
+ * `STATE_MISPLACED`; everything else that fails carries `STATE_INVALID`.
+ */
+const MISPLACED_CODES: ReadonlySet<string> = new Set<string>([
+  'REPOSITORY_ROOT_MISMATCH',
+  'TASK_ID_MISMATCH',
+]);
 
 export interface StateLoadSuccess {
   readonly ok: true;
@@ -291,11 +374,18 @@ function loadFailure(
   return Object.freeze({
     ok: false as const,
     code,
-    classification: code === 'NO_STATE' ? 'STATE_MISSING' : 'STATE_INVALID',
+    classification: classificationFor(code),
     path,
     detail,
     errnoCode,
   });
+}
+
+function classificationFor(
+  code: StateLoadFailureCode,
+): Exclude<StateClassification, 'STATE_VALID'> {
+  if (code === 'NO_STATE') return 'STATE_MISSING';
+  return MISPLACED_CODES.has(code) ? 'STATE_MISPLACED' : 'STATE_INVALID';
 }
 
 /** Best-effort close. The outcome is already decided by the caller. */
@@ -308,15 +398,26 @@ function closeQuietly(handle: number): void {
 }
 
 type BoundedRead =
-  | { readonly ok: true; readonly contents: string }
-  | { readonly ok: false; readonly code: 'NO_STATE' | 'UNREADABLE' | 'STATE_TOO_LARGE'; readonly errnoCode: string | null };
+  | { readonly ok: true; readonly bytes: Buffer }
+  | {
+      readonly ok: false;
+      readonly code: 'NO_STATE' | 'UNREADABLE' | 'STATE_TOO_LARGE';
+      readonly errnoCode: string | null;
+    };
 
 /**
- * Reads a state document, refusing anything larger than the budget.
+ * The one way this module reads a persisted state: bounded, and as raw bytes.
  *
- * The size is taken from the *open handle* rather than from a prior `stat` of
- * the path, so there is no window in which the thing measured and the thing
- * read are two different files.
+ * Open the canonical path, `fstat` the *handle*, refuse anything past the
+ * budget, read that many bytes, and hand them back undecoded. Every consumer —
+ * the loader, and the compare-and-swap that decides whether a write may
+ * proceed — goes through here, so there is one budget and one notion of "the
+ * bytes that are on disk".
+ *
+ * The size comes from the open handle rather than from a prior `stat` of the
+ * path, so there is no window in which the thing measured and the thing read
+ * are two different files. Decoding and parsing happen afterwards, to the
+ * caller's taste; the digest is taken over these bytes, before any of that.
  */
 function readBounded(path: string): BoundedRead {
   let handle: number;
@@ -329,7 +430,14 @@ function readBounded(path: string): BoundedRead {
   }
 
   try {
-    const { size } = fstatSync(handle);
+    const stats = fstatSync(handle);
+    // Windows opens a directory handle happily and reports it as zero bytes,
+    // which would decode to an empty document and be reported as malformed
+    // JSON — a wrong reason. Whatever is at the canonical path, if it is not a
+    // regular file it is not a state, and this build will not read it.
+    if (!stats.isFile()) return { ok: false, code: 'UNREADABLE', errnoCode: null };
+
+    const { size } = stats;
     if (size > MAX_TASK_STATE_BYTES) {
       return { ok: false, code: 'STATE_TOO_LARGE', errnoCode: null };
     }
@@ -343,7 +451,7 @@ function readBounded(path: string): BoundedRead {
     }
     if (offset !== size) return { ok: false, code: 'UNREADABLE', errnoCode: null };
 
-    return { ok: true, contents: buffer.toString('utf8') };
+    return { ok: true, bytes: buffer };
   } catch (error) {
     return { ok: false, code: 'UNREADABLE', errnoCode: safeErrnoCode(error) };
   } finally {
@@ -384,11 +492,13 @@ export function loadTaskState(
   // A task that was never started is a normal, expected answer, not an error.
   const read = readBounded(path);
   if (!read.ok) return loadFailure(read.code, path, null, read.errnoCode);
-  const raw = read.contents;
+  const raw = read.bytes;
 
   let document: unknown;
   try {
-    document = JSON.parse(raw);
+    // Decoded here, and only here: the revision below is taken from `raw`, so
+    // the digest describes the file rather than the text it turned into.
+    document = JSON.parse(raw.toString('utf8'));
   } catch {
     // The parser's message quotes the offending input; it is never surfaced.
     return loadFailure('MALFORMED_JSON', path);
@@ -407,12 +517,16 @@ export function loadTaskState(
   // contents contradict its own location — a state copied or moved between
   // repositories, not merely a stale one. Refused here rather than deferred to
   // reconciliation, because this is provable without resolving anything.
-  if (
-    !canonicalPathsEqual(parsed.data.repositoryRoot, repositoryRoot) ||
-    parsed.data.taskId !== taskId
-  ) {
-    return loadFailure('IDENTITY_MISMATCH', path);
-  }
+  //
+  // The two are reported apart, because they are not the same accident: a
+  // repository mismatch means this record is about another project entirely,
+  // while a task mismatch means two tasks of *this* project got crossed. They
+  // send an operator to different places, and the composed outcome in
+  // `reconcile-task.ts` keeps them apart all the way to its caller.
+  const recordedRoot = comparePathIdentity(parsed.data.repositoryRoot, repositoryRoot);
+  if (recordedRoot === 'NOT_ABSOLUTE') return loadFailure('REPOSITORY_ROOT_NOT_ABSOLUTE', path);
+  if (recordedRoot === 'DIFFERENT') return loadFailure('REPOSITORY_ROOT_MISMATCH', path);
+  if (parsed.data.taskId !== taskId) return loadFailure('TASK_ID_MISMATCH', path);
 
   return Object.freeze({
     ok: true as const,
@@ -420,9 +534,9 @@ export function loadTaskState(
     classification: 'STATE_VALID' as const,
     state: parsed.data,
     path,
-    // Taken from the bytes actually read, not from the re-serialised value: a
-    // writer must be held to what was on disk, not to what we would have
-    // written for the same state.
-    revision: revisionOf(raw),
+    // Taken from the bytes actually read, not from the re-serialised value and
+    // not from the decoded string: a writer must be held to what was on disk,
+    // byte for byte.
+    revision: revisionOfBytes(raw),
   });
 }

@@ -103,14 +103,37 @@ const defaultReplace: ReplaceFn = (from, to) => {
 const defaultTempSuffix: TempSuffixFn = () =>
   `${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`;
 
+/**
+ * Judges whether a name is one this caller may write.
+ *
+ * Injectable because "a single plain segment" is a shared safety property while
+ * the acceptable *length* is the caller's own contract: a run artefact and a
+ * task-state file are both plain names, and only one of them has to accommodate
+ * a 128-character repository-authored task id. Whatever this returns, the
+ * containment proof below is still performed on the resolved path, so a
+ * permissive validator can widen the set of names — never the set of
+ * directories written to.
+ */
+export type FileNameValidator = (name: string) => boolean;
+
 export interface AtomicWriteRequest {
   /** An existing directory. This function never creates one. */
   readonly directory: string;
   /** A single plain file name, e.g. `task-0001.json`. */
   readonly fileName: string;
-  readonly contents: string;
+  /**
+   * Exactly the bytes to persist.
+   *
+   * A `Buffer` is passed when the caller has already encoded the bytes it
+   * intends to be on disk — as `state-store.ts` does, because the same bytes
+   * are what its size budget and its revision digest are computed from, and
+   * re-encoding a string here would put a second encoding step between the two.
+   */
+  readonly contents: string | Uint8Array;
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
+  /** Defaults to `isPlainFileName`. See {@link FileNameValidator}. */
+  readonly isAcceptableFileName?: FileNameValidator;
 }
 
 function result(
@@ -167,7 +190,9 @@ export function writeFileAtomically(request: AtomicWriteRequest): AtomicWriteRes
   const replace = request.replace ?? defaultReplace;
   const tempSuffix = request.tempSuffix ?? defaultTempSuffix;
 
-  if (!isPlainFileName(request.fileName)) {
+  const isAcceptableFileName = request.isAcceptableFileName ?? isPlainFileName;
+
+  if (!isAcceptableFileName(request.fileName)) {
     return result('PATH_ESCAPES_DIRECTORY', join(directory, request.fileName), null);
   }
 
@@ -201,7 +226,13 @@ export function writeFileAtomically(request: AtomicWriteRequest): AtomicWriteRes
     return result('TEMP_CREATE_FAILED', target, safeErrnoCode(error));
   }
 
-  const buffer = Buffer.from(request.contents, 'utf8');
+  // A caller that already encoded its bytes gets those exact bytes written;
+  // only a string is encoded here, and only once.
+  const { contents } = request;
+  const buffer =
+    typeof contents === 'string'
+      ? Buffer.from(contents, 'utf8')
+      : Buffer.from(contents.buffer, contents.byteOffset, contents.byteLength);
   let offset = 0;
   let synced = false;
 

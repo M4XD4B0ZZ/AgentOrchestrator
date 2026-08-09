@@ -22,8 +22,7 @@
  * belongs to the loop that does not exist yet.
  */
 
-import { sep as pathSep, resolve as resolvePath } from 'node:path';
-
+import { absolutePathsEqual } from './path-identity.js';
 import type { TaskState } from './task-state.js';
 import { BLOCKED_STATE_POLICIES } from './resume-policy.js';
 import { isBlockingState } from './states.js';
@@ -116,17 +115,16 @@ function toEpochMs(value: string | Date): number | null {
  *
  * The caller supplies the *observed* path already canonicalised (symlinks and
  * junctions resolved) because this function performs no I/O. What is done here
- * is the purely lexical part: normalisation, separator handling, and the
- * case-insensitive comparison Windows requires.
+ * is the purely lexical part, and it lives in `core/path-identity.ts` so there
+ * is exactly one such comparison in the codebase.
+ *
+ * A relative path on either side is `false`, not "equal once resolved": a
+ * relative `repositoryRoot` or `worktreePath` would otherwise be measured
+ * against `process.cwd()`, and a state recorded as `"."` would match whichever
+ * checkout the process was launched from. See the module comment there.
  */
 export function canonicalPathsEqual(a: string, b: string): boolean {
-  const normalise = (value: string): string => {
-    const resolved = resolvePath(value);
-    const trimmed =
-      resolved.length > 1 && resolved.endsWith(pathSep) ? resolved.slice(0, -1) : resolved;
-    return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;
-  };
-  return normalise(a) === normalise(b);
+  return absolutePathsEqual(a, b);
 }
 
 /**
