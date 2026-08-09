@@ -1329,7 +1329,46 @@ that evidence in the process. The contract is applied on both sides of the disk:
 a state that violates it is never written, because a self-contradictory state
 that survives a restart is indistinguishable from a real one.
 
+### Concurrent writers
+
+Two orchestrator processes may be pointed at the same task. Neither is expected
+to win a race, but the loser must *know* it lost rather than silently flattening
+the winner's work.
+
+`loadTaskState()` returns a `revision` — a content digest of the exact bytes it
+read — and `saveTaskState()` takes it back as `expectedRevision`. A save whose
+expectation no longer matches what is on disk fails with `STATE_CONFLICT` and
+writes nothing. A digest rather than a counter: it needs no field in `TaskState`,
+it cannot drift from the file it describes, and two writers that independently
+produce byte-identical states correctly do not conflict.
+
+Omitting `expectedRevision` does **not** mean "overwrite whatever is there" — it
+means "I read nothing, so I expect nothing", and the save is refused if a state
+already exists. There is deliberately no force flag: an unconditional overwrite
+is the operation this mechanism exists to prevent.
+
+This is optimistic concurrency, and the residual window is stated rather than
+papered over. Between the compare and the `rename` a third writer could land its
+own state. Closing that entirely needs a lock, and a lock is a service — owner,
+lease, timeout, and a recovery story for the process that died holding it. The
+window is one `rename` wide and corrupts nothing: the loser's file is complete
+and valid, merely superseded. What this actually defends against is the writer
+that read a state minutes ago, went away to run an agent, and came back to
+persist a conclusion drawn from a world that has since moved.
+
 ### Reconciliation, and two ways to fail
+
+Reconciliation consumes the freshly **resolved repository**, the selected
+**task id**, the validated persisted state, and current Git/worktree
+observations. A state file that parses cleanly proves only that something wrote
+valid JSON — persisted Git facts are never trusted because the document is
+well-formed. `repositoryId`, `repositoryRoot`, `taskId` and `baseBranch` are
+compared against resolved reality *first*, and for every state rather than only
+on the unattended-resume path: a state resumed into the wrong repository is the
+one failure this slice exists to make impossible, and that must not depend on
+which state the task happens to be in. Roots are compared as paths, so separator
+shape, a trailing separator and Windows' case-insensitivity do not read as
+divergence.
 
 `observe-runtime.ts` asks Git and the filesystem what is true now and changes
 nothing; `reconcile.ts` is the only place those facts meet the persisted record.
@@ -1360,10 +1399,11 @@ would grant "resume allowed" for a task whose worktree is gone and then need
 overriding — a decision made twice is one that can disagree with itself.
 
 `evaluateAutomaticResume()` remains the authority on unattended resumes and is
-fed, not re-implemented. Repository identity and auth arrive as supplied
-evidence because re-establishing them is an *execution*, and this slice performs
-none. `STATE_DIVERGED` is named for the existing `RESUME_STATE_DIVERGED` state
-rather than inventing a second vocabulary for the same condition.
+fed, not re-implemented. Auth arrives as supplied evidence because re-proving it
+is an *execution*, and this slice performs none; repository identity is compared
+during reconciliation, so by the time the block is judged it has already been
+checked. `STATE_DIVERGED` is named for the existing `RESUME_STATE_DIVERGED`
+state rather than inventing a second vocabulary for the same condition.
 
 ### What V1-04 is not
 

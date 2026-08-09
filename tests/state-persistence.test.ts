@@ -299,16 +299,124 @@ describe('saving task state', () => {
     expect(beta.state.state).toBe('WORKTREE_READY');
   });
 
-  it('overwrites a previous checkpoint in place', () => {
+  it('advances a checkpoint when the writer proves which revision it read', () => {
     const provider = fixedPathProvider(scratch());
-
     saveTaskState(validCreatedState(), { provider });
-    saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), { provider });
+    const first = loadTaskState('repo-alpha', 'task-0001', { provider });
+    if (!first.ok) throw new Error('unreachable');
+
+    const advanced = saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
+      provider,
+      expectedRevision: first.revision,
+    });
+
+    expect(advanced.code).toBe('SAVED');
+    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.state.state).toBe('WORKTREE_READY');
+  });
+});
+
+/**
+ * Two orchestrator processes may be pointed at the same task. Neither is
+ * expected to win a race — but the loser must *know* it lost, rather than
+ * silently flattening the winner's work.
+ *
+ * The mechanism is optimistic compare-before-replace: a writer names the
+ * revision it read, and the store refuses if the file has moved on.
+ */
+describe('concurrent writers', () => {
+  it('hands out a revision with every loaded state', () => {
+    const provider = fixedPathProvider(scratch());
+    saveTaskState(validCreatedState(), { provider });
+
+    const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
+
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(typeof loaded.revision).toBe('string');
+    expect(loaded.revision.length).toBeGreaterThan(0);
+  });
+
+  it('changes the revision when the state changes', () => {
+    const provider = fixedPathProvider(scratch());
+    saveTaskState(validCreatedState(), { provider });
+    const first = loadTaskState('repo-alpha', 'task-0001', { provider });
+    if (!first.ok) throw new Error('unreachable');
+
+    saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
+      provider,
+      expectedRevision: first.revision,
+    });
+    const second = loadTaskState('repo-alpha', 'task-0001', { provider });
+
+    if (!second.ok) throw new Error('unreachable');
+    expect(second.revision).not.toBe(first.revision);
+  });
+
+  it('refuses a blind write over a state that already exists', () => {
+    const provider = fixedPathProvider(scratch());
+    saveTaskState(validCreatedState(), { provider });
+
+    const blind = saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), { provider });
+
+    expect(blind.ok).toBe(false);
+    expect(blind.code).toBe('STATE_CONFLICT');
+  });
+
+  it('refuses a writer whose revision has been overtaken', () => {
+    const provider = fixedPathProvider(scratch());
+    saveTaskState(validCreatedState(), { provider });
+    const stale = loadTaskState('repo-alpha', 'task-0001', { provider });
+    if (!stale.ok) throw new Error('unreachable');
+
+    // A second writer advances the state in between.
+    saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
+      provider,
+      expectedRevision: stale.revision,
+    });
+
+    const overtaken = saveTaskState(validCreatedState({ state: 'CONFIG_VALIDATED' }), {
+      provider,
+      expectedRevision: stale.revision,
+    });
+
+    expect(overtaken.ok).toBe(false);
+    expect(overtaken.code).toBe('STATE_CONFLICT');
+  });
+
+  it('leaves the winner’s state intact when a stale writer is refused', () => {
+    const provider = fixedPathProvider(scratch());
+    saveTaskState(validCreatedState(), { provider });
+    const stale = loadTaskState('repo-alpha', 'task-0001', { provider });
+    if (!stale.ok) throw new Error('unreachable');
+    saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
+      provider,
+      expectedRevision: stale.revision,
+    });
+
+    saveTaskState(validCreatedState({ state: 'CONFIG_VALIDATED' }), {
+      provider,
+      expectedRevision: stale.revision,
+    });
 
     const loaded = loadTaskState('repo-alpha', 'task-0001', { provider });
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
     expect(loaded.state.state).toBe('WORKTREE_READY');
+  });
+
+  it('refuses a revision-bearing write when no state exists at all', () => {
+    const provider = fixedPathProvider(scratch());
+
+    const orphaned = saveTaskState(validCreatedState(), {
+      provider,
+      expectedRevision: 'a-revision-that-never-existed',
+    });
+
+    expect(orphaned.ok).toBe(false);
+    expect(orphaned.code).toBe('STATE_CONFLICT');
   });
 });
 
@@ -410,9 +518,12 @@ describe('crash safety', () => {
   it('keeps the last complete checkpoint when the next save fails to replace it', () => {
     const provider = fixedPathProvider(scratch());
     saveTaskState(validCreatedState(), { provider });
+    const first = loadTaskState('repo-alpha', 'task-0001', { provider });
+    if (!first.ok) throw new Error('unreachable');
 
     const failed = saveTaskState(validCreatedState({ state: 'WORKTREE_READY' }), {
       provider,
+      expectedRevision: first.revision,
       replace: () => {
         const error: NodeJS.ErrnoException = new Error('denied');
         error.code = 'EACCES';

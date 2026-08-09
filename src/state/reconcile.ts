@@ -27,11 +27,43 @@
  * worktree as unregistered. It does not know that.
  */
 
+import { canonicalPathsEqual } from '../core/automatic-resume.js';
 import type { TaskState } from '../core/task-state.js';
 import { expectedWorkBranchRef, type ObservedRuntime } from './observe-runtime.js';
 
+/**
+ * The identity half of the reconciliation input.
+ *
+ * A `ResolvedRepository` is assignable to this. Reconciliation asks for the
+ * three fields it actually compares rather than for the whole resolved value:
+ * it has no use for the scope policy, the verification phases or the remote,
+ * and a narrower input is one fewer thing a caller can get wrong.
+ */
+export interface RepositoryIdentity {
+  readonly id: string;
+  readonly root: string;
+  readonly defaultBranch: string;
+}
+
+/**
+ * What the orchestrator believes it is working on *now*: the repository it just
+ * resolved and the task it just selected.
+ *
+ * A state file that parses cleanly proves only that something wrote valid JSON.
+ * It does not prove the file describes this repository or this task, and a state
+ * copied between checkouts parses exactly as well as one that belongs here.
+ */
+export interface ReconciliationExpectation {
+  readonly repository: RepositoryIdentity;
+  readonly taskId: string;
+}
+
 /** Findings that mean the world contradicts the record. */
 export const DIVERGENCE_FINDING_CODES = [
+  'REPOSITORY_ID_MISMATCH',
+  'REPOSITORY_ROOT_MISMATCH',
+  'TASK_ID_MISMATCH',
+  'BASE_BRANCH_MISMATCH',
   'WORKTREE_NOT_REGISTERED',
   'WORKTREE_MISSING_ON_DISK',
   'WORK_BRANCH_NOT_CHECKED_OUT',
@@ -77,8 +109,33 @@ export interface ReconciliationReport {
 export function reconcileTaskState(
   state: TaskState,
   observed: ObservedRuntime,
+  expected: ReconciliationExpectation,
 ): ReconciliationReport {
   const findings: ReconciliationFindingCode[] = [];
+
+  // --- 0. Is this even the right repository and the right task? -----------
+  // Checked first, and checked for *every* state rather than only on the
+  // unattended-resume path: a state resumed into the wrong repository is the
+  // one failure this whole slice exists to make impossible, and it must not
+  // depend on which state the task happens to be in.
+  if (state.repositoryId !== expected.repository.id) {
+    findings.push('REPOSITORY_ID_MISMATCH');
+  }
+  // Compared as paths, not strings: separator shape, a trailing separator and
+  // Windows' case-insensitivity all denote the same directory.
+  if (!canonicalPathsEqual(state.repositoryRoot, expected.repository.root)) {
+    findings.push('REPOSITORY_ROOT_MISMATCH');
+  }
+  // The file was found *by* task id, so a mismatch means its contents disagree
+  // with its own location — a state copied between tasks, not a stale one.
+  if (state.taskId !== expected.taskId) {
+    findings.push('TASK_ID_MISMATCH');
+  }
+  // The base the work was branched from must still be the base the repository
+  // declares; otherwise the pin below is measured against the wrong history.
+  if (state.baseBranch !== expected.repository.defaultBranch) {
+    findings.push('BASE_BRANCH_MISMATCH');
+  }
 
   // --- 1. Does Git still know this worktree? ------------------------------
   if (!observed.registryReadable) {

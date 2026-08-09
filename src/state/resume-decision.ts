@@ -41,7 +41,13 @@ import { isTerminalState } from '../core/states.js';
 import type { TaskState } from '../core/task-state.js';
 import { isBlockingState } from '../core/states.js';
 import type { ObservedRuntime } from './observe-runtime.js';
-import { reconcileTaskState, type ReconciliationReport } from './reconcile.js';
+import {
+  reconcileTaskState,
+  type ReconciliationReport,
+  type RepositoryIdentity,
+} from './reconcile.js';
+
+export type { RepositoryIdentity };
 
 /**
  * The facts this decision needs that are not Git's to give.
@@ -56,10 +62,10 @@ export interface ResumeContext {
   readonly now: string | Date;
   /** Did a *fresh* auth preflight pass for the blocked agent? */
   readonly authPreflightPassed: boolean;
-  /** Repository identity observed right now, from a fresh resolution. */
-  readonly observedRepositoryId: string | null;
-  /** Canonical repository root observed right now. */
-  readonly observedRepositoryRoot: string | null;
+  /** The repository just resolved — the identity the state must still match. */
+  readonly repository: RepositoryIdentity;
+  /** The task just selected. */
+  readonly taskId: string;
 }
 
 export const RESUME_CLASSIFICATIONS = [
@@ -107,6 +113,12 @@ export interface ResumeDecision {
  *  - the observed base pin is only reported as matching when the ancestry probe
  *    positively confirmed it. Anything less — rewritten, absent, unevaluable —
  *    is `null`, which denies.
+ *
+ * Repository identity is passed through from the freshly resolved repository.
+ * By the time this runs, reconciliation has already compared it against the
+ * state and refused on any mismatch, so these two checks are defence in depth
+ * rather than the primary guard — which is why identity is *not* something a
+ * caller can quietly weaken by supplying the recorded value back.
  */
 function toEvidence(
   state: TaskState,
@@ -117,8 +129,8 @@ function toEvidence(
   return Object.freeze({
     now: context.now,
     authPreflightPassed: context.authPreflightPassed,
-    observedRepositoryId: context.observedRepositoryId,
-    observedRepositoryRoot: context.observedRepositoryRoot,
+    observedRepositoryId: context.repository.id,
+    observedRepositoryRoot: context.repository.root,
     observedWorktreePath: observed.registeredWorktreePath,
     worktreeExists: observed.worktreeExists,
     observedBasePinnedCommit:
@@ -138,7 +150,10 @@ export function classifyResume(
   observed: ObservedRuntime,
   context: ResumeContext,
 ): ResumeDecision {
-  const reconciliation = reconcileTaskState(state, observed);
+  const reconciliation = reconcileTaskState(state, observed, {
+    repository: context.repository,
+    taskId: context.taskId,
+  });
 
   const decision = (
     classification: ResumeClassification,

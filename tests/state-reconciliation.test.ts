@@ -36,6 +36,21 @@ const STATE = parseTaskState(validUsageLimitState());
 const WORKTREE = STATE.worktreePath;
 const BRANCH_REF = `refs/heads/${STATE.workBranch}`;
 
+/**
+ * The identity half of the reconciliation input.
+ *
+ * A real `ResolvedRepository` is assignable to this: reconciliation needs the
+ * repository's *identity* and nothing else, so it asks for exactly that rather
+ * than for twelve fields it will never read.
+ */
+const REPOSITORY = Object.freeze({
+  id: STATE.repositoryId,
+  root: STATE.repositoryRoot,
+  defaultBranch: STATE.baseBranch,
+});
+
+const EXPECTATION = Object.freeze({ repository: REPOSITORY, taskId: STATE.taskId });
+
 /** The porcelain listing a healthy, matching repository produces. */
 const HEALTHY_REGISTRY = `worktree ${STATE.repositoryRoot}\nbranch refs/heads/main\n\nworktree ${WORKTREE}\nbranch ${BRANCH_REF}\n`;
 
@@ -73,7 +88,7 @@ const neverExists = (): boolean => false;
 
 async function reconcileWith(script: GitScript = {}, exists = alwaysExists) {
   const observed = await observeRuntime(scriptedGit(script), STATE, { exists });
-  return reconcileTaskState(STATE, observed);
+  return reconcileTaskState(STATE, observed, EXPECTATION);
 }
 
 describe('observing Git reality', () => {
@@ -217,10 +232,69 @@ describe('reconciling state against Git', () => {
       exists: alwaysExists,
     });
 
-    const report = reconcileTaskState(fresh, observed);
+    const report = reconcileTaskState(fresh, observed, EXPECTATION);
 
     expect(report.findings).not.toContain('CURRENT_COMMIT_MOVED');
     expect(report.findings).not.toContain('BASE_COMMIT_NOT_ANCESTOR');
+  });
+});
+
+/**
+ * A valid state file proves only that *something* wrote valid JSON. It does not
+ * prove it describes the repository now being resolved, or the task now being
+ * run. These checks are what stop a state that parses cleanly from being
+ * resumed into the wrong repository.
+ */
+describe('reconciling state against resolved identity', () => {
+  async function reconcileAgainst(expectation: typeof EXPECTATION) {
+    const observed = await observeRuntime(scriptedGit(), STATE, { exists: alwaysExists });
+    return reconcileTaskState(STATE, observed, expectation);
+  }
+
+  it('refuses when the resolved repository has a different id', async () => {
+    const report = await reconcileAgainst({
+      ...EXPECTATION,
+      repository: { ...REPOSITORY, id: 'some-other-repository' },
+    });
+
+    expect(report.verdict).toBe('DIVERGED');
+    expect(report.findings).toContain('REPOSITORY_ID_MISMATCH');
+  });
+
+  it('refuses when the resolved repository root is a different directory', async () => {
+    const report = await reconcileAgainst({
+      ...EXPECTATION,
+      repository: { ...REPOSITORY, root: '/srv/projects/somewhere-else' },
+    });
+
+    expect(report.verdict).toBe('DIVERGED');
+    expect(report.findings).toContain('REPOSITORY_ROOT_MISMATCH');
+  });
+
+  it('accepts a repository root that differs only in spelling', async () => {
+    const report = await reconcileAgainst({
+      ...EXPECTATION,
+      repository: { ...REPOSITORY, root: `${REPOSITORY.root}/` },
+    });
+
+    expect(report.findings).not.toContain('REPOSITORY_ROOT_MISMATCH');
+  });
+
+  it('refuses when the state file describes a different task', async () => {
+    const report = await reconcileAgainst({ ...EXPECTATION, taskId: 'task-0002' });
+
+    expect(report.verdict).toBe('DIVERGED');
+    expect(report.findings).toContain('TASK_ID_MISMATCH');
+  });
+
+  it('refuses when the base branch is no longer the one the repository declares', async () => {
+    const report = await reconcileAgainst({
+      ...EXPECTATION,
+      repository: { ...REPOSITORY, defaultBranch: 'develop' },
+    });
+
+    expect(report.verdict).toBe('DIVERGED');
+    expect(report.findings).toContain('BASE_BRANCH_MISMATCH');
   });
 });
 
@@ -228,8 +302,8 @@ describe('classifying whether a task may resume', () => {
   const context = {
     now: '2026-07-31T15:00:00.000Z',
     authPreflightPassed: true,
-    observedRepositoryId: STATE.repositoryId,
-    observedRepositoryRoot: STATE.repositoryRoot,
+    repository: REPOSITORY,
+    taskId: STATE.taskId,
   };
 
   async function classifyWith(script: GitScript = {}, exists = alwaysExists, state = STATE) {
@@ -280,11 +354,27 @@ describe('classifying whether a task may resume', () => {
 
     const decision = classifyResume(STATE, observed, {
       ...context,
-      observedRepositoryId: 'some-other-repository',
+      repository: { ...REPOSITORY, id: 'some-other-repository' },
     });
 
-    expect(decision.classification).toBe('AUTOMATIC_RESUME_REFUSED');
+    // Caught while reconciling, so it applies to every state — not only to the
+    // one blocking state an unattended resume is ever considered for.
+    expect(decision.classification).toBe('STATE_DIVERGED');
     expect(decision.reasonCodes).toContain('REPOSITORY_ID_MISMATCH');
+  });
+
+  it('checks repository identity for a regular in-flight state too', async () => {
+    const working = parseTaskState(
+      validUsageLimitState({ state: 'IMPLEMENTING', blockedAgent: null, resumeFrom: null }),
+    );
+    const observed = await observeRuntime(scriptedGit(), working, { exists: alwaysExists });
+
+    const decision = classifyResume(working, observed, {
+      ...context,
+      repository: { ...REPOSITORY, id: 'some-other-repository' },
+    });
+
+    expect(decision.classification).toBe('STATE_DIVERGED');
   });
 
   it('hands a state needing an operator to the operator', async () => {

@@ -26,6 +26,7 @@
  * record of. The operator decides; V1-04 only reports.
  */
 
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
@@ -43,6 +44,28 @@ export interface StateStoreOptions {
   readonly provider?: PathProvider;
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
+  /**
+   * The revision this writer read, from {@link StateLoadSuccess.revision}.
+   *
+   * Omitting it does **not** mean "overwrite whatever is there". It means "I
+   * read nothing, so I expect nothing" — the creation case — and the save is
+   * refused if a state already exists. There is deliberately no "force" option:
+   * an unconditional overwrite is precisely the operation this mechanism exists
+   * to prevent, so it is not offered as a flag someone can reach for.
+   */
+  readonly expectedRevision?: string;
+}
+
+/**
+ * An opaque identity for the exact bytes of one persisted state.
+ *
+ * A content digest rather than a counter: it needs no field in `TaskState`
+ * (which is canonical and unchanged), it cannot drift from the file it
+ * describes, and two writers that independently produce byte-identical states
+ * are correctly treated as not conflicting.
+ */
+function revisionOf(contents: string): string {
+  return createHash('sha256').update(contents, 'utf8').digest('hex');
 }
 
 /* ─────────────────────────────── saving ─────────────────────────────────── */
@@ -54,6 +77,8 @@ export type StateSaveFailureCode =
   | 'LOCATION_UNSUITABLE'
   /** The per-repository state directory could not be created. */
   | 'DIRECTORY_CREATE_FAILED'
+  /** Another writer has moved the state on. Nothing was written. */
+  | 'STATE_CONFLICT'
   /** The atomic replacement did not complete. The previous state survives. */
   | 'WRITE_FAILED';
 
@@ -85,10 +110,51 @@ function saveFailure(
 }
 
 /**
+ * Compares what is on disk against what the writer expected to find there.
+ * Returns a reason on conflict, or `null` when the write may proceed.
+ *
+ * ── The window, stated rather than papered over ────────────────────────────
+ *
+ * This is optimistic concurrency: read, compare, then replace. Between the
+ * compare and the `rename` there is a window in which a third writer could land
+ * its own state, and this writer would then overwrite it. Closing that window
+ * entirely needs a lock, and a lock is a service — with an owner, a lease, a
+ * timeout and a recovery story for the process that died holding it.
+ *
+ * The window is nanoseconds wide, it is bounded by a single `rename`, and no
+ * state is ever corrupted by losing that race — the loser's file is complete and
+ * valid, merely superseded. The failure mode this actually defends against is a
+ * writer that read a state minutes ago, went away to run an agent, and came back
+ * to persist a conclusion drawn from a world that has since moved. That window
+ * is minutes wide, and this closes it.
+ */
+function checkExpectedRevision(path: string, expected: string | undefined): string | null {
+  let current: string | null;
+  try {
+    current = readFileSync(path, 'utf8');
+  } catch (error) {
+    if (safeErrnoCode(error) !== 'ENOENT') {
+      // A state that exists but cannot be read is not a state we may replace:
+      // there is no way to prove we are not destroying someone else's work.
+      return 'CURRENT_STATE_UNREADABLE';
+    }
+    current = null;
+  }
+
+  if (expected === undefined) {
+    // The creation case: the writer read nothing, so it expects nothing.
+    return current === null ? null : 'EXPECTED_ABSENT';
+  }
+  if (current === null) return 'EXPECTED_PRESENT';
+  return revisionOf(current) === expected ? null : 'REVISION_MISMATCH';
+}
+
+/**
  * Persists `state` as the current checkpoint of its task.
  *
  * The state is validated *first*, so a contract violation writes nothing at all
- * — not even the directory it would have lived in.
+ * — not even the directory it would have lived in. The expected revision is
+ * checked second, so a conflict likewise creates nothing.
  */
 export function saveTaskState(state: unknown, options: StateStoreOptions = {}): StateSaveResult {
   const provider = options.provider ?? OS_PATH_PROVIDER;
@@ -101,6 +167,9 @@ export function saveTaskState(state: unknown, options: StateStoreOptions = {}): 
 
   const location = deriveTaskStateLocation(value.repositoryId, value.taskId, provider);
   if (!location.ok) return saveFailure('LOCATION_UNSUITABLE', null, location.code);
+
+  const conflict = checkExpectedRevision(location.path, options.expectedRevision);
+  if (conflict !== null) return saveFailure('STATE_CONFLICT', location.path, conflict);
 
   try {
     mkdirSync(location.directory, { recursive: true, mode: 0o700 });
@@ -148,6 +217,12 @@ export interface StateLoadSuccess {
   readonly code: 'LOADED';
   readonly state: TaskState;
   readonly path: string;
+  /**
+   * Identity of the exact bytes this state was read from. Hand it back as
+   * {@link StateStoreOptions.expectedRevision} to persist a state derived from
+   * it; the save is refused if anything advanced in the meantime.
+   */
+  readonly revision: string;
 }
 
 export interface StateLoadFailure {
@@ -234,5 +309,9 @@ export function loadTaskState(
     code: 'LOADED' as const,
     state: parsed.data,
     path,
+    // Taken from the bytes actually read, not from the re-serialised value: a
+    // writer must be held to what was on disk, not to what we would have
+    // written for the same state.
+    revision: revisionOf(raw),
   });
 }
