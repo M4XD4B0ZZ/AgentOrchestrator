@@ -60,6 +60,23 @@ export interface GitCommandResult {
   readonly outcome: GitCommandOutcome;
   /** Trimmed stdout on `OK`, the empty string otherwise. */
   readonly stdout: string;
+  /**
+   * The exit code Git returned, or `null` when no process ran to completion.
+   *
+   * Carried because a handful of Git commands answer a *question* with their
+   * exit status, and collapsing every non-zero into one bucket turns a refusal
+   * to answer into an answer. `merge-base --is-ancestor` is the case that
+   * forced this: it exits 1 to say "no, not an ancestor" and 128 when it could
+   * not evaluate the question at all — a missing ref, say. Those are opposite
+   * meanings, and only the exit code separates them.
+   *
+   * This is a narrow, factual addition: the seam reports what Git said. It is
+   * emphatically *not* a general licence to branch on exit codes — the
+   * `outcome` vocabulary stays the primary contract, and a caller that does
+   * read this must document which specific Git command's exit-status protocol
+   * it is relying on.
+   */
+  readonly exitCode: number | null;
 }
 
 /**
@@ -86,16 +103,13 @@ const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
 const RESULT_UNAVAILABLE: GitCommandResult = Object.freeze({
   outcome: 'UNAVAILABLE' as const,
   stdout: '',
+  exitCode: null,
 });
 
 const RESULT_REFUSED: GitCommandResult = Object.freeze({
   outcome: 'REFUSED_UNSAFE_ARGUMENT' as const,
   stdout: '',
-});
-
-const RESULT_NONZERO: GitCommandResult = Object.freeze({
-  outcome: 'NONZERO_EXIT' as const,
-  stdout: '',
+  exitCode: null,
 });
 
 /** The production {@link GitRunner}. */
@@ -117,6 +131,16 @@ export const runGitCommand: GitRunner = async (cwd, args) => {
   }
 
   if (result.outcome !== 'COMPLETED') return RESULT_UNAVAILABLE;
-  if (result.exitCode !== 0) return RESULT_NONZERO;
-  return Object.freeze({ outcome: 'OK' as const, stdout: result.stdout.trim() });
+  if (result.exitCode !== 0) {
+    return Object.freeze({
+      outcome: 'NONZERO_EXIT' as const,
+      stdout: '',
+      exitCode: result.exitCode,
+    });
+  }
+  return Object.freeze({
+    outcome: 'OK' as const,
+    stdout: result.stdout.trim(),
+    exitCode: 0,
+  });
 };

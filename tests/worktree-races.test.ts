@@ -76,12 +76,16 @@ function intercepting(
   return async (cwd, args) => hook(cwd, args) ?? (await runGitCommand(cwd, args));
 }
 
-const OK = (stdout = ''): GitCommandResult => Object.freeze({ outcome: 'OK' as const, stdout });
+const OK = (stdout = ''): GitCommandResult =>
+  Object.freeze({ outcome: 'OK' as const, stdout, exitCode: 0 });
 const UNAVAILABLE: GitCommandResult = Object.freeze({
   outcome: 'UNAVAILABLE' as const,
   stdout: '',
+  exitCode: null,
 });
-const NONZERO: GitCommandResult = Object.freeze({ outcome: 'NONZERO_EXIT' as const, stdout: '' });
+/** A non-zero exit, with the code Git would have produced for that condition. */
+const NONZERO = (exitCode = 1): GitCommandResult =>
+  Object.freeze({ outcome: 'NONZERO_EXIT' as const, stdout: '', exitCode });
 
 // ── Lost races ──────────────────────────────────────────────────────────────
 
@@ -215,7 +219,7 @@ describe('a worktree that is not what was asked for', () => {
         if (args[args.length - 1] === 'HEAD') return OK('0'.repeat(40));
       }
       // …and the removal that would undo it does not work either.
-      if (startsWith(args, ['worktree', 'remove'])) return NONZERO;
+      if (startsWith(args, ['worktree', 'remove'])) return NONZERO();
       return null;
     });
 
@@ -229,6 +233,65 @@ describe('a worktree that is not what was asked for', () => {
       expect(result.residue).toBe(true);
     }
     expect(existsSync(identity.worktreePath)).toBe(true);
+  });
+});
+
+// ── The ancestry probe's exit status is its answer ──────────────────────────
+
+describe('classifying `merge-base --is-ancestor`', () => {
+  /** Intercepts only the ancestry probe, leaving every other command real. */
+  function ancestryAnswering(result: GitCommandResult): GitRunner {
+    return intercepting((_cwd, args) =>
+      startsWith(args, ['merge-base', '--is-ancestor']) ? result : null,
+    );
+  }
+
+  it.each([
+    [
+      'exit 1 — a real answer of "not an ancestor"',
+      NONZERO(1),
+      'TASK_BRANCH_HAS_UNMERGED_WORK',
+    ],
+    [
+      'exit 128 — Git could not evaluate the question at all',
+      NONZERO(128),
+      'GIT_UNAVAILABLE',
+    ],
+    ['a Git that could not be run', UNAVAILABLE, 'GIT_UNAVAILABLE'],
+  ])('reads %s', async (_label, answer, expected) => {
+    const repository = await freshRepository();
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    expect(prepared.ok).toBe(true);
+    const identity = identityFor(repository, 'V1-03');
+
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
+      git: ancestryAnswering(answer),
+    });
+
+    expect(removal.ok).toBe(false);
+    if (!removal.ok) {
+      expect(removal.code).toBe(expected);
+      expect(removal.worktreeRemoved).toBe(false);
+      expect(removal.branchRemoved).toBe(false);
+    }
+    // Every one of these is a refusal, so the workspace is still standing.
+    expect(existsSync(identity.worktreePath)).toBe(true);
+  });
+
+  it('never blames the task branch when the probe merely failed', async () => {
+    // The regression this classification exists for: a non-zero exit that is
+    // not 1 is Git declining to answer, and must not be reported as "your
+    // branch holds unmerged work" — a reason that would simply be false.
+    const repository = await freshRepository();
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    expect(prepared.ok).toBe(true);
+
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
+      git: ancestryAnswering(NONZERO(128)),
+    });
+
+    expect(removal.ok).toBe(false);
+    if (!removal.ok) expect(removal.code).not.toBe('TASK_BRANCH_HAS_UNMERGED_WORK');
   });
 });
 
@@ -253,7 +316,11 @@ describe('Git that cannot answer', () => {
     const repository = await freshRepository();
     const runner = intercepting((_cwd, args) =>
       startsWith(args, ['rev-parse', '--show-toplevel'])
-        ? Object.freeze({ outcome: 'REFUSED_UNSAFE_ARGUMENT' as const, stdout: '' })
+        ? Object.freeze({
+            outcome: 'REFUSED_UNSAFE_ARGUMENT' as const,
+            stdout: '',
+            exitCode: null,
+          })
         : null,
     );
 
@@ -276,7 +343,7 @@ describe('Git that cannot answer', () => {
       'a base branch that has vanished',
       (id: ReturnType<typeof identityFor>) => (cwd: string, args: readonly string[]) =>
         cwd === id.repositoryRoot && args[args.length - 1] === `refs/heads/${id.baseBranch}`
-          ? NONZERO
+          ? NONZERO()
           : null,
       'BASE_BRANCH_NOT_FOUND',
     ],
@@ -325,7 +392,7 @@ describe('Git that cannot answer', () => {
     const identity = identityFor(repository, 'V1-03');
 
     const runner = intercepting((_cwd, args) =>
-      startsWith(args, ['worktree', 'remove']) ? NONZERO : null,
+      startsWith(args, ['worktree', 'remove']) ? NONZERO() : null,
     );
     const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
 
@@ -345,7 +412,7 @@ describe('Git that cannot answer', () => {
     expect(prepared.ok).toBe(true);
 
     const runner = intercepting((_cwd, args) =>
-      startsWith(args, ['branch', '-d']) ? NONZERO : null,
+      startsWith(args, ['branch', '-d']) ? NONZERO() : null,
     );
     const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
 

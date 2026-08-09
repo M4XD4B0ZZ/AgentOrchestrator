@@ -34,7 +34,7 @@
  */
 
 import type { TaskDefinition } from '../plan/task-definition.js';
-import { localBranchRef } from '../repo/branch-name.js';
+import { localBranchRef, LOCAL_BRANCH_REF_PREFIX } from '../repo/branch-name.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import { runGitCommand, type GitRunner } from './git-command.js';
 import {
@@ -56,8 +56,16 @@ export const WORKSPACE_REMOVAL_FAILURE_CODES = [
   'WORKTREE_NOT_OWNED',
   /** The worktree has uncommitted or untracked changes. Nothing was touched. */
   'WORKTREE_DIRTY',
-  /** The task branch holds commits the base branch does not. Nothing was touched. */
+  /**
+   * The task branch holds commits the base branch does not — established, not
+   * assumed. Nothing was touched.
+   */
   'TASK_BRANCH_HAS_UNMERGED_WORK',
+  /**
+   * The base branch no longer resolves, so whether the task branch holds
+   * unmerged work cannot be decided at all. Nothing was touched.
+   */
+  'BASE_BRANCH_NOT_FOUND',
   /** Git refused to remove the worktree. Nothing was removed. */
   'WORKTREE_REMOVE_FAILED',
 ] as const;
@@ -79,6 +87,8 @@ const REMOVAL_DETAIL: Readonly<Record<WorkspaceRemovalFailureCode, string>> = Ob
   WORKTREE_DIRTY: 'The worktree has uncommitted or untracked changes, so nothing was removed.',
   TASK_BRANCH_HAS_UNMERGED_WORK:
     'The task branch holds commits the base branch does not, so nothing was removed.',
+  BASE_BRANCH_NOT_FOUND:
+    'The declared base branch does not exist, so the task branch could not be shown to be safe to remove.',
   WORKTREE_REMOVE_FAILED: 'Git refused to remove the worktree.',
 });
 
@@ -125,6 +135,54 @@ function removalFailure(
 }
 
 /**
+ * What an ancestry probe established — including that it established nothing.
+ *
+ * `NOT_ANCESTOR` is an *answer*: Git evaluated the question and said no.
+ * `BASE_BRANCH_NOT_FOUND` and `INDETERMINATE` are refusals to answer, and are
+ * kept apart from it because "the base branch is gone" must never be reported
+ * as "your task branch holds unmerged work" — that reason would be false, and a
+ * false reason is worse than none.
+ */
+type AncestryVerdict = 'ANCESTOR' | 'NOT_ANCESTOR' | 'BASE_BRANCH_NOT_FOUND' | 'INDETERMINATE';
+
+/**
+ * Classifies `git merge-base --is-ancestor`, whose exit status *is* its answer.
+ *
+ * The protocol this relies on, stated explicitly because it is the one place in
+ * this slice that reads an exit code:
+ *
+ *   - **0** — `candidateRef` is an ancestor of `baseRef`;
+ *   - **1** — it is not. A real answer, and the only non-zero one that is;
+ *   - **anything else** (128 in practice) — Git could not evaluate the
+ *     question: a ref that does not resolve, a broken repository, a bad
+ *     invocation. Never an answer.
+ *
+ * On that third branch, and only there, one extra command distinguishes the
+ * common, actionable cause — the base branch no longer exists — from everything
+ * else. The happy path stays a single Git call.
+ */
+async function classifyAncestry(
+  git: GitRunner,
+  root: string,
+  candidateRef: string,
+  baseRef: string,
+): Promise<AncestryVerdict> {
+  const probe = await git(root, [
+    'merge-base',
+    '--is-ancestor',
+    '--end-of-options',
+    candidateRef,
+    baseRef,
+  ]);
+  if (probe.outcome === 'OK') return 'ANCESTOR';
+  if (probe.outcome === 'NONZERO_EXIT' && probe.exitCode === 1) return 'NOT_ANCESTOR';
+
+  const base = await git(root, ['rev-parse', '--verify', '--quiet', '--end-of-options', baseRef]);
+  if (base.outcome === 'NONZERO_EXIT') return 'BASE_BRANCH_NOT_FOUND';
+  return 'INDETERMINATE';
+}
+
+/**
  * Removes the workspace belonging to one task, if it provably belongs to it.
  *
  * Never throws for an expected condition. Every failure leaves the workspace
@@ -150,10 +208,16 @@ export async function removeTaskWorkspace(
 
   const registration = findByPath(registry.entries, identity.worktreePath);
   if (registration === null) return removalFailure('WORKTREE_NOT_OWNED');
-  if (registration.branchRef !== workBranchRef) return removalFailure('WORKTREE_NOT_OWNED');
-  if (!isOwnedTaskBranch(identity, identity.workBranch)) {
-    // Unreachable while the derivation is what it is; kept as a floor so that
-    // loosening the naming rule later cannot silently widen what may be deleted.
+
+  // Judged on the branch *Git reports*, not on a value derived here — a check
+  // that compared the derived name with itself would always pass and prove
+  // nothing. `isOwnedTaskBranch` requires both the reserved namespace and an
+  // exact match, so a detached worktree (no branch at all) and one holding
+  // somebody else's branch are refused by the same statement.
+  const registeredBranch = registration.branchRef?.startsWith(LOCAL_BRANCH_REF_PREFIX)
+    ? registration.branchRef.slice(LOCAL_BRANCH_REF_PREFIX.length)
+    : null;
+  if (registeredBranch === null || !isOwnedTaskBranch(identity, registeredBranch)) {
     return removalFailure('WORKTREE_NOT_OWNED');
   }
 
@@ -170,17 +234,22 @@ export async function removeTaskWorkspace(
   // Checked *before* the worktree goes, not after: discovering unmerged work
   // once the checkout is gone would leave a branch whose commits no longer have
   // a working tree to be inspected in.
-  const ancestor = await git(root, [
-    'merge-base',
-    '--is-ancestor',
-    '--end-of-options',
+  const ancestry = await classifyAncestry(
+    git,
+    root,
     workBranchRef,
     localBranchRef(identity.baseBranch),
-  ]);
-  if (ancestor.outcome === 'UNAVAILABLE' || ancestor.outcome === 'REFUSED_UNSAFE_ARGUMENT') {
-    return removalFailure('GIT_UNAVAILABLE');
+  );
+  switch (ancestry) {
+    case 'ANCESTOR':
+      break;
+    case 'NOT_ANCESTOR':
+      return removalFailure('TASK_BRANCH_HAS_UNMERGED_WORK');
+    case 'BASE_BRANCH_NOT_FOUND':
+      return removalFailure('BASE_BRANCH_NOT_FOUND');
+    case 'INDETERMINATE':
+      return removalFailure('GIT_UNAVAILABLE');
   }
-  if (ancestor.outcome !== 'OK') return removalFailure('TASK_BRANCH_HAS_UNMERGED_WORK');
 
   // --- Remove, unforced ----------------------------------------------------
   const removed = await git(root, ['worktree', 'remove', identity.worktreePath]);

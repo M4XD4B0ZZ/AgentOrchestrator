@@ -265,8 +265,12 @@ describe('G — a worktree registration collision is refused', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // The branch check comes first and is the more specific answer.
-      expect(['TASK_BRANCH_EXISTS', 'WORKTREE_ALREADY_REGISTERED']).toContain(result.code);
+      // Pinned to the one code the ordering actually produces, not to a set of
+      // acceptable ones: the branch is checked before the registry, so this is
+      // `TASK_BRANCH_EXISTS` and nothing else. Accepting either would hide the
+      // day that ordering changes — the same weakness V1-01's RR-F3 removed
+      // from the branch-name tests.
+      expect(result.code).toBe('TASK_BRANCH_EXISTS');
       expect(result.residue).toBe(false);
     }
     expect(existsSync(elsewhere)).toBe(true);
@@ -430,6 +434,32 @@ describe('J — a workspace holding work is never destroyed', () => {
   });
 });
 
+describe('J2 — a base branch that no longer exists', () => {
+  it('is reported as such, not as unmerged work on the task branch', async () => {
+    const repository = await freshRepository();
+    const workspace = await prepared(repository, 'V1-03');
+
+    // The base really is gone: move the main checkout off it, then delete it.
+    // `merge-base --is-ancestor` now exits 128 rather than 1 — it cannot
+    // evaluate the question, which is a different thing from answering "no".
+    git(repository.root, ['switch', '--quiet', '-c', 'parked']);
+    git(repository.root, ['branch', '-D', 'main']);
+
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+
+    expect(removal.ok).toBe(false);
+    if (!removal.ok) {
+      expect(removal.code).toBe('BASE_BRANCH_NOT_FOUND');
+      expect(removal.code).not.toBe('TASK_BRANCH_HAS_UNMERGED_WORK');
+      expect(removal.worktreeRemoved).toBe(false);
+      expect(removal.branchRemoved).toBe(false);
+    }
+    // Refused means nothing happened, exactly as for every other refusal.
+    expect(existsSync(workspace.worktreePath)).toBe(true);
+    expect(git(repository.root, ['branch', '--list', workspace.workBranch]).trim()).not.toBe('');
+  });
+});
+
 // ── K. Anything not provably ours ───────────────────────────────────────────
 
 describe('K — an unrelated worktree or branch is never removed', () => {
@@ -457,6 +487,27 @@ describe('K — an unrelated worktree or branch is never removed', () => {
     }
     expect(existsSync(identity.worktreePath)).toBe(true);
     expect(git(repository.root, ['branch', '--list', 'someones-experiment']).trim()).not.toBe('');
+  });
+
+  it('refuses a registered worktree with no branch at all', async () => {
+    const repository = await freshRepository();
+    const identity = identityFor(repository, 'V1-03');
+    const head = git(repository.root, ['rev-parse', 'HEAD']).trim();
+
+    // A detached worktree sitting at the derived path. Ownership is judged on
+    // the branch Git reports, and here Git reports none — so there is nothing
+    // to match the derived task branch against, and it is not ours.
+    mkdirSync(identity.worktreeParent, { recursive: true });
+    git(repository.root, ['worktree', 'add', '--quiet', '--detach', identity.worktreePath, head]);
+
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+
+    expect(removal.ok).toBe(false);
+    if (!removal.ok) {
+      expect(removal.code).toBe('WORKTREE_NOT_OWNED');
+      expect(removal.worktreeRemoved).toBe(false);
+    }
+    expect(existsSync(identity.worktreePath)).toBe(true);
   });
 
   it('refuses a plain directory that was never a registered worktree', async () => {

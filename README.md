@@ -1213,6 +1213,15 @@ workspace.
 `-D`. There is deliberately no option to force: discarding real work is a
 decision for a human with Git, not an orchestrator primitive.
 
+The third proof reads an exit status, and it is the one place in this slice that
+does, so the protocol is stated rather than assumed. `git merge-base
+--is-ancestor` exits **0** for "yes", **1** for "no", and **anything else**
+(128 in practice) when it could not evaluate the question at all — a ref that no
+longer resolves, say. Only exit 1 is an answer. Collapsing every non-zero into
+one bucket would let "the base branch is gone" be reported as "your task branch
+holds unmerged work", which is not merely vaguer but false; a deleted base is
+therefore its own outcome, and an unevaluable probe is `GIT_UNAVAILABLE`.
+
 ### Failure codes
 
 Failures are data and carry a static sentence, never an interpolated path, task
@@ -1227,7 +1236,9 @@ Preparation: `TASK_ID_INVALID`, `REPOSITORY_ROOT_UNSUITABLE`,
 `WORKTREE_VERIFICATION_FAILED`, `WORKTREE_ROLLBACK_INCOMPLETE`.
 
 Removal: the five identity codes, plus `GIT_UNAVAILABLE`, `WORKTREE_NOT_OWNED`,
-`WORKTREE_DIRTY`, `TASK_BRANCH_HAS_UNMERGED_WORK`, `WORKTREE_REMOVE_FAILED`.
+`WORKTREE_DIRTY`, `TASK_BRANCH_HAS_UNMERGED_WORK`, `BASE_BRANCH_NOT_FOUND`,
+`WORKTREE_REMOVE_FAILED`. `BASE_BRANCH_NOT_FOUND` carries the same meaning it
+does during preparation — a code means one thing wherever it is read.
 Success is `WORKSPACE_REMOVED`, or `WORKSPACE_PARTIALLY_REMOVED` when the
 worktree went and the owned branch did not — reported as its own outcome so a
 leftover branch is never invisible.
