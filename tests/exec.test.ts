@@ -6,8 +6,7 @@
  * platform.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -19,6 +18,7 @@ import {
   type CommandResult,
 } from '../src/doctor/exec.js';
 import { SENSITIVE_MARKER } from './fixtures.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 import { ExecArtifactRegistry } from './helpers/exec-cleanup.js';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -31,7 +31,7 @@ const IS_WINDOWS = process.platform === 'win32';
 const artifacts = new ExecArtifactRegistry();
 
 function makeTempDir(prefix = 'agent-loop-exec-'): string {
-  return artifacts.registerTempDir(mkdtempSync(join(tmpdir(), prefix)));
+  return artifacts.registerTempDir(makeCanonicalTempDir(prefix));
 }
 
 /**

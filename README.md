@@ -73,9 +73,14 @@ excluded**. It is a regular part of `test:foundation-safe`, and therefore of
 `verify`. The temporary AO-008 exclusion it used to carry was retired in
 AO-008-S3.
 
-There is currently no CI workflow in this repository (no `.github/workflows`);
-`npm run verify` is the complete local contract until one is added, and any
-future CI must call it, or run an equivalent, non-optional dist-doctor step.
+CI runs exactly this command. `.github/workflows/verify.yml` calls `npm run
+verify` on `windows-latest` for every pull request against `main` and every push
+to `main` — the same canonical gate, not a reduced substitute, and deliberately
+not on a Linux runner: `verify` ends in a real-process probe of the Windows
+process-tree termination path and checks a Windows profile resolver, so a green
+Ubuntu run would not carry the same meaning. The delivery rules that gate sits
+in — pull requests, required checks, what "merge" means here — are in
+`CLAUDE.md`.
 
 The individual steps remain available on their own:
 
