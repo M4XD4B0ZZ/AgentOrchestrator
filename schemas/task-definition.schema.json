@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-orchestrator.local/schemas/task-definition.schema.json",
+  "title": "AgentOrchestrator task definition",
+  "description": "Structural contract for the YAML frontmatter of one task file in a repository’s MARKDOWN_DIRECTORY task source. Generated from the Zod schema in src/plan/task-definition.ts by `npm run schema:generate` — do not edit by hand. This is the *static plan*, not the runtime state: it is deliberately unrelated to task-state.schema.json, shares no field with it, and carries no schema version because it is read from a repository rather than persisted by the orchestrator. Cross-field invariants (a duplicate-free dependsOn list, no self-dependency) and the task-id grammar beyond \"a string\" are NOT expressible in JSON Schema and are enforced only by TaskDefinitionSchema at runtime. Graph-wide rules — unique ids, dependencies that resolve, no cycles — belong to src/plan/task-graph.ts and are not properties of a single document at all.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "OPEN",
+        "DONE"
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "NORMAL",
+        "REMEDIATION"
+      ]
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "NORMAL",
+        "LOW"
+      ]
+    },
+    "currentFocus": {
+      "type": "boolean"
+    },
+    "dependsOn": {
+      "maxItems": 64,
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "id",
+    "title",
+    "status",
+    "kind",
+    "priority",
+    "currentFocus",
+    "dependsOn"
+  ],
+  "additionalProperties": false
+}

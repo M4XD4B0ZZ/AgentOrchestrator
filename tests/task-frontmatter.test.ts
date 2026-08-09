@@ -1,0 +1,215 @@
+/**
+ * The boundary where untrusted repository *markdown* becomes task *data*.
+ *
+ * A task file is repository-supplied input in the strongest sense: it is edited
+ * by hand, it arrives through whatever pull request landed it, and the
+ * orchestrator reads it in order to decide what to do next. Everything this
+ * suite pins is therefore a containment property, not a convenience: the body
+ * is never interpreted, the parser never speaks to the process, and every
+ * hostile document is a return value rather than an exception.
+ */
+
+import { describe, expect, it } from 'vitest';
+
+import {
+  MAX_TASK_FRONTMATTER_BYTES,
+  readTaskFrontmatter,
+} from '../src/plan/task-frontmatter.js';
+
+const WELL_FORMED = [
+  '---',
+  'id: V1-02',
+  'title: Task source',
+  'status: OPEN',
+  'kind: NORMAL',
+  'priority: HIGH',
+  'currentFocus: true',
+  'dependsOn:',
+  '  - V1-01',
+  '---',
+  '',
+  'Some human prose.',
+  '',
+].join('\n');
+
+describe('task frontmatter: the happy shape', () => {
+  it('returns the frontmatter mapping', () => {
+    const result = readTaskFrontmatter(WELL_FORMED);
+    expect(result.outcome).toBe('FRONTMATTER');
+    if (result.outcome !== 'FRONTMATTER') return;
+    expect(result.data).toMatchObject({ id: 'V1-02', status: 'OPEN', dependsOn: ['V1-01'] });
+  });
+
+  it('accepts a file that is nothing but frontmatter', () => {
+    expect(readTaskFrontmatter('---\nid: A\n---\n').outcome).toBe('FRONTMATTER');
+    expect(readTaskFrontmatter('---\nid: A\n---').outcome).toBe('FRONTMATTER');
+  });
+
+  it('accepts CRLF line endings, which is what a Windows editor writes', () => {
+    const crlf = WELL_FORMED.split('\n').join('\r\n');
+    const result = readTaskFrontmatter(crlf);
+    expect(result.outcome).toBe('FRONTMATTER');
+    if (result.outcome !== 'FRONTMATTER') return;
+    expect(result.data).toMatchObject({ id: 'V1-02' });
+  });
+
+  it('accepts a leading UTF-8 BOM, which is also what a Windows editor writes', () => {
+    const result = readTaskFrontmatter(`\ufeff${WELL_FORMED}`);
+    expect(result.outcome).toBe('FRONTMATTER');
+  });
+
+  it('yields an empty document for empty frontmatter, rather than inventing one', () => {
+    const result = readTaskFrontmatter('---\n---\nbody\n');
+    expect(result.outcome).toBe('FRONTMATTER');
+    if (result.outcome !== 'FRONTMATTER') return;
+    expect(result.data).toBeNull();
+  });
+});
+
+describe('task frontmatter: the body is never interpreted', () => {
+  it('ignores a body that looks like more frontmatter', () => {
+    const text = [
+      '---',
+      'id: A',
+      '---',
+      '',
+      'Prose that talks about frontmatter:',
+      '',
+      '---',
+      'id: B',
+      'priority: HIGH',
+      '---',
+      '',
+    ].join('\n');
+    const result = readTaskFrontmatter(text);
+    expect(result.outcome).toBe('FRONTMATTER');
+    if (result.outcome !== 'FRONTMATTER') return;
+    expect(result.data).toEqual({ id: 'A' });
+  });
+
+  it('ignores a body containing YAML the parser would have refused', () => {
+    const text = ['---', 'id: A', '---', '', 'key: !!weird [1, 2', ''].join('\n');
+    expect(readTaskFrontmatter(text).outcome).toBe('FRONTMATTER');
+  });
+
+  it('does not let an enormous body count against the frontmatter budget', () => {
+    const text = `---\nid: A\n---\n${'x'.repeat(MAX_TASK_FRONTMATTER_BYTES * 2)}`;
+    expect(readTaskFrontmatter(text).outcome).toBe('FRONTMATTER');
+  });
+});
+
+describe('task frontmatter: absent or unterminated', () => {
+  it('reports a file with no frontmatter as MISSING', () => {
+    expect(readTaskFrontmatter('# Just a heading\n').outcome).toBe('MISSING');
+    expect(readTaskFrontmatter('').outcome).toBe('MISSING');
+  });
+
+  it('requires the delimiter on the very first line', () => {
+    expect(readTaskFrontmatter('\n---\nid: A\n---\n').outcome).toBe('MISSING');
+    expect(readTaskFrontmatter(' ---\nid: A\n---\n').outcome).toBe('MISSING');
+  });
+
+  it('refuses an opening delimiter that is never closed', () => {
+    expect(readTaskFrontmatter('---\nid: A\n').outcome).toBe('MALFORMED');
+  });
+
+  it('requires the closing delimiter to be exactly three dashes', () => {
+    // `...` ends a YAML document but is not this format's delimiter, and
+    // `--- ` with trailing text is a *new* document rather than a terminator.
+    expect(readTaskFrontmatter('---\nid: A\n...\n').outcome).toBe('MALFORMED');
+    expect(readTaskFrontmatter('---\nid: A\n----\n').outcome).toBe('MALFORMED');
+  });
+});
+
+describe('task frontmatter: hostile documents are return values', () => {
+  it('refuses frontmatter beyond the size budget', () => {
+    const oversized = `---\n${'k: v\n'.repeat(MAX_TASK_FRONTMATTER_BYTES)}---\n`;
+    expect(readTaskFrontmatter(oversized).outcome).toBe('TOO_LARGE');
+  });
+
+  it('refuses malformed YAML', () => {
+    expect(readTaskFrontmatter('---\nid: [1, 2\n---\n').outcome).toBe('MALFORMED');
+    expect(readTaskFrontmatter('---\n\tid: A\n---\n').outcome).toBe('MALFORMED');
+    expect(readTaskFrontmatter('---\nid: A\nid: B\n---\n').outcome).toBe('MALFORMED');
+  });
+
+  it('refuses a custom or unresolved YAML tag', () => {
+    expect(readTaskFrontmatter('---\nid: !!python/object:os.system A\n---\n').outcome).toBe(
+      'MALFORMED',
+    );
+    expect(readTaskFrontmatter('---\nid: !Custom A\n---\n').outcome).toBe('MALFORMED');
+  });
+
+  it('refuses a document stream where one document was expected', () => {
+    expect(readTaskFrontmatter('---\nid: A\n--- \nid: B\n---\n').outcome).toBe('MALFORMED');
+  });
+
+  it('refuses an alias expansion beyond the budget', () => {
+    const bomb = [
+      '---',
+      'a: &a ["x","x","x","x","x","x","x","x","x"]',
+      'b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]',
+      'c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]',
+      'd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]',
+      'e: [*d,*d,*d,*d,*d,*d,*d,*d,*d]',
+      '---',
+    ].join('\n');
+    expect(readTaskFrontmatter(bomb).outcome).toBe('MALFORMED');
+  });
+
+  it('refuses a __proto__ key at the top level, before any object exists', () => {
+    const result = readTaskFrontmatter('---\nid: A\n__proto__:\n  polluted: true\n---\n');
+    expect(result.outcome).toBe('FORBIDDEN_KEY');
+    if (result.outcome !== 'FORBIDDEN_KEY') return;
+    expect(result.count).toBe(1);
+  });
+
+  it('refuses a nested __proto__ key just as firmly', () => {
+    const result = readTaskFrontmatter('---\nid: A\nnested:\n  __proto__:\n    x: 1\n---\n');
+    expect(result.outcome).toBe('FORBIDDEN_KEY');
+  });
+
+  it('never pollutes Object.prototype, whatever it refused', () => {
+    readTaskFrontmatter('---\n__proto__:\n  polluted: true\n---\n');
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+
+  it('never throws, for any input', () => {
+    const inputs = [
+      '---\n',
+      '---\n---\n---\n',
+      '---\n%YAML 1.1\n---\n',
+      `---\n${'['.repeat(2000)}\n---\n`,
+      '---\n\u0000\n---\n',
+      '\ufeff',
+    ];
+    for (const input of inputs) {
+      expect(() => readTaskFrontmatter(input), JSON.stringify(input.slice(0, 20))).not.toThrow();
+    }
+  });
+});
+
+describe('task frontmatter: nothing reaches the process', () => {
+  it('routes no parser warning to process.emitWarning', () => {
+    const original = process.emitWarning;
+    const seen: string[] = [];
+    // The warning text quotes the offending source line, which is exactly the
+    // repository content that must not reach stderr.
+    process.emitWarning = ((warning: string | Error) => {
+      seen.push(typeof warning === 'string' ? warning : warning.message);
+    }) as typeof process.emitWarning;
+    try {
+      readTaskFrontmatter('---\nsecret: !UnknownTag zzQUARANTINEDzz\n---\n');
+      readTaskFrontmatter('---\nid: !!unknown/tag zzQUARANTINEDzz\n---\n');
+    } finally {
+      process.emitWarning = original;
+    }
+    expect(seen.join('\n')).not.toContain('zzQUARANTINEDzz');
+    expect(seen).toEqual([]);
+  });
+
+  it('carries no fragment of the document in its outcome', () => {
+    const result = readTaskFrontmatter('---\nid: [zzQUARANTINEDzz\n---\n');
+    expect(JSON.stringify(result)).not.toContain('zzQUARANTINEDzz');
+  });
+});
