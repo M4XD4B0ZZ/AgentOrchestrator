@@ -54,6 +54,16 @@ export const TASK_STATE_SCHEMA_FILE = join(SCHEMAS_DIR, 'task-state.schema.json'
  */
 export const REPO_PROFILE_SCHEMA_FILE = join(SCHEMAS_DIR, 'repo-profile.schema.json');
 
+/**
+ * The generated task-definition contract, as shipped by this package.
+ *
+ * Like the profile contract, this is a location inside the *orchestrator's own*
+ * installation, not inside a target repository. A target repository's task
+ * files are found relative to its canonical root by `src/plan/discover-tasks.ts`
+ * and never through this module.
+ */
+export const TASK_DEFINITION_SCHEMA_FILE = join(SCHEMAS_DIR, 'task-definition.schema.json');
+
 /** Directory name of the orchestrator home inside the OS user profile. */
 export const ORCHESTRATOR_HOME_DIR_NAME = '.agent-orchestrator';
 

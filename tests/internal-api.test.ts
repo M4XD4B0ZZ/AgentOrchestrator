@@ -20,6 +20,7 @@ import * as resumePolicy from '../src/core/resume-policy.js';
 import * as automaticResume from '../src/core/automatic-resume.js';
 import * as states from '../src/core/states.js';
 import * as transitions from '../src/core/transitions.js';
+import * as taskDefinition from '../src/plan/task-definition.js';
 import { safeParseTaskState } from '../src/core/task-state.js';
 import { validReadyForPrState } from './fixtures.js';
 
@@ -77,6 +78,28 @@ describe('public runtime API', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('re-exports the structural task-definition schema from no module outside an internal directory', () => {
+    // Same rule, same reason, for the V1-02 planning contract:
+    // `TaskDefinitionObjectSchema` accepts a task that depends on itself and a
+    // `dependsOn` list that repeats an entry, both of which
+    // `TaskDefinitionSchema` refuses.
+    const offenders: string[] = [];
+    for (const file of sourceFiles()) {
+      if (file.includes(INTERNAL_SEGMENT)) continue;
+      if (/export\s*\{[^}]*TaskDefinitionObjectSchema/.test(readFileSync(file, 'utf8'))) {
+        offenders.push(relative(PACKAGE_ROOT, file));
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('exposes the refined task-definition schema and its parse helpers instead', () => {
+    expect(taskDefinition).not.toHaveProperty('TaskDefinitionObjectSchema');
+    expect(taskDefinition).toHaveProperty('TaskDefinitionSchema');
+    expect(typeof taskDefinition.parseTaskDefinition).toBe('function');
+    expect(typeof taskDefinition.safeParseTaskDefinition).toBe('function');
   });
 
   it('has no barrel file that could re-export internals wholesale', () => {

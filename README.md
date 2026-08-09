@@ -927,12 +927,216 @@ itself, which is the class of value `src/core/safe-error.ts` exists to keep out
 of user-facing output. `PROFILE_SCHEMA_INVALID` additionally carries an
 `issueCount` — a count, not the issues.
 
+## The task-selection contract
+
+The repository profile *declares* where tasks live. This is the layer that
+reads them, and turns them into one decision: **which task now?**
+
+It is a planning layer only. Selecting a task neither starts it nor writes
+anything: no worktree, no branch, no `TaskState`, no Git call at all.
+
+### `TaskDefinition` is not `TaskState`
+
+The two contracts are deliberately unrelated, and the separation is enforced by
+a test rather than by convention:
+
+| | `TaskDefinition` (`src/plan/`) | `TaskState` (`src/core/`) |
+| --- | --- | --- |
+| what it is | the **static plan** a repository wrote down | the **runtime record** of one task run |
+| who writes it | a human, in the repository | the orchestrator |
+| how many | one per task file, many per repository | exactly one per task |
+| versioned | no — it is read, never persisted by this tool | yes, `TASK_STATE_SCHEMA_VERSION` |
+| fields | `id`, `title`, `status`, `kind`, `priority`, `currentFocus`, `dependsOn` | states, rounds, commits, worktree, resume point, findings |
+
+Neither module imports the other. `TaskState` gained no `dependsOn`, `priority`,
+`currentFocus` or `kind`; `TaskDefinition` carries no state, no round, no commit
+and no `schemaVersion`. Merging them would have produced a value that is
+simultaneously a plan and a state — one in which a repository's markdown could
+assert a runtime fact.
+
+### What a task file looks like
+
+Every task is exactly one `<id>.md` file directly inside the declared
+`MARKDOWN_DIRECTORY`. There is no recursion, so an `archive/` subdirectory is
+not a task source.
+
+```markdown
+---
+id: V1-02
+title: Task source and deterministic selection
+status: OPEN            # or DONE
+kind: NORMAL            # or REMEDIATION
+priority: HIGH          # or NORMAL, LOW
+currentFocus: true
+dependsOn:
+  - V1-01
+---
+
+Optional prose for a human reader.
+```
+
+Every field is required; nothing is defaulted on the repository's behalf, and
+unknown keys are refused. **The body is never interpreted** — it contributes no
+dependency, no priority and no focus. There is no markdown heuristic and no
+natural-language extraction anywhere in this layer, because a plan that could be
+changed by rewording a paragraph would make the orchestrator's behaviour a
+function of prose.
+
+`currentFocus` is a ranking signal and explicitly *not* a singleton: any number
+of tasks may claim focus, and the ranking decides between them.
+
+### Identifiers, and the filename they imply
+
+A task id matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` — so `V1-02`, `AO-008`
+and `AO-008-S2-R1` are ids, while anything carrying a path separator,
+whitespace, a control character or a shell metacharacter is not. Three further
+refusals are Windows-shaped: `.` and `..`, a **trailing dot** (Windows strips
+it when opening a file, so `V1-02..md` and `V1-02.md` would be one file with two
+ids), and a **reserved device name** in any case — `NUL.md` is not a file on
+Windows but the null device, and reading it would succeed and yield nothing.
+
+The filename must be exactly `<id>.md`, lowercase extension, and the frontmatter
+`id` must agree with it exactly. A `V1-02.md` declaring `id: V1-03` is
+`TASK_ID_FILENAME_MISMATCH`; there is no implicit renaming in either direction.
+
+An id is the only piece of repository-authored task text that travels: it is the
+one value a planning failure carries, precisely because it has passed that
+grammar. A title, a filename or a path never appears in a failure.
+
+### Discovery, and its safety rules
+
+The task source is located from `ResolvedRepository.root` — **`process.cwd()` is
+never consulted** — and then checked afresh, because V1-01 proved only that the
+declared string was containable, not that anything exists:
+
+1. the directory is classified with `lstat`, so a link is seen rather than
+   followed; a link is `TASK_SOURCE_PATH_UNSAFE`;
+2. it must exist and be a directory;
+3. its canonical `realpath` must still be the joined path and still contained in
+   the canonical root;
+4. only **direct children** ending in a lowercase `.md` are candidates —
+   `.MD`, `.markdown` and `.md.bak` are not task files and are ignored;
+5. candidates are sorted **by id before any of them is opened**, so which file
+   is read first, and therefore which failure is reported first, is a property
+   of the repository rather than of the filesystem;
+6. every candidate is `lstat`-classified, size-capped and re-canonicalised the
+   same way. A link, a directory that merely ends in `.md`, or a file whose
+   canonical path is not itself, is `TASK_FILE_UNSAFE`.
+
+**An empty task source is `TASK_SOURCE_EMPTY`, never `ALL_TASKS_COMPLETE`.**
+That is the most important negative result in the layer: the other reading would
+turn a mistyped path, or a directory that never got committed, into a confident
+report that the work is finished.
+
+### Frontmatter safety
+
+A task file is untrusted repository input, so its frontmatter goes through the
+same hardened YAML boundary the repository profile uses. Those rules moved into
+`src/yaml/safe-yaml.ts` in this slice — plain YAML 1.2 core schema, merge keys
+off, a warned document refused, errors read from the document rather than
+caught, one document rather than a silently truncated stream, an explicit alias
+budget, and `__proto__` refused at any depth *before* any JavaScript object
+exists. The extraction changed none of V1-01's behaviour; it made two boundaries
+share one policy instead of two that could drift apart.
+
+On top of that, the frontmatter must be delimited exactly: `---` on the very
+first line, and a closing line that is exactly `---`. A BOM is stripped first,
+CRLF is accepted. The block is capped at 8 KiB and the file at 256 KiB — the
+budget is measured on the frontmatter, so a long human-written body never costs
+a task its validity.
+
+### The dependency DAG
+
+`dependsOn: [A]` on task `B` means the edge **A → B**: A must be `DONE` before B
+becomes eligible. The graph is normalised from the ids alone — tasks sorted by
+id, both edge lists sorted by id, and a topological order that breaks its own
+ties by id — so the same tasks produce one identical graph whatever order they
+arrived in. Nothing mutable is handed out.
+
+Validation is whole-set and fail-closed. Nothing is repaired: a cycle is not
+broken by dropping an edge, an unknown dependency is not ignored, and a
+duplicate id does not resolve to "last one wins".
+
+| code | meaning |
+| --- | --- |
+| `TASK_GRAPH_EMPTY` | no definitions at all |
+| `TASK_GRAPH_TOO_LARGE` | more than 512 tasks |
+| `TASK_ID_DUPLICATE` | two tasks claim one id — **including ids differing only in case**, which cannot both exist on Windows |
+| `TASK_DEPENDENCY_SELF` | a task lists itself |
+| `TASK_DEPENDENCY_UNKNOWN` | a dependency names no declared task |
+| `TASK_GRAPH_CYCLE` | the edges contain a cycle |
+
+The graph layer re-checks the self-dependency rule that `TaskDefinitionSchema`
+already enforces. It is typed to receive validated definitions but does not rely
+on that: a builder that assumed its input was validated is one refactor away
+from being wrong, and its failure mode is an orchestrator acting on a plan that
+is not one.
+
+### Eligibility and selection
+
+A task is **eligible** when it is `OPEN` and every task it depends on is `DONE`.
+The two ways of not being eligible are reported separately, because they mean
+opposite things to an operator: `ALREADY_DONE` is finished work,
+`BLOCKED_BY_DEPENDENCIES` is waiting work — and the dependencies it waits for
+are named.
+
+Eligible tasks are ordered by a five-element tuple, compared most-significant
+first:
+
+1. **kind** — `REMEDIATION` before `NORMAL`. Starting new work while a known
+   defect stands is how a plan accumulates unfinished corrections.
+2. **`currentFocus`** — focused first. Priority is a standing property of a
+   task; focus is a statement about *now*, so it outranks priority.
+3. **priority** — `HIGH`, `NORMAL`, `LOW`.
+4. **unlock count**, descending — the number of distinct not-yet-`DONE` tasks
+   that *transitively* depend on this one. Between otherwise equal tasks, the
+   one that releases more blocked work goes first.
+5. **id**, ascending by UTF-16 code unit (never `localeCompare`, which would
+   make the winner a function of the operator's Windows region setting).
+
+The id is unique, so the order is **total**: no two eligible tasks can tie and
+no residual choice is left to an implementation detail. The selection outcome
+carries the ranking and the full eligibility report alongside the winner — the
+reasoning is part of the answer.
+
+| outcome | meaning |
+| --- | --- |
+| `TASK_SELECTED` | one task chosen; it is the head of the published ranking |
+| `ALL_TASKS_COMPLETE` | the plan is non-empty and every task is `DONE` |
+| `NO_ELIGIBLE_TASK` | a fail-closed floor, not a reachable state |
+
+`NO_ELIGIBLE_TASK` cannot occur for a graph this layer accepts: in an acyclic
+graph whose dependencies all resolve, the topologically first `OPEN` task can
+have no `OPEN` dependency, so an eligible task always exists. It is kept so that
+a future rule which broke that argument would surface explicitly instead of
+being rounded to `ALL_TASKS_COMPLETE`. A test asserts the unreachability over a
+hundred generated graphs.
+
+### Failure codes
+
+As everywhere else, failures are data and carry a static sentence written in
+this repository, never an interpolated path, filename, title, Zod issue or `fs`
+exception:
+
+`TASK_SOURCE_NOT_FOUND`, `TASK_SOURCE_NOT_DIRECTORY`, `TASK_SOURCE_PATH_UNSAFE`,
+`TASK_SOURCE_READ_FAILED`, `TASK_SOURCE_EMPTY`, `TASK_FILE_NAME_INVALID`,
+`TASK_FILE_UNSAFE`, `TASK_FILE_TOO_LARGE`, `TASK_FILE_READ_FAILED`,
+`TASK_FRONTMATTER_MISSING`, `TASK_FRONTMATTER_MALFORMED`,
+`TASK_FRONTMATTER_TOO_LARGE`, `TASK_FRONTMATTER_FORBIDDEN_KEY`,
+`TASK_DEFINITION_INVALID`, `TASK_ID_FILENAME_MISMATCH`, plus the six graph codes
+above. A failure additionally carries the offending `taskId` where there is one,
+and an `issueCount` — a count, not the issues.
+
+`schemas/task-definition.schema.json` is generated from the same Zod source by
+`npm run schema:generate` and is drift-checked against it, exactly like the
+state and profile documents. The task-state schema was not touched.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: task discovery from a profile's `taskSource`, worktree setup, the
-implement/verify/review loop, resume handling, and finding-fingerprint
-computation. The repository profile *declares* the task source, the context
+build: worktree setup, the implement/verify/review loop, resume handling, and
+finding-fingerprint computation. The repository profile *declares* the context
 sources, the verification phases and the write scope; no code in this build
-reads a task, opens a context file, runs a verification command or enforces a
-scope.
+opens a context file, runs a verification command or enforces a scope. Task
+selection exists as a library and has no CLI command yet: nothing in
+`agent-loop` calls it.
