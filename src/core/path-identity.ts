@@ -56,7 +56,26 @@ function canonicalise(value: string): string {
   return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;
 }
 
-/** `true` when `value` can be compared at all: non-blank and absolute. */
+/**
+ * `true` when `value` can be compared at all: non-blank and absolute.
+ *
+ * ── A known narrowness, deliberately not closed here (F-4) ─────────────────
+ *
+ * On Windows `isAbsolute` answers `true` for a **drive-relative** root — `\foo`,
+ * and `/foo`, which normalises to the same thing — because such a path is
+ * absolute only *within* whichever volume the process is standing on. Two states
+ * both recording `\foo` therefore compare `EQUAL` while potentially naming
+ * different directories.
+ *
+ * It is left as it is because no producer in this build can emit such a path —
+ * `deriveTaskWorkspaceIdentity` joins onto a canonical root and
+ * `resolveRepository` returns a `realpath` — and because the one axis on which a
+ * hand-written value could have reached a spawned `cwd` is now closed upstream:
+ * reconciliation re-derives `worktreePath` and `workBranch` and refuses a record
+ * that does not match (`state/reconcile.ts`, V1-08). Tightening the rule here
+ * additionally means teaching every fixture a platform-specific absolute path,
+ * which is its own change and does not belong in a validation slice.
+ */
 export function isComparablePath(value: string): boolean {
   return typeof value === 'string' && value.trim().length > 0 && isAbsolute(value);
 }

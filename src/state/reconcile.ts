@@ -57,6 +57,7 @@
 import { canonicalPathsEqual } from '../core/automatic-resume.js';
 import type { TaskStateName } from '../core/states.js';
 import type { TaskState } from '../core/task-state.js';
+import { deriveTaskWorkspaceIdentity } from '../worktree/workspace-identity.js';
 import { expectedWorkBranchRef, type ObservedRuntime } from './observe-runtime.js';
 
 /**
@@ -92,6 +93,25 @@ export const DIVERGENCE_FINDING_CODES = [
   'REPOSITORY_ROOT_MISMATCH',
   'TASK_ID_MISMATCH',
   'BASE_BRANCH_MISMATCH',
+  /**
+   * The recorded work branch is not the one this task's identity derives.
+   *
+   * Its own code rather than a reuse of `WORK_BRANCH_NOT_CHECKED_OUT`: that
+   * finding means "the branch we expected is not checked out there", which is a
+   * fact about the *worktree*. This one means the record named a branch that
+   * was never this task's to begin with, which is a fact about the *record* —
+   * and the two send an operator to different places.
+   */
+  'WORK_BRANCH_NOT_DERIVED',
+  /** The recorded worktree path is not the one this task's identity derives. */
+  'WORKTREE_PATH_NOT_DERIVED',
+  /**
+   * No workspace identity exists for this repository and task, so the recorded
+   * claims cannot be checked against one. Fail-closed: a claim that cannot be
+   * verified is refused rather than accepted on the strength of being
+   * unverifiable.
+   */
+  'WORKSPACE_IDENTITY_UNDERIVABLE',
   'WORKTREE_NOT_REGISTERED',
   'WORKTREE_MISSING_ON_DISK',
   'WORK_BRANCH_NOT_CHECKED_OUT',
@@ -245,6 +265,50 @@ export function reconcileTaskState(
   // declares; otherwise the pin below is measured against the wrong history.
   if (state.baseBranch !== expected.repository.defaultBranch) {
     findings.push('BASE_BRANCH_MISMATCH');
+  }
+
+  // --- 0b. Are the recorded workspace claims this task's own? -------------
+  //
+  // `worktreePath` and `workBranch` are the two claims that decide *where a
+  // writing agent runs*, and until here they were only ever checked against
+  // each other. Step 1 below looks the recorded path up in Git's registry and
+  // requires the recorded branch to be checked out there — but both sides of
+  // that comparison come from the same file. Two claims that agree with each
+  // other are not authority; they are one claim written twice.
+  //
+  // The concrete failure that closes (V1-07-R-1): a state naming
+  // `worktreePath = <repository root>` and `workBranch = <default branch>`
+  // satisfies every check above, because `git worktree list` *does* register
+  // the main working tree, and it *does* hold the default branch. The registry
+  // then vouches for the canonical checkout, `authorisedWorktreePath` becomes
+  // the repository root, and the verifier, the reviewer and the Claude writer
+  // are handed `main` as their working directory — for a mutation the
+  // orchestrator never authorised.
+  //
+  // So the claims are re-derived rather than believed. The identity is a pure
+  // function of the repository and the task id (`workspace-identity.ts`), and
+  // it is the same function `prepare-workspace.ts` built the workspace with and
+  // `remove-workspace.ts` proves ownership with — so a legitimately prepared
+  // task always matches, and this check adds no I/O and no clock to a module
+  // that has neither.
+  //
+  // Compared by path identity rather than by string, for the reason
+  // `core/path-identity.ts` gives: Git prints `D:/repo/wt` where `node:path`
+  // builds `D:\repo\wt`, and Windows casing is not a difference. The branch is
+  // compared exactly, because Git branch names are case-sensitive.
+  const derived = deriveTaskWorkspaceIdentity(expected.repository, expected.taskId);
+  if (!derived.ok) {
+    // No identity exists for this repository and task, so neither claim can be
+    // checked against one. Refused rather than waved through: "the claim could
+    // not be verified" must never be the reason a claim is accepted.
+    findings.push('WORKSPACE_IDENTITY_UNDERIVABLE');
+  } else {
+    if (state.workBranch !== derived.identity.workBranch) {
+      findings.push('WORK_BRANCH_NOT_DERIVED');
+    }
+    if (!canonicalPathsEqual(state.worktreePath, derived.identity.worktreePath)) {
+      findings.push('WORKTREE_PATH_NOT_DERIVED');
+    }
   }
 
   // --- 1. Does Git still know this worktree? ------------------------------

@@ -44,7 +44,6 @@ import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { isShellInertArgument } from '../doctor/exec.js';
 import { isValidBranchName } from '../repo/branch-name.js';
 import { isValidTaskId } from '../plan/task-id.js';
-import type { ResolvedRepository } from '../repo/resolve-repository.js';
 
 /**
  * The reserved branch namespace of orchestrator-owned task branches.
@@ -84,6 +83,30 @@ const IDENTITY_DETAIL: Readonly<Record<WorkspaceIdentityFailureCode, string>> = 
   WORKTREE_PATH_UNSAFE:
     'The derived worktree path cannot be passed to Git as an argument, or is not outside the repository.',
 });
+
+/**
+ * The three repository facts an identity is derived from.
+ *
+ * Stated as its own shape rather than as `ResolvedRepository` because these are
+ * the only fields read, and because the *reconciler* has to re-derive an
+ * identity while holding nothing but `reconcile.ts`'s narrow
+ * `RepositoryIdentity` — which is structurally this. A `ResolvedRepository` is
+ * assignable here, so `prepare-workspace.ts` and `remove-workspace.ts` are
+ * unaffected.
+ *
+ * Narrowing the input is also what keeps the derivation honest: a function that
+ * accepted the whole resolved repository could quietly start depending on the
+ * scope policy or the verification phases, and the identity would stop being a
+ * pure function of the three facts it advertises.
+ */
+export interface WorkspaceIdentityInput {
+  /** Stable identity from the profile. */
+  readonly id: string;
+  /** Canonical, absolute repository root. */
+  readonly root: string;
+  /** The profile-declared default branch. */
+  readonly defaultBranch: string;
+}
 
 /** The one branch and the one directory that belong to a task. */
 export interface TaskWorkspaceIdentity {
@@ -133,7 +156,7 @@ function isContained(root: string, candidate: string): boolean {
  * means the identity *cannot exist*, not that it does not exist yet.
  */
 export function deriveTaskWorkspaceIdentity(
-  repository: ResolvedRepository,
+  repository: WorkspaceIdentityInput,
   taskId: string,
 ): WorkspaceIdentityResult {
   if (!isValidTaskId(taskId)) return identityFailure('TASK_ID_INVALID');

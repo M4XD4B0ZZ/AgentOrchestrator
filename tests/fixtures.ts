@@ -15,19 +15,50 @@ export const SHA_B = `${'a'.repeat(39)}1`;
  */
 export const SENSITIVE_MARKER = 'zzQUARANTINEDzz';
 
+/**
+ * The workspace identity `deriveTaskWorkspaceIdentity` produces for
+ * {@link FIXTURE_REPOSITORY_ROOT} and {@link FIXTURE_TASK_ID}.
+ *
+ * Spelled out here rather than imported from the production derivation, so a
+ * fixture cannot silently follow a change to the rule it is supposed to pin —
+ * and asserted against the real function in `tests/worktree-identity.test.ts`.
+ *
+ * These values matter now that reconciliation *re-derives* the workspace
+ * instead of believing the record (V1-08). The previous fixture claimed
+ * `agent/task-0001` and `/srv/worktrees/alpha/task-0001`, neither of which any
+ * production write could ever produce, so every state built from it described a
+ * task whose workspace the orchestrator would refuse to recognise as its own.
+ */
+export const FIXTURE_REPOSITORY_ROOT = '/srv/projects/alpha';
+export const FIXTURE_TASK_ID = 'task-0001';
+export const FIXTURE_WORK_BRANCH = `ao/task/${FIXTURE_TASK_ID}`;
+export const FIXTURE_WORKTREE_PATH = `/srv/projects/alpha.worktrees/${FIXTURE_TASK_ID}`;
+
+/**
+ * A canonical finding fingerprint: 32 lowercase hex characters.
+ *
+ * Exactly the grammar `fingerprintFinding` emits and `FindingRecordSchema`
+ * requires. A helper rather than a literal per test, so a case that means to
+ * vary the *round* or the *severity* does not silently vary the fingerprint too
+ * and pass for a reason it did not intend.
+ */
+export function fingerprint(seed = 0): string {
+  return seed.toString(16).padStart(32, '0');
+}
+
 /** A valid, fully settled state at the start of a task. */
 export function validCreatedState(overrides: Partial<TaskStateInput> = {}): TaskStateInput {
   return {
     schemaVersion: 1,
-    taskId: 'task-0001',
+    taskId: FIXTURE_TASK_ID,
     repositoryId: 'repo-alpha',
-    repositoryRoot: '/srv/projects/alpha',
-    worktreePath: '/srv/worktrees/alpha/task-0001',
+    repositoryRoot: FIXTURE_REPOSITORY_ROOT,
+    worktreePath: FIXTURE_WORKTREE_PATH,
     state: 'CREATED',
     stateEnteredAt: '2026-07-31T10:00:00.000Z',
     baseBranch: 'main',
     basePinnedCommit: null,
-    workBranch: 'agent/task-0001',
+    workBranch: FIXTURE_WORK_BRANCH,
     currentCommit: null,
     reviewRound: 0,
     maxReviewRounds: 3,
@@ -80,8 +111,8 @@ export function positiveResumeEvidence(
     now: '2026-07-31T15:00:00.000Z',
     authPreflightPassed: true,
     observedRepositoryId: 'repo-alpha',
-    observedRepositoryRoot: '/srv/projects/alpha',
-    observedWorktreePath: '/srv/worktrees/alpha/task-0001',
+    observedRepositoryRoot: FIXTURE_REPOSITORY_ROOT,
+    observedWorktreePath: FIXTURE_WORKTREE_PATH,
     worktreeExists: true,
     observedBasePinnedCommit: SHA_A,
     observedCurrentCommit: SHA_B,

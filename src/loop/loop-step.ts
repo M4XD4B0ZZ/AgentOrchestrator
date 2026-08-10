@@ -240,7 +240,20 @@ function currentRound(state: TaskState): number {
 }
 
 function saved(save: StateSaveResult, state: TaskStateName, outcome: LoopStepOutcome, extra: Partial<LoopStepResult> = {}): LoopStepResult {
-  if (!save.ok) return result({ outcome: 'STATE_NOT_RECORDED', save, ...extra });
+  if (!save.ok) {
+    // A refused write entered no phase, so the remediation payload that
+    // belonged to that entry describes a round the durable state never reached.
+    // `LoopStepResult.remediationPayload` is documented as present *only* on the
+    // write that enters `REMEDIATING`, and handing one back for a write that
+    // landed nothing invites a caller to brief a writer on a pass that does not
+    // exist. `run-driver.ts` happens to be safe — it carries the payload only
+    // from `ADVANCED` — but a contract that holds by the caller's good manners
+    // is not held here (V1-08).
+    //
+    // `verification` is deliberately kept: it reports what the repository's own
+    // commands said, which is true whether or not the write landed.
+    return result({ ...extra, remediationPayload: null, outcome: 'STATE_NOT_RECORDED', save });
+  }
   return result({ outcome, state, save, ...extra });
 }
 
@@ -590,6 +603,28 @@ export async function runRemediateStep(
     advance,
   );
   return saved(save, 'VERIFYING', 'ADVANCED');
+}
+
+/**
+ * The states this loop drives.
+ *
+ * Exported so a caller can ask, *before* making a durable move, whether the
+ * phase it is about to enter is one anything can continue from. The run driver
+ * needs that answer: a resume that lands a task in a phase nothing drives spends
+ * the block's evidence and produces no work, which is a one-way durable loss
+ * (V1-08).
+ *
+ * `tests/v1-08-contracts.test.ts` pins this set against {@link runLoopStep}'s
+ * actual dispatch over every declared state, so the advertised answer and the
+ * switch below cannot drift apart.
+ */
+export const LOOP_DRIVEN_STATES = ['VERIFYING', 'REVIEWING', 'REMEDIATING'] as const;
+
+const LOOP_DRIVEN_SET: ReadonlySet<string> = new Set<string>(LOOP_DRIVEN_STATES);
+
+/** `true` for a state {@link runLoopStep} has a step for. */
+export function isLoopDrivenState(state: TaskStateName): boolean {
+  return LOOP_DRIVEN_SET.has(state);
 }
 
 /**

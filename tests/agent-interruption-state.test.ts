@@ -44,7 +44,8 @@ import { loadTaskState, saveTaskState, type StateLoadSuccess } from '../src/stat
 import { observeRuntime } from '../src/state/observe-runtime.js';
 import { reconcileTaskState } from '../src/state/reconcile.js';
 import type { GitCommandResult, GitRunner } from '../src/worktree/git-command.js';
-import { positiveResumeEvidence, SHA_A, SHA_B, validCreatedState } from './fixtures.js';
+import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
+import { fingerprint, positiveResumeEvidence, SHA_A, SHA_B, validCreatedState } from './fixtures.js';
 
 const GIT_OK = (stdout = ''): GitCommandResult =>
   Object.freeze({ outcome: 'OK' as const, stdout, exitCode: 0 });
@@ -89,19 +90,36 @@ afterEach(() => {
   }
 });
 
+/**
+ * The worktree path this task's identity derives for `root`.
+ *
+ * From the production derivation, because reconciliation re-derives it and
+ * refuses a record that does not match (V1-08) — a fixture path of its own
+ * choosing would make every reconciliation below report divergence for a reason
+ * the case is not about.
+ */
+function worktreeOf(root: string): string {
+  const derived = deriveTaskWorkspaceIdentity(
+    { id: 'repo-alpha', root, defaultBranch: 'main' },
+    TASK_ID,
+  );
+  if (!derived.ok) throw new Error(`fixture identity did not derive: ${derived.code}`);
+  return derived.identity.worktreePath;
+}
+
 /** Work already done and already persisted: two findings, a completed round, a commit. */
 function inFlightState(root: string, overrides: Partial<TaskStateInput> = {}): TaskStateInput {
   return validCreatedState({
     repositoryRoot: root,
-    worktreePath: join(root, 'worktree'),
+    worktreePath: worktreeOf(root),
     state: 'IMPLEMENTING',
     basePinnedCommit: SHA_A,
     currentCommit: SHA_B,
     reviewRound: 1,
     maxReviewRounds: 3,
     findingHistory: [
-      { round: 1, severity: 'high', fingerprint: 'aaaa1111' },
-      { round: 1, severity: 'low', fingerprint: 'bbbb2222' },
+      { round: 1, severity: 'high', fingerprint: fingerprint(1) },
+      { round: 1, severity: 'low', fingerprint: fingerprint(2) },
     ],
     ...overrides,
   });
@@ -765,7 +783,7 @@ describe('an interrupted writer stops claiming checkpoint facts it may have inva
    */
   it('leaves a usage-limit pause resumable rather than diverged', async () => {
     const root = repoRoot();
-    const worktreePath = join(root, 'worktree');
+    const worktreePath = worktreeOf(root);
     const before = inFlightState(root, {
       state: 'IMPLEMENTING',
       worktreeCleanAtCheckpoint: true,

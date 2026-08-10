@@ -55,16 +55,58 @@ export const NonBlankString = (label: string) =>
     .min(1, `${label} must not be empty.`)
     .refine((value) => value.trim().length > 0, `${label} must not be blank.`);
 
+/**
+ * The canonical fingerprint grammar: a lowercase hex digest of fixed width.
+ *
+ * This is exactly what the one producer emits — `fingerprintFinding` in
+ * `agent/internal/codex-review-transcript.ts` takes a SHA-256 of the
+ * allow-listed triple, renders it with `digest('hex')` (lowercase by
+ * definition) and slices it to 32 characters — so the contract states the
+ * producer's output rather than a superset of it.
+ *
+ * ── Why this is a schema rule and not a rendering rule (V1-08, RR-B1-N4) ────
+ *
+ * `fingerprint` is the only free-form string the durable contract accepts, and
+ * a persisted state is untrusted input whoever wrote it: `state-store.ts` says
+ * so, and `claude-writer.ts` names the same threat model. The durable value is
+ * later rendered into a *writer's* prompt by
+ * `buildResumedRemediationBrief`, one record per `'\n'`-joined line — so a
+ * persisted fingerprint carrying a line break would arrive in a writing
+ * agent's instructions as a free-standing line, able to forge the very
+ * `FINDINGS (n; …)` header the module authors above it.
+ *
+ * That is precisely the reasoning `codex-review-transcript.ts` already applies
+ * to a reviewer-supplied `path`, which is constrained by an allow-list rather
+ * than a list of refusals *because* it is quoted into that same prompt. The
+ * defence belongs in the same place for the same reason: at the boundary where
+ * the value is admitted, not at the sink where it is rendered. A sink that
+ * escaped the value would still have accepted a state asserting a fingerprint
+ * no review could have produced.
+ *
+ * Anchored at both ends, so a conforming prefix cannot carry a payload after
+ * it. No `u` flag is needed: every member of the class is ASCII.
+ */
+export const FINDING_FINGERPRINT_PATTERN = /^[0-9a-f]{32}$/;
+
+export const FindingFingerprintSchema = z
+  .string()
+  .regex(
+    FINDING_FINGERPRINT_PATTERN,
+    'fingerprint must be a 32-character lowercase hex digest, exactly as the review parser computes it.',
+  );
+
 export const FindingRecordSchema = z
   .object({
     round: RoundSchema('Finding round', 1),
     severity: z.enum(FINDING_SEVERITIES),
     /**
-     * Stable identity of a finding across review rounds, used later to detect
-     * repeat findings. The actual fingerprint computation is intentionally not
-     * part of this foundation — only the field contract is fixed here.
+     * Stable identity of a finding across review rounds, used to detect repeat
+     * findings. Constrained to {@link FINDING_FINGERPRINT_PATTERN}: the
+     * computation lives with the review parser that owns it, but the *grammar*
+     * of what may be persisted is fixed here, because this is the boundary a
+     * hand-written state file has to pass.
      */
-    fingerprint: NonBlankString('fingerprint'),
+    fingerprint: FindingFingerprintSchema,
   })
   .strict();
 

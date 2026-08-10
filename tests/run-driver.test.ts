@@ -55,6 +55,7 @@ import {
 } from '../src/state/state-store.js';
 import type { VerificationCommandResult, VerificationRunner } from '../src/verify/verify-command.js';
 import type { GitCommandResult, GitRunner } from '../src/worktree/git-command.js';
+import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
 import {
   agentCommandResult,
   claudeSuccessEnvelope,
@@ -72,7 +73,16 @@ import {
 import { resolveFixture } from './helpers/worktree-fixtures.js';
 
 const TASK_ID = 'task-0001';
-const WORK_BRANCH = 'agent/task-0001';
+/**
+ * The work branch this task's identity derives — `ao/task/<id>`, not a name of
+ * the fixture's choosing.
+ *
+ * Reconciliation re-derives `workBranch` and `worktreePath` and refuses a record
+ * that does not match them (V1-08). A fixture that invented either would put
+ * every case in this file behind a `STATE_DIVERGED` that has nothing to do with
+ * the condition the case is about.
+ */
+const WORK_BRANCH = `ao/task/${TASK_ID}`;
 const BRANCH_REF = `refs/heads/${WORK_BRANCH}`;
 
 const tempDirs: string[] = [];
@@ -83,9 +93,19 @@ function repoRoot(): string {
   return dir;
 }
 
-/** The worktree the state records, and the one Git is scripted to vouch for. */
+/**
+ * The worktree the state records, and the one Git is scripted to vouch for.
+ *
+ * Taken from the production derivation rather than joined here, for the reason
+ * {@link WORK_BRANCH} gives.
+ */
 function worktreeOf(root: string): string {
-  return join(root, 'worktree');
+  const derived = deriveTaskWorkspaceIdentity(
+    { id: 'repo-alpha', root, defaultBranch: 'main' },
+    TASK_ID,
+  );
+  if (!derived.ok) throw new Error(`fixture identity did not derive: ${derived.code}`);
+  return derived.identity.worktreePath;
 }
 
 afterEach(() => {
@@ -1041,12 +1061,9 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
    * back is the resume write itself rather than whatever the resumed phase went
    * on to persist.
    */
-  it.each([
-    ['REMEDIATE', 'REMEDIATING'],
-    ['IMPLEMENT', 'IMPLEMENTING'],
-  ] as const)('withdraws both claims resuming %s', async (phase, target) => {
+  it('withdraws both claims resuming REMEDIATE', async () => {
     const root = repoRoot();
-    const before = blockedOn(root, phase);
+    const before = blockedOn(root, 'REMEDIATE');
     expect(before.state.currentCommit).toBe(SHA_B);
     expect(before.state.worktreeCleanAtCheckpoint).toBe(true);
 
@@ -1057,7 +1074,7 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
 
     expect(run.steps).toBe(1);
     const after = reload(root).state;
-    expect(after.state).toBe(target);
+    expect(after.state).toBe('REMEDIATING');
     expect(after.currentCommit).toBeNull();
     expect(after.worktreeCleanAtCheckpoint).toBe(false);
 
@@ -1070,6 +1087,56 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
     expect(after.basePinnedCommit).toBe(SHA_A);
     expect(after.findingHistory).toEqual([DURABLE_FINDING]);
     expect(after.reviewRound).toBe(1);
+  });
+
+  /**
+   * V1-08 — a resume must land somewhere this build can continue from.
+   *
+   * `IMPLEMENT` is the sharp case: the transition table declares it, the
+   * blocking policy lists it among `BLOCKED_USAGE_LIMIT`'s allowed resume
+   * phases, and `evaluateAutomaticResume` will authorise it — but `runLoopStep`
+   * has no implement step, so the phase it enters is one nothing drives.
+   *
+   * Writing that resume would be a one-way loss. `resumeBlockedTask` spends
+   * `resumeFrom`, `reportedResetAt` and `blockedAgent` and withdraws both
+   * checkpoint claims, so the task lands in `IMPLEMENTING` carrying none of the
+   * evidence a later run needs — and, because the withdrawal nulls
+   * `currentCommit` and clears `worktreeCleanAtCheckpoint`,
+   * `evaluateAutomaticResume` can never grant it again. A self-clearing quota
+   * pause would have become a task no run can pick up, in exchange for no work
+   * at all.
+   *
+   * That is the failure V1-07-RR-B1 ruled out for the attended grant, on the
+   * axis of "the phase is a dead end" rather than "this run will refuse". So the
+   * same rule applies: the gate precedes the write, and **nothing is persisted**.
+   */
+  it('refuses a resume into a phase nothing drives, rather than spending the pause', async () => {
+    const root = repoRoot();
+    const before = blockedOn(root, 'IMPLEMENT');
+
+    const agent = cappedAgent(agentCommandResult(), 0);
+    const verify = cappedVerify(0);
+    const run = await runTask(
+      request(root, { maxSteps: 3 }),
+      deps(root, { agent: agent.runner, verify: verify.runner }),
+    );
+
+    expect(run.outcome).toBe('CONTINUATION_NOT_AUTHORISED');
+    expect(run.reasonCodes).toContain('RESUME_PHASE_NOT_DRIVEN');
+    expect(run.steps).toBe(0);
+    // The authority module did grant it: this refusal is the driver's own, and
+    // it is the reason the pause survives.
+    expect(run.resume?.continuation).toBe('AUTOMATIC_ALLOWED');
+
+    // Every field of the block is intact, byte for byte, for a later run.
+    const after = reload(root);
+    expect(after.revision).toBe(before.revision);
+    expect(after.state.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(after.state.resumeFrom).toEqual({ phase: 'IMPLEMENT', round: 1 });
+    expect(after.state.reportedResetAt).toBe(RESET_PASSED);
+    expect(after.state.blockedAgent).toBe('claude');
+    expect(after.state.currentCommit).toBe(SHA_B);
+    expect(after.state.worktreeCleanAtCheckpoint).toBe(true);
   });
 
   /**
