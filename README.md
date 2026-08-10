@@ -9,9 +9,13 @@ already-installed CLI agents:
 Both are intended to run on their existing **subscription logins**, never on
 API keys.
 
-> **There is no orchestration loop in this build.** Task creation, worktree
-> management, implement/verify/review rounds and resume handling are not
-> implemented. No command in this build starts an agent.
+> **No command in this build executes the loop.** The orchestration runtime —
+> task selection, workspace lifecycle, durable task state, reconciliation, the
+> agent runners and the verify/review/remediate loop — exists as a verified
+> library, and the read-only `agent-loop run` command reports what it would
+> do. Fresh-task creation, the setup chain, the implement step and CLI-driven
+> execution are not implemented: no command starts an agent or writes task
+> state.
 
 What *is* implemented:
 
@@ -20,9 +24,15 @@ What *is* implemented:
    plus an explicit state-transition table).
 3. The read-only diagnosis command `agent-loop doctor`.
 4. The **repository-profile contract and repository resolution** (Zod →
-   generated JSON Schema, plus a fail-closed resolver). This is a runtime
-   library layer with no command attached: it can tell you what contract
-   governs a repository, but nothing in this build acts on that answer.
+   generated JSON Schema, plus a fail-closed resolver).
+5. The orchestration runtime as a **library** — task selection (V1-02),
+   workspace lifecycle (V1-03), durable state and reconciliation (V1-04), the
+   agent runners (V1-05), the verify/findings/remediation loop (V1-06) and the
+   run driver (V1-07/V1-08) — each documented in its own section below.
+6. The read-only planning command **`agent-loop run`** (V2-01): which task is
+   next and why, what its durable state permits, and on whose authority
+   anything may continue — with a documented exit-code contract. It executes
+   nothing.
 
 ## Requirements
 
@@ -126,6 +136,51 @@ agent-loop --help
 
 `bin.agent-loop` points at `dist/cli/index.js`, so `npm run build` must have run
 first.
+
+## `agent-loop run`
+
+```powershell
+agent-loop run --repository D:\path\to\repo
+agent-loop run --repository D:\path\to\repo --task V2-01
+```
+
+Read-only in this build: the command **plans**; it does not execute. It
+
+- resolves the repository through `resolveRepository`. `--repository` is
+  required and must be absolute — there is deliberately no `process.cwd()`
+  default, because nothing in the library ever consults the working directory,
+  and a command that defaulted to it would make the answer a property of the
+  shell rather than of the input;
+- asks the repository's own selector which task is next, and prints the full
+  ranking plus every ineligible task with its reason and unsatisfied
+  dependencies;
+- loads the durable state of the selected task — or of the task named with
+  `--task`, whose id must satisfy the task-id grammar before it is looked up —
+  reconciles it against observed Git reality, and prints the continuation
+  authority. The resume decision is computed with `authPreflightPassed: false`:
+  no preflight ran, and evidence is never assumed;
+- concludes with one code from a closed vocabulary
+  (`src/run/run-plan.ts`) and exits accordingly.
+
+It starts no agent, writes no state, prepares no workspace and performs no
+login or auth preflight. A plan leaves the repository byte-identical —
+`tests/run-plan.test.ts` asserts this on the durable state file itself.
+
+### `run` exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Nominal answer: `TASK_NOT_STARTED`, `RECONCILED_IN_FLIGHT`, `TASK_COMPLETED`, `ALL_TASKS_COMPLETE` |
+| `1` | Unexpected failure inside the tool |
+| `2` | Input unusable: resolution or planning failed, or the named task is invalid, unknown or ineligible |
+| `3` | The durable state needs an operator: parked, aborted, diverged, unusable or unobservable |
+
+Codes `4` (invocation refused / no progress) and `5` (step budget exhausted —
+call again) are reserved for the execution mode of a later slice. The mapping
+for **every** run outcome and every plan conclusion is already fixed in
+`src/cli/run-exit-codes.ts` and pinned as total by
+`tests/run-exit-codes.test.ts`, so widening either vocabulary forces a
+deliberate decision there rather than an accidental exit status.
 
 ## `agent-loop doctor`
 
@@ -2407,10 +2462,13 @@ rather than enforced, and nothing here opens a pull request, pushes or reads CI.
 
 ## Not implemented yet
 
-Planned commands — mentioned for orientation only, none of them exist in this
-build: any command exposing the loop or the run driver. The repository profile
-*declares* the context sources and the write scope; no code in this build opens
-a context file or enforces a scope. Task selection, workspace preparation, state
-persistence, the agent runners, the verify/review/remediate loop and the run
-driver exist as libraries and have no CLI command yet: nothing in `agent-loop`
-calls them.
+`agent-loop run` is read-only: it plans and reports, and nothing in this build
+executes what it reports. Still missing, deliberately, are: fresh `TaskState`
+creation and the `CREATED → … → IMPLEMENTING` setup chain; the implement step
+(`IMPLEMENTING` is not loop-driven); CLI-driven execution of the
+verify/review/remediate loop; context loading (no declared context file is
+ever opened); scope enforcement (`scope.allowedPaths` is declared, not
+enforced); multi-task queue progression; and any product-side PR/CI/merge
+automation. Task selection, workspace preparation, state persistence, the
+agent runners, the loop and the run driver exist as libraries; `run` consults
+the read-only ones and executes none of them.
