@@ -39,7 +39,7 @@
  */
 
 import type { AgentBlockEvidence, AgentDisposition } from './agent-outcome.js';
-import type { AgentId, ResumePhase, TaskStateName } from '../core/states.js';
+import { isBlockingState, type AgentId, type ResumePhase, type TaskStateName } from '../core/states.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
 
@@ -215,6 +215,37 @@ export function recordAgentInterruption(
   const block = interruption.block ?? fallback;
   const usageLimit = interruption.disposition === 'AGENT_BLOCKED_USAGE_LIMIT';
   const running = AGENT_PHASES[current.state.state];
+
+  // A task already parked in a blocking state had no agent running, so there is
+  // no interruption to record against it. Refused before anything else, because
+  // `AGENT_PHASES` holds no entry for these states and every guard below is
+  // therefore inoperative for them: the agent identity and resume phase would
+  // be taken from the caller verbatim, and nothing stale would be withdrawn.
+  //
+  // The sharp case is a `BLOCKED_USAGE_LIMIT` self-write. `from === to` is a
+  // checkpoint rather than a transition, so the table does not judge it, and a
+  // caller could write a `reportedResetAt` that has already passed onto a state
+  // that carried none — turning a block `evaluateAutomaticResume` refuses with
+  // `RESET_TIME_MISSING` into one it grants on a timer. That is the exact
+  // fabrication `AgentBlockEvidence.reportedResetAt` is documented to prevent
+  // (V1-05 followup NEW-4).
+  //
+  // Deliberately not a blanket refusal of "state absent from AGENT_PHASES":
+  // `AUTH_PREFLIGHT → BLOCKED_AUTH` is a legitimate non-agent-phase caller, and
+  // it is a regular state, not a blocking one.
+  if (isBlockingState(current.state.state)) {
+    return Object.freeze({
+      outcome: 'STATE_NOT_RECORDED' as const,
+      state: null,
+      save: Object.freeze({
+        ok: false as const,
+        code: 'INTERRUPTION_INCONSISTENT' as const,
+        path: null,
+        detail: `${current.state.state}/ALREADY_BLOCKED`,
+        errnoCode: null,
+      }),
+    });
+  }
 
   // The caller and the durable state disagree about what was running. Refused
   // rather than resolved: there is no basis for preferring one, and the cost of

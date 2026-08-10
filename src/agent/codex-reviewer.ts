@@ -32,6 +32,7 @@
  * one review. This boundary reports what the review said and stops.
  */
 
+import { isComparablePath } from '../core/path-identity.js';
 import type { ResumePhase } from '../core/states.js';
 import { isShellInertArgument } from '../doctor/exec.js';
 import { runAgentCommand, type AgentRunner } from './agent-command.js';
@@ -135,7 +136,11 @@ export async function runCodexReviewer(
     round: request.round,
   };
 
-  if (!isShellInertArgument(request.worktreePath)) {
+  // Absolute *and* shell-inert. See the equivalent guard in `claude-writer.ts`:
+  // a relative `cwd` resolves against `process.cwd()` at `spawn`, which would
+  // point the reviewer at whatever tree this process happens to sit in
+  // (V1-05 followup NEW-2).
+  if (!isComparablePath(request.worktreePath) || !isShellInertArgument(request.worktreePath)) {
     return Object.freeze({
       ...base,
       process: Object.freeze({
