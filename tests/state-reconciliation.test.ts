@@ -13,8 +13,7 @@
  * cannot be asked to produce on demand.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -38,7 +37,9 @@ import {
   CONTINUATION_AUTHORITIES,
   RESUME_CLASSIFICATIONS,
 } from '../src/state/resume-decision.js';
-import { SHA_A, SHA_B, validCreatedState, validUsageLimitState } from './fixtures.js';
+import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
+import { fingerprint, SHA_A, SHA_B, validCreatedState, validUsageLimitState } from './fixtures.js';
 import { parseTaskState, type TaskState, type TaskStateInput } from '../src/core/task-state.js';
 import { ALL_STATES, type TaskStateName } from '../src/core/states.js';
 import { TRANSITION_TABLE } from '../src/core/transitions.js';
@@ -491,6 +492,17 @@ describe('reconciling state against Git', () => {
       TASK_ID_MISMATCH: () => reconcileAgainst({ ...EXPECTATION, taskId: 'task-0002' }),
       BASE_BRANCH_MISMATCH: () =>
         reconcileAgainst({ ...EXPECTATION, repository: { ...REPOSITORY, defaultBranch: 'dev' } }),
+      // Reconciled against a *different* task id, so the identity this state
+      // must match is derived for `task-0002` while the record still names
+      // `task-0001`'s branch and directory. Both derived claims therefore
+      // disagree at once, which is what a state copied between tasks looks like.
+      WORK_BRANCH_NOT_DERIVED: () => reconcileAgainst({ ...EXPECTATION, taskId: 'task-0002' }),
+      WORKTREE_PATH_NOT_DERIVED: () => reconcileAgainst({ ...EXPECTATION, taskId: 'task-0002' }),
+      // A task id that is a legal *identifier* but cannot become a legal Git
+      // branch name, so no workspace identity exists to check the record
+      // against. `spec.lock` is one of the cases `workspace-identity.ts` names.
+      WORKSPACE_IDENTITY_UNDERIVABLE: () =>
+        reconcileAgainst({ ...EXPECTATION, taskId: 'spec.lock' }),
       WORKTREE_NOT_REGISTERED: () => reconcileWith({ registry: OK(noWorktree) }),
       WORKTREE_MISSING_ON_DISK: () => reconcileWith({}, neverExists),
       WORK_BRANCH_NOT_CHECKED_OUT: () => reconcileWith({ registry: OK(otherBranch) }),
@@ -762,8 +774,20 @@ describe('reconciling state against resolved identity', () => {
 describe('reconciliation outcomes', () => {
   const roots: string[] = [];
 
+  /**
+   * A canonical scratch root, via the shared helper rather than `tmpdir()`.
+   *
+   * `persistedTask` below derives this task's workspace identity from this
+   * root, and that derivation requires the path to be shell-inert: a GitHub
+   * Windows runner reports `C:\Users\RUNNER~1\AppData\Local\Temp`, an 8.3
+   * alias, and `SAFE_ARG_PATTERN` deliberately excludes `~`, so the raw
+   * `tmpdir()` spelling makes the *fixture* fail with `WORKTREE_PATH_UNSAFE`
+   * before any case's own subject is reached. Canonicalising at creation fixes
+   * the wrong assumption where it is made; it is emphatically not a reason to
+   * widen the argument contract.
+   */
   function repoRoot(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'ao-recon-'));
+    const dir = makeCanonicalTempDir('ao-recon-');
     roots.push(dir);
     return dir;
   }
@@ -775,18 +799,33 @@ describe('reconciliation outcomes', () => {
     }
   });
 
-  /** A persisted, self-consistent task in `root`, plus a Git that agrees. */
+  /**
+   * A persisted, self-consistent task in `root`, plus a Git that agrees.
+   *
+   * The workspace claims come from the **production derivation** rather than
+   * from a convenient literal. Reconciliation re-derives them (V1-08), so a
+   * fixture that invented its own `worktreePath` would describe a task whose
+   * workspace the orchestrator is right to refuse — and every case below would
+   * then be measuring that refusal instead of the condition it names.
+   */
   function persistedTask(root: string) {
-    const worktreePath = join(root, 'wt');
+    const derived = deriveTaskWorkspaceIdentity(
+      { id: 'repo-alpha', root, defaultBranch: 'main' },
+      'task-0001',
+    );
+    if (!derived.ok) throw new Error(`fixture identity did not derive: ${derived.code}`);
+    const { worktreePath, workBranch } = derived.identity;
+
     const state = validUsageLimitState({
       repositoryRoot: root,
       worktreePath,
+      workBranch,
       taskId: 'task-0001',
     });
     const saved = saveTaskState(state, { repositoryRoot: root });
     if (!saved.ok) throw new Error(`fixture did not persist: ${saved.code}`);
 
-    const registry = `worktree ${root}\nbranch refs/heads/main\n\nworktree ${worktreePath}\nbranch refs/heads/agent/task-0001\n`;
+    const registry = `worktree ${root}\nbranch refs/heads/main\n\nworktree ${worktreePath}\nbranch refs/heads/${workBranch}\n`;
     const expectation = {
       repository: { id: 'repo-alpha', root, defaultBranch: 'main' },
       taskId: 'task-0001',
@@ -1360,7 +1399,7 @@ describe('auth re-entry preserves work history', () => {
     ['a completed review round', { reviewRound: 1 }],
     [
       'recorded findings',
-      { findingHistory: [{ round: 1, severity: 'high', fingerprint: 'f-1' }] },
+      { findingHistory: [{ round: 1, severity: 'high', fingerprint: fingerprint(1) }] },
     ],
   ])('treats %s as evidence that work already exists', (_label, overrides) => {
     const state = freshlyPrepared(overrides as Partial<TaskStateInput>);

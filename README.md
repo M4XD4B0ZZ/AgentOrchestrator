@@ -651,7 +651,12 @@ root, canonical worktree path, pinned base commit and current commit all still
 match; the worktree exists and is clean; and no divergence was reported.
 Without a reliable reset timestamp, no unattended resume is ever granted.
 
-There is still no resume runner — this build only decides and validates.
+> **In this build no unattended resume is ever granted at all.** The table above
+> describes the decision function, not an operating capability: three
+> independent locks — no CLI reports a reset time, the writing phases withdraw
+> the checkpoint claims the function demands, and Codex has no quota recogniser
+> — each deny it on their own. See
+> [Unattended resume is inert in this build](#unattended-resume-is-inert-in-this-build-and-that-is-now-stated).
 
 ### Resume points
 
@@ -2226,6 +2231,179 @@ Left to the slice that owns them: creating a task's first state, the setup chain
 progression, and a `run` command. Review item **RR-F6** — `repo/git-query.ts`
 having no injection seam — remains **open and untouched**: the driver takes its
 `GitRunner` from V1-03's seam, which does not give V1-01's queries one.
+
+## Integrated validation
+
+V1-08 adds no state, no edge and no field. `TaskState` stays at schema
+version 1 and `READY_FOR_PR` stays terminal. What it adds is evidence — and,
+where that evidence found something, four fixes.
+
+Every slice before this one is tested against a *literal* of the layer beneath
+it: `tests/run-driver.test.ts` writes its own `ResolvedRepository` and scripts a
+`GitRunner` that answers `worktree list` from a string. That is the right shape
+for asking "does the driver stop when the registry is unreadable?", because no
+real repository can be asked to have an unreadable registry on demand. It cannot
+answer whether the slices agree with each other.
+
+So `tests/v1-08-e2e.test.ts` composes the real things: a real `git init`
+repository, a real `git worktree add` made by `prepareTaskWorkspace`, a real
+state file written by `saveTaskState`, and the registry that `git worktree list
+--porcelain` really prints. Only the two agent boundaries are injected — Claude
+and Codex are subscription CLIs, and `AgentRunner` exists so that no test starts
+one.
+
+The composition has a seam worth naming: **there is no production entry point
+from a resolved repository to a first `TaskState`.** `runTask` refuses to create
+one, so the suite seeds a state at `VERIFYING` from the real workspace receipt.
+That step is the test's, not the product's, and it is the boundary at which this
+stops being end-to-end coverage of shipped code.
+
+### What the composition found
+
+**The recorded workspace was never checked against the derived one
+(V1-07-R-1).** `observe-runtime.ts` looked the recorded `worktreePath` up in
+Git's registry and required the recorded `workBranch` to be checked out there —
+both sides of both comparisons coming from the same file. Two claims that agree
+with each other are not authority; they are one claim written twice. Since
+`git worktree list` registers the **main working tree**, and it does hold the
+default branch, a state naming the repository root and `main` satisfied every
+check, and the verifier, the reviewer and the **Claude writer** were handed the
+canonical checkout as their working directory.
+
+`reconcileTaskState` now re-derives both claims through the same
+`deriveTaskWorkspaceIdentity` that `prepare-workspace.ts` built the workspace
+with, and refuses a record that does not match:
+`WORK_BRANCH_NOT_DERIVED`, `WORKTREE_PATH_NOT_DERIVED`, and
+`WORKSPACE_IDENTITY_UNDERIVABLE` when no identity exists to check against. The
+comparison is by path identity, not by string — Git prints `C:/…/wt` where
+`node:path` builds `C:\…\wt`, and a string comparison would refuse every real
+task on Windows.
+
+**The persisted fingerprint accepted anything non-blank (RR-B1-N4).** The one
+producer emits a 32-character lowercase hex digest; the contract accepted any
+non-blank string, and `buildResumedRemediationBrief` renders the durable value
+into a **writing** agent's prompt, one record per newline-joined line. A
+persisted state is untrusted input whoever wrote it, so a fingerprint carrying a
+line break arrived in those instructions as a free-standing line, able to forge
+the `FINDINGS (n; …)` header above it. That is the reasoning the reviewer's
+`path` allow-list already applies, and the defence belongs in the same place:
+`FindingRecordSchema` now pins `^[0-9a-f]{32}$`, so the value is refused where it
+is admitted rather than escaped where it is rendered. The generated JSON Schema
+carries the pattern; the contract version is unchanged, because narrowing an
+accepted set is only safe while no states exist in the wild.
+
+**A resume could land a task where nothing could continue it.** `IMPLEMENT` is a
+declared resume phase of `BLOCKED_USAGE_LIMIT` and `evaluateAutomaticResume` will
+authorise it, but `runLoopStep` has no implement step. Writing that resume spends
+`resumeFrom`, `reportedResetAt` and `blockedAgent` and withdraws both checkpoint
+claims — so the task landed in `IMPLEMENTING` carrying none of the evidence a
+later run needs, and `evaluateAutomaticResume` could never grant it again. A
+self-clearing pause became a task no run can pick up, in exchange for no work at
+all. That is the V1-07-RR-B1 failure on a second axis, so the same rule applies:
+the driver now refuses with `RESUME_PHASE_NOT_DRIVEN` **before** the write, and
+`isLoopDrivenState` is pinned against `runLoopStep`'s own dispatch.
+
+**A refused write still carried a remediation brief.** `LoopStepResult.remediationPayload`
+is documented as present only on the write that enters `REMEDIATING`. The driver
+happened to be safe, because it carries a payload only out of `ADVANCED` — but
+the contract held by the caller's good manners rather than by the value.
+
+### Unattended resume is inert in this build, and that is now stated
+
+`BLOCKED_USAGE_LIMIT` is the one state `automaticResumeEligible` marks, which
+reads as though unattended resume operates. It does not, and cannot:
+
+1. **No reset time exists.** `readClaudeResultEnvelope` returns
+   `reportedResetAt: null` unconditionally, because no such field was observed in
+   either CLI's output, and this build refuses to invent one.
+   `evaluateAutomaticResume` denies `RESET_TIME_MISSING`. This lock is
+   phase-independent.
+2. **The checkpoint claims are withdrawn (F-10).** Entering `REMEDIATING` sets
+   `currentCommit: null` and `worktreeCleanAtCheckpoint: false` — correctly,
+   because a phase whose purpose is to modify the worktree may not assert a clean
+   one. `evaluateAutomaticResume` independently requires both, and denies
+   `CURRENT_COMMIT_MISMATCH` and `WORKTREE_NOT_CLEAN`.
+3. **Codex has no quota recogniser at all**, so `blockedAgent: 'codex'` is
+   unreachable.
+
+Each lock is sufficient alone. F-10 is therefore **not remediated here**: closing
+it would open one of three doors, and the other two are shut for reasons this
+repository considers correct. Weakening `evaluateAutomaticResume` to accept
+freshly observed facts in place of the withdrawn claims would trade a real safety
+property — "nothing moved while we waited" — for a capability that still would
+not work. The V1-08 suite pins the denial with its three reason codes, driven
+through a real 429 envelope rather than a hand-built state, so the gap is a
+tested fact rather than an implication of fixtures.
+
+### The verification seam now runs (F-8)
+
+`runVerificationCommand` is what will run a target repository's own `npm run
+build`. Until V1-08 **no test had ever executed it**: the pure translation was
+covered, and every caller injected a runner.
+`tests/v1-08-verification-boundary.test.ts` spawns real processes through it and
+pins `cwd` propagation, the argument vector, a non-zero exit, a failing run's
+retained output, a command that cannot start, an argument refused as
+shell-unsafe, and an output budget that terminates the child. The timeout is
+asserted as the constant it is; the mechanism belongs to `runCommand` and is
+exercised in `tests/exec.test.ts`.
+
+### Verification is a stated V1 platform limitation, not a hidden followup
+
+The item carried as **F-9** is resolved here as a documented limitation rather
+than as code: it was never a defect to fix, it is a boundary to state.
+
+The verification child runs under the `capability:generic` environment policy:
+**`PATH` and `PATHEXT` are the only variables explicitly supplied**, plus
+whatever the platform back-fills of its own accord. On Windows libuv adds
+`SYSTEMROOT`, `TEMP`, `USERPROFILE` and friends, which is why a Windows build
+starts at all.
+
+The consequence is a boundary on what V1 has actually demonstrated, and it is
+stated here rather than carried as a followup because an operator meets it on
+their first run:
+
+- V1's canonical verification evidence is **Windows + Node 22** — `verify` runs
+  on `windows-latest`, and `tests/v1-08-verification-boundary.test.ts` spawns its
+  real processes there;
+- **portability to POSIX, or to any project toolchain that needs `HOME`,
+  `npm_config_*`, `TMPDIR`, `LANG` or a proxy variable, is not proven by V1.** A
+  POSIX `npm` without `HOME` is the concrete case;
+- the failure mode is **fail-closed**: a command that cannot start is
+  `UNAVAILABLE`, which `run-verification.ts` reports as unrunnable rather than
+  failed, and the loop sends the task to a human. It never becomes a false
+  `PASSED`, and it never becomes `BLOCKED_VERIFY`, which would blame the
+  repository for something that is this build's limitation.
+
+Widening the policy is a product decision with a failing test behind it, not a
+quiet edit — `tests/v1-08-verification-boundary.test.ts` asserts the current
+narrow answer, so changing it has to be deliberate.
+
+### Carried forward, deliberately
+
+- **F-4** — on Windows `isAbsolute` accepts a drive-relative root (`\foo`), so
+  two states recording it compare equal while naming different volumes. No
+  producer can emit such a path, and the one axis on which a hand-written value
+  could have reached a spawned `cwd` is now closed upstream by the derived
+  identity check. Tightening it additionally means teaching every fixture a
+  platform-specific absolute path, which is its own change.
+- **F-2** — no invariant ties `findingHistory[].round` to `reviewRound`. The loop
+  writes both on one write and cannot violate it; only a hand-edited state can.
+- **F-5** — `remediationPayload` carries no round or revision. The driver carries
+  it across exactly one edge and drops it otherwise; a second producer would make
+  this live.
+- **F-7** — caller-chosen interruption identity is reachable only from a
+  non-agent phase, which is the unimplemented setup chain.
+- **AGENT_SESSION_REJECTED** has no producer, so `BLOCKED_AUTH` is unreachable
+  from the loop and auth failures land in `HUMAN_DECISION_REQUIRED`.
+- **RR-F6** — `repo/git-query.ts` still has no injection seam, and V1-08 did not
+  add one: the E2E suite uses real repositories throughout, which is the reason
+  that seam has not been missed. It remains **open and deferred**.
+
+### What V1-08 is not
+
+No CLI command, no setup chain, no `runImplementStep`, no multi-task queue. The
+driver still runs one task per invocation, `scope.allowedPaths` is still declared
+rather than enforced, and nothing here opens a pull request, pushes or reads CI.
 
 ## Not implemented yet
 

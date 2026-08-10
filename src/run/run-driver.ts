@@ -77,7 +77,12 @@ import {
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
-import { runLoopStep, type CompletionObserver, type LoopStepResult } from '../loop/loop-step.js';
+import {
+  isLoopDrivenState,
+  runLoopStep,
+  type CompletionObserver,
+  type LoopStepResult,
+} from '../loop/loop-step.js';
 import { planNextTask, type TaskPlanningResult } from '../plan/plan-next-task.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -522,6 +527,39 @@ export async function runTask(
 
     // --- 6. A blocked task's resume, once every gate above has passed -------
     if (resume.continuation === 'AUTOMATIC_ALLOWED') {
+      // The phase this resume would enter must be one this run can actually
+      // continue from, and that is checked *before* the write for the same
+      // reason the attended grant is (V1-07-RR-B1).
+      //
+      // `resumeBlockedTask` spends `resumeFrom`, `reportedResetAt` and
+      // `blockedAgent`, and withdraws the checkpoint claims for a mutating
+      // target. If the phase it enters is one `runLoopStep` does not drive —
+      // `IMPLEMENT`, today, because there is no implement step — the next
+      // iteration returns `NOT_APPLICABLE` and the run stops with
+      // `NO_PROGRESS`, having done no work at all. What it leaves behind is
+      // worse than where it started: the task now sits in a phase nothing in
+      // this build advances, and it no longer carries the resume point, the
+      // reset time or the checkpoint facts a later run would need to try again.
+      // A self-clearing pause has become a task that no run can pick up.
+      //
+      // RR-B1 closed this on the axis of "this run will refuse to execute".
+      // This is the same loss on the axis of "the phase is a dead end", and the
+      // same rule applies: every gate that decides whether the run may act
+      // comes before the durable write (V1-08).
+      const target = state.resumeFrom === null ? null : resumePointToState(state.resumeFrom);
+      if (target === null || !isLoopDrivenState(target)) {
+        return stop({
+          outcome: 'CONTINUATION_NOT_AUTHORISED',
+          state: state.state,
+          steps,
+          reasonCodes: Object.freeze([
+            target === null ? 'RESUME_POINT_MISSING' : 'RESUME_PHASE_NOT_DRIVEN',
+          ]),
+          reconciliation,
+          resume,
+        });
+      }
+
       const resumed = resumeBlockedTask(load, deps.now(), advance);
       if (resumed === null) {
         return stop({

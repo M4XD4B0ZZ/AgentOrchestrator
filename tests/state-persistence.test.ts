@@ -45,7 +45,7 @@ import {
   type StateLoadResult,
 } from '../src/state/state-store.js';
 import { advanceTaskState } from '../src/state/advance-state.js';
-import { validCreatedState, validUsageLimitState } from './fixtures.js';
+import { fingerprint, validCreatedState, validUsageLimitState } from './fixtures.js';
 
 const tempDirs: string[] = [];
 
@@ -820,14 +820,22 @@ describe('bounded raw bytes', () => {
     writeFileSync(location.path, bytes);
   }
 
-  /** A schema-valid state whose serialised form exceeds the read budget. */
+  /**
+   * A schema-valid state whose serialised form exceeds the read budget.
+   *
+   * The bulk comes from the *number* of findings rather than the size of any one
+   * of them, because `fingerprint` is now fixed at 32 characters. That is the
+   * honest shape of the risk anyway: `findingHistory` is the one field that
+   * grows without bound, and a fixed-width fingerprint is what makes the budget
+   * arithmetic rather than hopeful — it does not make the array finite.
+   */
   function oversizedState(root: string) {
     return stateIn(root, {
       maxReviewRounds: 3,
-      findingHistory: Array.from({ length: 1200 }, () => ({
+      findingHistory: Array.from({ length: 20_000 }, (_unused, index) => ({
         round: 1,
-        severity: 'high',
-        fingerprint: 'f'.repeat(1000),
+        severity: 'high' as const,
+        fingerprint: fingerprint(index),
       })),
     });
   }
@@ -842,13 +850,20 @@ describe('bounded raw bytes', () => {
   const OVERLONG = Buffer.from([0xc0, 0x80, 0xc0, 0x80]);
   const SURROGATE_HALF = Buffer.from([0xed, 0xa0, 0x80, 0xed]);
 
-  /** The same document, with `marker` standing in for raw bytes. */
+  /**
+   * The same document, with `marker` standing in for raw bytes.
+   *
+   * The bytes go in `baseBranch` rather than in a fingerprint: `fingerprint` is
+   * now pinned to 32 lowercase hex characters, so a value carrying invalid UTF-8
+   * would decode to replacement characters and be refused by the contract before
+   * the revision could be compared at all. `baseBranch` is still a plain
+   * non-blank string at this layer — `reconcile.ts` is what judges it against the
+   * repository — which is exactly the property this case needs: a field where
+   * two byte-distinct documents can decode to one identical string.
+   */
   function documentWith(root: string, raw: Buffer): Buffer {
     const text = JSON.stringify(
-      stateIn(root, {
-        maxReviewRounds: 3,
-        findingHistory: [{ round: 1, severity: 'high', fingerprint: '@@RAW@@' }],
-      }),
+      stateIn(root, { maxReviewRounds: 3, baseBranch: '@@RAW@@' }),
       null,
       2,
     );
@@ -926,9 +941,7 @@ describe('bounded raw bytes', () => {
 
     expect(loadedA.ok && loadedB.ok).toBe(true);
     if (!loadedA.ok || !loadedB.ok) return;
-    expect(loadedA.state.findingHistory[0]?.fingerprint).toBe(
-      loadedB.state.findingHistory[0]?.fingerprint,
-    );
+    expect(loadedA.state.baseBranch).toBe(loadedB.state.baseBranch);
     expect(loadedA.revision).not.toBe(loadedB.revision);
   });
 
