@@ -1853,6 +1853,21 @@ caller whose evidence contradicts the phase is refused with
 `INTERRUPTION_INCONSISTENT` rather than believed: a disagreement between the
 caller and the durable state is not resolved by picking one.
 
+That derivation covers the three states in which an agent actually runs, and
+V1-06 closed the gap around them. A task **already parked in a blocking state**
+had no agent running, so there is no interruption to record against it — and
+because `AGENT_PHASES` holds no entry for those states, every guard above was
+inoperative for them: the agent identity and resume phase were taken from the
+caller verbatim and nothing stale was withdrawn. The sharp case was a
+`BLOCKED_USAGE_LIMIT` self-write: `from === to` is a checkpoint rather than a
+transition, so the table never judged it, and an already-elapsed
+`reportedResetAt` could be written onto a state that carried none — turning a
+block `evaluateAutomaticResume` refuses with `RESET_TIME_MISSING` into one it
+grants on a timer. Such a write is now refused with
+`INTERRUPTION_INCONSISTENT`. `AUTH_PREFLIGHT` is deliberately still allowed to
+record an auth block: it probes real agent credentials, and it is a regular
+state, not a blocking one.
+
 **A writer's interruption withdraws the checkpoint claims it may have
 invalidated.** `worktreeCleanAtCheckpoint` and `currentCommit` were true when
 something last looked, and a writing agent changing the worktree is the job, not
@@ -1891,13 +1906,8 @@ contract already had are the ones used. `READY_FOR_PR` remains terminal.
 
 Deliberately not wired, and left to the slices that own them:
 
-- **V1-06** — the verify/findings/remediation loop. V1-05 reports a review; it
-  never appends to `findingHistory`, never increments `reviewRound`, and never
-  chooses between `READY_FOR_PR` and `REMEDIATING`. It also builds no context
-  payload: the caller supplies one, and `context.canonicalSources` is still
-  only declared.
-- **V1-07** — the queue and run driver. Nothing calls these boundaries yet, and
-  no CLI command exposes them.
+- **V1-07** — the queue and run driver. No CLI command exposes the loop, and
+  nothing selects which task to step next.
 - **Scope enforcement.** `scope.allowedPaths` remains declared, not enforced;
   the reviewer's read-only sandbox is asked of the CLI, not verified afterwards.
 - **A Codex usage-limit signal.** No evidence of one exists, so none is
@@ -1908,12 +1918,119 @@ Review item **RR-F6** is untouched and remains open: it is about
 `repo/git-query.ts` having no injection point, and adding an agent seam does
 not give it one.
 
+## The verify / review / remediate loop
+
+V1-06 is the first slice that *drives* anything. It composes what the earlier
+ones built — the verification commands a profile declares, the two agent
+boundaries, and V1-04's compare-and-swap persistence — into the one cycle the
+transition table describes, and adds no state and no edge to do it.
+
+### One step, one durable write
+
+Every step performs **at most one** `advanceTaskState` call and returns
+immediately afterwards. That single decision is what makes the rest cheap:
+there is no window in which half a step's progress is on disk, so a restart
+reads a state that is exactly "before" or exactly "after"; and a step that
+never writes twice never needs to re-derive a revision, which is the one way a
+stale-writer refusal gets laundered into a successful overwrite. Progress lives
+on disk, never in a closure — a driver that dies between steps loses nothing
+but the in-memory remediation prompt, and the loop says so in the next prompt
+when that happens.
+
+### The flow
+
+```
+VERIFYING ──pass──> REVIEWING ──clean review, settled worktree──> READY_FOR_PR
+    │                   │
+    │                   └──findings, budget left──> REMEDIATING ──> VERIFYING
+    │
+    └──failed──> BLOCKED_VERIFY        (the loop stops; a human decides)
+    └──unrunnable──> HUMAN_DECISION_REQUIRED
+```
+
+A **failed** verification and an **unrunnable** one are different answers.
+"The build is broken" and "we could not run the build" send an operator to
+different places, and only one of them is about the repository, so only the
+first reaches `BLOCKED_VERIFY`.
+
+`PASSED` is a positive conjunction over phases that actually ran, in the order
+the profile declares them, stopping at the first that does not pass. An empty
+phase list is `UNAVAILABLE`, not a vacuous pass: a gate that can be satisfied by
+the absence of evidence is not a gate. Nothing is ever retried — a suite that
+passes on the second attempt has not passed.
+
+### Rounds and history
+
+`reviewRound` counts **completed** reviews and starts at 0, so the review being
+attempted is `reviewRound + 1`. It is incremented exactly once, on the write
+that *leaves* `REVIEWING`. An interrupted review does not increment it: a round
+that was interrupted was not completed.
+
+`findingHistory` is appended to and never rewritten, and repeats are kept. The
+same finding in rounds 1 and 2 is two records with the same fingerprint — that
+pair is the evidence that remediation did not work, and de-duplicating on the
+fingerprint would delete precisely the fact worth knowing.
+
+The durable record stays `{ round, severity, fingerprint }`. `path` and `rule`
+are carried **in memory only**, because they are agent-authored text and the
+fingerprint remains the only free-form string the state contract accepts. They
+are what lets a remediation prompt name the files to fix; a pass resumed after a
+restart gets a weaker prompt built from the durable record, and that prompt says
+so rather than presenting a degraded brief as a complete one.
+
+### The bound has an owner
+
+The loop is bounded by `completion.maxReviewRounds` from the repository profile,
+mirrored into `TaskState.maxReviewRounds` and already enforced by the state
+contract as `reviewRound <= maxReviewRounds`. No retry count was invented here.
+A remediation pass is only started if its result could still be reviewed; at the
+last permitted round it could not, so the task goes to a human with its evidence
+intact.
+
+The one cycle `maxReviewRounds` does not bound —
+`VERIFYING → BLOCKED_VERIFY → REMEDIATING → VERIFYING`, which never touches
+`reviewRound` — is bounded instead by the loop refusing to leave
+`BLOCKED_VERIFY` at all. That state is `resumable: true` but
+`automaticResumeEligible: false`, and `resume-policy.ts` gives the reason:
+*resuming means handing the failure to the writing agent, which is a decision,
+not an automatic retry.* So the only cycle this loop drives unattended is
+`VERIFYING → REVIEWING → REMEDIATING → VERIFYING`, and every traversal of it
+consumes exactly one review round.
+
+### Completion is observed, not asserted
+
+`READY_FOR_PR` demands a resolved `currentCommit` and
+`worktreeCleanAtCheckpoint === true`, and no reviewer can attest to either. A
+clean review is therefore necessary and never sufficient: the worktree is
+observed through V1-04's observation half, and the state is claimed only when
+both facts were *positively* established. Anything else — a dirty tree, an
+unresolved HEAD, a Git that could not be asked — goes to a human.
+
+Entering `REMEDIATING` withdraws `worktreeCleanAtCheckpoint` and
+`currentCommit`, for the reason the interruption path already gives: carrying a
+clean checkpoint into a state whose whole purpose is to modify the worktree
+makes `reconcile.ts` read the writer's own work as divergence.
+
+### What V1-06 is not
+
+No state, no edge, and `TaskState` unchanged at schema version 1.
+`READY_FOR_PR` remains terminal, and remains reachable only from `REVIEWING`.
+There is no queue, no task selection, no CLI command, and no PR, CI or merge
+concept — those stay outside the product contract. `scope.allowedPaths` is still
+declared rather than enforced.
+
+Two V1-05 followups were closed here because V1-06 made them live: an agent or
+verification command is now refused unless its worktree path is **absolute** as
+well as shell-inert (a relative `cwd` resolves against `process.cwd()` at
+`spawn`), and an interruption recorded against a task that is *already* in a
+blocking state is refused. Review item **RR-F6** remains open and untouched.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: the implement/verify/review loop and the queue that would drive it. The
-repository profile *declares* the context sources, the verification phases and
-the write scope; no code in this build opens a context file, runs a verification
-command or enforces a scope. Task selection, workspace preparation, state
-persistence and the agent runners exist as libraries and have no CLI command
-yet: nothing in `agent-loop` calls them.
+build: the queue and run driver that would step tasks, and any command exposing
+the loop. The repository profile *declares* the context sources and the write
+scope; no code in this build opens a context file or enforces a scope. Task
+selection, workspace preparation, state persistence, the agent runners and the
+verify/review/remediate loop exist as libraries and have no CLI command yet:
+nothing in `agent-loop` calls them.

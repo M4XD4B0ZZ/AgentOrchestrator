@@ -46,6 +46,7 @@
  * `ranCleanly`: the stronger predicate would swallow exactly those refusals.
  */
 
+import { isComparablePath } from '../core/path-identity.js';
 import type { ResumePhase } from '../core/states.js';
 import { isShellInertArgument } from '../doctor/exec.js';
 import { runAgentCommand, type AgentRunner } from './agent-command.js';
@@ -166,7 +167,17 @@ export async function runClaudeWriter(
   // about *this* run, and so nothing is spawned to find it out. The worktree
   // path is repository-derived: a checkout under a path containing a space is
   // a real condition, not a programming error.
-  if (!isShellInertArgument(request.worktreePath)) {
+  //
+  // Absoluteness is checked alongside inertness, and the two are independent:
+  // `SAFE_ARG_PATTERN` is a *character* allow-list, so `.` and `..` pass it
+  // cleanly. A relative `cwd` reaches `spawn` verbatim and resolves against
+  // `process.cwd()` — so the seam's promise never to fall back to the working
+  // directory holds only for an absolute path, and a writing agent started in
+  // the wrong tree writes to the wrong tree. The persisted `worktreePath` is
+  // `NonBlankString` and this repository treats a state file as something
+  // anything may have edited, so the guarantee has to be re-established here
+  // rather than assumed from the producer (V1-05 followup NEW-2).
+  if (!isComparablePath(request.worktreePath) || !isShellInertArgument(request.worktreePath)) {
     return failed(base, 'AGENT_ARGUMENT_REFUSED', {
       outcome: 'REFUSED_UNSAFE_ARGUMENT',
       exitCode: null,

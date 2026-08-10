@@ -50,7 +50,7 @@ export const AGENT_FAILURE_CODES = [
    * no result here to act on.
    */
   'AGENT_RESULT_MALFORMED',
-  /** Quota or session exhaustion, positively recognised. See `internal/usage-limit.ts`. */
+  /** Quota exhaustion, positively recognised. See `internal/claude-result-envelope.ts`. */
   'AGENT_USAGE_LIMIT',
   /** An authentication or session rejection, positively recognised. */
   'AGENT_SESSION_REJECTED',
@@ -321,7 +321,24 @@ function withoutTrailingPartialRun(body: string): string {
   return body;
 }
 
-export function agentDiagnostics(result: AgentCommandResult): AgentDiagnostics {
+/**
+ * The two streams this excerpting needs, and deliberately nothing else.
+ *
+ * Stated structurally rather than as `AgentCommandResult` because the property
+ * being provided — bounded, redacted, clamped-after-redaction, with the raw cut
+ * held outside the redactor's field of view — is a property of *untrusted
+ * process output*, not of agents. V1-06's verification seam carries a
+ * repository's own test-runner output, which is untrusted in exactly the same
+ * way and for exactly the same reasons. A second copy of {@link redactedPrefix}
+ * for it would be a second copy of V1-05-RR-F6's fix, free to drift from this
+ * one, which is the outcome the whole design refuses.
+ */
+export interface DiagnosticStreams {
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+export function agentDiagnostics(result: DiagnosticStreams): AgentDiagnostics {
   return Object.freeze({
     stdoutExcerpt: diagnosticExcerpt(result.stdout),
     stderrExcerpt: diagnosticExcerpt(result.stderr),

@@ -76,10 +76,30 @@ const MAX_RULE_LENGTH = 128;
 /** A rule identifier: a bounded slug, never prose. */
 const RULE_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]*[A-Za-z0-9])?$/;
 
-/** A finding, with the fingerprint this module computed for it. */
+/**
+ * A finding, with the fingerprint this module computed for it.
+ *
+ * `path` and `rule` are carried **in memory only**, and the distinction is the
+ * whole point. They are what makes a finding actionable — a remediation prompt
+ * that can only say "one critical finding, fingerprint 9f2a…" is not a
+ * remediation prompt — but they are also agent-authored text, so they never
+ * reach `TaskState`: `findingHistory[]` stores `{ round, severity, fingerprint }`
+ * and nothing else, exactly as before. The durable contract is unchanged and
+ * still holds no free-form string the reviewed repository chose.
+ *
+ * They are safe to carry here because they were already validated to get this
+ * far: `isAcceptablePath` and `isAcceptableRule` are positive, bounded,
+ * closed-vocabulary checks, and a document failing either is `UNRECOGNISED` in
+ * whole. Nothing downstream may put them on a command line — they travel to the
+ * writer on stdin, like every other payload in this repository.
+ */
 export interface ReviewFinding {
   readonly severity: FindingSeverity;
   readonly fingerprint: string;
+  /** Repository-relative POSIX path, as validated by {@link isAcceptablePath}. */
+  readonly path: string;
+  /** Bounded rule slug, as validated by {@link isAcceptableRule}. */
+  readonly rule: string;
 }
 
 export type CodexTranscriptVerdict =
@@ -195,6 +215,8 @@ export function readReviewDocument(text: string): CodexTranscriptReading {
       Object.freeze({
         severity: severity as FindingSeverity,
         fingerprint: fingerprintFinding(severity, path, rule),
+        path,
+        rule,
       }),
     );
   }
