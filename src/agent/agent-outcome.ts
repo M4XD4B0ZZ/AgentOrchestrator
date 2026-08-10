@@ -187,9 +187,13 @@ export const DIAGNOSTIC_EXCERPT_LIMIT = 4_000;
  * the clear. Redacting a wider window and then discarding its tail means any
  * entity within the margin is seen whole, or not at all.
  *
- * 1 KiB is far larger than any credential the rules in `auth/redaction.ts`
- * recognise, which is the property that makes the bound below meaningful: no
- * entity shorter than this margin can be emitted in halves.
+ * "And then thrown away" is the load-bearing half, and the half V1-05-RR-F6 /
+ * NEW-1 found was not actually true: the margin was discarded only when
+ * redaction left enough text behind for the final clamp to reach it. Redaction
+ * *shrinks* — a JWT collapses from thousands of characters to fourteen — and a
+ * window that shrinks below the budget is returned entire, margin and all,
+ * with the raw cut as its last character. {@link redactedPrefix} is what makes
+ * the margin unconditionally unreachable.
  */
 export const REDACTION_OVERLAP = 1_024;
 
@@ -225,14 +229,13 @@ function truncationNotice(totalLength: number): string {
  *
  * Slicing *redacted* text is safe in a way slicing raw text is not: the worst a
  * cut can bisect is a `<redacted:…>` marker, which carries nothing. The one
- * remaining exposure — an entity straddling the far edge of the window — is
- * removed by dropping the trailing partial run.
+ * remaining exposure — an entity straddling the far edge of the raw window —
+ * is removed by {@link redactedPrefix}, which never returns text that reaches
+ * that edge.
  */
 function diagnosticExcerpt(text: string): string {
   const overflowed = text.length > DIAGNOSTIC_EXCERPT_LIMIT;
-  const redacted = redact(
-    overflowed ? text.slice(0, DIAGNOSTIC_EXCERPT_LIMIT + REDACTION_OVERLAP) : text,
-  );
+  const redacted = redactedPrefix(text);
 
   // The common case by far: a short stream that redaction did not push over the
   // ceiling. Returned whole, with no notice, because nothing was left out.
@@ -244,6 +247,50 @@ function diagnosticExcerpt(text: string): string {
 }
 
 /**
+ * Redacted text the raw cut cannot have altered.
+ *
+ * A stream shorter than the window was never cut, so its redaction is trusted
+ * end to end. Anything longer was cut at `LIMIT + OVERLAP`, and that cut can
+ * amputate the suffix a rule anchors on: `m4xd4b0zz@googlemail.com` becomes
+ * `m4xd4b0zz@googlemail.`, matches nothing without its TLD, and is emitted in
+ * the clear. So the answer must be the redaction of the first
+ * `DIAGNOSTIC_EXCERPT_LIMIT` characters — the margin exists to be discarded —
+ * except that *that* cut has exactly the same defect one kilobyte earlier.
+ *
+ * Redacting both and keeping the prefix on which they agree resolves it
+ * without a character-offset map. The rules use no lookaround and no
+ * backreferences, so the two runs can only differ from the first entity whose
+ * treatment the extra kilobyte changed — a credential bisected at `LIMIT` that
+ * the wider window sees whole. Everything before that point was produced twice,
+ * from two different amounts of input, and is therefore not an artefact of
+ * either cut. It is deliberately the *wider* run that is sliced: where the two
+ * disagree it is the better-informed one, and it never contributes text beyond
+ * the agreement.
+ *
+ * The margin is now unreachable by construction rather than by arithmetic, so
+ * shrinkage cannot drag it back into view. What this costs is the margin's
+ * worth of diagnostics in exactly the streams where redaction shrank — text
+ * that was never safe to show. Cost stays bounded: two passes over at most
+ * `LIMIT + OVERLAP` characters, both fixed-size whatever the stream contains.
+ */
+function redactedPrefix(text: string): string {
+  const window = DIAGNOSTIC_EXCERPT_LIMIT + REDACTION_OVERLAP;
+  if (text.length <= window) return redact(text);
+
+  const wide = redact(text.slice(0, window));
+  const narrow = redact(text.slice(0, DIAGNOSTIC_EXCERPT_LIMIT));
+  return wide.slice(0, agreedLength(wide, narrow));
+}
+
+/** How far two strings are the same string. */
+function agreedLength(a: string, b: string): number {
+  const bound = Math.min(a.length, b.length);
+  let index = 0;
+  while (index < bound && a.charCodeAt(index) === b.charCodeAt(index)) index += 1;
+  return index;
+}
+
+/**
  * Drops a trailing run of non-whitespace characters, so the excerpt never ends
  * in the middle of one.
  *
@@ -252,11 +299,19 @@ function diagnosticExcerpt(text: string): string {
  * ever be at the very end of the clamped text. Cutting back to the last
  * whitespace removes it.
  *
- * The backward scan is bounded by {@link REDACTION_OVERLAP}, which is also what
- * makes the guarantee precise rather than best-effort: an unbroken run longer
- * than the margin is left alone, because it is not any credential shape these
- * rules know, and eating it would empty the excerpt of a stream that legitimately
- * has no whitespace in it at all.
+ * The backward scan is bounded by {@link REDACTION_OVERLAP}: an unbroken run
+ * longer than the margin is left alone, because eating it would empty the
+ * excerpt of a stream that legitimately has no whitespace in it at all —
+ * minified output is the ordinary case, not a pathological one.
+ *
+ * That bound is why this is no longer the boundary guarantee. It is stated on
+ * the length of the *run*, while the reasoning behind it — no credential these
+ * rules recognise approaches a kilobyte — is about the length of the
+ * *credential*, and V1-05-RR-F6 / NEW-1 is precisely where the two diverge: an
+ * ordinary 24-character e-mail inside a 3 000-character minified run. The cut
+ * that could produce such a fragment is now closed in {@link redactedPrefix},
+ * upstream of this; what remains here is tidiness — an excerpt that does not
+ * end mid-word — with the tail of a bisected marker as its worst case.
  */
 function withoutTrailingPartialRun(body: string): string {
   const floor = body.length - REDACTION_OVERLAP;

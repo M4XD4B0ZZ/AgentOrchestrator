@@ -580,6 +580,11 @@ describe('an unclassifiable run fails closed', () => {
 // ── Untrusted text ─────────────────────────────────────────────────────────
 
 describe('the agent\u2019s own words are carried, never trusted', () => {
+  /** The raw prefix the redactors are shown before anything is thrown away. */
+  const RAW_WINDOW = DIAGNOSTIC_EXCERPT_LIMIT + REDACTION_OVERLAP;
+  /** An ordinary credential \u2014 24 characters, the size real ones come in. */
+  const SECRET = 'm4xd4b0zz@googlemail.com';
+
   it('reports only static text as the failure detail', async () => {
     const { outcome } = await writerWith(
       agentCommandResult({ exitCode: 1, stdout: SENSITIVE_MARKER, stderr: SENSITIVE_MARKER }),
@@ -741,5 +746,123 @@ describe('the agent\u2019s own words are carried, never trusted', () => {
     expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
     expect(excerpt).toContain('<redacted:jwt>');
     expect(excerpt).not.toContain('sk-ant');
+  });
+
+  /**
+   * V1-05-RR-F6 / NEW-1, and the case the test above was too kind to find.
+   *
+   * That one leaves a space ten characters before the bisected token, so the
+   * bounded backward scan finds it. The bound, though, is on the *run*, while
+   * the reasoning behind it — "1 KiB is far larger than any credential these
+   * rules recognise" — is about the *credential*. Minified agent output makes
+   * the two diverge: a 24-character e-mail inside a 3 000-character
+   * whitespace-free run is bisected by the window's far edge, matches nothing
+   * without its TLD, and the scan gives up two thousand characters short of
+   * the whitespace it needed.
+   *
+   * The JWT is what makes the fragment reachable at all: it collapses 2 000
+   * characters to fourteen, so the redacted window is 3 038 characters against
+   * a body cap of ~3 946 — the clamp discards nothing, and the raw cut becomes
+   * the end of the excerpt.
+   */
+  it('does not expose a credential the window bisects inside a long unbroken run', async () => {
+    const jwt = `eyJ${'A'.repeat(1_997)}`;
+    const visible = 'm4xd4b0zz@googlemail.'.length;
+    const run = '#'.repeat(RAW_WINDOW - visible - jwt.length - 1);
+    const stdout = `${jwt} ${run}${SECRET}${'#'.repeat(73)}`;
+
+    // The premise, asserted rather than assumed: the window really does cut
+    // this credential before its TLD, and the run carrying it really is longer
+    // than the margin the backward scan is allowed to look back over.
+    expect(stdout.slice(RAW_WINDOW - visible, RAW_WINDOW)).toBe('m4xd4b0zz@googlemail.');
+    expect(stdout.indexOf(' ', jwt.length + 1)).toBe(-1);
+    expect(run.length).toBeGreaterThan(REDACTION_OVERLAP);
+
+    const { outcome } = await writerWith(agentCommandResult({ exitCode: 1, stdout }));
+    const excerpt = outcome.diagnostics.stdoutExcerpt;
+
+    expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
+    // Neither whole nor halved: no part of the local part or the domain.
+    expect(excerpt).not.toContain('m4xd4b0zz');
+    expect(excerpt).not.toContain('googlemail');
+    // ...and what came before the cut is still there. Safety here is bought by
+    // dropping the margin, not by emptying the excerpt.
+    expect(excerpt).toContain('<redacted:jwt>');
+    expect(excerpt).toContain('truncated');
+  });
+
+  /**
+   * The control for the case above. The same credential, the same shrinking
+   * JWT, the same unbroken run — moved so that it lies wholly inside the text
+   * the excerpt keeps. Nothing about the boundary rule may weaken redaction of
+   * a credential that was never near the boundary.
+   */
+  it('redacts that same credential when it lies wholly inside what is kept', async () => {
+    const jwt = `eyJ${'A'.repeat(1_997)}`;
+    const run = '#'.repeat(1_000);
+    const stdout = `${jwt} ${run}${SECRET}${'#'.repeat(2_075)}`;
+
+    const at = jwt.length + 1 + run.length;
+    expect(stdout.indexOf(SECRET)).toBe(at);
+    expect(at + SECRET.length).toBeLessThan(DIAGNOSTIC_EXCERPT_LIMIT);
+
+    const { outcome } = await writerWith(agentCommandResult({ exitCode: 1, stdout }));
+    const excerpt = outcome.diagnostics.stdoutExcerpt;
+
+    expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
+    expect(excerpt).toContain('<redacted:email>');
+    expect(excerpt).not.toContain('m4xd4b0zz');
+    expect(excerpt).not.toContain('googlemail');
+  });
+
+  /**
+   * The other half of the same rule, and the reason it cannot simply be "drop
+   * whatever trails". A stream that legitimately contains no whitespace at all
+   * — minified JSON is the ordinary case — must still be described, promptly
+   * and within the budget.
+   */
+  it('keeps a whitespace-free stream bounded and prompt without emptying it', async () => {
+    const started = Date.now();
+    const { outcome } = await writerWith(
+      agentCommandResult({ exitCode: 1, stdout: '#'.repeat(2_000_000) }),
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+
+    const excerpt = outcome.diagnostics.stdoutExcerpt;
+    expect(excerpt.length).toBe(DIAGNOSTIC_EXCERPT_LIMIT);
+    expect(excerpt.startsWith('#'.repeat(3_500))).toBe(true);
+    expect(excerpt).toContain('truncated; 2000000 characters in the original stream');
+  });
+
+  /**
+   * The bound itself, swept across the threshold. Below and at the limit the
+   * stream is the excerpt; one character above it, the notice appears — and it
+   * is counted inside the budget, never added on top of it.
+   */
+  it.each([
+    ['below', DIAGNOSTIC_EXCERPT_LIMIT - 1, false],
+    ['exactly at', DIAGNOSTIC_EXCERPT_LIMIT, false],
+    ['one past', DIAGNOSTIC_EXCERPT_LIMIT + 1, true],
+  ] as [string, number, boolean][])(
+    'holds the total bound for a stream %s the limit',
+    async (_label, size, truncated) => {
+      const stdout = 'd'.repeat(size);
+      const { outcome } = await writerWith(agentCommandResult({ exitCode: 1, stdout }));
+      const excerpt = outcome.diagnostics.stdoutExcerpt;
+
+      expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
+      expect(excerpt.includes('truncated')).toBe(truncated);
+      if (truncated) expect(excerpt.endsWith('characters in the original stream]')).toBe(true);
+      else expect(excerpt).toBe(stdout);
+    },
+  );
+
+  /** A short diagnostic is redacted and otherwise returned as it stands. */
+  it('leaves a short diagnostic exactly as redaction left it', async () => {
+    const { outcome } = await writerWith(
+      agentCommandResult({ exitCode: 1, stdout: `contact ${SECRET} now` }),
+    );
+
+    expect(outcome.diagnostics.stdoutExcerpt).toBe('contact <redacted:email> now');
   });
 });
