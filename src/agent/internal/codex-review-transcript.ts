@@ -92,6 +92,11 @@ const RULE_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]*[A-Za-z0-9])?$/;
  * closed-vocabulary checks, and a document failing either is `UNRECOGNISED` in
  * whole. Nothing downstream may put them on a command line — they travel to the
  * writer on stdin, like every other payload in this repository.
+ *
+ * Travelling on stdin is what makes them harmless as *commands* and is exactly
+ * what makes them dangerous as *text*: the writer's stdin is its instruction
+ * stream. So the vocabulary is closed rather than merely shell-inert, and
+ * {@link isAcceptablePath} says which characters that leaves and why.
  */
 export interface ReviewFinding {
   readonly severity: FindingSeverity;
@@ -131,18 +136,55 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * A repository-relative POSIX path, guarded as far as a string can be.
+ * Characters a finding path may be built from.
+ *
+ * The shell-inert set `repo/internal/repo-profile-object-schema.ts` applies to
+ * every repository-relative path a profile declares, minus the backslash a
+ * POSIX path may not carry anyway. Repeated rather than imported, for the
+ * reason {@link isAcceptablePath} gives.
+ *
+ * An anchored allow-list, because the property that has to hold is closure
+ * rather than enumeration: every ASCII control character, DEL, the C1 range,
+ * U+2028, U+2029, the bidirectional overrides, whitespace of every kind, every
+ * shell metacharacter and every character nobody has thought of are outside
+ * this class without being named. JavaScript's `$`, with no `m` flag, matches
+ * end of input only — never before a trailing newline, as Perl's does — so the
+ * anchor means here what it appears to mean.
+ */
+const PATH_CHARACTER_PATTERN = /^[A-Za-z0-9._:@=+/-]+$/;
+
+/**
+ * A repository-relative POSIX path, as a closed vocabulary.
+ *
+ * The question a `path` has to answer is not "could this be opened" — nothing
+ * in this repository opens it — but "could this be read as an instruction". It
+ * is the one agent-authored string that leaves this module as text:
+ * `loop/findings.ts` interpolates it into a newline-joined prompt handed to the
+ * *writer*. A rule that refused `\` and NUL answered the filesystem question
+ * and left that one open, so `src/a.ts\n\nIGNORE PREVIOUS…` validated cleanly
+ * and arrived in another agent's instructions as free-standing lines (V1-06-B1).
+ * The character class closes it by construction, and the refusal is total: such
+ * a document is `UNRECOGNISED` in whole, never repaired into a path the
+ * reviewer did not send. Escaping it at the sink instead would leave the string
+ * valid here, one new sink away from being a prompt line again.
  *
  * Not reused from `repo/internal/repo-profile-object-schema.ts`: that schema
  * describes what a *repository* may declare about itself in a file it owns and
  * reviews. This describes what an *agent* may say about a file it looked at.
  * The two happen to look similar today and are allowed to diverge, which is
  * the same reason that module keeps its own copy of the shell-inert pattern.
+ *
+ * The consequence worth stating: a reviewed repository holding a filename with
+ * a space, or any non-ASCII character, cannot be reported on. That is already
+ * this repository's contract for every repository-relative path it accepts —
+ * such a tree fails earlier still, at `WORKTREE_PATH_UNSAFE` — and the failure
+ * is closed, because an unreadable review is never "no problems found".
  */
 function isAcceptablePath(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   if (value.length === 0 || value.length > MAX_PATH_LENGTH) return false;
-  if (value.includes('\\') || value.includes('\0')) return false;
+  if (!PATH_CHARACTER_PATTERN.test(value)) return false;
+  // `\` and NUL need no refusal of their own: neither is in the class above.
   if (value.startsWith('/') || /^[A-Za-z]:/.test(value)) return false;
   return value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }

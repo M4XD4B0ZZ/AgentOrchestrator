@@ -1814,8 +1814,12 @@ prompt, and it needs something stable to quote that is not a private constant:
 - `verdict` — `"PASS"` or `"FINDINGS"`, and it must agree with the list:
   `PASS` requires an empty `findings`, `FINDINGS` requires a non-empty one.
 - `severity` — one of `critical`, `high`, `medium`, `low`, `info`.
-- `path` — repository-relative POSIX, no drive letter, no leading `/`, no `\`,
-  no `.`/`..` segment, at most 1 024 characters.
+- `path` — repository-relative POSIX, at most 1 024 characters, built only from
+  `[A-Za-z0-9]` and `._:@=+/-`: no drive letter, no leading `/`, no `\`, no
+  `.`/`..` segment, and no space, line break or control character. The class is
+  an allow-list rather than a list of refusals, because the path is quoted into
+  the remediation prompt the *writer* is given — a `path` carrying a newline
+  would arrive there as a free-standing line of instructions.
 - `rule` — a bounded slug (`[A-Za-z0-9]`, inner `._:-`), at most 128 characters.
 - at most **64** findings per review.
 
