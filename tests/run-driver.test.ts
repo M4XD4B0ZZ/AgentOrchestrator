@@ -832,6 +832,347 @@ describe('an authorised quota resume', () => {
   });
 });
 
+/* ═══════ V1-07-RR-B1 — authority is decided before the state is moved ═══════ */
+
+/**
+ * The cross-product of the two authorities that govern a resume.
+ *
+ * `AUTOMATIC_ALLOWED` and `attendedContinuation` answer different questions —
+ * "may a machine continue *this task*" and "is anyone present for *this run*" —
+ * and the driver needs both. What makes the combination worth its own suite is
+ * that a blocked task's resume is not a step it can decline to take later: it
+ * spends `resumeFrom`, `reportedResetAt` and `blockedAgent`, and the work-loop
+ * state it lands in classifies `ATTENDED_ONLY` from then on. So a run that
+ * writes the resume and only afterwards discovers it may not execute has not
+ * merely wasted an iteration — it has converted a self-clearing quota pause
+ * into a task no unattended run can ever pick up, without doing any work.
+ *
+ * Hence: every gate that could stop this invocation is asserted to run *before*
+ * the write, by asserting the write did not happen.
+ */
+describe('a blocked task is never moved by a run that may not continue it', () => {
+  const RESET_PASSED = '2026-08-10T08:00:00.000Z';
+
+  /** A `BLOCKED_USAGE_LIMIT` whose evidence `evaluateAutomaticResume` grants. */
+  function resumableBlock(root: string, phase: 'IMPLEMENT' | 'REMEDIATE' | 'REVIEW') {
+    return persist(root, {
+      state: 'BLOCKED_USAGE_LIMIT',
+      blockedAgent: 'claude',
+      resumeFrom: { phase, round: 1 },
+      reportedResetAt: RESET_PASSED,
+      reviewRound: 1,
+      currentCommit: SHA_B,
+      worktreeCleanAtCheckpoint: true,
+      findingHistory: [DURABLE_FINDING],
+    });
+  }
+
+  /**
+   * A. The cell the independent review found missing, and the whole point of
+   * the ordering: the authority module said yes, the operator is absent, and
+   * the block must therefore still be a block afterwards — not a half-resumed
+   * task with its evidence spent.
+   */
+  it('writes nothing when the quota resume is allowed but the run is unattended', async () => {
+    const root = repoRoot();
+    const before = resumableBlock(root, 'REMEDIATE');
+    const agent = cappedAgent(agentCommandResult(), 0);
+    const verify = cappedVerify(0);
+
+    const run = await runTask(
+      request(root, { attendedContinuation: false, maxSteps: 4 }),
+      deps(root, { agent: agent.runner, verify: verify.runner }),
+    );
+
+    // The authority module did grant it — this is not a test of a refused
+    // resume dressed up as an ordering test.
+    expect(run.resume?.continuation).toBe('AUTOMATIC_ALLOWED');
+    expect(run.outcome).toBe('CONTINUATION_NOT_AUTHORISED');
+    expect(run.reasonCodes).toContain('ATTENDED_CONTINUATION_NOT_GRANTED');
+
+    // No durable transition, and no loop step.
+    expect(run.steps).toBe(0);
+    expect(run.lastStep).toBeNull();
+    expect(agent.count()).toBe(0);
+    expect(verify.count()).toBe(0);
+
+    // The state file is byte-identical, and every field the pause is made of
+    // survived. A later run — attended, or one a future slice clears — still
+    // has a resumable block to work with.
+    const after = reload(root);
+    expect(after.revision).toBe(before.revision);
+    expect(after.state.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(after.state.resumeFrom).toEqual({ phase: 'REMEDIATE', round: 1 });
+    expect(after.state.reportedResetAt).toBe(RESET_PASSED);
+    expect(after.state.blockedAgent).toBe('claude');
+  });
+
+  /**
+   * B. The same block, the same evidence, one flag different. `attendedContinuation`
+   * is not irrelevant to `AUTOMATIC_ALLOWED` — it is a requirement on the
+   * *invocation* rather than on the task, so the resume happens exactly when
+   * both hold. Asserted as a pair with A so that neither can drift alone.
+   */
+  it('performs the resume when the same block is driven by an attended run', async () => {
+    const root = repoRoot();
+    const before = resumableBlock(root, 'REMEDIATE');
+
+    const run = await runTask(
+      request(root, { attendedContinuation: true, maxSteps: 1 }),
+      deps(root, { agent: cappedAgent(agentCommandResult(), 0).runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.steps).toBe(1);
+    const after = reload(root);
+    expect(after.revision).not.toBe(before.revision);
+    // Only the `AUTOMATIC_ALLOWED` branch can move a blocking state — every
+    // other authority returns at the blocking gate above it — so the durable
+    // move is itself the evidence that the grant was what the run was missing.
+    expect(after.state.state).toBe('REMEDIATING');
+  });
+
+  /**
+   * C. `ATTENDED_ONLY` on a blocking state, unattended. The flag is never
+   * consulted here at all — the block gate precedes it — and the outcome must
+   * stay the block's own, not a continuation refusal, because those send an
+   * operator to two different places.
+   */
+  it.each([
+    ['HUMAN_DECISION_REQUIRED'],
+    ['BLOCKED_AUTH'],
+  ] as const)('leaves %s exactly where it found it when unattended', async (state) => {
+    const root = repoRoot();
+    const before = persist(root, {
+      state,
+      blockedAgent: state === 'BLOCKED_AUTH' ? 'claude' : null,
+      resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      reviewRound: 1,
+      worktreeCleanAtCheckpoint: true,
+      findingHistory: [DURABLE_FINDING],
+    });
+    const agent = cappedAgent(agentCommandResult(), 0);
+
+    const run = await runTask(
+      request(root, { attendedContinuation: false }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.resume?.continuation).toBe('ATTENDED_ONLY');
+    expect(run.outcome).toBe(state);
+    expect(run.steps).toBe(0);
+    expect(agent.count()).toBe(0);
+    expect(reload(root).revision).toBe(before.revision);
+  });
+
+  /**
+   * D. The grant present, on an `ATTENDED_ONLY` in-flight task: it continues,
+   * and only because every remaining gate held. Paired with C so that the flag
+   * is pinned in both directions on the same classification — a gate that
+   * stopped everything would satisfy C alone.
+   */
+  it('continues an in-flight task once the grant and every other gate hold', async () => {
+    const root = repoRoot();
+    const before = persist(root);
+    const verify = scriptedVerify({ exitCode: 0 });
+
+    const run = await runTask(
+      request(root, { attendedContinuation: true, maxSteps: 1 }),
+      deps(root, { verify: verify.runner, agent: cappedAgent(agentCommandResult(), 0).runner }),
+    );
+
+    expect(run.steps).toBe(1);
+    // It executed, which is the half C cannot show: the same classification
+    // that stopped the run in C drove a verification here.
+    expect(verify.calls).toHaveLength(1);
+    expect(reload(root).revision).not.toBe(before.revision);
+  });
+
+  /**
+   * The property behind A, stated once so it cannot be satisfied by accident:
+   * a run that reports zero executions must also report zero durable steps.
+   * The defect this suite exists for was precisely `steps: 1` alongside "no
+   * agent, no verification, not authorised to continue".
+   */
+  it('never reports durable progress on a run that executed nothing', async () => {
+    const root = repoRoot();
+    resumableBlock(root, 'REMEDIATE');
+    const agent = cappedAgent(agentCommandResult(), 0);
+    const verify = cappedVerify(0);
+
+    const run = await runTask(
+      request(root, { attendedContinuation: false, maxSteps: 12 }),
+      deps(root, { agent: agent.runner, verify: verify.runner }),
+    );
+
+    expect(agent.count() + verify.count()).toBe(0);
+    expect(run.steps).toBe(0);
+  });
+});
+
+/* ════ V1-07-RR-B2 — a resume never re-asserts a checkpoint it will break ════ */
+
+/**
+ * The resume write lands in a phase, and the phase decides what the checkpoint
+ * still means. `currentCommit` and `worktreeCleanAtCheckpoint` are exactly the
+ * evidence `evaluateAutomaticResume` demanded before allowing the resume — and
+ * exactly the evidence a writing agent is about to invalidate. Carrying them
+ * into `IMPLEMENTING` or `REMEDIATING` makes `reconcile.ts` read the writer's
+ * own work as divergence, which is `RESUME_STATE_DIVERGED`: not resumable at
+ * all, for the mutation this driver itself authorised.
+ */
+describe('a resume into a writing phase withdraws the checkpoint it will invalidate', () => {
+  const RESET_PASSED = '2026-08-10T08:00:00.000Z';
+
+  function blockedOn(root: string, phase: 'IMPLEMENT' | 'REMEDIATE' | 'REVIEW') {
+    return persist(root, {
+      state: 'BLOCKED_USAGE_LIMIT',
+      blockedAgent: 'claude',
+      resumeFrom: { phase, round: 1 },
+      reportedResetAt: RESET_PASSED,
+      reviewRound: 1,
+      currentCommit: SHA_B,
+      worktreeCleanAtCheckpoint: true,
+      findingHistory: [DURABLE_FINDING],
+    });
+  }
+
+  /**
+   * `maxSteps: 1` on purpose: the resume is the *only* write, so what is read
+   * back is the resume write itself rather than whatever the resumed phase went
+   * on to persist.
+   */
+  it.each([
+    ['REMEDIATE', 'REMEDIATING'],
+    ['IMPLEMENT', 'IMPLEMENTING'],
+  ] as const)('withdraws both claims resuming %s', async (phase, target) => {
+    const root = repoRoot();
+    const before = blockedOn(root, phase);
+    expect(before.state.currentCommit).toBe(SHA_B);
+    expect(before.state.worktreeCleanAtCheckpoint).toBe(true);
+
+    const run = await runTask(
+      request(root, { maxSteps: 1 }),
+      deps(root, { agent: cappedAgent(agentCommandResult(), 0).runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.steps).toBe(1);
+    const after = reload(root).state;
+    expect(after.state).toBe(target);
+    expect(after.currentCommit).toBeNull();
+    expect(after.worktreeCleanAtCheckpoint).toBe(false);
+
+    // The resume-only evidence is spent by the existing contract, and the
+    // evidence that is *not* about the pause is still carried through — the
+    // withdrawal is scoped to the two checkpoint claims and nothing else.
+    expect(after.resumeFrom).toBeNull();
+    expect(after.reportedResetAt).toBeNull();
+    expect(after.blockedAgent).toBeNull();
+    expect(after.basePinnedCommit).toBe(SHA_A);
+    expect(after.findingHistory).toEqual([DURABLE_FINDING]);
+    expect(after.reviewRound).toBe(1);
+  });
+
+  /**
+   * The other half, and the reason the rule is an `iff`. The reviewer is
+   * contractually read-only, so nothing it does can invalidate the checkpoint —
+   * and discarding it would deny a later block the `currentCommit` and clean
+   * checkpoint `evaluateAutomaticResume` requires.
+   */
+  it('keeps both claims resuming REVIEW, which cannot invalidate them', async () => {
+    const root = repoRoot();
+    blockedOn(root, 'REVIEW');
+
+    const run = await runTask(
+      request(root, { maxSteps: 1 }),
+      deps(root, { agent: cappedAgent(agentCommandResult(), 0).runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.steps).toBe(1);
+    const after = reload(root).state;
+    expect(after.state).toBe('REVIEWING');
+    expect(after.currentCommit).toBe(SHA_B);
+    expect(after.worktreeCleanAtCheckpoint).toBe(true);
+  });
+
+  /**
+   * The consequence the withdrawal exists for, driven end to end.
+   *
+   * The authorised writer commits and leaves uncommitted work, and its
+   * completion write is lost — a crash between the subprocess and the state
+   * file, which is the ordinary way a run dies. The next run must find a task
+   * it can still reconcile. With the claims re-asserted it would instead find
+   * `CURRENT_COMMIT_MOVED` and `WORKTREE_DIRTY` and stop at `STATE_DIVERGED`,
+   * blaming the orchestrator's own authorised mutation on the record.
+   */
+  it('survives the authorised writer changing the repository and losing its write', async () => {
+    const root = repoRoot();
+    blockedOn(root, 'REMEDIATE');
+    const MOVED = 'd'.repeat(40);
+
+    // 1. The resume write, and nothing else.
+    const resumed = await runTask(
+      request(root, { maxSteps: 1 }),
+      deps(root, { agent: cappedAgent(agentCommandResult(), 0).runner, verify: cappedVerify(0).runner }),
+    );
+    expect(resumed.steps).toBe(1);
+    expect(reload(root).state.state).toBe('REMEDIATING');
+
+    // 2. The writer runs and mutates the repository, and its completion write
+    //    never reaches the disk.
+    const crashing: ReplaceFn = () => {
+      throw new Error('crash between the writer and the state file');
+    };
+    const mutated = { head: OK(MOVED), status: OK(' M src/widget.ts\n') };
+    const crashed = await runTask(
+      request(root, { maxSteps: 1 }),
+      deps(root, {
+        git: scriptedGit(root),
+        agent: scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() })).runner,
+        verify: cappedVerify(0).runner,
+        replace: crashing,
+      }),
+    );
+    expect(crashed.outcome).toBe('STATE_NOT_RECORDED');
+    expect(reload(root).state.state).toBe('REMEDIATING');
+
+    // 3. Reconciliation against the world the writer left behind, read
+    //    directly. An unattended run stops on the authority gate *after*
+    //    reconciliation, which is what makes it a probe: it reports the
+    //    comparison without executing or writing anything.
+    const probe = await runTask(
+      request(root, { attendedContinuation: false, maxSteps: 1 }),
+      deps(root, {
+        git: scriptedGit(root, mutated),
+        agent: cappedAgent(agentCommandResult(), 0).runner,
+        verify: cappedVerify(0).runner,
+      }),
+    );
+
+    expect(probe.outcome).toBe('CONTINUATION_NOT_AUTHORISED');
+    expect(probe.reconciliation?.outcome).toBe('RECONCILED');
+    // Specifically not on either finding the re-asserted claims would produce.
+    expect(probe.reconciliation?.report?.findings ?? []).not.toContain('CURRENT_COMMIT_MOVED');
+    expect(probe.reconciliation?.report?.findings ?? []).not.toContain('WORKTREE_DIRTY');
+
+    // 4. And the run carries on: the remediation pass ran against the very
+    //    worktree the writer mutated, rather than the task being parked as
+    //    diverged for the orchestrator's own authorised change.
+    const next = await runTask(
+      request(root, { maxSteps: 1 }),
+      deps(root, {
+        git: scriptedGit(root, mutated),
+        agent: scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() })).runner,
+        verify: cappedVerify(0).runner,
+      }),
+    );
+
+    expect(next.outcome).not.toBe('STATE_DIVERGED');
+    expect(next.outcome).not.toBe('RESUME_STATE_DIVERGED');
+    expect(next.steps).toBe(1);
+    expect(reload(root).state.state).toBe('VERIFYING');
+  });
+});
+
 /* ══════════════ B — remediation needs a cause that survived ═════════════════ */
 
 describe('remediation is never started on invented evidence', () => {

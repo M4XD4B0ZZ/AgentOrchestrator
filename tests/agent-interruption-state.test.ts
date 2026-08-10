@@ -36,6 +36,7 @@ import {
   type AgentInterruption,
 } from '../src/agent/record-interruption.js';
 import type { AgentBlockEvidence } from '../src/agent/agent-outcome.js';
+import { phaseMutatesRepository, withdrawnCheckpointFor } from '../src/core/agent-phases.js';
 import { evaluateAutomaticResume } from '../src/core/automatic-resume.js';
 import { allowedResumePhases } from '../src/core/resume-policy.js';
 import { parseTaskState, type TaskStateInput } from '../src/core/task-state.js';
@@ -796,5 +797,51 @@ describe('an interrupted writer stops claiming checkpoint facts it may have inva
     expect(report.findings).not.toContain('WORKTREE_DIRTY');
     expect(report.findings).not.toContain('CURRENT_COMMIT_MOVED');
     expect(report.verdict).toBe('CONSISTENT');
+  });
+});
+
+/* ═════════ V1-07-RR-B2 — one definition of "this phase mutates" ═════════════ */
+
+/**
+ * The phase table and the withdrawal rule are shared rather than restated,
+ * because more than one durable write has to answer the same question: the
+ * interruption above, and the run driver's resume into a work phase. Two
+ * tables would be two opinions about what `REMEDIATING` costs a checkpoint,
+ * and they would disagree the first time one of them was edited.
+ *
+ * Asserted directly, so the rule is pinned once rather than only inferred from
+ * whichever caller happens to exercise it.
+ */
+describe('the mutating-phase rule is stated once and is total', () => {
+  it('names the writer’s phases as mutating and the reviewer’s as not', () => {
+    expect(phaseMutatesRepository('IMPLEMENTING')).toBe(true);
+    expect(phaseMutatesRepository('REMEDIATING')).toBe(true);
+    expect(phaseMutatesRepository('REVIEWING')).toBe(false);
+  });
+
+  /**
+   * `VERIFYING` runs the project's own commands and no agent at all, which is
+   * why it is absent from the table — and absence must answer "does not
+   * mutate" rather than throwing or returning `undefined`, because both
+   * callers spread the result into a state object.
+   */
+  it.each(['VERIFYING', 'WORKTREE_READY', 'BLOCKED_USAGE_LIMIT', 'READY_FOR_PR'] as const)(
+    'treats %s, which runs no agent, as mutating nothing',
+    (state) => {
+      expect(phaseMutatesRepository(state)).toBe(false);
+      expect(withdrawnCheckpointFor(state)).toEqual({});
+    },
+  );
+
+  it('withdraws exactly the two checkpoint claims, and only for a mutating phase', () => {
+    for (const phase of ['IMPLEMENTING', 'REMEDIATING'] as const) {
+      expect(withdrawnCheckpointFor(phase)).toEqual({
+        worktreeCleanAtCheckpoint: false,
+        currentCommit: null,
+      });
+    }
+    // Not a weaker claim in the other direction: nothing is asserted about the
+    // reviewer's worktree, so the spread contributes no field at all.
+    expect(withdrawnCheckpointFor('REVIEWING')).toEqual({});
   });
 });

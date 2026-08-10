@@ -18,16 +18,24 @@
  *  2. `classifyResume` — decide what, if anything, may continue. Only
  *     `AUTOMATIC_ALLOWED` continues a *blocked* task, and it has exactly one
  *     source, which this module feeds rather than re-implements;
- *  3. `observed.authorisedWorktreePath` — the directory Git vouched for. Absent
+ *  3. `attendedContinuation` — whether *this invocation* is cleared to continue
+ *     at all. A second requirement on top of the authority module's answer,
+ *     and one this run either has or does not;
+ *  4. `observed.authorisedWorktreePath` — the directory Git vouched for. Absent
  *     authority stops the run before anything is spawned;
- *  4. only then `runLoopStep`, with that path handed to it explicitly.
+ *  5. only then a durable write: the one transition an unattended resume
+ *     authorises, or `runLoopStep` with that path handed to it explicitly.
  *
  * The order is not a style preference. Reversing any two of them produces a
  * concrete failure this repository has already written down: judging the block
  * before reconciling produces "resume allowed" for a task whose worktree is
  * gone; executing before observing runs an agent in a directory nothing has
- * vouched for; and re-reading the state to obtain a fresh revision after a
- * refused write is how a stale-writer refusal becomes a successful overwrite.
+ * vouched for; re-reading the state to obtain a fresh revision after a refused
+ * write is how a stale-writer refusal becomes a successful overwrite; and
+ * writing a blocked task's resume before the gates that decide whether this run
+ * may act converts a self-clearing quota pause into an attended-only task
+ * without doing any work, because the resume spends the very evidence a later
+ * unattended run would need (V1-07-RR-B1).
  *
  * ── Reconciliation is re-run every iteration ───────────────────────────────
  *
@@ -66,6 +74,7 @@ import {
   type BlockingState,
   type TaskStateName,
 } from '../core/states.js';
+import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import { runLoopStep, type CompletionObserver, type LoopStepResult } from '../loop/loop-step.js';
@@ -243,8 +252,14 @@ export interface RunRequest {
    * with half-written work in its worktree. This flag is the operator saying
    * they are present for *this run*. It is a second requirement on top of the
    * authority module's answer and never a substitute for it: it can only ever
-   * narrow what runs, and it grants nothing for a *blocked* task, which stops
-   * regardless of what is set here.
+   * narrow what runs, and it grants nothing for a *blocked* task, which moves
+   * only on `AUTOMATIC_ALLOWED` and stops on anything else whatever is set
+   * here.
+   *
+   * Because it is a requirement on the *invocation*, it is checked before any
+   * durable write, including the one an unattended resume authorises. A run
+   * that will refuse to execute must not first spend a task's resume evidence
+   * on a transition it cannot follow up (V1-07-RR-B1).
    */
   readonly attendedContinuation: boolean;
   /**
@@ -460,6 +475,52 @@ export async function runTask(
       });
     }
 
+    // --- 4. Is *this invocation* cleared to continue at all? ----------------
+    //
+    // Ahead of every durable write, and that ordering is the whole point
+    // (V1-07-RR-B1). The operator's grant is a second requirement on top of the
+    // authority module's answer, so an invocation without it will refuse to
+    // execute whatever `classifyResume` said — and a resume written first would
+    // then be a state change made by a run that never did any work.
+    //
+    // For a blocked task the cost of that ordering is not a lost step but a
+    // lost *pause*: `resumeBlockedTask` spends `resumeFrom`, `reportedResetAt`
+    // and `blockedAgent`, and the work-loop state it lands in classifies
+    // `ATTENDED_ONLY` from then on. So an unattended run that wrote the resume
+    // and then stopped would have converted a self-clearing quota block into a
+    // task no unattended run can ever pick up, having executed nothing. The
+    // grant is therefore checked before the write, never after it.
+    //
+    // This narrows and never widens. `AUTOMATIC_ALLOWED` remains necessary for
+    // a blocked task to move — nothing here can substitute for it — and this
+    // flag can still only withhold.
+    if (!request.attendedContinuation) {
+      return stop({
+        outcome: 'CONTINUATION_NOT_AUTHORISED',
+        state: state.state,
+        steps,
+        reasonCodes: Object.freeze(['ATTENDED_CONTINUATION_NOT_GRANTED']),
+        reconciliation,
+        resume,
+      });
+    }
+
+    // --- 5. Where may this run execute? -------------------------------------
+    // Also ahead of the resume write, and for the same reason: a run with no
+    // authorised directory cannot drive the phase it would resume into, so
+    // writing the resume would spend the pause on nothing.
+    const authorisedWorktreePath = observed.authorisedWorktreePath;
+    if (authorisedWorktreePath === null) {
+      return stop({
+        outcome: 'EXECUTION_UNAUTHORISED',
+        state: state.state,
+        steps,
+        reconciliation,
+        resume,
+      });
+    }
+
+    // --- 6. A blocked task's resume, once every gate above has passed -------
     if (resume.continuation === 'AUTOMATIC_ALLOWED') {
       const resumed = resumeBlockedTask(load, deps.now(), advance);
       if (resumed === null) {
@@ -489,33 +550,7 @@ export async function runTask(
       continue;
     }
 
-    // `ATTENDED_ONLY` on a non-blocking state: the task is in flight and the
-    // record agrees with the world. That is not permission, and the operator's
-    // grant for this run is what supplies it.
-    if (!request.attendedContinuation) {
-      return stop({
-        outcome: 'CONTINUATION_NOT_AUTHORISED',
-        state: state.state,
-        steps,
-        reasonCodes: Object.freeze(['ATTENDED_CONTINUATION_NOT_GRANTED']),
-        reconciliation,
-        resume,
-      });
-    }
-
-    // --- 4. Where may this run execute? -------------------------------------
-    const authorisedWorktreePath = observed.authorisedWorktreePath;
-    if (authorisedWorktreePath === null) {
-      return stop({
-        outcome: 'EXECUTION_UNAUTHORISED',
-        state: state.state,
-        steps,
-        reconciliation,
-        resume,
-      });
-    }
-
-    // --- 5. One step -------------------------------------------------------
+    // --- 7. One step -------------------------------------------------------
     const step = await runLoopStep(load, {
       ...advance,
       now: deps.now(),
@@ -610,6 +645,24 @@ export async function runTask(
  * described the pause are spent the moment the pause ends. `advanceTaskState`
  * still judges the edge, and the contract still judges the result, so this
  * cannot reach a phase the table does not declare.
+ *
+ * ── The checkpoint the resumed phase is about to invalidate (V1-07-RR-B2) ───
+ *
+ * `currentCommit` and `worktreeCleanAtCheckpoint` are exactly the evidence
+ * `evaluateAutomaticResume` demanded before it allowed this resume — but they
+ * describe the worktree as the *pause* left it, not as the resumed phase will
+ * leave it. Carrying them into `IMPLEMENTING` or `REMEDIATING` re-asserts "this
+ * task is at a known HEAD with a clean tree" about a phase whose whole purpose
+ * is to modify the worktree, and `reconcile.ts` reads that assertion literally:
+ * a writer's own commit becomes `CURRENT_COMMIT_MOVED` and its own uncommitted
+ * work becomes `WORKTREE_DIRTY`, verdict `DIVERGED` — for the mutation this
+ * driver itself authorised. So the claims are withdrawn on the same write that
+ * enters the phase, exactly as the loop's own writing edge and the interruption
+ * path already do, from the one table that says which phases mutate.
+ *
+ * Withdrawn only for a mutating target. `REVIEWING` is contractually read-only,
+ * and discarding true evidence there would deny a later resume the checkpoint
+ * it was entitled to.
  */
 function resumeBlockedTask(
   load: StateLoadSuccess,
@@ -619,15 +672,18 @@ function resumeBlockedTask(
   const state = load.state;
   if (state.resumeFrom === null) return null;
 
+  const target = resumePointToState(state.resumeFrom);
+
   return {
     save: advanceTaskState(
       load,
       {
         ...state,
-        state: resumePointToState(state.resumeFrom),
+        state: target,
         stateEnteredAt: now,
         blockedAgent: null,
         ...RESUME_EVIDENCE_SPENT,
+        ...withdrawnCheckpointFor(target),
       },
       advance,
     ),

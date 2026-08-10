@@ -1883,7 +1883,10 @@ diverged reconciliation to `BLOCKED`. A self-clearing quota pause was becoming
 every interrupted writer. Neither value is fabricated in the other direction:
 `false` withdraws a claim of cleanliness rather than asserting dirtiness, and
 `null` means the recorded HEAD is no longer known to be current. The reviewer is
-contractually read-only, so its interruption withdraws nothing.
+contractually read-only, so its interruption withdraws nothing. The rule and the
+phase table it reads live in `core/agent-phases.ts`, stated once, because more
+than one durable write has to answer the same question — see the run driver's
+resume below.
 
 The run driver receives one of `RUN_COMPLETED`, `PAUSED_USAGE_LIMIT`,
 `NEEDS_ATTENTION` or `STATE_NOT_RECORDED`. There is deliberately no
@@ -2081,7 +2084,7 @@ never passes it.
 | `VERIFYING` / `REVIEWING` / `REMEDIATING` | steps, given an attended grant |
 | `IMPLEMENTING` and the setup chain | `NO_PROGRESS`; the loop does not drive them |
 | `READY_FOR_PR` / `ABORTED` | terminal, nothing run |
-| `BLOCKED_USAGE_LIMIT` | resumed **only** on `AUTOMATIC_ALLOWED`; otherwise stops with the checks that denied it |
+| `BLOCKED_USAGE_LIMIT` | resumed **only** on `AUTOMATIC_ALLOWED` *and* an attended grant; otherwise stops with the checks that denied it, writing nothing |
 | `BLOCKED_VERIFY` | stops. Never an automatic retry |
 | `BLOCKED_AUTH`, `HUMAN_DECISION_REQUIRED`, `SCOPE_VIOLATION`, `RESUME_STATE_DIVERGED` | stop; each keeps its own outcome |
 | diverged / unobservable / unusable | stop, fail-closed, repair nothing |
@@ -2098,7 +2101,32 @@ reconciles is an interrupted task with half-written work in its worktree.
 `RunRequest.attendedContinuation` is the operator saying they are present for
 *this run*. It is a second requirement on top of the authority module's answer
 and never a substitute: it can only narrow what runs, and it grants nothing for
-a blocked task, which stops regardless.
+a blocked task, which moves only on `AUTOMATIC_ALLOWED` and stops on anything
+else whatever is set here.
+
+**The grant is checked before any durable write, including a resume.** Because
+it is a requirement on the *invocation*, the order matters: a resume written
+first spends `resumeFrom`, `reportedResetAt` and `blockedAgent`, and the
+work-loop state it lands in classifies `ATTENDED_ONLY` from then on — so an
+unattended run that wrote the resume and then refused to execute would have
+converted a self-clearing quota pause into a task no unattended run can ever
+pick up, having done no work at all. The gates that decide whether this run may
+act therefore all precede the write, and an unattended `AUTOMATIC_ALLOWED` run
+stops with `CONTINUATION_NOT_AUTHORISED` / `ATTENDED_CONTINUATION_NOT_GRANTED`,
+leaving every field of the block intact for a later one (V1-07-RR-B1).
+
+**A resume into a writing phase withdraws the checkpoint it is about to
+invalidate.** `currentCommit` and `worktreeCleanAtCheckpoint` are exactly the
+evidence `evaluateAutomaticResume` demanded, but they describe the worktree as
+the *pause* left it. Carrying them into `IMPLEMENTING` or `REMEDIATING` asserts
+"known HEAD, clean tree" about a phase whose purpose is to modify the worktree,
+and `reconcile.ts` reads that literally: the writer's own commit becomes
+`CURRENT_COMMIT_MOVED`, its own uncommitted work becomes `WORKTREE_DIRTY`, and
+the verdict is `DIVERGED` — for the mutation the orchestrator itself
+authorised. The resume write therefore withdraws both, from the same
+`AGENT_PHASES` table the interruption path and the loop's own writing edge
+consult, and leaves them untouched for the read-only `REVIEWING` target
+(V1-07-RR-B2).
 
 ### Stopping, and the absence of a retry
 
