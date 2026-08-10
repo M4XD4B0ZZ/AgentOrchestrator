@@ -943,20 +943,31 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
    *
    * An earlier version of this case was titled as though it proved the
    * V1-07-RR-B1 ordering ("an unattended run must not spend the pause before
-   * refusing to execute"). It could not: a durably blocked task is refused at
-   * the *blocking* gate, which precedes the attended-continuation gate, so the
-   * run stops identically whether or not the operator's grant is present.
-   * Deleting the attended gate outright left that test green.
+   * refusing to execute"). It could not, for a reason specific to *this*
+   * fixture: the block is recorded with `reportedResetAt: null`, because no CLI
+   * this build has observed reports a reset time. `evaluateAutomaticResume`
+   * therefore denies `RESET_TIME_MISSING`, `classifyResume` cannot answer
+   * `AUTOMATIC_ALLOWED`, and the blocking gate returns `BLOCKED_USAGE_LIMIT`
+   * before the attended-continuation gate is ever reached. Deleting the attended
+   * gate outright left that test green.
    *
-   * The ordering property is a property of the driver and is pinned where it can
-   * actually be observed — `tests/run-driver.test.ts`, against an in-flight
-   * (non-blocked) task, where the attended gate is the gate that fires.
-   * Duplicating it here would only restate a lower-level test in a slower one.
+   * Note what that does *not* say. A blocked task is not categorically refused
+   * ahead of the attended gate: the blocking gate lets `AUTOMATIC_ALLOWED`
+   * through, so a block whose evidence the authority module grants does reach
+   * the attended gate and is refused there with
+   * `CONTINUATION_NOT_AUTHORISED` / `ATTENDED_CONTINUATION_NOT_GRANTED`. That is
+   * exactly the RR-B1 case, and it is owned by
+   * `tests/run-driver.test.ts` — "writes nothing when the quota resume is
+   * allowed but the run is unattended", which hand-builds a block carrying an
+   * elapsed reset time, asserts `resume.continuation === 'AUTOMATIC_ALLOWED'`,
+   * and then asserts the attended refusal left every field of the pause intact.
+   * Reproducing that here would restate a lower-level test in a slower one.
    *
-   * What this case genuinely proves is narrower and still worth having: for a
-   * durably blocked task the operator's grant changes nothing, because
-   * `AUTOMATIC_ALLOWED` is the only thing that could move it, and nothing here
-   * can substitute for that.
+   * So the ownership split is: this case owns the earlier **blocking-gate**
+   * behaviour for a block this build can actually produce, and the run-driver
+   * regression owns the **attendedContinuation** behaviour. What this case
+   * genuinely proves is narrower and still worth having: for a block denied by
+   * the authority module, the operator's grant changes nothing.
    */
   it('leaves a blocked task blocked whether or not this invocation is attended', async () => {
     const started = await startTask({ taskId: TASK_ID });
@@ -977,7 +988,8 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
 
     // The blocking gate is what fired, and saying so is what makes the title
     // true: `CONTINUATION_NOT_AUTHORISED` would mean the attended gate had been
-    // reached, which for a blocked task it never is.
+    // reached, which for *this* block — denied `AUTOMATIC_ALLOWED` because it
+    // carries no reset time — cannot happen.
     expect(again.outcome).toBe('BLOCKED_USAGE_LIMIT');
     expect(again.reasonCodes).not.toContain('ATTENDED_CONTINUATION_NOT_GRANTED');
     expect(again.steps).toBe(0);
