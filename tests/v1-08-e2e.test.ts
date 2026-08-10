@@ -62,7 +62,7 @@ import {
   writerThatCommits,
   type StartedTask,
 } from './helpers/e2e-fixtures.js';
-import { passingReview } from './fixtures.js';
+import { fingerprint, passingReview } from './fixtures.js';
 
 afterAll(() => {
   removeTrackedWorkspaces();
@@ -150,7 +150,17 @@ describe('a task the repository is happy with reaches READY_FOR_PR', () => {
     }
   });
 
-  it('does no external work at all when run again on a terminal task', async () => {
+  /**
+   * "No further step", not "no subprocess".
+   *
+   * Reconciliation runs *before* the terminal gate — deliberately, so the gate
+   * is reached only for a state that loaded and belongs to this repository — so
+   * a rerun does spawn real Git probes (`worktree list`, `rev-parse`, `status`,
+   * `merge-base`). What it must not do is run another task phase or write
+   * anything, and an earlier title claiming "no external work at all" was simply
+   * false about the Git probes.
+   */
+  it('does not execute another task step for a terminal task', async () => {
     const started = await startTask({ taskId: TASK_ID });
     seedState(started);
     const first = await runTask(
@@ -169,6 +179,8 @@ describe('a task the repository is happy with reaches READY_FOR_PR', () => {
 
     expect(again.outcome).toBe('TASK_COMPLETED');
     expect(again.steps).toBe(0);
+    // No *task* work: no agent, no verification command. Git observation did
+    // run, ahead of the terminal gate — see this case's note.
     expectNothingRan(agent, verify);
     // Byte-identical: a terminal task is not re-checkpointed.
     expect(reload(started.root, TASK_ID).revision).toBe(settled.revision);
@@ -729,6 +741,79 @@ describe('one repository cannot reach into another', () => {
  * written twice. Reconciliation now re-derives both.
  */
 describe('a tampered state cannot make the main checkout a task workspace', () => {
+  /**
+   * The unmasked exploit, and the only case here that is a true regression test.
+   *
+   * The obvious tampered scenario — a `VERIFYING` state claiming the root — was
+   * refused before this fix existed too, but for an unrelated reason: the
+   * persisted state file is itself an untracked file in the main checkout, so
+   * `worktreeCleanAtCheckpoint: true` met a dirty tree and reconciliation
+   * answered `WORKTREE_DIRTY`. A test built that way documents the fix without
+   * being able to fail without it.
+   *
+   * This scenario removes both accidental defences, which is what a real
+   * deployment looks like:
+   *
+   *  - `.agent-orchestrator/runtime/` is git-ignored, exactly as the
+   *    state-persistence contract says a repository is expected to ignore it, so
+   *    the main checkout is genuinely clean;
+   *  - the phase is `REMEDIATING` with `worktreeCleanAtCheckpoint: false` and
+   *    `currentCommit: null` — the honest record of an interrupted writer. In
+   *    that phase a dirty tree contradicts nothing and no HEAD is expected, so
+   *    neither `WORKTREE_DIRTY` nor `CURRENT_COMMIT_MOVED` can fire.
+   *
+   * Every other check then passes on the tampered record, and without the
+   * derived-identity comparison reconciliation answers `CONSISTENT` — Git's
+   * registry vouches for the main working tree, which really does hold `main`.
+   * The Claude **writer** is then handed the canonical checkout as its `cwd`.
+   *
+   * The durable finding for round 1 is required, or the remediate step would
+   * refuse for lack of a cause (`NO_DURABLE_FINDINGS`) and mask the exploit a
+   * third way.
+   */
+  it('refuses the tampered state that would otherwise reconcile clean', async () => {
+    const started = await startTask({
+      taskId: TASK_ID,
+      // A repository that ignores the orchestrator's runtime directory, so the
+      // main checkout stays clean and cannot refuse this state by accident.
+      files: { '.gitignore': '.agent-orchestrator/runtime/\n' },
+    });
+
+    seedState(started, {
+      worktreePath: started.root,
+      workBranch: 'main',
+      state: 'REMEDIATING',
+      reviewRound: 1,
+      currentCommit: null,
+      worktreeCleanAtCheckpoint: false,
+      findingHistory: [{ round: 1, severity: 'high', fingerprint: fingerprint(7) }],
+    });
+
+    // The main checkout really is clean: the accidental defence is gone.
+    expect(git(started.root, ['status', '--porcelain']).trim()).toBe('');
+
+    const verify = recordedVerify();
+    const agent = recordedAgent({});
+    const run = await runTask(request(started), deps({ verify: verify.runner, agent: agent.runner }));
+
+    expect(run.outcome).toBe('STATE_DIVERGED');
+    expect(run.steps).toBe(0);
+
+    // The identity findings are the *only* reason this was refused. Asserted as
+    // an exact set rather than with `toContain`, because a scenario that also
+    // diverged for some other reason would prove nothing about the identity
+    // invariant — which is precisely how the weaker version of this test passed
+    // against code that did not have the fix.
+    expect(run.reconciliation?.report?.findings).toEqual([
+      'WORK_BRANCH_NOT_DERIVED',
+      'WORKTREE_PATH_NOT_DERIVED',
+    ]);
+
+    // The point of the whole exercise: nothing was started anywhere, least of
+    // all a writing agent in the canonical checkout.
+    expectNothingRan(agent, verify);
+  });
+
   it('refuses a state claiming the repository root and the default branch', async () => {
     const started = await startTask({ taskId: TASK_ID });
     // Self-consistent, contract-valid, and a lie: both claims agree with each
@@ -853,7 +938,27 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
     expect(reload(started.root, TASK_ID).revision).toBe(blocked.revision);
   });
 
-  it('does not spend the pause when this invocation is unattended', async () => {
+  /**
+   * The blocking gate, not the attended gate — and the distinction is the point.
+   *
+   * An earlier version of this case was titled as though it proved the
+   * V1-07-RR-B1 ordering ("an unattended run must not spend the pause before
+   * refusing to execute"). It could not: a durably blocked task is refused at
+   * the *blocking* gate, which precedes the attended-continuation gate, so the
+   * run stops identically whether or not the operator's grant is present.
+   * Deleting the attended gate outright left that test green.
+   *
+   * The ordering property is a property of the driver and is pinned where it can
+   * actually be observed — `tests/run-driver.test.ts`, against an in-flight
+   * (non-blocked) task, where the attended gate is the gate that fires.
+   * Duplicating it here would only restate a lower-level test in a slower one.
+   *
+   * What this case genuinely proves is narrower and still worth having: for a
+   * durably blocked task the operator's grant changes nothing, because
+   * `AUTOMATIC_ALLOWED` is the only thing that could move it, and nothing here
+   * can substitute for that.
+   */
+  it('leaves a blocked task blocked whether or not this invocation is attended', async () => {
     const started = await startTask({ taskId: TASK_ID });
     seedState(started);
     await runTask(
@@ -870,6 +975,11 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
       deps({ verify: recordedVerify().runner, agent: recordedAgent({}).runner }),
     );
 
+    // The blocking gate is what fired, and saying so is what makes the title
+    // true: `CONTINUATION_NOT_AUTHORISED` would mean the attended gate had been
+    // reached, which for a blocked task it never is.
+    expect(again.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    expect(again.reasonCodes).not.toContain('ATTENDED_CONTINUATION_NOT_GRANTED');
     expect(again.steps).toBe(0);
     expect(reload(started.root, TASK_ID).revision).toBe(blocked.revision);
     expect(reload(started.root, TASK_ID).state.resumeFrom).toEqual({ phase: 'REMEDIATE', round: 1 });

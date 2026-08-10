@@ -558,21 +558,56 @@ describe('findingHistory entries', () => {
       expect(accept('abcdef0123456789abcdef0123456789')).toBe(true);
     });
 
+    /**
+     * Every hostile character is written as an **escape**, never as the raw
+     * byte.
+     *
+     * A literal U+0007 or U+2028 in the source is invisible in an editor and
+     * in a diff, and a whitespace-normalising edit would silently reduce such
+     * a row to a 31-character `'0'` string — which this schema also refuses,
+     * so the case would stay green while no longer testing anything. The
+     * escapes keep the intent readable, and `pinned` then asserts the value
+     * really carries the character the case is named for, so a mangled escape
+     * cannot pass either.
+     */
+    const BEL = '\u0007';
+    const LINE_SEPARATOR = '\u2028';
+    const NUL = '\u0000';
+    const LF = '\n';
+    const CRLF = '\r\n';
+
     it.each([
-      ['uppercase hex', 'ABCDEF0123456789ABCDEF0123456789'],
-      ['one character short', '0'.repeat(31)],
-      ['one character long', '0'.repeat(33)],
-      ['non-hex characters', 'z'.repeat(32)],
-      ['a leading space', ` ${'0'.repeat(31)}`],
-      ['a trailing newline', `${'0'.repeat(32)}\n`],
-      ['an embedded newline', `${'0'.repeat(16)}\n${'0'.repeat(15)}`],
-      ['an embedded CRLF', `${'0'.repeat(16)}\r\n${'0'.repeat(14)}`],
-      ['a NUL byte', `${'0'.repeat(31)}\0`],
-      ['a control character', `${'0'.repeat(31)}`],
-      ['a line separator', `${'0'.repeat(31)} `],
-      ['an extremely long value', 'a'.repeat(100_000)],
-    ])('refuses a fingerprint with %s', (_label, value) => {
+      ['uppercase hex', 'ABCDEF0123456789ABCDEF0123456789', null],
+      ['one character short', '0'.repeat(31), null],
+      ['one character long', '0'.repeat(33), null],
+      ['non-hex characters', 'z'.repeat(32), null],
+      ['a leading space', ` ${'0'.repeat(31)}`, ' '],
+      ['a trailing newline', `${'0'.repeat(32)}${LF}`, LF],
+      ['an embedded newline', `${'0'.repeat(16)}${LF}${'0'.repeat(15)}`, LF],
+      ['an embedded CRLF', `${'0'.repeat(16)}${CRLF}${'0'.repeat(14)}`, CRLF],
+      ['a NUL byte', `${'0'.repeat(31)}${NUL}`, NUL],
+      ['a control character', `${'0'.repeat(31)}${BEL}`, BEL],
+      ['a line separator', `${'0'.repeat(31)}${LINE_SEPARATOR}`, LINE_SEPARATOR],
+      ['an extremely long value', 'a'.repeat(100_000), null],
+    ])('refuses a fingerprint with %s', (_label, value, pinned) => {
+      // The value really carries the character this case is named for, so an
+      // edit that stripped it would fail here rather than pass by accident on
+      // a string that is merely the wrong length.
+      if (pinned !== null) expect(value).toContain(pinned);
       expect(accept(value)).toBe(false);
+    });
+
+    it('refuses a hostile character for the character, not for the length', () => {
+      // Exactly 32 characters, one of them hostile — so length cannot be the
+      // reason and the character class must be.
+      const bel = `${'0'.repeat(31)}${BEL}`;
+      const separator = `${'0'.repeat(31)}${LINE_SEPARATOR}`;
+      expect(bel).toHaveLength(32);
+      expect(separator).toHaveLength(32);
+      expect(bel.codePointAt(31)).toBe(0x0007);
+      expect(separator.codePointAt(31)).toBe(0x2028);
+      expect(accept(bel)).toBe(false);
+      expect(accept(separator)).toBe(false);
     });
 
     /**

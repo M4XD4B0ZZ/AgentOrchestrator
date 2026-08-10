@@ -2347,11 +2347,36 @@ shell-unsafe, and an output budget that terminates the child. The timeout is
 asserted as the constant it is; the mechanism belongs to `runCommand` and is
 exercised in `tests/exec.test.ts`.
 
-That test also records **F-9** rather than resolving it: the child gets
-`capability:generic` — `PATH`, `PATHEXT`, and whatever the platform back-fills.
-A Windows build works because libuv supplies `SYSTEMROOT` and `TEMP`; a POSIX
-toolchain needing `HOME` would not, and `npm_config_*` never arrives. Widening
-that policy is a decision with a failing test behind it, not a quiet edit.
+### Verification is a stated V1 platform limitation, not a hidden followup
+
+The item carried as **F-9** is resolved here as a documented limitation rather
+than as code: it was never a defect to fix, it is a boundary to state.
+
+The verification child runs under the `capability:generic` environment policy:
+**`PATH` and `PATHEXT` are the only variables explicitly supplied**, plus
+whatever the platform back-fills of its own accord. On Windows libuv adds
+`SYSTEMROOT`, `TEMP`, `USERPROFILE` and friends, which is why a Windows build
+starts at all.
+
+The consequence is a boundary on what V1 has actually demonstrated, and it is
+stated here rather than carried as a followup because an operator meets it on
+their first run:
+
+- V1's canonical verification evidence is **Windows + Node 22** — `verify` runs
+  on `windows-latest`, and `tests/v1-08-verification-boundary.test.ts` spawns its
+  real processes there;
+- **portability to POSIX, or to any project toolchain that needs `HOME`,
+  `npm_config_*`, `TMPDIR`, `LANG` or a proxy variable, is not proven by V1.** A
+  POSIX `npm` without `HOME` is the concrete case;
+- the failure mode is **fail-closed**: a command that cannot start is
+  `UNAVAILABLE`, which `run-verification.ts` reports as unrunnable rather than
+  failed, and the loop sends the task to a human. It never becomes a false
+  `PASSED`, and it never becomes `BLOCKED_VERIFY`, which would blame the
+  repository for something that is this build's limitation.
+
+Widening the policy is a product decision with a failing test behind it, not a
+quiet edit — `tests/v1-08-verification-boundary.test.ts` asserts the current
+narrow answer, so changing it has to be deliberate.
 
 ### Carried forward, deliberately
 
