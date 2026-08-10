@@ -13,8 +13,7 @@
  * cannot be asked to produce on demand.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -39,6 +38,7 @@ import {
   RESUME_CLASSIFICATIONS,
 } from '../src/state/resume-decision.js';
 import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 import { fingerprint, SHA_A, SHA_B, validCreatedState, validUsageLimitState } from './fixtures.js';
 import { parseTaskState, type TaskState, type TaskStateInput } from '../src/core/task-state.js';
 import { ALL_STATES, type TaskStateName } from '../src/core/states.js';
@@ -774,8 +774,20 @@ describe('reconciling state against resolved identity', () => {
 describe('reconciliation outcomes', () => {
   const roots: string[] = [];
 
+  /**
+   * A canonical scratch root, via the shared helper rather than `tmpdir()`.
+   *
+   * `persistedTask` below derives this task's workspace identity from this
+   * root, and that derivation requires the path to be shell-inert: a GitHub
+   * Windows runner reports `C:\Users\RUNNER~1\AppData\Local\Temp`, an 8.3
+   * alias, and `SAFE_ARG_PATTERN` deliberately excludes `~`, so the raw
+   * `tmpdir()` spelling makes the *fixture* fail with `WORKTREE_PATH_UNSAFE`
+   * before any case's own subject is reached. Canonicalising at creation fixes
+   * the wrong assumption where it is made; it is emphatically not a reason to
+   * widen the argument contract.
+   */
   function repoRoot(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'ao-recon-'));
+    const dir = makeCanonicalTempDir('ao-recon-');
     roots.push(dir);
     return dir;
   }
