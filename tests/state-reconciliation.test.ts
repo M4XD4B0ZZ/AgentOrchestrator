@@ -162,6 +162,56 @@ describe('observing Git reality', () => {
     expect(baseProbes).toHaveLength(0);
   });
 
+  /**
+   * The authorised path is a narrower answer than the registered one, and the
+   * gap between them is where an agent gets started in the wrong checkout.
+   *
+   * `registeredWorktreePath` says "Git lists the directory the record names".
+   * `authorisedWorktreePath` additionally says "and this task's own branch is
+   * checked out there". A caller that rebuilt the second from the first would
+   * be restating a rule that already has one home — and would get it wrong in
+   * exactly the case below, where Git knows the directory perfectly well and it
+   * belongs to somebody else's work.
+   */
+  it('authorises nothing when the registration holds another branch', async () => {
+    const foreign = `worktree ${STATE.repositoryRoot}\nbranch refs/heads/main\n\nworktree ${WORKTREE}\nbranch refs/heads/agent/task-9999\n`;
+
+    const observed = await observeRuntime(scriptedGit({ registry: OK(foreign) }), STATE, {
+      exists: alwaysExists,
+    });
+
+    expect(observed.worktreeRegistered).toBe(true);
+    expect(observed.registeredWorktreePath).toBe(WORKTREE);
+    expect(observed.authorisedWorktreePath).toBeNull();
+  });
+
+  it.each([
+    ['an unreadable registry', { registry: UNAVAILABLE }],
+    ['a worktree Git does not list', { registry: OK(`worktree ${STATE.repositoryRoot}\nbranch refs/heads/main\n`) }],
+  ])('authorises nothing given %s', async (_label, script) => {
+    const observed = await observeRuntime(scriptedGit(script), STATE, { exists: alwaysExists });
+
+    expect(observed.authorisedWorktreePath).toBeNull();
+  });
+
+  /**
+   * And the positive half: what is authorised is the path *Git printed*, not
+   * the spelling the record happens to carry. Git prints POSIX-shaped paths
+   * even on Windows, so the two routinely differ by separator and by case, and
+   * the one that must reach a `spawn` is Git's.
+   */
+  it('authorises the path Git printed, not the one the record carries', async () => {
+    const printed = `${WORKTREE.split('\\').join('/')}/`;
+    const registry = `worktree ${STATE.repositoryRoot}\nbranch refs/heads/main\n\nworktree ${printed}\nbranch ${BRANCH_REF}\n`;
+
+    const observed = await observeRuntime(scriptedGit({ registry: OK(registry) }), STATE, {
+      exists: alwaysExists,
+    });
+
+    expect(observed.authorisedWorktreePath).toBe(printed);
+    expect(observed.authorisedWorktreePath).not.toBe(STATE.worktreePath);
+  });
+
   it('separates "not an ancestor" from "could not be evaluated"', async () => {
     const answered = await observeRuntime(scriptedGit({ ancestry: NONZERO(1) }), STATE, {
       exists: alwaysExists,
@@ -960,7 +1010,15 @@ describe('classifying whether a task may resume', () => {
 
   it('checks repository identity for a regular in-flight state too', async () => {
     const working = parseTaskState(
-      validUsageLimitState({ state: 'IMPLEMENTING', blockedAgent: null, resumeFrom: null }),
+      // A task *executing* carries none of the block's evidence: no blocked
+      // agent, no resume point, and no quota reset time. The contract enforces
+      // all three for a work-loop state.
+      validUsageLimitState({
+        state: 'IMPLEMENTING',
+        blockedAgent: null,
+        resumeFrom: null,
+        reportedResetAt: null,
+      }),
     );
     const observed = await observeRuntime(scriptedGit(), working, { exists: alwaysExists });
 
@@ -1003,7 +1061,15 @@ describe('classifying whether a task may resume', () => {
 
   it('continues a regular in-flight state that reconciles cleanly', async () => {
     const working = parseTaskState(
-      validUsageLimitState({ state: 'IMPLEMENTING', blockedAgent: null, resumeFrom: null }),
+      // A task *executing* carries none of the block's evidence: no blocked
+      // agent, no resume point, and no quota reset time. The contract enforces
+      // all three for a work-loop state.
+      validUsageLimitState({
+        state: 'IMPLEMENTING',
+        blockedAgent: null,
+        resumeFrom: null,
+        reportedResetAt: null,
+      }),
     );
 
     const decision = await classifyWith({}, alwaysExists, working);
@@ -1045,6 +1111,7 @@ describe('continuation authority is separate from reconciliation', () => {
         state: 'IMPLEMENTING',
         blockedAgent: null,
         resumeFrom: null,
+        reportedResetAt: null,
         worktreeCleanAtCheckpoint: false,
       }),
     );
@@ -1081,7 +1148,15 @@ describe('continuation authority is separate from reconciliation', () => {
       }),
     );
     const working = parseTaskState(
-      validUsageLimitState({ state: 'IMPLEMENTING', blockedAgent: null, resumeFrom: null }),
+      // A task *executing* carries none of the block's evidence: no blocked
+      // agent, no resume point, and no quota reset time. The contract enforces
+      // all three for a work-loop state.
+      validUsageLimitState({
+        state: 'IMPLEMENTING',
+        blockedAgent: null,
+        resumeFrom: null,
+        reportedResetAt: null,
+      }),
     );
 
     const decisions = [

@@ -125,6 +125,49 @@ export type AgentId = (typeof AGENT_IDS)[number];
 export const RESUME_PHASES = ['IMPLEMENT', 'VERIFY', 'REVIEW', 'REMEDIATE'] as const;
 export type ResumePhase = (typeof RESUME_PHASES)[number];
 
+/**
+ * The regular state each resume phase names.
+ *
+ * It lives here, next to the two vocabularies it relates, so that the resume
+ * policy and the state contract read the *same* mapping. `resume-policy.ts`
+ * derives its legitimate resume phases from it; `task-state.ts` derives the
+ * work-loop set below from it. A second copy of this table would be a second
+ * opinion on what `REVIEW` means.
+ */
+export const RESUME_PHASE_STATES: Readonly<Record<ResumePhase, TaskStateName>> = Object.freeze({
+  IMPLEMENT: 'IMPLEMENTING',
+  VERIFY: 'VERIFYING',
+  REVIEW: 'REVIEWING',
+  REMEDIATE: 'REMEDIATING',
+});
+
+/**
+ * The states in which the loop is *executing* rather than waiting.
+ *
+ * Derived from {@link RESUME_PHASE_STATES} rather than listed again: a work
+ * phase is exactly a state some resume point can name, because a resume point
+ * names where execution continues.
+ *
+ * The set exists because these four states are the ones for which resume-only
+ * evidence — a `resumeFrom` point and a reported quota reset — is necessarily
+ * stale. A task executing in one of them is not paused, so a record saying
+ * where to continue after a pause describes a pause that is over. The setup
+ * chain is deliberately *not* here: `BLOCKED_AUTH → AUTH_PREFLIGHT →
+ * GIT_PREFLIGHT → WORKTREE_READY → CONTEXT_LOADING` is the declared path a
+ * re-authenticated task walks, and `resume-policy.ts` requires the stored point
+ * to survive it.
+ */
+export const WORK_LOOP_STATES = Object.freeze(
+  RESUME_PHASES.map((phase) => RESUME_PHASE_STATES[phase]),
+) as readonly TaskStateName[];
+
+const WORK_LOOP_SET: ReadonlySet<string> = new Set<string>(WORK_LOOP_STATES);
+
+/** `true` for the four states in which an agent or a verification command runs. */
+export function isWorkLoopState(state: TaskStateName): boolean {
+  return WORK_LOOP_SET.has(state);
+}
+
 /** Severity vocabulary for review findings. */
 export const FINDING_SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];

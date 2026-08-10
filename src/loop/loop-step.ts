@@ -39,6 +39,17 @@
  * `VERIFYING → REVIEWING → REMEDIATING → VERIFYING`, and every traversal of it
  * passes through `REVIEWING`, which consumes exactly one review round.
  *
+ * ── Where a step is allowed to execute ─────────────────────────────────────
+ *
+ * Every process a step starts — the verification commands, the reviewer, the
+ * writer — runs in {@link LoopDependencies.authorisedWorktreePath}, which the
+ * caller obtains from `observeRuntime(...).authorisedWorktreePath` and nowhere
+ * else. The persisted `state.worktreePath` is compared against it as identity
+ * evidence and is never used as a `cwd`: it is a claim this process did not
+ * watch being written, and the absolute / shell-inert guards at the agent
+ * boundaries prove a path is *usable*, never that it is *ours*. A step handed
+ * no authority runs nothing and writes nothing (`EXECUTION_UNAUTHORISED`).
+ *
  * ── Rounds ─────────────────────────────────────────────────────────────────
  *
  * `reviewRound` counts **completed** reviews and starts at 0. The review being
@@ -53,6 +64,8 @@ import { codexReviewResumePoint, runCodexReviewer } from '../agent/codex-reviewe
 import { interruptedResumePoint, type AgentBlockEvidence } from '../agent/agent-outcome.js';
 import type { AgentRunner } from '../agent/agent-command.js';
 import { recordAgentInterruption } from '../agent/record-interruption.js';
+import { absolutePathsEqual, isComparablePath } from '../core/path-identity.js';
+import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import type { TaskState } from '../core/task-state.js';
 import type { TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
@@ -65,7 +78,7 @@ import type { VerificationRunner } from '../verify/verify-command.js';
 import {
   appendFindings,
   buildRemediationPayload,
-  buildResumedRemediationPayload,
+  buildResumedRemediationBrief,
   buildReviewPayload,
 } from './findings.js';
 
@@ -86,6 +99,18 @@ export const LOOP_STEP_OUTCOMES = [
   'STATE_NOT_RECORDED',
   /** The task is not in a state this loop drives. Nothing was run and nothing written. */
   'NOT_APPLICABLE',
+  /**
+   * No authorised worktree was supplied for this state, so nothing was started
+   * and nothing was written.
+   *
+   * Distinct from `NOT_APPLICABLE`, which is a fact about the *task's phase*,
+   * and from `BLOCKED`, which is a durable fact about the *task*. This is a
+   * fact about the **caller's authority**, and folding it into either would
+   * turn "we were never allowed to run" into "the task has nothing to do" or
+   * "the task is parked" — two sentences that send an operator somewhere the
+   * problem is not.
+   */
+  'EXECUTION_UNAUTHORISED',
 ] as const;
 
 export type LoopStepOutcome = (typeof LOOP_STEP_OUTCOMES)[number];
@@ -138,6 +163,21 @@ export const observeCompletion: CompletionObserver = async (state) => {
 export interface LoopDependencies extends AdvanceOptions {
   /** The instant a state is entered, ISO-8601. Injected, never read from a clock. */
   readonly now: string;
+  /**
+   * The one directory every process this step starts runs in.
+   *
+   * It is `observeRuntime(...).authorisedWorktreePath`: the path **Git printed**
+   * for a registration holding this task's work branch. It is emphatically not
+   * `state.worktreePath`, which is a sentence in a file — a stale record, a
+   * hand-edited state or one copied from another machine would each be enough
+   * to point a writing agent at somebody else's checkout, and the absolute /
+   * shell-inert guards the agent boundaries apply would each wave it through.
+   *
+   * Required, and not nullable. A driver that has no authority cannot call this
+   * loop at all, and an omitted field is a compile error rather than a quiet
+   * fall back to the persisted claim.
+   */
+  readonly authorisedWorktreePath: string;
   /** The repository's resolved verification policy. Never the raw profile. */
   readonly verification: ResolvedVerificationPolicy;
   /** What the task is, in the reviewer's and writer's own words. */
@@ -164,6 +204,29 @@ function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutc
 }
 
 const NOT_APPLICABLE = result({ outcome: 'NOT_APPLICABLE' });
+const EXECUTION_UNAUTHORISED = result({ outcome: 'EXECUTION_UNAUTHORISED' });
+
+/**
+ * Whether `deps.authorisedWorktreePath` is authority for *this* state.
+ *
+ * Two questions, and both have to hold. The path must be comparable at all —
+ * a blank or relative `cwd` resolves against `process.cwd()` at `spawn`, which
+ * is the one directory nothing here is allowed to inherit. And it must denote
+ * the directory the state records, because a caller that reconciled task A and
+ * then stepped task B would otherwise run B's agents in A's worktree.
+ *
+ * This is not a comparison of a value with itself. The left side's provenance
+ * is Git's registry; the right side's is the state file. They agree exactly
+ * when the observation handed in belongs to the state handed in, and the
+ * comparison is by path identity rather than by string, because Git prints
+ * `D:/repo/wt` where `node:path` produces `D:\repo\wt`.
+ */
+function authorised(state: TaskState, authorisedWorktreePath: string): boolean {
+  return (
+    isComparablePath(authorisedWorktreePath) &&
+    absolutePathsEqual(authorisedWorktreePath, state.worktreePath)
+  );
+}
 
 /**
  * The round a resume point should name for work belonging to the current pass.
@@ -195,19 +258,35 @@ export async function runVerifyStep(
   const state = current.state;
   if (state.state !== 'VERIFYING') return NOT_APPLICABLE;
 
-  const { now, verification, taskBrief, verify, agent, observe, remediationPayload, ...advance } = deps;
+  const {
+    now,
+    authorisedWorktreePath,
+    verification,
+    taskBrief,
+    verify,
+    agent,
+    observe,
+    remediationPayload,
+    ...advance
+  } = deps;
   void taskBrief;
   void agent;
   void observe;
   void remediationPayload;
 
+  if (!authorised(state, authorisedWorktreePath)) return EXECUTION_UNAUTHORISED;
+
   const report = await runVerification(
-    { worktreePath: state.worktreePath, verification },
+    { worktreePath: authorisedWorktreePath, verification },
     verify === undefined ? {} : { verify },
   );
 
   if (report.verdict === 'PASSED') {
-    const save = advanceTaskState(current, { ...state, state: 'REVIEWING', stateEnteredAt: now }, advance);
+    const save = advanceTaskState(
+      current,
+      { ...state, state: 'REVIEWING', stateEnteredAt: now, ...RESUME_EVIDENCE_SPENT },
+      advance,
+    );
     return saved(save, 'REVIEWING', 'ADVANCED', { verification: report });
   }
 
@@ -264,11 +343,13 @@ export async function runReviewStep(
   const state = current.state;
   if (state.state !== 'REVIEWING') return NOT_APPLICABLE;
 
-  const { now, taskBrief, agent, observe, ...rest } = deps;
+  const { now, authorisedWorktreePath, taskBrief, agent, observe, ...rest } = deps;
   const { verification, verify, remediationPayload, ...advance } = rest;
   void verification;
   void verify;
   void remediationPayload;
+
+  if (!authorised(state, authorisedWorktreePath)) return EXECUTION_UNAUTHORISED;
 
   const round = state.reviewRound + 1;
 
@@ -291,7 +372,7 @@ export async function runReviewStep(
   }
 
   const review = await runCodexReviewer(
-    { worktreePath: state.worktreePath, round, payload: buildReviewPayload(taskBrief) },
+    { worktreePath: authorisedWorktreePath, round, payload: buildReviewPayload(taskBrief) },
     agent === undefined ? {} : { agent },
   );
 
@@ -347,6 +428,7 @@ export async function runReviewStep(
         findingHistory: history,
         worktreeCleanAtCheckpoint: false,
         currentCommit: null,
+        ...RESUME_EVIDENCE_SPENT,
       },
       advance,
     );
@@ -415,17 +497,64 @@ export async function runRemediateStep(
   const state = current.state;
   if (state.state !== 'REMEDIATING') return NOT_APPLICABLE;
 
-  const { now, agent, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  const {
+    now,
+    authorisedWorktreePath,
+    agent,
+    remediationPayload,
+    taskBrief,
+    verification,
+    verify,
+    observe,
+    ...advance
+  } = deps;
   void taskBrief;
   void verification;
   void verify;
   void observe;
 
+  if (!authorised(state, authorisedWorktreePath)) return EXECUTION_UNAUTHORISED;
+
   const round = currentRound(state);
-  const payload = remediationPayload ?? buildResumedRemediationPayload(state.findingHistory, round);
+
+  // A remediation pass needs a *cause*, and the cause has to have survived.
+  //
+  // The caller's payload is the live one: it exists only on the step that just
+  // read a review, and the same write persisted that review's findings. Without
+  // it — a restarted driver, or an entry into `REMEDIATING` that came from
+  // somewhere other than `REVIEWING` — the durable history is the only evidence
+  // there is, and where it holds nothing for this round there is no brief to
+  // build. Composing one anyway produces a document in the reviewer's voice
+  // claiming a review reported findings and then listing none of them, which is
+  // a fabricated cause handed to a writing agent with a worktree to modify.
+  //
+  // `BLOCKED_VERIFY → REMEDIATING` is the sharp case: a failed verification is
+  // a real reason to remediate, but the report is deliberately never persisted,
+  // so nothing durable makes it actionable. A caller that has just run the
+  // verification may supply its own brief; one that has not must not invent the
+  // reviewer's.
+  const brief =
+    remediationPayload === undefined
+      ? buildResumedRemediationBrief(state.findingHistory, round)
+      : ({ kind: 'DURABLE_RECORD', payload: remediationPayload } as const);
+
+  if (brief.kind === 'NO_DURABLE_FINDINGS') {
+    const save = advanceTaskState(
+      current,
+      {
+        ...state,
+        state: 'HUMAN_DECISION_REQUIRED',
+        stateEnteredAt: now,
+        resumeFrom: { phase: 'REMEDIATE', round },
+        reportedResetAt: null,
+      },
+      advance,
+    );
+    return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
+  }
 
   const writer = await runClaudeWriter(
-    { worktreePath: state.worktreePath, phase: 'REMEDIATE', round, payload },
+    { worktreePath: authorisedWorktreePath, phase: 'REMEDIATE', round, payload: brief.payload },
     agent === undefined ? {} : { agent },
   );
 
@@ -456,6 +585,7 @@ export async function runRemediateStep(
       stateEnteredAt: now,
       worktreeCleanAtCheckpoint: false,
       currentCommit: null,
+      ...RESUME_EVIDENCE_SPENT,
     },
     advance,
   );

@@ -34,7 +34,7 @@
 
 import { z } from 'zod';
 
-import { getStateKind, isBlockingState } from './states.js';
+import { getStateKind, isBlockingState, isWorkLoopState } from './states.js';
 import {
   TASK_STATE_SCHEMA_VERSION,
   TaskStateObjectSchema,
@@ -165,6 +165,47 @@ export const TaskStateSchema = TaskStateObjectSchema.superRefine((value, ctx) =>
           `State ${stateName} is ${getStateKind(stateName)} and not blocking, ` +
           `so blockedAgent must be null (got "${value.blockedAgent}").`,
       });
+    }
+
+    // --- 7. Resume-only evidence does not survive into the work loop -------
+    // A `resumeFrom` point says where to continue *after a pause*, and a
+    // `reportedResetAt` says when a quota pause ends. A task recorded in one of
+    // the four work-loop states is executing, not paused: reaching the state a
+    // resume point names *is* the continuation it asked for, so the point has
+    // been spent, and a running task is not waiting on anyone's quota.
+    //
+    // Nothing but a schema rule would catch a stale one. Every write in this
+    // codebase is a `{ ...state, … }` spread, and three of the loop's own
+    // writes name neither field; without this, a point left over from an
+    // earlier block rides `REMEDIATING → VERIFYING → REVIEWING → REMEDIATING`
+    // indefinitely, and an elapsed reset time sits on a running task waiting to
+    // be read as "the quota has cleared" by the next resume decision. Both are
+    // records of a continuation that has already happened.
+    //
+    // Deliberately scoped to the work loop rather than to every non-blocking
+    // state: `BLOCKED_AUTH → AUTH_PREFLIGHT → GIT_PREFLIGHT → WORKTREE_READY →
+    // CONTEXT_LOADING` is the declared path a re-authenticated task walks, and
+    // `resume-policy.ts` requires the stored point to survive it. `reconcile.ts`
+    // additionally reads it there as evidence that work precedes this phase.
+    if (isWorkLoopState(stateName)) {
+      if (value.resumeFrom !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['resumeFrom'],
+          message:
+            `State ${stateName} is a work-loop state, and reaching it consumes the resume point ` +
+            'that led there, so resumeFrom must be null.',
+        });
+      }
+      if (value.reportedResetAt !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['reportedResetAt'],
+          message:
+            `State ${stateName} is running rather than waiting on a quota, ` +
+            'so it must not carry a reported quota reset time.',
+        });
+      }
     }
   } else {
     const policy = BLOCKED_STATE_POLICIES[stateName];

@@ -52,6 +52,26 @@ export interface ResumePoint {
   readonly round: number;
 }
 
+/**
+ * The resume-only evidence, withdrawn.
+ *
+ * Spread after `...state` on every write that *enters* a work-loop state —
+ * whether the loop takes it in its stride or a driver takes it to continue a
+ * block. Reaching the state a resume point names **is** the continuation the
+ * point asked for, so the point has been spent; and a task that is running is
+ * not waiting on anyone's quota, so a reported reset time on it is a fact about
+ * a pause that is over.
+ *
+ * Both are refused outright by `TaskStateSchema` for those four states, so
+ * forgetting this is a refused write rather than a silent lie. It lives here,
+ * stated once, so that the correct write is a spread rather than two fields a
+ * caller has to remember at each of the seven places they are needed.
+ */
+export const RESUME_EVIDENCE_SPENT = Object.freeze({
+  resumeFrom: null,
+  reportedResetAt: null,
+});
+
 /** Round schema reused for `reviewRound` / `maxReviewRounds` / finding rounds. */
 export const RoundSchema = (label: string, minimum: number) =>
   z

@@ -38,6 +38,7 @@
 
 import {
   RESUME_PHASES,
+  RESUME_PHASE_STATES,
   isBlockingState,
   type AgentId,
   type BlockingState,
@@ -57,15 +58,13 @@ export type { ResumePoint } from './resume-point.js';
 /**
  * The regular state a resume point re-enters.
  *
- * Note that this is *not* automatically a legal transition from wherever the
- * task currently is — callers must still run `assertTransition`.
+ * Taken from `states.ts` rather than restated here, so the state contract's
+ * work-loop set and this policy's phase mapping cannot disagree about what a
+ * phase means. Note that a mapped state is *not* automatically a legal
+ * transition from wherever the task currently is — callers must still run
+ * `assertTransition`.
  */
-const PHASE_TO_STATE: Readonly<Record<ResumePhase, TaskStateName>> = Object.freeze({
-  IMPLEMENT: 'IMPLEMENTING',
-  VERIFY: 'VERIFYING',
-  REVIEW: 'REVIEWING',
-  REMEDIATE: 'REMEDIATING',
-});
+const PHASE_TO_STATE: Readonly<Record<ResumePhase, TaskStateName>> = RESUME_PHASE_STATES;
 
 /** How a blocking state re-enters the work loop when it is continued. */
 export type ResumeReentry = 'DIRECT' | 'VIA_AUTH_PREFLIGHT' | 'NONE';

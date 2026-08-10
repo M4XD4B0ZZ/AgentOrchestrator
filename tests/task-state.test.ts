@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { BLOCKING_STATES, RESUME_PHASES } from '../src/core/states.js';
+import {
+  BLOCKING_STATES,
+  RESUME_PHASES,
+  RESUME_PHASE_STATES,
+  WORK_LOOP_STATES,
+} from '../src/core/states.js';
 import { allowedResumePhases } from '../src/core/resume-policy.js';
 import { MAX_ROUND } from '../src/core/resume-point.js';
 // Internal modules, imported from where they live. They are deliberately not
@@ -273,6 +278,74 @@ describe('resumeFrom invariants', () => {
 });
 
 // ── AO-004: the schema accepts only reachable resume phases ────────────────
+
+/**
+ * Resume-only evidence, and the four states it may not survive into.
+ *
+ * A `resumeFrom` says where to continue after a pause; a `reportedResetAt` says
+ * when a quota pause ends. Reaching the state a resume point names *is* the
+ * continuation it asked for, and a task that is running is not waiting on
+ * anyone's quota — so in the work loop both are records of something that has
+ * already happened.
+ *
+ * The invariant lives in the contract rather than in the writers because every
+ * state write in this codebase is a `{ ...state, … }` spread, and a spread that
+ * forgets a field is silent. Here it is a refused write that persists nothing.
+ */
+describe('resume evidence does not survive into the work loop', () => {
+  it.each(WORK_LOOP_STATES)('rejects a resumeFrom on %s', (state) => {
+    const result = safeParseTaskState(
+      validCreatedState({
+        state,
+        currentCommit: SHA_B,
+        resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      }),
+    );
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain('resumeFrom');
+  });
+
+  it.each(WORK_LOOP_STATES)('rejects a reportedResetAt on %s', (state) => {
+    const result = safeParseTaskState(
+      validCreatedState({
+        state,
+        currentCommit: SHA_B,
+        reportedResetAt: '2026-08-10T12:00:00.000Z',
+      }),
+    );
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain('reportedResetAt');
+  });
+
+  /**
+   * The liveness half, and the reason the rule is scoped to the work loop
+   * rather than to every non-blocking state: `BLOCKED_AUTH → AUTH_PREFLIGHT →
+   * GIT_PREFLIGHT → WORKTREE_READY → CONTEXT_LOADING` is the declared path a
+   * re-authenticated task walks, and the resume policy requires the stored
+   * point to survive it. `reconcile.ts` additionally reads it there as evidence
+   * that work precedes the phase.
+   */
+  it.each(['AUTH_PREFLIGHT', 'GIT_PREFLIGHT', 'WORKTREE_READY', 'CONTEXT_LOADING'] as const)(
+    'carries a resumeFrom through %s',
+    (state) => {
+      const result = safeParseTaskState(
+        validCreatedState({ state, resumeFrom: { phase: 'IMPLEMENT', round: 1 } }),
+      );
+      expect(result.success).toBe(true);
+    },
+  );
+
+  /**
+   * The set is derived, not listed twice. A phase added to `RESUME_PHASES`, or
+   * a mapping changed in `RESUME_PHASE_STATES`, must move this invariant with
+   * it rather than leaving a state the contract has stopped guarding.
+   */
+  it('guards exactly the states a resume point can name', () => {
+    expect([...WORK_LOOP_STATES].sort()).toEqual(
+      RESUME_PHASES.map((phase) => RESUME_PHASE_STATES[phase]).sort(),
+    );
+  });
+});
 
 describe('resume phases per blocking state', () => {
   /** A minimally valid state in `state`, with the given resume point. */
