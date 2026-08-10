@@ -160,6 +160,8 @@ export const PROBE_ENV_POLICIES = [
   'capability:codex',
   'auth:claude',
   'auth:codex',
+  'agent:claude',
+  'agent:codex',
 ] as const;
 
 export type ProbeEnvPolicy = (typeof PROBE_ENV_POLICIES)[number];
@@ -239,6 +241,28 @@ const POLICY_ALLOWLIST: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = Ob
    * particular no Anthropic/Claude variable.
    */
   'auth:codex': Object.freeze([...EXEC_CONTRACT_VARS, 'HOME', 'USERPROFILE']),
+
+  /**
+   * The Claude *writer* run — the agent process that actually edits a
+   * worktree, not a probe that asks a question about it.
+   *
+   * It gets the same four variables as `auth:claude` and, deliberately, not
+   * one more. The reasoning is the same reasoning: the CLI has to be
+   * locatable (`PATH`/`PATHEXT`) and it has to find the subscription login
+   * that `auth:claude` just proved exists, which lives under the profile
+   * root. CLI-login operation is the expected mode, so no credential variable
+   * appears here either — a writer that needed one would be running under an
+   * authentication path the preflight never verified.
+   *
+   * Stated separately from `auth:claude` even though the two lists coincide
+   * today, for the reason given above: these are different processes doing
+   * different things, and a future need of the writer must not silently
+   * widen what a read-only status probe receives.
+   */
+  'agent:claude': Object.freeze([...EXEC_CONTRACT_VARS, 'HOME', 'USERPROFILE']),
+
+  /** The Codex *reviewer* run. Same reasoning, against `~/.codex`, and no Claude anything. */
+  'agent:codex': Object.freeze([...EXEC_CONTRACT_VARS, 'HOME', 'USERPROFILE']),
 });
 
 /** Thrown when a caller asks for a policy that does not exist. */

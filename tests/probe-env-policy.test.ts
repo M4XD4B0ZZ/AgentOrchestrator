@@ -29,8 +29,12 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   createProbeEnv,
   probeEnvAllowlist,
+  FORBIDDEN_CHILD_ENV_VARS,
+  LOADER_INJECTION_ENV_VARS,
+  OBSERVED_PROVIDER_ENV_VARS,
   PROBE_ENV_POLICIES,
   ProbeEnvironmentCollisionError,
+  WITHHELD_AUTH_ENV_VARS,
   type ProbeEnvPolicy,
 } from '../src/auth/env-guard.js';
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
@@ -173,6 +177,11 @@ const EXPECTED_KEYS: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = {
   'capability:codex': ['PATH', 'PATHEXT'],
   'auth:claude': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
   'auth:codex': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
+  // V1-05. The agent runs read the same login the auth probes proved, so they
+  // get the profile root and nothing beyond it. In particular they get no
+  // credential variable: CLI-login operation is the expected mode.
+  'agent:claude': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
+  'agent:codex': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
 };
 
 /**
@@ -213,21 +222,58 @@ describe('the policy matrix is exact', () => {
     }
   });
 
-  it('gives profile roots to the auth probes only', () => {
+  it('withholds profile roots from every capability probe', () => {
     for (const policy of ['capability:generic', 'capability:claude', 'capability:codex'] as const) {
       const env = createProbeEnv(policy, sourceEnv());
       for (const name of ['HOME', 'USERPROFILE', ...APP_DATA_ROOTS]) {
         expect(env[name]).toBeUndefined();
       }
     }
+  });
 
-    // Each auth probe reads a login under the profile root — `~/.claude` and
-    // `~/.codex` — so that is what each gets, and nothing wider.
-    for (const policy of ['auth:claude', 'auth:codex'] as const) {
+  it('gives profile roots to the login readers only — the auth probes and the agent runs', () => {
+    // Each of these reads a login under the profile root — `~/.claude` and
+    // `~/.codex` — so that is what each gets, and nothing wider. The agent
+    // runs are on this list for the same reason the auth probes are: they use
+    // the very login the preflight proved (V1-05).
+    for (const policy of ['auth:claude', 'auth:codex', 'agent:claude', 'agent:codex'] as const) {
       const env = createProbeEnv(policy, sourceEnv());
       expect(env['HOME']).toBe(OPERATIONAL.HOME);
       expect(env['USERPROFILE']).toBe(OPERATIONAL.USERPROFILE);
     }
+  });
+
+  /**
+   * V1-05. The writer edits a repository and the reviewer reads one; neither
+   * is entitled to a credential out of the environment, because the login they
+   * are meant to use is the stored CLI login that `runAuthPreflight` verified.
+   * An API key arriving here would mean the run was authenticated by a path
+   * nothing checked.
+   */
+  it('starts neither agent with a credential or a provider-routing variable', () => {
+    for (const policy of ['agent:claude', 'agent:codex'] as const) {
+      const env = createProbeEnv(policy, sourceEnv());
+      for (const name of [
+        ...FORBIDDEN_CHILD_ENV_VARS,
+        ...WITHHELD_AUTH_ENV_VARS,
+        ...LOADER_INJECTION_ENV_VARS,
+        ...OBSERVED_PROVIDER_ENV_VARS,
+      ]) {
+        expect(env[name]).toBeUndefined();
+        expect(keysUpper(env)).not.toContain(name.toUpperCase());
+      }
+    }
+  });
+
+  it('keeps the two agent policies stated separately rather than shared', () => {
+    const claude = probeEnvAllowlist('agent:claude');
+    const codex = probeEnvAllowlist('agent:codex');
+    expect([...claude]).toEqual([...codex]);
+    expect(claude).not.toBe(codex);
+    // And separate from the auth policies they currently coincide with: a
+    // future widening of the writer must not widen a read-only status probe.
+    expect(claude).not.toBe(probeEnvAllowlist('auth:claude'));
+    expect(codex).not.toBe(probeEnvAllowlist('auth:codex'));
   });
 
   /** AO-FOUNDATION-REM-003A-RR-02. */

@@ -1684,12 +1684,152 @@ unchanged: `repo/git-query.ts` still has no injection point, and this slice did
 not need one — it re-observes through V1-03's `GitRunner` seam and takes
 repository identity as evidence rather than resolving it.
 
+## The agent-runner contract
+
+Source of truth: `src/agent/`.
+
+V1-05 answers one question, for one agent run: **how did it end, and what may
+the task do about it?** It starts a Claude writer or a Codex reviewer, reads
+what came back, and classifies it. It does not decide what happens next, and it
+runs no loop.
+
+### Two agents, one execution seam
+
+`src/agent/agent-command.ts` wraps `doctor/exec.ts` the way
+`worktree/git-command.ts` does: agent-sized budgets (thirty minutes, 8 MiB per
+stream), the one thrown condition translated into data, and an injectable
+`AgentRunner` so a quota refusal or a process killed mid-sentence is
+reproducible without a real CLI. There is no second spawn implementation — the
+bounded sinks, the two-stage process-tree termination and the `.cmd` codec
+exist once.
+
+Each agent runs under its own environment policy, `agent:claude` and
+`agent:codex`: `PATH`, `PATHEXT`, `HOME`, `USERPROFILE`, and no credential.
+CLI-login operation is the expected mode, so an agent uses the stored login the
+auth preflight verified; an API key arriving out of the environment would mean
+the run was authenticated by a path nothing checked.
+
+### The prompt travels on stdin, never in argv
+
+`SAFE_ARG_PATTERN` excludes spaces and quotes, so instructions are not
+expressible as an argument at all — and must not be, because an argument is the
+one thing on this path a command processor ever reads. `RunOptions` gained a
+`stdin` payload for this. It defaults to absent, which keeps every diagnostic
+probe on the historical `'ignore'` descriptor, and on the `.cmd` route the
+payload never touches the `cmd.exe` command line.
+
+Both installed CLIs read it there. Observed while implementing: `codex exec
+--help` (codex-cli 0.146.0) — "If not provided as an argument (or if `-` is
+used), instructions are read from stdin", confirmed by a run printing `Reading
+additional input from stdin...`; `claude --help` (Claude Code 2.1.226) —
+"`-p, --print`  Print response and exit (useful for pipes)".
+
+### Success is recognised, never inferred
+
+Both boundaries classify in a fixed order, and the order is the contract:
+nothing spawned → the process did not run cleanly → a recognised quota refusal
+→ a non-zero exit → an unrecognised result → completed.
+
+Truncation is folded into "did not run cleanly", above parsing, because a
+stream cut at its byte budget can still end on a closing brace and parse
+perfectly. The quota check sits above the exit-code check because a quota
+refusal *is* a non-zero exit, and reading the code first would bury the one
+outcome a run driver is meant to pause on. And "ran cleanly" asks three
+questions, not one: `runCommand` reports a child killed from outside this
+process as a completion, so `outcome`, `exitCode` and `signal` are each
+individually insufficient.
+
+For the writer, success is the `--output-format json` envelope observed at
+2.1.226: `type: "result"`, `subtype: "success"`, `is_error: false`, and no
+`api_error_status`. The envelope must be the whole of stdout — not something
+found inside it. That is not paranoia about a hostile agent: the reviewer in
+this system reads *this* repository, so an agent quoting a success envelope out
+of a source file or a test fixture is ordinary traffic.
+
+### Findings, and who names them
+
+The reviewer runs `codex exec --json --sandbox read-only` — the sandbox flag
+because the reviewer is contractually read-only, which is why
+`REVIEWING → SCOPE_VIOLATION` exists at all. Its transcript must carry a
+completed turn, and its final agent message must validate as a review document:
+a version, a `PASS`/`FINDINGS` verdict, and a finding list that *agrees* with
+that verdict. A document claiming to pass while listing findings is not a pass
+with a caveat; it is unreadable, and the safe reading of an unreadable review
+is never "no problems found".
+
+Each finding supplies a severity, a repository-relative path and a rule id, all
+validated against closed vocabularies — an unrecognised severity invalidates
+the document rather than degrading into `info`. The **fingerprint is computed
+here**, as a fixed-width digest of that triple. `findingHistory[].fingerprint`
+is the only free-form string in the durable contract, so a reviewed-repository
+agent does not get to choose it, and a fixed width is what makes the 1 MiB
+state bound arithmetic rather than hopeful. A review exceeding the per-review
+cap is refused, never silently shortened.
+
+### Usage exhaustion is a governed pause
+
+A quota refusal is recognised **structurally**: `api_error_status` carrying the
+standard `429`, in an envelope that also admits to being an error. It is not a
+phrase matched against free text, and it cannot be — a sentinel string would
+eventually be matched against a review that quotes the sentinel's own source
+file.
+
+`recordAgentInterruption` composes V1-04 rather than reimplementing it: it
+builds the successor state and hands it to `advanceTaskState`, so the
+transition table and the exact-byte revision apply automatically. A usage-limit
+block recorded from `VERIFYING` is refused as `ILLEGAL_TRANSITION`, because
+verification consumes no agent quota and that edge does not exist. Everything
+already persisted is carried forward — `findingHistory` above all, which
+`reconcile.ts` reads as evidence that a task has done work.
+
+The run driver receives one of `RUN_COMPLETED`, `PAUSED_USAGE_LIMIT`,
+`NEEDS_ATTENTION` or `STATE_NOT_RECORDED`. There is deliberately no
+`RESUME_READY`, no `RETRY` and no `AUTOMATIC_ALLOWED`: that authority has
+exactly one source, `evaluateAutomaticResume` reached through `classifyResume`
+after reconciliation, and a second value a driver could mistake for it would be
+a way to resume without ever having checked.
+
+**No reset timestamp is ever invented.** None was observed in either CLI's
+output, so `reportedResetAt` is `null` in practice, `evaluateAutomaticResume`
+refuses with `RESET_TIME_MISSING`, and the block waits for a human. That is the
+correct outcome for evidence we do not have — a fabricated timestamp would not
+merely mislead a report, it would convert a governed block into an automatic
+retry on a timer.
+
+Nothing here retries, sleeps, polls or backs off. One call, one process, one
+result.
+
+### What V1-05 is not
+
+No state was added to `src/core/states.ts`, no edge to `src/core/transitions.ts`,
+and `TaskState` is unchanged at schema version 1 — the block fields the
+contract already had are the ones used. `READY_FOR_PR` remains terminal.
+
+Deliberately not wired, and left to the slices that own them:
+
+- **V1-06** — the verify/findings/remediation loop. V1-05 reports a review; it
+  never appends to `findingHistory`, never increments `reviewRound`, and never
+  chooses between `READY_FOR_PR` and `REMEDIATING`. It also builds no context
+  payload: the caller supplies one, and `context.canonicalSources` is still
+  only declared.
+- **V1-07** — the queue and run driver. Nothing calls these boundaries yet, and
+  no CLI command exposes them.
+- **Scope enforcement.** `scope.allowedPaths` remains declared, not enforced;
+  the reviewer's read-only sandbox is asked of the CLI, not verified afterwards.
+- **A Codex usage-limit signal.** No evidence of one exists, so none is
+  recognised, and an exhausted Codex allowance reaches a human rather than a
+  pause. Adding one means capturing a dated, version-pinned observation first.
+
+Review item **RR-F6** is untouched and remains open: it is about
+`repo/git-query.ts` having no injection point, and adding an agent seam does
+not give it one.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: the implement/verify/review loop and finding-fingerprint computation. The
+build: the implement/verify/review loop and the queue that would drive it. The
 repository profile *declares* the context sources, the verification phases and
 the write scope; no code in this build opens a context file, runs a verification
-command or enforces a scope. Task selection, workspace preparation and state
-persistence exist as libraries and have no CLI command yet: nothing in
-`agent-loop` calls them.
+command or enforces a scope. Task selection, workspace preparation, state
+persistence and the agent runners exist as libraries and have no CLI command
+yet: nothing in `agent-loop` calls them.

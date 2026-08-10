@@ -180,6 +180,33 @@ export interface RunOptions {
   readonly maxStderrBytes?: number;
   /** How long to wait for the immediate child to be observably gone after a termination attempt. */
   readonly killGraceMs?: number;
+  /**
+   * Text written to the child's standard input, which is then closed.
+   *
+   * Absent by default, and absence keeps the historical behaviour exactly:
+   * `stdin` is `'ignore'`, so a child that reads it sees EOF immediately and
+   * no diagnostic probe changes shape.
+   *
+   * It exists because the agent CLIs take their instructions on stdin and
+   * cannot take them any other way here. `SAFE_ARG_PATTERN` excludes spaces
+   * and quotes, so a prompt is not expressible as an argv token at all, and
+   * both installed CLIs document stdin as the alternative — `codex exec`
+   * prints "Reading additional input from stdin..." and reads it when no
+   * PROMPT argument is given (codex-cli 0.146.0), and `claude -p` is
+   * documented as the mode for pipes (Claude Code 2.1.226).
+   *
+   * This is a *payload* channel, never a command channel: the bytes are
+   * handed to the child's own reader, and nothing on this path is parsed by a
+   * shell or a command processor. On the `.cmd` route the payload does not
+   * touch the `cmd.exe` command line either — that line is still built from
+   * the encoded argument vector alone.
+   *
+   * A write that fails is data, not an exception: a child that exits without
+   * reading its input makes the pipe emit `EPIPE`, which says something about
+   * the child's behaviour and is answered by the outcome the child produces,
+   * not by a rejected promise.
+   */
+  readonly stdin?: string;
 }
 
 /**
@@ -663,7 +690,10 @@ export async function runCommand(
         // reached — that is the extent of the guarantee, by design.
         // Windows uses taskkill /T instead.
         detached: process.platform !== 'win32',
-        stdio: ['ignore', 'pipe', 'pipe'],
+        // A pipe only when there is something to write. With no payload the
+        // descriptor stays `'ignore'`, which is what every diagnostic probe
+        // has always been given.
+        stdio: [options.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       });
     } catch (spawnError) {
       // A resolved candidate that exists as a regular file but is not a valid
@@ -696,6 +726,23 @@ export async function runCommand(
 
     const stdout = new BoundedSink(maxStdoutBytes);
     const stderr = new BoundedSink(maxStderrBytes);
+
+    // The payload, handed over once and then closed so the child sees EOF and
+    // does not wait for more. A failure to deliver it is deliberately not
+    // reported here: the child either produced a usable result without the
+    // input, in which case its own output is the answer, or it did not, in
+    // which case its exit code and outcome already say so. Nothing about a
+    // broken pipe is worth turning into an exception on a path whose entire
+    // contract is that failures are data.
+    if (options.stdin !== undefined) {
+      const input = child.stdin;
+      if (input !== null) {
+        input.on('error', () => {
+          /* EPIPE and friends: see above. */
+        });
+        input.end(options.stdin);
+      }
+    }
 
     let termination: Termination = 'NONE';
     let treeKilled = false;
