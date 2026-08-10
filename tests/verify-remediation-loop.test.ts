@@ -47,7 +47,12 @@ import {
   runVerifyStep,
   type CompletionObserver,
   type LoopDependencies,
+  type LoopStepResult,
 } from '../src/loop/loop-step.js';
+import {
+  buildResumedRemediationBrief,
+  type FindingRecord,
+} from '../src/loop/findings.js';
 import type { VerificationCommandResult, VerificationRunner } from '../src/verify/verify-command.js';
 import {
   agentCommandResult,
@@ -162,13 +167,44 @@ function cappedAgent(result: AgentCommandResult, cap: number) {
   return { runner, count: () => calls };
 }
 
+/** The same, for verification: every "nothing ran" claim is backed by a cap. */
+function cappedVerify(cap: number) {
+  let calls = 0;
+  const runner: VerificationRunner = async () => {
+    calls += 1;
+    if (calls > cap) throw new Error(`verification invoked more than ${cap} times`);
+    return Object.freeze({
+      outcome: 'RAN' as const,
+      exitCode: 0,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      outputTruncated: false,
+      failureCode: null,
+      errnoCode: null,
+      durationMs: 1,
+    });
+  };
+  return { runner, count: () => calls };
+}
+
 const settledObserver: CompletionObserver = async () =>
   Object.freeze({ currentCommit: SHA_B, worktreeClean: true });
+
+/**
+ * The path a healthy `observeRuntime` would authorise for {@link loopState}:
+ * the worktree the state records, as Git would print it. Every `deps()` carries
+ * it, so a test that means to withhold authority has to say so explicitly.
+ */
+function authorisedWorktree(root: string): string {
+  return join(root, 'worktree');
+}
 
 function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDependencies {
   return {
     repositoryRoot: root,
     now: NOW,
+    authorisedWorktreePath: authorisedWorktree(root),
     verification: VERIFICATION,
     taskBrief: 'Add a widget.',
     observe: settledObserver,
@@ -570,12 +606,35 @@ describe('the remediation bound', () => {
 /* ──────────────────────────── the remediate stage ───────────────────────── */
 
 describe('the remediate stage', () => {
+  /**
+   * The durable evidence a `REMEDIATING` state necessarily carries.
+   *
+   * A task reaches `REMEDIATING` through a review that reported findings, and
+   * the same write that entered the state persisted that review's records. A
+   * fixture without them describes a state the loop cannot produce — and one
+   * the loop now refuses to run a writer against, because the only brief it
+   * could build would claim a review reported findings and then list none.
+   */
+  const REMEDIATION_EVIDENCE = [
+    { round: 1, severity: 'high' as const, fingerprint: 'c'.repeat(32) },
+  ];
+
+  /** A persisted `REMEDIATING` state with its round's findings behind it. */
+  function persistRemediating(root: string, overrides: Partial<TaskStateInput> = {}) {
+    return persist(root, {
+      state: 'REMEDIATING',
+      reviewRound: 1,
+      findingHistory: REMEDIATION_EVIDENCE,
+      ...overrides,
+    });
+  }
+
   it('returns a completed writer to VERIFYING, and never straight to REVIEWING', async () => {
     const root = repoRoot();
     const agent = scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
 
     const step = await runRemediateStep(
-      persist(root, { state: 'REMEDIATING', reviewRound: 1 }),
+      persistRemediating(root),
       deps(root, { agent: agent.runner }),
     );
 
@@ -604,7 +663,7 @@ describe('the remediate stage', () => {
     const verify = scriptedVerify({ exitCode: 0 });
 
     const step = await runRemediateStep(
-      persist(root, { state: 'REMEDIATING', reviewRound: 1 }),
+      persistRemediating(root),
       deps(root, { agent: scriptedAgent(result).runner, verify: verify.runner }),
     );
 
@@ -625,7 +684,7 @@ describe('the remediate stage', () => {
     });
 
     const step = await runRemediateStep(
-      persist(root, { state: 'REMEDIATING', reviewRound: 1 }),
+      persistRemediating(root),
       deps(root, { agent: scriptedAgent(refusal).runner }),
     );
 
@@ -636,7 +695,8 @@ describe('the remediate stage', () => {
     // Never fabricated: no reset time was reported, so none is recorded, and
     // `evaluateAutomaticResume` keeps refusing with RESET_TIME_MISSING.
     expect(after.reportedResetAt).toBeNull();
-    expect(after.findingHistory).toEqual([]);
+    // The evidence the pass was started on is carried through untouched.
+    expect(after.findingHistory).toEqual(REMEDIATION_EVIDENCE);
   });
 
   /**
@@ -929,5 +989,199 @@ describe('durability', () => {
 
   it('exposes a production completion observer', () => {
     expect(typeof observeCompletion).toBe('function');
+  });
+});
+
+/* ─────────────────── where a step is allowed to execute ─────────────────── */
+
+/**
+ * V1-06 followup F-6, closed here.
+ *
+ * Every process a step starts runs in the authorised worktree — the path Git
+ * printed for a registration holding this task's branch — and never in
+ * `state.worktreePath`, which is a sentence in a file. The absolute and
+ * shell-inert guards at the agent boundaries prove a path is *usable*; they say
+ * nothing about it being *ours*, and a state copied from another machine passes
+ * both.
+ */
+describe('execution authority', () => {
+  type Phase = [
+    label: string,
+    step: (current: StateLoadSuccess, deps: LoopDependencies) => Promise<LoopStepResult>,
+    overrides: Partial<TaskStateInput>,
+  ];
+
+  /** All three, because a fix applied to two of them leaves the third exposed. */
+  const phases: Phase[] = [
+    ['VERIFYING', runVerifyStep, {}],
+    ['REVIEWING', runReviewStep, { state: 'REVIEWING' }],
+    [
+      'REMEDIATING',
+      runRemediateStep,
+      {
+        state: 'REMEDIATING',
+        reviewRound: 1,
+        findingHistory: [{ round: 1, severity: 'high', fingerprint: 'c'.repeat(32) }],
+      },
+    ],
+  ];
+
+  it.each(phases)('%s runs nothing when the authority is absent or relative', async (_label, step, overrides) => {
+    const agent = cappedAgent(agentCommandResult(), 0);
+    const verify = cappedVerify(0);
+
+    for (const authorisedWorktreePath of ['', '.', '..', 'worktree']) {
+      const root = repoRoot();
+      const before = persist(root, overrides);
+
+      const result = await step(
+        before,
+        deps(root, { authorisedWorktreePath, agent: agent.runner, verify: verify.runner }),
+      );
+
+      expect(result.outcome).toBe('EXECUTION_UNAUTHORISED');
+      expect(result.save).toBeNull();
+      expect(result.state).toBeNull();
+      expect(reload(root).revision).toBe(before.revision);
+    }
+
+    expect(agent.count()).toBe(0);
+    expect(verify.count()).toBe(0);
+  });
+
+  /**
+   * The tampering case. The record names one directory and the authority names
+   * another; the step refuses rather than picking a winner, because there is no
+   * basis for preferring either and the cost of guessing is an agent writing to
+   * somebody else's checkout.
+   */
+  it.each(phases)('%s refuses an authority that is not about this state', async (_label, step, overrides) => {
+    const root = repoRoot();
+    const agent = cappedAgent(agentCommandResult(), 0);
+    const verify = cappedVerify(0);
+    const before = persist(root, { ...overrides, worktreePath: join(root, 'recorded') });
+
+    const result = await step(
+      before,
+      deps(root, {
+        authorisedWorktreePath: join(root, 'somebody-elses-worktree'),
+        agent: agent.runner,
+        verify: verify.runner,
+      }),
+    );
+
+    expect(result.outcome).toBe('EXECUTION_UNAUTHORISED');
+    expect(agent.count()).toBe(0);
+    expect(verify.count()).toBe(0);
+    expect(reload(root).revision).toBe(before.revision);
+  });
+
+  /**
+   * The liveness half, at all three sites at once: a fix that threaded the
+   * authorised path into two of the three phases would leave the third silently
+   * running from the record.
+   */
+  it('runs every phase in the authorised path, in Git\u2019s own spelling', async () => {
+    const root = repoRoot();
+    // The same directory, spelled the way Git prints it rather than the way
+    // `node:path` produced the recorded value.
+    const printed = authorisedWorktree(root).split('\\').join('/');
+    const verify = scriptedVerify({ exitCode: 0 });
+    const agent = scriptedAgent(
+      agentCommandResult({ stdout: findingsReview() }),
+      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+    );
+
+    let current = persist(root, { state: 'VERIFYING' });
+    for (let i = 0; i < 3; i += 1) {
+      const step = await runLoopStep(
+        current,
+        deps(root, {
+          authorisedWorktreePath: printed,
+          verify: verify.runner,
+          agent: agent.runner,
+        }),
+      );
+      expect(step.outcome).toBe('ADVANCED');
+      current = reload(root);
+    }
+
+    expect(verify.calls.map((call) => call.cwd)).toEqual([printed]);
+    expect(agent.calls.map((call) => call.cwd)).toEqual([printed, printed]);
+  });
+});
+
+/* ───────────── a remediation pass needs a cause that survived ───────────── */
+
+/**
+ * V1-06 followup F-3, closed here.
+ *
+ * The failure it names is a document written in the reviewer's voice, claiming
+ * a review reported findings and then listing none of them, handed to an agent
+ * with a worktree to modify. Both of its claims are invented, and the empty
+ * list is the most confident-looking degraded brief of them all.
+ */
+describe('the resumed remediation brief', () => {
+  it.each([
+    ['no history at all', [] as FindingRecord[], 1],
+    ['history for other rounds only', [{ round: 2, severity: 'low' as const, fingerprint: 'd'.repeat(32) }], 1],
+  ])('reports %s as no durable findings, and carries no payload', (_label, history, round) => {
+    const brief = buildResumedRemediationBrief(history, round);
+
+    expect(brief.kind).toBe('NO_DURABLE_FINDINGS');
+    expect('payload' in brief).toBe(false);
+  });
+
+  it('renders the durable record for the round, and says the detail is gone', () => {
+    const brief = buildResumedRemediationBrief(
+      [{ round: 1, severity: 'high', fingerprint: 'c'.repeat(32) }],
+      1,
+    );
+
+    expect(brief.kind).toBe('DURABLE_RECORD');
+    const payload = brief.kind === 'DURABLE_RECORD' ? brief.payload : '';
+    expect(payload).toContain('did not survive');
+    expect(payload).toContain('c'.repeat(32));
+    expect(payload).not.toMatch(/FINDINGS \(0;/);
+  });
+
+  it.each([
+    ['an empty history', [] as FindingRecord[], 1],
+    ['only an earlier round', [{ round: 1, severity: 'high' as const, fingerprint: 'c'.repeat(32) }], 2],
+  ])('refuses to start a writer on %s', async (_label, findingHistory, reviewRound) => {
+    const root = repoRoot();
+    const agent = cappedAgent(agentCommandResult(), 0);
+    const before = persist(root, { state: 'REMEDIATING', reviewRound, findingHistory });
+
+    const step = await runRemediateStep(before, deps(root, { agent: agent.runner }));
+
+    expect(step.outcome).toBe('BLOCKED');
+    expect(step.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(agent.count()).toBe(0);
+    const after = reload(root).state;
+    expect(after.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(after.state).not.toBe('VERIFYING');
+    expect(after.resumeFrom).toEqual({ phase: 'REMEDIATE', round: reviewRound });
+  });
+
+  /**
+   * `BLOCKED_VERIFY → REMEDIATING` stays usable, and that is deliberate: a
+   * failed verification is a real reason to remediate. What changed is who may
+   * state it. A caller that has just run the verification supplies its own
+   * brief; one that has not may no longer borrow the reviewer's voice.
+   */
+  it('accepts a brief the caller brought, and hands it over unaltered', async () => {
+    const root = repoRoot();
+    const writer = scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const supplied = 'VERIFICATION FAILED: the build does not compile.';
+
+    const step = await runRemediateStep(
+      persist(root, { state: 'REMEDIATING', reviewRound: 1, findingHistory: [] }),
+      deps(root, { agent: writer.runner, remediationPayload: supplied }),
+    );
+
+    expect(step.outcome).toBe('ADVANCED');
+    expect(step.state).toBe('VERIFYING');
+    expect(writer.calls[0]?.payload).toBe(supplied);
   });
 });

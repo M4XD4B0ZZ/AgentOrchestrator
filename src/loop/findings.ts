@@ -151,19 +151,44 @@ export function buildRemediationPayload(
 }
 
 /**
- * The remediation payload for a pass that was resumed rather than driven
- * straight through, when only the durable history survives.
+ * What the durable history can say about a remediation pass being resumed.
  *
- * It is a *weaker* prompt and it says so. The alternative — presenting a
- * severity tally in the shape of an actionable brief — would have the writer
- * guess at which files were meant, and a guess is exactly what this repository
- * refuses to let an agent make on evidence it does not have.
+ * Two members, because "the record is thinner than the live findings were" and
+ * "the record holds nothing about this round at all" are different situations
+ * with different correct responses. A single `string` return cannot express the
+ * second, which is how a brief listing zero findings came to be written in the
+ * reviewer's voice.
  */
-export function buildResumedRemediationPayload(
+export type ResumedRemediationBrief =
+  /** The durable record for this round, rendered as instructions. */
+  | { readonly kind: 'DURABLE_RECORD'; readonly payload: string }
+  /**
+   * Nothing durable records a finding for this round, so there is nothing to
+   * brief. Carries no payload, deliberately: a brief that says "FINDINGS (0)"
+   * asserts both that a review ran and that it reported an empty list, and
+   * neither is in evidence. The caller must refuse rather than compose one.
+   */
+  | { readonly kind: 'NO_DURABLE_FINDINGS' };
+
+/**
+ * The remediation brief for a pass that was resumed rather than driven straight
+ * through, when only the durable history survives.
+ *
+ * Where there is a record, it is a *weaker* prompt and it says so. The
+ * alternative — presenting a severity tally in the shape of an actionable brief
+ * — would have the writer guess at which files were meant, and a guess is
+ * exactly what this repository refuses to let an agent make on evidence it does
+ * not have. Where there is no record, there is no prompt at all: an empty list
+ * is the most confident-looking degraded brief of them all, and the one whose
+ * every claim is invented.
+ */
+export function buildResumedRemediationBrief(
   history: readonly FindingRecord[],
   round: number,
-): string {
+): ResumedRemediationBrief {
   const current = history.filter((record) => record.round === round);
+  if (current.length === 0) return Object.freeze({ kind: 'NO_DURABLE_FINDINGS' as const });
+
   const lines = [
     `Address the findings reported by review round ${round}.`,
     '',
@@ -180,7 +205,7 @@ export function buildResumedRemediationPayload(
     lines.push(`- [${record.severity}] fingerprint ${record.fingerprint}`);
   }
 
-  return clamp(lines.join('\n'));
+  return Object.freeze({ kind: 'DURABLE_RECORD' as const, payload: clamp(lines.join('\n')) });
 }
 
 function clamp(text: string): string {

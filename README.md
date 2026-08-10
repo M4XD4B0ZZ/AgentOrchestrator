@@ -1883,7 +1883,10 @@ diverged reconciliation to `BLOCKED`. A self-clearing quota pause was becoming
 every interrupted writer. Neither value is fabricated in the other direction:
 `false` withdraws a claim of cleanliness rather than asserting dirtiness, and
 `null` means the recorded HEAD is no longer known to be current. The reviewer is
-contractually read-only, so its interruption withdraws nothing.
+contractually read-only, so its interruption withdraws nothing. The rule and the
+phase table it reads live in `core/agent-phases.ts`, stated once, because more
+than one durable write has to answer the same question — see the run driver's
+resume below.
 
 The run driver receives one of `RUN_COMPLETED`, `PAUSED_USAGE_LIMIT`,
 `NEEDS_ATTENTION` or `STATE_NOT_RECORDED`. There is deliberately no
@@ -1910,8 +1913,8 @@ contract already had are the ones used. `READY_FOR_PR` remains terminal.
 
 Deliberately not wired, and left to the slices that own them:
 
-- **V1-07** — the queue and run driver. No CLI command exposes the loop, and
-  nothing selects which task to step next.
+- **V1-07** — the run driver. It arrived in the slice of that name; no CLI
+  command exposes it.
 - **Scope enforcement.** `scope.allowedPaths` remains declared, not enforced;
   the reviewer's read-only sandbox is asked of the CLI, not verified afterwards.
 - **A Codex usage-limit signal.** No evidence of one exists, so none is
@@ -2029,12 +2032,207 @@ well as shell-inert (a relative `cwd` resolves against `process.cwd()` at
 `spawn`), and an interruption recorded against a task that is *already* in a
 blocking state is refused. Review item **RR-F6** remains open and untouched.
 
+## The run driver
+
+V1-07 is what makes the state machine runnable. It composes the earlier slices —
+task selection, state loading, reconciliation, the resume decision, runtime
+observation and the V1-06 loop — and adds one ordering and one closed outcome.
+It adds no state, no edge and no field, and `TaskState` stays at schema
+version 1.
+
+### A step is never executed from persisted state alone
+
+This is the invariant the whole slice exists to hold. Every iteration, in this
+order, with each gate closing on the one before it:
+
+1. **`reconcileTask`** — load the durable state *and* compare it against what
+   Git says now. `RECONCILED` is the only outcome anything continues from.
+2. **`classifyResume`** — decide what, if anything, may continue. The driver
+   feeds that authority; it never re-implements or widens it.
+3. **`observed.authorisedWorktreePath`** — the directory Git vouched for. No
+   authority, nothing spawned.
+4. **`runLoopStep`**, with that path handed to it explicitly.
+
+Reversing any two of them produces a failure this repository had already written
+down: judging the block before reconciling yields "resume allowed" for a task
+whose worktree is gone; executing before observing runs an agent in a directory
+nothing vouched for; and re-reading the state to get a fresh revision after a
+refused write is precisely how a stale-writer refusal becomes a successful
+overwrite.
+
+Reconciliation is re-run **every iteration**, not once per run. A step is a
+subprocess that took minutes and changed the worktree, so the world it left is
+not the world the previous observation described. Re-loading is also how the
+compare-and-swap token is obtained: `advanceTaskState` threads the revision of
+the `StateLoadSuccess` it was handed and `StateSaveSuccess` carries no new one,
+so exactly one write may be made per load.
+
+### Terminal is judged before the world is
+
+A `READY_FOR_PR` or `ABORTED` task stops the run whatever Git says. It has no
+outgoing transition, so nothing could run in any case — and asking anyway
+invites "your completed task diverged", which is noise about something nobody
+will continue. `classifyResume` orders itself the same way. The gate is reached
+only for a state that *loaded*, so a record belonging to another repository
+never passes it.
+
+### Fresh, resumed, and refused
+
+| durable state | what the driver does |
+| --- | --- |
+| none | `TASK_NOT_STARTED`. Nothing is created — see below |
+| `VERIFYING` / `REVIEWING` / `REMEDIATING` | steps, given an attended grant |
+| `IMPLEMENTING` and the setup chain | `NO_PROGRESS`; the loop does not drive them |
+| `READY_FOR_PR` / `ABORTED` | terminal, nothing run |
+| `BLOCKED_USAGE_LIMIT` | resumed **only** on `AUTOMATIC_ALLOWED` *and* an attended grant; otherwise stops with the checks that denied it, writing nothing |
+| `BLOCKED_VERIFY` | stops. Never an automatic retry |
+| `BLOCKED_AUTH`, `HUMAN_DECISION_REQUIRED`, `SCOPE_VIOLATION`, `RESUME_STATE_DIVERGED` | stop; each keeps its own outcome |
+| diverged / unobservable / unusable | stop, fail-closed, repair nothing |
+
+**A fresh task is not started here.** Creating the first `TaskState` means
+recording a `worktreePath`, and this driver prepares no workspace; writing one
+anyway would durably assert a directory nobody created. `runLoopStep` also does
+not drive `IMPLEMENTING`, so a freshly created state could not be moved even if
+it existed. Both belong to the slice that composes the setup chain.
+
+**An in-flight task needs an attended grant.** `classifyResume` reports a
+healthy in-flight task as `ATTENDED_ONLY`, because the most common thing that
+reconciles is an interrupted task with half-written work in its worktree.
+`RunRequest.attendedContinuation` is the operator saying they are present for
+*this run*. It is a second requirement on top of the authority module's answer
+and never a substitute: it can only narrow what runs, and it grants nothing for
+a blocked task, which moves only on `AUTOMATIC_ALLOWED` and stops on anything
+else whatever is set here.
+
+**The grant is checked before any durable write, including a resume.** Because
+it is a requirement on the *invocation*, the order matters: a resume written
+first spends `resumeFrom`, `reportedResetAt` and `blockedAgent`, and the
+work-loop state it lands in classifies `ATTENDED_ONLY` from then on — so an
+unattended run that wrote the resume and then refused to execute would have
+converted a self-clearing quota pause into a task no unattended run can ever
+pick up, having done no work at all. The gates that decide whether this run may
+act therefore all precede the write, and an unattended `AUTOMATIC_ALLOWED` run
+stops with `CONTINUATION_NOT_AUTHORISED` / `ATTENDED_CONTINUATION_NOT_GRANTED`,
+leaving every field of the block intact for a later one (V1-07-RR-B1).
+
+**A resume into a writing phase withdraws the checkpoint it is about to
+invalidate.** `currentCommit` and `worktreeCleanAtCheckpoint` are exactly the
+evidence `evaluateAutomaticResume` demanded, but they describe the worktree as
+the *pause* left it. Carrying them into `IMPLEMENTING` or `REMEDIATING` asserts
+"known HEAD, clean tree" about a phase whose purpose is to modify the worktree,
+and `reconcile.ts` reads that literally: the writer's own commit becomes
+`CURRENT_COMMIT_MOVED`, its own uncommitted work becomes `WORKTREE_DIRTY`, and
+the verdict is `DIVERGED` — for the mutation the orchestrator itself
+authorised. The resume write therefore withdraws both, from the same
+`AGENT_PHASES` table the interruption path and the loop's own writing edge
+consult, and leaves them untouched for the read-only `REVIEWING` target
+(V1-07-RR-B2).
+
+### Stopping, and the absence of a retry
+
+Nothing retries, sleeps, polls or backs off. A block is a stop, a refused write
+is a stop, `NOT_APPLICABLE` is a stop. The loop continues only while the
+previous iteration made a durable change — **measured by the state file's
+revision moving**, never by a step having returned a hopeful outcome. A
+`replace` that silently does nothing produces a `SAVED` result over an unchanged
+file, and a driver that trusted the outcome would spend its whole budget on a
+task standing still.
+
+The bound on the *loop* is still `maxReviewRounds`, the repository's.
+`RunRequest.maxSteps` bounds one *invocation*, so a future edge that made an
+unbounded cycle reachable cannot run away.
+
+Every authority boundary keeps its own outcome. "The quota ran out", "the build
+is broken", "a human must decide", "we were never allowed to run here" and
+"another writer got there first" have nothing in common except that the run
+stopped, and they send an operator to five different places.
+
+### Queue: one task per invocation
+
+Selection goes through V1-02's selector unchanged — no ordering, filter or
+eligibility rule is restated in the driver, and `selectRunTask` reports why
+there is nothing to do, naming the ineligible tasks.
+
+The driver drives **one** task and then returns. That is a refusal rather than
+an omission. `selectNextTask` decides eligibility from `status: DONE` in the
+repository's own task files; nothing in this build writes a task file; and
+`READY_FOR_PR` is terminal precisely because a human takes the task from there.
+So "this task is finished, move on" is a statement only the repository can make.
+A driver that made it — by treating `READY_FOR_PR` as `DONE`, or by keeping its
+own list of attempted ids — would be inventing completion semantics the
+repository has not defined, and would either re-select the same task forever or
+silently disagree with the published ranking. **The repository is silent on
+whether an independent task may run after one blocks, and this slice does not
+answer it.**
+
+### Three V1-06 followups closed here, because V1-07 made them live
+
+**F-6 — execution authority.** `observeRuntime` already computed the one
+directory a task may execute in — the path Git printed for a registration
+holding *this task's* branch — and threw it away. It is now reported as
+`ObservedRuntime.authorisedWorktreePath`, deliberately narrower than
+`registeredWorktreePath`, which is populated whenever Git lists the recorded
+path *whatever branch is checked out there*. `LoopDependencies` gained a
+**required** `authorisedWorktreePath`, and the three `spawn` sites — the
+verification commands, the reviewer, the writer — use it instead of
+`state.worktreePath`. The persisted path is compared against it as identity
+evidence and is never a `cwd`. A step handed no authority, a relative one, or
+one belonging to a different state, returns `EXECUTION_UNAUTHORISED` and starts
+nothing.
+
+**F-3 — the empty resumed remediation brief.** A resumed `REMEDIATING` whose
+durable history held no finding for its round produced a document in the
+reviewer's voice claiming a review had reported findings and then listing none,
+and handed it to an agent with a worktree to modify. Both claims were invented.
+`buildResumedRemediationBrief` now returns a discriminated result whose
+`NO_DURABLE_FINDINGS` member carries no payload — the falsehood is
+unrepresentable — and the remediate step fails closed to
+`HUMAN_DECISION_REQUIRED` without starting a writer. `BLOCKED_VERIFY →
+REMEDIATING` stays usable: a caller that has just run the verification may
+supply its own brief. What changed is that a caller who has *not* may no longer
+borrow the reviewer's voice. No verification report is fabricated, because none
+is persisted.
+
+**Stale resume evidence.** Three loop writes spread `...state` while naming
+neither `resumeFrom` nor `reportedResetAt`, so a point left over from an earlier
+block rode `REMEDIATING → VERIFYING → REVIEWING → REMEDIATING` indefinitely, and
+an elapsed reset time would have sat on a running task waiting to be read as
+"the quota has cleared" by the next resume decision — the fabrication V1-05's
+NEW-4 already had to close once, one layer up. The fix is a **contract**
+invariant, not a habit: the four work-loop states may carry neither field.
+Reaching the state a resume point names *is* the continuation it asked for, and
+a running task is not waiting on anyone's quota. Forgetting to clear is now a
+refused write that persists nothing, rather than a silent lie. The set is
+derived from `RESUME_PHASE_STATES` so the contract and the resume policy cannot
+drift, and it is deliberately scoped to the work loop: `BLOCKED_AUTH →
+AUTH_PREFLIGHT → GIT_PREFLIGHT → WORKTREE_READY → CONTEXT_LOADING` is a declared
+path that must carry the stored point through. `RESUME_EVIDENCE_SPENT` states
+the clearing once, for the loop and the driver alike.
+
+### What V1-07 is not
+
+No state, no edge, `TaskState` unchanged at schema version 1, `READY_FOR_PR`
+still terminal and still reachable only from `REVIEWING`. No PR, CI, merge or
+post-merge concept entered the product. `scope.allowedPaths` is still declared
+rather than enforced.
+
+There is **no CLI command**: the driver is a library, like every slice before
+it. Exposing it needs argv semantics for the operator grant and the task
+override that the repository does not define, and it belongs with the
+end-to-end wiring rather than here.
+
+Left to the slice that owns them: creating a task's first state, the setup chain
+`CREATED → … → IMPLEMENTING`, a `runImplementStep`, multi-task queue
+progression, and a `run` command. Review item **RR-F6** — `repo/git-query.ts`
+having no injection seam — remains **open and untouched**: the driver takes its
+`GitRunner` from V1-03's seam, which does not give V1-01's queries one.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: the queue and run driver that would step tasks, and any command exposing
-the loop. The repository profile *declares* the context sources and the write
-scope; no code in this build opens a context file or enforces a scope. Task
-selection, workspace preparation, state persistence, the agent runners and the
-verify/review/remediate loop exist as libraries and have no CLI command yet:
-nothing in `agent-loop` calls them.
+build: any command exposing the loop or the run driver. The repository profile
+*declares* the context sources and the write scope; no code in this build opens
+a context file or enforces a scope. Task selection, workspace preparation, state
+persistence, the agent runners, the verify/review/remediate loop and the run
+driver exist as libraries and have no CLI command yet: nothing in `agent-loop`
+calls them.

@@ -63,6 +63,22 @@ export interface ObservedRuntime {
   readonly worktreeRegistered: boolean;
   /** The path exactly as Git printed it, or `null`. */
   readonly registeredWorktreePath: string | null;
+  /**
+   * The one directory this task's work may execute in, or `null` when Git
+   * authorised none.
+   *
+   * It is the path Git printed for a registration that both matches the
+   * recorded `worktreePath` **and** holds this task's work branch. Deliberately
+   * narrower than {@link registeredWorktreePath}, which is populated whenever
+   * Git lists the recorded path *whatever branch is checked out there* — the
+   * two answer different questions, and a caller that rebuilt this one from
+   * `registeredWorktreePath` and {@link observedWorkBranchRef} would be
+   * restating the rule that lives here.
+   *
+   * `null` is an absence of authority, never a weaker authority. Nothing may
+   * be spawned, and nothing may be asked, without a non-`null` value.
+   */
+  readonly authorisedWorktreePath: string | null;
   /** Full ref checked out there (`refs/heads/…`), or `null`. */
   readonly observedWorkBranchRef: string | null;
   /**
@@ -251,6 +267,10 @@ export async function observeRuntime(
     registryReadable: registry.ok,
     worktreeRegistered: registration !== null,
     registeredWorktreePath: registration?.path ?? null,
+    // Reported rather than recomputed by the caller: this module already had to
+    // decide it in order to know which questions it was allowed to ask, and a
+    // second derivation elsewhere would be a second, quieter authority.
+    authorisedWorktreePath: authorisedPath,
     observedWorkBranchRef: registration?.branchRef ?? null,
     worktreeExists,
     observedCurrentCommit,
