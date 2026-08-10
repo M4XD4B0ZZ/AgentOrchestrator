@@ -110,6 +110,20 @@ export type StateSaveFailureCode =
    * predecessor and has no edge to judge.
    */
   | 'ILLEGAL_TRANSITION'
+  /**
+   * The interruption being recorded contradicts the phase it was recorded
+   * against — a reviewer's block written down against an implementing task, or
+   * a resume phase belonging to a different state.
+   *
+   * Produced only by `recordAgentInterruption()`, and refused before anything
+   * is written. Distinct from `STATE_CONTRACT_VIOLATION` because the state
+   * *is* well formed: every field validates on its own, and only the
+   * combination is false. That is precisely why it needs its own code — a
+   * schema cannot catch it, and a state that validates while describing a run
+   * that did not happen is an instruction to the operator to go and fix the
+   * wrong thing.
+   */
+  | 'INTERRUPTION_INCONSISTENT'
   /** The atomic replacement did not complete. The previous state survives. */
   | 'WRITE_FAILED';
 

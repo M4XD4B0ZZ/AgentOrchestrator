@@ -1684,12 +1684,236 @@ unchanged: `repo/git-query.ts` still has no injection point, and this slice did
 not need one — it re-observes through V1-03's `GitRunner` seam and takes
 repository identity as evidence rather than resolving it.
 
+## The agent-runner contract
+
+Source of truth: `src/agent/`.
+
+V1-05 answers one question, for one agent run: **how did it end, and what may
+the task do about it?** It starts a Claude writer or a Codex reviewer, reads
+what came back, and classifies it. It does not decide what happens next, and it
+runs no loop.
+
+### Two agents, one execution seam
+
+`src/agent/agent-command.ts` wraps `doctor/exec.ts` the way
+`worktree/git-command.ts` does: agent-sized budgets (thirty minutes, 8 MiB per
+stream), the one thrown condition translated into data, and an injectable
+`AgentRunner` so a quota refusal or a process killed mid-sentence is
+reproducible without a real CLI. There is no second spawn implementation — the
+bounded sinks, the two-stage process-tree termination and the `.cmd` codec
+exist once.
+
+Each agent runs under its own environment policy, `agent:claude` and
+`agent:codex`: `PATH`, `PATHEXT`, `HOME`, `USERPROFILE`, and no credential.
+CLI-login operation is the expected mode, so an agent uses the stored login the
+auth preflight verified; an API key arriving out of the environment would mean
+the run was authenticated by a path nothing checked.
+
+### The prompt travels on stdin, never in argv
+
+`SAFE_ARG_PATTERN` excludes spaces and quotes, so instructions are not
+expressible as an argument at all — and must not be, because an argument is the
+one thing on this path a command processor ever reads. `RunOptions` gained a
+`stdin` payload for this. It defaults to absent, which keeps every diagnostic
+probe on the historical `'ignore'` descriptor, and on the `.cmd` route the
+payload never touches the `cmd.exe` command line.
+
+Both installed CLIs read it there. Observed while implementing: `codex exec
+--help` (codex-cli 0.146.0) — "If not provided as an argument (or if `-` is
+used), instructions are read from stdin", confirmed by a run printing `Reading
+additional input from stdin...`; `claude --help` (Claude Code 2.1.226) —
+"`-p, --print`  Print response and exit (useful for pipes)".
+
+A failure to hand the payload over is reported on
+`CommandResult.stdinDelivery`, and the agent seam folds it into `UNAVAILABLE`
+alongside truncation — a run that received a fraction of its instructions
+answered a different question, so its output is not evidence about this task.
+It used to be caught by an empty `'error'` listener and discarded, on the
+reasoning that the child's exit code would say so. It does not: a child that
+reads a prefix of its prompt, closes its read end and exits 0 with a
+well-formed result is, at the process level, indistinguishable from one that
+did the work. What is claimed is exact — a delivery failure *Node reported* is
+never thrown away — and no more: a payload below the OS pipe buffer is accepted
+whole even by a child that has already exited, and no parent-side observation
+can see that.
+
+### Success is recognised, never inferred
+
+Both boundaries classify in a fixed order, and the order is the contract:
+nothing spawned → the process never reached its own end → a recognised quota
+refusal → a non-zero exit → an unrecognised result → completed.
+
+Truncation is folded into "never reached its own end", above parsing, because a
+stream cut at its byte budget can still end on a closing brace and parse
+perfectly. So is **termination by a signal**: `runCommand` reports a child
+killed from outside this process as an ordinary completion — nothing here
+issued the termination — so a SIGKILLed agent arrives as `outcome: 'RAN'`
+carrying whatever bytes it had already written. The invariant is unconditional:
+*a process terminated by a signal is never classified from its own output*, not
+as a success and not as a usage limit. Asking about the signal after parsing
+let a killed agent's partial bytes park a task on `BLOCKED_USAGE_LIMIT`.
+
+The step is `endedUnderOwnControl` — outcome plus signal — rather than the
+stronger "ran cleanly", precisely so the quota check below it still works: the
+quota check sits above the exit-code check because a quota refusal *is* a
+non-zero exit, and gating the parse on a zero exit code would bury the one
+outcome a run driver is meant to pause on. "Ran cleanly" then asks the third
+question, the exit code, and each of the three is individually insufficient.
+
+A failed run is diagnosed for what it was. A run whose exit status was zero is
+never reported as a "non-zero exit" because it carried a signal:
+`AGENT_NONZERO_EXIT` means what it says — exited non-zero, *without* a
+recognised signal — and a terminated process is `AGENT_PROCESS_UNAVAILABLE`.
+
+For the writer, success is the `--output-format json` envelope observed at
+2.1.226: `type: "result"`, `subtype: "success"`, `is_error: false`, and no
+`api_error_status`. The envelope must be the whole of stdout — not something
+found inside it. That is not paranoia about a hostile agent: the reviewer in
+this system reads *this* repository, so an agent quoting a success envelope out
+of a source file or a test fixture is ordinary traffic.
+
+### Findings, and who names them
+
+The reviewer runs `codex exec --json --sandbox read-only` — the sandbox flag
+because the reviewer is contractually read-only, which is why
+`REVIEWING → SCOPE_VIOLATION` exists at all. Its transcript must carry a
+completed turn, and its final agent message must validate as a review document:
+a version, a `PASS`/`FINDINGS` verdict, and a finding list that *agrees* with
+that verdict. A document claiming to pass while listing findings is not a pass
+with a caveat; it is unreadable, and the safe reading of an unreadable review
+is never "no problems found".
+
+Each finding supplies a severity, a repository-relative path and a rule id, all
+validated against closed vocabularies — an unrecognised severity invalidates
+the document rather than degrading into `info`. The **fingerprint is computed
+here**, as a fixed-width digest of that triple. `findingHistory[].fingerprint`
+is the only free-form string in the durable contract, so a reviewed-repository
+agent does not get to choose it, and a fixed width is what makes the 1 MiB
+state bound arithmetic rather than hopeful. A review exceeding the per-review
+cap is refused, never silently shortened.
+
+#### The review document, canonically
+
+This is the shape the reviewer's final agent message must have. It is written
+down here because the parser that enforces it is deliberately internal, while
+the prompt that has to *ask* for it is not yet written — V1-06 supplies that
+prompt, and it needs something stable to quote that is not a private constant:
+
+```json
+{
+  "reviewVersion": 1,
+  "verdict": "FINDINGS",
+  "findings": [
+    { "severity": "high", "path": "src/agent/claude-writer.ts", "rule": "classification.order" }
+  ]
+}
+```
+
+- `reviewVersion` — exactly `1`. A later version is unrecognised, not assumed
+  compatible.
+- `verdict` — `"PASS"` or `"FINDINGS"`, and it must agree with the list:
+  `PASS` requires an empty `findings`, `FINDINGS` requires a non-empty one.
+- `severity` — one of `critical`, `high`, `medium`, `low`, `info`.
+- `path` — repository-relative POSIX, no drive letter, no leading `/`, no `\`,
+  no `.`/`..` segment, at most 1 024 characters.
+- `rule` — a bounded slug (`[A-Za-z0-9]`, inner `._:-`), at most 128 characters.
+- at most **64** findings per review.
+
+Anything else — a missing field, an unknown severity, a document wrapped in
+prose, more than the cap — is `AGENT_RESULT_MALFORMED`, which is
+`HUMAN_DECISION_REQUIRED`. **Exit 0 alone is never a review pass**: the absence
+of a valid document is not the absence of findings.
+
+### Usage exhaustion is a governed pause
+
+A quota refusal is recognised **structurally**: `api_error_status` carrying the
+standard `429`, in an envelope that also admits to being an error. It is not a
+phrase matched against free text, and it cannot be — a sentinel string would
+eventually be matched against a review that quotes the sentinel's own source
+file.
+
+`recordAgentInterruption` composes V1-04 rather than reimplementing it: it
+builds the successor state and hands it to `advanceTaskState`, so the
+transition table and the exact-byte revision apply automatically. A usage-limit
+block recorded from `VERIFYING` is refused as `ILLEGAL_TRANSITION`, because
+verification consumes no agent quota and that edge does not exist. Everything
+already persisted is carried forward — `findingHistory` above all, which
+`reconcile.ts` reads as evidence that a task has done work.
+
+**The blocked agent and the resume phase are derived from the running phase,
+never copied from the caller.** `IMPLEMENTING` and `REMEDIATING` are the
+writer's, `REVIEWING` is the reviewer's, and the persisted state already knows
+which it is. Every agent × phase combination validates against the schema —
+`allowedBlockedAgents` and `allowedResumePhases` are set per blocking state, not
+per predecessor — so a Codex review interrupted in `REVIEWING` could be written
+down as *Claude's quota is exhausted, continue at IMPLEMENT round 1* with every
+gate passing and the operator sent to re-authenticate the wrong CLI. Only the
+*round* comes from the run, because only the run knows which pass it was. A
+caller whose evidence contradicts the phase is refused with
+`INTERRUPTION_INCONSISTENT` rather than believed: a disagreement between the
+caller and the durable state is not resolved by picking one.
+
+**A writer's interruption withdraws the checkpoint claims it may have
+invalidated.** `worktreeCleanAtCheckpoint` and `currentCommit` were true when
+something last looked, and a writing agent changing the worktree is the job, not
+an edge case. Carrying `worktreeCleanAtCheckpoint: true` across the interruption
+made `reconcile.ts` read a dirty tree as contradicting the record —
+`WORKTREE_DIRTY`, verdict `DIVERGED`, and `classifyResume` short-circuits every
+diverged reconciliation to `BLOCKED`. A self-clearing quota pause was becoming
+`RESUME_STATE_DIVERGED`, which is `resumable: false`, for a condition true of
+every interrupted writer. Neither value is fabricated in the other direction:
+`false` withdraws a claim of cleanliness rather than asserting dirtiness, and
+`null` means the recorded HEAD is no longer known to be current. The reviewer is
+contractually read-only, so its interruption withdraws nothing.
+
+The run driver receives one of `RUN_COMPLETED`, `PAUSED_USAGE_LIMIT`,
+`NEEDS_ATTENTION` or `STATE_NOT_RECORDED`. There is deliberately no
+`RESUME_READY`, no `RETRY` and no `AUTOMATIC_ALLOWED`: that authority has
+exactly one source, `evaluateAutomaticResume` reached through `classifyResume`
+after reconciliation, and a second value a driver could mistake for it would be
+a way to resume without ever having checked.
+
+**No reset timestamp is ever invented.** None was observed in either CLI's
+output, so `reportedResetAt` is `null` in practice, `evaluateAutomaticResume`
+refuses with `RESET_TIME_MISSING`, and the block waits for a human. That is the
+correct outcome for evidence we do not have — a fabricated timestamp would not
+merely mislead a report, it would convert a governed block into an automatic
+retry on a timer.
+
+Nothing here retries, sleeps, polls or backs off. One call, one process, one
+result.
+
+### What V1-05 is not
+
+No state was added to `src/core/states.ts`, no edge to `src/core/transitions.ts`,
+and `TaskState` is unchanged at schema version 1 — the block fields the
+contract already had are the ones used. `READY_FOR_PR` remains terminal.
+
+Deliberately not wired, and left to the slices that own them:
+
+- **V1-06** — the verify/findings/remediation loop. V1-05 reports a review; it
+  never appends to `findingHistory`, never increments `reviewRound`, and never
+  chooses between `READY_FOR_PR` and `REMEDIATING`. It also builds no context
+  payload: the caller supplies one, and `context.canonicalSources` is still
+  only declared.
+- **V1-07** — the queue and run driver. Nothing calls these boundaries yet, and
+  no CLI command exposes them.
+- **Scope enforcement.** `scope.allowedPaths` remains declared, not enforced;
+  the reviewer's read-only sandbox is asked of the CLI, not verified afterwards.
+- **A Codex usage-limit signal.** No evidence of one exists, so none is
+  recognised, and an exhausted Codex allowance reaches a human rather than a
+  pause. Adding one means capturing a dated, version-pinned observation first.
+
+Review item **RR-F6** is untouched and remains open: it is about
+`repo/git-query.ts` having no injection point, and adding an agent seam does
+not give it one.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: the implement/verify/review loop and finding-fingerprint computation. The
+build: the implement/verify/review loop and the queue that would drive it. The
 repository profile *declares* the context sources, the verification phases and
 the write scope; no code in this build opens a context file, runs a verification
-command or enforces a scope. Task selection, workspace preparation and state
-persistence exist as libraries and have no CLI command yet: nothing in
-`agent-loop` calls them.
+command or enforces a scope. Task selection, workspace preparation, state
+persistence and the agent runners exist as libraries and have no CLI command
+yet: nothing in `agent-loop` calls them.

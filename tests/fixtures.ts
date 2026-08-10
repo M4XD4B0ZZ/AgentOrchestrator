@@ -1,3 +1,4 @@
+import type { AgentCommandResult } from '../src/agent/agent-command.js';
 import type { AutomaticResumeEvidence } from '../src/core/automatic-resume.js';
 import type { TaskStateInput } from '../src/core/task-state.js';
 import type { CommandResult } from '../src/doctor/exec.js';
@@ -109,7 +110,73 @@ export function commandResult(overrides: Partial<CommandResult> = {}): CommandRe
     errnoCode: null,
     stdoutTruncated: false,
     stderrTruncated: false,
+    stdinDelivery: 'NOT_REQUESTED',
     processTreeKilled: false,
     ...overrides,
   };
+}
+
+/**
+ * An agent run that ended under its own control, for driving the V1-05
+ * boundaries without starting a real CLI.
+ *
+ * The default is the *permissive* case — ran, exit 0, nothing truncated — so
+ * that every adversarial test below has to say explicitly which single fact it
+ * is changing, and a boundary that stopped checking one of them would be
+ * caught by the test that varies it rather than hidden by a stricter default.
+ */
+export function agentCommandResult(
+  overrides: Partial<AgentCommandResult> = {},
+): AgentCommandResult {
+  return {
+    outcome: 'RAN',
+    exitCode: 0,
+    signal: null,
+    stdout: '',
+    stderr: '',
+    outputTruncated: false,
+    failureCode: null,
+    errnoCode: null,
+    durationMs: 1000,
+    ...overrides,
+  };
+}
+
+/** The stdout of a Claude run that positively succeeded, as observed at 2.1.226. */
+export function claudeSuccessEnvelope(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    api_error_status: null,
+    stop_reason: 'end_turn',
+    terminal_reason: 'completed',
+    result: 'done',
+    ...overrides,
+  });
+}
+
+/** A Codex `--json` transcript ending in `review`, as observed at codex-cli 0.146.0. */
+export function codexTranscript(review: unknown, options: { completed?: boolean } = {}): string {
+  const lines = [
+    JSON.stringify({ type: 'thread.started', thread_id: 'thread_0' }),
+    JSON.stringify({ type: 'turn.started' }),
+    JSON.stringify({
+      type: 'item.completed',
+      item: {
+        id: 'item_0',
+        type: 'agent_message',
+        text: typeof review === 'string' ? review : JSON.stringify(review),
+      },
+    }),
+  ];
+  if (options.completed !== false) {
+    lines.push(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1 } }));
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/** A review document that positively passes. */
+export function passingReview(): Record<string, unknown> {
+  return { reviewVersion: 1, verdict: 'PASS', findings: [] };
 }
