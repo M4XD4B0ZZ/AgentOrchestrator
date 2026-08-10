@@ -1266,12 +1266,430 @@ added to `src/core/states.ts`: `WORKTREE_READY` was already in the vocabulary,
 and this slice produces the value a task in that state describes — it does not
 persist one. Nothing here opens a pull request, pushes, fetches, or reads CI.
 
+## The state-persistence and reconciliation contract
+
+V1-04 is the first slice that *writes down* what a run believed and then checks
+that belief against the world on the way back in. It answers one question: what
+did the orchestrator previously persist, what does Git actually look like now,
+and is it safe to continue?
+
+`TaskState` itself is unchanged. `TASK_STATE_SCHEMA_VERSION` is still `1` and
+`schemas/task-state.schema.json` is byte-identical — this slice persists the
+existing contract rather than extending it.
+
+### Where a state lives
+
+    <canonical repository root>/.agent-orchestrator/runtime/<taskId>.json
+
+The same shape, and the same reasoning, as the repository profile: exactly one
+location, no fallback name, no fallback extension, no upward search and no
+environment override. The path is a pure function of `ResolvedRepository.root`
+and the task id, and is never derived from `process.cwd()`.
+
+State belongs to the repository it describes, so it sits under the directory
+that already holds the orchestrator's per-repository files. A checkout carries
+its own runtime record: copy the repository and it comes along, delete it and it
+goes, and two checkouts of one project never share a record. That is also why
+the path carries **no `repositoryId` segment** — the repository root *is* the
+identity, and an id in the path would be a second, weaker spelling of it that
+could disagree with the directory it sits in.
+
+`runtime/` rather than something beside `repo-profile.yaml` without
+distinction: the profile is authored and reviewed, this is machine-written
+per-run data, and the directory name says which is which. It is expected to be
+ignored by the repository's VCS — nothing here creates or edits an ignore rule.
+
+`taskId` is repository-authored text and this is where it becomes a path
+segment, so it is re-checked against V1-02's canonical grammar; a failure is
+refused with `TASK_ID_UNSUITABLE`, never slugified or truncated.
+
+The name is judged by the state layer's own `isStateFileName`, deliberately
+*not* by `doctor/safe-write.ts`'s `isPlainFileName`. Sharing that helper would
+have imported the artefact writer's unrelated 64-character budget into the
+task-id contract, so ids the planner accepts and V1-03 can build a workspace for
+— anything past 59 characters, once `.json` is appended — could never be written
+down at all. A task that can be started and never checkpointed is worse than one
+that is refused up front. The safety properties are unchanged, because they come
+from the task-id grammar itself: one plain segment, no separators, no traversal,
+no absolute path, no trailing dot, no Windows device name, plus a containment
+proof on the derived path. Only the length budget is the storage layer's own,
+and it is derived from `MAX_TASK_ID_LENGTH` rather than chosen.
+
+### Absolute paths, or no comparison at all
+
+A non-absolute root is refused with `REPOSITORY_ROOT_UNSUITABLE` rather than
+resolved, because resolving it is exactly the `process.cwd()` dependency this
+must not have — and the same rule governs every *comparison* of two paths.
+`core/path-identity.ts` is the single such comparison in the codebase, and it is
+three-valued on purpose:
+
+| Input | Answer |
+| --- | --- |
+| two absolute paths | `EQUAL` / `DIFFERENT` |
+| anything relative or blank | `NOT_ABSOLUTE` — a refusal, never an equality |
+
+It normalises rather than resolves: `.`/`..` segments are folded, separator
+shape is unified, a trailing separator is dropped and Windows casing is ignored,
+but nothing is ever measured against the current working directory. Without
+that, a persisted `repositoryRoot` of `"."` would compare *equal* to whichever
+checkout the process was launched from, and one project's record could be
+accepted, resumed and overwritten as another's. A relative recorded root is
+therefore refused: `REPOSITORY_ROOT_MISMATCH` on save (detail
+`REPOSITORY_ROOT_NOT_ABSOLUTE`), and `REPOSITORY_ROOT_NOT_ABSOLUTE` on load. A
+save whose state describes a different repository than the root it is being
+filed under is refused with `REPOSITORY_ROOT_MISMATCH` as before.
+
+### Writes are atomic; `doctor/safe-write.ts` is not reused for them
+
+`writeRunArtifact` is deliberately append-only — it opens each artefact `wx`
+under its final name and documents that nothing is ever replaced. That is right
+for a run artefact and wrong for a checkpoint, which is rewritten at every
+transition over a file whose previous contents are the only thing standing
+between a killed process and a lost task.
+
+So `src/state/atomic-file.ts` exists alongside it and *imports* the shared
+safety posture rather than restating it: `isPlainFileName`, `isContained`,
+`pathContainsLink` and `safeErrnoCode` all come from the existing modules.
+
+The guarantee is that after a write returns, the file holds **either** its
+previous complete contents **or** the new complete contents. Contents go to a
+temporary file *in the same directory* — `rename` is only atomic within a
+filesystem — which is flushed, closed, and only then moved onto the target in
+one step. The target is never opened for writing, never truncated and never
+unlinked, so every failure before the rename could not have touched it. A
+failure removes the staging file; a *crash* may leave one, which is inert
+because readers open the target by name and never enumerate the directory.
+
+### Loading is validation
+
+A persisted file is untrusted input, whoever wrote it. Every load answers with
+one of four classifications — `STATE_MISSING`, `STATE_VALID`, `STATE_INVALID`,
+`STATE_MISPLACED` — alongside a precise code from a closed exported set.
+
+Rejected as `STATE_INVALID`: anything at the path that is not a regular file; a
+document larger than the 1 MiB read budget; malformed JSON; an unsupported
+`schemaVersion`; an unknown field, since the contract is `.strict()`; an invalid
+state enum; anything else the canonical `TaskStateSchema` rejects; and a
+recorded repository root that is not absolute, which cannot be compared at all.
+
+`STATE_MISPLACED` is kept apart from that list, and this is the distinction the
+composed outcome below depends on. `REPOSITORY_ROOT_MISMATCH` and
+`TASK_ID_MISMATCH` are reported separately from each other and from
+`STATE_INVALID`, because a well-formed state found in the wrong place is not a
+broken document — it is an intact record of something else. Calling it
+"invalid" would send an operator looking for corruption instead of for the
+copied checkout or the crossed-over task that actually happened, and the two
+mismatches have different causes and different repairs. Both are provable
+without resolving anything, so both are refused at load rather than deferred.
+
+No raw parser, JSON or filesystem text ever reaches a result. Only closed codes
+and allow-listed errno identifiers, per AO-002.
+
+### Nothing is ever repaired
+
+`loadTaskState()` performs no writes on any path. A malformed, stale or
+unsupported state file is reported and left exactly as found. Not migrated, not
+truncated, not renamed aside, not deleted.
+
+The same restraint applies to the writer: a failed write removes *only* the
+staging file it created itself, by the exact path it constructed. The state
+directory is never enumerated and no other temporary file is ever touched — a
+concurrent writer's in-flight staging file is none of our business.
+
+That is a refusal, not an omission. Every repair is a guess about what the
+previous run meant, made when the evidence for it is weakest, and it destroys
+that evidence in the process. The contract is applied on both sides of the disk:
+a state that violates it is never written, because a self-contradictory state
+that survives a restart is indistinguishable from a real one.
+
+### Creation and movement are different operations
+
+`saveTaskState()` validates a state *in isolation*. That is right for it — the
+first state a task ever has must be writable and has no predecessor — but it
+means it cannot see the one thing that makes a move legal: where the task came
+from. `TaskStateSchema` accepts a `CREATED` document and an `IMPLEMENTING`
+document equally; only the transition table knows the second may not directly
+follow the first.
+
+So the two are separate:
+
+- `saveTaskState()` — **creation**, a state with no predecessor;
+- `advanceTaskState()` — **movement**, which requires the state that was read
+  and consults `canTransition()` before writing anything, refusing an
+  undeclared edge with `ILLEGAL_TRANSITION`.
+
+The table is consulted, never restated: a new edge is added in
+`core/transitions.ts` or nowhere. Re-persisting the *same* state is a
+checkpoint rather than a move — no state lists itself as its own successor, so
+requiring a declared edge would make recording progress impossible — and only a
+genuine change is checked.
+
+This is the persistence primitive the runtime loop will call. It is not the
+loop: nothing here decides which state comes next, runs an agent, or reads a
+repository.
+
+### Concurrent writers
+
+Two orchestrator processes may be pointed at the same task. Neither is expected
+to win a race, but the loser must *know* it lost rather than silently flattening
+the winner's work.
+
+`loadTaskState()` returns a `revision` — a content digest of the exact bytes it
+read — and `saveTaskState()` takes it back as `expectedRevision`. A save whose
+expectation no longer matches what is on disk fails with `STATE_CONFLICT` and
+writes nothing. A digest rather than a counter: it needs no field in `TaskState`,
+it cannot drift from the file it describes, and two writers that independently
+produce byte-identical states correctly do not conflict.
+
+**Bytes, never decoded text.** The digest is taken over the raw bytes, not over
+the string they decoded to, because decoding is lossy in exactly the direction
+that matters: every invalid UTF-8 sequence — an overlong encoding, a surrogate
+half, a truncated character — decodes to the same replacement character, so two
+files that differ on disk can decode to one identical string. Hashing that
+string would hand both the same revision and wave a stale writer straight
+through the check that exists to stop it.
+
+### One bounded raw-byte read
+
+There is exactly one way this module reads a persisted state, and both the
+loader and the compare-and-swap go through it: open the canonical path, `fstat`
+the *handle* (so the thing measured and the thing read cannot be two different
+files), refuse anything that is not a regular file or is past the 1 MiB budget,
+read that many bytes, and hand them back undecoded. Digesting happens on those
+bytes; decoding and parsing happen afterwards, separately.
+
+The write side is the same budget seen from the other direction. `saveTaskState`
+validates, serialises, encodes the exact bytes it would persist and checks their
+length **before touching the filesystem at all** — before the runtime directory,
+before a staging file, before the revision check. A schema-valid state can
+serialise past the budget (an unbounded `findingHistory` will do it), and
+writing one would checkpoint a task into a file this same build refuses to load:
+permanently unrecoverable, by our own hand. It is refused with
+`STATE_TOO_LARGE`, and nothing is created. An *existing* oversize document is
+likewise refused rather than read: the compare-and-swap answers
+`STATE_CONFLICT` with detail `CURRENT_STATE_TOO_LARGE` and replaces nothing,
+because a file we may not read is a file we cannot prove is ours to overwrite.
+
+Omitting `expectedRevision` does **not** mean "overwrite whatever is there" — it
+means "I read nothing, so I expect nothing", and the save is refused if a state
+already exists. There is deliberately no force flag: an unconditional overwrite
+is the operation this mechanism exists to prevent.
+
+This is optimistic concurrency, and the residual window is stated rather than
+papered over. Between the compare and the `rename` a third writer could land its
+own state. Closing that entirely needs a lock, and a lock is a service — owner,
+lease, timeout, and a recovery story for the process that died holding it. The
+window is one `rename` wide and corrupts nothing: the loser's file is complete
+and valid, merely superseded. What this actually defends against is the writer
+that read a state minutes ago, went away to run an agent, and came back to
+persist a conclusion drawn from a world that has since moved.
+
+### Reconciliation, and two ways to fail
+
+Reconciliation consumes the freshly **resolved repository**, the selected
+**task id**, the validated persisted state, and current Git/worktree
+observations. A state file that parses cleanly proves only that something wrote
+valid JSON — persisted Git facts are never trusted because the document is
+well-formed. `repositoryId`, `repositoryRoot`, `taskId` and `baseBranch` are
+compared against resolved reality *first*, and for every state rather than only
+on the unattended-resume path: a state resumed into the wrong repository is the
+one failure this slice exists to make impossible, and that must not depend on
+which state the task happens to be in. Roots are compared as paths, so separator
+shape, a trailing separator and Windows' case-insensitivity do not read as
+divergence.
+
+`observe-runtime.ts` asks Git and the filesystem what is true now and changes
+nothing; `reconcile.ts` is the only place those facts meet the persisted record.
+Splitting them is what keeps "we could not find out" from becoming "we found out
+that it is false".
+
+`DIVERGED` means the world contradicts the record — the worktree is
+unregistered or gone, another branch is checked out, HEAD moved, the base pin is
+no longer an ancestor, there is uncommitted work. `UNOBSERVABLE` means the world
+could not be read. Both refuse, so collapsing them would change no decision —
+which is exactly why they stay apart: they are shown to a human, and "your base
+commit was rewritten" is the wrong thing to say when the truth is that Git could
+not be run. A false reason is worse than none. In the same spirit, an unreadable
+registry is never reported as proof that the worktree is unregistered.
+
+The base pin is checked with `merge-base --is-ancestor`, whose exit status is
+its answer, on the protocol `remove-workspace.ts` already documents: `0` yes,
+`1` a genuine no, anything else a refusal to evaluate. The happy path costs one
+Git call; only an indeterminate answer pays for a second probe asking whether
+the pinned object still exists at all — and that probe reads its own exit status
+under the same discipline. `rev-parse --verify --quiet` exits `1` to say "does
+not resolve" and `128` when it could not evaluate the question, so only `1` is
+read as absence. Everything else — an unexpected exit, Git unavailable, a
+refused argument — is `null`, and the reconciler reports
+`BASE_COMMIT_UNVERIFIABLE` rather than `BASE_COMMIT_ABSENT`. An indeterminate
+failure turned into proof of absence would send an operator hunting for a
+force-push that never happened.
+
+### Git's registry is the authority; the record is only a claim
+
+A persisted `worktreePath` is a sentence in a file. Running `git status` inside
+it — or `rev-parse`, or anything — before Git has confirmed that directory *is*
+this task's worktree means executing somewhere nothing has vouched for: a stale
+record, a hand-edited file or a state copied from another machine would each be
+enough to point the probes at somebody else's checkout.
+
+So the order is fixed, and each step gates the next:
+
+1. read `git worktree list --porcelain` for the repository;
+2. the registry must itself be readable — an unreadable one authorises nothing;
+3. find the registration for the recorded path (a *comparison*, which is all the
+   recorded path is ever used for);
+4. confirm that registration holds this task's own work branch, judged on the
+   ref Git printed;
+5. only then, and only at **the path Git printed**, ask the filesystem whether
+   the directory exists and ask Git for HEAD, cleanliness and ancestry.
+
+Where any step fails, the dependent observations stay `null` — "never
+established" — and the reconciler never reads a `null` as a `false`. In
+particular `worktreeExists` is tri-state: `false` means Git named a directory
+and it is not there, and that is divergence; `null` means the question was never
+asked, and the unreadable registry or absent registration is reported as itself
+instead. This mirrors the three proofs `worktree/remove-workspace.ts` requires
+before it deletes anything, for the same reason.
+
+### Git reality is phase-sensitive
+
+Two of those checks have no phase-independent answer, and asking them globally
+is how a reconciler starts reporting the loop's own work as divergence.
+
+`HEAD == basePinnedCommit` is **not** a task-wide invariant. It is the truth for
+a worktree that has just been created and nothing more; from `IMPLEMENTING`
+onwards the writing agent legitimately commits into it. Uncommitted work is the
+same story: an interrupted `IMPLEMENTING` is *supposed* to have some, and
+refusing every dirty worktree would make the ordinary crash — the one this slice
+exists to survive — permanently unresumable.
+
+So both are asked against what the record claims, and fall back to a phase
+expectation only for a worktree in which nothing can yet have run:
+
+| Phase | Expected `HEAD` | A dirty worktree is |
+| --- | --- | --- |
+| `WORKTREE_READY`, `CONTEXT_LOADING`, **with no prior-work evidence** | `currentCommit`, else `basePinnedCommit` | always divergence |
+| the same two phases **re-entered after a block**, and `IMPLEMENTING` onwards | `currentCommit` when recorded; otherwise no exact expectation | divergence only when the checkpoint recorded a clean tree |
+
+Those two pre-work phases are read off `TRANSITION_TABLE`, not chosen:
+`WORKTREE_READY` is entered from `GIT_PREFLIGHT` the moment V1-03 created the
+worktree at the pin, and `CONTEXT_LOADING` has `WORKTREE_READY` as its sole
+predecessor and `IMPLEMENTING` as its sole work successor. The two
+direct-predecessor facts are pinned by a test, so a table change that
+invalidated them fails rather than drifts.
+
+But the phase name alone is not the question, because
+`BLOCKED_AUTH → AUTH_PREFLIGHT → GIT_PREFLIGHT → WORKTREE_READY` is a *declared
+path*: re-authenticating genuinely re-enters the setup chain, and a task that
+walks it after days of implementation arrives at `WORKTREE_READY` carrying
+commits and often uncommitted work. Judging that arrival as a freshly created
+worktree would report the loop's own work as corruption at the exact moment an
+operator has just repaired the thing that blocked it.
+
+So the fallback applies only to a **virgin** pre-work state: the phase, *and* no
+evidence of work in the record. The evidence is what `TaskState` already
+carries — a `resumeFrom` (which `BLOCKED_AUTH` requires and the re-entry path
+exists to carry through), a checkpointed `currentCommit`, `reviewRound > 0`, or
+a non-empty `findingHistory`. No new field, no event history, and no second
+workflow. `worktreeCleanAtCheckpoint === false` is deliberately *not* evidence:
+letting a dirty checkpoint excuse itself would accept a dirty tree in a phase
+where nothing could have dirtied it.
+
+What is still refused after an auth cycle: a HEAD that no longer descends from
+the pinned base, a HEAD that contradicts a recorded `currentCommit`, somebody
+else's branch in the worktree, and uncommitted work the checkpoint said was not
+there.
+
+What stays global is the invariant that actually holds everywhere: the work must
+still descend from the pinned base. And none of this widens autonomy —
+`evaluateAutomaticResume()` independently requires an exact recorded
+`currentCommit`, a clean tree *and* `worktreeCleanAtCheckpoint === true`, and is
+neither wrapped nor weakened by reconciliation.
+
+### One closed outcome
+
+`reconcileTask()` composes load, observation and comparison into a single value
+a caller can branch on without re-deriving it:
+
+| Outcome | Meaning |
+| --- | --- |
+| `RECONCILED` | the only outcome anything may continue from |
+| `NO_PERSISTED_STATE` | the task has never run — the normal start, not an error |
+| `STATE_INVALID` | something is there and it is not usable as state |
+| `STATE_REPOSITORY_MISMATCH` | well-formed, but about a *different* repository |
+| `STATE_TASK_MISMATCH` | well-formed and about this repository, but a different task |
+| `STATE_DIVERGED` | the world contradicts the record |
+| `STATE_UNOBSERVABLE` | the world could not be read |
+
+The derivation is where mistakes live, which is why it happens once, here.
+"Nothing persisted" and "unreadable state" both invite the same `if (!loaded)`,
+and a wrong repository invites being folded in with "someone committed since we
+last looked". A repository mismatch therefore outranks every other finding: it
+is not a repository that drifted, it is the wrong repository, and continuing
+would apply one project's work to another. A task mismatch ranks next, and stays
+its own outcome rather than collapsing into either neighbour: a copied checkout
+and two crossed-over tasks of one project are different accidents with different
+repairs, and neither is a corrupt document.
+
+### One deterministic decision
+
+`classifyResume()` returns exactly one classification, in a fixed order, with no
+clock and no I/O of its own: terminal states first (a finished task is not a
+resume question), then reconciliation, then the block. Judging the block first
+would grant "resume allowed" for a task whose worktree is gone and then need
+overriding — a decision made twice is one that can disagree with itself.
+
+### Reconciliation is not permission
+
+The result carries **two** fields, because they answer two questions:
+`classification` says what the situation is, and `continuation` says what may be
+done about it. Nothing named in the first suggests a machine may act on it.
+
+| `continuation` | Meaning |
+| --- | --- |
+| `TERMINAL` | the task is over; there is nothing to continue |
+| `BLOCKED` | nothing continues until something changes — the record and reality disagree, or the unattended-resume authority denied it |
+| `ATTENDED_ONLY` | a human may continue this; a machine may not do so alone |
+| `AUTOMATIC_ALLOWED` | unattended execution is permitted |
+
+`AUTOMATIC_ALLOWED` has exactly one source: an `AutomaticResumeDecision` from
+`evaluateAutomaticResume()` with `allowed === true`. It is not derivable from a
+classification, from a `CONSISTENT` reconciliation, or from any combination of
+the two, and a test pins that equivalence in both directions.
+
+This is why there is no `RESUME_READY`. A single status meaning "everything
+checks out" invites a future caller to read it as "carry on" — and the most
+common thing that checks out is an interrupted task with half-written work in
+its worktree, which reconciles precisely because the phase-sensitive checks are
+doing their job. That case is now `RECONCILED_IN_FLIGHT` / `ATTENDED_ONLY`: the
+record is accurate, and that is all it says.
+
+`evaluateAutomaticResume()` remains the authority on unattended resumes and is
+fed, not re-implemented; `BLOCKED_USAGE_LIMIT` is still the only state it will
+ever consider, and only on positive evidence. There is no second resume policy
+and no second state machine. Auth arrives as supplied evidence because re-proving
+it is an *execution*, and this slice performs none; repository identity is
+compared during reconciliation, so by the time the block is judged it has
+already been checked. `STATE_DIVERGED` is named for the existing
+`RESUME_STATE_DIVERGED` state rather than inventing a second vocabulary for the
+same condition.
+
+### What V1-04 is not
+
+It decides; it does not act. Nothing here transitions a task, writes a state as
+a side effect of reading one, runs an agent, or touches a repository. Performing
+the transition a classification implies belongs to the loop. `RR-F6` is
+unchanged: `repo/git-query.ts` still has no injection point, and this slice did
+not need one — it re-observes through V1-03's `GitRunner` seam and takes
+repository identity as evidence rather than resolving it.
+
 ## Not implemented yet
 
 Planned commands — mentioned for orientation only, none of them exist in this
-build: the implement/verify/review loop, resume handling, and
-finding-fingerprint computation. The repository profile *declares* the context
-sources, the verification phases and the write scope; no code in this build
-opens a context file, runs a verification command or enforces a scope. Task
-selection and workspace preparation exist as libraries and have no CLI command
-yet: nothing in `agent-loop` calls them.
+build: the implement/verify/review loop and finding-fingerprint computation. The
+repository profile *declares* the context sources, the verification phases and
+the write scope; no code in this build opens a context file, runs a verification
+command or enforces a scope. Task selection, workspace preparation and state
+persistence exist as libraries and have no CLI command yet: nothing in
+`agent-loop` calls them.
