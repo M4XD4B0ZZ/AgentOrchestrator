@@ -40,6 +40,7 @@ import {
   agentProcessEvidence,
   AGENT_FAILURE_DISPOSITION,
   AGENT_FAILURE_TEXT,
+  endedUnderOwnControl,
   interruptedResumePoint,
   ranCleanly,
   type AgentBlockEvidence,
@@ -168,7 +169,12 @@ export async function runCodexReviewer(
   if (result.outcome === 'REFUSED_UNSAFE_ARGUMENT') {
     return reviewFailure(evidence, 'AGENT_ARGUMENT_REFUSED');
   }
-  if (result.outcome !== 'RAN') return reviewFailure(evidence, 'AGENT_PROCESS_UNAVAILABLE');
+  // Same shape as the writer's, and for the same reason (V1-05-RR-F1/F3): a
+  // process that did not reach its own end — including one killed from outside,
+  // which arrives here as an ordinary completion — is never classified from the
+  // bytes it managed to print, and is never labelled a "non-zero exit" when its
+  // exit status was zero or absent.
+  if (!endedUnderOwnControl(result)) return reviewFailure(evidence, 'AGENT_PROCESS_UNAVAILABLE');
 
   if (!ranCleanly(result)) {
     return reviewFailure(

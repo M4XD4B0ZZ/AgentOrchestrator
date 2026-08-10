@@ -21,7 +21,11 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentCommandResult, AgentRunner } from '../src/agent/agent-command.js';
-import { AGENT_FAILURE_TEXT } from '../src/agent/agent-outcome.js';
+import {
+  AGENT_FAILURE_TEXT,
+  DIAGNOSTIC_EXCERPT_LIMIT,
+  REDACTION_OVERLAP,
+} from '../src/agent/agent-outcome.js';
 import {
   CLAUDE_WRITER_ARGS,
   runClaudeWriter,
@@ -201,8 +205,15 @@ describe('process evidence outranks anything the agent printed', () => {
    * future producer of an `AgentCommandResult` (a different transport, a
    * replayed transcript) could present it, and "completed with a signal" must
    * not be the one shape that slips through as success.
+   *
+   * The *diagnosis* is what V1-05-RR-F3 corrected. A run whose exit status was
+   * zero is not a "non-zero exit", and saying so put an untrue sentence in
+   * front of the person holding the failure. `AGENT_NONZERO_EXIT` documents
+   * itself as "exited non-zero **without any recognised signal**"; a signalled
+   * run belongs to `AGENT_PROCESS_UNAVAILABLE`, which already says "it was
+   * terminated". Same disposition, truthful sentence.
    */
-  it('refuses an envelope from a run that reports both a zero exit and a signal', async () => {
+  it('refuses a run that reports both a zero exit and a signal, as a terminated process', async () => {
     const { outcome } = await writerWith(
       agentCommandResult({
         exitCode: 0,
@@ -213,7 +224,9 @@ describe('process evidence outranks anything the agent printed', () => {
 
     expect(outcome.ok).toBe(false);
     if (outcome.ok) expect.unreachable();
-    expect(outcome.code).toBe('AGENT_NONZERO_EXIT');
+    expect(outcome.code).toBe('AGENT_PROCESS_UNAVAILABLE');
+    expect(outcome.detail).toBe(AGENT_FAILURE_TEXT['AGENT_PROCESS_UNAVAILABLE']);
+    expect(outcome.process.signal).toBe('SIGTERM');
   });
 
   it('refuses a perfect envelope carried on a non-zero exit', async () => {
@@ -430,6 +443,120 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
     expect(outcome.code).toBe('AGENT_PROCESS_UNAVAILABLE');
     expect(outcome.disposition).toBe('AGENT_NEEDS_ATTENTION');
   });
+
+  /**
+   * V1-05-RR-F1. The case above is caught by `outcome`, and so it never proved
+   * anything about a run the seam *did* report as `RAN`.
+   *
+   * `runCommand` reports a child killed from outside this process as an
+   * ordinary completion — nothing here issued the termination — so a SIGKILLed
+   * agent arrives as `{outcome:'RAN', exitCode:null, signal:'SIGKILL'}` with
+   * whatever bytes it had already written. If those bytes happen to be a
+   * structurally perfect 429 envelope, reading them before the signal parks the
+   * task on `BLOCKED_USAGE_LIMIT`: a governed pause, waiting on a quota that
+   * was never the reason, for what is an infrastructure kill.
+   *
+   * The invariant is therefore stronger than "recognise 429 structurally": a
+   * process terminated by a signal is never classified from its own output at
+   * all — not as a success, and not as a usage limit.
+   */
+  it('does not let a signalled run be reclassified as a usage limit by its own output', async () => {
+    const { outcome } = await writerWith(
+      agentCommandResult({
+        outcome: 'RAN',
+        exitCode: null,
+        signal: 'SIGKILL',
+        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+      }),
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) expect.unreachable();
+    expect(outcome.code).toBe('AGENT_PROCESS_UNAVAILABLE');
+    expect(outcome.disposition).toBe('AGENT_NEEDS_ATTENTION');
+    // No block evidence, so nothing downstream can record a resume point or a
+    // reset time for a limit that was never reported.
+    expect(outcome.block).toBeNull();
+  });
+
+  /**
+   * The same, with the one difference that makes it a distinct mutation: a zero
+   * exit code. Without the signal guard this input reaches the envelope reader
+   * exactly as the case above does, and neither the exit-code check nor
+   * `ranCleanly` gets a chance to disagree first.
+   */
+  it('does not let a signalled run with a zero exit be read as a usage limit', async () => {
+    const { outcome } = await writerWith(
+      agentCommandResult({
+        outcome: 'RAN',
+        exitCode: 0,
+        signal: 'SIGTERM',
+        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+      }),
+    );
+
+    if (outcome.ok) expect.unreachable();
+    expect(outcome.code).toBe('AGENT_PROCESS_UNAVAILABLE');
+    expect(outcome.block).toBeNull();
+  });
+
+  /**
+   * V1-05-RR-F2. The envelope reader recognises a quota refusal only when the
+   * envelope also admits to being an error, and that guard had no test of its
+   * own: every 429 case in this file sets `is_error:true`, so deleting the
+   * condition left the whole suite green.
+   *
+   * A success that carries a 429 is a contradiction. It must fail closed to
+   * `AGENT_RESULT_MALFORMED` — an inconsistent envelope is not authority for a
+   * pause any more than prose is.
+   */
+  it.each([[429], ['429']])(
+    'refuses an envelope that claims success while carrying api_error_status %j',
+    async (status) => {
+      const { outcome } = await writerWith(
+        agentCommandResult({
+          stdout: claudeSuccessEnvelope({ is_error: false, api_error_status: status }),
+        }),
+      );
+
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) expect.unreachable();
+      expect(outcome.code).toBe('AGENT_RESULT_MALFORMED');
+      expect(outcome.disposition).toBe('AGENT_NEEDS_ATTENTION');
+      expect(outcome.block).toBeNull();
+    },
+  );
+
+  /**
+   * The other half of the guard, so that "inconsistent" is not quietly narrowed
+   * to "429". A non-null error status on an envelope claiming success is
+   * unrecognised whatever the status is.
+   */
+  it('refuses an envelope that claims success while carrying a non-429 error status', async () => {
+    const { outcome } = await writerWith(
+      agentCommandResult({ stdout: claudeSuccessEnvelope({ is_error: false, api_error_status: 503 }) }),
+    );
+
+    if (outcome.ok) expect.unreachable();
+    expect(outcome.code).toBe('AGENT_RESULT_MALFORMED');
+  });
+
+  /**
+   * The positive control for the two above: with the guard in place a genuine
+   * error envelope carrying 429 is still recognised as the usage limit it is,
+   * so the fix cannot be "stop recognising quota refusals".
+   */
+  it('still recognises a genuine error envelope carrying 429', async () => {
+    const { outcome } = await writerWith(
+      agentCommandResult({
+        exitCode: 1,
+        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+      }),
+    );
+
+    if (outcome.ok) expect.unreachable();
+    expect(outcome.code).toBe('AGENT_USAGE_LIMIT');
+  });
 });
 
 // ── Failing closed ─────────────────────────────────────────────────────────
@@ -490,12 +617,129 @@ describe('the agent\u2019s own words are carried, never trusted', () => {
     expect(Date.now() - started).toBeLessThan(2_000);
 
     const excerpt = outcome.diagnostics.stdoutExcerpt;
-    // Four kilobytes kept, plus a short notice saying how much was dropped, so
-    // the excerpt is a little longer than the budget by construction. What
-    // matters is that a runaway agent cannot decide how much memory its
-    // diagnostics occupy.
-    expect(excerpt.length).toBeLessThan(4_200);
+    // The budget is the budget: the notice saying where the cut fell is counted
+    // inside it, not added on top. What matters is that a runaway agent cannot
+    // decide how much memory its diagnostics occupy.
+    expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
     expect(excerpt).toContain('truncated');
-    expect(excerpt.startsWith('x'.repeat(4_000))).toBe(true);
+    // Still recognisably the head of the stream, not a stub.
+    expect(excerpt.startsWith('x'.repeat(3_500))).toBe(true);
+  });
+
+  /**
+   * V1-05-RR-F6. The case above cannot detect this defect, because a stream of
+   * `x`s is the one input class on which redaction is a no-op.
+   *
+   * Redaction *expands*: `a@b.co` (6 characters) becomes `<redacted:email>`
+   * (16). Clamping the raw text to the budget and redacting afterwards
+   * therefore returns something far larger than the budget — measured at 9 745
+   * characters for this input, 2.4× the limit — and the limit is the only thing
+   * standing between an 8 MiB stream budget and the memory a failed run costs
+   * to describe.
+   */
+  it('holds the budget even when redaction expands what it kept', async () => {
+    const { outcome } = await writerWith(
+      agentCommandResult({ exitCode: 1, stdout: 'a@b.co '.repeat(600) }),
+    );
+
+    const excerpt = outcome.diagnostics.stdoutExcerpt;
+    expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
+    expect(excerpt).toContain('<redacted:email>');
+    expect(excerpt).not.toContain('a@b.co');
+  });
+
+  /**
+   * The same expansion below the truncation threshold, where the old fast path
+   * returned `redact(text)` with no clamp at all — so a 3 500-character stdout
+   * could still produce an 8 500-character excerpt.
+   */
+  it('holds the budget for a stream that never needed truncating', async () => {
+    const { outcome } = await writerWith(
+      agentCommandResult({ exitCode: 1, stdout: 'a@b.co '.repeat(500) }),
+    );
+
+    expect(outcome.diagnostics.stdoutExcerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
+  });
+
+  /**
+   * The boundary leak, which is the half of V1-05-RR-F6 that is a safety
+   * property rather than a size one.
+   *
+   * Every redaction rule anchors on a suffix — a TLD, an `{8,}` token body.
+   * Cutting the raw text mid-secret amputates that suffix, so the surviving
+   * prefix matches no rule and is emitted verbatim: clamping first used to
+   * print `m4xd4b0zz@googlemail.` in the clear where redacting first prints
+   * `<redacted:email>`. Truncation must not be a way to defeat redaction.
+   */
+  it('does not expose a secret that straddles the point where it cuts', async () => {
+    const secret = 'm4xd4b0zz@googlemail.com';
+    const { outcome } = await writerWith(
+      agentCommandResult({
+        exitCode: 1,
+        stdout: `${'x'.repeat(DIAGNOSTIC_EXCERPT_LIMIT - 21)} ${secret} ${'y'.repeat(2_000)}`,
+      }),
+    );
+
+    const excerpt = outcome.diagnostics.stdoutExcerpt;
+    expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
+    // Neither whole nor halved: no part of the local part or the domain.
+    expect(excerpt).not.toContain('m4xd4b0zz');
+    expect(excerpt).not.toContain('googlemail');
+  });
+
+  /**
+   * The same property swept across the boundary, because a single offset only
+   * proves that one alignment is safe. Every one of these places the secret so
+   * that it either straddles the budget or sits just inside it; none may leak a
+   * fragment.
+   */
+  it.each([-40, -24, -12, -1, 0, 8, 20])(
+    'does not expose a secret placed at budget offset %i',
+    async (offset) => {
+      const secret = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA';
+      const lead = DIAGNOSTIC_EXCERPT_LIMIT + offset;
+      const { outcome } = await writerWith(
+        agentCommandResult({
+          exitCode: 1,
+          stdout: `${'x'.repeat(lead)} ${secret} ${'y'.repeat(2_000)}`,
+        }),
+      );
+
+      const excerpt = outcome.diagnostics.stdoutExcerpt;
+      expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
+      expect(excerpt).not.toContain('sk-ant');
+    },
+  );
+
+  /**
+   * The far edge of the redaction window, which the cases above cannot reach.
+   *
+   * Widening the window moves the bisection risk rather than removing it: an
+   * entity straddling the window's own end still loses its tail. It normally
+   * falls outside the excerpt anyway — but only because redaction roughly
+   * preserves length, and one rule does not. A JWT collapses from thousands of
+   * characters to fourteen, and that shrinkage drags whatever followed it back
+   * inside the budget.
+   *
+   * So this input is built to land a *fragment* of a token in the excerpt: a
+   * long JWT that redacts to almost nothing, then a token positioned so that
+   * only its first nine characters lie inside the window — too few for the
+   * `{8,}` body the rule requires, so the fragment matches nothing and would be
+   * printed verbatim. Dropping the trailing partial run is what removes it.
+   */
+  it('does not expose a token bisected by the far edge of the redaction window', async () => {
+    const visible = 9;
+    const lead = DIAGNOSTIC_EXCERPT_LIMIT + REDACTION_OVERLAP - visible - 1;
+    const jwt = `eyJ${'A'.repeat(lead - 3)}`;
+    const stdout = `${jwt} sk-ant-api03-${'S'.repeat(400)} ${'y'.repeat(2_000)}`;
+
+    const { outcome } = await writerWith(agentCommandResult({ exitCode: 1, stdout }));
+    const excerpt = outcome.diagnostics.stdoutExcerpt;
+
+    // The premise: the window really does cut this token after nine characters.
+    expect(stdout.slice(lead + 1, DIAGNOSTIC_EXCERPT_LIMIT + REDACTION_OVERLAP)).toBe('sk-ant-ap');
+    expect(excerpt.length).toBeLessThanOrEqual(DIAGNOSTIC_EXCERPT_LIMIT);
+    expect(excerpt).toContain('<redacted:jwt>');
+    expect(excerpt).not.toContain('sk-ant');
   });
 });

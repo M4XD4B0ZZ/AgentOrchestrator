@@ -22,6 +22,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentCommandResult, AgentRunner } from '../src/agent/agent-command.js';
+import { AGENT_FAILURE_TEXT } from '../src/agent/agent-outcome.js';
 import {
   CODEX_REVIEWER_ARGS,
   codexReviewResumePoint,
@@ -301,7 +302,15 @@ describe('a pass is never inferred', () => {
     expect(outcome.code).toBe('AGENT_PROCESS_UNAVAILABLE');
   });
 
-  /** The signal is consulted in its own right; see the writer suite for why. */
+  /**
+   * The signal is consulted in its own right; see the writer suite for why.
+   *
+   * The diagnosis is pinned as well as the refusal (V1-05-RR-F3). Refusing for
+   * an untrue reason is still a defect: this run's exit status was zero, so
+   * `AGENT_NONZERO_EXIT` — documented as "exited non-zero **without any
+   * recognised signal**" — would contradict both the evidence and its own
+   * definition. A terminated process is `AGENT_PROCESS_UNAVAILABLE`.
+   */
   it('refuses a valid document from a run reporting both a zero exit and a signal', async () => {
     const { outcome } = await reviewWith(
       agentCommandResult({
@@ -312,6 +321,9 @@ describe('a pass is never inferred', () => {
     );
 
     expect(outcome.ok).toBe(false);
+    if (outcome.ok) expect.unreachable();
+    expect(outcome.code).toBe('AGENT_PROCESS_UNAVAILABLE');
+    expect(outcome.detail).toBe(AGENT_FAILURE_TEXT['AGENT_PROCESS_UNAVAILABLE']);
   });
 
   /**

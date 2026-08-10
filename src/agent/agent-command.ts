@@ -179,13 +179,23 @@ const RESULT_REFUSED: AgentCommandResult = Object.freeze({
 /** Translates one `CommandResult` into this seam's vocabulary. Exported for tests. */
 export function toAgentCommandResult(result: CommandResult): AgentCommandResult {
   const outputTruncated = result.stdoutTruncated || result.stderrTruncated;
+  // A payload was configured and this process could not be sure it handed it
+  // over. Folded in beside truncation because it is the same kind of fact — the
+  // *channel* failed, not the process — and has the same consequence: the run
+  // answered a different question than the one that was asked, so its output is
+  // not evidence about this task (V1-05-RR-F5).
+  //
+  // `UNCONFIRMED` counts too. The alternative is to read the output of a run we
+  // cannot say received its instructions, which is the fail-open direction.
+  const payloadDelivered =
+    result.stdinDelivery === 'NOT_REQUESTED' || result.stdinDelivery === 'DELIVERED';
 
   // Anything other than a process that ended under its own control is
   // UNAVAILABLE, and carries no output: a timed-out or budget-killed run has
   // said nothing this slice is entitled to read. Truncation is folded in here
   // rather than left for each caller to remember, because forgetting it is the
   // single cheapest way to turn a cut-off stream into a verdict.
-  if (result.outcome !== 'COMPLETED' || outputTruncated) {
+  if (result.outcome !== 'COMPLETED' || outputTruncated || !payloadDelivered) {
     return unavailable({
       exitCode: result.exitCode,
       signal: result.signal,

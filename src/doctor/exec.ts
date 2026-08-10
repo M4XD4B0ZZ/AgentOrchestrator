@@ -138,6 +138,36 @@ export type CommandFailureCode =
   | 'OUTPUT_LIMIT_STDERR'
   | 'PROCESS_TREE_KILL_FAILED';
 
+/**
+ * What became of the payload on {@link RunOptions.stdin}.
+ *
+ * Evidence about the *channel*, deliberately separate from `outcome`, which is
+ * about the process: a child can exit zero having been handed a fraction of its
+ * input, and both of those are true at once.
+ *
+ * `DELIVERED` is a statement about this process's side of the pipe — the whole
+ * payload was written and the stream closed with no error reported. It is not a
+ * claim that the child read it. Nothing observable from here can make that
+ * claim: a payload smaller than the OS pipe buffer is accepted in full even by
+ * a child that has already exited.
+ */
+export type StdinDelivery =
+  /** No payload was configured; the child was given the historical `'ignore'`. */
+  | 'NOT_REQUESTED'
+  /** The whole payload was written and the stream closed, with no error. */
+  | 'DELIVERED'
+  /** Node reported a failure — `EPIPE`, `EOF`, a destroyed stream — while handing it over. */
+  | 'FAILED'
+  /**
+   * A payload was configured and the run settled before its fate was known.
+   *
+   * Reached when the command was terminated with a write still in flight. Kept
+   * distinct from `FAILED` because it is a different fact, and distinct from
+   * `DELIVERED` because reporting a delivery that was never confirmed is the
+   * defect this vocabulary exists to prevent.
+   */
+  | 'UNCONFIRMED';
+
 export interface CommandResult {
   /** The logical command, e.g. `claude auth status --help`. */
   readonly display: string;
@@ -160,6 +190,13 @@ export interface CommandResult {
   /** Whether the stream hit its byte budget and was cut off. */
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
+  /**
+   * What became of the payload on {@link RunOptions.stdin}.
+   *
+   * `NOT_REQUESTED` for every command that configures no payload, which is
+   * every diagnostic probe in this repository.
+   */
+  readonly stdinDelivery: StdinDelivery;
   /**
    * Whether the best-effort termination attempt reported success — the
    * supervised `taskkill /T /F` on Windows (see
@@ -202,9 +239,15 @@ export interface RunOptions {
    * the encoded argument vector alone.
    *
    * A write that fails is data, not an exception: a child that exits without
-   * reading its input makes the pipe emit `EPIPE`, which says something about
-   * the child's behaviour and is answered by the outcome the child produces,
-   * not by a rejected promise.
+   * reading its input makes the pipe emit `EPIPE`, and that is reported on
+   * {@link CommandResult.stdinDelivery} rather than by a rejected promise.
+   *
+   * It is reported, and not merely tolerated. The earlier version of this path
+   * caught the error and discarded it, on the reasoning that the child's own
+   * exit code would say so. It does not (V1-05-RR-F5): a child that reads a
+   * prefix of its instructions, closes its read end and exits zero with a
+   * well-formed result is indistinguishable, at the process level, from one
+   * that did the work.
    */
   readonly stdin?: string;
 }
@@ -655,6 +698,8 @@ export async function runCommand(
       errnoCode: null,
       stdoutTruncated: false,
       stderrTruncated: false,
+      // Nothing was spawned, so no payload was handed to anything.
+      stdinDelivery: options.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED',
       processTreeKilled: false,
     });
   }
@@ -670,6 +715,8 @@ export async function runCommand(
       errnoCode: null,
       stdoutTruncated: false,
       stderrTruncated: false,
+      // Nothing was spawned, so no payload was handed to anything.
+      stdinDelivery: options.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED',
       processTreeKilled: false,
     });
   }
@@ -718,6 +765,7 @@ export async function runCommand(
           errnoCode,
           stdoutTruncated: false,
           stderrTruncated: false,
+          stdinDelivery: options.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED',
           processTreeKilled: false,
         }),
       );
@@ -727,20 +775,52 @@ export async function runCommand(
     const stdout = new BoundedSink(maxStdoutBytes);
     const stderr = new BoundedSink(maxStderrBytes);
 
+    /**
+     * What became of the payload, once it is known.
+     *
+     * `UNCONFIRMED` while a write is still in flight, so a run that settles
+     * early — a timeout, a tree kill — reports honestly that it never found
+     * out, rather than claiming a delivery it did not observe.
+     */
+    let stdinDelivery: StdinDelivery = options.stdin === undefined ? 'NOT_REQUESTED' : 'UNCONFIRMED';
+
     // The payload, handed over once and then closed so the child sees EOF and
-    // does not wait for more. A failure to deliver it is deliberately not
-    // reported here: the child either produced a usable result without the
-    // input, in which case its own output is the answer, or it did not, in
-    // which case its exit code and outcome already say so. Nothing about a
-    // broken pipe is worth turning into an exception on a path whose entire
-    // contract is that failures are data.
+    // does not wait for more.
+    //
+    // A failure to deliver it is data, exactly like every other failure on this
+    // path — but it *is* recorded (V1-05-RR-F5). It used to be caught by an
+    // empty `'error'` listener and discarded, on the reasoning that the child's
+    // own exit code already said so. It does not: a child that reads a prefix
+    // of its instructions, closes its read end and exits zero with a
+    // well-formed result produces a completion in which every process-level
+    // fact is clean and the only thing wrong is that it was answering a
+    // different question.
+    //
+    // The `end` callback is the observation point rather than the `'error'`
+    // event, because it is the more complete one: a stream destroyed underneath
+    // the write reports `ERR_STREAM_DESTROYED` to the callback and emits no
+    // event at all. The listener is still attached, and must stay — without it
+    // an `EPIPE`/`EOF` on this stream is an uncaught exception in *this*
+    // process — but its job is now only to keep the process alive.
     if (options.stdin !== undefined) {
       const input = child.stdin;
-      if (input !== null) {
+      if (input === null) {
+        // No pipe was opened, so nothing can be handed over. Reported as a
+        // failure rather than silently ignored: a payload was configured, and
+        // it demonstrably did not reach the child.
+        stdinDelivery = 'FAILED';
+      } else {
+        // Both observations record the same verdict, and a failure once seen is
+        // never revised: `'error'` is the one that must exist at all, and the
+        // `end` callback is the one that also sees a stream destroyed
+        // underneath the write, which emits no event.
         input.on('error', () => {
-          /* EPIPE and friends: see above. */
+          stdinDelivery = 'FAILED';
         });
-        input.end(options.stdin);
+        input.end(options.stdin, (error?: Error | null) => {
+          if (stdinDelivery === 'FAILED') return;
+          stdinDelivery = error === undefined || error === null ? 'DELIVERED' : 'FAILED';
+        });
       }
     }
 
@@ -801,6 +881,7 @@ export async function runCommand(
         errnoCode: null,
         stdoutTruncated: stdout.truncated,
         stderrTruncated: stderr.truncated,
+        stdinDelivery,
         processTreeKilled: treeKilled,
       });
 
@@ -860,6 +941,7 @@ export async function runCommand(
             errnoCode: null,
             stdoutTruncated: stdout.truncated,
             stderrTruncated: stderr.truncated,
+            stdinDelivery,
             processTreeKilled: treeKilled,
           }),
         );
@@ -925,6 +1007,7 @@ export async function runCommand(
           errnoCode: safeErrnoCode(error),
           stdoutTruncated: stdout.truncated,
           stderrTruncated: stderr.truncated,
+          stdinDelivery,
           processTreeKilled: false,
         }),
       );

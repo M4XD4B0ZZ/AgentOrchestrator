@@ -19,21 +19,31 @@
  * Each step below can only ever reach a *worse* answer than the one after it,
  * and the order is what stops a later step from rescuing an earlier failure:
  *
- *  1. nothing was spawned                → `AGENT_ARGUMENT_REFUSED`
- *  2. the process did not run cleanly    → `AGENT_PROCESS_UNAVAILABLE`
- *  3. the envelope says quota exhausted  → `AGENT_USAGE_LIMIT`
- *  4. the exit code is non-zero          → `AGENT_NONZERO_EXIT`
- *  5. the envelope is not recognised     → `AGENT_RESULT_MALFORMED`
+ *  1. nothing was spawned                  → `AGENT_ARGUMENT_REFUSED`
+ *  2. the process never reached its own end → `AGENT_PROCESS_UNAVAILABLE`
+ *  3. the envelope says quota exhausted    → `AGENT_USAGE_LIMIT`
+ *  4. the exit code is non-zero            → `AGENT_NONZERO_EXIT`
+ *  5. the envelope is not recognised       → `AGENT_RESULT_MALFORMED`
  *  6. the envelope positively says success → completed
  *
  * Step 2 subsumes truncation, which matters more than it looks: a stream cut
  * at its byte budget can still end on a closing brace and parse perfectly.
  * Parsing before checking would turn a cut-off transcript into a verdict.
  *
+ * Step 2 also subsumes **termination by a signal**, and that is the whole of
+ * V1-05-RR-F1. It used to be asked at step 4, below the envelope — so a child
+ * SIGKILLed mid-sentence, which `runCommand` reports as an ordinary completion
+ * because nothing here issued the termination, could still have its partial
+ * bytes read as a quota refusal and park the task on `BLOCKED_USAGE_LIMIT`.
+ * The invariant that closes it is unconditional: *a process terminated by a
+ * signal is never classified from its own output* — not as a success, and not
+ * as a usage limit.
+ *
  * Step 3 sits above step 4 because a quota refusal is reported *with* a
  * non-zero exit; reading the exit code first would collapse every quota block
  * into an ordinary failure and lose the one outcome the run driver is supposed
- * to pause on.
+ * to pause on. This is why step 2 asks `endedUnderOwnControl` and not
+ * `ranCleanly`: the stronger predicate would swallow exactly those refusals.
  */
 
 import type { ResumePhase } from '../core/states.js';
@@ -44,6 +54,7 @@ import {
   agentProcessEvidence,
   AGENT_FAILURE_DISPOSITION,
   AGENT_FAILURE_TEXT,
+  endedUnderOwnControl,
   interruptedResumePoint,
   ranCleanly,
   type AgentBlockEvidence,
@@ -176,9 +187,14 @@ export async function runClaudeWriter(
     return frozenFailure(evidence, 'AGENT_ARGUMENT_REFUSED');
   }
 
-  // Truncation is folded into the seam's `UNAVAILABLE`, so this one check
-  // covers "never started", "killed", "timed out" and "cut off" alike.
-  if (result.outcome !== 'RAN') return frozenFailure(evidence, 'AGENT_PROCESS_UNAVAILABLE');
+  // Truncation is folded into the seam's `UNAVAILABLE`, and a signal is asked
+  // about here rather than after the envelope, so this one check covers "never
+  // started", "killed by this module", "killed from outside", "timed out" and
+  // "cut off" alike — every way a process can fail to reach its own end.
+  //
+  // It stands above the parse deliberately: nothing below may read a byte the
+  // process printed before this returns true.
+  if (!endedUnderOwnControl(result)) return frozenFailure(evidence, 'AGENT_PROCESS_UNAVAILABLE');
 
   const envelope = readClaudeResultEnvelope(result.stdout);
 
@@ -192,8 +208,10 @@ export async function runClaudeWriter(
     });
   }
 
-  // A child killed from outside is reported by `runCommand` as a normal
-  // completion with a null exit code, so this asks about the signal too.
+  // Only the exit code is still open here: the guard above already established
+  // that the process ended under its own control. `ranCleanly` is asked in full
+  // rather than narrowed to `exitCode !== 0`, so that the two rules cannot drift
+  // apart — this stays correct even if a third condition joins it.
   if (!ranCleanly(result)) {
     return frozenFailure(
       evidence,

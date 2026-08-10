@@ -30,6 +30,14 @@
  * the agent's last message. The review document inside that message is
  * *content*, and it is validated field by field against a closed vocabulary.
  *
+ * That document's shape is written down in `README.md`, under "The review
+ * document, canonically". The duplication is deliberate and one-directional:
+ * this module is internal, and the prompt that has to *ask* an agent for the
+ * document is not written here — V1-06 supplies it, and it needs a stable
+ * reference to quote that is not a private constant in a file it does not
+ * import. The constants below remain the enforcement; the README is the
+ * integration anchor, and the two are expected to be changed together.
+ *
  * The reviewer supplies a severity, a path and a rule id. It does **not**
  * supply the fingerprint: `TaskState.findingHistory[].fingerprint` is the only
  * free-form string in the durable contract, and letting a reviewed-repository

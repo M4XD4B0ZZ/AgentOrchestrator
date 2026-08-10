@@ -39,7 +39,7 @@
  */
 
 import type { AgentBlockEvidence, AgentDisposition } from './agent-outcome.js';
-import type { TaskStateName } from '../core/states.js';
+import type { AgentId, ResumePhase, TaskStateName } from '../core/states.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
 
@@ -80,6 +80,40 @@ export const AGENT_RUN_OUTCOMES = [
 ] as const;
 
 export type AgentRunOutcome = (typeof AGENT_RUN_OUTCOMES)[number];
+
+/**
+ * What was running in each state an agent can be interrupted in.
+ *
+ * The single source for two questions a caller must not be trusted to answer
+ * about itself: *which agent was running* and *where the task re-enters*. Both
+ * are properties of the phase, and the phase is persisted — so the durable
+ * state already knows, and asking the caller only creates the opportunity to
+ * disagree with it (V1-05-RR-F4).
+ *
+ * `mutatesRepository` is the third property of the same fact and belongs here
+ * for the same reason. The writer edits the worktree; the reviewer is
+ * contractually read-only, which is why a write attempt by it is a scope
+ * violation rather than ordinary work. What survives an interruption as
+ * evidence differs accordingly — see `staleAfterInterruption` below.
+ *
+ * States absent from this table run no agent. `VERIFYING` is the one that
+ * matters: it runs the project's own commands and consumes no agent quota,
+ * which is why `VERIFYING → BLOCKED_USAGE_LIMIT` is not a declared edge. They
+ * are left to `advanceTaskState`, so the transition table stays the one
+ * authority on which moves exist.
+ */
+const AGENT_PHASES: Readonly<
+  Partial<
+    Record<
+      TaskStateName,
+      { readonly agent: AgentId; readonly resumePhase: ResumePhase; readonly mutatesRepository: boolean }
+    >
+  >
+> = Object.freeze({
+  IMPLEMENTING: Object.freeze({ agent: 'claude', resumePhase: 'IMPLEMENT', mutatesRepository: true }),
+  REMEDIATING: Object.freeze({ agent: 'claude', resumePhase: 'REMEDIATE', mutatesRepository: true }),
+  REVIEWING: Object.freeze({ agent: 'codex', resumePhase: 'REVIEW', mutatesRepository: false }),
+});
 
 /** The blocking state each disposition lands in. Total, so a new disposition must choose one. */
 const DISPOSITION_STATE: Readonly<
@@ -130,6 +164,42 @@ export interface AgentInterruptionRecord {
 }
 
 /**
+ * The checkpoint facts an interrupted run may have invalidated.
+ *
+ * `worktreeCleanAtCheckpoint` and `currentCommit` are observations, true when
+ * something last looked. Carrying them across a writer's interruption
+ * *re-asserts* them, and a writing agent changing the worktree is not an edge
+ * case — it is the job (V1-05-RR-F8).
+ *
+ * The consequence of re-asserting them is severe and one-directional.
+ * `reconcile.ts` reads `worktreeCleanAtCheckpoint: true` as a record that a
+ * dirty tree contradicts, which makes the verdict `DIVERGED`, which
+ * `classifyResume` turns into `STATE_DIVERGED` / `BLOCKED` — so a self-clearing
+ * quota pause became `RESUME_STATE_DIVERGED`, permanently non-resumable, for a
+ * condition true of *every* interrupted writer. Reconciliation is already built
+ * to survive the honest version: a checkpoint recording `false` is "a task with
+ * work in progress, which is the normal thing to find".
+ *
+ * Neither value is fabricated in the other direction. `false` here does not
+ * claim the tree is dirty — nothing in this module looked at it — it withdraws
+ * a claim that it is clean, which is a weaker statement and a true one. `null`
+ * likewise means the recorded HEAD is no longer known to be current, not that
+ * there is no commit. Everything else the state holds, including
+ * `basePinnedCommit` and `findingHistory`, is durable evidence and is carried
+ * through untouched.
+ *
+ * Nothing is withdrawn for the reviewer. It is contractually read-only — a
+ * write attempt by it is a scope violation rather than ordinary work — so its
+ * interruption invalidates nothing, and discarding true evidence for a run that
+ * could not have changed it would be its own kind of lie.
+ */
+function staleAfterInterruption(
+  mutatesRepository: boolean,
+): { readonly worktreeCleanAtCheckpoint: false; readonly currentCommit: null } | Record<never, never> {
+  return mutatesRepository ? { worktreeCleanAtCheckpoint: false, currentCommit: null } : {};
+}
+
+/**
  * Records `interruption` against the state in `current`.
  *
  * Returns rather than throws for every expected condition, including a refused
@@ -144,18 +214,49 @@ export function recordAgentInterruption(
   const target = DISPOSITION_STATE[interruption.disposition];
   const block = interruption.block ?? fallback;
   const usageLimit = interruption.disposition === 'AGENT_BLOCKED_USAGE_LIMIT';
+  const running = AGENT_PHASES[current.state.state];
+
+  // The caller and the durable state disagree about what was running. Refused
+  // rather than resolved: there is no basis for preferring one, and the cost of
+  // guessing is an operator sent to re-authenticate the wrong CLI or to resume
+  // at a phase whose work was never started.
+  if (
+    running !== undefined &&
+    (block.blockedAgent !== running.agent || block.resumeFrom.phase !== running.resumePhase)
+  ) {
+    return Object.freeze({
+      outcome: 'STATE_NOT_RECORDED' as const,
+      state: null,
+      save: Object.freeze({
+        ok: false as const,
+        code: 'INTERRUPTION_INCONSISTENT' as const,
+        path: null,
+        // The two values that disagree, not a rendered sentence — the caller
+        // holds both, and this is a code path.
+        detail: `${current.state.state}/${block.blockedAgent}:${block.resumeFrom.phase}`,
+        errnoCode: null,
+      }),
+    });
+  }
 
   const next = {
     ...current.state,
     state: target,
     stateEnteredAt: now,
-    blockedAgent: block.blockedAgent,
-    resumeFrom: { phase: block.resumeFrom.phase, round: block.resumeFrom.round },
+    // Derived from the phase, never copied from the caller: see AGENT_PHASES.
+    // Only the round comes from the run, because only the run knows which pass
+    // it was.
+    blockedAgent: running?.agent ?? block.blockedAgent,
+    resumeFrom: {
+      phase: running?.resumePhase ?? block.resumeFrom.phase,
+      round: block.resumeFrom.round,
+    },
     // Only a usage limit has a reset time to record, and only if the CLI
     // reported one. Every other block clears it: a stale timestamp left on a
     // state a human has to resolve would be evidence about a condition that is
     // no longer the one holding the task.
     reportedResetAt: usageLimit ? block.reportedResetAt : null,
+    ...staleAfterInterruption(running?.mutatesRepository ?? false),
   };
 
   const save = advanceTaskState(current, next, advance);

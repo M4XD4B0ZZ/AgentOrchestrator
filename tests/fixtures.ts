@@ -110,6 +110,7 @@ export function commandResult(overrides: Partial<CommandResult> = {}): CommandRe
     errnoCode: null,
     stdoutTruncated: false,
     stderrTruncated: false,
+    stdinDelivery: 'NOT_REQUESTED',
     processTreeKilled: false,
     ...overrides,
   };

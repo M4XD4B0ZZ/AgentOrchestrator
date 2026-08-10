@@ -166,31 +166,104 @@ export interface AgentBlockEvidence {
   readonly reportedResetAt: string | null;
 }
 
-/** How much of a stream is worth keeping for a human. Bounded; never persisted. */
-const DIAGNOSTIC_EXCERPT_LIMIT = 4_000;
+/**
+ * The hard ceiling on one diagnostic excerpt, in characters.
+ *
+ * A **total**, not a body size: the notice saying where the cut fell is counted
+ * inside it. Exported because it is the contract — a bound stated only in a
+ * private constant is a bound no caller and no test can check, and the version
+ * of this that measured only the pre-redaction text was how V1-05-RR-F6 came
+ * about.
+ */
+export const DIAGNOSTIC_EXCERPT_LIMIT = 4_000;
 
 /**
- * Clamps first, then redacts — deliberately the opposite order to
- * `redactAndClamp`, which redacts the whole string and slices afterwards.
+ * Raw characters redacted *beyond* the budget and then thrown away.
  *
- * The reason is cost, and it is not marginal. An agent's stream budget here is
- * 8 MiB, against the few kilobytes a diagnostic probe emits, and running the
- * redaction rules over a multi-megabyte stream to then discard all but four
- * kilobytes of it was measured at roughly thirty seconds for a 200 KB input on
- * this machine. A failing agent run must not cost half a minute of CPU to
- * *describe*.
+ * This margin is the whole mechanism. Redacting exactly as much text as the
+ * excerpt may contain puts the cut inside the redactor's field of view, and a
+ * secret lying across that cut loses the suffix its rule anchors on — a TLD, an
+ * `{8,}` token body — so the surviving prefix matches nothing and is emitted in
+ * the clear. Redacting a wider window and then discarding its tail means any
+ * entity within the margin is seen whole, or not at all.
  *
- * The trade-off is stated rather than hidden: a secret straddling the cut
- * could be halved so that neither part matches a rule. That is acceptable
- * precisely here, because redaction in this repository is a safety net and not
- * a boundary — `auth/redaction.ts` says so itself — and nothing on this path is
- * persisted or reported. The property that keeps the excerpt safe is that it is
- * marked untrusted and never becomes an artefact, not that a pattern matched.
+ * 1 KiB is far larger than any credential the rules in `auth/redaction.ts`
+ * recognise, which is the property that makes the bound below meaningful: no
+ * entity shorter than this margin can be emitted in halves.
+ */
+export const REDACTION_OVERLAP = 1_024;
+
+/**
+ * Says that the excerpt is not the whole stream, and how big the whole stream
+ * was. Fixed shape, bounded length, and no arithmetic a reader has to trust:
+ * the raw total is a fact, whereas "how much was dropped" stops being one once
+ * redaction has rewritten what was kept.
+ */
+function truncationNotice(totalLength: number): string {
+  return `\n… [truncated; ${totalLength} characters in the original stream]`;
+}
+
+/**
+ * The agent's own words, bounded and redacted, in that order of guarantees.
+ *
+ * ── Two properties, and neither may be traded for the other ────────────────
+ *
+ * **Cost is bounded.** The redaction rules never see more than
+ * `DIAGNOSTIC_EXCERPT_LIMIT + REDACTION_OVERLAP` characters, whatever the
+ * stream contains. That matters against an 8 MiB per-stream budget: running the
+ * rules over a multi-megabyte stream to then discard all but four kilobytes was
+ * measured at roughly thirty seconds for a 200 KB input on this machine, and a
+ * failing agent run must not cost half a minute of CPU to *describe*. This is
+ * why `redactAndClamp` is not used here.
+ *
+ * **The size bound holds after redaction, not before it.** Redaction expands:
+ * `a@b.co` (6 characters) becomes `<redacted:email>` (16), so a clamp applied
+ * only to the raw text bounds nothing. An e-mail-dense stream measured 9 745
+ * characters against a 4 000-character budget before V1-05-RR-F6 — 2.4× — and
+ * that is the number the ceiling exists to prevent. The clamp is therefore
+ * applied last, to the redacted text, with the notice counted inside it.
+ *
+ * Slicing *redacted* text is safe in a way slicing raw text is not: the worst a
+ * cut can bisect is a `<redacted:…>` marker, which carries nothing. The one
+ * remaining exposure — an entity straddling the far edge of the window — is
+ * removed by dropping the trailing partial run.
  */
 function diagnosticExcerpt(text: string): string {
-  if (text.length <= DIAGNOSTIC_EXCERPT_LIMIT) return redact(text);
-  const kept = redact(text.slice(0, DIAGNOSTIC_EXCERPT_LIMIT));
-  return `${kept}\n… [truncated, ${text.length - DIAGNOSTIC_EXCERPT_LIMIT} more characters]`;
+  const overflowed = text.length > DIAGNOSTIC_EXCERPT_LIMIT;
+  const redacted = redact(
+    overflowed ? text.slice(0, DIAGNOSTIC_EXCERPT_LIMIT + REDACTION_OVERLAP) : text,
+  );
+
+  // The common case by far: a short stream that redaction did not push over the
+  // ceiling. Returned whole, with no notice, because nothing was left out.
+  if (!overflowed && redacted.length <= DIAGNOSTIC_EXCERPT_LIMIT) return redacted;
+
+  const notice = truncationNotice(text.length);
+  const body = redacted.slice(0, Math.max(0, DIAGNOSTIC_EXCERPT_LIMIT - notice.length));
+  return `${withoutTrailingPartialRun(body)}${notice}`;
+}
+
+/**
+ * Drops a trailing run of non-whitespace characters, so the excerpt never ends
+ * in the middle of one.
+ *
+ * The redaction rules that match a credential — e-mail, UUID, `sk-`/`pk-`
+ * token, JWT — all match whitespace-free runs, so a fragment of one can only
+ * ever be at the very end of the clamped text. Cutting back to the last
+ * whitespace removes it.
+ *
+ * The backward scan is bounded by {@link REDACTION_OVERLAP}, which is also what
+ * makes the guarantee precise rather than best-effort: an unbroken run longer
+ * than the margin is left alone, because it is not any credential shape these
+ * rules know, and eating it would empty the excerpt of a stream that legitimately
+ * has no whitespace in it at all.
+ */
+function withoutTrailingPartialRun(body: string): string {
+  const floor = body.length - REDACTION_OVERLAP;
+  for (let index = body.length - 1; index >= 0 && index >= floor; index -= 1) {
+    if (/\s/.test(body.charAt(index))) return body.slice(0, index);
+  }
+  return body;
 }
 
 export function agentDiagnostics(result: AgentCommandResult): AgentDiagnostics {
@@ -228,34 +301,49 @@ export function agentProcessEvidence(result: AgentCommandResult): AgentProcessEv
  *    caller of this still has to positively recognise a structured result.
  */
 export function ranCleanly(result: AgentCommandResult): boolean {
-  return result.outcome === 'RAN' && result.signal === null && result.exitCode === 0;
+  return endedUnderOwnControl(result) && result.exitCode === 0;
 }
 
 /**
- * Accepts a reset timestamp only if it is one, and reports `null` otherwise.
+ * `true` when the process reached its own end — it was not prevented from
+ * running, and nothing terminated it.
  *
- * The gate exists because `TaskState.reportedResetAt` is validated as an
- * ISO-8601 instant *with an offset*, and a value that fails that validation
- * would be refused by `safeParseTaskState` at the moment the block is written —
- * which is to say, at the worst possible moment, after an agent run has
- * already been spent. Failing here instead costs nothing and loses nothing:
- * the timestamp is preferred evidence, never required.
+ * The separate, weaker predicate exists because it is the one that has to be
+ * asked *before* anything the process printed is read (V1-05-RR-F1).
+ * `ranCleanly` cannot serve that purpose: it also asks for a zero exit code,
+ * and a quota refusal legitimately exits non-zero, so a boundary that gated
+ * parsing on `ranCleanly` would lose every usage limit. Splitting the question
+ * is what lets both rules hold at once — a signalled run is never classified
+ * from its output, and a non-zero exit still gets to carry a recognised
+ * refusal.
  *
- * Deliberately narrow. It accepts a string that both parses as a finite
- * instant and carries an explicit offset; it does not coerce a number, does
- * not read `retry-after`-style durations, and does not fall back to a computed
- * value.
+ * The `signal` half is the load-bearing one. `runCommand` reports a child
+ * killed by something *outside* this process as an ordinary completion —
+ * nothing here issued the termination — so a SIGKILLed agent arrives as
+ * `outcome: 'RAN'` with whatever bytes it had already written. Those bytes are
+ * not a result: they are the middle of one.
  */
-export function recogniseReportedResetAt(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  // The offset is not decoration: an instant without one is not a point in
-  // time until someone guesses a zone, and guessing is how a block becomes an
-  // early resume.
-  if (!/(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return null;
-  return value;
+export function endedUnderOwnControl(result: AgentCommandResult): boolean {
+  return result.outcome === 'RAN' && result.signal === null;
 }
+
+/*
+ * There is deliberately no reset-timestamp recogniser here.
+ *
+ * One existed and was removed in V1-05-RR-F7: exported, never called, never
+ * tested. No producer in this slice ever holds a candidate string to recognise
+ * — `readClaudeResultEnvelope` reports `reportedResetAt: null` unconditionally,
+ * because no reset timestamp has been observed in the envelope at the version
+ * this was written against, and the Codex boundary recognises no quota signal
+ * at all.
+ *
+ * A validator on a path with no input is not a safety measure; it is a claim
+ * that reset times are handled, standing where the reader expects to find the
+ * code that handles them. When a CLI is observed to report one, the function
+ * comes back together with the producer that feeds it and the tests that pin
+ * both. Until then `null` is the honest answer, `evaluateAutomaticResume`
+ * refuses with `RESET_TIME_MISSING`, and the block waits for a human.
+ */
 
 /**
  * The resume point for a run that was interrupted.

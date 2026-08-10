@@ -1724,20 +1724,46 @@ used), instructions are read from stdin", confirmed by a run printing `Reading
 additional input from stdin...`; `claude --help` (Claude Code 2.1.226) —
 "`-p, --print`  Print response and exit (useful for pipes)".
 
+A failure to hand the payload over is reported on
+`CommandResult.stdinDelivery`, and the agent seam folds it into `UNAVAILABLE`
+alongside truncation — a run that received a fraction of its instructions
+answered a different question, so its output is not evidence about this task.
+It used to be caught by an empty `'error'` listener and discarded, on the
+reasoning that the child's exit code would say so. It does not: a child that
+reads a prefix of its prompt, closes its read end and exits 0 with a
+well-formed result is, at the process level, indistinguishable from one that
+did the work. What is claimed is exact — a delivery failure *Node reported* is
+never thrown away — and no more: a payload below the OS pipe buffer is accepted
+whole even by a child that has already exited, and no parent-side observation
+can see that.
+
 ### Success is recognised, never inferred
 
 Both boundaries classify in a fixed order, and the order is the contract:
-nothing spawned → the process did not run cleanly → a recognised quota refusal
-→ a non-zero exit → an unrecognised result → completed.
+nothing spawned → the process never reached its own end → a recognised quota
+refusal → a non-zero exit → an unrecognised result → completed.
 
-Truncation is folded into "did not run cleanly", above parsing, because a
+Truncation is folded into "never reached its own end", above parsing, because a
 stream cut at its byte budget can still end on a closing brace and parse
-perfectly. The quota check sits above the exit-code check because a quota
-refusal *is* a non-zero exit, and reading the code first would bury the one
-outcome a run driver is meant to pause on. And "ran cleanly" asks three
-questions, not one: `runCommand` reports a child killed from outside this
-process as a completion, so `outcome`, `exitCode` and `signal` are each
-individually insufficient.
+perfectly. So is **termination by a signal**: `runCommand` reports a child
+killed from outside this process as an ordinary completion — nothing here
+issued the termination — so a SIGKILLed agent arrives as `outcome: 'RAN'`
+carrying whatever bytes it had already written. The invariant is unconditional:
+*a process terminated by a signal is never classified from its own output*, not
+as a success and not as a usage limit. Asking about the signal after parsing
+let a killed agent's partial bytes park a task on `BLOCKED_USAGE_LIMIT`.
+
+The step is `endedUnderOwnControl` — outcome plus signal — rather than the
+stronger "ran cleanly", precisely so the quota check below it still works: the
+quota check sits above the exit-code check because a quota refusal *is* a
+non-zero exit, and gating the parse on a zero exit code would bury the one
+outcome a run driver is meant to pause on. "Ran cleanly" then asks the third
+question, the exit code, and each of the three is individually insufficient.
+
+A failed run is diagnosed for what it was. A run whose exit status was zero is
+never reported as a "non-zero exit" because it carried a signal:
+`AGENT_NONZERO_EXIT` means what it says — exited non-zero, *without* a
+recognised signal — and a terminated process is `AGENT_PROCESS_UNAVAILABLE`.
 
 For the writer, success is the `--output-format json` envelope observed at
 2.1.226: `type: "result"`, `subtype: "success"`, `is_error: false`, and no
@@ -1766,6 +1792,38 @@ agent does not get to choose it, and a fixed width is what makes the 1 MiB
 state bound arithmetic rather than hopeful. A review exceeding the per-review
 cap is refused, never silently shortened.
 
+#### The review document, canonically
+
+This is the shape the reviewer's final agent message must have. It is written
+down here because the parser that enforces it is deliberately internal, while
+the prompt that has to *ask* for it is not yet written — V1-06 supplies that
+prompt, and it needs something stable to quote that is not a private constant:
+
+```json
+{
+  "reviewVersion": 1,
+  "verdict": "FINDINGS",
+  "findings": [
+    { "severity": "high", "path": "src/agent/claude-writer.ts", "rule": "classification.order" }
+  ]
+}
+```
+
+- `reviewVersion` — exactly `1`. A later version is unrecognised, not assumed
+  compatible.
+- `verdict` — `"PASS"` or `"FINDINGS"`, and it must agree with the list:
+  `PASS` requires an empty `findings`, `FINDINGS` requires a non-empty one.
+- `severity` — one of `critical`, `high`, `medium`, `low`, `info`.
+- `path` — repository-relative POSIX, no drive letter, no leading `/`, no `\`,
+  no `.`/`..` segment, at most 1 024 characters.
+- `rule` — a bounded slug (`[A-Za-z0-9]`, inner `._:-`), at most 128 characters.
+- at most **64** findings per review.
+
+Anything else — a missing field, an unknown severity, a document wrapped in
+prose, more than the cap — is `AGENT_RESULT_MALFORMED`, which is
+`HUMAN_DECISION_REQUIRED`. **Exit 0 alone is never a review pass**: the absence
+of a valid document is not the absence of findings.
+
 ### Usage exhaustion is a governed pause
 
 A quota refusal is recognised **structurally**: `api_error_status` carrying the
@@ -1781,6 +1839,32 @@ block recorded from `VERIFYING` is refused as `ILLEGAL_TRANSITION`, because
 verification consumes no agent quota and that edge does not exist. Everything
 already persisted is carried forward — `findingHistory` above all, which
 `reconcile.ts` reads as evidence that a task has done work.
+
+**The blocked agent and the resume phase are derived from the running phase,
+never copied from the caller.** `IMPLEMENTING` and `REMEDIATING` are the
+writer's, `REVIEWING` is the reviewer's, and the persisted state already knows
+which it is. Every agent × phase combination validates against the schema —
+`allowedBlockedAgents` and `allowedResumePhases` are set per blocking state, not
+per predecessor — so a Codex review interrupted in `REVIEWING` could be written
+down as *Claude's quota is exhausted, continue at IMPLEMENT round 1* with every
+gate passing and the operator sent to re-authenticate the wrong CLI. Only the
+*round* comes from the run, because only the run knows which pass it was. A
+caller whose evidence contradicts the phase is refused with
+`INTERRUPTION_INCONSISTENT` rather than believed: a disagreement between the
+caller and the durable state is not resolved by picking one.
+
+**A writer's interruption withdraws the checkpoint claims it may have
+invalidated.** `worktreeCleanAtCheckpoint` and `currentCommit` were true when
+something last looked, and a writing agent changing the worktree is the job, not
+an edge case. Carrying `worktreeCleanAtCheckpoint: true` across the interruption
+made `reconcile.ts` read a dirty tree as contradicting the record —
+`WORKTREE_DIRTY`, verdict `DIVERGED`, and `classifyResume` short-circuits every
+diverged reconciliation to `BLOCKED`. A self-clearing quota pause was becoming
+`RESUME_STATE_DIVERGED`, which is `resumable: false`, for a condition true of
+every interrupted writer. Neither value is fabricated in the other direction:
+`false` withdraws a claim of cleanliness rather than asserting dirtiness, and
+`null` means the recorded HEAD is no longer known to be current. The reviewer is
+contractually read-only, so its interruption withdraws nothing.
 
 The run driver receives one of `RUN_COMPLETED`, `PAUSED_USAGE_LIMIT`,
 `NEEDS_ATTENTION` or `STATE_NOT_RECORDED`. There is deliberately no
