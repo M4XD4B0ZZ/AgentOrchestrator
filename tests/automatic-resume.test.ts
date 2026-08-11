@@ -101,7 +101,7 @@ describe('evaluateAutomaticResume', () => {
 
   // ── Every remaining check, one at a time ────────────────────────────────
   it.each([
-    ['auth was not re-proven', { authPreflightPassed: false }, 'AUTH_PREFLIGHT_NOT_PASSED'],
+    ['auth was not re-proven', { authEvidence: null }, 'AUTH_PREFLIGHT_NOT_PASSED'],
     ['the repository id changed', { observedRepositoryId: 'repo-beta' }, 'REPOSITORY_ID_MISMATCH'],
     ['the repository id is unknown', { observedRepositoryId: null }, 'REPOSITORY_ID_MISMATCH'],
     [
@@ -147,7 +147,7 @@ describe('evaluateAutomaticResume', () => {
   it('collects every failing check rather than stopping at the first', () => {
     const decision = decide(
       { reportedResetAt: null },
-      { authPreflightPassed: false, worktreeClean: false, divergenceDetected: true },
+      { authEvidence: null, worktreeClean: false, divergenceDetected: true },
     );
     expect(decision.allowed).toBe(false);
     expect(decision.reasonCodes).toEqual(
@@ -161,7 +161,7 @@ describe('evaluateAutomaticResume', () => {
   });
 
   it('names a human-readable check for every reason code', () => {
-    const decision = decide({}, { authPreflightPassed: false });
+    const decision = decide({}, { authEvidence: null });
     expect(decision.missingChecks).toEqual(['auth preflight passed again']);
   });
 });

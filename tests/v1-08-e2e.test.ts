@@ -40,6 +40,7 @@ import { saveTaskState } from '../src/state/state-store.js';
 import type { ReplaceFn } from '../src/state/atomic-file.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
+import { provenAuthEvidence } from './helpers/auth-evidence.js';
 import { removeRepoFixtures, git, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces } from './helpers/worktree-fixtures.js';
 import {
@@ -78,7 +79,7 @@ function request(started: StartedTask, overrides: Record<string, unknown> = {}) 
     taskId: started.taskId,
     taskBrief: 'Make the integrated pipeline behave.',
     attendedContinuation: true,
-    authPreflightPassed: true,
+    authEvidence: provenAuthEvidence(),
     maxSteps: 8,
     ...overrides,
   };
@@ -1013,7 +1014,7 @@ describe('selection reads the repository\'s own task files', () => {
         repository: started.repository,
         taskBrief: (task) => `brief for ${task.id}`,
         attendedContinuation: true,
-        authPreflightPassed: true,
+        authEvidence: provenAuthEvidence(),
         maxSteps: 8,
       },
       deps({ verify: recordedVerify().runner, agent: recordedAgent({ codex: () => reviewResult(passingReview()) }).runner }),
@@ -1031,7 +1032,7 @@ describe('selection reads the repository\'s own task files', () => {
         repository: started.repository,
         taskBrief: (task) => `brief for ${task.id}`,
         attendedContinuation: true,
-        authPreflightPassed: true,
+        authEvidence: provenAuthEvidence(),
         maxSteps: 8,
       },
       deps({ verify: recordedVerify().runner, agent: recordedAgent({}).runner }),

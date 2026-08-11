@@ -31,6 +31,7 @@ import { startTask } from '../src/run/start-task.js';
 import { loadTaskState, type StateLoadSuccess } from '../src/state/state-store.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
+import { authPreflightPasses } from './helpers/auth-evidence.js';
 import { createRepoFixture, removeRepoFixtures, git, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import { e2eProfile, tickingClock } from './helpers/e2e-fixtures.js';
@@ -43,7 +44,8 @@ afterAll(() => {
   removeTrackedWorkspaces();
 });
 
-const authPassed = async (): Promise<boolean> => true;
+// Real evidence from the real mint; see `helpers/auth-evidence.ts`.
+const authPassed = authPreflightPasses;
 
 /** A directory outside any fixture repository, cleaned up with the rest. */
 const outsideDirs: string[] = [];

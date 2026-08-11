@@ -9,13 +9,12 @@ already-installed CLI agents:
 Both are intended to run on their existing **subscription logins**, never on
 API keys.
 
-> **No command in this build executes the loop.** The orchestration runtime —
-> task selection, workspace lifecycle, durable task state, reconciliation, the
-> agent runners and the verify/review/remediate loop — exists as a verified
-> library, and the read-only `agent-loop run` command reports what it would
-> do. Fresh-task creation, the setup chain, the implement step and CLI-driven
-> execution are not implemented: no command starts an agent or writes task
-> state.
+> **One command executes, behind one explicit grant.** `agent-loop run
+> --attended` starts a single task and drives it. Everything else is read-only:
+> `agent-loop doctor`, and `agent-loop run` without the grant, which still starts
+> no agent, writes no task state and prepares no workspace. Unattended operation,
+> multi-task blocks, scope enforcement and any PR/CI/merge automation are **not**
+> in this build.
 
 What *is* implemented:
 
@@ -33,6 +32,12 @@ What *is* implemented:
    next and why, what its durable state permits, and on whose authority
    anything may continue — with a documented exit-code contract. It executes
    nothing.
+7. **Attended execution of one task** — `agent-loop run --attended` (V2-05):
+   starts the task if needed, drives it, and exits on a total mapping from its
+   outcome. Requires an operator grant *and* a passing auth preflight, which are
+   independent requirements; auth evidence is an unforgeable artefact rather than
+   a boolean a caller can assert. See
+   [Attended execution](#attended-execution-v2-05).
 
 ## Requirements
 
@@ -144,7 +149,10 @@ agent-loop run --repository D:\path\to\repo
 agent-loop run --repository D:\path\to\repo --task V2-01
 ```
 
-Read-only in this build: the command **plans**; it does not execute. It
+Read-only **by default**: without `--attended` the command **plans** and does not
+execute. For the execution mode see
+[Attended execution](#attended-execution-v2-05); everything in this section
+describes the default, which V2-05 left unchanged. It
 
 - resolves the repository through `resolveRepository`. `--repository` is
   required and must be absolute — there is deliberately no `process.cwd()`
@@ -157,8 +165,9 @@ Read-only in this build: the command **plans**; it does not execute. It
 - loads the durable state of the selected task — or of the task named with
   `--task`, whose id must satisfy the task-id grammar before it is looked up —
   reconciles it against observed Git reality, and prints the continuation
-  authority. The resume decision is computed with `authPreflightPassed: false`:
-  no preflight ran, and evidence is never assumed;
+  authority. The resume decision is computed with `authEvidence: null`: no
+  preflight ran, and evidence is never assumed — since V2-05 that is also the
+  only value a plan *could* supply, because the artefact has one producer;
 - reports whether the task's **brief** can be assembled — its prose, and
   whether every declared context source can actually be opened. Reported, never
   enforced: no run is refused for want of a brief, because no run exists yet.
@@ -712,9 +721,11 @@ evaluateAutomaticResume(state, evidence)  // → { allowed, reasonCodes, missing
 
 which grants a resume only when every check produced positive evidence: the
 reported quota reset time exists, is a valid timestamp and has demonstrably
-passed; the auth preflight passed again; repository id, canonical repository
-root, canonical worktree path, pinned base commit and current commit all still
-match; the worktree exists and is clean; and no divergence was reported.
+passed; the auth preflight passed again — proven by the artefact it mints, not
+by a flag a caller set, and verified with `instanceof` so a cast denies too;
+repository id, canonical repository root, canonical worktree path, pinned base
+commit and current commit all still match; the worktree exists and is clean; and
+no divergence was reported.
 Without a reliable reset timestamp, no unattended resume is ever granted.
 
 > **In this build no unattended resume is ever granted at all.** The table above
@@ -784,9 +795,9 @@ commands and consumes no agent quota.
 
 ## Starting a task
 
-Source: `src/run/start-task.ts`. **Library only in this build** — no command
-calls it, deliberately: see [why there is no `start` command
-yet](#why-there-is-no-start-command-yet).
+Source: `src/run/start-task.ts`. Called by `agent-loop run --attended`, and by no
+other command: see [why there is no separate `start`
+command](#why-there-is-no-separate-start-command).
 
 `startTask` is the entry point V1 deliberately did not have. It walks the setup
 chain `CREATED → REPOSITORY_RESOLVED → CONFIG_VALIDATED → AUTH_PREFLIGHT →
@@ -878,17 +889,19 @@ It is `RUNTIME_IGNORE_UNDETERMINED`, and it refuses.
 **Onboarding requirement:** a repository the orchestrator starts tasks in must
 ignore `.agent-orchestrator/runtime/`.
 
-### Why there is no `start` command yet
+### Why there is no separate `start` command
 
-Not because a started task would be stuck — since V2-04 it is not. `startTask`
-and `runTask` compose: a task created here is driven off `WORKTREE_READY`
-through the setup hops and the implement pass into the verify/review loop, all
-by shipped code. `tests/implement-step.test.ts` does exactly that.
+There is no `agent-loop start`, and starting is not a mode of its own: `run
+--attended` starts the task if it needs starting and then drives it, because
+those two are one operator intention. Splitting them would make an operator issue
+two commands to get one task moving, and would put two closed outcome
+vocabularies behind one exit code without either being the answer.
 
-What is missing is the CLI wiring, and it is missing deliberately. Executing
-requires the operator grant, a real auth preflight and the outcome→exit-code
-mapping to be joined up in one command, and that is its own slice. `agent-loop
-run` stays read-only until then.
+So the start half is reachable only as part of executing, which is also why its
+outcomes needed exit codes of their own (`START_TASK_EXIT_CODES`): an invocation
+can legitimately end on a start outcome — `RUNTIME_NOT_IGNORED`,
+`WORKSPACE_COLLISION`, `AUTH_PREFLIGHT_FAILED` — with nothing to drive. See
+[Attended execution](#attended-execution-v2-05).
 
 ## The setup hops and the implement step
 
@@ -2808,18 +2821,76 @@ No CLI command, no setup chain, no `runImplementStep`, no multi-task queue. The
 driver still runs one task per invocation, `scope.allowedPaths` is still declared
 rather than enforced, and nothing here opens a pull request, pushes or reads CI.
 
+## Attended execution (V2-05)
+
+One task can now be run from the CLI:
+
+```
+agent-loop run --repository <abs path> --attended [--task <id>] [--max-steps <n>]
+```
+
+**A bare `agent-loop run` is unchanged and still writes nothing.** That is a
+contract, not a phase of development: the command shipped as read-only in V2-01,
+and scripts may be invoking it on that promise, so execution arrived as a new
+flag rather than as a new meaning for an existing verb.
+`tests/run-command.test.ts` proves the default by driving the real command
+against a real repository with a startable task and checking that no state file,
+branch or worktree appeared.
+
+Executing requires **two independent things**, and neither implies the other:
+
+| Requirement | What it states | How it is satisfied |
+| --- | --- | --- |
+| `--attended` | An operator is present for *this* invocation | Passing the flag |
+| Auth evidence | The agent CLIs are logged in on an accepted subscription | A real preflight passing |
+
+Passing `--attended` on a machine that is not logged in refuses with
+`AUTH_PREFLIGHT_FAILED` and creates nothing. Being fully logged in without
+`--attended` still only produces a plan. There is no flag that declares the
+preflight satisfied, and there is no `--force`, `--adopt` or `--unattended`.
+
+Every way a start can end has an exit code (`START_TASK_EXIT_CODES`), mapped onto
+the six codes the command already used rather than onto thirteen new ones. The
+mapping is total by `satisfies`, and `tests/run-exit-codes.test.ts` proves its
+expectation table is load-bearing by mutating it.
+
+### Auth evidence is produced, not asserted (I4)
+
+`RunRequest` used to carry `authPreflightPassed: boolean`, documented as
+"evidence, never assumed" — and it was not. Nothing on the execution path called
+`runAuthPreflight`, so `runTask({ …, authPreflightPassed: true })` was a
+type-correct way to claim a preflight that never ran, and the test suite did it
+routinely.
+
+It now carries `authEvidence: AuthPreflightEvidence | null`: an opaque artefact
+whose only producer is the real preflight. A plain evidence *object* would not
+have fixed this — TypeScript is structural, so `{ allPassed: true, checks: [] }`
+would have been the same assertion in a longer spelling. Three layers hold it,
+of three different kinds:
+
+- **nominal typing** — the artefact carries a `#private` field, so no object
+  literal is assignable to it and `{ proven: true }` does not compile as evidence;
+- **a runtime check** — `isAuthPreflightEvidence` is an `instanceof` test, so
+  `as unknown as` fails closed and denies exactly as an absent value does;
+- **reachability** — the mint lives in `core/internal/`, and a test walks `src/`
+  to pin that exactly one module imports it.
+
+What this does *not* claim is freshness: it proves the preflight ran in this
+process and passed, not that it did so recently. `tests/auth-preflight-evidence.test.ts`
+is written as the counter-proof — four routes back to the old position, each
+refused.
+
 ## Not implemented yet
 
-`agent-loop run` is read-only: it plans and reports, and **no command in this
-build executes what it reports.** The runtime it reports on can now take a task
-from nothing to `READY_FOR_PR` — `startTask` creates it, the setup hops and the
-implement step move it into the work loop, and the verify/review/remediate loop
-finishes it — but only when called as a library, as
-`tests/implement-step.test.ts` does.
+Still missing, deliberately: **workspace adoption after a crash** — a collision is
+refused, not adopted, so a start that died after `git worktree add` leaves a
+worktree an operator must clear by hand; **scope enforcement**
+(`scope.allowedPaths` is declared, never enforced, so nothing constrains where a
+writing agent writes inside its worktree); multi-task queue progression;
+unattended operation; and any product-side PR/CI/merge automation.
 
-Still missing, deliberately: the CLI execution path that joins the operator
-grant, a real auth preflight and the exit-code contract into one command;
-workspace adoption after a crash (a collision is refused, not adopted); scope
-enforcement (`scope.allowedPaths` is declared, never enforced, so nothing
-constrains where a writing agent writes inside its worktree); multi-task queue
-progression; unattended operation; and any product-side PR/CI/merge automation.
+Adoption is next after scope enforcement and before the first block runner. The
+boundary that fixes its place: before anything starts several tasks on its own, a
+crash after `git worktree add` has to be reconcilable — adopted or safely cleaned
+— without hand work. For V2-05 itself `WORKSPACE_COLLISION` remains an explicit
+fail-closed refusal, with no flag to talk an invocation past it.

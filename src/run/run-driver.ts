@@ -74,6 +74,7 @@ import {
   type BlockingState,
   type TaskStateName,
 } from '../core/states.js';
+import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
@@ -277,10 +278,23 @@ export interface RunRequest {
    */
   readonly attendedContinuation: boolean;
   /**
-   * Whether a *fresh* auth preflight passed. Evidence, never assumed: it is fed
-   * to `evaluateAutomaticResume`, which denies without it.
+   * The artefact a *fresh* auth preflight produced, or `null` when none ran.
+   *
+   * Evidence, never assumed — and since V2-05 that is enforced rather than
+   * asserted. This used to be `authPreflightPassed: boolean`, which made the
+   * claim in its own documentation and did not keep it: any caller could write
+   * `true`. The type is now opaque, its only producer is `runAuthPreflight`, and
+   * `evaluateAutomaticResume` verifies it at runtime instead of comparing it to
+   * `true` — so a caller holding nothing cannot describe a passing preflight,
+   * and a caller holding a cast gets a denial.
+   *
+   * `null` is the honest value for a path that ran no preflight, and it denies
+   * an unattended resume. It does not, on its own, stop a run: an attended run
+   * of a non-blocked task never consults it. Operator presence
+   * ({@link attendedContinuation}) and auth evidence are independent
+   * requirements, and neither substitutes for the other.
    */
-  readonly authPreflightPassed: boolean;
+  readonly authEvidence: AuthPreflightEvidence | null;
   /**
    * The most durable steps this call may take.
    *
@@ -449,7 +463,7 @@ export async function runTask(
     // --- 3. May anything continue, and on whose authority? ------------------
     const resume = classifyResume(state, observed, {
       now: deps.now(),
-      authPreflightPassed: request.authPreflightPassed,
+      authEvidence: request.authEvidence,
       repository,
       taskId,
     });
@@ -863,7 +877,7 @@ export async function runNextTask(
       taskId: task.id,
       taskBrief: request.taskBrief(task),
       attendedContinuation: request.attendedContinuation,
-      authPreflightPassed: request.authPreflightPassed,
+      authEvidence: request.authEvidence,
       maxSteps: request.maxSteps,
     },
     deps,

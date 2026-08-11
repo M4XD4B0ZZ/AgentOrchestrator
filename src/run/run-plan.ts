@@ -29,8 +29,10 @@
  * ── Evidence, never assumed ────────────────────────────────────────────────
  *
  * The plan performs no auth preflight, so `classifyResume` is fed
- * `authPreflightPassed: false` — the honest value for a check that did not run.
- * The only consequence today is in the automatic-resume reason codes of a
+ * `authEvidence: null` — the honest value for a check that did not run, and
+ * since V2-05 the *only* value this module could supply even if it wanted to
+ * overstate: evidence is minted by the preflight and nothing else can construct
+ * it. The only consequence today is in the automatic-resume reason codes of a
  * quota-blocked task; a plan grants nothing and can therefore never overstate.
  *
  * ── Conclusion spellings are reused, not invented ──────────────────────────
@@ -359,7 +361,7 @@ export async function planRun(
   const resume = classifyResume(state, reconciliation.observed, {
     now: deps.now(),
     // No preflight ran; the honest value for a check that was not performed.
-    authPreflightPassed: false,
+    authEvidence: null,
     repository,
     taskId: target.taskId,
   });

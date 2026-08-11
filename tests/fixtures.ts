@@ -2,6 +2,7 @@ import type { AgentCommandResult } from '../src/agent/agent-command.js';
 import type { AutomaticResumeEvidence } from '../src/core/automatic-resume.js';
 import type { TaskStateInput } from '../src/core/task-state.js';
 import type { CommandResult } from '../src/doctor/exec.js';
+import { provenAuthEvidence } from './helpers/auth-evidence.js';
 
 /** A plausible full SHA-1 object name. Not a real commit from any repository. */
 export const SHA_A = '0'.repeat(40);
@@ -109,7 +110,9 @@ export function positiveResumeEvidence(
 ): AutomaticResumeEvidence {
   return {
     now: '2026-07-31T15:00:00.000Z',
-    authPreflightPassed: true,
+    // Real evidence from the real mint, not a stand-in: see
+    // `helpers/auth-evidence.ts` for why a cast is not used here.
+    authEvidence: provenAuthEvidence(),
     observedRepositoryId: 'repo-alpha',
     observedRepositoryRoot: FIXTURE_REPOSITORY_ROOT,
     observedWorktreePath: FIXTURE_WORKTREE_PATH,

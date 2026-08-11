@@ -79,6 +79,12 @@ import { createProbeEnv } from './env-guard.js';
 import { runCommand, type CommandResult, type RunOptions } from '../doctor/exec.js';
 import { findRecord, probeSupportsFlag, type CapabilityRecord } from '../doctor/capabilities.js';
 import type { AgentId } from '../core/states.js';
+import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
+// The mint. This is the only module in `src/` that may import it, and
+// `tests/auth-preflight-evidence.test.ts` walks the tree to keep it that way:
+// running the checks and producing the artefact are one act, and separating them
+// would be exactly the seam a caller could step into.
+import { mintAuthPreflightEvidence } from '../core/internal/auth-preflight-evidence.js';
 
 export type AuthStatusCode =
   /** Subscription / ChatGPT login positively confirmed. */
@@ -416,6 +422,19 @@ export function evaluateCodexLoginStatus(result: CommandResult): AuthCheckResult
 export interface AuthAssessment {
   readonly checks: readonly AuthCheckResult[];
   readonly allPassed: boolean;
+  /**
+   * The unforgeable artefact a passing preflight produces, or `null`.
+   *
+   * `allPassed` answers "did it pass?" for a human reading a diagnosis.
+   * {@link evidence} is what an *execution* path is given, and the difference is
+   * the point of V2-05's I4: this assessment is an ordinary interface, so a
+   * caller can write `{ checks: [], allPassed: true, … }` and TypeScript will
+   * accept it — but it cannot fill this field, because
+   * `core/internal/auth-preflight-evidence.ts` is the only producer and the type
+   * is nominal. A fabricated assessment can therefore claim a pass to a reader
+   * and still carry no authority to run anything.
+   */
+  readonly evidence: AuthPreflightEvidence | null;
 }
 
 /**
@@ -479,5 +498,13 @@ export async function runAuthPreflight(
     checks.push(evaluateCodexLoginStatus(result));
   }
 
-  return { checks, allPassed: checks.every((c) => c.passed) };
+  // The verdict is derived twice, from the same checks, by two functions that do
+  // not consult each other: `allPassed` for the report, and the mint for the
+  // authority. The mint additionally refuses an empty check list, so "no check
+  // could even be attempted" cannot arrive at an execution path as a pass.
+  return {
+    checks,
+    allPassed: checks.every((c) => c.passed),
+    evidence: mintAuthPreflightEvidence(checks),
+  };
 }
