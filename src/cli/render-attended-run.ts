@@ -44,6 +44,10 @@ export const GRANT_WITHHELD_SENTENCE =
 /** One static sentence per start outcome. Closed, and pinned by test. */
 export const START_OUTCOME_SENTENCES: Readonly<Record<StartTaskOutcome, string>> = Object.freeze({
   STARTED: 'A workspace was created and the first durable state was written.',
+  ADOPTED:
+    'An untouched workspace left behind by an earlier start of this same task was proven to\n' +
+    '  be ours and reused. Nothing was created, and the durable state written is the one a\n' +
+    '  fresh start writes.',
   ALREADY_STARTED: 'This task already had durable state. Nothing was started a second time.',
   TASK_ID_INVALID: 'The requested task id is not a valid task id. It was not looked up.',
   PLANNING_FAILED: 'The task source could not be read or normalised. Nothing was started.',
@@ -58,9 +62,9 @@ export const START_OUTCOME_SENTENCES: Readonly<Record<StartTaskOutcome, string>>
     'A fresh auth preflight did not pass, so no agent could have run. Nothing was started\n' +
     '  and no branch was created. Log the agent CLIs in and invoke again.',
   WORKSPACE_COLLISION:
-    'Something already occupies the branch, path or worktree registry entry for this task.\n' +
-    '  It may be leftovers from an earlier start of this same task that died; adopting one\n' +
-    '  needs an ownership proof this build does not make, so it is refused, not reused.',
+    'Something already occupies the branch, path or worktree registry entry for this task,\n' +
+    '  and it was tested for adoption and refused. The second reason code says which proof\n' +
+    '  failed: the workspace is not this task\'s own untouched leftovers.',
   WORKSPACE_REFUSED: 'Workspace preparation was refused. Nothing was started.',
   STATE_UNUSABLE:
     'A durable record exists but is unusable here: broken, or an intact record of somewhere else.',

@@ -326,7 +326,10 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
     const result = await started({ repository, taskId: 'V2-03' }, deps());
 
     expect(result.outcome).toBe('WORKSPACE_COLLISION');
-    expect(result.reasonCodes).toEqual(['TASK_BRANCH_EXISTS']);
+    // Two codes since V2-06A: what collided, and what the recovery assessor
+    // concluded about it. A bare branch is not a workspace — there is no
+    // registered worktree to prove anything about — so nothing is adopted.
+    expect(result.reasonCodes).toEqual(['TASK_BRANCH_EXISTS', 'WORKSPACE_NOT_REGISTERED']);
     expectNothingStarted(root, 'V2-03');
   });
 
@@ -342,7 +345,8 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
     const result = await started({ repository, taskId: 'V2-03' }, deps());
 
     expect(result.outcome).toBe('WORKSPACE_COLLISION');
-    expect(result.reasonCodes).toEqual(['WORKTREE_PATH_OCCUPIED']);
+    // A stranger's directory at the derived path is registered with nobody.
+    expect(result.reasonCodes).toEqual(['WORKTREE_PATH_OCCUPIED', 'WORKSPACE_NOT_REGISTERED']);
     expect(loadTaskState(root, 'V2-03').classification).toBe('STATE_MISSING');
     // Never adopted: the stranger's file is still there, untouched.
     expect(existsSync(join(derived.identity.worktreePath, 'stranger.txt'))).toBe(true);
@@ -366,7 +370,9 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
     const result = await started({ repository, taskId: 'V2-03' }, deps());
 
     expect(result.outcome).toBe('WORKSPACE_COLLISION');
-    expect(result.reasonCodes).toEqual(['TASK_BRANCH_EXISTS']);
+    // The branch exists on a different base and holds no registered worktree,
+    // so V2-06A refuses it for the same reason it refuses any bare branch.
+    expect(result.reasonCodes).toEqual(['TASK_BRANCH_EXISTS', 'WORKSPACE_NOT_REGISTERED']);
     expect(loadTaskState(root, 'V2-03').classification).toBe('STATE_MISSING');
     // The foreign branch is left exactly where it was.
     expect(git(root, ['rev-parse', 'ao/task/V2-03']).trim()).toBe(otherBase);
@@ -517,11 +523,13 @@ describe('the write that does not land', () => {
       }),
     );
 
-    // The distinct code exists so that the adoption slice has something
-    // precise to attach to: this collision is the task's own leftovers, not a
-    // stranger's branch.
+    // Until V2-06A this was a `WORKSPACE_COLLISION` an operator cleaned up by
+    // hand. The distinct code existed so that the adoption slice would have
+    // something precise to attach to, and it now has: the leftovers are proven
+    // to be this task's own untouched workspace and are reused.
+    // `tests/v2-06a-workspace-adoption.test.ts` holds the counter-proofs.
     const retry = await started({ repository, taskId: 'V2-03' }, deps());
-    expect(retry.outcome).toBe('WORKSPACE_COLLISION');
+    expect(retry.outcome).toBe('ADOPTED');
     expect(retry.residue).toBe(false);
   });
 });

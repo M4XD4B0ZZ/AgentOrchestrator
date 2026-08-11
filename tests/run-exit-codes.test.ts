@@ -157,13 +157,17 @@ describe('every run outcome has an exit code', () => {
  * failure mode the V2-01 review found in the run-outcome section above.
  *
  * Because it is written out, this constant is also the place where the *count* is
- * asserted: thirteen. (The slice was scoped as "fourteen outcomes"; the
- * vocabulary actually has thirteen, and the tests state the real number rather
- * than the expected one.)
+ * asserted: fourteen. (V2-01 scoped the slice as "fourteen outcomes" and the
+ * vocabulary actually had thirteen; the tests stated the real number rather than
+ * the expected one. V2-06A added `ADOPTED`, which is the fourteenth — arrived at
+ * by counting again, not by the earlier estimate coming true.)
  */
 const EXPECTED_START_EXIT_CODES: Readonly<Record<string, number>> = Object.freeze({
-  // Nominal: something drivable exists. Neither ends the attended command.
+  // Nominal: something drivable exists. None of these ends the attended command.
   STARTED: 0,
+  // Adoption is a nominal start: the task ends up with the state a fresh start
+  // would have written, so the invocation continues exactly as it would have.
+  ADOPTED: 0,
   ALREADY_STARTED: 0,
   // The input situation is unusable: the id, the plan, the task, or a repository
   // that cannot hold task state without dirtying itself.
@@ -190,7 +194,7 @@ describe('every start outcome has an exit code', () => {
     const expected = Object.keys(EXPECTED_START_EXIT_CODES).sort();
 
     expect(expected).toEqual(declared);
-    expect(START_TASK_OUTCOMES).toHaveLength(13);
+    expect(START_TASK_OUTCOMES).toHaveLength(14);
     expect(new Set(declared).size).toBe(declared.length);
   });
 
@@ -213,7 +217,7 @@ describe('every start outcome has an exit code', () => {
     }
 
     expect(Object.fromEntries([...grouped.entries()].sort((a, b) => a[0] - b[0]))).toEqual({
-      [EXIT_RUN_OK]: ['ALREADY_STARTED', 'STARTED'],
+      [EXIT_RUN_OK]: ['ADOPTED', 'ALREADY_STARTED', 'STARTED'],
       [EXIT_RUN_INPUT_UNUSABLE]: [
         'PLANNING_FAILED',
         'RUNTIME_NOT_IGNORED',

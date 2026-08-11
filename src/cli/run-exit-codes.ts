@@ -28,6 +28,7 @@
  * outcome itself is the execution slice's decision, not this table's.
  */
 
+import type { ReleaseOutcome } from '../run/release-workspace.js';
 import type { RunOutcome } from '../run/run-driver.js';
 import type { RunPlanConclusion } from '../run/run-plan.js';
 import type { StartTaskOutcome } from '../run/start-task.js';
@@ -151,6 +152,9 @@ const START_TASK_EXIT_CODES = Object.freeze({
   // Nominal: a task is ready to be driven. Neither is terminal for the
   // attended command, which continues into the run and exits on *its* outcome.
   STARTED: EXIT_RUN_OK,
+  // Adoption is a nominal start: the task now has the same durable state a
+  // fresh one would, so the invocation continues exactly as it would have.
+  ADOPTED: EXIT_RUN_OK,
   ALREADY_STARTED: EXIT_RUN_OK,
   // The input situation is unusable: the id, the plan, or the named task.
   TASK_ID_INVALID: EXIT_RUN_INPUT_UNUSABLE,
@@ -173,4 +177,33 @@ const START_TASK_EXIT_CODES = Object.freeze({
 
 export function exitCodeForStartOutcome(outcome: StartTaskOutcome): CliExitCode {
   return START_TASK_EXIT_CODES[outcome];
+}
+
+/**
+ * What `release` exits with (V2-06A).
+ *
+ * `NOT_RELEASABLE` is `EXIT_RUN_NEEDS_OPERATOR` rather than a refusal code, and
+ * that is the whole point of the command: the workspace could not be proven to
+ * be an untouched crash artefact, so a human has to look at it. Reporting it as
+ * a plain refusal would invite a script to retry, and there is nothing to retry.
+ */
+const RELEASE_EXIT_CODES = Object.freeze({
+  RELEASED: EXIT_RUN_OK,
+  // The worktree is gone and a branch is not. Nominal enough to exit 0 — the
+  // thing occupying the path is released — but the report says what remains.
+  RELEASED_BRANCH_KEPT: EXIT_RUN_OK,
+  TASK_ID_INVALID: EXIT_RUN_INPUT_UNUSABLE,
+  PLANNING_FAILED: EXIT_RUN_INPUT_UNUSABLE,
+  TASK_UNKNOWN: EXIT_RUN_INPUT_UNUSABLE,
+  NOT_RELEASABLE: EXIT_RUN_NEEDS_OPERATOR,
+  // Files exist that no proof looked at. A human decides, never a retry.
+  HOLDS_IGNORED_CONTENT: EXIT_RUN_NEEDS_OPERATOR,
+  // Git could not answer. Nothing is wrong with the workspace and the next
+  // invocation may well succeed: the definition of code 4.
+  IGNORED_CONTENT_UNDETERMINED: EXIT_RUN_REFUSED,
+  REMOVE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+}) satisfies Record<ReleaseOutcome, CliExitCode>;
+
+export function exitCodeForReleaseOutcome(outcome: ReleaseOutcome): CliExitCode {
+  return RELEASE_EXIT_CODES[outcome];
 }
