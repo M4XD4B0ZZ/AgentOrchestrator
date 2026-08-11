@@ -148,13 +148,15 @@ export interface StartedTask {
 /**
  * A repository, a real worktree for one task, and nothing persisted yet.
  *
- * This is as far as the *product* composes on its own today: there is no
- * production entry point from a resolved repository to a first `TaskState`, and
- * `runTask` deliberately refuses to create one (`TASK_NOT_STARTED`). A test
- * therefore has to seed the state itself — see {@link seedState} — and that
- * seam is where V1-08 stops being an end-to-end test of shipped code and starts
- * being a composition the shipped code does not yet offer. Saying so here is
- * cheaper than discovering it in review.
+ * A repository and a real worktree, with no state persisted.
+ *
+ * When V1-08 was written this was as far as the product composed on its own,
+ * because nothing could create a first `TaskState` at all. V2-03's `startTask`
+ * now can — but it creates one at `WORKTREE_READY`, and these scenarios need a
+ * state at `VERIFYING`, which still requires the setup chain and the implement
+ * step. So {@link seedState} remains the test's own composition, for a
+ * narrower reason than before: not "the product cannot create a state", but
+ * "the product cannot yet reach the state these scenarios start from".
  */
 export async function startTask(options: {
   readonly taskId: string;

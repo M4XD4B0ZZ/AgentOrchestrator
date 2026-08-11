@@ -782,6 +782,113 @@ with the reason it can physically occur there. For example `VERIFYING` cannot
 enter `BLOCKED_USAGE_LIMIT`, because verification runs deterministic local
 commands and consumes no agent quota.
 
+## Starting a task
+
+Source: `src/run/start-task.ts`. **Library only in this build** — no command
+calls it, deliberately: see [why there is no `start` command
+yet](#why-there-is-no-start-command-yet).
+
+`startTask` is the entry point V1 deliberately did not have. It walks the setup
+chain `CREATED → REPOSITORY_RESOLVED → CONFIG_VALIDATED → AUTH_PREFLIGHT →
+GIT_PREFLIGHT → WORKTREE_READY` and persists **only the last one**.
+
+### Why persistence begins at `WORKTREE_READY`
+
+The five earlier phases are real and they still happen; they are *transient* —
+process-local steps of one start attempt rather than restartable checkpoints.
+
+Persistence begins where a record can first be reconciled against the outside
+world. A `TaskState` names a `worktreePath`, a `workBranch` and a
+`basePinnedCommit`; before the workspace exists there is nothing for any of
+those to describe, and `reconcile.ts` reads such a record as
+`WORKTREE_NOT_REGISTERED` → `DIVERGED` → blocked — for every one of the five.
+`PRE_WORK_STATES` already contains exactly `WORKTREE_READY` and
+`CONTEXT_LOADING`, which is the same boundary drawn from the other side.
+
+Persisting the earlier phases would mean inventing a second reconciliation
+world for "the task exists but its workspace does not", which nothing needs
+yet, and would make the caller-chosen-identity residual (**F-7**) live by
+giving a non-agent phase a durable state to be interrupted in. A persistable
+pre-workspace state machine is a later extension, to be built only if resuming
+*inside* the setup chain is ever actually needed.
+
+### Three invariants
+
+1. **No durable state before the workspace exists.** An ineligible task, an
+   unignored runtime directory, a failed auth preflight and a refused workspace
+   all write no state, create no branch and create no runtime directory. A
+   failed start cannot be resumed into existence, because there is no record to
+   resume.
+
+   That claim is about *task state*, and it holds without exception. The weaker
+   claim "a refusal leaves nothing behind at all" would be false, and is not
+   made: `prepareTaskWorkspace` can fail with `WORKTREE_ROLLBACK_INCOMPLETE`
+   (it created a worktree, rejected it, and could not remove it again), and a
+   refused durable write leaves a correct but orphaned worktree. Both set
+   `residue: true` on the result, because an operator with a stray worktree
+   beside their repository should hear it from the thing that made it. Neither
+   is tidied up automatically — removing a worktree is a destructive act on a
+   path the code has just failed to reason about, which is the same argument
+   `remove-workspace.ts` makes about `--force`.
+
+2. **The first state carries derived identity, never supplied identity.** Every
+   identity field comes from the `TaskWorkspace` receipt that
+   `prepareTaskWorkspace` verified *from inside the worktree it created*.
+   `reconcile.ts` re-derives the same values and refuses a mismatch, so a state
+   built from anything else would be diverged from the moment it was written.
+
+3. **The runtime directory is proven ignorable before the first write.** See
+   below.
+
+The initial state is a **literal**, not a parameter. `saveTaskState` writes a
+state with no predecessor, so the transition table has no edge to judge and
+cannot defend the setup chain here — a creation call naming `IMPLEMENTING`, or
+`READY_FOR_PR`, would simply be written. `tests/start-task.test.ts` pins
+structurally that `WORKTREE_READY` is the only state any production path can
+create.
+
+### The runtime directory must be provably ignored
+
+Source: `src/state/runtime-ignored.ts`.
+
+Task state lives *inside* the target repository, and `prepareTaskWorkspace`
+refuses `SOURCE_WORKTREE_DIRTY` on an untracked file. Those two facts collide:
+if `.agent-orchestrator/runtime/` is not ignored, starting task one leaves an
+untracked file, and preparing task two fails. **The first task succeeds, every
+later task refuses, and the cause is a file the orchestrator wrote itself.**
+
+For one manual run that is a confusing afternoon. For a roadmap block running
+tasks in sequence it is a guaranteed stall after the first one. So it is a
+check, not a paragraph: `startTask` asks Git — with read-only `git check-ignore
+--quiet` — about the exact path it is about to write, before it writes it or
+creates anything.
+
+Git is asked rather than `.gitignore` parsed, because ignore rules compose from
+several files with precedence, negation and per-directory scope, and the only
+opinion that matters is Git's own. The index is deliberately *not* excluded:
+a **tracked** runtime file answers `NOT_IGNORED`, which is the right refusal —
+writing to a tracked path dirties the tree just as effectively.
+
+The three answers stay apart. `check-ignore --quiet` exits `0` for ignored, `1`
+for not ignored, and otherwise could not evaluate the question at all; reporting
+that third case as "not ignored" would refuse a correctly configured repository
+because Git hiccuped, and reporting it as "ignored" would walk into the defect.
+It is `RUNTIME_IGNORE_UNDETERMINED`, and it refuses.
+
+**Onboarding requirement:** a repository the orchestrator starts tasks in must
+ignore `.agent-orchestrator/runtime/`.
+
+### Why there is no `start` command yet
+
+`WORKTREE_READY` is not a state the loop drives — `LOOP_DRIVEN_STATES` is
+`VERIFYING`, `REVIEWING`, `REMEDIATING` — and there is no implement step. A
+`start` command today would let an operator create durable state that nothing
+in this build can advance, and `agent-loop run` would report it, correctly and
+uselessly, as reconciled and attended-only forever.
+
+A library with no consumer is a smell; a command that manufactures stuck tasks
+is worse. The consumer arrives with the implement step.
+
 ## The task brief
 
 Source: `src/plan/task-brief.ts`.
@@ -2219,9 +2326,12 @@ never passes it.
 
 **A fresh task is not started here.** Creating the first `TaskState` means
 recording a `worktreePath`, and this driver prepares no workspace; writing one
-anyway would durably assert a directory nobody created. `runLoopStep` also does
-not drive `IMPLEMENTING`, so a freshly created state could not be moved even if
-it existed. Both belong to the slice that composes the setup chain.
+anyway would durably assert a directory nobody created. That refusal still
+stands: starting a task is `startTask`'s job (see [Starting a
+task](#starting-a-task)), and the driver's `TASK_NOT_STARTED` is the correct
+answer to "drive a task that has no state". `runLoopStep` also does not drive
+`IMPLEMENTING`, so a freshly created state cannot yet be moved out of the setup
+chain — that belongs to the implement step.
 
 **An in-flight task needs an attended grant.** `classifyResume` reports a
 healthy in-flight task as `ATTENDED_ONLY`, because the most common thing that
@@ -2375,11 +2485,18 @@ state file written by `saveTaskState`, and the registry that `git worktree list
 and Codex are subscription CLIs, and `AgentRunner` exists so that no test starts
 one.
 
-The composition has a seam worth naming: **there is no production entry point
-from a resolved repository to a first `TaskState`.** `runTask` refuses to create
-one, so the suite seeds a state at `VERIFYING` from the real workspace receipt.
-That step is the test's, not the product's, and it is the boundary at which this
-stops being end-to-end coverage of shipped code.
+The composition had a seam worth naming, and V2-03 closed half of it. When this
+suite was written there was **no production entry point from a resolved
+repository to a first `TaskState`**: `runTask` refuses to create one, so the
+suite seeds a state at `VERIFYING` from the real workspace receipt, and that
+step was the test's rather than the product's.
+
+`startTask` is now that entry point — see [Starting a task](#starting-a-task) —
+so the *creation* half is shipped code. The seeding here remains the test's own
+for a different reason: `startTask` creates a state at `WORKTREE_READY`, and
+these scenarios need one at `VERIFYING`, which requires the setup chain and the
+implement step that still do not exist. The boundary has moved rather than
+disappeared, and it will move again with the implement step.
 
 ### What the composition found
 
