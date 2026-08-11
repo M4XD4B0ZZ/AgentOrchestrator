@@ -11,7 +11,7 @@
  * stays injected: it is a subscription CLI and no test may start one.
  */
 
-import { readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
@@ -26,7 +26,7 @@ import {
 } from '../src/loop/loop-step.js';
 import { buildImplementPayload } from '../src/loop/implement-payload.js';
 import { MAX_AGENT_PAYLOAD_CHARS } from '../src/loop/payload-budget.js';
-import { readTaskBrief } from '../src/plan/task-brief.js';
+import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { startTask } from '../src/run/start-task.js';
 import { runTask } from '../src/run/run-driver.js';
 import { loadTaskState, type StateLoadSuccess } from '../src/state/state-store.js';
@@ -106,7 +106,7 @@ function stepDeps(
     authorisedWorktreePath: current.state.worktreePath,
     verification: repository.verification,
     taskBrief: 'unused by these steps',
-    brief: readTaskBrief(repository, current.state.taskId),
+    brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
     ...overrides,
   };
 }
@@ -230,9 +230,14 @@ describe('CONTEXT_LOADING → IMPLEMENTING', () => {
     // step that only asked `brief.ok` advanced and briefed the agent with a
     // path that is not there. The profile declares README.md; delete it.
     const { repository, root, current } = await atContextLoading();
-    rmSync(join(root, 'README.md'));
+    // Removed from the **worktree**, which is the tree the agent opens and the
+    // tree the verdict is about. Deleting it from the source checkout instead
+    // � which is what this test did until the V2-02 remediation � proved
+    // nothing about the run, and the gate correctly ignores it now.
+    rmSync(join(current.state.worktreePath, 'README.md'));
+    expect(existsSync(join(root, 'README.md'))).toBe(true);
 
-    const briefNow = readTaskBrief(repository, 'V2-04');
+    const briefNow = readExecutionBrief(repository, 'V2-04', current.state.worktreePath);
     // Still "ok" — the task file is fine. Only the context is incomplete.
     expect(briefNow.ok).toBe(true);
     if (!briefNow.ok) return;
@@ -358,8 +363,8 @@ describe('IMPLEMENTING → VERIFYING', () => {
     // Re-checked here and not merely inherited from `CONTEXT_LOADING`: a
     // restarted driver enters this step directly, so the same conjunction has
     // to hold at both entry points.
-    const { repository, root, current } = await atImplementing();
-    rmSync(join(root, 'README.md'));
+    const { repository, current } = await atImplementing();
+    rmSync(join(current.state.worktreePath, 'README.md'));
     const agent = recordedAgent({ claude: () => writerSuccess() });
 
     const step = await runImplementStep(
@@ -392,8 +397,11 @@ describe('the dispatch advertises what it drives', () => {
 describe('buildImplementPayload', () => {
   it('names context sources instead of pasting them', async () => {
     const { repository, root } = await readyRepo();
-    writeRepoFile(root, 'README.md', 'CANARY-README-BODY\n');
-    const brief = readTaskBrief(repository, 'V2-04');
+    // Started first: writing into the source checkout before preparing the
+    // workspace leaves it dirty, and `prepareTaskWorkspace` refuses that.
+    const started = await startedAt(repository, root);
+    writeRepoFile(started.state.worktreePath, 'README.md', 'CANARY-README-BODY\n');
+    const brief = readExecutionBrief(repository, 'V2-04', started.state.worktreePath);
     expect(brief.ok).toBe(true);
     if (!brief.ok) return;
 
@@ -405,8 +413,9 @@ describe('buildImplementPayload', () => {
   });
 
   it('is deterministic and bounded', async () => {
-    const { repository } = await readyRepo('x'.repeat(40_000));
-    const brief = readTaskBrief(repository, 'V2-04');
+    const { repository, root } = await readyRepo('x'.repeat(40_000));
+    const started = await startedAt(repository, root);
+    const brief = readExecutionBrief(repository, 'V2-04', started.state.worktreePath);
     expect(brief.ok).toBe(true);
     if (!brief.ok) return;
 
@@ -420,8 +429,9 @@ describe('buildImplementPayload', () => {
   });
 
   it('clamps a payload that really does exceed the budget, marker included', async () => {
-    const { repository } = await readyRepo();
-    const brief = readTaskBrief(repository, 'V2-04');
+    const { repository, root } = await readyRepo();
+    const started = await startedAt(repository, root);
+    const brief = readExecutionBrief(repository, 'V2-04', started.state.worktreePath);
     expect(brief.ok).toBe(true);
     if (!brief.ok) return;
 
@@ -443,8 +453,9 @@ describe('buildImplementPayload', () => {
   });
 
   it('says so when the task text was truncated', async () => {
-    const { repository } = await readyRepo('y'.repeat(20_000));
-    const brief = readTaskBrief(repository, 'V2-04');
+    const { repository, root } = await readyRepo('y'.repeat(20_000));
+    const started = await startedAt(repository, root);
+    const brief = readExecutionBrief(repository, 'V2-04', started.state.worktreePath);
     expect(brief.ok).toBe(true);
     if (!brief.ok) return;
     expect(brief.brief.bodyTruncated).toBe(true);
@@ -491,3 +502,4 @@ describe('a task created by production code now runs', () => {
     expect(readFileSync(after.path, 'utf8')).toContain('"state": "VERIFYING"');
   });
 });
+

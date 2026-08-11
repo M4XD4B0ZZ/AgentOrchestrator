@@ -14,60 +14,93 @@
  * `TaskDefinition` therefore gains no `body` field, and nothing here is
  * consulted by the selector, the graph or the eligibility rules.
  *
+ * ── Two briefs, and why they are different types ───────────────────────────
+ *
+ * {@link previewTaskBrief} is for a **plan**: it inspects the source checkout,
+ * which is whatever `main` currently looks like. {@link readExecutionBrief} is
+ * for a **run**: it inspects the authorised task worktree, pinned at
+ * `basePinnedCommit`, which is the tree the writing agent actually opens.
+ *
+ * They are separate functions returning separate types because V2-02 had only
+ * one, proved against the source checkout, and the payload then told the agent
+ * those paths were "in this worktree". Once execution gated on that verdict, a
+ * file present on `main` and absent from the pinned worktree produced a writer
+ * briefed on a promise nobody had checked — and a file deleted on `main` while
+ * a task was in flight parked a task whose own worktree still had it.
+ *
+ * A preview therefore carries **no `contextComplete`** and cannot be handed to
+ * the loop: the type system refuses it, so the confusion is not expressible
+ * rather than merely discouraged. A preview is a courtesy to an operator, never
+ * an authority over a writer.
+ *
  * ── Context sources are named, not inlined ─────────────────────────────────
  *
  * The profile declares `context.canonicalSources`. This module proves each one
- * is present and safe to open, and then reports its **path** — it does not
- * copy the file's contents into the brief.
+ * is present and safe to open, and then reports its **path** — it does not copy
+ * the file's contents.
  *
- * That is a deliberate design decision, not a budget compromise. The writing
- * agent is Claude Code running *inside the task's worktree*: it can open those
- * files itself, at the moment it needs them, in whatever order its own work
- * requires. Inlining them would replace that with a fixed, truncated snapshot
- * chosen by this module, make every payload grow with the repository, and
- * bound the useful context by whatever ceiling happened to be set here. Naming
- * a file the agent can read is strictly more useful than pasting a prefix of
- * it.
+ * That is a design decision, not a budget compromise. The writing agent is
+ * Claude Code running *inside the task's worktree*: it can open those files
+ * itself, at the moment it needs them, in whatever order its own work requires.
  *
- * What the orchestrator owes the operator is the *guarantee that the names are
- * good*: a declared context source that does not exist, or that is a link out
- * of the repository, is reported here rather than discovered by an agent as a
- * missing file halfway through a task.
+ * Because nothing is parsed, the inspection has **no size ceiling**. It used to
+ * borrow the 256 KiB *task-file parsing* ceiling and then discard the bytes,
+ * which protected nothing and reported a perfectly readable architecture note
+ * as unreadable — blocking every task in the repository once execution gated on
+ * the verdict. `PRESENT` now means exactly: the path exists, lies safely inside
+ * the tree, is a regular file, is not a link, and opens read-only. The byte
+ * budget for actually *loading* context is a separate contract and belongs
+ * wherever that loading is implemented.
  *
  * ── Bounded and deterministic ──────────────────────────────────────────────
  *
- * The body is clamped to {@link MAX_TASK_BODY_CHARS} and the clamp is
- * *reported*, never silent — the same rule `buildRemediationPayload` follows
- * when it hands an agent a brief built from partial evidence. The same file
- * always produces the same brief, byte for byte.
+ * The body is clamped to {@link MAX_TASK_BODY_BYTES} **UTF-8 bytes**, never
+ * mid-code-point, and the clamp is *reported*, never silent. Bytes rather than
+ * JavaScript string length because the promise is about what travels: slicing
+ * UTF-16 code units could keep a high surrogate and drop its low one, yielding
+ * a string with no valid UTF-8 representation that reaches the agent as U+FFFD
+ * while `bodyTruncated` reported only that the tail was cut.
  */
 
 import { join } from 'node:path';
 
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
+import {
+  inspectContainedFile,
+  proveContainedDirectory,
+  readContainedFile,
+  type InspectRefusal,
+  type ReadRefusal,
+} from '../repo/internal/contained-file.js';
 import { MAX_TASK_FILE_BYTES } from './discover-tasks.js';
-import { readContainedFile, type ReadRefusal } from './internal/task-file-source.js';
 import { readTaskFrontmatter } from './task-frontmatter.js';
 import { isValidTaskId, taskFileName } from './task-id.js';
 
 /**
- * Characters of task prose a brief may carry.
+ * UTF-8 bytes of task prose a brief may carry.
  *
  * Generous for a human-written task note and far below the agent payload
  * ceiling, so a brief always leaves room for the instructions wrapped around
  * it. A body longer than this is truncated *and said to be truncated*.
  */
-export const MAX_TASK_BODY_CHARS = 8_192;
+export const MAX_TASK_BODY_BYTES = 8_192;
 
 /** Every way a brief can fail to be assembled. A closed set. */
 export const TASK_BRIEF_FAILURE_CODES = [
   /** The id does not satisfy the task-id grammar. Nothing was opened. */
   'TASK_ID_INVALID',
-  /** The task source path is unusable, or escapes the canonical root. */
+  /**
+   * The declared task source is a link, not a directory, or escapes the root.
+   *
+   * Spelled exactly as `discoverTasks` spells it, because it is the same fact
+   * about the same repository. Two vocabularies disagreeing about one
+   * condition is what this member exists to prevent — and it was unreachable
+   * until the source was actually classified here.
+   */
   'TASK_SOURCE_PATH_UNSAFE',
   /** The task file is a link, not a regular file, or escapes the root. */
   'TASK_FILE_UNSAFE',
-  /** The task file exceeds the byte ceiling and was not read. */
+  /** The task file exceeds the parsing ceiling and was not read. */
   'TASK_FILE_TOO_LARGE',
   /** The task file does not exist, or could not be read. */
   'TASK_FILE_READ_FAILED',
@@ -97,7 +130,7 @@ const FAILURE_DETAIL: Readonly<Record<TaskBriefFailureCode, string>> = Object.fr
   TASK_BODY_EMPTY: 'The task file carries no prose for an agent to act on.',
 });
 
-/** How a declared context source stood up to being checked. */
+/** How a declared context source stood up to being inspected. */
 export const CONTEXT_SOURCE_STATUSES = ['PRESENT', 'MISSING', 'UNSAFE', 'UNREADABLE'] as const;
 export type ContextSourceStatus = (typeof CONTEXT_SOURCE_STATUSES)[number];
 
@@ -107,22 +140,50 @@ export interface ContextSourceReport {
   readonly status: ContextSourceStatus;
 }
 
-export interface TaskBrief {
+/** What both briefs carry: the task's own words. */
+interface TaskProse {
   readonly taskId: string;
   /** The task's prose, clamped. Opaque text: never parsed, never interpreted. */
   readonly body: string;
-  /** `true` when {@link body} was clamped to {@link MAX_TASK_BODY_CHARS}. */
+  /** `true` when {@link body} was clamped to {@link MAX_TASK_BODY_BYTES}. */
   readonly bodyTruncated: boolean;
-  /** Every declared context source and whether it can actually be opened. */
+}
+
+/**
+ * A plan's non-authoritative view.
+ *
+ * `contextPreview` describes the **source checkout**, which is not the tree any
+ * writer will open. It exists so an operator can see whether a repository looks
+ * onboarded, and for nothing else. It deliberately has no `contextComplete`:
+ * there is no completeness question to answer about a tree the run will not use.
+ */
+export interface TaskBriefPreview extends TaskProse {
+  readonly contextPreview: readonly ContextSourceReport[];
+}
+
+/**
+ * The brief a run is entitled to act on.
+ *
+ * `contextSources` describes the **authorised task worktree**, at the commit
+ * the task was pinned to — the tree `buildImplementPayload` tells the agent to
+ * open, and the tree the agent's `cwd` really is.
+ */
+export interface ExecutionBrief extends TaskProse {
   readonly contextSources: readonly ContextSourceReport[];
-  /** `true` when every declared context source is `PRESENT`. */
+  /** `true` when every declared context source is `PRESENT` in the worktree. */
   readonly contextComplete: boolean;
 }
 
-export interface TaskBriefSuccess {
+export interface TaskBriefPreviewSuccess {
+  readonly ok: true;
+  readonly code: 'PREVIEW';
+  readonly preview: TaskBriefPreview;
+}
+
+export interface ExecutionBriefSuccess {
   readonly ok: true;
   readonly code: 'BRIEF';
-  readonly brief: TaskBrief;
+  readonly brief: ExecutionBrief;
 }
 
 export interface TaskBriefFailure {
@@ -132,7 +193,8 @@ export interface TaskBriefFailure {
   readonly detail: string;
 }
 
-export type TaskBriefResult = TaskBriefSuccess | TaskBriefFailure;
+export type TaskBriefPreviewResult = TaskBriefPreviewSuccess | TaskBriefFailure;
+export type ExecutionBriefResult = ExecutionBriefSuccess | TaskBriefFailure;
 
 function failure(code: TaskBriefFailureCode): TaskBriefFailure {
   return Object.freeze({ ok: false as const, code, detail: FAILURE_DETAIL[code] });
@@ -145,63 +207,148 @@ const TASK_FILE_REFUSAL_CODE: Readonly<Record<ReadRefusal, TaskBriefFailureCode>
   READ_FAILED: 'TASK_FILE_READ_FAILED',
 });
 
-const CONTEXT_REFUSAL_STATUS: Readonly<Record<ReadRefusal, ContextSourceStatus>> = Object.freeze({
+const CONTEXT_REFUSAL_STATUS: Readonly<Record<InspectRefusal, ContextSourceStatus>> = Object.freeze({
   UNSAFE: 'UNSAFE',
-  TOO_LARGE: 'UNREADABLE',
-  READ_FAILED: 'MISSING',
+  MISSING: 'MISSING',
+  UNREADABLE: 'UNREADABLE',
 });
 
 /**
- * Assembles the brief for one task.
+ * Clamps `text` to `maxBytes` UTF-8 bytes without splitting a code point.
  *
- * Never throws for an expected condition. Read-only: nothing is written, and
- * no path outside the canonical repository root is opened.
- *
- * A context source is checked by *reading* it rather than by `stat`-ing it,
- * deliberately: a file that exists but cannot be opened is exactly the case an
- * operator needs to know about before an agent meets it, and only a read
- * proves it. The bytes are then dropped — see the module header for why they
- * are not carried.
+ * Iteration is by code point (`for…of` over a string yields whole astral
+ * characters), so a surrogate pair is either wholly kept or wholly dropped. A
+ * grapheme cluster may still be split — that is a different contract, and this
+ * one is stated in code points because that is what "valid UTF-8" needs.
  */
-export function readTaskBrief(
-  repository: ResolvedRepository,
-  taskId: string,
-): TaskBriefResult {
+function clampUtf8(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: false };
+
+  let used = 0;
+  let out = '';
+  for (const codePoint of text) {
+    const size = Buffer.byteLength(codePoint, 'utf8');
+    if (used + size > maxBytes) break;
+    out += codePoint;
+    used += size;
+  }
+  return { text: out, truncated: true };
+}
+
+/**
+ * Proves the declared task source is a usable directory inside the root.
+ *
+ * The same classification `discoverTasks` performs, so the two readers report
+ * one repository condition with one code. Before this existed,
+ * `TASK_SOURCE_PATH_UNSAFE` was declared, exported and unreachable, and a
+ * symlinked task source was reported here as a *task-file* problem.
+ */
+function proveTaskSource(root: string, sourcePath: string): TaskBriefFailure | null {
+  // The same proof discovery runs, from the same owner. The brief's vocabulary
+  // is coarser — it has one code for "the source is not usable" where discovery
+  // distinguishes four — but the *check* is not a second implementation.
+  return proveContainedDirectory(root, sourcePath).ok ? null : failure('TASK_SOURCE_PATH_UNSAFE');
+}
+
+/** The task's own words, read from the repository's task source. */
+function readProse(repository: ResolvedRepository, taskId: string): TaskProse | TaskBriefFailure {
   if (!isValidTaskId(taskId)) return failure('TASK_ID_INVALID');
 
   const root = repository.root;
   const sourceSegments = repository.taskSource.path.split('/');
-  const filePath = join(root, ...sourceSegments, taskFileName(taskId));
+  const sourcePath = join(root, ...sourceSegments);
 
-  const read = readContainedFile(root, filePath, MAX_TASK_FILE_BYTES);
+  const unsafeSource = proveTaskSource(root, sourcePath);
+  if (unsafeSource !== null) return unsafeSource;
+
+  const read = readContainedFile(root, join(sourcePath, taskFileName(taskId)), MAX_TASK_FILE_BYTES);
   if (!read.ok) return failure(TASK_FILE_REFUSAL_CODE[read.refusal]);
 
   const frontmatter = readTaskFrontmatter(read.text);
   if (frontmatter.outcome !== 'FRONTMATTER') return failure('TASK_FRONTMATTER_UNUSABLE');
 
-  const body = frontmatter.body.trim();
-  if (body === '') return failure('TASK_BODY_EMPTY');
+  const trimmed = frontmatter.body.trim();
+  if (trimmed === '') return failure('TASK_BODY_EMPTY');
 
-  const bodyTruncated = body.length > MAX_TASK_BODY_CHARS;
+  const clamped = clampUtf8(trimmed, MAX_TASK_BODY_BYTES);
+  return { taskId, body: clamped.text, bodyTruncated: clamped.truncated };
+}
 
-  const contextSources = Object.freeze(
+function isFailure(value: TaskProse | TaskBriefFailure): value is TaskBriefFailure {
+  return 'ok' in value && value.ok === false;
+}
+
+/** Inspects each declared source inside `tree`, reading none of them. */
+function inspectContext(
+  repository: ResolvedRepository,
+  tree: string,
+): readonly ContextSourceReport[] {
+  return Object.freeze(
     repository.context.canonicalSources.map((declared) => {
-      const sourcePath = join(root, ...declared.split('/'));
-      const probe = readContainedFile(root, sourcePath, MAX_TASK_FILE_BYTES);
+      const probe = inspectContainedFile(tree, join(tree, ...declared.split('/')));
       return Object.freeze({
         path: declared,
         status: probe.ok ? ('PRESENT' as const) : CONTEXT_REFUSAL_STATUS[probe.refusal],
       });
     }),
   );
+}
 
+/**
+ * A plan's view of the brief. **Not authoritative for execution.**
+ *
+ * The prose is the repository's, and the context report describes the source
+ * checkout. Nothing here may gate, authorise or block a writer — see
+ * {@link readExecutionBrief}, which is what a run must use.
+ *
+ * Never throws for an expected condition. Read-only.
+ */
+export function previewTaskBrief(
+  repository: ResolvedRepository,
+  taskId: string,
+): TaskBriefPreviewResult {
+  const prose = readProse(repository, taskId);
+  if (isFailure(prose)) return prose;
+
+  return Object.freeze({
+    ok: true as const,
+    code: 'PREVIEW' as const,
+    preview: Object.freeze({
+      ...prose,
+      contextPreview: inspectContext(repository, repository.root),
+    }),
+  });
+}
+
+/**
+ * The brief a run acts on, with its context proven in `worktreePath`.
+ *
+ * `worktreePath` must be the **authorised** worktree — the path Git printed for
+ * this task's registration, which is what the loop passes and what the agent's
+ * `cwd` will be. Proving the context anywhere else is the defect this function
+ * exists to make unrepeatable.
+ *
+ * The prose still comes from the repository's task source rather than from the
+ * worktree, deliberately: a human who corrects a task file to release a parked
+ * task edits it on the default branch, and a run that read its instructions
+ * from the pinned worktree could never see that correction.
+ *
+ * Never throws for an expected condition. Read-only.
+ */
+export function readExecutionBrief(
+  repository: ResolvedRepository,
+  taskId: string,
+  worktreePath: string,
+): ExecutionBriefResult {
+  const prose = readProse(repository, taskId);
+  if (isFailure(prose)) return prose;
+
+  const contextSources = inspectContext(repository, worktreePath);
   return Object.freeze({
     ok: true as const,
     code: 'BRIEF' as const,
     brief: Object.freeze({
-      taskId,
-      body: bodyTruncated ? body.slice(0, MAX_TASK_BODY_CHARS) : body,
-      bodyTruncated,
+      ...prose,
       contextSources,
       contextComplete: contextSources.every((source) => source.status === 'PRESENT'),
     }),

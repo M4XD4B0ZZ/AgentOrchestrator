@@ -40,9 +40,16 @@
  * caller gets is a code from a closed set and a sentence written here.
  */
 
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { isAbsolute, resolve as resolvePath } from 'node:path';
 
+import {
+  classify,
+  inspectContainedFile,
+  isContained,
+  samePath,
+  type Entry,
+} from './internal/contained-file.js';
 import {
   capabilitySatisfied,
   probeCodegraphCapability,
@@ -104,6 +111,23 @@ export const REPOSITORY_RESOLUTION_FAILURE_CODES = [
   'REQUIRED_CAPABILITY_UNAVAILABLE',
   /** The profile requires a remote and the repository has none. */
   'REMOTE_REQUIRED_BUT_ABSENT',
+  /**
+   * A declared context source exists and is not a regular file — a directory,
+   * a link, a device.
+   *
+   * Refused here, at resolution, because it is a *configuration* error and this
+   * is where configuration is judged. Left to execution it became a permanent
+   * `HUMAN_DECISION_REQUIRED` on every task in the repository, which tells an
+   * operator that a task is stuck rather than that a profile line is wrong.
+   *
+   * A source that simply does not exist is **not** this: absence is an ordinary
+   * execution-time `MISSING`, and a repository is allowed to declare a document
+   * it has not written yet. Only a path that is there and is the wrong *kind*
+   * of thing is a configuration error. Directories and globs may become legal
+   * later, with their own source type and a bounded enumeration; until then
+   * `docs/` is a mistake, and saying so early is the whole point.
+   */
+  'CONTEXT_SOURCE_NOT_REGULAR_FILE',
 ] as const;
 
 export type RepositoryResolutionFailureCode =
@@ -142,6 +166,8 @@ const FAILURE_DETAIL: Readonly<Record<RepositoryResolutionFailureCode, string>> 
     'A capability the profile declares as required could not be proven available.',
   REMOTE_REQUIRED_BUT_ABSENT:
     'The profile requires a configured remote and the repository has none.',
+  CONTEXT_SOURCE_NOT_REGULAR_FILE:
+    'A declared context source is not a regular file inside the repository.',
 });
 
 // ── Resolved value ─────────────────────────────────────────────────────────
@@ -255,52 +281,14 @@ const NUL = '\u0000';
 const MAX_PROFILE_BYTES = 262_144;
 
 /**
- * `true` when `candidate` is `root` itself or lies beneath it.
+ * The safety chain lives in `internal/contained-file.ts`.
  *
- * `path.relative` is the comparison, so the platform's own rules apply —
- * including case-insensitive matching on Windows, where treating `D:\Repo` and
- * `D:\repo` as different roots would be a containment hole rather than rigour.
+ * This module used to hold `isContained`, `samePath` and `classify` verbatim,
+ * plus the same six-step chain inline — while V2-02's commit message claimed
+ * discovery had held "the only copy". It had not. The type policy below is
+ * still this module's own; the chain is not.
  */
-function isContained(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  if (rel === '') return true;
-  return !rel.startsWith('..') && !isAbsolute(rel);
-}
-
-/** `true` when the two canonical paths denote the same location. */
-function samePath(a: string, b: string): boolean {
-  return relative(a, b) === '';
-}
-
-type LinkFreeEntry =
-  | { readonly kind: 'DIRECTORY' }
-  | { readonly kind: 'FILE'; readonly size: number }
-  | { readonly kind: 'OTHER' }
-  | { readonly kind: 'ABSENT' }
-  | { readonly kind: 'LINK' }
-  | { readonly kind: 'UNREADABLE' };
-
-/**
- * Classifies a path with `lstat`, so a link is *seen* rather than followed.
- *
- * Following the link first and asking questions afterwards is the classic
- * escape: the answers would describe the target, while the path that gets used
- * is still the link.
- */
-function classify(path: string): LinkFreeEntry {
-  let stats;
-  try {
-    stats = lstatSync(path);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'ABSENT' };
-    return { kind: 'UNREADABLE' };
-  }
-  if (stats.isSymbolicLink()) return { kind: 'LINK' };
-  if (stats.isDirectory()) return { kind: 'DIRECTORY' };
-  if (stats.isFile()) return { kind: 'FILE', size: stats.size };
-  return { kind: 'OTHER' };
-}
+type LinkFreeEntry = Entry;
 
 // ── Resolution ─────────────────────────────────────────────────────────────
 
@@ -438,6 +426,34 @@ export async function resolveRepository(
     const absolute = resolvePath(root, ...declared.split('/'));
     if (!isContained(root, absolute) || samePath(root, absolute)) {
       return failure('REPOSITORY_PATH_UNSAFE');
+    }
+  }
+
+  // --- 7b. A declared context source must be usable, if it is anything ------
+  // Configuration is judged here, so a `docs/` entry is refused here. Left to
+  // execution it became a permanent `HUMAN_DECISION_REQUIRED` on every task in
+  // the repository — an operator told that a task is stuck rather than that a
+  // profile line is wrong.
+  //
+  // The check is **the same proof execution runs** (`inspectContainedFile`),
+  // not a cheaper approximation of it. The first version of this step used a
+  // bare `classify`, which is a single `lstat`: `lstat` does not follow the
+  // final component but does follow every parent, so a source under a
+  // symlinked directory was classified `FILE` and resolved — and then execution,
+  // running the full chain, refused it as `UNSAFE` and parked every task
+  // forever. The same misconfiguration answered two different ways depending on
+  // whether the link was the leaf or one component up. A gate that is weaker
+  // than the gate it exists to pre-empt does not pre-empt it.
+  //
+  // Absence is deliberately *not* an error: a repository may declare a document
+  // it has not written yet, and that is an ordinary execution-time `MISSING`.
+  // `UNREADABLE` is left to execution too — a permission or I/O fault is a fact
+  // about the machine, not about the profile, and refusing to resolve the
+  // repository over one would blame the wrong thing.
+  for (const declared of profile.context.canonicalSources) {
+    const inspected = inspectContainedFile(root, resolvePath(root, ...declared.split('/')));
+    if (!inspected.ok && inspected.refusal === 'UNSAFE') {
+      return failure('CONTEXT_SOURCE_NOT_REGULAR_FILE');
     }
   }
 

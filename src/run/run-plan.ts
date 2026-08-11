@@ -43,7 +43,7 @@
 
 import { isTerminalState, isBlockingState, type TaskStateName } from '../core/states.js';
 import { isValidTaskId } from '../plan/task-id.js';
-import { readTaskBrief, type TaskBriefResult } from '../plan/task-brief.js';
+import { previewTaskBrief, type TaskBriefPreviewResult } from '../plan/task-brief.js';
 import type { TaskEligibility } from '../plan/select-task.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import {
@@ -156,18 +156,21 @@ export interface RunPlan {
   /** The continuation decision, or `null` when it was never reached. */
   readonly resume: ResumeDecision | null;
   /**
-   * Whether the target task's brief could be assembled, or `null` when no task
-   * was in hand to ask about.
+   * A **preview** of the target task's brief, or `null` when no task was in
+   * hand to ask about.
    *
-   * Reported rather than acted on. A brief is what the writing agent would be
-   * handed, and nothing in this build hands anything to an agent — but an
-   * operator who has onboarded a repository needs to learn that a task carries
-   * no prose, or that a declared context source is missing, *before* an
-   * execution mode exists to discover it the hard way. It is deliberately not
-   * a conclusion: a plan reports what a run would do, and today no run is
-   * refused for want of a brief.
+   * Reported rather than acted on, and deliberately not the type a run
+   * consumes. Its context report describes the *source checkout*, which is not
+   * the tree any writer opens — a run proves its context in the authorised
+   * worktree, at the commit the task was pinned to. Handing this value to the
+   * loop is a type error rather than a subtle mistake, which is the point: the
+   * two were one type once, and a verdict about the wrong tree gated a writer.
+   *
+   * An operator still wants it: learning that a task carries no prose, or that
+   * a declared source is missing on `main`, is worth knowing before starting.
+   * It is never a conclusion, and no run is refused for want of it.
    */
-  readonly brief: TaskBriefResult | null;
+  readonly brief: TaskBriefPreviewResult | null;
   /** The durable state's name, or `null` when none was loaded. */
   readonly state: TaskStateName | null;
   /**
@@ -285,7 +288,7 @@ export async function planRun(
   // diverged still benefits from learning that its brief is unreadable, and
   // reporting it only on the healthy path would hide it exactly when the
   // repository is already in trouble.
-  const brief = readTaskBrief(repository, target.taskId);
+  const brief = previewTaskBrief(repository, target.taskId);
 
   // --- 3. The record, and the world it claims to describe ------------------
   const reconciliation = await reconcileTask(deps.git, {

@@ -21,7 +21,7 @@
  * and an operator reading the prompt can see the same thing.
  */
 
-import type { TaskBrief } from '../plan/task-brief.js';
+import type { ExecutionBrief } from '../plan/task-brief.js';
 import { clampPayload } from './payload-budget.js';
 
 /**
@@ -30,7 +30,7 @@ import { clampPayload } from './payload-budget.js';
  * `round` is the pass this work belongs to, carried so the prompt and the
  * resume point a failure records name the same number.
  */
-export function buildImplementPayload(brief: TaskBrief, round: number): string {
+export function buildImplementPayload(brief: ExecutionBrief, round: number): string {
   const lines = [
     `Implement task ${brief.taskId} (pass ${round}).`,
     '',

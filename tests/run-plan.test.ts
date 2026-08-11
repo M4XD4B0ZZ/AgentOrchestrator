@@ -350,9 +350,9 @@ describe('planRun — the task brief (V2-02)', () => {
 
     expect(plan.brief?.ok).toBe(true);
     if (plan.brief?.ok !== true) return;
-    expect(plan.brief.brief.taskId).toBe('V2-01');
-    expect(plan.brief.brief.body).toBe('Body prose, which nothing interprets.');
-    expect(plan.brief.brief.contextComplete).toBe(true);
+    expect(plan.brief.preview.taskId).toBe('V2-01');
+    expect(plan.brief.preview.body).toBe('Body prose, which nothing interprets.');
+    expect(plan.brief.preview.contextPreview.every((s) => s.status === 'PRESENT')).toBe(true);
   });
 
   it('reports the brief on a path that stops, not only on the healthy one', async () => {
@@ -409,7 +409,13 @@ describe('planRun — the task brief (V2-02)', () => {
 
     expect(text).toContain('Brief');
     expect(text).toContain('readable');
-    expect(text).toContain('all present');
+    // A preview says which tree it looked at and makes no completeness claim:
+    // "all present" would read as a verdict about the run, and a run proves its
+    // context in the worktree, not here. It says "source checkout" rather than
+    // naming a branch, because nothing here asked Git which branch that is.
+    expect(text).toContain('in the source checkout');
+    expect(text).not.toContain('all present');
+    expect(text).not.toContain('default branch');
     // A healthy source is counted, never listed.
     expect(text).not.toContain('README.md  [');
   });
@@ -478,3 +484,4 @@ describe('planRun — conclusion coverage', () => {
     expect(uncovered).toEqual(['NO_ELIGIBLE_TASK']);
   });
 });
+
