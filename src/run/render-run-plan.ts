@@ -119,6 +119,28 @@ export function renderRunPlan(plan: RunPlan, repository: { id: string; root: str
     );
   }
 
+  if (plan.brief !== null) {
+    if (plan.brief.ok) {
+      const { body, bodyTruncated, contextSources, contextComplete } = plan.brief.brief;
+      const context =
+        contextSources.length === 0
+          ? 'no context declared'
+          : `${contextSources.length} context source(s), ${contextComplete ? 'all present' : 'INCOMPLETE'}`;
+      lines.push(
+        line('Brief', `readable — ${body.length} chars${bodyTruncated ? ' (truncated)' : ''}; ${context}`),
+      );
+      // Only the ones that are not fine are named, and only by the path the
+      // profile itself declared — a value the schema already constrained.
+      for (const source of contextSources) {
+        if (source.status !== 'PRESENT') {
+          lines.push(`  - ${source.path}  [${source.status}]`);
+        }
+      }
+    } else {
+      lines.push(line('Brief', `${plan.brief.code} — ${plan.brief.detail}`));
+    }
+  }
+
   if (plan.resume !== null) {
     lines.push(line('Continuation', `${plan.resume.continuation}  (${plan.resume.classification})`));
   }

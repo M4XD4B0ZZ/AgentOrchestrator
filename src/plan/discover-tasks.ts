@@ -61,13 +61,28 @@
  * content and stays inside the value it was parsed into.
  */
 
-import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path';
+import { lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { join, resolve as resolvePath } from 'node:path';
 
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
+import {
+  classify,
+  isContained,
+  readContainedFile,
+  samePath,
+  type ReadRefusal,
+} from './internal/task-file-source.js';
 import { compareTaskIds, taskIdFromFileName, TASK_FILE_EXTENSION } from './task-id.js';
 import { readTaskFrontmatter } from './task-frontmatter.js';
 import { safeParseTaskDefinition, type TaskDefinition } from './task-definition.js';
+
+/** Discovery's own sentence for each fact the safe-open chain reports. */
+const TASK_FILE_REFUSAL_CODE: Readonly<Record<ReadRefusal, TaskDiscoveryFailureCode>> =
+  Object.freeze({
+    UNSAFE: 'TASK_FILE_UNSAFE',
+    TOO_LARGE: 'TASK_FILE_TOO_LARGE',
+    READ_FAILED: 'TASK_FILE_READ_FAILED',
+  });
 
 /**
  * The largest task file that is read at all.
@@ -178,47 +193,6 @@ function failure(
   });
 }
 
-/** `true` when `candidate` is `root` itself or lies beneath it. */
-function isContained(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  if (rel === '') return true;
-  return !rel.startsWith('..') && !isAbsolute(rel);
-}
-
-/** `true` when the two canonical paths denote the same location. */
-function samePath(a: string, b: string): boolean {
-  return relative(a, b) === '';
-}
-
-type Entry =
-  | { readonly kind: 'DIRECTORY' }
-  | { readonly kind: 'FILE'; readonly size: number }
-  | { readonly kind: 'OTHER' }
-  | { readonly kind: 'ABSENT' }
-  | { readonly kind: 'LINK' }
-  | { readonly kind: 'UNREADABLE' };
-
-/**
- * Classifies a path with `lstat`, so a link is *seen* rather than followed.
- *
- * Following first and asking afterwards is the classic escape: the answers
- * would describe the target while the path that gets used is still the link.
- */
-function classify(path: string): Entry {
-  let stats;
-  try {
-    stats = lstatSync(path);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'ABSENT' };
-    return { kind: 'UNREADABLE' };
-  }
-  if (stats.isSymbolicLink()) return { kind: 'LINK' };
-  if (stats.isDirectory()) return { kind: 'DIRECTORY' };
-  if (stats.isFile()) return { kind: 'FILE', size: stats.size };
-  return { kind: 'OTHER' };
-}
-
 /**
  * Reads and validates one task file.
  *
@@ -227,35 +201,22 @@ function classify(path: string): Entry {
  * either direction — a file that disagrees with itself is refused, because
  * silently preferring one of the two would make the dependency graph depend on
  * which half of the disagreement this module happened to trust.
+ *
+ * The safe-open chain itself lives in `internal/task-file-source.ts`, which
+ * more than one caller now needs; this function only translates its three
+ * refusals into discovery's own vocabulary.
  */
-function readTaskFile(path: string, expectedId: string): TaskDefinition | TaskDiscoveryFailure {
-  const entry = classify(path);
-  if (entry.kind === 'LINK' || entry.kind === 'DIRECTORY' || entry.kind === 'OTHER') {
-    return failure('TASK_FILE_UNSAFE', expectedId);
-  }
-  if (entry.kind === 'ABSENT' || entry.kind === 'UNREADABLE') {
-    return failure('TASK_FILE_READ_FAILED', expectedId);
-  }
-  if (entry.size > MAX_TASK_FILE_BYTES) return failure('TASK_FILE_TOO_LARGE', expectedId);
-
-  // No segment of this path is a link, so its canonical form must be itself.
-  // A difference means something changed underneath us between the checks.
-  let canonical: string;
-  try {
-    canonical = realpathSync.native(path);
-  } catch {
-    return failure('TASK_FILE_READ_FAILED', expectedId);
-  }
-  if (!samePath(path, canonical)) return failure('TASK_FILE_UNSAFE', expectedId);
-
-  let text: string;
-  try {
-    text = readFileSync(canonical, 'utf8');
-  } catch {
-    return failure('TASK_FILE_READ_FAILED', expectedId);
+function readTaskFile(
+  root: string,
+  path: string,
+  expectedId: string,
+): TaskDefinition | TaskDiscoveryFailure {
+  const read = readContainedFile(root, path, MAX_TASK_FILE_BYTES);
+  if (!read.ok) {
+    return failure(TASK_FILE_REFUSAL_CODE[read.refusal], expectedId);
   }
 
-  const frontmatter = readTaskFrontmatter(text);
+  const frontmatter = readTaskFrontmatter(read.text);
   switch (frontmatter.outcome) {
     case 'MISSING':
       return failure('TASK_FRONTMATTER_MISSING', expectedId);
@@ -338,7 +299,7 @@ export function discoverTasks(repository: ResolvedRepository): TaskDiscoveryResu
   const tasks: TaskDefinition[] = [];
   for (const candidate of candidates) {
     if (candidate.id === null) return failure('TASK_FILE_NAME_INVALID');
-    const outcome = readTaskFile(join(canonicalSource, candidate.fileName), candidate.id);
+    const outcome = readTaskFile(root, join(canonicalSource, candidate.fileName), candidate.id);
     if (isFailure(outcome)) return outcome;
     tasks.push(outcome);
   }

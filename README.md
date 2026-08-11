@@ -159,6 +159,10 @@ Read-only in this build: the command **plans**; it does not execute. It
   reconciles it against observed Git reality, and prints the continuation
   authority. The resume decision is computed with `authPreflightPassed: false`:
   no preflight ran, and evidence is never assumed;
+- reports whether the task's **brief** can be assembled — its prose, and
+  whether every declared context source can actually be opened. Reported, never
+  enforced: no run is refused for want of a brief, because no run exists yet.
+  See [the task brief](#the-task-brief);
 - concludes with one code from a closed vocabulary
   (`src/run/run-plan.ts`) and exits accordingly.
 
@@ -777,6 +781,63 @@ no blanket "any state may enter any error state" rule: each error edge is listed
 with the reason it can physically occur there. For example `VERIFYING` cannot
 enter `BLOCKED_USAGE_LIMIT`, because verification runs deterministic local
 commands and consumes no agent quota.
+
+## The task brief
+
+Source: `src/plan/task-brief.ts`.
+
+Task *discovery* answers "which tasks exist and how do they relate", and its
+whole discipline is that a task file's prose contributes nothing to that
+answer. The brief answers a different question — "what should the writing agent
+be told" — and prose is the only correct source for it. Keeping them apart is
+what lets both rules hold at once: **the plan still cannot be changed by
+rewording a paragraph, and the paragraph can still reach an agent.**
+
+`TaskDefinition` therefore gains no `body` field, and nothing in `task-brief.ts`
+is consulted by the selector, the graph or the eligibility rules. A body that
+says `status: DONE` changes nothing, and `tests/task-brief.test.ts` pins that.
+
+### Context sources are named, not inlined
+
+The profile declares `context.canonicalSources`. The brief proves each one is
+present and safe to open, and then reports its **path** — it does not copy the
+file's contents.
+
+That is a design decision, not a budget compromise. The writing agent is Claude
+Code running *inside the task's worktree*: it can open those files itself, when
+it needs them, in the order its own work requires. Inlining them would replace
+that with a fixed, truncated snapshot chosen by the wrong layer, make every
+payload grow with the repository, and cap the useful context at whatever
+ceiling happened to be set in this module. Naming a file the agent can read is
+strictly more useful than pasting a prefix of it.
+
+What the orchestrator does owe the operator is the guarantee that the names are
+good: a declared source that is missing, unreadable, or a link out of the
+repository is reported here rather than met by an agent halfway through a task.
+
+### Bounds and refusals
+
+The body is clamped to `MAX_TASK_BODY_CHARS` (8 192) and a clamp is **reported**
+(`bodyTruncated`), never silent — the rule `buildRemediationPayload` already
+follows when it briefs an agent from partial evidence. The same file always
+produces the same brief, byte for byte, and CRLF is normalised so a task does
+not mean two different things on two platforms.
+
+A file whose frontmatter parses but which carries **no prose at all** is
+`TASK_BODY_EMPTY` rather than an empty brief: a title is not a task, and a
+repository is better told its file is incomplete than handed an agent run that
+guesses. Failures carry a closed code and a static sentence — no path, no
+filename, no file content.
+
+### One owner for "safe to open"
+
+`src/plan/internal/task-file-source.ts` owns the chain every reader of
+repository content uses: classify with `lstat` so a link is *seen* rather than
+followed, refuse a link outright, cap the size before reading, re-canonicalise,
+re-test containment, then read. Discovery and the brief reader both call it and
+each translates its three refusals — `UNSAFE`, `TOO_LARGE`, `READ_FAILED` —
+into its own vocabulary, because "this file is a symlink" is `TASK_FILE_UNSAFE`
+to one and a context-source status to the other.
 
 ## The repository-profile contract
 

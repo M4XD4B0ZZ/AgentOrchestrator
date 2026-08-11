@@ -340,6 +340,81 @@ describe('planRun — durable-state conclusions', () => {
   });
 });
 
+describe('planRun — the task brief (V2-02)', () => {
+  it('reports a readable brief and its declared context for a fresh task', async () => {
+    const { repository } = await fixtureRepository({
+      'tasks/V2-01.md': taskFile('V2-01'),
+    });
+
+    const plan = await planned({ repository, taskId: null });
+
+    expect(plan.brief?.ok).toBe(true);
+    if (plan.brief?.ok !== true) return;
+    expect(plan.brief.brief.taskId).toBe('V2-01');
+    expect(plan.brief.brief.body).toBe('Body prose, which nothing interprets.');
+    expect(plan.brief.brief.contextComplete).toBe(true);
+  });
+
+  it('reports the brief on a path that stops, not only on the healthy one', async () => {
+    const started = await startTask({ taskId: 'V2-01' });
+    seedState(started, { state: 'READY_FOR_PR', reviewRound: 1 });
+
+    const plan = await planned({ repository: started.repository, taskId: 'V2-01' });
+
+    // Terminal — nothing continues — and the brief is still reported, because
+    // an unreadable brief is worth knowing about precisely when something else
+    // is already wrong.
+    expect(plan.conclusion).toBe('TASK_COMPLETED');
+    expect(plan.brief).not.toBeNull();
+  });
+
+  it('carries no brief when no task was ever in hand', async () => {
+    const { repository } = await fixtureRepository({
+      'tasks/V2-01.md': taskFile('V2-01', { status: 'DONE' }),
+    });
+
+    const plan = await planned({ repository, taskId: null });
+
+    expect(plan.conclusion).toBe('ALL_TASKS_COMPLETE');
+    expect(plan.brief).toBeNull();
+  });
+
+  it('reports an unreadable brief as a failure code without failing the plan', async () => {
+    const { repository, root } = await fixtureRepository({
+      'tasks/V2-01.md': taskFile('V2-01'),
+    });
+    // Strip the prose: the frontmatter still parses, so planning is unaffected.
+    writeFileSync(
+      join(root, 'tasks', 'V2-01.md'),
+      taskFile('V2-01').replace('Body prose, which nothing interprets.\n', ''),
+      'utf8',
+    );
+
+    const plan = await planned({ repository, taskId: null });
+
+    // The plan still concludes normally — a brief is reported, not enforced.
+    expect(plan.conclusion).toBe('TASK_NOT_STARTED');
+    expect(plan.brief?.ok).toBe(false);
+    if (plan.brief?.ok !== false) return;
+    expect(plan.brief.code).toBe('TASK_BODY_EMPTY');
+  });
+
+  it('renders the brief line, and names only the context sources that are not fine', async () => {
+    const { repository } = await fixtureRepository({
+      'tasks/V2-01.md': taskFile('V2-01'),
+    });
+
+    const plan = await planned({ repository, taskId: null });
+    const text = renderRunPlan(plan, repository);
+
+    expect(text).toContain('Brief');
+    expect(text).toContain('readable');
+    expect(text).toContain('all present');
+    // A healthy source is counted, never listed.
+    expect(text).not.toContain('README.md  [');
+  });
+});
+
 describe('renderRunPlan', () => {
   it('renders ids, closed codes and the read-only note — never a title', async () => {
     const { repository } = await fixtureRepository({
