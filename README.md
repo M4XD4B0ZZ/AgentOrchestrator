@@ -48,6 +48,10 @@ What *is* implemented:
    but only when every part of that claim is proven — plus
    `release --attended` to hand such a workspace back. See
    [Workspace recovery](#workspace-recovery-v2-06a).
+10. The **block-run ledger** (V2-07): the durable record of one started block
+    run, with frozen membership, evidence-backed progress and a reconciliation
+    that believes the task records rather than the ledger. It stores; it does
+    not drive. See [The block-run ledger](#the-block-run-ledger-v2-07).
 
 ## Requirements
 
@@ -3109,10 +3113,98 @@ still race for creation or adoption. This slice detects *crash artefacts*; it
 does not prevent *concurrent owners*. An execution lease is a separate mechanism
 and is still required before unattended block autonomy.
 
+## The block-run ledger (V2-07)
+
+The durable record of one started block run — and the first piece of
+multi-task machinery in the build. It stores; it does not drive.
+
+One principle governs the whole contract:
+
+> The ledger is durable **orchestration** truth, and never the primary truth
+> about a single task.
+
+A `TaskState` proves what happened to a task. The ledger references it and
+derives block progress from it; it never overwrites it, and where the two
+disagree the ledger never wins.
+
+### Two words that must not become one
+
+```
+BlockDefinition   what this block should work through
+BlockRunLedger    what durably happened in one started run of it
+```
+
+The same line V1-02 holds between `TaskDefinition` and `TaskState`, one level
+up. A run **freezes** its membership: `frozenTaskIds` and a `planFingerprint`
+over the block id and ordered task ids are written once and never again. A
+roadmap edited mid-run cannot silently swap task four while tasks one to three
+have already gone — the drift is reported, never adopted.
+
+The fingerprint deliberately covers identity and order only, not task prose or
+status: a task's `status` becomes `DONE` precisely *because* the run worked on
+it, and a fingerprint that moved with it would report drift on every success.
+
+### Progress is evidence, not assignment
+
+`SETTLED` and `BLOCKED` are not setters. `settleBlockTask` reads the task's
+durable state and refuses unless it proves the claim — `READY_FOR_PR`, which the
+task contract already makes expensive to reach — and writes the **revision** of
+that state into the entry. A claim with no evidence is refused by the contract
+itself, before reconciliation ever looks.
+
+A run drives at most one task at a time; parallelism inside a block is not a V2
+contract. A run may not simply stop, either: `stopReason` is a closed
+vocabulary (`COMPLETE`, `TASK_BLOCKED`, `NO_ELIGIBLE_TASK`, `OPERATOR_STOPPED`,
+`LEDGER_DIVERGED`, `STATE_UNUSABLE`, `DEFINITION_DRIFTED`), and `COMPLETE` is
+checked against every entry so it cannot be claimed over unfinished work.
+
+Persistence is the task store's mechanism, restated: a content-digest revision,
+an omitted `expectedRevision` meaning *creation* and refused if a ledger
+exists, and no force option. The file is named by the **run**, not the block, so
+starting the same block again never destroys the record of the last attempt.
+
+### Reconciliation believes the records
+
+The shape this exists to catch:
+
+```
+ledger:  A = SETTLED,  B = ACTIVE
+reality: A never reached READY_FOR_PR
+```
+
+Taken at face value, a corrupted ledger has unlocked B — and once V2-09 makes
+B's base A's result, it would have unlocked a *dependency edge on work that does
+not exist*. So every outcome claim is re-checked against the task state, and
+disagreement is `DIVERGED`. `tests/v2-07-block-ledger.test.ts` hand-edits a
+ledger into exactly that shape and asserts it is not believed; removing the
+check makes that test fail.
+
+**Reporting, not repairing.** The opposite direction — a task that reached
+`READY_FOR_PR` while the ledger still says `ACTIVE` — is benign and is reported
+as `TASK_AHEAD_OF_LEDGER` with `progressAvailable`, and **not** written. Which
+positive reconciliations may safely be applied on their own is V2-08's decision,
+made with a runner in front of it.
+
+### Room for the chain, without the chain
+
+Each entry carries `baseCommit` and `resultCommit`. `resultCommit` records the
+commit a settled task's own record proves it ended at — and that is **not** a
+claim that the commit is a fit base for a dependent successor. Whether a settled
+task yields a usable chain commit is V2-09's separate question; the fields exist
+so answering it needs no new ledger shape.
+
+### What V2-07 is not
+
+No block execution: nothing here drives a run. No dependent commit chain. No
+execution lease — compare-and-swap is sufficient while the ledger orchestrates
+no agent and no Git effect, and the lease is required before *unattended*
+running, not before this.
+
 ## Not implemented yet
 
-Still missing, deliberately: multi-task queue progression; unattended operation;
-an execution lease; and any product-side PR/CI/merge automation.
+Still missing, deliberately: block execution (V2-08); the dependent commit chain
+(V2-09); unattended operation; an execution lease; and any product-side
+PR/CI/merge automation.
 
 The lease is the boundary that matters next for autonomy: before anything runs
 several tasks on its own, two processes must not be able to believe they own the
