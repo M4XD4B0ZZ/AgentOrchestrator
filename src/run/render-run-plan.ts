@@ -19,6 +19,23 @@
 
 import type { RunPlan, RunPlanConclusion } from './run-plan.js';
 
+/**
+ * The closing contract sentence, printed on every path that reports a plan —
+ * including the CLI's resolution-failure path, which never reaches the
+ * renderer. One constant rather than two literals: the sentence is a promise
+ * about what the command did, and a promise spelled twice can drift.
+ *
+ * It says what the *orchestrator* did, and stops there. It deliberately does
+ * not claim the repository is byte-identical afterwards, because that is not
+ * this code's to promise: observing a worktree runs `git status`, and Git may
+ * refresh that worktree's index as a side effect of being asked. No tracked
+ * content, ref, branch or HEAD moves, and nothing this orchestrator owns is
+ * written — which is the honest, narrower statement.
+ */
+export const READ_ONLY_TRAILER =
+  'Read-only plan. No agent was started, no task state was written, no workspace was\n' +
+  'created or modified. Observing a worktree may let Git refresh its own index.';
+
 /** One static sentence per conclusion. Closed, and pinned by test. */
 export const CONCLUSION_SENTENCES: Readonly<Record<RunPlanConclusion, string>> = Object.freeze({
   PLANNING_FAILED: 'The task source could not be read or normalised. Nothing can be planned.',
@@ -50,8 +67,9 @@ function codes(values: readonly string[]): string {
 
 /**
  * Renders one plan for the console. The trailing note is part of the contract:
- * a plan is read-only, and the report says so every time rather than assuming
- * the operator remembers.
+ * a plan executes nothing, and the report says so every time rather than
+ * assuming the operator remembers. See {@link READ_ONLY_TRAILER} for the exact
+ * scope of that promise.
  */
 export function renderRunPlan(plan: RunPlan, repository: { id: string; root: string }): string {
   const lines: string[] = [
@@ -111,7 +129,7 @@ export function renderRunPlan(plan: RunPlan, repository: { id: string; root: str
     `Conclusion   : ${plan.conclusion}`,
     `  ${CONCLUSION_SENTENCES[plan.conclusion]}`,
     '',
-    'Read-only plan. No agent was started, no state was written, no workspace was touched.',
+    READ_ONLY_TRAILER,
     '',
   );
 

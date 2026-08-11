@@ -162,9 +162,16 @@ Read-only in this build: the command **plans**; it does not execute. It
 - concludes with one code from a closed vocabulary
   (`src/run/run-plan.ts`) and exits accordingly.
 
-It starts no agent, writes no state, prepares no workspace and performs no
-login or auth preflight. A plan leaves the repository byte-identical —
-`tests/run-plan.test.ts` asserts this on the durable state file itself.
+It starts no agent, writes no task state, prepares no workspace and performs
+no login or auth preflight. `tests/run-plan.test.ts` asserts that on the
+durable state file's bytes and on the absence of a runtime directory.
+
+The claim stops exactly there, on purpose. Observing a worktree runs `git
+status` inside it, and Git may refresh that worktree's own index while
+answering — so "the repository is byte-identical afterwards" is not something
+this command can promise, and it does not. What it does promise is that no
+ref, branch or tracked file moves, and that nothing the orchestrator owns is
+written.
 
 ### `run` exit codes
 

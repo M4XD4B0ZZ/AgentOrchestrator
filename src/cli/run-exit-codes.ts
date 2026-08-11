@@ -29,7 +29,7 @@
  */
 
 import type { RunOutcome } from '../run/run-driver.js';
-import { RUN_PLAN_CONCLUSIONS, type RunPlanConclusion } from '../run/run-plan.js';
+import type { RunPlanConclusion } from '../run/run-plan.js';
 
 export const EXIT_RUN_OK = 0;
 export const EXIT_RUN_UNEXPECTED = 1;
@@ -62,9 +62,6 @@ const PLAN_EXIT_CODES: Readonly<Record<RunPlanConclusion, number>> = Object.free
 export function exitCodeForPlan(conclusion: RunPlanConclusion): number {
   return PLAN_EXIT_CODES[conclusion];
 }
-
-/** Every plan conclusion, re-exported so the exit-code test can be total. */
-export const PLAN_CONCLUSIONS_FOR_EXIT = RUN_PLAN_CONCLUSIONS;
 
 /**
  * Exit code for every run outcome. Total; pinned by test. Not consumed by any

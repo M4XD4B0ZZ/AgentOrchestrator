@@ -17,8 +17,18 @@ import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
-import { planRun, RUN_PLAN_CONCLUSIONS, type RunPlan } from '../src/run/run-plan.js';
-import { renderRunPlan, CONCLUSION_SENTENCES } from '../src/run/render-run-plan.js';
+import {
+  planRun,
+  RUN_PLAN_CONCLUSIONS,
+  type RunPlan,
+  type RunPlanConclusion,
+} from '../src/run/run-plan.js';
+import type { GitRunner } from '../src/worktree/git-command.js';
+import {
+  renderRunPlan,
+  CONCLUSION_SENTENCES,
+  READ_ONLY_TRAILER,
+} from '../src/run/render-run-plan.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import {
@@ -41,6 +51,25 @@ afterAll(() => {
 });
 
 const deps = { git: runGitCommand, now: tickingClock() };
+
+/**
+ * Every conclusion this suite actually produced.
+ *
+ * Recorded rather than asserted from the declared list, because the point of
+ * the coverage check at the bottom of this file is to know which members are
+ * exercised end to end — a question no assertion about the declared list can
+ * answer.
+ */
+const produced = new Set<RunPlanConclusion>();
+
+async function planned(
+  request: Parameters<typeof planRun>[0],
+  dependencies: Parameters<typeof planRun>[1] = deps,
+): Promise<RunPlan> {
+  const result = await planRun(request, dependencies);
+  produced.add(result.conclusion);
+  return result;
+}
 
 function runtimeDirectory(root: string): string {
   return join(root, '.agent-orchestrator', 'runtime');
@@ -65,7 +94,7 @@ describe('planRun — selection-level conclusions', () => {
       'tasks/V2-02.md': taskFile('V2-02', { dependsOn: ['V2-01'] }),
     });
 
-    const plan = await planRun({ repository, taskId: null }, deps);
+    const plan = await planned({ repository, taskId: null }, deps);
 
     expect(plan.conclusion).toBe('TASK_NOT_STARTED');
     expect(plan.target).toEqual({
@@ -87,11 +116,17 @@ describe('planRun — selection-level conclusions', () => {
       'tasks/V2-01.md': taskFile('V2-01', { status: 'DONE' }),
     });
 
-    const plan = await planRun({ repository, taskId: null }, deps);
+    const plan = await planned({ repository, taskId: null }, deps);
 
     expect(plan.conclusion).toBe('ALL_TASKS_COMPLETE');
     expect(plan.target).toBeNull();
     expect(plan.reconciliation).toBeNull();
+    // `reasonCodes` carries codes, never task ids. The selector fills its own
+    // with every ineligible id — for an all-DONE plan, the whole repository —
+    // and passing those through would make the most nominal conclusion there
+    // is arrive with a list of task names as its "reasons" (V2-01 review).
+    expect(plan.reasonCodes).toEqual([]);
+    expect(plan.selection.reasonCodes).toEqual(['V2-01']);
   });
 
   it('reports PLANNING_FAILED when the task source is missing', async () => {
@@ -100,7 +135,7 @@ describe('planRun — selection-level conclusions', () => {
       'README.md': 'no tasks here\n',
     });
 
-    const plan = await planRun({ repository, taskId: null }, deps);
+    const plan = await planned({ repository, taskId: null }, deps);
 
     expect(plan.conclusion).toBe('PLANNING_FAILED');
     expect(plan.selection.code).toBe('PLANNING_FAILED');
@@ -116,7 +151,7 @@ describe('planRun — named-task conclusions', () => {
       'tasks/V2-02.md': taskFile('V2-02'),
     });
 
-    const plan = await planRun({ repository, taskId: 'V2-02' }, deps);
+    const plan = await planned({ repository, taskId: 'V2-02' }, deps);
 
     expect(plan.conclusion).toBe('TASK_NOT_STARTED');
     expect(plan.target?.taskId).toBe('V2-02');
@@ -130,7 +165,7 @@ describe('planRun — named-task conclusions', () => {
       'tasks/V2-01.md': taskFile('V2-01'),
     });
 
-    const plan = await planRun({ repository, taskId: '../escape' }, deps);
+    const plan = await planned({ repository, taskId: '../escape' }, deps);
 
     expect(plan.conclusion).toBe('TASK_ID_INVALID');
     expect(plan.target).toBeNull();
@@ -143,7 +178,7 @@ describe('planRun — named-task conclusions', () => {
       'tasks/V2-01.md': taskFile('V2-01'),
     });
 
-    const plan = await planRun({ repository, taskId: 'V2-99' }, deps);
+    const plan = await planned({ repository, taskId: 'V2-99' }, deps);
 
     expect(plan.conclusion).toBe('TASK_UNKNOWN');
     expect(plan.target).toBeNull();
@@ -155,7 +190,7 @@ describe('planRun — named-task conclusions', () => {
       'tasks/V2-02.md': taskFile('V2-02'),
     });
 
-    const plan = await planRun({ repository, taskId: 'V2-01' }, deps);
+    const plan = await planned({ repository, taskId: 'V2-01' }, deps);
 
     expect(plan.conclusion).toBe('TASK_INELIGIBLE');
     expect(plan.reasonCodes).toEqual(['ALREADY_DONE']);
@@ -168,7 +203,7 @@ describe('planRun — named-task conclusions', () => {
       'tasks/V2-02.md': taskFile('V2-02', { dependsOn: ['V2-01'] }),
     });
 
-    const plan = await planRun({ repository, taskId: 'V2-02' }, deps);
+    const plan = await planned({ repository, taskId: 'V2-02' }, deps);
 
     expect(plan.conclusion).toBe('TASK_INELIGIBLE');
     expect(plan.reasonCodes).toEqual(['BLOCKED_BY_DEPENDENCIES']);
@@ -183,7 +218,7 @@ describe('planRun — durable-state conclusions', () => {
     const stateFile = seeded.path;
     const bytesBefore = readFileSync(stateFile);
 
-    const plan = await planRun(
+    const plan = await planned(
       { repository: started.repository, taskId: 'V2-01' },
       deps,
     );
@@ -206,7 +241,7 @@ describe('planRun — durable-state conclusions', () => {
       reviewRound: 1,
     });
 
-    const plan = await planRun(
+    const plan = await planned(
       { repository: started.repository, taskId: 'V2-01' },
       deps,
     );
@@ -225,7 +260,7 @@ describe('planRun — durable-state conclusions', () => {
       worktreeCleanAtCheckpoint: true,
     });
 
-    const plan = await planRun(
+    const plan = await planned(
       { repository: started.repository, taskId: 'V2-01' },
       deps,
     );
@@ -244,7 +279,7 @@ describe('planRun — durable-state conclusions', () => {
     seedState(started);
     removeTree(started.workspace.worktreePath);
 
-    const plan = await planRun(
+    const plan = await planned(
       { repository: started.repository, taskId: 'V2-01' },
       deps,
     );
@@ -252,6 +287,37 @@ describe('planRun — durable-state conclusions', () => {
     expect(plan.conclusion).toBe('STATE_DIVERGED');
     expect(plan.reasonCodes.length).toBeGreaterThan(0);
     expect(plan.resume).toBeNull();
+  });
+
+  it('reports an aborted task as TASK_ABORTED, before judging the world', async () => {
+    const started = await startTask({ taskId: 'V2-01' });
+    seedState(started, { state: 'ABORTED' });
+    // Even with the worktree gone — a terminal task is not a resume question.
+    removeTree(started.workspace.worktreePath);
+
+    const plan = await planned({ repository: started.repository, taskId: 'V2-01' });
+
+    expect(plan.conclusion).toBe('TASK_ABORTED');
+    expect(plan.state).toBe('ABORTED');
+    expect(plan.resume).toBeNull();
+  });
+
+  it('reports an unreadable repository as STATE_UNOBSERVABLE', async () => {
+    const started = await startTask({ taskId: 'V2-01' });
+    seedState(started);
+    // A Git that cannot answer at all: every probe is UNAVAILABLE, so the
+    // world is unobservable rather than merely different.
+    const blindGit: GitRunner = async () =>
+      Object.freeze({ outcome: 'UNAVAILABLE' as const, stdout: '', exitCode: null });
+
+    const plan = await planned(
+      { repository: started.repository, taskId: 'V2-01' },
+      { git: blindGit, now: deps.now },
+    );
+
+    expect(plan.conclusion).toBe('STATE_UNOBSERVABLE');
+    expect(plan.resume).toBeNull();
+    expect(plan.reasonCodes.length).toBeGreaterThan(0);
   });
 
   it('reports an unusable record as STATE_UNUSABLE and repairs nothing', async () => {
@@ -262,7 +328,7 @@ describe('planRun — durable-state conclusions', () => {
     writeFileSync(stateFile, 'not json at all\n', 'utf8');
     const bytesBefore = readFileSync(stateFile);
 
-    const plan = await planRun(
+    const plan = await planned(
       { repository: started.repository, taskId: 'V2-01' },
       deps,
     );
@@ -281,7 +347,7 @@ describe('renderRunPlan', () => {
       'tasks/V2-02.md': taskFile('V2-02', { dependsOn: ['V2-01'] }),
     });
 
-    const plan = await planRun({ repository, taskId: null }, deps);
+    const plan = await planned({ repository, taskId: null }, deps);
     const text = renderRunPlan(plan, repository);
 
     expect(text).toContain('TASK_NOT_STARTED');
@@ -298,9 +364,16 @@ describe('renderRunPlan', () => {
     }
   });
 
+  it('closes with the one shared contract sentence, which claims only what is true', () => {
+    expect(READ_ONLY_TRAILER).toContain('no task state was written');
+    // The narrower, honest claim: Git's own index refresh is not denied.
+    expect(READ_ONLY_TRAILER).toContain('refresh its own index');
+    expect(READ_ONLY_TRAILER).not.toContain('byte-identical');
+  });
+
   it('renders a planning failure with only the closed code and static detail', async () => {
     const { repository } = await fixtureRepository({ 'README.md': 'no tasks\n' });
-    const plan = await planRun({ repository, taskId: null }, deps);
+    const plan = await planned({ repository, taskId: null }, deps);
     const text = renderRunPlan(plan, repository);
 
     expect(text).toContain('PLANNING_FAILED');
@@ -308,12 +381,25 @@ describe('renderRunPlan', () => {
   });
 });
 
-describe('planRun — the conclusion vocabulary is closed', () => {
-  it('every conclusion the suite produced is a declared member', () => {
-    // A compile-time truth restated at runtime so a widened union cannot
-    // bypass the declared list.
-    const declared: readonly string[] = RUN_PLAN_CONCLUSIONS;
-    const witness: RunPlan['conclusion'][] = [...RUN_PLAN_CONCLUSIONS];
-    expect(new Set(witness).size).toBe(declared.length);
+/**
+ * Runs last, and reads the record every case above wrote through `planned`.
+ *
+ * This replaces an earlier check that compared the declared list with itself
+ * and therefore asserted only that it had no duplicates, while its name
+ * claimed coverage it never measured (V2-01 review). What follows measures the
+ * coverage, and states the exception explicitly rather than leaving a silent
+ * hole: a member nobody can produce is worth naming in one place.
+ */
+describe('planRun — conclusion coverage', () => {
+  it('exercises every conclusion except the one that is unreachable by construction', () => {
+    const uncovered = RUN_PLAN_CONCLUSIONS.filter((conclusion) => !produced.has(conclusion));
+
+    // `NO_ELIGIBLE_TASK` is a fail-closed floor, not a reachable state:
+    // `select-task.ts` documents that in an acyclic graph whose dependencies
+    // all resolve — the only kind `normalizeTaskGraph` returns — the
+    // topologically first OPEN task can have no OPEN dependency, so an
+    // eligible task always exists. No fixture can produce it without first
+    // breaking the graph normaliser, which is that module's own test's job.
+    expect(uncovered).toEqual(['NO_ELIGIBLE_TASK']);
   });
 });

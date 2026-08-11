@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
 import { resolveRepository } from '../repo/resolve-repository.js';
-import { renderRunPlan } from '../run/render-run-plan.js';
+import { renderRunPlan, READ_ONLY_TRAILER } from '../run/render-run-plan.js';
 import { planRun } from '../run/run-plan.js';
 import { runGitCommand } from '../worktree/git-command.js';
 import {
@@ -53,7 +53,7 @@ export function registerRunCommand(program: Command): void {
           process.stdout.write(
             `\nRepository   : could not be resolved\n` +
               `Failure      : ${resolution.code} — ${resolution.detail}\n\n` +
-              'Read-only plan. No agent was started, no state was written, no workspace was touched.\n\n',
+              `${READ_ONLY_TRAILER}\n\n`,
           );
           process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
           return;

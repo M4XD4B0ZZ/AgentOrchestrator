@@ -20,7 +20,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { GitCommandResult, GitRunner } from '../src/worktree/git-command.js';
 import { saveTaskState } from '../src/state/state-store.js';
-import { reconcileTask, RECONCILIATION_OUTCOMES } from '../src/state/reconcile-task.js';
+import {
+  reconcileTask,
+  stopSpellingFor,
+  RECONCILIATION_OUTCOMES,
+} from '../src/state/reconcile-task.js';
 import { observeRuntime } from '../src/state/observe-runtime.js';
 import {
   DIVERGENCE_FINDING_CODES,
@@ -1414,5 +1418,45 @@ describe('auth re-entry preserves work history', () => {
     expect(
       isVirginPreWorkState(parseTaskState(validCreatedState({ state: 'IMPLEMENTING' }))),
     ).toBe(false);
+  });
+});
+
+/**
+ * The fold every consumer applies to a non-continuable outcome.
+ *
+ * It lives beside the vocabulary because more than one caller needs it —
+ * `run-driver.ts` turns it into a `RunOutcome`, `run-plan.ts` into a
+ * `RunPlanConclusion` — and both spell the three results identically. Before
+ * V2-01 each restated the fold privately, so the two could disagree about what
+ * "the wrong repository" is called while both suites stayed green.
+ */
+describe('the non-continuable fold', () => {
+  it('is total over the outcome vocabulary', () => {
+    for (const outcome of RECONCILIATION_OUTCOMES) {
+      const spelling = stopSpellingFor(outcome);
+      expect(spelling === null || typeof spelling === 'string').toBe(true);
+    }
+  });
+
+  it('answers null exactly for the two outcomes the caller must interpret', () => {
+    const deferred = RECONCILIATION_OUTCOMES.filter(
+      (outcome) => stopSpellingFor(outcome) === null,
+    );
+    expect([...deferred].sort()).toEqual(['NO_PERSISTED_STATE', 'RECONCILED']);
+  });
+
+  it('folds every well-formed-but-not-ours record into one spelling', () => {
+    for (const outcome of [
+      'STATE_INVALID',
+      'STATE_REPOSITORY_MISMATCH',
+      'STATE_TASK_MISMATCH',
+    ] as const) {
+      expect(stopSpellingFor(outcome)).toBe('STATE_UNUSABLE');
+    }
+  });
+
+  it('keeps a drifted record and an unreadable one apart', () => {
+    expect(stopSpellingFor('STATE_DIVERGED')).toBe('STATE_DIVERGED');
+    expect(stopSpellingFor('STATE_UNOBSERVABLE')).toBe('STATE_UNOBSERVABLE');
   });
 });

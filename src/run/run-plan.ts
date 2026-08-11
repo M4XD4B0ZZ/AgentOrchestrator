@@ -10,13 +10,21 @@
  * re-deriving it from four vocabularies — the same argument, one layer up, that
  * `reconcile-task.ts` makes for its own composed outcome.
  *
- * ── Read-only, and provably so ─────────────────────────────────────────────
+ * ── Read-only, and exactly how far that goes ───────────────────────────────
  *
- * Nothing here writes a state, prepares a workspace, spawns an agent or runs a
- * verification command. The only processes started are the read-only Git
- * queries `observeRuntime` needs, through the injected {@link GitRunner}. A
- * plan of a repository leaves it byte-identical — the tests assert this on the
- * durable state file and on the workspace directory, not just on this comment.
+ * Nothing here writes a task state, prepares a workspace, spawns an agent or
+ * runs a verification command. The only processes started are the read-only
+ * Git queries `observeRuntime` needs, through the injected {@link GitRunner}.
+ * The tests assert that on the durable state file's bytes and on the absence
+ * of a runtime directory, not just on this comment.
+ *
+ * The honest statement is not "the repository is byte-identical afterwards",
+ * and this module does not make that claim. `observeRuntime` asks a worktree
+ * for `git status`, and Git may refresh that worktree's own index in the
+ * course of answering. That is Git's bookkeeping about content it already
+ * tracked: no ref moves, no branch changes, no tracked file changes, and
+ * nothing the orchestrator owns is written. Claiming otherwise would be a
+ * promise about a tool this module only asks questions of.
  *
  * ── Evidence, never assumed ────────────────────────────────────────────────
  *
@@ -37,7 +45,11 @@ import { isTerminalState, isBlockingState, type TaskStateName } from '../core/st
 import { isValidTaskId } from '../plan/task-id.js';
 import type { TaskEligibility } from '../plan/select-task.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
-import { reconcileTask, type TaskReconciliation } from '../state/reconcile-task.js';
+import {
+  reconcileTask,
+  stopSpellingFor,
+  type TaskReconciliation,
+} from '../state/reconcile-task.js';
 import { classifyResume, type ResumeDecision } from '../state/resume-decision.js';
 import type { GitRunner } from '../worktree/git-command.js';
 import { selectRunTask, type RunSelection } from './run-driver.js';
@@ -64,8 +76,16 @@ export const RUN_PLAN_CONCLUSIONS = [
   /** The named id is well-formed but names no task in the plan. */
   'TASK_UNKNOWN',
   /**
-   * The named task exists but may not run: it is `DONE`, or a dependency is
-   * not. `target.eligibility` carries the reason and the unsatisfied ids.
+   * The named task exists, has **no durable state**, and may not be started:
+   * it is `DONE`, or a dependency is not. `target.eligibility` carries the
+   * reason and the unsatisfied ids.
+   *
+   * The no-durable-state precondition is part of the meaning, not an accident
+   * of the implementation. A task that already has an in-flight record is
+   * reported from that record — `RECONCILED_IN_FLIGHT`, `TASK_PARKED` and the
+   * rest — because a run driven from durable state does not re-consult the
+   * plan file's `status` either, and a plan that answered differently from the
+   * run it describes would be worse than one that answered incompletely.
    */
   'TASK_INELIGIBLE',
   /* ── task in hand ─────────────────────────────────────────────────────── */
@@ -136,7 +156,19 @@ export interface RunPlan {
   readonly resume: ResumeDecision | null;
   /** The durable state's name, or `null` when none was loaded. */
   readonly state: TaskStateName | null;
-  /** Stable codes explaining the conclusion. Empty when nominal. */
+  /**
+   * Stable **codes** explaining the conclusion, and only codes: reconciliation
+   * findings, automatic-resume reason codes, an ineligibility reason or a
+   * planning failure code. Empty when there is nothing to explain.
+   *
+   * Deliberately *not* the ineligible task ids. `selectRunTask` fills its own
+   * `reasonCodes` with them — a useful convention there, and the renderer
+   * prints them from `selection` — but ids are not codes, and passing them
+   * through here would put a list of task names under a field a caller reads
+   * as a vocabulary. It would also make the most nominal conclusion there is,
+   * `ALL_TASKS_COMPLETE`, arrive carrying every task in the repository as a
+   * "reason".
+   */
   readonly reasonCodes: readonly string[];
 }
 
@@ -156,25 +188,18 @@ function plan(
   });
 }
 
-/** Mirrors the run driver's mapping for a non-`RECONCILED` outcome. */
+/**
+ * The non-continuable spellings, taken from the fold `reconcile-task.ts` owns
+ * rather than restated here — so a plan and a run can never disagree about
+ * what a broken or foreign record is called.
+ *
+ * The two outcomes that fold leaves to its caller are both already answered
+ * before this is asked (`NO_PERSISTED_STATE` above, `RECONCILED` below), so
+ * reaching it at all means the outcome set widened underneath us. That fails
+ * closed to the spelling that stops.
+ */
 function conclusionForReconciliation(reconciliation: TaskReconciliation): RunPlanConclusion {
-  switch (reconciliation.outcome) {
-    case 'STATE_DIVERGED':
-      return 'STATE_DIVERGED';
-    case 'STATE_UNOBSERVABLE':
-      return 'STATE_UNOBSERVABLE';
-    // A well-formed record of somewhere else is not a broken document, but it
-    // is equally unusable here, and neither may be repaired.
-    case 'STATE_INVALID':
-    case 'STATE_REPOSITORY_MISMATCH':
-    case 'STATE_TASK_MISMATCH':
-      return 'STATE_UNUSABLE';
-    case 'NO_PERSISTED_STATE':
-    case 'RECONCILED':
-      // Both handled before this function is asked. Present so the switch
-      // stays total against a widened outcome set, and fail-closed.
-      return 'STATE_UNUSABLE';
-  }
+  return stopSpellingFor(reconciliation.outcome) ?? 'STATE_UNUSABLE';
 }
 
 /**
@@ -219,7 +244,11 @@ export async function planRun(
         conclusion:
           selection.code === 'TASK_SELECTED' ? 'NO_ELIGIBLE_TASK' : selection.code,
         selection,
-        reasonCodes: selection.reasonCodes,
+        // Only the planning failure contributes a *code*; the other two
+        // selection codes carry ineligible task ids, which belong to the
+        // selection this plan already reports in full, not to this field.
+        reasonCodes:
+          selection.code === 'PLANNING_FAILED' ? selection.reasonCodes : Object.freeze([]),
       });
     }
     const selectedId = selection.task.id;
