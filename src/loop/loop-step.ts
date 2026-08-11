@@ -64,8 +64,10 @@ import { codexReviewResumePoint, runCodexReviewer } from '../agent/codex-reviewe
 import { interruptedResumePoint, type AgentBlockEvidence } from '../agent/agent-outcome.js';
 import type { AgentRunner } from '../agent/agent-command.js';
 import { recordAgentInterruption } from '../agent/record-interruption.js';
+import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { absolutePathsEqual, isComparablePath } from '../core/path-identity.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
+import type { TaskBriefResult } from '../plan/task-brief.js';
 import type { TaskState } from '../core/task-state.js';
 import type { TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
@@ -81,6 +83,7 @@ import {
   buildResumedRemediationBrief,
   buildReviewPayload,
 } from './findings.js';
+import { buildImplementPayload } from './implement-payload.js';
 
 /** What one loop step did. A closed vocabulary; never a message. */
 export const LOOP_STEP_OUTCOMES = [
@@ -182,6 +185,19 @@ export interface LoopDependencies extends AdvanceOptions {
   readonly verification: ResolvedVerificationPolicy;
   /** What the task is, in the reviewer's and writer's own words. */
   readonly taskBrief: string;
+  /**
+   * The repository's own account of the task, read by `task-brief.ts`.
+   *
+   * Supplied by the caller rather than read here, for the reason this module
+   * supplies every other input the same way: a loop step performs at most one
+   * durable write and no repository I/O of its own.
+   *
+   * Optional because most steps do not need it — only the setup hops and the
+   * implement pass do. Where they need it and it is absent, they park the task
+   * for a human rather than proceeding: a writing agent briefed with nothing
+   * is the one failure mode this whole layer exists to prevent.
+   */
+  readonly brief?: TaskBriefResult;
   /** Execution seams. Default to the real ones; tests pass their own. */
   readonly verify?: VerificationRunner;
   readonly agent?: AgentRunner;
@@ -605,6 +621,243 @@ export async function runRemediateStep(
   return saved(save, 'VERIFYING', 'ADVANCED');
 }
 
+/* ─────────────────────────── the setup hops ─────────────────────────────── */
+
+/**
+ * `WORKTREE_READY → CONTEXT_LOADING`.
+ *
+ * The one step in this module that starts no process and reads no repository.
+ * That is not an oversight: the work it would otherwise do has already been
+ * done and re-proven. `startTask` created and verified the workspace; the run
+ * driver reconciled the record against Git before this step was reached, and
+ * `authorised()` below re-checks that this caller's authority is for *this*
+ * state. There is nothing left for the step to establish.
+ *
+ * It exists because the transition table declares the hop, and a durable move
+ * is how the task stops being "prepared" and starts being "under way". Skipping
+ * it and writing `IMPLEMENTING` straight from `WORKTREE_READY` is an illegal
+ * transition that `advanceTaskState` would refuse — correctly.
+ */
+export async function runWorktreeReadyStep(
+  current: StateLoadSuccess,
+  deps: LoopDependencies,
+): Promise<LoopStepResult> {
+  const state = current.state;
+  if (state.state !== 'WORKTREE_READY') return NOT_APPLICABLE;
+
+  const { now, authorisedWorktreePath, agent, remediationPayload, taskBrief, brief, verification, verify, observe, ...advance } = deps;
+  void agent;
+  void remediationPayload;
+  void taskBrief;
+  void brief;
+  void verification;
+  void verify;
+  void observe;
+
+  if (!authorised(state, authorisedWorktreePath)) return EXECUTION_UNAUTHORISED;
+
+  const save = advanceTaskState(
+    current,
+    { ...state, state: 'CONTEXT_LOADING', stateEnteredAt: now },
+    advance,
+  );
+  return saved(save, 'CONTEXT_LOADING', 'ADVANCED');
+}
+
+/**
+ * `CONTEXT_LOADING → IMPLEMENTING`, or a human.
+ *
+ * This is where the repository's account of the task has to actually exist. A
+ * task file with no prose, a declared context source that is missing, an
+ * unreadable file — each of them means the writing agent would be briefed with
+ * something less than the repository promised, and each is a repository
+ * problem a human fixes rather than something the loop can work around.
+ *
+ * ── Why the checkpoint is withdrawn on the way in ──────────────────────────
+ *
+ * `IMPLEMENTING` is a mutating phase: from the moment it is entered, a writing
+ * agent may be changing the worktree. A state that carried `currentCommit` and
+ * `worktreeCleanAtCheckpoint: true` into it would be claiming a settled tree
+ * for exactly the period in which the tree is expected to move, and the next
+ * reconciliation would read the writer's own work as `CURRENT_COMMIT_MOVED` +
+ * `WORKTREE_DIRTY` → `DIVERGED` → `RESUME_STATE_DIVERGED`, which nothing
+ * resumes. `withdrawnCheckpointFor` states that once, and this is one of its
+ * callers rather than a second copy of the rule.
+ */
+export async function runContextLoadingStep(
+  current: StateLoadSuccess,
+  deps: LoopDependencies,
+): Promise<LoopStepResult> {
+  const state = current.state;
+  if (state.state !== 'CONTEXT_LOADING') return NOT_APPLICABLE;
+
+  const { now, authorisedWorktreePath, brief, agent, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  void agent;
+  void remediationPayload;
+  void taskBrief;
+  void verification;
+  void verify;
+  void observe;
+
+  if (!authorised(state, authorisedWorktreePath)) return EXECUTION_UNAUTHORISED;
+
+  const round = currentRound(state);
+
+  // Two different failures, one response.
+  //
+  // `!brief.ok` is the task file itself: absent, unreadable, no frontmatter,
+  // no prose. `!contextComplete` is a declared context source that could not
+  // be opened — missing, unreadable, or a link out of the repository.
+  //
+  // The second is checked here because `readTaskBrief` reports it on a
+  // *successful* brief, as a per-source status, and a step that only asked
+  // `brief.ok` would advance with it. That is not a small gap: the payload
+  // hands the agent those paths to open, so an unopenable one becomes an
+  // instruction to read a file that is not there — and an `UNSAFE` one is a
+  // path the reader already refused to follow.
+  //
+  // The repository declared those sources as the canonical context for its
+  // work. If one of them is gone, the repository's own contract is broken, and
+  // that is a thing a human fixes rather than something the loop routes around.
+  const contextIncomplete = brief !== undefined && brief.ok && !brief.brief.contextComplete;
+
+  if (brief === undefined || !brief.ok || contextIncomplete) {
+    const save = advanceTaskState(
+      current,
+      {
+        ...state,
+        state: 'HUMAN_DECISION_REQUIRED',
+        stateEnteredAt: now,
+        // The phase the task was heading for. A human who fixes the task file
+        // resumes into the implement pass, not back into loading.
+        resumeFrom: { phase: 'IMPLEMENT', round },
+        reportedResetAt: null,
+      },
+      advance,
+    );
+    return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
+  }
+
+  const save = advanceTaskState(
+    current,
+    {
+      ...state,
+      state: 'IMPLEMENTING',
+      stateEnteredAt: now,
+      ...RESUME_EVIDENCE_SPENT,
+      ...withdrawnCheckpointFor('IMPLEMENTING'),
+    },
+    advance,
+  );
+  return saved(save, 'IMPLEMENTING', 'ADVANCED');
+}
+
+/* ───────────────────────────── implement ────────────────────────────────── */
+
+/**
+ * `IMPLEMENTING → VERIFYING`: the writing agent's first pass.
+ *
+ * The mirror of {@link runRemediateStep}, and deliberately so — the two differ
+ * in the cause they are given (a task, versus a review's findings) and in
+ * nothing else. Both run the same writer in the same authorised directory,
+ * both record an interruption the same way, and both leave the checkpoint
+ * withdrawn for verification to settle.
+ *
+ * ── A completed writer is not a completed task ─────────────────────────────
+ *
+ * `runClaudeWriter` returning `ok` means an argument-safe process ran to its
+ * own end, exited 0, and printed a positively recognised `COMPLETED` envelope.
+ * It carries **no evidence that any file changed**. So the only destination is
+ * `VERIFYING`: the transition table offers no other forward edge, and the
+ * repository's own commands are what look next. Nothing here observes the
+ * worktree, and nothing here may claim the task is finished — `READY_FOR_PR`
+ * is reachable only through a real `REVIEWING` pass.
+ *
+ * `reviewRound` is deliberately untouched. It counts *completed reviews*, and
+ * an implement pass that consumed one would silently spend the repository's
+ * review budget on work no reviewer had seen.
+ */
+export async function runImplementStep(
+  current: StateLoadSuccess,
+  deps: LoopDependencies,
+): Promise<LoopStepResult> {
+  const state = current.state;
+  if (state.state !== 'IMPLEMENTING') return NOT_APPLICABLE;
+
+  const { now, authorisedWorktreePath, agent, brief, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  void remediationPayload;
+  void taskBrief;
+  void verification;
+  void verify;
+  void observe;
+
+  if (!authorised(state, authorisedWorktreePath)) return EXECUTION_UNAUTHORISED;
+
+  const round = currentRound(state);
+
+  // Re-checked rather than assumed from the previous step: a restarted driver
+  // enters here directly, and a task whose file was emptied — or whose
+  // declared context vanished — in the meantime must not be handed a prompt
+  // built from nothing. The same conjunction as `CONTEXT_LOADING`, for the
+  // same reasons, because this is a separate entry point into the same work.
+  if (brief === undefined || !brief.ok || !brief.brief.contextComplete) {
+    const save = advanceTaskState(
+      current,
+      {
+        ...state,
+        state: 'HUMAN_DECISION_REQUIRED',
+        stateEnteredAt: now,
+        resumeFrom: { phase: 'IMPLEMENT', round },
+        reportedResetAt: null,
+      },
+      advance,
+    );
+    return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
+  }
+
+  const writer = await runClaudeWriter(
+    {
+      worktreePath: authorisedWorktreePath,
+      phase: 'IMPLEMENT',
+      round,
+      payload: buildImplementPayload(brief.brief, round),
+    },
+    agent === undefined ? {} : { agent },
+  );
+
+  if (!writer.ok) {
+    const fallback: AgentBlockEvidence = {
+      blockedAgent: 'claude',
+      resumeFrom: interruptedResumePoint('IMPLEMENT', round),
+      reportedResetAt: null,
+    };
+    const record = recordAgentInterruption(
+      current,
+      { disposition: writer.disposition, block: writer.block },
+      { now, fallback, ...advance },
+    );
+    if (record.outcome === 'STATE_NOT_RECORDED') {
+      return result({ outcome: 'STATE_NOT_RECORDED', save: record.save });
+    }
+    return result({ outcome: 'BLOCKED', state: record.state, save: record.save });
+  }
+
+  // The writer changed the worktree and nothing here looked at the result, so
+  // the checkpoint facts stay withdrawn. Verification is what looks next.
+  const save = advanceTaskState(
+    current,
+    {
+      ...state,
+      state: 'VERIFYING',
+      stateEnteredAt: now,
+      ...withdrawnCheckpointFor('IMPLEMENTING'),
+      ...RESUME_EVIDENCE_SPENT,
+    },
+    advance,
+  );
+  return saved(save, 'VERIFYING', 'ADVANCED');
+}
+
 /**
  * The states this loop drives.
  *
@@ -618,7 +871,14 @@ export async function runRemediateStep(
  * actual dispatch over every declared state, so the advertised answer and the
  * switch below cannot drift apart.
  */
-export const LOOP_DRIVEN_STATES = ['VERIFYING', 'REVIEWING', 'REMEDIATING'] as const;
+export const LOOP_DRIVEN_STATES = [
+  'WORKTREE_READY',
+  'CONTEXT_LOADING',
+  'IMPLEMENTING',
+  'VERIFYING',
+  'REVIEWING',
+  'REMEDIATING',
+] as const;
 
 const LOOP_DRIVEN_SET: ReadonlySet<string> = new Set<string>(LOOP_DRIVEN_STATES);
 
@@ -639,6 +899,12 @@ export async function runLoopStep(
   deps: LoopDependencies,
 ): Promise<LoopStepResult> {
   switch (current.state.state) {
+    case 'WORKTREE_READY':
+      return runWorktreeReadyStep(current, deps);
+    case 'CONTEXT_LOADING':
+      return runContextLoadingStep(current, deps);
+    case 'IMPLEMENTING':
+      return runImplementStep(current, deps);
     case 'VERIFYING':
       return runVerifyStep(current, deps);
     case 'REVIEWING':

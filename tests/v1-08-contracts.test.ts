@@ -120,12 +120,25 @@ describe('the states the loop advertises are the states it dispatches', () => {
     },
   );
 
-  it('advertises exactly the three work-loop phases that execute something', () => {
-    expect([...LOOP_DRIVEN_STATES].sort()).toEqual(['REMEDIATING', 'REVIEWING', 'VERIFYING']);
+  it('advertises exactly the phases it dispatches, setup hops included', () => {
+    // V2-04 added the two setup hops and the implement pass. `IMPLEMENTING` in
+    // particular used to be listed here as *not* driven, which was the whole
+    // reason the driver refused an `IMPLEMENT` resume.
+    expect([...LOOP_DRIVEN_STATES].sort()).toEqual([
+      'CONTEXT_LOADING',
+      'IMPLEMENTING',
+      'REMEDIATING',
+      'REVIEWING',
+      'VERIFYING',
+      'WORKTREE_READY',
+    ]);
     // `BLOCKED_VERIFY` is deliberately outside it: leaving that state means
     // handing a failure to the writing agent, which is a decision.
     expect(isLoopDrivenState('BLOCKED_VERIFY')).toBe(false);
-    expect(isLoopDrivenState('IMPLEMENTING')).toBe(false);
+    // The transient setup phases stay outside it too. They are never persisted
+    // (see `startTask`), so nothing can be dispatched from one.
+    expect(isLoopDrivenState('CREATED')).toBe(false);
+    expect(isLoopDrivenState('GIT_PREFLIGHT')).toBe(false);
   });
 });
 

@@ -85,6 +85,7 @@ import {
 } from '../loop/loop-step.js';
 import { planNextTask, type TaskPlanningResult } from '../plan/plan-next-task.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
+import { readTaskBrief } from '../plan/task-brief.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import { advanceTaskState } from '../state/advance-state.js';
 import {
@@ -160,9 +161,13 @@ export const RUN_OUTCOMES = [
    *
    * Not an error, and deliberately not a start. Creating the first state means
    * recording a `worktreePath`, and this driver does not prepare workspaces;
-   * writing one anyway would durably assert a directory nobody created. The
-   * setup chain and the implement step that would move a fresh task belong to a
-   * later slice.
+   * writing one anyway would durably assert a directory nobody created.
+   *
+   * Starting a task is `startTask`'s job (V2-03), and since V2-04 this driver
+   * can carry one the whole way from the `WORKTREE_READY` it produces. The
+   * division stands: preparing a workspace and driving one are different
+   * authorities, and this outcome is still the correct answer to "drive a task
+   * that has no state".
    */
   'TASK_NOT_STARTED',
 
@@ -532,19 +537,24 @@ export async function runTask(
       //
       // `resumeBlockedTask` spends `resumeFrom`, `reportedResetAt` and
       // `blockedAgent`, and withdraws the checkpoint claims for a mutating
-      // target. If the phase it enters is one `runLoopStep` does not drive —
-      // `IMPLEMENT`, today, because there is no implement step — the next
-      // iteration returns `NOT_APPLICABLE` and the run stops with
-      // `NO_PROGRESS`, having done no work at all. What it leaves behind is
-      // worse than where it started: the task now sits in a phase nothing in
-      // this build advances, and it no longer carries the resume point, the
-      // reset time or the checkpoint facts a later run would need to try again.
-      // A self-clearing pause has become a task that no run can pick up.
+      // target. If the phase it enters were one `runLoopStep` does not drive,
+      // the next iteration would return `NOT_APPLICABLE` and the run would
+      // stop with `NO_PROGRESS`, having done no work at all — leaving the task
+      // in a phase nothing advances, without the resume point, the reset time
+      // or the checkpoint facts a later run would need to try again. A
+      // self-clearing pause would have become a task no run can pick up.
       //
       // RR-B1 closed this on the axis of "this run will refuse to execute".
       // This is the same loss on the axis of "the phase is a dead end", and the
       // same rule applies: every gate that decides whether the run may act
       // comes before the durable write (V1-08).
+      //
+      // **This gate no longer fires from a legal resume point.** `IMPLEMENT`
+      // was the case it existed for, and V2-04 added the implement step, so
+      // all four resume phases now name states the loop drives. It is kept as
+      // a fail-closed floor: `resumePointToState` and `LOOP_DRIVEN_STATES` are
+      // separate vocabularies, and a future phase added to one and not the
+      // other would land here rather than spending a pause on a dead end.
       const target = state.resumeFrom === null ? null : resumePointToState(state.resumeFrom);
       if (target === null || !isLoopDrivenState(target)) {
         return stop({
@@ -594,6 +604,11 @@ export async function runTask(
       authorisedWorktreePath,
       verification: repository.verification,
       taskBrief,
+      // Read fresh each iteration rather than once per run: a task file can be
+      // corrected between steps, and a driver holding a stale answer would
+      // park a task a human has already fixed. Reading it is not authoring it
+      // — the words are the repository's, and this module still writes none.
+      brief: readTaskBrief(repository, taskId),
       ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
       ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
       ...(deps.observe !== undefined ? { observe: deps.observe } : {}),

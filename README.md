@@ -880,14 +880,103 @@ ignore `.agent-orchestrator/runtime/`.
 
 ### Why there is no `start` command yet
 
-`WORKTREE_READY` is not a state the loop drives — `LOOP_DRIVEN_STATES` is
-`VERIFYING`, `REVIEWING`, `REMEDIATING` — and there is no implement step. A
-`start` command today would let an operator create durable state that nothing
-in this build can advance, and `agent-loop run` would report it, correctly and
-uselessly, as reconciled and attended-only forever.
+Not because a started task would be stuck — since V2-04 it is not. `startTask`
+and `runTask` compose: a task created here is driven off `WORKTREE_READY`
+through the setup hops and the implement pass into the verify/review loop, all
+by shipped code. `tests/implement-step.test.ts` does exactly that.
 
-A library with no consumer is a smell; a command that manufactures stuck tasks
-is worse. The consumer arrives with the implement step.
+What is missing is the CLI wiring, and it is missing deliberately. Executing
+requires the operator grant, a real auth preflight and the outcome→exit-code
+mapping to be joined up in one command, and that is its own slice. `agent-loop
+run` stays read-only until then.
+
+## The setup hops and the implement step
+
+Source: `src/loop/loop-step.ts` (`runWorktreeReadyStep`,
+`runContextLoadingStep`, `runImplementStep`) and
+`src/loop/implement-payload.ts`.
+
+`startTask` stops at `WORKTREE_READY`. These three steps are what move a task
+from there into the work loop, and they are ordinary loop steps: dispatched on
+the durable state, at most one durable write each, refusing without an
+authorised worktree.
+
+**`WORKTREE_READY → CONTEXT_LOADING`** starts no process and reads no
+repository. That is not an oversight — `startTask` created and verified the
+workspace, the driver reconciled the record against Git before the step ran,
+and the step re-checks execution authority. There is nothing left to establish.
+It exists because the transition table declares the hop, and writing
+`IMPLEMENTING` straight from `WORKTREE_READY` is an illegal transition
+`advanceTaskState` would refuse.
+
+**`CONTEXT_LOADING → IMPLEMENTING`** is where the repository's account of the
+task has to actually exist. Two different failures get one response, and both
+are checked:
+
+- the **task file** itself is absent, unreadable, has no frontmatter or no
+  prose — `readTaskBrief` returns `ok: false`;
+- a **declared context source** could not be opened: missing, unreadable, or a
+  link out of the repository. This one arrives on a *successful* brief, as a
+  per-source status plus `contextComplete: false`, so a step that only asked
+  `brief.ok` would advance straight past it. That was the shape of a real
+  defect in this slice: the gate was documented here and in the step's own
+  header, and implemented in neither.
+
+Either parks the task at `HUMAN_DECISION_REQUIRED` with `resumeFrom` naming
+`IMPLEMENT`, so a human who fixes the repository resumes into the pass it was
+heading for. The check is repeated in the implement step, because a restarted
+driver enters there directly.
+
+Parking on an incomplete context is the fail-closed reading, and it is the one
+that matches what the payload does: it hands the agent those paths *to open*.
+An unopenable one would be an instruction to read a file that is not there, and
+an `UNSAFE` one a path the reader already refused to follow.
+
+The write into `IMPLEMENTING` **withdraws the checkpoint**
+(`worktreeCleanAtCheckpoint: false`, `currentCommit: null`). `IMPLEMENTING` is
+a mutating phase: a state carrying a clean checkpoint into it would be claiming
+a settled tree for exactly the period the tree is expected to move, and the next
+reconciliation would read the writer's own work as `CURRENT_COMMIT_MOVED` +
+`WORKTREE_DIRTY` → `RESUME_STATE_DIVERGED`, which nothing resumes.
+
+**`IMPLEMENTING → VERIFYING`** runs the Claude writer with `phase: 'IMPLEMENT'`
+in the authorised worktree, and is the mirror of the remediate step — they
+differ in the cause they are given and in nothing else.
+
+A completed writer is **not** a completed task. `runClaudeWriter` returning `ok`
+means an argument-safe process ran to its own end, exited 0 and printed a
+recognised `COMPLETED` envelope; it carries no evidence that any file changed.
+So the only destination is `VERIFYING` — the transition table offers no other
+forward edge — and `reviewRound` is untouched, because it counts *completed
+reviews* and an implement pass that spent one would consume the repository's
+review budget on work no reviewer had seen.
+
+### The implement payload
+
+Deterministic and bounded, like the remediation brief. Context sources appear
+as **paths, not contents**, for the reason [the task brief](#the-task-brief)
+gives: the agent runs inside the worktree and can open them itself.
+
+Both builders are held to one budget by `src/loop/payload-budget.ts`. They were
+briefly bounded separately, by two constants of the same value and two private
+clamps — and the clamps disagreed on their first day: one reserved a character
+for its trailing newline and stayed inside the budget, the other appended its
+marker after slicing and overshot it. A clamped payload is now always at or
+under the ceiling, marker included, because a budget a result can exceed is not
+a budget.
+
+A source that could not be opened is still rendered with its status rather than
+omitted, even though the step above now parks before such a brief can reach
+here. That branch is for any other caller: silently dropping a declared path
+would be the worse failure.
+
+### One consequence worth stating
+
+`RESUME_PHASE_NOT_DRIVEN` is now unreachable through any legal resume point.
+All four resume phases map to states the loop drives, so the driver's gate can
+no longer fire from a valid `resumeFrom`. It is kept as a fail-closed floor
+against a widened vocabulary, not removed — but an `IMPLEMENT` pause now
+genuinely resumes instead of being refused.
 
 ## The task brief
 
@@ -2647,13 +2736,16 @@ rather than enforced, and nothing here opens a pull request, pushes or reads CI.
 
 ## Not implemented yet
 
-`agent-loop run` is read-only: it plans and reports, and nothing in this build
-executes what it reports. Still missing, deliberately, are: fresh `TaskState`
-creation and the `CREATED → … → IMPLEMENTING` setup chain; the implement step
-(`IMPLEMENTING` is not loop-driven); CLI-driven execution of the
-verify/review/remediate loop; context loading (no declared context file is
-ever opened); scope enforcement (`scope.allowedPaths` is declared, not
-enforced); multi-task queue progression; and any product-side PR/CI/merge
-automation. Task selection, workspace preparation, state persistence, the
-agent runners, the loop and the run driver exist as libraries; `run` consults
-the read-only ones and executes none of them.
+`agent-loop run` is read-only: it plans and reports, and **no command in this
+build executes what it reports.** The runtime it reports on can now take a task
+from nothing to `READY_FOR_PR` — `startTask` creates it, the setup hops and the
+implement step move it into the work loop, and the verify/review/remediate loop
+finishes it — but only when called as a library, as
+`tests/implement-step.test.ts` does.
+
+Still missing, deliberately: the CLI execution path that joins the operator
+grant, a real auth preflight and the exit-code contract into one command;
+workspace adoption after a crash (a collision is refused, not adopted); scope
+enforcement (`scope.allowedPaths` is declared, never enforced, so nothing
+constrains where a writing agent writes inside its worktree); multi-task queue
+progression; unattended operation; and any product-side PR/CI/merge automation.
