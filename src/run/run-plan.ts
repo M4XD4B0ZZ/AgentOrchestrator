@@ -43,6 +43,7 @@
 
 import { isTerminalState, isBlockingState, type TaskStateName } from '../core/states.js';
 import { isValidTaskId } from '../plan/task-id.js';
+import { readTaskBrief, type TaskBriefResult } from '../plan/task-brief.js';
 import type { TaskEligibility } from '../plan/select-task.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import {
@@ -154,6 +155,19 @@ export interface RunPlan {
   readonly reconciliation: TaskReconciliation | null;
   /** The continuation decision, or `null` when it was never reached. */
   readonly resume: ResumeDecision | null;
+  /**
+   * Whether the target task's brief could be assembled, or `null` when no task
+   * was in hand to ask about.
+   *
+   * Reported rather than acted on. A brief is what the writing agent would be
+   * handed, and nothing in this build hands anything to an agent — but an
+   * operator who has onboarded a repository needs to learn that a task carries
+   * no prose, or that a declared context source is missing, *before* an
+   * execution mode exists to discover it the hard way. It is deliberately not
+   * a conclusion: a plan reports what a run would do, and today no run is
+   * refused for want of a brief.
+   */
+  readonly brief: TaskBriefResult | null;
   /** The durable state's name, or `null` when none was loaded. */
   readonly state: TaskStateName | null;
   /**
@@ -182,6 +196,7 @@ function plan(
     target: null,
     reconciliation: null,
     resume: null,
+    brief: null,
     state: null,
     reasonCodes: Object.freeze([]),
     ...from,
@@ -264,7 +279,15 @@ export async function planRun(
     });
   }
 
-  // --- 2. The record, and the world it claims to describe ------------------
+  // --- 2. What would the writing agent be told about this task? ------------
+  // Read once the target is known and reported unconditionally from here on,
+  // including on the paths that stop: an operator whose task is parked or
+  // diverged still benefits from learning that its brief is unreadable, and
+  // reporting it only on the healthy path would hide it exactly when the
+  // repository is already in trouble.
+  const brief = readTaskBrief(repository, target.taskId);
+
+  // --- 3. The record, and the world it claims to describe ------------------
   const reconciliation = await reconcileTask(deps.git, {
     repository,
     taskId: target.taskId,
@@ -280,6 +303,7 @@ export async function planRun(
       target,
       selection,
       reconciliation,
+      brief,
       reasonCodes:
         ineligible && target.eligibility !== null && target.eligibility.reason !== null
           ? Object.freeze([target.eligibility.reason])
@@ -298,6 +322,7 @@ export async function planRun(
       target,
       selection,
       reconciliation,
+      brief,
       state: reconciliation.load.state.state,
     });
   }
@@ -308,6 +333,7 @@ export async function planRun(
       target,
       selection,
       reconciliation,
+      brief,
       state: reconciliation.state?.state ?? null,
       reasonCodes: reconciliation.reasonCodes,
     });
@@ -321,10 +347,11 @@ export async function planRun(
       target,
       selection,
       reconciliation,
+      brief,
     });
   }
 
-  // --- 3. May anything continue, and on whose authority? -------------------
+  // --- 4. May anything continue, and on whose authority? -------------------
   const state = reconciliation.load.state;
   const resume = classifyResume(state, reconciliation.observed, {
     now: deps.now(),
@@ -340,6 +367,7 @@ export async function planRun(
     selection,
     reconciliation,
     resume,
+    brief,
     state: state.state,
     reasonCodes: resume.reasonCodes,
   });

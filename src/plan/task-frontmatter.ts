@@ -25,7 +25,13 @@
  * natural-language extraction, no second frontmatter block and no scan for
  * checkbox lists — a plan that could be changed by rewording a paragraph would
  * make the orchestrator's behaviour a function of prose. The body is not parsed
- * as YAML either: it is located, and then ignored.
+ * as YAML either: it is located, and returned as text.
+ *
+ * Returned, since V2-02, rather than discarded — and that is not a softening
+ * of the rule. `task-brief.ts` hands the body to the *writing agent* as prompt
+ * text; no planning decision reads it, and `TaskDefinition` still has no field
+ * for it. The rule was never "prose must be destroyed", it was "prose must not
+ * decide anything", and that still holds exactly.
  *
  * That also bounds what a hostile file can attempt. Everything a task file can
  * say to this orchestrator has to fit in a delimited, size-capped block at the
@@ -63,8 +69,23 @@ export const MAX_TASK_FRONTMATTER_BYTES = 8_192;
 const DELIMITER = '---';
 
 export type TaskFrontmatterOutcome =
-  /** A frontmatter block was found and converted to the JSON data model. */
-  | { readonly outcome: 'FRONTMATTER'; readonly data: unknown }
+  /**
+   * A frontmatter block was found and converted to the JSON data model.
+   *
+   * `body` is everything after the closing delimiter, verbatim and
+   * uninterpreted. It is carried because this function already knows where the
+   * body begins — locating it a second time elsewhere would be a second
+   * opinion about where frontmatter ends — and for exactly one purpose: prompt
+   * text for the writing agent, assembled by `task-brief.ts`.
+   *
+   * It remains **not input**. Nothing in the planning path reads it: it
+   * contributes no dependency, no priority, no focus and no status, and
+   * `TaskDefinition` has no field for it. The rule that a plan cannot be
+   * changed by rewording a paragraph is unaffected — what changes is that the
+   * paragraph can now be *handed to an agent*, which is the one thing prose is
+   * actually for.
+   */
+  | { readonly outcome: 'FRONTMATTER'; readonly data: unknown; readonly body: string }
   /** The file does not open with a frontmatter delimiter at all. */
   | { readonly outcome: 'MISSING' }
   /** A block was opened but is not one well-formed, warning-free document. */
@@ -86,12 +107,16 @@ function splitLines(text: string): string[] {
 }
 
 /**
- * Reads the frontmatter of a task file.
+ * Reads the frontmatter of a task file, and locates its body.
  *
  * Never throws: every malformed, oversized or hostile document is one of the
- * outcomes above. No fragment of the document appears in the result — a caller
- * learns *that* the file was refused and, for a refused key, how many there
- * were, which is exactly the shape V1-01 established for profiles.
+ * outcomes above. **No fragment of a *refused* document appears in the result**
+ * — a caller learns *that* the file was refused and, for a refused key, how
+ * many there were, which is exactly the shape V1-01 established for profiles.
+ *
+ * A successful read is the one case that does carry document text, and only
+ * the body: see {@link TaskFrontmatterOutcome}. The narrower promise is stated
+ * deliberately rather than left as the older, now-untrue blanket one.
  */
 export function readTaskFrontmatter(text: string): TaskFrontmatterOutcome {
   // A byte-order mark is a transport artefact, not content.
@@ -122,5 +147,12 @@ export function readTaskFrontmatter(text: string): TaskFrontmatterOutcome {
   if (loaded.outcome === 'FORBIDDEN_KEY') {
     return { outcome: 'FORBIDDEN_KEY', count: loaded.count };
   }
-  return { outcome: 'FRONTMATTER', data: loaded.document };
+  // Joined with `\n` rather than preserved verbatim: the split above already
+  // normalised CRLF and lone CR, and a prompt that differed byte for byte
+  // depending on which editor last wrote the file would not be reproducible.
+  return {
+    outcome: 'FRONTMATTER',
+    data: loaded.document,
+    body: lines.slice(closingIndex + 1).join('\n'),
+  };
 }
