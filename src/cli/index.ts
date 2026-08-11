@@ -2,26 +2,32 @@
 /**
  * `agent-loop` CLI entry point.
  *
- * This build contains the foundation only: the task-state contract and the
- * read-only `doctor` command. No orchestration loop exists yet, and no command
- * here invokes an agent.
+ * This build contains the orchestration runtime as a library — task selection,
+ * workspace lifecycle, durable state, reconciliation, the agent runners and
+ * the verify/review/remediate loop — plus two read-only commands: `doctor`
+ * and the planning mode of `run`. No command here starts an agent or writes
+ * task state.
  */
 
 import { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
 import { registerDoctorCommand } from './doctor-command.js';
+import { registerRunCommand } from './run-command.js';
 
 const DESCRIPTION = [
   'Repository-agnostic orchestrator for a writing agent and a read-only reviewer.',
   '',
-  'This build ships the foundation only:',
+  'This build ships:',
   '  - the binding single-task state contract (schemas/task-state.schema.json)',
   '  - the read-only `doctor` diagnosis',
+  '  - the read-only `run` plan: which task is next, what its durable state',
+  '    permits, and on whose authority anything may continue',
   '',
-  'The orchestration loop (task creation, worktrees, implement/verify/review',
-  'rounds, resume handling) is NOT implemented yet and no command here starts',
-  'an agent.',
+  'The orchestration runtime (task selection, workspace lifecycle, durable',
+  'state, reconciliation, verify/review/remediation loop, run driver) exists',
+  'as a library. Executing it from the CLI is not implemented yet: no command',
+  'here starts an agent, writes task state or prepares a workspace.',
 ].join('\n');
 
 export function buildProgram(): Command {
@@ -35,6 +41,7 @@ export function buildProgram(): Command {
     .showSuggestionAfterError(true);
 
   registerDoctorCommand(program);
+  registerRunCommand(program);
 
   return program;
 }

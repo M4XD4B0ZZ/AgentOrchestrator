@@ -139,6 +139,48 @@ function outcomeForLoadFailure(code: StateLoadFailureCode): ReconciliationOutcom
 }
 
 /**
+ * The three spellings a consumer folds a *non-continuable* reconciliation into.
+ *
+ * Every caller that turns this module's outcome into its own vocabulary needs
+ * the same fold, and each spells the result identically on purpose. So the fold
+ * is owned here, beside the vocabulary it folds, rather than restated in each
+ * caller: a second table anywhere would be a second opinion about what "the
+ * wrong repository" means, and the copies could drift while every caller's own
+ * suite stayed green.
+ *
+ * `RECONCILED` and `NO_PERSISTED_STATE` are deliberately **not** folded, and
+ * `null` is how that is said. Their meaning belongs to the caller and the two
+ * callers genuinely disagree: to a driver, "never started" is a refusal to
+ * start, because creating the first state is not its job; to a read-only plan
+ * it is simply the answer. Returning a spelling for them here would decide that
+ * question in the wrong place.
+ */
+export type ReconciliationStopSpelling =
+  | 'STATE_DIVERGED'
+  | 'STATE_UNOBSERVABLE'
+  | 'STATE_UNUSABLE';
+
+export function stopSpellingFor(
+  outcome: ReconciliationOutcome,
+): ReconciliationStopSpelling | null {
+  switch (outcome) {
+    case 'STATE_DIVERGED':
+      return 'STATE_DIVERGED';
+    case 'STATE_UNOBSERVABLE':
+      return 'STATE_UNOBSERVABLE';
+    // A well-formed record of somewhere else is not a broken document, but it
+    // is equally unusable here, and neither may be repaired.
+    case 'STATE_INVALID':
+    case 'STATE_REPOSITORY_MISMATCH':
+    case 'STATE_TASK_MISMATCH':
+      return 'STATE_UNUSABLE';
+    case 'RECONCILED':
+    case 'NO_PERSISTED_STATE':
+      return null;
+  }
+}
+
+/**
  * A repository mismatch outranks every other finding: if this is not the right
  * repository, nothing else observed about it is worth reporting as the headline.
  * A task mismatch comes next, for the same reason and one level down.

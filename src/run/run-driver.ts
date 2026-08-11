@@ -87,7 +87,11 @@ import { planNextTask, type TaskPlanningResult } from '../plan/plan-next-task.js
 import type { TaskDefinition } from '../plan/task-definition.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import { advanceTaskState } from '../state/advance-state.js';
-import { reconcileTask, type TaskReconciliation } from '../state/reconcile-task.js';
+import {
+  reconcileTask,
+  stopSpellingFor,
+  type TaskReconciliation,
+} from '../state/reconcile-task.js';
 import { classifyResume, type ResumeDecision } from '../state/resume-decision.js';
 import type { ReplaceFn, TempSuffixFn } from '../state/atomic-file.js';
 import type { StateLoadSuccess } from '../state/state-store.js';
@@ -320,26 +324,21 @@ function runResult(
   });
 }
 
-/** The load-failure outcomes, kept as distinct as the loader reports them. */
+/**
+ * The load-failure outcomes, kept as distinct as the loader reports them.
+ *
+ * The three non-continuable spellings come from `stopSpellingFor`, which owns
+ * that fold beside the vocabulary it folds. Only the two outcomes it leaves to
+ * its caller are decided here — and this driver's answer to "never started" is
+ * a refusal, which is exactly the decision that must not live in a shared table.
+ */
 function outcomeForReconciliation(reconciliation: TaskReconciliation): RunOutcome {
-  switch (reconciliation.outcome) {
-    case 'NO_PERSISTED_STATE':
-      return 'TASK_NOT_STARTED';
-    case 'STATE_DIVERGED':
-      return 'STATE_DIVERGED';
-    case 'STATE_UNOBSERVABLE':
-      return 'STATE_UNOBSERVABLE';
-    // A well-formed record of somewhere else is not a broken document, but it
-    // is equally unusable here, and neither may be repaired.
-    case 'STATE_INVALID':
-    case 'STATE_REPOSITORY_MISMATCH':
-    case 'STATE_TASK_MISMATCH':
-      return 'STATE_UNUSABLE';
-    case 'RECONCILED':
-      // Not reachable: the caller checks for it before asking. Present so the
-      // switch stays total against a widened outcome set.
-      return 'NO_PROGRESS';
-  }
+  const stop = stopSpellingFor(reconciliation.outcome);
+  if (stop !== null) return stop;
+
+  // `RECONCILED` is not reachable: the caller checks for it before asking.
+  // Answered anyway so the function stays total against a widened outcome set.
+  return reconciliation.outcome === 'NO_PERSISTED_STATE' ? 'TASK_NOT_STARTED' : 'NO_PROGRESS';
 }
 
 /**
