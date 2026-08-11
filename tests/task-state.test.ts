@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   BLOCKING_STATES,
@@ -278,7 +278,7 @@ describe('resumeFrom invariants', () => {
   });
 });
 
-// â”€â”€ AO-004: the schema accepts only reachable resume phases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── AO-004: the schema accepts only reachable resume phases ────────────────
 
 /**
  * Resume-only evidence, and the four states it may not survive into.
@@ -286,11 +286,11 @@ describe('resumeFrom invariants', () => {
  * A `resumeFrom` says where to continue after a pause; a `reportedResetAt` says
  * when a quota pause ends. Reaching the state a resume point names *is* the
  * continuation it asked for, and a task that is running is not waiting on
- * anyone's quota â€” so in the work loop both are records of something that has
+ * anyone's quota — so in the work loop both are records of something that has
  * already happened.
  *
  * The invariant lives in the contract rather than in the writers because every
- * state write in this codebase is a `{ ...state, â€¦ }` spread, and a spread that
+ * state write in this codebase is a `{ ...state, … }` spread, and a spread that
  * forgets a field is silent. Here it is a refused write that persists nothing.
  */
 describe('resume evidence does not survive into the work loop', () => {
@@ -320,8 +320,8 @@ describe('resume evidence does not survive into the work loop', () => {
 
   /**
    * The liveness half, and the reason the rule is scoped to the work loop
-   * rather than to every non-blocking state: `BLOCKED_AUTH â†’ AUTH_PREFLIGHT â†’
-   * GIT_PREFLIGHT â†’ WORKTREE_READY â†’ CONTEXT_LOADING` is the declared path a
+   * rather than to every non-blocking state: `BLOCKED_AUTH → AUTH_PREFLIGHT →
+   * GIT_PREFLIGHT → WORKTREE_READY → CONTEXT_LOADING` is the declared path a
    * re-authenticated task walks, and the resume policy requires the stored
    * point to survive it. `reconcile.ts` additionally reads it there as evidence
    * that work precedes the phase.
@@ -419,7 +419,7 @@ describe('resume phases per blocking state', () => {
   });
 });
 
-// â”€â”€ AO-006: READY_FOR_PR must be fully settled and provable â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── AO-006: READY_FOR_PR must be fully settled and provable ────────────────
 
 describe('READY_FOR_PR invariants', () => {
   it('accepts the fully settled reference state', () => {
