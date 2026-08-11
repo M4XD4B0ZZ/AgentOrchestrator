@@ -108,11 +108,6 @@ const EVIDENCE_BACKED: ReadonlySet<TaskDisposition> = new Set<TaskDisposition>([
   'ABANDONED',
 ]);
 
-/** Dispositions nothing continues from. */
-const TERMINAL_DISPOSITIONS: ReadonlySet<TaskDisposition> = new Set<TaskDisposition>([
-  'SETTLED',
-  'ABANDONED',
-]);
 
 /**
  * Why a run is not continuing. A closed set, because "the block simply stopped"
@@ -459,9 +454,4 @@ export function assessLedgerSuccession(
   }
 
   return Object.freeze([...violations]);
-}
-
-/** `true` when nothing continues from this disposition. */
-export function isTerminalDisposition(disposition: TaskDisposition): boolean {
-  return TERMINAL_DISPOSITIONS.has(disposition);
 }

@@ -29,8 +29,27 @@
  *
  * Nothing in this module writes. It is the observation half, exactly as
  * `observe-runtime.ts` is for a task.
+ *
+ * ── One definition of "supported" ──────────────────────────────────────────
+ *
+ * The per-entry check is `block-evidence.ts`, the same proof the store applies
+ * before it writes anything. A reconciler with its own, weaker idea of what a
+ * task record proves is a reconciler that certifies what the gate refused — and
+ * the two did drift: `evidenceRevision` was re-derived here on every pass while
+ * `baseCommit` and `resultCommit` were carried, so a hand-edited result commit
+ * reconciled `CONSISTENT` for as long as anyone cared to look.
+ *
+ * ── Whose repository is this, asked first ──────────────────────────────────
+ *
+ * Before any record is read. `loadBlockLedger` holds both identities, but this
+ * function takes a ledger *value* and a root, and a value did not have to come
+ * through the store to get here — while every task record below is looked up
+ * under that root. A ledger describing another project is not slightly wrong
+ * here; it is asking about somebody else's tasks.
  */
 
+import { comparePathIdentity } from '../core/path-identity.js';
+import { readDeclaredRepositoryId } from '../repo/declared-identity.js';
 import { fingerprintBlockDefinition, type BlockDefinition } from './block-definition.js';
 import { proveBlockTaskEntry, type EntryProofCode } from './block-evidence.js';
 import type { BlockRunLedger, TaskDisposition } from './block-ledger.js';
@@ -78,6 +97,17 @@ export const BLOCK_RECONCILIATION_FINDINGS = [
   'TASK_AHEAD_OF_LEDGER',
   /** The block definition in the repository is no longer the frozen one. */
   'DEFINITION_DRIFTED',
+  /**
+   * The ledger is being reconciled against a repository it does not describe.
+   *
+   * Either the recorded root is not this one, or the identity the profile
+   * declares now is not the one the run was started under. Both make every task
+   * record read below somebody else's, so it is a fact about the whole
+   * reconciliation rather than about a task — and it is checked here as well as
+   * on load, because this function takes a ledger value and a root, and a value
+   * did not have to come through the store to get here.
+   */
+  'REPOSITORY_IDENTITY_DRIFTED',
 ] as const;
 
 export type BlockReconciliationFinding = (typeof BLOCK_RECONCILIATION_FINDINGS)[number];
@@ -92,6 +122,7 @@ const DIVERGENT: ReadonlySet<BlockReconciliationFinding> = new Set([
   'TASK_STATE_UNUSABLE',
   'COMMIT_NOT_PROVEN_BY_STATE',
   'DEFINITION_DRIFTED',
+  'REPOSITORY_IDENTITY_DRIFTED',
 ]);
 
 export interface BlockReconciliationEntry {
@@ -141,6 +172,21 @@ export function reconcileBlockRun(
 ): BlockReconciliation {
   const findings: BlockReconciliationEntry[] = [];
   let progressAvailable = false;
+
+  // Whose repository is this? Asked before anything is read from it, because
+  // every answer below is a task record looked up under `repositoryRoot`, and
+  // if the ledger is not this checkout's then none of those records is the one
+  // it is talking about.
+  const declared = readDeclaredRepositoryId(options.repositoryRoot);
+  if (
+    comparePathIdentity(ledger.repositoryRoot, options.repositoryRoot) !== 'EQUAL' ||
+    !declared.ok ||
+    declared.id !== ledger.repositoryId
+  ) {
+    findings.push(
+      Object.freeze({ taskId: ledger.blockId, finding: 'REPOSITORY_IDENTITY_DRIFTED' as const }),
+    );
+  }
 
   if (
     options.definition !== undefined &&

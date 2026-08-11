@@ -3174,11 +3174,21 @@ vocabulary (`COMPLETE`, `TASK_BLOCKED`, `TASK_ABANDONED`, `NO_ELIGIBLE_TASK`,
 Three of those are claims about what the tasks did, and each is **proved against
 every task's own record** before it is written, not checked against the ledger's
 own entries. Checking `COMPLETE` against the entries that assert it is asking
-the document that makes the claim whether the claim is true. The other five
-assert that the run *cannot continue* rather than that it progressed, so they
-stay writable over a ledger whose entries are not supported — otherwise a run
-that has just detected `LEDGER_DIVERGED` could not record that it had, which is
-the one thing it must always be able to do.
+the document that makes the claim whether the claim is true.
+
+Any write that moves a disposition is held to the same standard, and to *every*
+entry rather than only the one it moved. A write re-serialises the whole
+document, so an entry forged on disk by hand would otherwise ride out on the
+next legitimate activation, carried forward under the store's signature having
+been examined by nothing — and there is no such thing as progressing a run whose
+record is already unsupported.
+
+The exempt write is a stop whose reason asserts no progress:
+`OPERATOR_STOPPED`, `NO_ELIGIBLE_TASK`, `LEDGER_DIVERGED`, `STATE_UNUSABLE`,
+`DEFINITION_DRIFTED`. Those say the run *cannot continue*, which is exactly what
+a run with an unsupported ledger needs to be able to say. Requiring a clean
+proof there would mean a run that has just detected a divergence could not
+record having detected it — the one thing it must always be able to do.
 
 A stop reason is also **written once**. `LEDGER_DIVERGED` relabelled
 `OPERATOR_STOPPED` destroys the only durable trace that a divergence was ever
@@ -3221,6 +3231,13 @@ not change may not be edited; a terminal stop reason is neither relabelled nor
 cleared. `LEDGER_SUCCESSION_REFUSED` is kept apart from `LEDGER_CONFLICT` on
 purpose — a conflict says *somebody else wrote*, and this says *you may not write
 this*, however current your revision, so re-reading and retrying is not the fix.
+
+A **creation claims no progress** — every entry `PLANNED`, nothing active, no
+stop reason — and that is enforced rather than assumed. Splitting the store gave
+the update path a predecessor to be held against and left creation with none, so
+under an unused run id a first ledger needs no predecessor and no revision to
+get written. Without the rule, that door takes the same forged `COMPLETE` the
+update path had just been taught to refuse.
 
 The file is named by the **run**, not the block, so starting the same block again
 never destroys the record of the last attempt.
@@ -3272,6 +3289,14 @@ to make a successor's base: a forgery there is a forged dependency edge, not a
 cosmetic error. `COMMIT_NOT_PROVEN_BY_STATE` is now a divergent finding, derived
 from the task record's own `basePinnedCommit` and `currentCommit`.
 
+Reconciliation also asks *whose repository is this* before it reads anything
+from one, and reports `REPOSITORY_IDENTITY_DRIFTED`. `loadBlockLedger` already
+holds both identities, but `reconcileBlockRun` takes a ledger **value** and a
+root, and a value did not have to come through the store to get there — while
+every task record it reads is looked up under that root. A ledger describing
+another project is not slightly wrong there; it is asking about somebody else's
+tasks.
+
 **Reporting, not repairing.** The opposite direction — a task that reached
 `READY_FOR_PR` while the ledger still says `ACTIVE` — is benign and is reported
 as `TASK_AHEAD_OF_LEDGER` with `progressAvailable`, and **not** written. Which
@@ -3313,6 +3338,17 @@ file on disk. They are conserved as assertions of the contract rather than as
 probes, in four clusters: successor authority and loaded identity; progress only
 from external evidence; a terminal reason as history; and commit fields that
 stay provable after the fact. Each is described in its own section above.
+
+Two further cases are not from those probes. They are doors the remediation
+**opened** and had to close behind itself — an unguarded creation, and a
+reconciliation handed a ledger that never came through the store — and they are
+labelled as such in the file, because where a case came from is part of what it
+is worth.
+
+Two more assert the opposite direction, and matter as much. A proof strong
+enough to refuse a forgery is a proof that can quietly make the legitimate case
+unreachable, so a block whose every task really finished must still record
+`COMPLETE`, and a genuinely blocked task must still park and stop its run.
 
 One of them is not a contract at all. The separator in
 `fingerprintBlockDefinition` was a **raw NUL byte** in the source — invisible in

@@ -302,9 +302,16 @@ function persist(
  * block is not a run, and starting one again must not destroy the record of
  * what happened last time.
  *
- * Nothing is proved against the task records here, because a freshly created
- * ledger claims nothing about them — every entry is `PLANNED`. The contract
- * refuses any other shape from a creation.
+ * A creation **claims no progress**, and that is enforced here rather than
+ * assumed: every entry `PLANNED`, nothing active, no stop reason. Without it,
+ * creation would be the door update closed — a first ledger written straight
+ * into a repository with every entry `SETTLED`, digest-shaped evidence behind
+ * none of it and `COMPLETE` on top, needing no predecessor to get past and no
+ * task record to support it. A run that has not started has nothing to say
+ * about what its tasks did.
+ *
+ * Which is also why nothing is proved against the task records here: after that
+ * rule there is no claim left to prove.
  */
 export function createBlockLedger(ledger: unknown, options: BlockStoreOptions): LedgerSaveResult {
   const parsed = safeParseBlockRunLedger(ledger);
@@ -312,6 +319,14 @@ export function createBlockLedger(ledger: unknown, options: BlockStoreOptions): 
     return saveFailure('LEDGER_CONTRACT_VIOLATION', parsed.error.issues[0]?.message ?? null);
   }
   const value = parsed.data;
+
+  if (
+    value.stopReason !== null ||
+    value.activeTaskId !== null ||
+    value.tasks.some((task) => task.disposition !== 'PLANNED')
+  ) {
+    return saveFailure('LEDGER_CONTRACT_VIOLATION', 'CREATION_MUST_CLAIM_NO_PROGRESS');
+  }
 
   const identity = checkRecordedIdentity(value, options.repositoryRoot);
   if (identity !== null) return identity;
@@ -415,43 +430,47 @@ export function updateBlockLedger(
 }
 
 /**
- * The proof code of the first newly-made claim the task records do not support,
+ * The proof code of the first claim in `next` the task records do not support,
  * or `null` when every one of them holds.
+ *
+ * ── Why every entry, and not only the ones that moved ──────────────────────
+ *
+ * Proving only the moved entry looks sufficient and is not. A write
+ * re-serialises the *whole* document, so an entry forged on disk by hand rides
+ * out on the next legitimate activation — carried forward under this store's
+ * signature, having been examined by nothing. And there is no such thing as
+ * progressing a run whose record is already unsupported: the correct move for a
+ * ledger that disagrees with the task states is to stop with `LEDGER_DIVERGED`,
+ * not to add a well-proven step to it.
+ *
+ * ── The one write that is exempt, and why it must be ───────────────────────
+ *
+ * A stop whose reason asserts no progress. `LEDGER_DIVERGED`, `STATE_UNUSABLE`,
+ * `OPERATOR_STOPPED`, `NO_ELIGIBLE_TASK` and `DEFINITION_DRIFTED` say the run
+ * *cannot continue*, which is exactly what a run with an unsupported ledger
+ * needs to be able to say. Requiring a clean proof for those would mean a run
+ * that has just detected a divergence could not record having detected it —
+ * the one thing it must always be able to do.
  */
 function firstUnprovenClaim(
   previous: BlockRunLedger,
   next: BlockRunLedger,
   repositoryRoot: string,
 ): EntryProofCode | null {
-  const prove = (index: number): EntryProofCode | null => {
-    const entry = next.tasks[index];
-    if (entry === undefined) return null;
-    const { code } = proveBlockTaskEntry(repositoryRoot, entry);
-    return code === 'PROVEN' ? null : code;
-  };
-
-  // Every entry that moved. Succession has already established that the two
-  // lists line up by index.
-  for (let index = 0; index < next.tasks.length; index += 1) {
-    if (next.tasks[index]?.disposition === previous.tasks[index]?.disposition) continue;
-    const failed = prove(index);
-    if (failed !== null) return failed;
-  }
-
-  // Three stop reasons are claims about what the tasks did, so each is proved
-  // against every task — including the ones this write did not touch. Checking
-  // them against the ledger's own entries is asking the liar whether it lied,
-  // which is exactly how a hand-edited file of `SETTLED` entries was once
-  // recorded as a finished block.
-  if (
+  // Succession has already established that the two lists line up by index.
+  const dispositionsMoved = next.tasks.some(
+    (entry, index) => entry.disposition !== previous.tasks[index]?.disposition,
+  );
+  const claimsProgress =
     next.stopReason !== null &&
     next.stopReason !== previous.stopReason &&
-    CLAIMS_PROGRESS.has(next.stopReason)
-  ) {
-    for (let index = 0; index < next.tasks.length; index += 1) {
-      const failed = prove(index);
-      if (failed !== null) return failed;
-    }
+    CLAIMS_PROGRESS.has(next.stopReason);
+
+  if (!dispositionsMoved && !claimsProgress) return null;
+
+  for (const entry of next.tasks) {
+    const { code } = proveBlockTaskEntry(repositoryRoot, entry);
+    if (code !== 'PROVEN') return code;
   }
 
   return null;

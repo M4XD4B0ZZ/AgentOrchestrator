@@ -38,7 +38,7 @@
  * and never claims a guarantee it does not have.
  */
 
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -58,7 +58,11 @@ import {
   startBlockRun,
   stopBlockRun,
 } from '../src/block/block-progress.js';
-import { loadBlockLedger, updateBlockLedger } from '../src/block/block-store.js';
+import {
+  createBlockLedger,
+  loadBlockLedger,
+  updateBlockLedger,
+} from '../src/block/block-store.js';
 import { reconcileBlockRun } from '../src/block/reconcile-block.js';
 import { startTask } from '../src/run/start-task.js';
 import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
@@ -592,6 +596,107 @@ describe('the boundary V2-07 keeps, and the one it must not claim', () => {
     const status = await runGitCommand(fixture.root, ['status', '--porcelain']);
     expect(status.outcome).toBe('OK');
     expect(status.outcome === 'OK' ? status.stdout : 'not run').toBe('');
+  }, 180_000);
+});
+
+/* ───────────────── gaps the remediation itself opened ──────────────────── */
+
+describe('the doors the remediation had to close behind itself', () => {
+  it('refuses a first ledger that claims progress before the run has started', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001'], 'run-0001');
+    const honest = reload(fixture.root, 'run-0001').ledger;
+
+    // Splitting the store gave `updateBlockLedger` a predecessor to be held
+    // against — and left creation with none. Under a run id nothing has
+    // written, a first ledger needs no predecessor and no revision, so an
+    // unguarded creation is the same forged `COMPLETE` through a door the
+    // update path had just been taught to refuse.
+    const forgedFirst = {
+      ...honest,
+      runId: 'run-0002',
+      activeTaskId: null,
+      tasks: honest.tasks.map((task) => ({
+        ...task,
+        disposition: 'SETTLED' as const,
+        evidenceRevision: FORGED_REVISION,
+        baseCommit: FORGED_SHA,
+        resultCommit: FORGED_SHA,
+      })),
+      stopReason: 'COMPLETE' as const,
+    };
+    // It is a perfectly valid ledger; what it is not is a valid *creation*.
+    expect(safeParseBlockRunLedger(forgedFirst).success).toBe(true);
+
+    const created = createBlockLedger(forgedFirst, { repositoryRoot: fixture.root });
+
+    expect(created.ok).toBe(false);
+    expect(created.ok ? null : created.detail).toBe('CREATION_MUST_CLAIM_NO_PROGRESS');
+    expect(existsSync(ledgerPath(fixture.root, 'run-0002'))).toBe(false);
+  }, 180_000);
+
+  it('will not carry a forged sibling entry forward on a legitimate step', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+
+    await reallyStart(fixture, 'A-001');
+    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+    driveToReadyForPr(fixture, 'A-001');
+    expect(settleBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome)
+      .toBe('RECORDED');
+
+    // A-001's settlement is honest. It is then forged on disk, by hand.
+    const tampered = onDisk(fixture.root) as { tasks: Record<string, unknown>[] };
+    tampered.tasks[0]!['resultCommit'] = FORGED_SHA;
+    writeFileSync(ledgerPath(fixture.root), `${JSON.stringify(tampered, null, 2)}\n`, 'utf8');
+
+    // Proving only the entry a write *moves* looks sufficient and is not: a
+    // write re-serialises the whole document, so the forgery would ride out on
+    // the next legitimate activation, carried forward under the store's
+    // signature having been examined by nothing. There is also no such thing as
+    // progressing a run whose record is already unsupported.
+    await reallyStart(fixture, 'B-001');
+    const activated = activateBlockTask(reload(fixture.root), 'B-001', {
+      repositoryRoot: fixture.root,
+    });
+    expect(activated.outcome).toBe('TASK_STATE_DOES_NOT_PROVE_IT');
+    expect(activated.save?.ok === false ? activated.save.code : null).toBe('ENTRY_NOT_PROVEN');
+    expect((onDisk(fixture.root) as { tasks: Record<string, unknown>[] }).tasks[1]!['disposition'])
+      .toBe('PLANNED');
+
+    // And the escape hatch is open, which is the whole reason the rule is not
+    // "prove everything, always": the one move a run with an unsupported
+    // ledger must always have is saying so.
+    const stopped = stopBlockRun(reload(fixture.root), 'LEDGER_DIVERGED', {
+      repositoryRoot: fixture.root,
+    });
+    expect(stopped.outcome).toBe('RECORDED');
+    expect(onDisk(fixture.root)['stopReason']).toBe('LEDGER_DIVERGED');
+  }, 180_000);
+
+  it('reconciles nothing against a repository the ledger does not describe', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    const honest = reload(fixture.root).ledger;
+
+    // `loadBlockLedger` holds `repositoryId` against the profile, but
+    // `reconcileBlockRun` takes a ledger *value* and a root — and a value did
+    // not have to come through the store to get here. Every task record it
+    // would read is looked up under that root, so a ledger describing another
+    // project is not slightly wrong, it is asking about somebody else's tasks.
+    const foreign = reconcileBlockRun(
+      { ...honest, repositoryId: 'a-different-project' },
+      { repositoryRoot: fixture.root },
+    );
+
+    expect(foreign.verdict).toBe('DIVERGED');
+    expect(foreign.findings).toContainEqual({
+      taskId: BLOCK_ID,
+      finding: 'REPOSITORY_IDENTITY_DRIFTED',
+    });
+
+    // And the honest one still answers about this repository.
+    expect(reconcileBlockRun(honest, { repositoryRoot: fixture.root }).verdict).toBe('CONSISTENT');
   }, 180_000);
 });
 
