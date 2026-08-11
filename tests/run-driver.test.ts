@@ -70,6 +70,7 @@ import {
   FIXTURE_A_PROFILE,
   removeRepoFixtures,
 } from './helpers/repo-fixtures.js';
+import { provenAuthEvidence } from './helpers/auth-evidence.js';
 import { resolveFixture } from './helpers/worktree-fixtures.js';
 
 const TASK_ID = 'task-0001';
@@ -328,7 +329,7 @@ function request(root: string, overrides: Partial<RunRequest> = {}): RunRequest 
     taskId: TASK_ID,
     taskBrief: 'Add a widget.',
     attendedContinuation: true,
-    authPreflightPassed: true,
+    authEvidence: provenAuthEvidence(),
     maxSteps: 12,
     ...overrides,
   };
@@ -1666,7 +1667,7 @@ describe('task selection', () => {
         repository: resolved,
         taskBrief: (task) => task.title,
         attendedContinuation: true,
-        authPreflightPassed: true,
+        authEvidence: provenAuthEvidence(),
         maxSteps: 4,
       },
       {

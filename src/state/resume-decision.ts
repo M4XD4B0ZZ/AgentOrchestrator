@@ -52,6 +52,7 @@ import {
 } from '../core/automatic-resume.js';
 import { isAutomaticResumeEligible } from '../core/resume-policy.js';
 import { isTerminalState } from '../core/states.js';
+import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { TaskState } from '../core/task-state.js';
 import { isBlockingState } from '../core/states.js';
 import type { ObservedRuntime } from './observe-runtime.js';
@@ -74,8 +75,15 @@ export type { RepositoryIdentity };
 export interface ResumeContext {
   /** The current instant, supplied rather than read, so the decision is pure. */
   readonly now: string | Date;
-  /** Did a *fresh* auth preflight pass for the blocked agent? */
-  readonly authPreflightPassed: boolean;
+  /**
+   * The artefact a *fresh* auth preflight produced, or `null` when none ran.
+   *
+   * The evidence itself rather than a verdict about it, so that the sentence
+   * above this interface — a caller cannot accidentally get a "resume allowed"
+   * without having re-proven auth — is enforced instead of merely intended
+   * (V2-05 / I4).
+   */
+  readonly authEvidence: AuthPreflightEvidence | null;
   /** The repository just resolved — the identity the state must still match. */
   readonly repository: RepositoryIdentity;
   /** The task just selected. */
@@ -221,7 +229,7 @@ function toEvidence(
 ): AutomaticResumeEvidence {
   return Object.freeze({
     now: context.now,
-    authPreflightPassed: context.authPreflightPassed,
+    authEvidence: context.authEvidence,
     observedRepositoryId: context.repository.id,
     observedRepositoryRoot: context.repository.root,
     observedWorktreePath: observed.registeredWorktreePath,

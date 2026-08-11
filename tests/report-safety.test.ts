@@ -619,7 +619,10 @@ describe('an arbitrary sensitive marker never reaches the report or the console'
     );
     const poisoned: DoctorReport = {
       ...report,
-      authAssessment: { checks: [claude], allPassed: false },
+      // `evidence: null` is the only value this literal *can* carry: the
+      // artefact has one producer and it is not reachable from a test fixture.
+      // A failing assessment would mint nothing anyway.
+      authAssessment: { checks: [claude], allPassed: false, evidence: null },
       checks: checksFromPoisonedOutput(),
     };
     expect(JSON.stringify(poisoned)).not.toContain(SENSITIVE_MARKER);

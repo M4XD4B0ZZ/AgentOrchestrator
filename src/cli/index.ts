@@ -4,9 +4,13 @@
  *
  * This build contains the orchestration runtime as a library — task selection,
  * workspace lifecycle, durable state, reconciliation, the agent runners and
- * the verify/review/remediate loop — plus two read-only commands: `doctor`
- * and the planning mode of `run`. No command here starts an agent or writes
- * task state.
+ * the verify/review/remediate loop — plus `doctor` and `run`.
+ *
+ * `doctor` is read-only, and so is `run` by default. Execution exists behind one
+ * explicit grant, `run --attended`, which is the only way any command here
+ * starts an agent, writes task state or prepares a workspace. See
+ * `run-command.ts` for why the grant is a new flag rather than a new meaning for
+ * an existing verb.
  */
 
 import { Command } from 'commander';
@@ -23,11 +27,15 @@ const DESCRIPTION = [
   '  - the read-only `doctor` diagnosis',
   '  - the read-only `run` plan: which task is next, what its durable state',
   '    permits, and on whose authority anything may continue',
+  '  - attended execution of one task: `run --attended`',
   '',
-  'The orchestration runtime (task selection, workspace lifecycle, durable',
-  'state, reconciliation, verify/review/remediation loop, run driver) exists',
-  'as a library. Executing it from the CLI is not implemented yet: no command',
-  'here starts an agent, writes task state or prepares a workspace.',
+  'Execution requires two independent things, and neither implies the other:',
+  '`--attended`, the operator stating they are present for this invocation, and',
+  'a fresh auth preflight that passes. Without --attended, `run` still only',
+  'reports: it starts no agent, writes no task state and prepares no workspace.',
+  '',
+  'Unattended running, multi-task blocks, scope enforcement and opening pull',
+  'requests are not in this build.',
 ].join('\n');
 
 export function buildProgram(): Command {

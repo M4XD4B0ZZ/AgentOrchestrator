@@ -22,6 +22,10 @@
  * belongs to the loop that does not exist yet.
  */
 
+import {
+  isAuthPreflightEvidence,
+  type AuthPreflightEvidence,
+} from './auth-preflight-evidence.js';
 import { absolutePathsEqual } from './path-identity.js';
 import type { TaskState } from './task-state.js';
 import { BLOCKED_STATE_POLICIES } from './resume-policy.js';
@@ -37,8 +41,14 @@ import { isBlockingState } from './states.js';
 export interface AutomaticResumeEvidence {
   /** The current instant, as an ISO-8601 string or a `Date`. */
   readonly now: string | Date;
-  /** Did a *fresh* auth preflight pass for the blocked agent? */
-  readonly authPreflightPassed: boolean;
+  /**
+   * The artefact a real auth preflight produced, or `null` when none ran.
+   *
+   * Not a boolean, deliberately (V2-05 / I4): a caller cannot mint one, so a
+   * caller cannot claim a preflight it never performed. `null` is the honest
+   * value for "no check was run" and denies the resume.
+   */
+  readonly authEvidence: AuthPreflightEvidence | null;
   /** Repository identity observed right now. */
   readonly observedRepositoryId: string | null;
   /** Canonicalised repository root observed right now. */
@@ -176,7 +186,12 @@ export function evaluateAutomaticResume(
   }
 
   // --- 3. Are the credentials good again? ---------------------------------
-  if (evidence.authPreflightPassed !== true) {
+  // Verified, not read. `authEvidence` is typed as the opaque artefact, but a
+  // static type is not a runtime guarantee: `as unknown as` defeats any of them.
+  // So the gate is the `instanceof` predicate, and a forged or absent value
+  // denies identically. The reason code is unchanged — from an operator's point
+  // of view "auth was not re-proven" is still exactly what happened.
+  if (!isAuthPreflightEvidence(evidence.authEvidence)) {
     deny('AUTH_PREFLIGHT_NOT_PASSED');
   }
 

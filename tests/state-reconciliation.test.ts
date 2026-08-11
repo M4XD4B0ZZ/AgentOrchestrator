@@ -42,6 +42,7 @@ import {
   RESUME_CLASSIFICATIONS,
 } from '../src/state/resume-decision.js';
 import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
+import { provenAuthEvidence } from './helpers/auth-evidence.js';
 import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 import { fingerprint, SHA_A, SHA_B, validCreatedState, validUsageLimitState } from './fixtures.js';
 import { parseTaskState, type TaskState, type TaskStateInput } from '../src/core/task-state.js';
@@ -678,7 +679,7 @@ describe('phase-sensitive Git expectations', () => {
 
     const decision = classifyResume(state, observed, {
       now: '2026-07-31T15:00:00.000Z',
-      authPreflightPassed: true,
+      authEvidence: provenAuthEvidence(),
       repository: REPOSITORY,
       taskId: STATE.taskId,
     });
@@ -701,7 +702,7 @@ describe('phase-sensitive Git expectations', () => {
 
     const decision = classifyResume(state, observed, {
       now: '2026-07-31T15:00:00.000Z',
-      authPreflightPassed: true,
+      authEvidence: provenAuthEvidence(),
       repository: REPOSITORY,
       taskId: STATE.taskId,
     });
@@ -989,7 +990,7 @@ describe('reconciliation outcomes', () => {
 describe('classifying whether a task may resume', () => {
   const context = {
     now: '2026-07-31T15:00:00.000Z',
-    authPreflightPassed: true,
+    authEvidence: provenAuthEvidence(),
     repository: REPOSITORY,
     taskId: STATE.taskId,
   };
@@ -1021,7 +1022,7 @@ describe('classifying whether a task may resume', () => {
   it('refuses an unattended resume when auth has not been re-proven', async () => {
     const observed = await observeRuntime(scriptedGit(), STATE, { exists: alwaysExists });
 
-    const decision = classifyResume(STATE, observed, { ...context, authPreflightPassed: false });
+    const decision = classifyResume(STATE, observed, { ...context, authEvidence: null });
 
     expect(decision.classification).toBe('AUTOMATIC_RESUME_REFUSED');
     expect(decision.reasonCodes).toContain('AUTH_PREFLIGHT_NOT_PASSED');
@@ -1134,7 +1135,7 @@ describe('classifying whether a task may resume', () => {
 describe('continuation authority is separate from reconciliation', () => {
   const context = {
     now: '2026-07-31T15:00:00.000Z',
-    authPreflightPassed: true,
+    authEvidence: provenAuthEvidence(),
     repository: REPOSITORY,
     taskId: STATE.taskId,
   };

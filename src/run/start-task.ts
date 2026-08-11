@@ -67,6 +67,10 @@
  * production path can create is that one.
  */
 
+import {
+  isAuthPreflightEvidence,
+  type AuthPreflightEvidence,
+} from '../core/auth-preflight-evidence.js';
 import { TASK_STATE_SCHEMA_VERSION } from '../core/internal/task-state-object-schema.js';
 import type { TaskStateInput } from '../core/task-state.js';
 import { planNextTask } from '../plan/plan-next-task.js';
@@ -164,8 +168,17 @@ export interface StartTaskDependencies {
    * Claude and Codex CLIs, and a default would mean any caller that forgot it
    * — including a test — silently spawned subscription agents. Making it an
    * argument forces every caller to state what it is proving.
+   *
+   * Returns the preflight's **evidence** rather than a verdict, and `null` when
+   * it did not pass. Before V2-05 this returned `boolean`, which meant
+   * `async () => true` satisfied it — a seam that forced a caller to *state*
+   * something, not one that checked what was stated. The artefact cannot be
+   * fabricated, so the only way to satisfy this now is to run a real preflight
+   * or to inject a stub at a seam *above* evidence creation. Returning it also
+   * lets the caller hand the same proof to `runTask` instead of paying for a
+   * second preflight.
    */
-  readonly authPreflight: () => Promise<boolean>;
+  readonly authPreflight: () => Promise<AuthPreflightEvidence | null>;
   /** State-store seams, forwarded unchanged. */
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
@@ -314,7 +327,12 @@ export async function startTask(
   if (ignored === 'UNDETERMINED') return stop({ outcome: 'RUNTIME_IGNORE_UNDETERMINED' });
 
   // --- 4. Auth preflight, proven rather than assumed -----------------------
-  if (!(await deps.authPreflight())) return stop({ outcome: 'AUTH_PREFLIGHT_FAILED' });
+  // Verified with the same predicate the resume gate uses, so a cast fails
+  // closed here too rather than only deeper in.
+  const authEvidence = await deps.authPreflight();
+  if (!isAuthPreflightEvidence(authEvidence)) {
+    return stop({ outcome: 'AUTH_PREFLIGHT_FAILED' });
+  }
 
   // --- 5. The workspace. The first thing that changes anything. ------------
   const prepared = await prepareTaskWorkspace(repository, task, { git: deps.git });

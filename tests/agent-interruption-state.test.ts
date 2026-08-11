@@ -475,7 +475,7 @@ describe('recording a block is not permission to clear it', () => {
         observedCurrentCommit: SHA_B,
         // Before the reported reset, and with the login not re-proven.
         now: '2026-08-10T10:00:00.000Z',
-        authPreflightPassed: false,
+        authEvidence: null,
       }),
     );
 

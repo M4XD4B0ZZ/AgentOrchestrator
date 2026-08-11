@@ -31,6 +31,7 @@ import { startTask } from '../src/run/start-task.js';
 import { runTask } from '../src/run/run-driver.js';
 import { loadTaskState, type StateLoadSuccess } from '../src/state/state-store.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
+import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { createRepoFixture, removeRepoFixtures, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture } from './helpers/worktree-fixtures.js';
 import {
@@ -52,7 +53,8 @@ afterAll(() => {
   removeTrackedWorkspaces();
 });
 
-const authPassed = async (): Promise<boolean> => true;
+// Real evidence from the real mint; see `helpers/auth-evidence.ts`.
+const authPassed = authPreflightPasses;
 
 /** A repository whose runtime directory is ignored, with one startable task. */
 async function readyRepo(
@@ -484,7 +486,7 @@ describe('a task created by production code now runs', () => {
         taskId: 'V2-04',
         taskBrief: 'unused: the implement step reads the repository',
         attendedContinuation: true,
-        authPreflightPassed: true,
+        authEvidence: provenAuthEvidence(),
         maxSteps: 3,
       },
       { now: tickingClock(), git: runGitCommand, agent: agent.runner, verify: verify.runner },

@@ -27,6 +27,11 @@ import {
 } from '../src/run/start-task.js';
 import { checkRuntimeIgnored } from '../src/state/runtime-ignored.js';
 import { loadTaskState } from '../src/state/state-store.js';
+import {
+  authPreflightFails,
+  authPreflightPasses,
+  provenAuthEvidence,
+} from './helpers/auth-evidence.js';
 import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
 import { runGitCommand, type GitRunner } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
@@ -42,8 +47,16 @@ afterAll(() => {
   removeTrackedWorkspaces();
 });
 
-/** An auth preflight that passed, without starting anything. */
-const authPassed = async (): Promise<boolean> => true;
+/**
+ * An auth preflight that passed, without starting anything.
+ *
+ * Since V2-05 this returns the preflight's own artefact rather than `true`. It
+ * is minted by the real mint from real check results — see
+ * `helpers/auth-evidence.ts` — so this stub proves what a passing preflight
+ * proves and nothing more. `async () => true` no longer compiles here, which was
+ * the point of the change.
+ */
+const authPassed = authPreflightPasses;
 
 /** Every outcome this suite actually produced. Read by the coverage check. */
 const produced = new Set<StartTaskOutcome>();
@@ -146,7 +159,7 @@ describe('startTask — the supported start', () => {
         now: tickingClock(Date.parse('2026-08-10T11:00:00.000Z')),
         authPreflight: async () => {
           preflightCalls += 1;
-          return true;
+          return provenAuthEvidence();
         },
       }),
     );
@@ -294,7 +307,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
 
     const result = await started(
       { repository, taskId: 'V2-03' },
-      deps({ authPreflight: async () => false }),
+      deps({ authPreflight: authPreflightFails }),
     );
 
     expect(result.outcome).toBe('AUTH_PREFLIGHT_FAILED');
