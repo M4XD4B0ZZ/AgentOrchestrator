@@ -67,7 +67,7 @@ import { recordAgentInterruption } from '../agent/record-interruption.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { absolutePathsEqual, isComparablePath } from '../core/path-identity.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
-import type { TaskBriefResult } from '../plan/task-brief.js';
+import type { ExecutionBriefResult } from '../plan/task-brief.js';
 import type { TaskState } from '../core/task-state.js';
 import type { TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
@@ -192,12 +192,17 @@ export interface LoopDependencies extends AdvanceOptions {
    * supplies every other input the same way: a loop step performs at most one
    * durable write and no repository I/O of its own.
    *
+   * An **execution** brief specifically: its context verdict is proven in the
+   * authorised worktree, which is the tree this loop's agents open. A plan's
+   * preview is a different type and cannot be passed here, because it describes
+   * the source checkout — a tree no writer ever sees.
+   *
    * Optional because most steps do not need it — only the setup hops and the
    * implement pass do. Where they need it and it is absent, they park the task
    * for a human rather than proceeding: a writing agent briefed with nothing
    * is the one failure mode this whole layer exists to prevent.
    */
-  readonly brief?: TaskBriefResult;
+  readonly brief?: ExecutionBriefResult;
   /** Execution seams. Default to the real ones; tests pass their own. */
   readonly verify?: VerificationRunner;
   readonly agent?: AgentRunner;

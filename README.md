@@ -914,7 +914,7 @@ task has to actually exist. Two different failures get one response, and both
 are checked:
 
 - the **task file** itself is absent, unreadable, has no frontmatter or no
-  prose — `readTaskBrief` returns `ok: false`;
+  prose — `readExecutionBrief` returns `ok: false`;
 - a **declared context source** could not be opened: missing, unreadable, or a
   link out of the repository. This one arrives on a *successful* brief, as a
   per-source status plus `contextComplete: false`, so a step that only asked
@@ -993,11 +993,57 @@ rewording a paragraph, and the paragraph can still reach an agent.**
 is consulted by the selector, the graph or the eligibility rules. A body that
 says `status: DONE` changes nothing, and `tests/task-brief.test.ts` pins that.
 
+### Two briefs, and why they are different types
+
+`previewTaskBrief` is for a **plan**; `readExecutionBrief` is for a **run**.
+They return different types on purpose.
+
+A preview inspects the **source checkout** — whatever `main` looks like now — so
+an operator can see whether a repository looks onboarded. It carries no
+`contextComplete`, because there is no completeness question to answer about a
+tree the run will not use, and it cannot be handed to the loop: that is a type
+error rather than a subtle mistake.
+
+An execution brief inspects the **authorised task worktree**, pinned at
+`basePinnedCommit` — the tree `buildImplementPayload` tells the agent to open,
+and the tree the agent's `cwd` really is.
+
+They were one function once, proved against the source checkout, while the
+payload told the agent those paths were "in this worktree". Once execution
+gated on that verdict, a file present on `main` and absent from the pinned
+worktree produced a writer briefed on a promise nobody had checked — and a file
+deleted on `main` while a task was in flight parked a task whose own worktree
+still had it.
+
+The task's **prose** still comes from the repository's task source rather than
+from the worktree, deliberately: a human who corrects a task file to release a
+parked task edits it on the default branch, and a run reading its instructions
+from the pinned worktree could never see that correction.
+
 ### Context sources are named, not inlined
 
 The profile declares `context.canonicalSources`. The brief proves each one is
 present and safe to open, and then reports its **path** — it does not copy the
 file's contents.
+
+Because nothing is parsed, the inspection has **no size ceiling**. It used to
+borrow the 256 KiB *task-file parsing* ceiling and then discard the bytes, which
+protected nothing and reported a perfectly readable architecture note as
+unreadable — blocking every task in the repository once execution gated on the
+verdict. `PRESENT` means exactly: the path exists, lies safely inside the tree,
+is a regular file, is not a link, and opens read-only. The byte budget for
+actually *loading* context is a separate contract, and belongs wherever that
+loading is implemented.
+
+A **directory** is not a legal context source. `docs/` is refused when the
+repository is resolved, as `CONTEXT_SOURCE_NOT_REGULAR_FILE` — a configuration
+error judged where configuration is judged. Left to execution it became a
+permanent `HUMAN_DECISION_REQUIRED` on every task, telling an operator that a
+task is stuck rather than that a profile line is wrong. A source that simply
+does not exist is *not* this: absence is an ordinary execution-time `MISSING`,
+and a repository may declare a document it has not written yet. Directories and
+globs may become legal later, with their own source type and a bounded
+enumeration.
 
 That is a design decision, not a budget compromise. The writing agent is Claude
 Code running *inside the task's worktree*: it can open those files itself, when
@@ -1013,11 +1059,21 @@ repository is reported here rather than met by an agent halfway through a task.
 
 ### Bounds and refusals
 
-The body is clamped to `MAX_TASK_BODY_CHARS` (8 192) and a clamp is **reported**
-(`bodyTruncated`), never silent — the rule `buildRemediationPayload` already
-follows when it briefs an agent from partial evidence. The same file always
-produces the same brief, byte for byte, and CRLF is normalised so a task does
-not mean two different things on two platforms.
+The body is clamped to `MAX_TASK_BODY_BYTES` (8 192 **UTF-8 bytes**) and a clamp
+is **reported** (`bodyTruncated`), never silent — the rule
+`buildRemediationPayload` already follows when it briefs an agent from partial
+evidence. The same file always produces the same brief, and CRLF is normalised
+so a task does not mean two different things on two platforms.
+
+Bytes rather than JavaScript string length, and never mid-code-point. Slicing
+UTF-16 code units could keep a high surrogate and drop its low one, yielding a
+string with no valid UTF-8 representation: it reached the agent as U+FFFD while
+`bodyTruncated` reported only that the tail had been cut, and "the same brief,
+byte for byte" was vacuous because encoding it was lossy rather than an
+identity. Truncation now cuts between code points, so a body ending in an emoji
+loses the emoji rather than half of it. (Grapheme clusters may still split —
+that is a different contract, and this one is stated in code points because
+that is what valid UTF-8 requires.)
 
 A file whose frontmatter parses but which carries **no prose at all** is
 `TASK_BODY_EMPTY` rather than an empty brief: a title is not a task, and a
@@ -1027,13 +1083,30 @@ filename, no file content.
 
 ### One owner for "safe to open"
 
-`src/plan/internal/task-file-source.ts` owns the chain every reader of
-repository content uses: classify with `lstat` so a link is *seen* rather than
-followed, refuse a link outright, cap the size before reading, re-canonicalise,
-re-test containment, then read. Discovery and the brief reader both call it and
-each translates its three refusals — `UNSAFE`, `TOO_LARGE`, `READ_FAILED` —
-into its own vocabulary, because "this file is a symlink" is `TASK_FILE_UNSAFE`
-to one and a context-source status to the other.
+`src/repo/internal/contained-file.ts` owns the chain every reader of repository
+content uses: classify with `lstat` so a link is *seen* rather than followed,
+refuse a link outright, re-canonicalise, re-test containment, then either read
+(`readContainedFile`, with a **parsing** ceiling), inspect without reading
+(`inspectContainedFile`, no ceiling), or prove a directory
+(`proveContainedDirectory`).
+
+It lives under `repo/` because `plan/` already depends on `repo/` and not the
+other way round. An earlier version of this section named a module under
+`plan/internal/` and claimed discovery had held "the only copy" of the chain —
+which was false when it was written: the resolver held `isContained`,
+`samePath` and `classify` verbatim and ran the same steps inline. Both are now
+callers.
+
+Discovery, the brief reader and the resolver each translate the refusals into
+their own vocabulary, because "this file is a symlink" is `TASK_FILE_UNSAFE` to
+one, a context-source status to another and `PROFILE_NOT_REGULAR_FILE` to the
+third. Callers may differ there; they may not each re-derive the chain.
+
+Three other modules define a same-named helper — `doctor/safe-write.ts` and the
+two worktree modules — and none is a copy of *this* chain: one contains a
+diagnostics artefact inside the per-user run directory, the others compare paths
+Git printed. They are named in `tests/v2-02-remediation.test.ts` rather than
+silently excluded, because a claim of "one owner" was already false once.
 
 ## The repository-profile contract
 
@@ -1242,7 +1315,8 @@ from a closed set together with a static sentence written in this repository:
 `REPOSITORY_ROOT_MISMATCH`, `PROFILE_MISSING`, `PROFILE_NOT_REGULAR_FILE`,
 `PROFILE_TOO_LARGE`, `PROFILE_READ_FAILED`, `PROFILE_PARSE_FAILED`,
 `PROFILE_SCHEMA_INVALID`, `DEFAULT_BRANCH_INVALID`, `DEFAULT_BRANCH_NOT_FOUND`,
-`REQUIRED_CAPABILITY_UNAVAILABLE`, `REMOTE_REQUIRED_BUT_ABSENT`.
+`REQUIRED_CAPABILITY_UNAVAILABLE`, `REMOTE_REQUIRED_BUT_ABSENT`,
+`CONTEXT_SOURCE_NOT_REGULAR_FILE`.
 
 Nothing is interpolated into those sentences: not the repository path, not the
 profile path, not the branch name, not a Zod issue message, not a YAML or `fs`

@@ -121,17 +121,21 @@ export function renderRunPlan(plan: RunPlan, repository: { id: string; root: str
 
   if (plan.brief !== null) {
     if (plan.brief.ok) {
-      const { body, bodyTruncated, contextSources, contextComplete } = plan.brief.brief;
+      const { body, bodyTruncated, contextPreview } = plan.brief.preview;
+      // "in the source checkout" rather than "on the default branch": nothing
+      // here asked Git which branch the checkout is on, and `resolveRepository`
+      // does not require it to be the declared default. Naming a branch would
+      // be a claim this code never established.
       const context =
-        contextSources.length === 0
+        contextPreview.length === 0
           ? 'no context declared'
-          : `${contextSources.length} context source(s), ${contextComplete ? 'all present' : 'INCOMPLETE'}`;
+          : `${contextPreview.length} context source(s) in the source checkout`;
       lines.push(
         line('Brief', `readable — ${body.length} chars${bodyTruncated ? ' (truncated)' : ''}; ${context}`),
       );
       // Only the ones that are not fine are named, and only by the path the
       // profile itself declared — a value the schema already constrained.
-      for (const source of contextSources) {
+      for (const source of contextPreview) {
         if (source.status !== 'PRESENT') {
           lines.push(`  - ${source.path}  [${source.status}]`);
         }

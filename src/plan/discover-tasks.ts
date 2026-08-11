@@ -61,20 +61,28 @@
  * content and stays inside the value it was parsed into.
  */
 
-import { lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import {
-  classify,
-  isContained,
+  proveContainedDirectory,
   readContainedFile,
-  samePath,
+  type DirectoryRefusal,
   type ReadRefusal,
-} from './internal/task-file-source.js';
+} from '../repo/internal/contained-file.js';
 import { compareTaskIds, taskIdFromFileName, TASK_FILE_EXTENSION } from './task-id.js';
 import { readTaskFrontmatter } from './task-frontmatter.js';
 import { safeParseTaskDefinition, type TaskDefinition } from './task-definition.js';
+
+/** Discovery's own sentence for each fact the directory proof reports. */
+const SOURCE_REFUSAL_CODE: Readonly<Record<DirectoryRefusal, TaskDiscoveryFailureCode>> =
+  Object.freeze({
+    UNSAFE: 'TASK_SOURCE_PATH_UNSAFE',
+    MISSING: 'TASK_SOURCE_NOT_FOUND',
+    NOT_A_DIRECTORY: 'TASK_SOURCE_NOT_DIRECTORY',
+    UNREADABLE: 'TASK_SOURCE_READ_FAILED',
+  });
 
 /** Discovery's own sentence for each fact the safe-open chain reports. */
 const TASK_FILE_REFUSAL_CODE: Readonly<Record<ReadRefusal, TaskDiscoveryFailureCode>> =
@@ -202,8 +210,8 @@ function failure(
  * silently preferring one of the two would make the dependency graph depend on
  * which half of the disagreement this module happened to trust.
  *
- * The safe-open chain itself lives in `internal/task-file-source.ts`, which
- * more than one caller now needs; this function only translates its three
+ * The safe-open chain itself lives in `../repo/internal/contained-file.ts`,
+ * which more than one caller needs; this function only translates its three
  * refusals into discovery's own vocabulary.
  */
 function readTaskFile(
@@ -256,25 +264,13 @@ export function discoverTasks(repository: ResolvedRepository): TaskDiscoveryResu
 
   // --- 1. Locate the task source, from the canonical root ------------------
   const sourcePath = resolvePath(root, ...repository.taskSource.path.split('/'));
-  if (!isContained(root, sourcePath) || samePath(root, sourcePath)) {
-    return failure('TASK_SOURCE_PATH_UNSAFE');
-  }
 
-  const sourceEntry = classify(sourcePath);
-  if (sourceEntry.kind === 'LINK') return failure('TASK_SOURCE_PATH_UNSAFE');
-  if (sourceEntry.kind === 'ABSENT') return failure('TASK_SOURCE_NOT_FOUND');
-  if (sourceEntry.kind === 'UNREADABLE') return failure('TASK_SOURCE_READ_FAILED');
-  if (sourceEntry.kind !== 'DIRECTORY') return failure('TASK_SOURCE_NOT_DIRECTORY');
-
-  let canonicalSource: string;
-  try {
-    canonicalSource = realpathSync.native(sourcePath);
-  } catch {
-    return failure('TASK_SOURCE_READ_FAILED');
-  }
-  if (!samePath(sourcePath, canonicalSource) || !isContained(root, canonicalSource)) {
-    return failure('TASK_SOURCE_PATH_UNSAFE');
-  }
+  // The directory proof — containment, not-the-root, link refusal,
+  // canonicalisation and re-containment — lives with the file proof, in the
+  // module that owns the safety chain. Only the naming is discovery's own.
+  const provedSource = proveContainedDirectory(root, sourcePath);
+  if (!provedSource.ok) return failure(SOURCE_REFUSAL_CODE[provedSource.refusal]);
+  const canonicalSource = provedSource.canonical;
 
   // --- 2. List direct children only ----------------------------------------
   let entries: readonly string[];

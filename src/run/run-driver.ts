@@ -85,7 +85,7 @@ import {
 } from '../loop/loop-step.js';
 import { planNextTask, type TaskPlanningResult } from '../plan/plan-next-task.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
-import { readTaskBrief } from '../plan/task-brief.js';
+import { readExecutionBrief } from '../plan/task-brief.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import { advanceTaskState } from '../state/advance-state.js';
 import {
@@ -608,7 +608,12 @@ export async function runTask(
       // corrected between steps, and a driver holding a stale answer would
       // park a task a human has already fixed. Reading it is not authoring it
       // — the words are the repository's, and this module still writes none.
-      brief: readTaskBrief(repository, taskId),
+      //
+      // Proven against `authorisedWorktreePath`, never against the repository
+      // root: that is the tree the agents this loop starts will open, and the
+      // one the payload names. The path Git printed, not the one the record
+      // claims — the same authority every other execution input here uses.
+      brief: readExecutionBrief(repository, taskId, authorisedWorktreePath),
       ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
       ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
       ...(deps.observe !== undefined ? { observe: deps.observe } : {}),

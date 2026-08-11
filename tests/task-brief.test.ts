@@ -1,5 +1,5 @@
 /**
- * `readTaskBrief` — the task's prose, prepared for an agent (V2-02).
+ * `previewTaskBrief` — the task's prose, prepared for an agent (V2-02).
  *
  * Real repositories throughout: a real `git init` fixture and the production
  * `resolveRepository`, so the brief is read from a repository the resolver
@@ -16,8 +16,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  readTaskBrief,
-  MAX_TASK_BODY_CHARS,
+  previewTaskBrief,
+  MAX_TASK_BODY_BYTES,
   TASK_BRIEF_FAILURE_CODES,
   type TaskBriefFailureCode,
 } from '../src/plan/task-brief.js';
@@ -77,21 +77,21 @@ async function fixture(
   return { repository: await resolveFixture(root), root };
 }
 
-describe('readTaskBrief — the prose', () => {
+describe('previewTaskBrief — the prose', () => {
   it('carries the body verbatim, trimmed, and reports the context as complete', async () => {
     const { repository } = await fixture({
       'tasks/V2-02.md': taskFileWithBody('V2-02', '\nDo the thing.\n\nAnd the other thing.\n'),
     });
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.brief.taskId).toBe('V2-02');
-    expect(result.brief.body).toBe('Do the thing.\n\nAnd the other thing.');
-    expect(result.brief.bodyTruncated).toBe(false);
-    expect(result.brief.contextSources).toEqual([{ path: 'README.md', status: 'PRESENT' }]);
-    expect(result.brief.contextComplete).toBe(true);
+    expect(result.preview.taskId).toBe('V2-02');
+    expect(result.preview.body).toBe('Do the thing.\n\nAnd the other thing.');
+    expect(result.preview.bodyTruncated).toBe(false);
+    expect(result.preview.contextPreview).toEqual([{ path: 'README.md', status: 'PRESENT' }]);
+    expect(result.preview.contextPreview.every((s) => s.status === 'PRESENT')).toBe(true);
   });
 
   it('is deterministic: the same file always produces the same brief', async () => {
@@ -99,8 +99,8 @@ describe('readTaskBrief — the prose', () => {
       'tasks/V2-02.md': taskFileWithBody('V2-02', 'Stable prose.'),
     });
 
-    const a = readTaskBrief(repository, 'V2-02');
-    const b = readTaskBrief(repository, 'V2-02');
+    const a = previewTaskBrief(repository, 'V2-02');
+    const b = previewTaskBrief(repository, 'V2-02');
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
   });
 
@@ -108,35 +108,35 @@ describe('readTaskBrief — the prose', () => {
     const { repository, root } = await fixture({ 'tasks/V2-02.md': taskFileWithBody('V2-02', 'x') });
     // Rewrite the same content with Windows line endings.
     writeRepoFile(root, 'tasks/V2-02.md', taskFileWithBody('V2-02', 'line one\nline two'));
-    const lf = readTaskBrief(repository, 'V2-02');
+    const lf = previewTaskBrief(repository, 'V2-02');
     writeFileSync(
       join(root, 'tasks', 'V2-02.md'),
       taskFileWithBody('V2-02', 'line one\nline two').replace(/\n/g, '\r\n'),
       'utf8',
     );
-    const crlf = readTaskBrief(repository, 'V2-02');
+    const crlf = previewTaskBrief(repository, 'V2-02');
 
     expect(lf.ok && crlf.ok).toBe(true);
     if (!lf.ok || !crlf.ok) return;
-    expect(crlf.brief.body).toBe(lf.brief.body);
+    expect(crlf.preview.body).toBe(lf.preview.body);
   });
 
   it('truncates an oversized body and says so rather than silently clipping', async () => {
-    const long = 'A'.repeat(MAX_TASK_BODY_CHARS + 500);
+    const long = 'A'.repeat(MAX_TASK_BODY_BYTES + 500);
     const { repository } = await fixture({ 'tasks/V2-02.md': taskFileWithBody('V2-02', long) });
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.brief.body).toHaveLength(MAX_TASK_BODY_CHARS);
-    expect(result.brief.bodyTruncated).toBe(true);
+    expect(Buffer.byteLength(result.preview.body, 'utf8')).toBeLessThanOrEqual(MAX_TASK_BODY_BYTES);
+    expect(result.preview.bodyTruncated).toBe(true);
   });
 
   it('refuses a task file that carries no prose at all', async () => {
     const { repository } = await fixture({ 'tasks/V2-02.md': taskFileWithBody('V2-02', '   \n\n') });
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -151,22 +151,22 @@ describe('readTaskBrief — the prose', () => {
     );
     const { repository } = await fixture({ 'tasks/V2-02.md': taskFileWithBody('V2-02', hostile) });
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     // Carried verbatim, as text, with no field of it promoted to anything.
-    expect(result.brief.body).toBe(hostile);
-    expect(result.brief).not.toHaveProperty('status');
-    expect(result.brief).not.toHaveProperty('dependsOn');
+    expect(result.preview.body).toBe(hostile);
+    expect(result.preview).not.toHaveProperty('status');
+    expect(result.preview).not.toHaveProperty('dependsOn');
   });
 });
 
-describe('readTaskBrief — refusals', () => {
+describe('previewTaskBrief — refusals', () => {
   it('refuses an id outside the grammar without opening anything', async () => {
     const { repository } = await fixture({ 'tasks/V2-02.md': taskFileWithBody('V2-02', 'x') });
 
-    const result = readTaskBrief(repository, '../escape');
+    const result = previewTaskBrief(repository, '../escape');
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -176,7 +176,7 @@ describe('readTaskBrief — refusals', () => {
   it('reports a task file that does not exist', async () => {
     const { repository } = await fixture({ 'tasks/V2-02.md': taskFileWithBody('V2-02', 'x') });
 
-    const result = readTaskBrief(repository, 'V2-99');
+    const result = previewTaskBrief(repository, 'V2-99');
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -188,7 +188,7 @@ describe('readTaskBrief — refusals', () => {
       'tasks/V2-02.md': 'no frontmatter here, just prose\n',
     });
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -198,7 +198,7 @@ describe('readTaskBrief — refusals', () => {
   it('carries no path, no filename and no file content in a failure', async () => {
     const { repository } = await fixture({ 'tasks/V2-02.md': taskFileWithBody('V2-02', 'secret') });
 
-    const result = readTaskBrief(repository, 'V2-99');
+    const result = previewTaskBrief(repository, 'V2-99');
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -212,11 +212,11 @@ describe('readTaskBrief — refusals', () => {
     // what the renderer and any future consumer branch on.
     const declared: readonly TaskBriefFailureCode[] = TASK_BRIEF_FAILURE_CODES;
     expect(new Set(declared).size).toBe(declared.length);
-    expect(readTaskBrief(repository, 'V2-02').ok).toBe(true);
+    expect(previewTaskBrief(repository, 'V2-02').ok).toBe(true);
   });
 });
 
-describe('readTaskBrief — declared context sources', () => {
+describe('previewTaskBrief — declared context sources', () => {
   it('reports a missing declared source rather than assuming it is there', async () => {
     const profile = PROFILE.replace('    - README.md\n', '    - README.md\n    - docs/design.md\n');
     const { repository } = await fixture(
@@ -224,15 +224,15 @@ describe('readTaskBrief — declared context sources', () => {
       profile,
     );
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.brief.contextSources).toEqual([
+    expect(result.preview.contextPreview).toEqual([
       { path: 'README.md', status: 'PRESENT' },
       { path: 'docs/design.md', status: 'MISSING' },
     ]);
-    expect(result.brief.contextComplete).toBe(false);
+    expect(result.preview.contextPreview.some((s) => s.status !== 'PRESENT')).toBe(true);
   });
 
   it('reports a present declared source as PRESENT', async () => {
@@ -245,11 +245,11 @@ describe('readTaskBrief — declared context sources', () => {
       profile,
     );
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.brief.contextComplete).toBe(true);
+    expect(result.preview.contextPreview.every((s) => s.status === 'PRESENT')).toBe(true);
   });
 
   it('does not carry the contents of a context source', async () => {
@@ -258,7 +258,7 @@ describe('readTaskBrief — declared context sources', () => {
     });
     writeRepoFile(root, 'README.md', 'CANARY-CONTEXT-CONTENT\n');
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -286,12 +286,12 @@ describe('readTaskBrief — declared context sources', () => {
     }
     if (!linked) return;
 
-    const result = readTaskBrief(repository, 'V2-02');
+    const result = previewTaskBrief(repository, 'V2-02');
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.brief.contextSources).toEqual([{ path: 'linked.md', status: 'UNSAFE' }]);
-    expect(result.brief.contextComplete).toBe(false);
+    expect(result.preview.contextPreview).toEqual([{ path: 'linked.md', status: 'UNSAFE' }]);
+    expect(result.preview.contextPreview.some((s) => s.status !== 'PRESENT')).toBe(true);
   });
 });
 
@@ -335,13 +335,16 @@ describe('the brief is not planning input', () => {
     });
 
     const original = process.cwd();
-    const first = readTaskBrief(repository, 'V2-02');
+    const first = previewTaskBrief(repository, 'V2-02');
     try {
       process.chdir(join(original, 'src'));
-      const second = readTaskBrief(repository, 'V2-02');
+      const second = previewTaskBrief(repository, 'V2-02');
       expect(JSON.stringify(second)).toBe(JSON.stringify(first));
     } finally {
       process.chdir(original);
     }
   });
 });
+
+
+
