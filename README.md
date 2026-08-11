@@ -38,6 +38,11 @@ What *is* implemented:
    independent requirements; auth evidence is an unforgeable artefact rather than
    a boolean a caller can assert. See
    [Attended execution](#attended-execution-v2-05).
+8. **Scope enforcement** (V2-06): `scope.allowedPaths` is enforced against the
+   task's actual repository effect — the whole delta from `basePinnedCommit`,
+   untracked files included — before *and* after every writing agent, under the
+   scope declared by the profile at the pinned commit. See
+   [Scope enforcement](#scope-enforcement-v2-06).
 
 ## Requirements
 
@@ -1204,7 +1209,7 @@ verification:                # declared only — nothing is executed in this bui
       command: [npm, run, build]
     - phase: VERIFY
       command: [npm, run, verify]
-scope:                       # declared only — no scope is enforced in this build
+scope:                       # enforced since V2-06, against the pinned commit
   allowedPaths: [src, tests]
   protectedPaths: [dist]     # wins over allowedPaths where the two overlap
 completion:
@@ -2880,17 +2885,152 @@ process and passed, not that it did so recently. `tests/auth-preflight-evidence.
 is written as the counter-proof — four routes back to the old position, each
 refused.
 
+## Scope enforcement (V2-06)
+
+`scope.allowedPaths` is now enforced. Until this slice it was declared and
+nothing read it, so a writing agent was confined only by its `cwd`.
+
+The guarantee is about **effect, not intention**:
+
+> A mutating step cannot be left successfully until the task's *actual*
+> cumulative effect on the repository has been measured against the scope it
+> was pinned under.
+
+`runImplementStep` and `runRemediateStep` both run the same guard, twice:
+
+```
+load the scope out of the pinned commit
+         ↓
+PRE-SCOPE   full task delta ⊆ allowed scope?
+         ├── no → SCOPE_VIOLATION, and the writer never starts
+         ↓
+the writing agent
+         ↓
+POST-SCOPE  full task delta ⊆ allowed scope?
+         ├── no → SCOPE_VIOLATION, no verification and no reviewer
+         ↓
+durable transition → VERIFYING
+```
+
+The second check is the one the guarantee rests on. A scope tested only
+*before* a writer governs what the loop intended to permit; the repository only
+ever suffers what the writer actually did. The pre-check is not symmetry — a
+violation is left in the tree as evidence, so a step can legitimately *begin* on
+an already-violated worktree, and without it the next run would hand that tree
+to an agent and only notice afterwards.
+
+**No state and no edge were added.** `SCOPE_VIOLATION` was already in
+`src/core/states.ts`, already a declared successor of both mutating states, and
+already the one block that is not resumable at all. `TaskState` is unchanged at
+schema version 1.
+
+### The delta is the whole task effect, not `git status`
+
+A writing agent is allowed to commit, and a writer that commits leaves a
+**clean** worktree — so the observation an agent most easily makes invisible is
+exactly the one a `git status` check misses. The guard measures the cumulative
+state instead:
+
+```
+basePinnedCommit
+      ├── committed tracked changes   ┐
+      ├── staged tracked changes      ├── git diff <base>
+      ├── unstaged tracked changes    ┘
+      └── untracked, non-ignored      ─── git ls-files --others
+```
+
+Ignored files are deliberately **not** a scope effect — the orchestrator writes
+its own runtime state into an ignored directory, so counting them would fail
+every correctly configured repository. A *tracked* file stays observed even when
+an ignore rule matches it: an ignore rule does not un-track a file.
+
+Renames are split rather than parsed. `--no-renames` turns a move of
+`secret/key.ts` into `src/key.ts` into two records — `D secret/key.ts` and
+`A src/key.ts` — so both endpoints are classified and the forbidden deletion
+cannot hide behind the allowed addition. `protectedPaths` wins over
+`allowedPaths` wherever they overlap, and is consulted first.
+
+### Attacking the observation, not the files
+
+A writer that cannot hide *in* the delta will try to break the instrument. Three
+ways it can, each verified against real Git and each closed:
+
+| Attack | What it does | How it is closed |
+| --- | --- | --- |
+| `git replace -f <base> <forged>` | Re-points the pinned commit, so the diff is taken against a tree the writer built. `refs/replace` lives in the common ref store, so a linked worktree can install one. | `--no-replace-objects` on both object reads |
+| `update-index --assume-unchanged` / `--skip-worktree` | Tells Git to stop comparing a tracked path with the worktree; `git diff <base>` then reports nothing however far the file moved. No flag makes `diff` look anyway. | `ls-files -v` detects the bits → `INDETERMINATE` |
+| A writer-authored `.gitignore` containing `*` | Excludes the writer's new files from `ls-files --others --exclude-standard` — and excludes itself along with them. **Needs no Git command at all: two plain file writes.** | Ignore files are recovered from the ignored listing and classified like any other path |
+
+The third rests on a property of the workspace rather than a new rule: a task
+worktree starts as a clean checkout of `basePinnedCommit`, so every untracked
+file in it is the task's own doing, and an untracked `.gitignore` is therefore
+always writer-authored. One planted *inside* the allowed subtree is permitted,
+because an ignore pattern cannot reach above its own directory and so can only
+hide paths that were already allowed.
+
+`ls-files -v` lists every tracked path and the Git seam caps output at 1 MiB, so
+a repository large enough to exceed that parks the task as `INDETERMINATE`
+rather than passing it — the right direction to fail in, stated here rather than
+left to be discovered.
+
+### The scope is the pinned one, and the writer cannot widen it
+
+The governing declaration is read with `git show <basePinnedCommit>:<profile>`,
+not from `repository.scope` and not from the worktree:
+
+- **not `repository.scope`** — that describes the source checkout, so a profile
+  edited on the default branch would silently re-scope a run already under way;
+- **not the worktree** — that is the tree the writing agent has write access to,
+  so reading the policy there would be asking the agent how far it may go.
+  Self-authorisation, one file edit away.
+
+A writer can dirty a worktree; it cannot change what an existing commit
+contains. The profile is re-validated through the same YAML and contract
+boundaries as any other profile, because a commit is not trustworthy merely for
+being immutable.
+
+### "Could not check" is neither a pass nor an accusation
+
+The verdict is three-way. An unreadable Git, a pin that no longer resolves or a
+profile missing from the pinned tree produce `INDETERMINATE`, which parks the
+task at `HUMAN_DECISION_REQUIRED` carrying the phase it was heading for — *not*
+`SCOPE_VIOLATION`, which says an agent left its sandbox and sends an operator to
+look at damage that may not exist. Both stop the task; only one accuses. It is
+the same split `runVerifyStep` already makes between `BLOCKED_VERIFY` and a
+verification that could not be run.
+
+Nothing is ever reverted. The offending changes are the evidence a human is
+being asked to inspect, and undoing them would hide the effect *and* risk
+destroying legitimate work in the same tree.
+
+### The verdict cannot be handed in
+
+There is no `scopePassed` flag, no scope override and no caller-constructible
+assessment anywhere in `LoopDependencies`. The mutating step calls the assessor
+itself, and the assessor reads the scope out of the pinned commit rather than
+taking one as a parameter — so unlike V2-05's auth evidence there is no artefact
+in flight to forge. The one seam a caller may substitute is the `GitRunner`,
+which supplies raw evidence a step still judges for itself.
+
+`tests/v2-06-scope-enforcement.test.ts` is written as the counter-proof, against
+real repositories and real commits: a committing writer whose tree is provably
+clean, a rename out of a forbidden directory, a writer that rewrites its own
+profile to authorise itself, and a profile widened on the default branch after
+the pin — each refused.
+
 ## Not implemented yet
 
 Still missing, deliberately: **workspace adoption after a crash** — a collision is
 refused, not adopted, so a start that died after `git worktree add` leaves a
-worktree an operator must clear by hand; **scope enforcement**
-(`scope.allowedPaths` is declared, never enforced, so nothing constrains where a
-writing agent writes inside its worktree); multi-task queue progression;
+worktree an operator must clear by hand; multi-task queue progression;
 unattended operation; and any product-side PR/CI/merge automation.
 
-Adoption is next after scope enforcement and before the first block runner. The
-boundary that fixes its place: before anything starts several tasks on its own, a
-crash after `git worktree add` has to be reconcilable — adopted or safely cleaned
-— without hand work. For V2-05 itself `WORKSPACE_COLLISION` remains an explicit
-fail-closed refusal, with no flag to talk an invocation past it.
+Adoption is next, and before the first block runner. The boundary that fixes its
+place: before anything starts several tasks on its own, a crash after `git
+worktree add` has to be reconcilable — adopted or safely cleaned — without hand
+work. `WORKSPACE_COLLISION` remains an explicit fail-closed refusal, with no flag
+to talk an invocation past it.
+
+Scope enforcement covers the **repository** effect of a writing agent, which is
+what the profile declares. It is not a sandbox: an agent's `cwd` is its worktree,
+and nothing here constrains what a process does outside the repository.

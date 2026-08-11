@@ -63,6 +63,7 @@ import {
   SHA_B,
   validCreatedState,
 } from './fixtures.js';
+import { cleanScopeGit } from './helpers/scope-git.js';
 
 const NOW = '2026-08-10T09:00:00.000Z';
 const TASK_ID = 'task-0001';
@@ -208,6 +209,15 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     verification: VERIFICATION,
     taskBrief: 'Add a widget.',
     observe: settledObserver,
+    // The Git a healthy repository would be, for the same reason `observe`
+    // is the observation a healthy `observeRuntime` would make: this root is
+    // synthetic — no `git init`, no `worktree` directory, a fabricated base
+    // SHA — because these tests are about the loop's routing. V2-06's scope
+    // guard reads the repository for real before and after every writer, so
+    // without this every mutating step here would fail closed on "this is not
+    // a repository", which is true and is not what any of them are asking.
+    // A test that means to exercise the guard overrides it explicitly.
+    git: cleanScopeGit,
     ...overrides,
   };
 }
