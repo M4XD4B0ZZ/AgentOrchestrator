@@ -595,6 +595,73 @@ describe('the boundary V2-07 keeps, and the one it must not claim', () => {
   }, 180_000);
 });
 
+/* ───────────────── the run the contract exists to record ───────────────── */
+
+describe('a tightened gate still passes an honest run', () => {
+  it('records a block whose every task really finished as COMPLETE', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+
+    // `COMPLETE` is now proved against every task's own record rather than
+    // against the entries claiming it, and a proof strong enough to refuse a
+    // forgery is a proof that could quietly make the honest case unreachable.
+    // This is the case it must not: two tasks, really started, really finished.
+    for (const taskId of ['A-001', 'B-001']) {
+      await reallyStart(fixture, taskId);
+      expect(
+        activateBlockTask(reload(fixture.root), taskId, { repositoryRoot: fixture.root }).outcome,
+      ).toBe('RECORDED');
+      driveToReadyForPr(fixture, taskId);
+      expect(
+        settleBlockTask(reload(fixture.root), taskId, { repositoryRoot: fixture.root }).outcome,
+      ).toBe('RECORDED');
+    }
+
+    const stopped = stopBlockRun(reload(fixture.root), 'COMPLETE', {
+      repositoryRoot: fixture.root,
+    });
+
+    expect(stopped.outcome).toBe('RECORDED');
+    expect(onDisk(fixture.root)['stopReason']).toBe('COMPLETE');
+    expect(reconcileBlockRun(reload(fixture.root).ledger, { repositoryRoot: fixture.root }))
+      .toEqual({ verdict: 'CONSISTENT', findings: [], progressAvailable: false });
+  }, 180_000);
+
+  it('records a genuinely blocked task, and then refuses to progress the run', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    await reallyStart(fixture, 'A-001');
+    expect(activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome)
+      .toBe('RECORDED');
+
+    const loaded = loadTaskState(fixture.root, 'A-001');
+    if (!loaded.ok) throw new Error('fixture: the task never started');
+    // `SCOPE_VIOLATION` rather than one of the resumable blocks: it is blocking
+    // by the state contract's own classification and carries no resume point,
+    // so the fixture states one fact and not three.
+    const blocked = saveTaskState(
+      {
+        ...loaded.state,
+        state: 'SCOPE_VIOLATION',
+        stateEnteredAt: '2026-08-11T12:00:00.000Z',
+        blockedAgent: 'claude',
+      },
+      { repositoryRoot: fixture.root, expectedRevision: loaded.revision },
+    );
+    if (!blocked.ok) throw new Error(`fixture could not reach a blocking state: ${blocked.code}`);
+
+    expect(parkBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome)
+      .toBe('RECORDED');
+    expect(onDisk(fixture.root)['stopReason']).toBe('TASK_BLOCKED');
+
+    // A stopped run does not quietly keep going. Refused as its own outcome,
+    // because the task's disposition is not what stands in the way — the run's
+    // own ending is, and an operator reading the two goes to different places.
+    expect(activateBlockTask(reload(fixture.root), 'B-001', { repositoryRoot: fixture.root }).outcome)
+      .toBe('RUN_ALREADY_STOPPED');
+  }, 180_000);
+});
+
 /* ───────────────── the fingerprint separator ────────────────────────────── */
 
 describe('the definition fingerprint separator', () => {
