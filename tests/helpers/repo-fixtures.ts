@@ -82,6 +82,28 @@ export function createRepoFixture(options: RepoFixtureOptions): string {
 
   git(root, ['init', '-b', options.defaultBranch, '--quiet']);
 
+  // Line endings are the fixture's own business, not the host's.
+  //
+  // `GIT_ENV` above clears the global and system config so a developer's
+  // settings cannot change what a fixture *is*. That covers every Git command
+  // this file runs — and not the ones the **product** runs: `runGitCommand`
+  // forwards `PATH` and `PATHEXT` only, so it inherits the machine's config, and
+  // on a Windows box with a system-wide `core.autocrlf=true` the production
+  // `git worktree add` checks out CRLF files into a tree whose blobs are LF.
+  //
+  // A test writer that then commits through this file's `git()` stores those
+  // CRLF bytes verbatim, and every text file in the repository becomes a
+  // genuine content change — attributed, correctly but uselessly, to the
+  // writing agent. Whether it happens at all depends on Git's stat cache, so it
+  // is flaky rather than merely wrong.
+  //
+  // `* -text` turns the conversion off for both sides at once, in the
+  // repository itself, where neither config can override it. It is also the
+  // honest declaration for a fixture: these bytes are the test's input, and
+  // nothing may rewrite them on the way to disk. A caller that wants to test
+  // conversion supplies its own `.gitattributes` through `files`.
+  writeRepoFile(root, '.gitattributes', '* -text\n');
+
   writeRepoFile(root, 'README.md', `# fixture on ${options.defaultBranch}\n`);
   for (const [path, contents] of Object.entries(options.files ?? {})) {
     writeRepoFile(root, path, contents);

@@ -628,6 +628,11 @@ export async function runTask(
       // one the payload names. The path Git printed, not the one the record
       // claims — the same authority every other execution input here uses.
       brief: readExecutionBrief(repository, taskId, authorisedWorktreePath),
+      // The same Git this driver reconciled with, handed down rather than left
+      // to be reached for. A mutating step's scope guard asks the repository
+      // what the writer actually did (V2-06); if it resolved its own runner,
+      // this run would be observing one Git and enforcing against another.
+      git: deps.git,
       ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
       ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
       ...(deps.observe !== undefined ? { observe: deps.observe } : {}),

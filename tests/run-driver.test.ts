@@ -71,6 +71,7 @@ import {
   removeRepoFixtures,
 } from './helpers/repo-fixtures.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
+import { cleanScopeAnswer } from './helpers/scope-git.js';
 import { resolveFixture } from './helpers/worktree-fixtures.js';
 
 const TASK_ID = 'task-0001';
@@ -220,6 +221,13 @@ function scriptedGit(root: string, script: GitScript = {}) {
     if (startsWith(args, ['merge-base', '--is-ancestor'])) return OK();
     if (startsWith(args, ['rev-parse']) && args.includes('HEAD')) return script.head ?? OK(SHA_B);
     if (startsWith(args, ['rev-parse'])) return OK(SHA_A);
+    // The scope guard's three questions, answered as a task that changed
+    // nothing (V2-06). These roots are synthetic, so a real Git could establish
+    // nothing here and every mutating step would fail closed — a true answer to
+    // a question this suite is not asking. Delegated rather than inlined so the
+    // "unscripted call throws" rule below still covers everything else.
+    const scope = cleanScopeAnswer(args);
+    if (scope !== null) return scope;
     throw new Error(`unscripted git call: ${args.join(' ')}`);
   };
   return Object.assign(runner, {

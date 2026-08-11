@@ -50,6 +50,38 @@
  * boundaries prove a path is *usable*, never that it is *ours*. A step handed
  * no authority runs nothing and writes nothing (`EXECUTION_UNAUTHORISED`).
  *
+ * ── What a mutating step is allowed to change (V2-06) ──────────────────────
+ *
+ * Being allowed to execute *somewhere* is not being allowed to change
+ * *anything*. `IMPLEMENTING` and `REMEDIATING` are the two phases that run a
+ * writing agent, and both of them are wrapped by {@link enforceScope}: once
+ * before the writer starts, and again immediately before the durable move to
+ * `VERIFYING`.
+ *
+ *     load the scope out of the pinned commit
+ *              ↓
+ *     PRE-SCOPE   full task delta ⊆ allowed scope?
+ *              ├── no → SCOPE_VIOLATION, and the writer never starts
+ *              ↓
+ *     the writing agent
+ *              ↓
+ *     POST-SCOPE  full task delta ⊆ allowed scope?
+ *              ├── no → SCOPE_VIOLATION, no verification and no reviewer
+ *              ↓
+ *     durable transition → VERIFYING
+ *
+ * The second check is the one the guarantee rests on. A scope tested only
+ * before a writer runs governs what the loop *intended* to permit; the
+ * repository only ever suffers what the writer actually did, and that is
+ * measured from Git — the whole delta from `basePinnedCommit` to the current
+ * worktree, untracked files included — rather than from anything the agent, or
+ * this module's caller, says about it. `scope/` owns that derivation and
+ * explains each part of it; nothing here may be handed a scope verdict.
+ *
+ * No new state was needed for it. `SCOPE_VIOLATION` was already in the
+ * vocabulary, already declared as a successor of both mutating states, and
+ * already the one block that is not resumable at all.
+ *
  * ── Rounds ─────────────────────────────────────────────────────────────────
  *
  * `reviewRound` counts **completed** reviews and starts at 0. The review being
@@ -69,12 +101,13 @@ import { absolutePathsEqual, isComparablePath } from '../core/path-identity.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import type { ExecutionBriefResult } from '../plan/task-brief.js';
 import type { TaskState } from '../core/task-state.js';
-import type { TaskStateName } from '../core/states.js';
+import type { ResumePhase, TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
+import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import { observeRuntime } from '../state/observe-runtime.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
-import { runGitCommand } from '../worktree/git-command.js';
+import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
 import { runVerification, type VerificationReport } from '../verify/run-verification.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import {
@@ -136,6 +169,18 @@ export interface LoopStepResult {
    * restarts gets the weaker durable version and is told as much.
    */
   readonly remediationPayload: string | null;
+  /**
+   * What the scope guard found, present only on the steps that run it.
+   *
+   * Handed back rather than persisted, for the same reason as `verification`:
+   * it names repository paths, and this contract does not store paths in a task
+   * state. It is reporting, never authority — nothing downstream may read it as
+   * permission, because the step that produced it has already acted on it.
+   *
+   * Kept on a refused write too. What Git said about the worktree is true
+   * whether or not the durable record of it landed.
+   */
+  readonly scope: ScopeAssessment | null;
 }
 
 /** What the loop must be told about the world. */
@@ -208,6 +253,21 @@ export interface LoopDependencies extends AdvanceOptions {
   readonly agent?: AgentRunner;
   readonly observe?: CompletionObserver;
   /**
+   * The Git seam the scope guard observes through. Defaults to the real one.
+   *
+   * Deliberately the *lowest* seam in this dependency set, and deliberately not
+   * a scope-shaped one. A caller may substitute the process that answers
+   * questions about a repository — that is what makes an unreadable Git, a
+   * rewritten pin and a garbled diff testable at all — but it cannot substitute
+   * the verdict, the scope declaration, or the classification of a path. Those
+   * are derived inside `scope/`, from whatever this seam reports, and a runner
+   * that lies produces raw evidence a step still judges for itself.
+   *
+   * There is no `scopePassed`, no `ScopeAssessment` input and no scope override
+   * anywhere in this interface, and that absence is the contract (V2-06).
+   */
+  readonly git?: GitRunner;
+  /**
    * The remediation prompt a previous review step produced. When absent, the
    * remediate step rebuilds a weaker one from `findingHistory`.
    */
@@ -220,6 +280,7 @@ function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutc
     save: null,
     verification: null,
     remediationPayload: null,
+    scope: null,
     ...from,
   });
 }
@@ -271,11 +332,121 @@ function saved(save: StateSaveResult, state: TaskStateName, outcome: LoopStepOut
     // from `ADVANCED` — but a contract that holds by the caller's good manners
     // is not held here (V1-08).
     //
-    // `verification` is deliberately kept: it reports what the repository's own
-    // commands said, which is true whether or not the write landed.
+    // `verification` and `scope` are deliberately kept: they report what the
+    // repository's own commands and Git said, which is true whether or not the
+    // write landed.
     return result({ ...extra, remediationPayload: null, outcome: 'STATE_NOT_RECORDED', save });
   }
   return result({ outcome, state, save, ...extra });
+}
+
+/* ─────────────────────────── the scope guard ────────────────────────────── */
+
+/**
+ * The gate both mutating steps run — before the writer, and again before the
+ * durable move to `VERIFYING`.
+ *
+ * `blocked` is `null` when the task's whole effect is inside the scope it was
+ * pinned under, and a finished {@link LoopStepResult} when it is not. A caller
+ * that gets one must return it unchanged: the single durable write for this
+ * step has already been made.
+ *
+ * `assessment` is reported either way, so a step that passes the gate can hand
+ * back what the guard actually saw rather than only the fact that it survived.
+ *
+ * ── Why the check runs twice ───────────────────────────────────────────────
+ *
+ * The **post**-writer check is the one the guarantee is about. Checking a scope
+ * only before a writer runs controls the *intention* and not the *effect*, and
+ * the effect is the only thing a repository actually suffers.
+ *
+ * The **pre**-writer check is not symmetry. A violation is durable — the
+ * offending changes are deliberately left in the tree as evidence — so a tree
+ * can already be out of scope when a step begins: a previous pass violated it
+ * and the `SCOPE_VIOLATION` write was refused, or a human continued the task
+ * without cleaning up. Without a pre-check, the next run would hand that tree to
+ * a writing agent and only notice afterwards, having spent an agent invocation
+ * to compound a violation somebody already had to look at.
+ *
+ * ── Why two different blocking states ──────────────────────────────────────
+ *
+ * A proven violation is `SCOPE_VIOLATION`: not resumable, no resume point
+ * permitted, and it tells an operator to go and inspect what an agent wrote.
+ *
+ * An *indeterminate* assessment — Git unreadable, the pin gone, no profile in
+ * the pinned tree — is `HUMAN_DECISION_REQUIRED`, carrying the phase the task
+ * was heading for. Nothing was proven about the agent, and saying "an agent
+ * wrote outside its allowed scope" because Git could not be run would send an
+ * operator hunting for damage that may not exist. The same split
+ * `runVerifyStep` already makes between `BLOCKED_VERIFY` and an unusable
+ * verification, for the same reason. Both stop the task; only one accuses.
+ *
+ * Neither path reverts anything. The changes stay exactly where the writer left
+ * them — see `scope/assess-scope.ts` for why undoing them would be the more
+ * dangerous act.
+ */
+async function enforceScope(
+  current: StateLoadSuccess,
+  options: {
+    readonly now: string;
+    readonly git: GitRunner;
+    readonly authorisedWorktreePath: string;
+    readonly phase: ResumePhase;
+    readonly round: number;
+    /** Whether the writing agent has already run in this pass. */
+    readonly writerRan: boolean;
+    readonly advance: AdvanceOptions;
+  },
+): Promise<{ readonly blocked: LoopStepResult | null; readonly assessment: ScopeAssessment }> {
+  const state = current.state;
+
+  // Derived here from Git, never accepted as an input. The scope declaration is
+  // not passed either — `assessTaskScope` reads it out of the pinned commit.
+  const assessment = await assessTaskScope({
+    git: options.git,
+    authorisedWorktreePath: options.authorisedWorktreePath,
+    basePinnedCommit: state.basePinnedCommit,
+  });
+
+  if (assessment.verdict === 'WITHIN_SCOPE') return { blocked: null, assessment };
+
+  if (assessment.verdict === 'VIOLATION') {
+    const save = advanceTaskState(
+      current,
+      {
+        ...state,
+        state: 'SCOPE_VIOLATION',
+        stateEnteredAt: options.now,
+        // Only when a writer actually ran. A pre-writer violation is a fact
+        // about the tree this step found, and naming an agent that was never
+        // started would attribute it to a run that did not happen.
+        blockedAgent: options.writerRan ? 'claude' : null,
+        // The state cannot be continued, so it may not carry a re-entry point.
+        resumeFrom: null,
+        reportedResetAt: null,
+        ...withdrawnCheckpointFor(state.state),
+      },
+      options.advance,
+    );
+    return { blocked: saved(save, 'SCOPE_VIOLATION', 'BLOCKED', { scope: assessment }), assessment };
+  }
+
+  const save = advanceTaskState(
+    current,
+    {
+      ...state,
+      state: 'HUMAN_DECISION_REQUIRED',
+      stateEnteredAt: options.now,
+      resumeFrom: { phase: options.phase, round: options.round },
+      reportedResetAt: null,
+      ...withdrawnCheckpointFor(state.state),
+    },
+    options.advance,
+  );
+  return {
+    blocked: saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED', { scope: assessment }),
+    assessment,
+  };
 }
 
 /**
@@ -299,12 +470,14 @@ export async function runVerifyStep(
     taskBrief,
     verify,
     agent,
+    git,
     observe,
     remediationPayload,
     ...advance
   } = deps;
   void taskBrief;
   void agent;
+  void git;
   void observe;
   void remediationPayload;
 
@@ -378,9 +551,10 @@ export async function runReviewStep(
   if (state.state !== 'REVIEWING') return NOT_APPLICABLE;
 
   const { now, authorisedWorktreePath, taskBrief, agent, observe, ...rest } = deps;
-  const { verification, verify, remediationPayload, ...advance } = rest;
+  const { verification, verify, git, remediationPayload, ...advance } = rest;
   void verification;
   void verify;
+  void git;
   void remediationPayload;
 
   if (!authorised(state, authorisedWorktreePath)) return EXECUTION_UNAUTHORISED;
@@ -535,6 +709,7 @@ export async function runRemediateStep(
     now,
     authorisedWorktreePath,
     agent,
+    git,
     remediationPayload,
     taskBrief,
     verification,
@@ -587,6 +762,19 @@ export async function runRemediateStep(
     return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
   }
 
+  const scopeGuard = {
+    now,
+    git: git ?? runGitCommand,
+    authorisedWorktreePath,
+    phase: 'REMEDIATE' as const,
+    round,
+    advance,
+  };
+
+  // PRE-SCOPE. A tree that is already out of scope does not get a writer.
+  const before = await enforceScope(current, { ...scopeGuard, writerRan: false });
+  if (before.blocked !== null) return before.blocked;
+
   const writer = await runClaudeWriter(
     { worktreePath: authorisedWorktreePath, phase: 'REMEDIATE', round, payload: brief.payload },
     agent === undefined ? {} : { agent },
@@ -609,7 +797,15 @@ export async function runRemediateStep(
     return result({ outcome: 'BLOCKED', state: record.state, save: record.save });
   }
 
-  // The writer changed the worktree and nothing here looked at the result, so
+  // POST-SCOPE. Identical to the implement pass, and deliberately so: the two
+  // steps differ in the cause they are given and in nothing else, so a
+  // remediation that writes outside the declared scope must not reach
+  // `VERIFYING` either. A guard on only the first pass would be a sandbox a
+  // writer escapes on its second attempt.
+  const after = await enforceScope(current, { ...scopeGuard, writerRan: true });
+  if (after.blocked !== null) return after.blocked;
+
+  // The scope guard read *which* paths the writer touched and nothing more, so
   // the checkpoint facts stay withdrawn. Verification is what looks next.
   const save = advanceTaskState(
     current,
@@ -623,7 +819,7 @@ export async function runRemediateStep(
     },
     advance,
   );
-  return saved(save, 'VERIFYING', 'ADVANCED');
+  return saved(save, 'VERIFYING', 'ADVANCED', { scope: after.assessment });
 }
 
 /* ─────────────────────────── the setup hops ─────────────────────────────── */
@@ -650,8 +846,9 @@ export async function runWorktreeReadyStep(
   const state = current.state;
   if (state.state !== 'WORKTREE_READY') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, agent, remediationPayload, taskBrief, brief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, agent, git, remediationPayload, taskBrief, brief, verification, verify, observe, ...advance } = deps;
   void agent;
+  void git;
   void remediationPayload;
   void taskBrief;
   void brief;
@@ -696,8 +893,9 @@ export async function runContextLoadingStep(
   const state = current.state;
   if (state.state !== 'CONTEXT_LOADING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, brief, agent, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, brief, agent, git, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
   void agent;
+  void git;
   void remediationPayload;
   void taskBrief;
   void verification;
@@ -789,7 +987,7 @@ export async function runImplementStep(
   const state = current.state;
   if (state.state !== 'IMPLEMENTING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, agent, brief, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, agent, brief, git, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
   void remediationPayload;
   void taskBrief;
   void verification;
@@ -820,6 +1018,19 @@ export async function runImplementStep(
     return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
   }
 
+  const scopeGuard = {
+    now,
+    git: git ?? runGitCommand,
+    authorisedWorktreePath,
+    phase: 'IMPLEMENT' as const,
+    round,
+    advance,
+  };
+
+  // PRE-SCOPE. A tree that is already out of scope does not get a writer.
+  const before = await enforceScope(current, { ...scopeGuard, writerRan: false });
+  if (before.blocked !== null) return before.blocked;
+
   const writer = await runClaudeWriter(
     {
       worktreePath: authorisedWorktreePath,
@@ -847,8 +1058,17 @@ export async function runImplementStep(
     return result({ outcome: 'BLOCKED', state: record.state, save: record.save });
   }
 
-  // The writer changed the worktree and nothing here looked at the result, so
-  // the checkpoint facts stay withdrawn. Verification is what looks next.
+  // POST-SCOPE. The guarantee: no mutating step is left successfully until the
+  // writer's *actual* effect on the repository has been measured. This runs
+  // before the durable move, so a task that wrote out of scope cannot reach
+  // `VERIFYING` — and therefore cannot reach a reviewer either.
+  const after = await enforceScope(current, { ...scopeGuard, writerRan: true });
+  if (after.blocked !== null) return after.blocked;
+
+  // The scope guard read *which* paths the writer touched and nothing more: it
+  // has no opinion on whether the work is right, and it did not re-establish
+  // HEAD or a clean tree. So the checkpoint facts stay withdrawn, and
+  // verification is still what looks next.
   const save = advanceTaskState(
     current,
     {
@@ -860,7 +1080,7 @@ export async function runImplementStep(
     },
     advance,
   );
-  return saved(save, 'VERIFYING', 'ADVANCED');
+  return saved(save, 'VERIFYING', 'ADVANCED', { scope: after.assessment });
 }
 
 /**
