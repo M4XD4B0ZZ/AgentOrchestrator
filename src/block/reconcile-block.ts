@@ -50,7 +50,11 @@
 
 import { comparePathIdentity } from '../core/path-identity.js';
 import { readDeclaredRepositoryId } from '../repo/declared-identity.js';
-import { fingerprintBlockDefinition, type BlockDefinition } from './block-definition.js';
+import {
+  fingerprintBlockDefinition,
+  fingerprintFrozenMembership,
+  type BlockDefinition,
+} from './block-definition.js';
 import { proveBlockTaskEntry, type EntryProofCode } from './block-evidence.js';
 import type { BlockRunLedger, TaskDisposition } from './block-ledger.js';
 
@@ -98,6 +102,19 @@ export const BLOCK_RECONCILIATION_FINDINGS = [
   /** The block definition in the repository is no longer the frozen one. */
   'DEFINITION_DRIFTED',
   /**
+   * The ledger's stored `planFingerprint` is not the digest of the membership
+   * the ledger itself lists.
+   *
+   * A document that came through the store cannot be in this state: the
+   * contract re-derives the field on every create, every update and every load.
+   * So this is a ledger *value* that did not come through it — and it is
+   * reported rather than quietly corrected, because a stored digest describing
+   * a plan the document does not list does not merely lose drift detection, it
+   * inverts it, and every drift answer computed against that field would be a
+   * comparison against a lie.
+   */
+  'PLAN_FINGERPRINT_UNSOUND',
+  /**
    * The ledger is being reconciled against a repository it does not describe.
    *
    * Either the recorded root is not this one, or the identity the profile
@@ -122,6 +139,7 @@ const DIVERGENT: ReadonlySet<BlockReconciliationFinding> = new Set([
   'TASK_STATE_UNUSABLE',
   'COMMIT_NOT_PROVEN_BY_STATE',
   'DEFINITION_DRIFTED',
+  'PLAN_FINGERPRINT_UNSOUND',
   'REPOSITORY_IDENTITY_DRIFTED',
 ]);
 
@@ -188,14 +206,32 @@ export function reconcileBlockRun(
     );
   }
 
+  // The frozen plan, derived rather than believed.
+  //
+  // `planFingerprint` is a stored field, and this function takes a ledger
+  // *value*: nothing forced it through the schema that re-derives that digest
+  // on every create, update and load. Comparing the current definition against
+  // the stored field therefore compared it against whatever the field happened
+  // to say, and a value carrying the digest of a plan it does not list inverts
+  // the answer — the edited roadmap reports clean and the honest one reports
+  // drifted. That is the failure the store closed for itself, reached through
+  // the one door the store does not stand in.
+  //
+  // So the frozen membership is recomputed here from the two fields that *are*
+  // the plan, and both the ledger's own claim about it and the repository's
+  // current definition are held against that, rather than against each other.
+  const frozen = fingerprintFrozenMembership(ledger.blockId, ledger.frozenTaskIds);
+  if (ledger.planFingerprint !== frozen) {
+    findings.push(record(ledger.blockId, 'PLAN_FINGERPRINT_UNSOUND'));
+  }
   if (
     options.definition !== undefined &&
-    fingerprintBlockDefinition(options.definition) !== ledger.planFingerprint
+    fingerprintBlockDefinition(options.definition) !== frozen
   ) {
     // The membership this run was started against is not the one in front of
     // us. Reported against the block rather than a task, because it is a fact
     // about the plan.
-    findings.push(Object.freeze({ taskId: ledger.blockId, finding: 'DEFINITION_DRIFTED' as const }));
+    findings.push(record(ledger.blockId, 'DEFINITION_DRIFTED'));
   }
 
   for (const entry of ledger.tasks) {

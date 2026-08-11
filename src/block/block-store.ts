@@ -17,13 +17,30 @@
  * field. A store keyed on the block would make "start it again" mean "destroy
  * the evidence of what happened last time".
  *
- * ── The same compare-and-swap, deliberately ────────────────────────────────
+ * ── The same compare-and-swap, deliberately — and what it is not ───────────
  *
  * Revision is a digest of the exact bytes on disk, and there is no force
  * option. This is the same mechanism as `state-store.ts`, restated here rather
  * than shared because the two write different documents to different places —
  * but the *semantics* are copied on purpose, so a reader who knows one knows the
  * other, and neither can quietly become laxer than its sibling.
+ *
+ * It is **advisory, not atomic**, and this module says so rather than implying
+ * otherwise. Every write is a read followed, several syscalls later, by an
+ * unconditional rename: the revision is compared, and only then are the bytes
+ * staged, flushed and moved into place. Two writers holding one revision both
+ * pass the comparison, both report success, and the later rename wins — so a
+ * recorded `LEDGER_DIVERGED` can be lost to a concurrent `OPERATOR_STOPPED`
+ * that had every reason to believe it was first.
+ *
+ * `state-store.ts` documents the same window and justifies it: the loser's file
+ * is complete and valid, merely superseded. That reasoning does **not** carry
+ * over here, because the loser is a run's whole recorded history rather than
+ * one task's latest state. Closing it properly needs a repository-wide owner —
+ * the execution lease's contract, keyed on the local Git administrative
+ * identity, which does not exist yet. Until it does, **one writer per ledger is
+ * a prerequisite this store depends on and cannot enforce**, and nothing below
+ * should be read as a guarantee against a second one.
  *
  * ── Two functions, because they were never one operation ───────────────────
  *
@@ -82,6 +99,7 @@ import { proveBlockTaskEntry, type EntryProofCode } from './block-evidence.js';
 import {
   assessLedgerSuccession,
   safeParseBlockRunLedger,
+  PROGRESS_CLAIMING_STOP_REASONS,
   type BlockRunLedger,
 } from './block-ledger.js';
 
@@ -296,11 +314,17 @@ function persist(
 /* ── creating ────────────────────────────────────────────────────────────── */
 
 /**
- * Writes the first ledger of a run, atomically, and only if there is none.
+ * Writes the first ledger of a run, and only if there is none.
  *
  * A run id that already has a ledger is refused rather than overwritten: a
  * block is not a run, and starting one again must not destroy the record of
  * what happened last time.
+ *
+ * That refusal is a **read followed by a write**, not an atomic create — see
+ * the module header on the single-writer prerequisite. It defends against a
+ * caller starting the same run twice in sequence, which is the mistake that
+ * actually happens; it does not defend against two callers racing, and this
+ * function does not claim to.
  *
  * A creation **claims no progress**, and that is enforced here rather than
  * assumed: every entry `PLANNED`, nothing active, no stop reason. Without it,
@@ -464,7 +488,7 @@ function firstUnprovenClaim(
   const claimsProgress =
     next.stopReason !== null &&
     next.stopReason !== previous.stopReason &&
-    CLAIMS_PROGRESS.has(next.stopReason);
+    PROGRESS_CLAIMING_STOP_REASONS.has(next.stopReason);
 
   if (!dispositionsMoved && !claimsProgress) return null;
 
@@ -475,22 +499,6 @@ function firstUnprovenClaim(
 
   return null;
 }
-
-/**
- * The stop reasons that assert something about the tasks rather than about the
- * run's ability to continue.
- *
- * The others — `OPERATOR_STOPPED`, `NO_ELIGIBLE_TASK`, `LEDGER_DIVERGED`,
- * `STATE_UNUSABLE`, `DEFINITION_DRIFTED` — claim no progress, and must stay
- * writable over a ledger whose entries are *not* supported. Otherwise a run
- * that has just detected a divergence could not record that it had, which is
- * the one thing it must always be able to do.
- */
-const CLAIMS_PROGRESS: ReadonlySet<string> = new Set<string>([
-  'COMPLETE',
-  'TASK_BLOCKED',
-  'TASK_ABANDONED',
-]);
 
 /* ─────────────────────────────── loading ────────────────────────────────── */
 

@@ -38,7 +38,7 @@
  * and never claims a guarantee it does not have.
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -48,6 +48,7 @@ import {
   defineBlock,
   fingerprintBlockDefinition,
   fingerprintFrozenMembership,
+  isValidBlockId,
 } from '../src/block/block-definition.js';
 import { safeParseBlockRunLedger } from '../src/block/block-ledger.js';
 import {
@@ -765,6 +766,376 @@ describe('a tightened gate still passes an honest run', () => {
     expect(activateBlockTask(reload(fixture.root), 'B-001', { repositoryRoot: fixture.root }).outcome)
       .toBe('RUN_ALREADY_STOPPED');
   }, 180_000);
+});
+
+/* ────────── the contract the second adversarial review settled ─────────── */
+
+/** Where a task's own durable record lives, so a probe can take it away. */
+function taskStatePath(root: string, taskId: string): string {
+  return join(root, '.agent-orchestrator', 'runtime', `${taskId}.json`);
+}
+
+describe('a run may record that it stopped while a task was still unresolved', () => {
+  it('records STATE_UNUSABLE over an active task whose record has gone, and moves nothing else', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    await reallyStart(fixture, 'A-001');
+    expect(activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome)
+      .toBe('RECORDED');
+
+    const before = reload(fixture.root).ledger;
+
+    // The task's own record disappears. No forgery, no adversary: a crash
+    // mid-write, or `git clean -xfd` over the gitignored runtime directory.
+    // Nothing in the ledger is touched.
+    rmSync(taskStatePath(fixture.root, 'A-001'));
+
+    // Every outcome-bearing move is now correctly unprovable — no record proves
+    // settlement, blocking or abandonment.
+    for (const move of [settleBlockTask, parkBlockTask, abandonBlockTask]) {
+      expect(move(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome)
+        .toBe('TASK_NOT_STARTED');
+    }
+
+    // Which is precisely the situation `STATE_UNUSABLE` is a stop reason for.
+    // While clearing `activeTaskId` first was required, no call could move the
+    // entry off ACTIVE, so this stop could never be written: the run could see
+    // the fault and never record it, and the only move left was to edit the
+    // ledger by hand — the one thing this module exists to prevent.
+    const stopped = stopBlockRun(reload(fixture.root), 'STATE_UNUSABLE', {
+      repositoryRoot: fixture.root,
+    });
+    expect(stopped.outcome).toBe('RECORDED');
+
+    const after = reload(fixture.root).ledger;
+    expect(after.stopReason).toBe('STATE_UNUSABLE');
+    // The honest record, and only it: the block stopped, and this task was
+    // still unresolved when it did. Not rewound to PLANNED — which would claim
+    // it was never started — and not given an outcome nothing proved.
+    expect(after.activeTaskId).toBe('A-001');
+    expect(after.tasks[0]?.disposition).toBe('ACTIVE');
+    expect(after.tasks).toEqual(before.tasks);
+
+    // And the stop does not launder the fault. The reconciler still names it.
+    const reconciled = reconcileBlockRun(after, { repositoryRoot: fixture.root });
+    expect(reconciled.verdict).toBe('DIVERGED');
+    expect(reconciled.findings).toContainEqual({
+      taskId: 'A-001',
+      finding: 'ACTIVE_WITHOUT_TASK_STATE',
+    });
+  }, 180_000);
+
+  it('holds that stop to saying only that the run stopped', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    await reallyStart(fixture, 'A-001');
+    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+    await reallyStart(fixture, 'B-001');
+    driveToReadyForPr(fixture, 'B-001');
+
+    const current = reload(fixture.root);
+    const before = readFileSync(ledgerPath(fixture.root));
+
+    // This write is the one exempt from the evidence proof, because the whole
+    // point is that no evidence is available. An exempt write that could also
+    // carry a commit, a disposition or a rewritten identity would be the widest
+    // hole in the module rather than its narrowest allowance. Each successor
+    // below stops the run *and* smuggles one extra thing, keeping the task
+    // active so the exemption is the rule being tested.
+    const smuggles: Record<string, unknown> = {
+      'a base commit onto the unresolved task': {
+        ...current.ledger,
+        stopReason: 'LEDGER_DIVERGED' as const,
+        tasks: current.ledger.tasks.map((task) =>
+          task.taskId === 'A-001' ? { ...task, baseCommit: FORGED_SHA } : task,
+        ),
+      },
+      'a genuinely provable settlement of the neighbour': {
+        ...current.ledger,
+        stopReason: 'LEDGER_DIVERGED' as const,
+        tasks: current.ledger.tasks.map((task) =>
+          task.taskId === 'B-001'
+            ? {
+                ...task,
+                disposition: 'SETTLED' as const,
+                evidenceRevision: (() => {
+                  const state = loadTaskState(fixture.root, 'B-001');
+                  return state.ok ? state.revision : FORGED_REVISION;
+                })(),
+                baseCommit: (() => {
+                  const state = loadTaskState(fixture.root, 'B-001');
+                  return state.ok ? state.state.basePinnedCommit : FORGED_SHA;
+                })(),
+                resultCommit: (() => {
+                  const state = loadTaskState(fixture.root, 'B-001');
+                  return state.ok ? state.state.currentCommit : FORGED_SHA;
+                })(),
+              }
+            : task,
+        ),
+      },
+      'a backdated start': {
+        ...current.ledger,
+        stopReason: 'LEDGER_DIVERGED' as const,
+        startedAt: '2020-01-01T00:00:00.000Z',
+      },
+    };
+
+    for (const [what, successor] of Object.entries(smuggles)) {
+      const saved = updateBlockLedger(successor, {
+        repositoryRoot: fixture.root,
+        expectedRevision: current.revision,
+      });
+
+      expect(saved.ok, what).toBe(false);
+      expect(saved.ok ? null : saved.code, what).toBe('LEDGER_SUCCESSION_REFUSED');
+      expect(saved.ok ? '' : (saved.detail ?? ''), what).toContain('UNRESOLVED_STOP_CARRIED_MORE');
+      expect(readFileSync(ledgerPath(fixture.root)).equals(before), what).toBe(true);
+    }
+
+    // The bare stop, by contrast, lands.
+    expect(stopBlockRun(reload(fixture.root), 'LEDGER_DIVERGED', { repositoryRoot: fixture.root })
+      .outcome).toBe('RECORDED');
+    expect(onDisk(fixture.root)['stopReason']).toBe('LEDGER_DIVERGED');
+  }, 180_000);
+
+  it('still refuses to claim an outcome for the tasks while one is unresolved', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    await reallyStart(fixture, 'A-001');
+    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+
+    // The relaxation is for reasons that claim nothing about the tasks. A
+    // reason that does claim something is still an outcome for a task nobody
+    // looked at, and the contract refuses the document outright.
+    for (const reason of ['COMPLETE', 'TASK_BLOCKED', 'TASK_ABANDONED'] as const) {
+      expect(stopBlockRun(reload(fixture.root), reason, { repositoryRoot: fixture.root }).outcome)
+        .toBe('ANOTHER_TASK_ACTIVE');
+      expect(
+        safeParseBlockRunLedger({ ...reload(fixture.root).ledger, stopReason: reason }).success,
+      ).toBe(false);
+    }
+    expect(onDisk(fixture.root)['stopReason']).toBeNull();
+  }, 180_000);
+});
+
+describe('a run that has ended has a past, not a present', () => {
+  it('refuses later progress at the store, not only at the layer above it', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    await reallyStart(fixture, 'A-001');
+    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+    driveToReadyForPr(fixture, 'A-001');
+
+    // The run ends while still holding A-001 — the write the rule above makes
+    // possible.
+    expect(stopBlockRun(reload(fixture.root), 'LEDGER_DIVERGED', { repositoryRoot: fixture.root })
+      .outcome).toBe('RECORDED');
+
+    const current = reload(fixture.root);
+    const before = readFileSync(ledgerPath(fixture.root));
+
+    // The progress API refuses, as it always did. That is manners, and manners
+    // are walked around by going one layer down.
+    expect(settleBlockTask(current, 'A-001', { repositoryRoot: fixture.root }).outcome)
+      .toBe('RUN_ALREADY_STOPPED');
+
+    // The successor below is entirely honest: A-001 really is READY_FOR_PR, and
+    // the evidence is its own current revision, so the proof at the gate would
+    // pass it. It is refused anyway — because a run that has recorded why it is
+    // not continuing does not then continue, and that has to be a rule of the
+    // contract rather than a habit of one caller.
+    const truth = loadTaskState(fixture.root, 'A-001');
+    if (!truth.ok) throw new Error('fixture: the task state vanished');
+    const progressed = updateBlockLedger(
+      {
+        ...current.ledger,
+        activeTaskId: null,
+        tasks: current.ledger.tasks.map((task) =>
+          task.taskId === 'A-001'
+            ? {
+                ...task,
+                disposition: 'SETTLED' as const,
+                evidenceRevision: truth.revision,
+                baseCommit: truth.state.basePinnedCommit,
+                resultCommit: truth.state.currentCommit,
+              }
+            : task,
+        ),
+      },
+      { repositoryRoot: fixture.root, expectedRevision: current.revision },
+    );
+
+    expect(progressed.ok).toBe(false);
+    expect(progressed.ok ? null : progressed.code).toBe('LEDGER_SUCCESSION_REFUSED');
+    expect(progressed.ok ? '' : (progressed.detail ?? '')).toContain('STOPPED_RUN_PROGRESSED');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+  }, 180_000);
+});
+
+describe('drift is answered against a fingerprint the reconciler derives itself', () => {
+  it('cannot be inverted by a ledger value carrying a foreign fingerprint', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001', 'C-001']);
+    startRun(fixture, ['A-001', 'B-001', 'C-001']);
+    const persisted = reload(fixture.root).ledger;
+
+    const honest = block(['A-001', 'B-001', 'C-001']);
+    const edited = block(['A-001', 'C-001', 'B-001']);
+
+    // A ledger *value* that never came through the store: it lists the honest
+    // plan and carries the digest of the edited one. `reconcileBlockRun` takes
+    // a value, so nothing forced it through the schema that re-derives the
+    // field — which is exactly the door the store does not stand in.
+    const lying = { ...persisted, planFingerprint: fingerprintBlockDefinition(edited) };
+    expect(safeParseBlockRunLedger(lying).success).toBe(false);
+
+    const findingsOf = (ledger: typeof persisted, definition: typeof honest): string[] =>
+      reconcileBlockRun(ledger, { repositoryRoot: fixture.root, definition }).findings.map(
+        (entry) => entry.finding,
+      );
+
+    // Believing the stored field inverts both answers: the edited roadmap
+    // reports clean and the honest one reports drifted. Deriving the frozen
+    // membership from the document's own two plan fields is what makes the
+    // stored digest unable to decide anything.
+    expect(findingsOf(lying, edited)).toContain('DEFINITION_DRIFTED');
+    expect(findingsOf(lying, honest)).not.toContain('DEFINITION_DRIFTED');
+
+    // And the unsound field is reported in its own right, rather than silently
+    // ignored: a ledger whose stored digest does not describe its own plan did
+    // not come through the store, and that is worth saying.
+    expect(findingsOf(lying, honest)).toContain('PLAN_FINGERPRINT_UNSOUND');
+    expect(reconcileBlockRun(lying, { repositoryRoot: fixture.root }).verdict).toBe('DIVERGED');
+
+    // The persisted ledger still answers drift the one honest way.
+    expect(findingsOf(persisted, honest)).toEqual([]);
+    expect(findingsOf(persisted, edited)).toEqual(['DEFINITION_DRIFTED']);
+  }, 180_000);
+});
+
+describe('the limits this slice does not claim', () => {
+  it('loses a ledger write to a concurrent writer, which is why the lease comes first', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+
+    // Two writers read the same ledger and each hold a current revision.
+    const first = reload(fixture.root);
+    const second = reload(fixture.root);
+    expect(first.revision).toBe(second.revision);
+
+    // The second lands entirely while the first is between its revision check
+    // and its rename. `replace` is the store's own seam and is used here to
+    // make the interleaving deterministic — it does not create the window,
+    // which is in the ordering of the real code path: read, compare, stage,
+    // flush, then an unconditional move.
+    const winner = updateBlockLedger(
+      { ...first.ledger, stopReason: 'OPERATOR_STOPPED' as const },
+      {
+        repositoryRoot: fixture.root,
+        expectedRevision: first.revision,
+        replace: (from, to) => {
+          const loser = updateBlockLedger(
+            { ...second.ledger, stopReason: 'LEDGER_DIVERGED' as const },
+            { repositoryRoot: fixture.root, expectedRevision: second.revision },
+          );
+          expect(loser.ok).toBe(true);
+          renameSync(from, to);
+        },
+      },
+    );
+
+    // Both writers were told they had succeeded, and the divergence one of them
+    // recorded is gone. This is the known single-writer limitation, pinned so
+    // that it stays known: a compare-and-swap answers "has anybody written
+    // since my revision?", and answering it is not the same as holding the
+    // file. Closing it needs a repository-wide owner — the execution lease,
+    // which is why that now comes before the block runner rather than after it.
+    expect(winner.ok).toBe(true);
+    expect(onDisk(fixture.root)['stopReason']).toBe('OPERATOR_STOPPED');
+  }, 180_000);
+});
+
+/* ───────────────── gaps the counter-proofs had left ─────────────────────── */
+
+describe('rules that were contract but not yet counter-proved', () => {
+  it('refuses an edit to an entry whose disposition did not move', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    await reallyStart(fixture, 'A-001');
+    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+    driveToReadyForPr(fixture, 'A-001');
+    expect(settleBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome)
+      .toBe('RECORDED');
+
+    const current = reload(fixture.root);
+    const before = readFileSync(ledgerPath(fixture.root));
+
+    // Nothing re-proves an entry whose disposition does not move, which is
+    // exactly why "a record that did not move did not change" has to be its own
+    // rule. The field being rewritten here is the one V2-09 intends to make a
+    // successor's base.
+    const edited = {
+      ...current.ledger,
+      tasks: current.ledger.tasks.map((task) =>
+        task.taskId === 'A-001' ? { ...task, resultCommit: FORGED_SHA } : task,
+      ),
+    };
+    const saved = updateBlockLedger(edited, {
+      repositoryRoot: fixture.root,
+      expectedRevision: current.revision,
+    });
+
+    expect(saved.ok).toBe(false);
+    expect(saved.ok ? null : saved.code).toBe('LEDGER_SUCCESSION_REFUSED');
+    expect(saved.ok ? '' : (saved.detail ?? '')).toContain('RECORDED_ENTRY_CHANGED');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+  }, 180_000);
+
+  it('reports an abandoned entry whose record never reached ABORTED', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+
+    const truth = loadTaskState(fixture.root, 'A-001');
+    if (!truth.ok) throw new Error('fixture: the task state vanished');
+
+    // A-001 finished. The ledger is edited to say it was given up on instead,
+    // carrying the revision that is genuinely current — so the evidence check
+    // passes it and only the *state it points at* can refuse the claim.
+    const forged = onDisk(fixture.root) as { tasks: Record<string, unknown>[] };
+    forged.tasks[0]!['disposition'] = 'ABANDONED';
+    forged.tasks[0]!['evidenceRevision'] = truth.revision;
+    forged.tasks[0]!['baseCommit'] = truth.state.basePinnedCommit;
+    writeFileSync(ledgerPath(fixture.root), `${JSON.stringify(forged, null, 2)}\n`, 'utf8');
+
+    const loaded = loadBlockLedger(fixture.root, RUN_ID);
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+
+    const reconciled = reconcileBlockRun(loaded.ledger, { repositoryRoot: fixture.root });
+
+    // Settling and abandoning must never be reachable from one record:
+    // READY_FOR_PR is terminal too, and a run that claims it gave up on work
+    // that actually finished is as wrong as the reverse.
+    expect(reconciled.verdict).toBe('DIVERGED');
+    expect(reconciled.findings).toContainEqual({
+      taskId: 'A-001',
+      finding: 'ABANDONED_WITHOUT_ABORTED_STATE',
+    });
+  }, 180_000);
+
+  it('refuses a block whose id is also one of its own tasks', () => {
+    const defined = defineBlock('A-001', ['A-001', 'B-001']);
+
+    expect(defined.ok).toBe(false);
+    expect(defined.ok ? null : defined.code).toBe('BLOCK_ID_COLLIDES_WITH_TASK');
+
+    // The two grammars are deliberately one rule, so an id alone never says
+    // which of the two it names — and a reconciliation files findings about the
+    // block under the same field it uses for findings about a task.
+    expect(isValidBlockId('A-001')).toBe(true);
+  });
 });
 
 /* ───────────────── the fingerprint separator ────────────────────────────── */

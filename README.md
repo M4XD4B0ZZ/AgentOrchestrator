@@ -3151,6 +3151,16 @@ create, update and load. A stored digest describing a plan the document does not
 list would not merely lose drift detection — it inverts it, so the honest
 roadmap reports as drifted and the edited one reports as clean.
 
+Reconciliation derives it too, rather than reading the stored field.
+`reconcileBlockRun` takes a ledger *value*, and a value did not have to come
+through the store to get here — so it recomputes the frozen membership from the
+document's own `blockId` and `frozenTaskIds`, and holds both the ledger's stored
+digest and the repository's current definition against that. A value whose
+stored digest describes a plan it does not list is reported as
+`PLAN_FINGERPRINT_UNSOUND` rather than believed. Believing it was the one door
+the store does not stand in, and every drift answer behind that door was
+inverted.
+
 ### Progress is evidence, not assignment
 
 `SETTLED`, `BLOCKED` and `ABANDONED` are not setters. `settleBlockTask` reads
@@ -3189,6 +3199,35 @@ The exempt write is a stop whose reason asserts no progress:
 a run with an unsupported ledger needs to be able to say. Requiring a clean
 proof there would mean a run that has just detected a divergence could not
 record having detected it — the one thing it must always be able to do.
+
+For one slice that exemption was unreachable in the case it was written for,
+because a second rule said a stopped run may not also have an active task. A task
+whose record has become unreadable proves neither settlement nor blocking nor
+abandonment, so nothing could move it off `ACTIVE`, so `activeTaskId` could not
+be cleared, so no stop could be written at all: a run could *see*
+`STATE_UNUSABLE` and never record it, and the only move left was hand-editing the
+ledger. A non-progress stop may therefore now be recorded **over a task that is
+still unresolved**, and the document then says what actually happened — the block
+stopped, and this task was `ACTIVE` when it did. Rewinding the entry to `PLANNED`
+was the alternative and is the worse one: it claims the task was never started,
+when the run knows perfectly well that it was.
+
+That write is held to its minimum. It may set `stopReason` and change nothing
+else — no disposition, no commit, no evidence, no identity, and not
+`activeTaskId` itself — or it is refused as `UNRESOLVED_STOP_CARRIED_MORE`. The
+one write that needs no evidence is thereby also the one write that can carry
+none. The three reasons that *do* claim something about the tasks stay
+unavailable while a task is unresolved, refused by the contract rather than
+merely discouraged by the caller.
+
+And an ended run is history rather than a present tense: once `stopReason` is
+set, no later successor may move a disposition or edit an entry
+(`STOPPED_RUN_PROGRESSED`). `block-progress` had refused that all along, which
+made it caller manners rather than contract — and manners are precisely what a
+caller going one layer down walks around. Without the rule the store accepted
+genuinely-proved progress *after* the ending, leaving a durable ledger that read
+`LEDGER_DIVERGED` over entries which had all since moved to `SETTLED`, and which
+reconciliation then called consistent.
 
 A stop reason is also **written once**. `LEDGER_DIVERGED` relabelled
 `OPERATOR_STOPPED` destroys the only durable trace that a divergence was ever
@@ -3241,6 +3280,33 @@ update path had just been taught to refuse.
 
 The file is named by the **run**, not the block, so starting the same block again
 never destroys the record of the last attempt.
+
+### The compare-and-swap is advisory, not atomic
+
+Stated here because the store used to imply otherwise. Every write is a read
+followed, several syscalls later, by an unconditional rename: two writers holding
+one revision both pass the comparison, both are told they succeeded, and the
+later rename wins — so a recorded `LEDGER_DIVERGED` can be lost to a concurrent
+`OPERATOR_STOPPED` that had every reason to believe it was first.
+`createBlockLedger`'s "only if there is none" is the same shape, a read and then
+a write. It defends against starting the same run twice in sequence, which is the
+mistake that actually happens; it does not defend against two callers racing, and
+no longer claims to.
+
+`state-store.ts` documents the same window and justifies it: the loser's file is
+complete and valid, merely superseded. That reasoning does **not** carry over
+here, because the loser is a run's whole recorded history rather than one task's
+latest state. Closing it properly needs a repository-wide owner — the execution
+lease — so until that exists, **one writer per ledger is a prerequisite this
+store depends on and cannot enforce**. `tests/v2-07-remediation.test.ts` pins the
+limitation with a deliberate two-writer counter-proof, so that it stays a known
+boundary rather than becoming a surprise.
+
+A block id may also not collide with one of its own task ids. The two grammars
+are deliberately one rule, so an id alone never says which of the two it names —
+and a reconciliation files findings about the block under the same field it uses
+for findings about a task, which would leave a consumer unable to tell "this plan
+drifted" from "this task's record does not support it".
 
 ### A ledger is bound to the file it came from
 
@@ -3357,14 +3423,56 @@ reason two definitions cannot encode to one string. It is written as `'\u0000'`
 now, and the test compares the digest with one computed from an independently
 constructed separator, so the change is proven to move no existing fingerprint.
 
+### Carried forward from the second adversarial review, deliberately
+
+That review broke the remediation rather than reading it: six independent
+read-only reviewers, every finding reproduced through a production boundary. Four
+findings were fixed on the spot and are the rules above. These are the ones taken
+as decisions instead.
+
+- **F-5** — renaming `repository.id` while a run is open strands that run: it can
+  no longer be loaded, written keeping the recorded id, or written adopting the
+  new one. Accepted as fail-closed product behaviour. `repository.id` is
+  *declared logical identity*, so changing it mid-run is a **migration**, not a
+  transparent rename, and inventing a mechanism for it now would be inventing the
+  answer early. Nothing false is persisted, and reconciliation still reports
+  `REPOSITORY_IDENTITY_DRIFTED`.
+- **F-7** — `BlockStoreOptions.replace` is a production type, and supplying one
+  lets bytes the store never validated land while `LedgerSaveSuccess.revision`
+  still describes the bytes it *intended* to write. Not an escalation: a caller
+  that can pass a function into the store can already write the file. It should
+  stay explicitly documented as a test seam rather than quietly available.
+- **F-9** — `LEDGER_TOO_LARGE` on the save path has a producer but no reachable
+  input: `encode` runs after the identity check, and every remaining field is
+  bounded well under the ceiling. Harmless defensive symmetry with the load path;
+  either the union is sharpened or the unreachability is documented, later.
+
+Two things a later slice must not read into the ledger, neither of them defects:
+
+- **`COMPLETE` is not run-scoped.** It means *every task of this block is in
+  `READY_FOR_PR`*, never *this run produced these commits*. A `TaskState` carries
+  no run identity, so a fresh run over already-finished tasks reaches `COMPLETE`
+  immediately, doing no work, with every claim genuinely evidence-backed. V2-09
+  makes one task's `resultCommit` the next task's base, and that is exactly the
+  assumption it has to earn rather than inherit.
+- **`loadBlockLedger` proves identity, never evidence.** It answers
+  `LEDGER_VALID` for a document whose entries are fiction, by construction — the
+  store's rule is scoped to *mutating* calls. A runner that reads
+  `stopReason: 'COMPLETE'` without reconciling is trusting a forgery the store
+  considers valid.
+
 ### What V2-07 is not
 
 No block execution: nothing here drives a run. No dependent commit chain. No
-execution lease — the ledger orchestrates no agent and no Git effect, and the
-lease is required before *unattended* running, not before this. What the
-remediation established is narrower and worth stating exactly: a compare-and-swap
-plus a successor contract is sufficient for **one run's own record**, and says
-nothing about two runs sharing a repository.
+execution lease — the ledger orchestrates no agent and no Git effect.
+
+What the remediation established is narrower than it first looked, and worth
+stating exactly: a compare-and-swap plus a successor contract is sufficient for
+**one run's own record, against one writer at a time**. It says nothing about two
+runs sharing a repository — and, as the second adversarial review showed, nothing
+about two writers sharing one ledger either. The lease was previously described
+here as required before *unattended* running. That was wrong by one slice; see
+below.
 
 ## Not implemented yet
 
@@ -3372,12 +3480,28 @@ Still missing, deliberately: block execution (V2-08); the dependent commit chain
 (V2-09); unattended operation; an execution lease; and any product-side
 PR/CI/merge automation.
 
-The lease is the boundary that matters next for autonomy: before anything runs
-several tasks on its own, two processes must not be able to believe they own the
-same task. Recovery closed the crash window, which is a different problem and
-was the one blocking a block runner from being *restartable*.
+**The lease now comes before the block runner, not after it**, and V2-07 is what
+forced that change of order. The ledger's compare-and-swap is advisory, so two
+concurrent writers of one ledger can each be told they succeeded while one of the
+two records is silently lost — and "attended" is not mutual exclusion: two
+terminals, two remote-control calls, or one accidental double start are enough. A
+block runner built on this ledger before the lease exists would be building on a
+record that can lose writes. So the order is:
 
-V2-07 sharpened what the lease has to be, in two ways. It showed the gap
+```
+V2-07 ledger authority
+        ↓
+execution lease / ownership
+        ↓
+V2-08 attended block runner
+```
+
+Inventing a cross-platform atomic file compare-and-swap inside V2-07 was the
+alternative, and it would have burst the slice for a guarantee the lease has to
+provide anyway. Recovery closed the crash window, which is a different problem
+and was the one blocking a block runner from being *restartable*.
+
+V2-07 sharpened what the lease has to be, in three ways. It showed the gap
 concretely — two run ledgers in one repository can each hold the same task
 `ACTIVE`, and neither document is wrong — and it settled what the lease may
 **not** be keyed on. `repositoryId` is the profile's configurable logical
@@ -3386,6 +3510,11 @@ local execution domains, while two worktrees of one clone are one. The lease key
 must therefore be the local Git administrative identity — the normalised
 `git-common-dir`, which is exactly what proved worktree membership in V2-06A —
 and `repositoryId` stays what it is, a declared identity a ledger is held to.
+
+The third is scope. The lease is not only about two processes believing they own
+the same *task*: it is also what makes one writer per *ledger file* true, which
+the store cannot establish for itself. Both guarantees come from the same owner,
+which is the other reason for taking it before the runner rather than beside it.
 
 Scope enforcement covers the **repository** effect of a writing agent, which is
 what the profile declares. It is not a sandbox: an agent's `cwd` is its worktree,

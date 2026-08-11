@@ -134,6 +134,23 @@ export const BLOCK_STOP_REASONS = [
 
 export type BlockStopReason = (typeof BLOCK_STOP_REASONS)[number];
 
+/**
+ * The stop reasons that assert something about the tasks, rather than about the
+ * run's ability to continue.
+ *
+ * The distinction earns its keep twice over. A reason in this set is proved
+ * against every task's own record before it is written; the others claim no
+ * progress and must stay writable over a ledger whose entries are *not*
+ * supported, because a run that has just detected a divergence has to be able
+ * to say so.
+ *
+ * It lives here, with the contract, rather than beside the gate that consumes
+ * it. The schema and the store both have to answer "does this reason claim
+ * progress?", and two answers to that question would be two contracts.
+ */
+export const PROGRESS_CLAIMING_STOP_REASONS: ReadonlySet<BlockStopReason> =
+  new Set<BlockStopReason>(['COMPLETE', 'TASK_BLOCKED', 'TASK_ABANDONED']);
+
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const ISO_8601 =
@@ -215,6 +232,15 @@ export const BlockRunLedgerSchema = BlockRunLedgerObjectSchema.superRefine((valu
   if (new Set(value.frozenTaskIds).size !== value.frozenTaskIds.length) {
     issue(['frozenTaskIds'], 'frozenTaskIds must not repeat a task.');
   }
+  // A block id that is also one of its own task ids makes a finding reported
+  // against the *block* indistinguishable from one reported against that task:
+  // the two id grammars are deliberately the same rule, so nothing but this
+  // separates them, and a reconciliation reports both under one field name.
+  // Refused here as well as in `defineBlock`, because a document did not have
+  // to come from a definition to get here.
+  if (value.frozenTaskIds.includes(value.blockId)) {
+    issue(['blockId'], 'blockId must not also be a task id of this block.');
+  }
 
   // --- 1b. The fingerprint describes the plan the document actually lists ---
   // `planFingerprint` used to be stored and believed, which made it possible
@@ -278,9 +304,37 @@ export const BlockRunLedgerSchema = BlockRunLedgerObjectSchema.superRefine((valu
     }
   });
 
-  // --- 5. A stopped run is not also running --------------------------------
-  if (value.stopReason !== null && value.activeTaskId !== null) {
-    issue(['stopReason'], 'A run with a stop reason must not also have an active task.');
+  // --- 5. A stopped run may still be holding an unresolved task ------------
+  // For one slice this read "a stopped run is not also running" and forbade the
+  // two outright. That was the wrong shape, and it cost the run the one write
+  // it must always have.
+  //
+  // A task whose record has become unreadable can be neither settled, parked
+  // nor abandoned — no evidence proves any of the three — so requiring
+  // `activeTaskId` to be cleared first was requiring a disposition to move,
+  // which re-arms the whole evidence proof. A run could therefore *see*
+  // `STATE_UNUSABLE` and never record it, and the only move left was to edit
+  // the ledger by hand: precisely what this contract exists to prevent.
+  //
+  // So the honest record is now sayable: the block stopped while this task was
+  // still unresolved. Rewinding the entry to `PLANNED` was the other way out
+  // and is a worse one — it claims the task was never started, when the run
+  // knows perfectly well that it was.
+  //
+  // What may still never coexist with an active task is a reason that claims
+  // the *tasks* did something. Those three are proved against the task records,
+  // and a run still holding an unresolved task has not finished, has not been
+  // blocked, and has not given anything up. `assessLedgerSuccession` holds the
+  // other half: such a stop may say that the run stopped, and nothing else.
+  if (
+    value.stopReason !== null &&
+    value.activeTaskId !== null &&
+    PROGRESS_CLAIMING_STOP_REASONS.has(value.stopReason)
+  ) {
+    issue(
+      ['stopReason'],
+      `${value.stopReason} must not be claimed while a task is still ACTIVE.`,
+    );
   }
   // Three stop reasons are claims about the entries, and are checked against
   // them here. That is a consistency check and never a *proof*: whether the
@@ -352,6 +406,10 @@ export const LEDGER_SUCCESSION_VIOLATIONS = [
   'RECORDED_ENTRY_CHANGED',
   /** A run that already stopped was given a different reason, or restarted. */
   'STOP_REASON_RELABELLED',
+  /** A run that had already recorded its ending changed one of its records. */
+  'STOPPED_RUN_PROGRESSED',
+  /** A stop recorded over a still-unresolved active task said more than that. */
+  'UNRESOLVED_STOP_CARRIED_MORE',
 ] as const;
 
 export type LedgerSuccessionViolation = (typeof LEDGER_SUCCESSION_VIOLATIONS)[number];
@@ -387,6 +445,43 @@ function sameEntry(a: BlockTaskEntry, b: BlockTaskEntry): boolean {
     a.evidenceRevision === b.evidenceRevision &&
     a.baseCommit === b.baseCommit &&
     a.resultCommit === b.resultCommit
+  );
+}
+
+/** `true` when the two documents hold the same task records, in order. */
+function sameEntries(previous: BlockRunLedger, next: BlockRunLedger): boolean {
+  return (
+    previous.tasks.length === next.tasks.length &&
+    previous.tasks.every((before, index) => {
+      const after = next.tasks[index];
+      return after !== undefined && sameEntry(before, after);
+    })
+  );
+}
+
+/**
+ * `true` when `next` is `previous` with nothing but its stop reason set.
+ *
+ * Every field of the document except `stopReason` is named here, deliberately
+ * and exhaustively, in the same spirit as {@link sameEntry}: this is the
+ * predicate that keeps the one evidence-exempt write from becoming the one
+ * write that can carry anything. A field added to the contract and not added
+ * here would be a field that write could change unexamined, so the list is
+ * meant to be edited whenever the schema is.
+ */
+function onlyStopReasonChanged(previous: BlockRunLedger, next: BlockRunLedger): boolean {
+  return (
+    next.schemaVersion === previous.schemaVersion &&
+    next.repositoryId === previous.repositoryId &&
+    next.repositoryRoot === previous.repositoryRoot &&
+    next.blockId === previous.blockId &&
+    next.runId === previous.runId &&
+    next.startedAt === previous.startedAt &&
+    next.planFingerprint === previous.planFingerprint &&
+    next.activeTaskId === previous.activeTaskId &&
+    next.frozenTaskIds.length === previous.frozenTaskIds.length &&
+    next.frozenTaskIds.every((taskId, index) => taskId === previous.frozenTaskIds[index]) &&
+    sameEntries(previous, next)
   );
 }
 
@@ -451,6 +546,39 @@ export function assessLedgerSuccession(
   // happened, and the only durable trace of the divergence is gone.
   if (previous.stopReason !== null && next.stopReason !== previous.stopReason) {
     violations.add('STOP_REASON_RELABELLED');
+  }
+
+  // A run that has recorded why it is not continuing has a past, not a present.
+  // `block-progress` refuses to progress a stopped run and, until this rule
+  // existed, was the *only* thing that did — which made it caller manners
+  // rather than contract, and a caller going straight to the store walked
+  // around it exactly as one walked around the evidence proof before the store
+  // owned that. The result was a durable ledger reading `LEDGER_DIVERGED` over
+  // entries that had all moved to `SETTLED` afterwards, every one of them
+  // genuinely proved, which a reconciliation then called consistent.
+  //
+  // Note what this does *not* say: the stop reason itself is already write-once
+  // above, and an ended run holding an unresolved `ACTIVE` task keeps it. What
+  // is frozen is the record — no disposition moves, no entry is edited, and the
+  // task the run was working on when it ended stays the task it was working on.
+  if (previous.stopReason !== null) {
+    if (!sameEntries(previous, next) || next.activeTaskId !== previous.activeTaskId) {
+      violations.add('STOPPED_RUN_PROGRESSED');
+    }
+  }
+
+  // The escape hatch, held to its own minimum.
+  //
+  // A run may record that it stopped while a task is still unresolved — see the
+  // contract rule this pairs with — and that write is exempt from the evidence
+  // proof, because the whole point is that no evidence is available. An exempt
+  // write that could also carry a disposition, a commit or a rewritten identity
+  // would be the widest hole in the module rather than its narrowest allowance.
+  // So it may say one thing: that the run stopped.
+  if (previous.stopReason === null && next.stopReason !== null && next.activeTaskId !== null) {
+    if (!onlyStopReasonChanged(previous, next)) {
+      violations.add('UNRESOLVED_STOP_CARRIED_MORE');
+    }
   }
 
   return Object.freeze([...violations]);

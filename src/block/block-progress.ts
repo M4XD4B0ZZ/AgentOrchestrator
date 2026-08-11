@@ -30,6 +30,7 @@ import { fingerprintBlockDefinition } from './block-definition.js';
 import {
   BLOCK_LEDGER_SCHEMA_VERSION,
   entryFor,
+  PROGRESS_CLAIMING_STOP_REASONS,
   type BlockRunLedger,
   type BlockStopReason,
   type BlockTaskEntry,
@@ -414,11 +415,26 @@ export function abandonBlockTask(
  * is checked by the contract against every entry, so it cannot be claimed over
  * unfinished work.
  *
- * An **active task must be resolved first** — settled, parked, or abandoned,
- * each with its own evidence. Clearing `activeTaskId` here while an entry still
- * said `ACTIVE` would produce a document the contract refuses, and clearing the
- * entry too would be this function inventing an outcome for a task it never
+ * ── An active task, and the two kinds of ending ────────────────────────────
+ *
+ * A reason that claims the *tasks* did something — `COMPLETE`, `TASK_BLOCKED`,
+ * `TASK_ABANDONED` — still requires the active task to be resolved first, with
+ * its own evidence. Claiming any of the three over a task the run is still
+ * holding would be this function inventing an outcome for a task it never
  * looked at. So it refuses, and the caller says what happened to the task.
+ *
+ * A reason that claims **no** progress does not require that, and must not.
+ * This once refused every stop while a task was active, and the cost was the
+ * wedge the ledger exists to make impossible: a task whose record has become
+ * unreadable proves neither settlement nor blocking nor abandonment, so no call
+ * could move it off `ACTIVE`, so no stop could be recorded, so a run could see
+ * `STATE_UNUSABLE` and never say so. The remaining move was hand-editing the
+ * ledger.
+ *
+ * Such a stop leaves the entry exactly as it found it. The record then reads:
+ * the block stopped, and this task was still unresolved when it did — which is
+ * what actually happened. `assessLedgerSuccession` holds that write to saying
+ * only that, so the one ending that needs no evidence cannot carry any.
  *
  * ── Why it is written once ─────────────────────────────────────────────────
  *
@@ -448,7 +464,9 @@ export function stopBlockRun(
     // either. It changes nothing, and says so.
     return progress({ outcome: 'RUN_ALREADY_STOPPED' });
   }
-  if (current.ledger.activeTaskId !== null) return progress({ outcome: 'ANOTHER_TASK_ACTIVE' });
+  if (current.ledger.activeTaskId !== null && PROGRESS_CLAIMING_STOP_REASONS.has(reason)) {
+    return progress({ outcome: 'ANOTHER_TASK_ACTIVE' });
+  }
   const next: BlockRunLedger = { ...current.ledger, stopReason: reason };
   return commit(current, next, options);
 }

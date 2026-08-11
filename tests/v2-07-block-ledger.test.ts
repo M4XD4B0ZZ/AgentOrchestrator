@@ -252,6 +252,28 @@ describe('the ledger contract', () => {
     stopReason: null,
   };
 
+  // The control every other case in this block leans on. Each of them asserts
+  // only that a forgery is *refused*, and a `base` that had stopped being valid
+  // would satisfy all of them for the wrong reason. That is not hypothetical:
+  // `base` once carried a hand-written `planFingerprint`, which the
+  // re-derivation rule would have made invalid — and five tests would have gone
+  // on passing while proving nothing.
+  it('starts from a base document the contract actually accepts', () => {
+    expect(safeParseBlockRunLedger(base).success).toBe(true);
+  });
+
+  it('refuses a block whose id is also one of its own tasks', () => {
+    // The fingerprint is recomputed for the colliding id, so the only thing
+    // left to refuse this document is the collision itself.
+    const collided = {
+      ...base,
+      blockId: 'A-001',
+      planFingerprint: fingerprintFrozenMembership('A-001', ['A-001', 'B-001']),
+    };
+
+    expect(safeParseBlockRunLedger(collided).success).toBe(false);
+  });
+
   it('refuses a settled entry with no evidence behind it', () => {
     const forged = {
       ...base,
@@ -366,19 +388,46 @@ describe('recording progress', () => {
     expect(parked.outcome).toBe('TASK_STATE_DOES_NOT_PROVE_IT');
   });
 
-  it('will not stop a run that still has an active task', async () => {
+  it('will not claim an outcome for the run while a task is still active', async () => {
     const fixture = await repoWithTasks();
     started(fixture);
     await realTask(fixture, 'A-001');
     activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
 
+    // The three reasons that say what the *tasks* did. Claiming any of them
+    // over a task the run is still holding would invent an outcome for a task
+    // nothing looked at.
+    for (const reason of ['COMPLETE', 'TASK_BLOCKED', 'TASK_ABANDONED'] as const) {
+      expect(
+        stopBlockRun(reload(fixture.root), reason, { repositoryRoot: fixture.root }).outcome,
+      ).toBe('ANOTHER_TASK_ACTIVE');
+    }
+    expect(reload(fixture.root).ledger.stopReason).toBeNull();
+  });
+
+  it('records a no-progress stop over a task it never resolved, and changes nothing else', async () => {
+    const fixture = await repoWithTasks();
+    started(fixture);
+    await realTask(fixture, 'A-001');
+    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+    const before = reload(fixture.root).ledger;
+
     const stopped = stopBlockRun(reload(fixture.root), 'OPERATOR_STOPPED', {
       repositoryRoot: fixture.root,
     });
 
-    // Clearing the active task here would either produce a document the
-    // contract refuses, or invent an outcome for a task nothing looked at.
-    expect(stopped.outcome).toBe('ANOTHER_TASK_ACTIVE');
+    // A reason that claims no progress needs no evidence, so it does not need
+    // the active task resolved first — and requiring that was what once left a
+    // run able to see a fault it could never record.
+    expect(stopped.outcome).toBe('RECORDED');
+
+    const after = reload(fixture.root).ledger;
+    expect(after.stopReason).toBe('OPERATOR_STOPPED');
+    // The honest record: the run stopped, and this task was unresolved when it
+    // did. Nothing was rewound, nothing was invented, nothing else moved.
+    expect(after.activeTaskId).toBe('A-001');
+    expect(after.tasks).toEqual(before.tasks);
+    expect({ ...after, stopReason: null }).toEqual({ ...before, stopReason: null });
   });
 });
 

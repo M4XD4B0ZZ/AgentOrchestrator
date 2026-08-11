@@ -59,6 +59,7 @@ export const BLOCK_DEFINITION_FAILURE_CODES = [
   'BLOCK_TOO_LARGE',
   'TASK_ID_INVALID',
   'TASK_REPEATED',
+  'BLOCK_ID_COLLIDES_WITH_TASK',
 ] as const;
 
 export type BlockDefinitionFailureCode = (typeof BLOCK_DEFINITION_FAILURE_CODES)[number];
@@ -104,6 +105,13 @@ export function defineBlock(blockId: string, taskIds: readonly string[]): BlockD
     // A repeated task is not harmless noise: it would give one task two entries
     // in the ledger, and two dispositions that can disagree.
     if (seen.has(taskId)) return definitionFailure('TASK_REPEATED');
+    // Nor is a block that is also one of its own tasks. The block-id grammar is
+    // the task-id grammar on purpose — see `isValidBlockId` — so an id alone
+    // never says which of the two it names. A reconciliation reports findings
+    // about the block under the same field it reports findings about a task, and
+    // where the two ids are equal a consumer keying on that field cannot tell
+    // "this plan drifted" from "this task's record does not support it".
+    if (taskId === blockId) return definitionFailure('BLOCK_ID_COLLIDES_WITH_TASK');
     seen.add(taskId);
   }
 
