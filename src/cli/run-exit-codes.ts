@@ -196,6 +196,11 @@ const RELEASE_EXIT_CODES = Object.freeze({
   PLANNING_FAILED: EXIT_RUN_INPUT_UNUSABLE,
   TASK_UNKNOWN: EXIT_RUN_INPUT_UNUSABLE,
   NOT_RELEASABLE: EXIT_RUN_NEEDS_OPERATOR,
+  // Files exist that no proof looked at. A human decides, never a retry.
+  HOLDS_IGNORED_CONTENT: EXIT_RUN_NEEDS_OPERATOR,
+  // Git could not answer. Nothing is wrong with the workspace and the next
+  // invocation may well succeed: the definition of code 4.
+  IGNORED_CONTENT_UNDETERMINED: EXIT_RUN_REFUSED,
   REMOVE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
 }) satisfies Record<ReleaseOutcome, CliExitCode>;
 

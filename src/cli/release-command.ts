@@ -60,6 +60,13 @@ export const RELEASE_OUTCOME_SENTENCES: Readonly<Record<ReleaseResult['outcome']
       '  was not removed. The reason code says which proof failed. A workspace holding work,\n' +
       '  or belonging to a task that has durable state, is a decision for you rather than\n' +
       '  something this command will delete.',
+    HOLDS_IGNORED_CONTENT:
+      'The workspace is otherwise releasable and holds files Git ignores. Nothing above looks\n' +
+      '  inside ignored content, and an unforced worktree removal deletes it anyway, so this\n' +
+      '  refuses rather than destroying files you were never shown. Inspect the directory and\n' +
+      '  remove it with git if you are satisfied.',
+    IGNORED_CONTENT_UNDETERMINED:
+      'Git could not say whether the workspace holds ignored content, so nothing was removed.',
     REMOVE_FAILED:
       'Every ownership proof held and Git still refused to remove the worktree. Nothing was\n' +
       '  forced; the workspace is as it was.',

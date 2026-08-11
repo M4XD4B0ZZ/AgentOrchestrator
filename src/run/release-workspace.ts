@@ -68,6 +68,13 @@ export const RELEASE_OUTCOMES = [
    * operation will delete. `verdict` says which proof failed.
    */
   'NOT_RELEASABLE',
+  /**
+   * The workspace holds ignored content, so deleting it would destroy files
+   * nothing else records. See {@link holdsIgnoredContent}.
+   */
+  'HOLDS_IGNORED_CONTENT',
+  /** Git could not be asked whether the workspace holds ignored content. */
+  'IGNORED_CONTENT_UNDETERMINED',
   /** Every proof held and Git still refused to remove the worktree. */
   'REMOVE_FAILED',
 ] as const;
@@ -110,6 +117,46 @@ function result(
 }
 
 /**
+ * `true` when the worktree holds files Git ignores, `null` when Git could not
+ * say.
+ *
+ * ── Why adoption does not ask this and deletion must ───────────────────────
+ *
+ * "Nothing done in it" is proven with `git status --porcelain
+ * --untracked-files=all`, and that command does not list **ignored** files. For
+ * *adoption* that is the right boundary and matches the scope decision V2-06
+ * made: an ignored file is not a repository effect, and continuing a task over
+ * one costs nothing.
+ *
+ * Deletion is the asymmetric half. `git worktree remove` without `--force`
+ * refuses a worktree with untracked or modified files — and **removes one whose
+ * only extra content is ignored**, verified against real Git rather than
+ * assumed. So the exact set of files no proof above ever looked at is the set
+ * an unforced removal silently destroys: a `.env`, a local database, whatever a
+ * developer left in the directory.
+ *
+ * A pristine crash artefact — a fresh checkout nothing has run in — has no
+ * ignored content, so this refuses nothing the command is for. It refuses
+ * exactly the case where "release" would have meant "delete files you never
+ * showed me".
+ */
+async function holdsIgnoredContent(
+  git: GitRunner,
+  worktreePath: string,
+): Promise<boolean | null> {
+  const ignored = await git(worktreePath, [
+    'ls-files',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '--directory',
+    '-z',
+  ]);
+  if (ignored.outcome !== 'OK') return null;
+  return ignored.stdout.length > 0;
+}
+
+/**
  * Removes a task workspace that is provably an untouched crash artefact.
  *
  * Never throws for an expected condition. Every refusal leaves the workspace
@@ -146,6 +193,20 @@ export async function releaseTaskWorkspace(
       verdict: assessment.verdict,
       reasonCodes: Object.freeze([assessment.verdict]),
     });
+  }
+
+  // The one question adoption does not ask, and deletion must. Asked after the
+  // ownership proof, so a stranger's directory is never enumerated at all.
+  const ignored = await holdsIgnoredContent(deps.git, assessment.workspace.worktreePath);
+  if (ignored === null) {
+    return result({
+      outcome: 'IGNORED_CONTENT_UNDETERMINED',
+      taskId,
+      verdict: assessment.verdict,
+    });
+  }
+  if (ignored) {
+    return result({ outcome: 'HOLDS_IGNORED_CONTENT', taskId, verdict: assessment.verdict });
   }
 
   const removal = await removeTaskWorkspace(repository, task, { git: deps.git });

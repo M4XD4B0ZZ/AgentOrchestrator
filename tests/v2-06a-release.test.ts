@@ -13,7 +13,14 @@ import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
-import { RELEASE_OUTCOME_SENTENCES } from '../src/cli/release-command.js';
+import { Command } from 'commander';
+
+// Deliberately not `buildProgram` from `src/cli/index.js`: that module calls
+// `main()` at import, so importing it would run the whole CLI against vitest's
+// own argv — printing help, reporting an unexpected error and setting
+// `process.exitCode`. The command is registered on a bare program instead,
+// which is also the narrower subject.
+import { RELEASE_OUTCOME_SENTENCES, registerReleaseCommand } from '../src/cli/release-command.js';
 import { exitCodeForReleaseOutcome } from '../src/cli/run-exit-codes.js';
 import type { ReplaceFn } from '../src/state/atomic-file.js';
 import { loadTaskState } from '../src/state/state-store.js';
@@ -184,6 +191,37 @@ describe('release refuses whatever adoption refuses', () => {
     expect(existsSync(fixture.orphan)).toBe(true);
   });
 
+  it('refuses to delete a workspace holding ignored content', async () => {
+    const fixture = await afterCrashedStart();
+    // `git status --porcelain --untracked-files=all` does not list ignored
+    // files, so every ownership proof above passes — and an unforced
+    // `git worktree remove` deletes them anyway. This is the exact set of files
+    // no proof looked at, which is why deletion asks its own question.
+    writeRepoFile(fixture.root, '.gitignore', '.agent-orchestrator/runtime/\nsecret.env\n');
+    git(fixture.root, ['add', '--all']);
+    git(fixture.root, ['commit', '--quiet', '-m', 'ignore secrets']);
+    // Re-create the orphan against the new base so it stays otherwise pristine.
+    git(fixture.root, ['worktree', 'remove', fixture.orphan]);
+    git(fixture.root, ['branch', '-D', `ao/task/${TASK_ID}`]);
+    const base = git(fixture.root, ['rev-parse', 'main']).trim();
+    git(fixture.root, [
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      `ao/task/${TASK_ID}`,
+      fixture.orphan,
+      base,
+    ]);
+    writeFileSync(join(fixture.orphan, 'secret.env'), 'TOKEN=hunter2\n', 'utf8');
+
+    const result = await release(fixture);
+
+    expect(result.outcome).toBe('HOLDS_IGNORED_CONTENT');
+    expect(existsSync(join(fixture.orphan, 'secret.env'))).toBe(true);
+    expect(existsSync(fixture.orphan)).toBe(true);
+  });
+
   it('refuses a task this repository does not declare', async () => {
     const fixture = await afterCrashedStart();
 
@@ -212,7 +250,7 @@ describe('the release report', () => {
     const declared = [...RELEASE_OUTCOMES].sort();
     expect(Object.keys(RELEASE_OUTCOME_SENTENCES).sort()).toEqual(declared);
     for (const outcome of RELEASE_OUTCOMES) {
-      expect([0, 2, 3]).toContain(exitCodeForReleaseOutcome(outcome));
+      expect([0, 2, 3, 4]).toContain(exitCodeForReleaseOutcome(outcome));
     }
   });
 
@@ -221,6 +259,37 @@ describe('the release report', () => {
       const releasing = outcome === 'RELEASED' || outcome === 'RELEASED_BRANCH_KEPT';
       expect(exitCodeForReleaseOutcome(outcome) === 0).toBe(releasing);
     }
+  });
+
+  it('refuses to run at all without --attended, and inspects nothing', async () => {
+    const fixture = await afterCrashedStart();
+    // The only safety gate on the one command whose purpose is to delete, and
+    // it is checked before the repository is even resolved.
+    const program = new Command();
+    program.exitOverride();
+    registerReleaseCommand(program);
+    const written: string[] = [];
+    const stdout = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    const previousExitCode = process.exitCode;
+
+    try {
+      await program.parseAsync(
+        ['release', '--repository', fixture.root, '--task', TASK_ID],
+        { from: 'user' },
+      );
+    } finally {
+      process.stdout.write = stdout;
+    }
+
+    expect(process.exitCode).toBe(3);
+    expect(written.join('')).toContain('not requested');
+    // Nothing was removed, and nothing was even looked at.
+    expect(existsSync(fixture.orphan)).toBe(true);
+    process.exitCode = previousExitCode;
   });
 
   it('prints only ASCII, so no console or encoding can garble a refusal', () => {

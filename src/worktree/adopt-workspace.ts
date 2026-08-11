@@ -126,6 +126,13 @@ export const WORKSPACE_ADOPTION_VERDICTS = [
   'WORKSPACE_BRANCH_MISMATCH',
   /** `HEAD` is not the commit a fresh start would pin. Includes any commit made. */
   'WORKSPACE_HEAD_MOVED',
+  /**
+   * The directory is a worktree of a different repository.
+   *
+   * Its own answers and this repository's registry are each self-consistent and
+   * describe two different Gits — the one mismatch neither side can see alone.
+   */
+  'WORKSPACE_FOREIGN_REPOSITORY',
   /** Tracked files in the worktree have been modified. */
   'WORKSPACE_DIRTY',
   /** Untracked files are present in the worktree. */
@@ -174,6 +181,8 @@ const ADOPTION_DETAIL: Readonly<
   WORKSPACE_NOT_REGISTERED: 'Git registers no worktree at the derived path for this repository.',
   WORKSPACE_PATH_MISMATCH: 'Git reports a different working-tree root than the derived path.',
   WORKSPACE_BRANCH_MISMATCH: 'The worktree does not hold the branch derived for this task.',
+  WORKSPACE_FOREIGN_REPOSITORY:
+    'The directory is a worktree of a different repository, whatever this one’s registry says.',
   WORKSPACE_HEAD_MOVED:
     'The worktree is not at the commit a fresh start would pin, so its history is unaccounted for.',
   WORKSPACE_DIRTY: 'Tracked files in the worktree have been modified.',
@@ -253,6 +262,8 @@ export async function assessWorkspaceAdoption(
       return unadoptable('WORKSPACE_PATH_MISMATCH');
     case 'BRANCH_MISMATCH':
       return unadoptable('WORKSPACE_BRANCH_MISMATCH');
+    case 'FOREIGN_REPOSITORY':
+      return unadoptable('WORKSPACE_FOREIGN_REPOSITORY');
     case 'HEAD_MISMATCH':
       return unadoptable('WORKSPACE_HEAD_MOVED');
     case 'DIRTY':

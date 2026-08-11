@@ -431,6 +431,14 @@ export const WORKSPACE_MATCH_VERDICTS = [
   'DIRTY',
   /** Nothing tracked has changed, and there are untracked files present. */
   'UNTRACKED_CONTENT',
+  /**
+   * The directory is a worktree of a *different* repository.
+   *
+   * The one mismatch that cannot be seen from either side alone: the source's
+   * registry and the worktree's own answers are consistent, and belong to two
+   * different Gits. See {@link verifyWorkspaceMatches}.
+   */
+  'FOREIGN_REPOSITORY',
   /** A probe could not be run at all, so nothing was established. */
   'UNREADABLE',
 ] as const;
@@ -482,6 +490,35 @@ export async function verifyWorkspaceMatches(
   const toplevel = await git(path, ['rev-parse', '--show-toplevel']);
   if (toplevel.outcome !== 'OK') return matchResult('UNREADABLE');
   if (!samePath(toplevel.stdout, path)) return matchResult('PATH_MISMATCH');
+
+  // Which Git is answering here?
+  //
+  // Every other probe below asks the repository *at this path* about itself,
+  // and every one of them can be satisfied by a repository that is not ours.
+  // The caller's registry check — "the source lists this path, holding this
+  // branch" — reads the **source's** administrative files, which survive the
+  // directory underneath being replaced. So the two halves of the ownership
+  // proof can each pass while describing two different repositories: a worktree
+  // of a clone, parked at the same path, on a branch of the same name, at the
+  // same commit, answers every question correctly and is still not ours
+  // (V2-06A review). Adopting it produces a state naming this repository while
+  // every commit lands in the other one, and reconciliation re-reads the same
+  // wrong place, so it never diverges.
+  //
+  // The common directory is what joins them: two worktrees of one repository
+  // share it, and no two repositories do.
+  const commonDir = await git(path, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const sourceCommonDir = await git(identity.repositoryRoot, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  if (commonDir.outcome !== 'OK' || sourceCommonDir.outcome !== 'OK') {
+    return matchResult('UNREADABLE');
+  }
+  if (!samePath(commonDir.stdout, sourceCommonDir.stdout)) {
+    return matchResult('FOREIGN_REPOSITORY');
+  }
 
   const branch = await git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
   // A detached HEAD exits non-zero under `--quiet`, which is a branch mismatch

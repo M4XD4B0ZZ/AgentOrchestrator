@@ -14,7 +14,8 @@
  * adopted, pushed at every gate in turn.
  */
 
-import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
@@ -255,6 +256,57 @@ describe('a workspace that is not provably ours is never adopted', () => {
     // which is the property this case is really about.
     expect(refused.outcome).toBe('WORKSPACE_REFUSED');
     expect(refused.reasonCodes).toContain('SOURCE_WORKTREE_DIRTY');
+  });
+});
+
+/* ══════════ two proofs that pass separately and describe two Gits ═══════ */
+
+describe('the two halves of the ownership proof must describe one repository', () => {
+  it('refuses a worktree of a different repository parked at the derived path', async () => {
+    const fixture = await afterCrashedStart();
+
+    // The source's registry reads its *own* administrative files, which survive
+    // the directory underneath being replaced. So a worktree of a clone, parked
+    // at the same path, on a branch of the same name, at the same commit,
+    // answers every question correctly — and is not ours.
+    const clone = join(mkdtempSync(join(tmpdir(), 'ao-foreign-')), 'clone');
+    git(fixture.root, ['clone', '--quiet', '--no-hardlinks', fixture.root, clone]);
+    const base = git(fixture.root, ['rev-parse', 'main']).trim();
+    git(fixture.root, ['worktree', 'remove', '--force', fixture.orphan]);
+    git(clone, ['worktree', 'add', '--quiet', '-b', `ao/task/${TASK_ID}`, fixture.orphan, base]);
+    // Re-register the path in the *source* too, so its registry names it again.
+    git(fixture.root, ['worktree', 'prune']);
+
+    const assessment = await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
+      git: runGitCommand,
+    });
+
+    // Whatever the source's registry says, the Git answering at that path is a
+    // different one. Adopting it would write a state naming this repository
+    // while every commit landed in the other.
+    expect(assessment.verdict).not.toBe('ADOPTABLE_PRISTINE_ORPHAN');
+  });
+
+  it('refuses a directory whose Git reports a different working-tree root', async () => {
+    const fixture = await afterCrashedStart();
+
+    // The registry term passes and the inside-out term does not. Driven through
+    // the seam because no fixture can make a real `git worktree add` disagree
+    // with itself about where it put the worktree.
+    const lyingGit: typeof runGitCommand = async (cwd, args) => {
+      // Only from inside the worktree: the source's own preflight asks the same
+      // question, and answering it wrongly would refuse for a different reason.
+      if (cwd === fixture.orphan && args[0] === 'rev-parse' && args[1] === '--show-toplevel') {
+        return Object.freeze({ outcome: 'OK' as const, stdout: join(cwd, 'elsewhere'), exitCode: 0 });
+      }
+      return runGitCommand(cwd, args);
+    };
+
+    const assessment = await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
+      git: lyingGit,
+    });
+
+    expect(assessment.verdict).toBe('WORKSPACE_PATH_MISMATCH');
   });
 });
 
