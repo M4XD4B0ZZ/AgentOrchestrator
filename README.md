@@ -43,6 +43,11 @@ What *is* implemented:
    untracked files included — before *and* after every writing agent, under the
    scope declared by the profile at the pinned commit. See
    [Scope enforcement](#scope-enforcement-v2-06).
+9. **Workspace recovery** (V2-06A): a start that died between `git worktree add`
+   and its first durable write is recognised on the next attempt and adopted —
+   but only when every part of that claim is proven — plus
+   `release --attended` to hand such a workspace back. See
+   [Workspace recovery](#workspace-recovery-v2-06a).
 
 ## Requirements
 
@@ -3018,18 +3023,105 @@ clean, a rename out of a forbidden directory, a writer that rewrites its own
 profile to authorise itself, and a profile widened on the default branch after
 the pin — each refused.
 
+## Workspace recovery (V2-06A)
+
+`startTask` creates the workspace and then writes the first durable state. The
+gap between those two acts was the last hand-cleanup in the product:
+
+```
+prepareTaskWorkspace succeeds
+         ↓
+worktree + branch exist
+         ↓
+CRASH                          ← the window
+         ↓
+no TaskState was ever written
+         ↓
+the next start collides with its own leftovers
+```
+
+A start now *tests* that collision instead of refusing it outright. Where the
+leftovers are provably this task's own untouched workspace they are adopted, and
+the start writes the ordinary `WORKTREE_READY` it would have written anyway.
+
+### Adoption is a conjunction, and every term is proven
+
+A workspace is adopted only when **all** of these hold, each established from
+Git or from canonical derivation and none from a caller's claim:
+
+- no durable `TaskState` exists — and the absence is *positive*: an unreadable
+  or invalid record is a record, never an absence;
+- the identity is re-derived by the same pure function preparation uses, so
+  there is no "workspace to adopt" parameter for anyone to point somewhere;
+- Git registers that exact path, holding this task's branch — judged on the
+  branch Git reports, never on the derived name compared with itself;
+- read from inside the worktree: right root, right branch, right commit,
+  nothing done in it;
+- `HEAD` is the commit a fresh start would pin **now**;
+- the source checkout still satisfies every invariant a start requires.
+
+**`HEAD` must equal the current base tip**, not merely some ancestor. A pristine
+orphan left behind at an earlier tip — because the base branch moved on after
+the crash — is not the workspace a fresh start would produce, and adopting it
+would silently start the task from a base nobody chose. It is reported as
+`WORKSPACE_HEAD_MOVED` and a human decides.
+
+**A commit in the orphan makes it less adoptable, not more.** Without durable
+state nothing records whether an agent ran, whether verification passed, or what
+authority was lost. There is nothing to reconstruct, so nothing is reconstructed.
+
+### No second truth
+
+There is no `ADOPTED` task state and no second recovery lifeline. Adoption
+produces the ordinary `TaskWorkspace` receipt and `startTask` writes the ordinary
+first state from it, so a task recovered from a crash and a task freshly created
+are indistinguishable from the next step onwards, and both run through the same
+reconciliation. `ADOPTED` exists only as a *start outcome* — a fact about the
+invocation, reported to the operator, carried nowhere.
+
+`WORKSPACE_COLLISION` gained no new meaning either: reaching it now means the
+recovery assessor looked and refused, and its verdict is the second reason code.
+The vocabulary — `STATE_ALREADY_EXISTS`, `STATE_UNREADABLE`,
+`WORKSPACE_NOT_REGISTERED`, `WORKSPACE_PATH_MISMATCH`,
+`WORKSPACE_BRANCH_MISMATCH`, `WORKSPACE_HEAD_MOVED`, `WORKSPACE_DIRTY`,
+`WORKSPACE_UNTRACKED_CONTENT`, `OWNERSHIP_UNPROVEN`, … — is a *recovery*
+vocabulary translated into outcomes, not ten new task states.
+
+### `agent-loop release --attended`
+
+```
+agent-loop release --repository <abs path> --task <id> --attended
+```
+
+The other thing an operator may want from a proven orphan: not to continue it,
+but to be rid of it. It removes **exactly** the workspaces adoption would have
+accepted — the same proof, reused rather than restated, so there is no laxer
+notion of ownership on the destructive path. A worktree holding a commit, a
+dirty one, one whose base has moved, or one whose task has durable state is
+refused with the verdict that refused it.
+
+`--attended` is required, and there is no `--force`.
+
+### What recovery does not solve
+
+**Mutual exclusion.** Two processes starting the same task concurrently can
+still race for creation or adoption. This slice detects *crash artefacts*; it
+does not prevent *concurrent owners*. An execution lease is a separate mechanism
+and is still required before unattended block autonomy.
+
 ## Not implemented yet
 
-Still missing, deliberately: **workspace adoption after a crash** — a collision is
-refused, not adopted, so a start that died after `git worktree add` leaves a
-worktree an operator must clear by hand; multi-task queue progression;
-unattended operation; and any product-side PR/CI/merge automation.
+Still missing, deliberately: multi-task queue progression; unattended operation;
+an execution lease; and any product-side PR/CI/merge automation.
 
-Adoption is next, and before the first block runner. The boundary that fixes its
-place: before anything starts several tasks on its own, a crash after `git
-worktree add` has to be reconcilable — adopted or safely cleaned — without hand
-work. `WORKSPACE_COLLISION` remains an explicit fail-closed refusal, with no flag
-to talk an invocation past it.
+The lease is the boundary that matters next for autonomy: before anything runs
+several tasks on its own, two processes must not be able to believe they own the
+same task. Recovery closed the crash window, which is a different problem and
+was the one blocking a block runner from being *restartable*.
+
+Scope enforcement covers the **repository** effect of a writing agent, which is
+what the profile declares. It is not a sandbox: an agent's `cwd` is its worktree,
+and nothing here constrains what a process does outside the repository.
 
 Scope enforcement covers the **repository** effect of a writing agent, which is
 what the profile declares. It is not a sandbox: an agent's `cwd` is its worktree,

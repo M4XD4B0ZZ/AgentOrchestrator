@@ -230,7 +230,7 @@ export async function prepareTaskWorkspace(
   const identity = derived.identity;
 
   // --- 2. Git preflight on the source repository ---------------------------
-  const preflight = await runGitPreflight(git, identity);
+  const preflight = await proveSourcePreflight(git, identity);
   if (!preflight.ok) return preparationFailure(preflight.code);
   const basePinnedCommit = preflight.basePinnedCommit;
 
@@ -262,8 +262,12 @@ export async function prepareTaskWorkspace(
   }
 
   // --- 5. Verify what was actually created ---------------------------------
-  const verified = await verifyCreatedWorktree(git, identity, basePinnedCommit);
-  if (!verified.ok) {
+  // Every way it can differ is the same refusal here: a worktree this call
+  // created seconds ago and which is wrong in any respect is wrong. The finer
+  // verdicts exist for `adopt-workspace.ts`, which asks about a worktree it did
+  // not create.
+  const verified = await verifyWorkspaceMatches(git, identity, basePinnedCommit);
+  if (verified.verdict !== 'MATCHES' || verified.canonicalWorktreePath === null) {
     const rolledBack = await rollBack(git, identity);
     return preparationFailure(
       rolledBack ? 'WORKTREE_VERIFICATION_FAILED' : 'WORKTREE_ROLLBACK_INCOMPLETE',
@@ -289,7 +293,7 @@ export async function prepareTaskWorkspace(
 
 // ── Preflight ───────────────────────────────────────────────────────────────
 
-type PreflightResult =
+export type PreflightResult =
   | { readonly ok: true; readonly basePinnedCommit: string }
   | { readonly ok: false; readonly code: WorkspacePreparationFailureCode };
 
@@ -298,8 +302,15 @@ type PreflightResult =
  *
  * Ordered from "is this even the repository we think it is" outwards, so a
  * misconfigured root is never reported as a dirty tree.
+ *
+ * Exported because adoption needs the *same* four answers and the same pinned
+ * commit (V2-06A): a workspace may only be adopted if the source checkout still
+ * satisfies every invariant a fresh start would have required of it, and the
+ * commit an orphan must be sitting at is precisely the one a fresh start would
+ * have pinned. Re-deriving that elsewhere would be a second opinion about what
+ * "the base" is.
  */
-async function runGitPreflight(
+export async function proveSourcePreflight(
   git: GitRunner,
   identity: TaskWorkspaceIdentity,
 ): Promise<PreflightResult> {
@@ -389,38 +400,108 @@ async function detectCollisions(
   return null;
 }
 
-// ── Post-create verification ────────────────────────────────────────────────
-
-type VerificationResult =
-  | { readonly ok: true; readonly canonicalWorktreePath: string }
-  | { readonly ok: false };
+// ── Worktree verification ───────────────────────────────────────────────────
 
 /**
- * Confirms the created worktree is the one that was asked for.
+ * Whether a worktree on disk is the one an identity describes, and if not, in
+ * which respect it differs. A closed set.
  *
- * Four independent facts, all read from inside the new worktree: it is where it
- * was supposed to be, it is on the derived branch, it is at the pinned commit,
- * and it is clean. Anything else — including a base branch that moved between
- * the pin and the create — fails here rather than becoming a receipt.
+ * The members are finer-grained than *this* module needs — preparation treats
+ * every one of them as the same refusal, because a worktree it created seconds
+ * ago that is wrong in any respect is wrong. They are distinguished because
+ * `adopt-workspace.ts` asks the same question of a worktree it did **not**
+ * create, where "the branch is somebody else's", "somebody committed to it" and
+ * "there is an untracked file in it" send an operator to three different places
+ * (V2-06A).
+ *
+ * One implementation, two vocabularies. A second copy of these four probes
+ * would be a second opinion about what "this workspace is ours and untouched"
+ * means, and the two would drift.
  */
-async function verifyCreatedWorktree(
+export const WORKSPACE_MATCH_VERDICTS = [
+  /** Right place, right branch, right commit, nothing in it. */
+  'MATCHES',
+  /** Git reports a different working-tree root, or the path cannot be resolved. */
+  'PATH_MISMATCH',
+  /** A different branch is checked out, or HEAD is detached. */
+  'BRANCH_MISMATCH',
+  /** The branch is there and its tip is not the expected commit. */
+  'HEAD_MISMATCH',
+  /** Tracked files are modified, staged or deleted. */
+  'DIRTY',
+  /** Nothing tracked has changed, and there are untracked files present. */
+  'UNTRACKED_CONTENT',
+  /** A probe could not be run at all, so nothing was established. */
+  'UNREADABLE',
+] as const;
+
+export type WorkspaceMatchVerdict = (typeof WORKSPACE_MATCH_VERDICTS)[number];
+
+export interface WorkspaceMatchResult {
+  readonly verdict: WorkspaceMatchVerdict;
+  /** Canonical path as the filesystem spells it. Only on `MATCHES`. */
+  readonly canonicalWorktreePath: string | null;
+}
+
+function matchResult(
+  verdict: WorkspaceMatchVerdict,
+  canonicalWorktreePath: string | null = null,
+): WorkspaceMatchResult {
+  return Object.freeze({ verdict, canonicalWorktreePath });
+}
+
+/**
+ * A porcelain line is an untracked entry exactly when its status field is `??`.
+ *
+ * Split rather than counted, because "somebody edited a tracked file here" and
+ * "somebody left a file lying about" are different facts about whose worktree
+ * this is, and only the first can destroy work.
+ */
+function classifyStatus(porcelain: string): 'CLEAN' | 'DIRTY' | 'UNTRACKED_CONTENT' {
+  const lines = porcelain.split('\n').filter((line) => line.length > 0);
+  if (lines.length === 0) return 'CLEAN';
+  return lines.every((line) => line.startsWith('??')) ? 'UNTRACKED_CONTENT' : 'DIRTY';
+}
+
+/**
+ * Confirms a worktree is the one `identity` describes, at `expectedCommit`.
+ *
+ * Four independent facts, all read from inside the worktree itself: it is where
+ * it was supposed to be, it is on the derived branch, it is at the expected
+ * commit, and nothing has been done in it. Nothing here trusts a path the
+ * caller supplied — `identity` is re-derived by a pure function, and every
+ * answer comes from Git run *in* that directory.
+ */
+export async function verifyWorkspaceMatches(
   git: GitRunner,
   identity: TaskWorkspaceIdentity,
-  basePinnedCommit: string,
-): Promise<VerificationResult> {
+  expectedCommit: string,
+): Promise<WorkspaceMatchResult> {
   const path = identity.worktreePath;
 
   const toplevel = await git(path, ['rev-parse', '--show-toplevel']);
-  if (toplevel.outcome !== 'OK' || !samePath(toplevel.stdout, path)) return { ok: false };
+  if (toplevel.outcome !== 'OK') return matchResult('UNREADABLE');
+  if (!samePath(toplevel.stdout, path)) return matchResult('PATH_MISMATCH');
 
   const branch = await git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  if (branch.outcome !== 'OK' || branch.stdout !== identity.workBranch) return { ok: false };
+  // A detached HEAD exits non-zero under `--quiet`, which is a branch mismatch
+  // rather than an unreadable repository: there is no branch, and this workspace
+  // is required to be on one.
+  if (branch.outcome === 'UNAVAILABLE' || branch.outcome === 'REFUSED_UNSAFE_ARGUMENT') {
+    return matchResult('UNREADABLE');
+  }
+  if (branch.outcome !== 'OK' || branch.stdout !== identity.workBranch) {
+    return matchResult('BRANCH_MISMATCH');
+  }
 
   const head = await git(path, ['rev-parse', '--verify', '--end-of-options', 'HEAD']);
-  if (head.outcome !== 'OK' || head.stdout !== basePinnedCommit) return { ok: false };
+  if (head.outcome !== 'OK') return matchResult('UNREADABLE');
+  if (head.stdout !== expectedCommit) return matchResult('HEAD_MISMATCH');
 
   const status = await git(path, ['status', '--porcelain', '--untracked-files=all']);
-  if (status.outcome !== 'OK' || status.stdout.length > 0) return { ok: false };
+  if (status.outcome !== 'OK') return matchResult('UNREADABLE');
+  const cleanliness = classifyStatus(status.stdout);
+  if (cleanliness !== 'CLEAN') return matchResult(cleanliness);
 
   // The canonical spelling of the path, resolved once the directory certainly
   // exists, so the receipt carries what every later comparison will observe.
@@ -428,10 +509,10 @@ async function verifyCreatedWorktree(
   try {
     canonical = realpathSync.native(path);
   } catch {
-    return { ok: false };
+    return matchResult('UNREADABLE');
   }
 
-  return { ok: true, canonicalWorktreePath: canonical };
+  return matchResult('MATCHES', canonical);
 }
 
 /**

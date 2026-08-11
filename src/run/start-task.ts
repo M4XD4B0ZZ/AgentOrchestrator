@@ -80,6 +80,7 @@ import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import { checkRuntimeIgnored } from '../state/runtime-ignored.js';
 import { loadTaskState, saveTaskState } from '../state/state-store.js';
 import type { ReplaceFn, TempSuffixFn } from '../state/atomic-file.js';
+import { assessWorkspaceAdoption } from '../worktree/adopt-workspace.js';
 import type { GitRunner } from '../worktree/git-command.js';
 import {
   prepareTaskWorkspace,
@@ -99,6 +100,16 @@ import {
 export const START_TASK_OUTCOMES = [
   /** The workspace exists and the first durable state was written. */
   'STARTED',
+  /**
+   * The same, over a workspace this task's own crashed start had left behind.
+   *
+   * Reported separately because an operator whose repository just healed itself
+   * should be told so, and because "a worktree was already there" is otherwise
+   * indistinguishable from "we made one". It is a fact about *this invocation*,
+   * never about the task: the state written is the one `STARTED` writes, and
+   * nothing downstream can tell the two apart (V2-06A).
+   */
+  'ADOPTED',
   /**
    * A durable state already exists for this task. Not an error, and not a
    * second start: continuing it is `runTask`'s job, not this module's.
@@ -127,9 +138,13 @@ export const START_TASK_OUTCOMES = [
    *
    * Kept apart from every other workspace refusal because it is the one that
    * may be *this task's own* leftovers — a start that created the worktree and
-   * then died before its durable write. Adopting such a workspace needs an
-   * ownership proof this slice does not make, so it refuses; the distinct code
-   * is the hook that proof will attach to.
+   * then died before its durable write.
+   *
+   * Since V2-06A that possibility is *tested* rather than assumed: reaching
+   * this outcome means `assessWorkspaceAdoption` looked and refused, and its
+   * verdict is the second entry in `reasonCodes`. So this no longer means
+   * "something is in the way"; it means "something is in the way and here is
+   * the proof it is not ours".
    */
   'WORKSPACE_COLLISION',
   /** Workspace preparation refused for any other reason. */
@@ -336,19 +351,45 @@ export async function startTask(
 
   // --- 5. The workspace. The first thing that changes anything. ------------
   const prepared = await prepareTaskWorkspace(repository, task, { git: deps.git });
+
+  // A collision may be this task's own crashed start. Only there is adoption
+  // even asked about, so the ordinary path is unchanged and costs nothing
+  // extra: a repository with nothing in the way never reaches this branch.
+  let workspace: TaskWorkspace;
+  let adopted = false;
+
   if (!prepared.ok) {
-    return stop({
-      outcome: COLLISION_CODES.has(prepared.code) ? 'WORKSPACE_COLLISION' : 'WORKSPACE_REFUSED',
-      residue: prepared.residue,
-      reasonCodes: Object.freeze([prepared.code]),
-    });
+    if (!COLLISION_CODES.has(prepared.code)) {
+      return stop({
+        outcome: 'WORKSPACE_REFUSED',
+        residue: prepared.residue,
+        reasonCodes: Object.freeze([prepared.code]),
+      });
+    }
+
+    const adoption = await assessWorkspaceAdoption(repository, taskId, { git: deps.git });
+    if (adoption.verdict !== 'ADOPTABLE_PRISTINE_ORPHAN') {
+      // The refusal now names *why* the thing in the way is not ours, which is
+      // the difference between "delete a stale worktree" and "somebody is
+      // working in there". Both codes are reported: what collided, and what the
+      // recovery assessor concluded about it.
+      return stop({
+        outcome: 'WORKSPACE_COLLISION',
+        residue: prepared.residue,
+        reasonCodes: Object.freeze([prepared.code, adoption.verdict]),
+      });
+    }
+    workspace = adoption.workspace;
+    adopted = true;
+  } else {
+    workspace = prepared.workspace;
   }
 
   // --- 6. The first durable write ------------------------------------------
   // `expectedRevision` is omitted, which is the creation case: the writer read
   // nothing and expects nothing, and the save is refused if a state appeared
   // in the meantime. There is deliberately no force option to reach for.
-  const saved = saveTaskState(firstState(prepared.workspace, repository, deps.now()), {
+  const saved = saveTaskState(firstState(workspace, repository, deps.now()), {
     repositoryRoot: repository.root,
     ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
     ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
@@ -357,12 +398,18 @@ export async function startTask(
   if (!saved.ok) {
     return stop({
       outcome: 'STATE_NOT_RECORDED',
-      workspace: prepared.workspace,
-      // The worktree exists and nothing records that it is this task's.
+      workspace,
+      // The worktree exists and nothing records that it is this task's. True of
+      // an adopted workspace as well: the crash window is still open, and the
+      // next attempt will find the same orphan and adopt it again.
       residue: true,
       reasonCodes: Object.freeze(saved.detail === null ? [saved.code] : [saved.code, saved.detail]),
     });
   }
 
-  return stop({ outcome: 'STARTED', workspace: prepared.workspace });
+  // `ADOPTED` reports how this invocation got its workspace, and nothing more.
+  // The state on disk is byte-for-byte the one a fresh start writes — there is
+  // no adopted flag in the contract and no second recovery lifeline — so from
+  // the next step onwards the two are indistinguishable, by design.
+  return stop({ outcome: adopted ? 'ADOPTED' : 'STARTED', workspace });
 }

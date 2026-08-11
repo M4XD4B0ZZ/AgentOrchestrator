@@ -17,6 +17,7 @@ import { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
 import { registerDoctorCommand } from './doctor-command.js';
+import { registerReleaseCommand } from './release-command.js';
 import { registerRunCommand } from './run-command.js';
 
 const DESCRIPTION = [
@@ -28,13 +29,15 @@ const DESCRIPTION = [
   '  - the read-only `run` plan: which task is next, what its durable state',
   '    permits, and on whose authority anything may continue',
   '  - attended execution of one task: `run --attended`',
+  '  - `release --attended`: hand back a workspace a crashed start left behind,',
+  '    and only one proven to be that task’s own untouched leftovers',
   '',
   'Execution requires two independent things, and neither implies the other:',
   '`--attended`, the operator stating they are present for this invocation, and',
   'a fresh auth preflight that passes. Without --attended, `run` still only',
   'reports: it starts no agent, writes no task state and prepares no workspace.',
   '',
-  'Unattended running, multi-task blocks, scope enforcement and opening pull',
+  'Unattended running, multi-task blocks, an execution lease and opening pull',
   'requests are not in this build.',
 ].join('\n');
 
@@ -50,6 +53,7 @@ export function buildProgram(): Command {
 
   registerDoctorCommand(program);
   registerRunCommand(program);
+  registerReleaseCommand(program);
 
   return program;
 }
