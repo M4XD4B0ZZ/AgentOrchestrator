@@ -1090,27 +1090,28 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
   });
 
   /**
-   * V1-08 — a resume must land somewhere this build can continue from.
+   * V1-08 required a resume to land somewhere this build can continue from,
+   * and `IMPLEMENT` was the case that failed it: the transition table declared
+   * the phase, the blocking policy allowed it and `evaluateAutomaticResume`
+   * authorised it, but `runLoopStep` had no implement step. So the driver
+   * refused the resume rather than spending the pause on a dead end, because
+   * `resumeBlockedTask` clears `resumeFrom`, `reportedResetAt` and
+   * `blockedAgent` and withdraws the checkpoint claims — a task that landed in
+   * an undriven `IMPLEMENTING` could never be granted an automatic resume
+   * again.
    *
-   * `IMPLEMENT` is the sharp case: the transition table declares it, the
-   * blocking policy lists it among `BLOCKED_USAGE_LIMIT`'s allowed resume
-   * phases, and `evaluateAutomaticResume` will authorise it — but `runLoopStep`
-   * has no implement step, so the phase it enters is one nothing drives.
+   * **V2-04 added the implement step, so the premise is gone.** All four
+   * resume phases now name states the loop drives, the gate cannot fire from a
+   * legal resume point, and the pause is spent on a resume that reaches real
+   * work. This case now pins that: the resume proceeds, the record moves off
+   * the block, and the checkpoint withdrawal that used to be the danger is
+   * exactly the correct bookkeeping for entering a mutating phase.
    *
-   * Writing that resume would be a one-way loss. `resumeBlockedTask` spends
-   * `resumeFrom`, `reportedResetAt` and `blockedAgent` and withdraws both
-   * checkpoint claims, so the task lands in `IMPLEMENTING` carrying none of the
-   * evidence a later run needs — and, because the withdrawal nulls
-   * `currentCommit` and clears `worktreeCleanAtCheckpoint`,
-   * `evaluateAutomaticResume` can never grant it again. A self-clearing quota
-   * pause would have become a task no run can pick up, in exchange for no work
-   * at all.
-   *
-   * That is the failure V1-07-RR-B1 ruled out for the attended grant, on the
-   * axis of "the phase is a dead end" rather than "this run will refuse". So the
-   * same rule applies: the gate precedes the write, and **nothing is persisted**.
+   * The gate itself is kept as a fail-closed floor — see the comment at its
+   * site in `run-driver.ts` for why a dead vocabulary check is still worth its
+   * branch.
    */
-  it('refuses a resume into a phase nothing drives, rather than spending the pause', async () => {
+  it('now resumes an IMPLEMENT pause, because the implement step exists', async () => {
     const root = repoRoot();
     const before = blockedOn(root, 'IMPLEMENT');
 
@@ -1121,22 +1122,38 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
       deps(root, { agent: agent.runner, verify: verify.runner }),
     );
 
-    expect(run.outcome).toBe('CONTINUATION_NOT_AUTHORISED');
-    expect(run.reasonCodes).toContain('RESUME_PHASE_NOT_DRIVEN');
-    expect(run.steps).toBe(0);
-    // The authority module did grant it: this refusal is the driver's own, and
-    // it is the reason the pause survives.
-    expect(run.resume?.continuation).toBe('AUTOMATIC_ALLOWED');
+    // Until V2-04 this asserted `CONTINUATION_NOT_AUTHORISED` /
+    // `RESUME_PHASE_NOT_DRIVEN`: `IMPLEMENT` resolved to a state nothing drove,
+    // so writing the resume would have spent the pause for no work. The step
+    // now exists, so the guard no longer fires and the resume proceeds.
+    //
+    // It proceeds into a *fixture* repository with no task file, so the
+    // implement step immediately parks for a human rather than briefing a
+    // writer with nothing — which is the correct behaviour, and the reason no
+    // agent was started.
+    expect(run.outcome).toBe('HUMAN_DECISION_REQUIRED');
+    expect(run.reasonCodes).not.toContain('RESUME_PHASE_NOT_DRIVEN');
+    // The pause really was spent this time, on a resume that reached a step:
+    // durable writes happened and the record moved off the block.
+    expect(run.steps).toBeGreaterThan(0);
+    expect(reload(root).revision).not.toBe(before.revision);
+    expect(reload(root).state.state).toBe('HUMAN_DECISION_REQUIRED');
+    // The last iteration's decision describes the resumed, non-blocking task —
+    // reconciled and attended-only — not the block it started from.
+    expect(run.resume?.continuation).toBe('ATTENDED_ONLY');
+    expect(agent.count()).toBe(0);
 
-    // Every field of the block is intact, byte for byte, for a later run.
+    // The block's evidence was spent, which is now the correct outcome: the
+    // resume reached a step. `resumeBlockedTask` clears the pause and, because
+    // `IMPLEMENTING` mutates, withdraws the checkpoint claims — so the record
+    // that survives describes a task under way, not one still waiting.
     const after = reload(root);
-    expect(after.revision).toBe(before.revision);
-    expect(after.state.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(after.state.blockedAgent).toBeNull();
+    expect(after.state.reportedResetAt).toBeNull();
+    expect(after.state.currentCommit).toBeNull();
+    expect(after.state.worktreeCleanAtCheckpoint).toBe(false);
+    // And the park that followed names the phase a human should resume into.
     expect(after.state.resumeFrom).toEqual({ phase: 'IMPLEMENT', round: 1 });
-    expect(after.state.reportedResetAt).toBe(RESET_PASSED);
-    expect(after.state.blockedAgent).toBe('claude');
-    expect(after.state.currentCommit).toBe(SHA_B);
-    expect(after.state.worktreeCleanAtCheckpoint).toBe(true);
   });
 
   /**
@@ -1476,7 +1493,11 @@ describe('progress is the durable state moving, not a step saying so', () => {
 
   it('reports a state the loop does not drive as no progress, once', async () => {
     const root = repoRoot();
-    const before = persist(root, { state: 'IMPLEMENTING', currentCommit: SHA_B });
+    // A transient setup phase. `startTask` never persists one — that is the
+    // point of the V2-03 decision — so this is the fail-closed floor for a
+    // state that should not exist, not a supported situation. `IMPLEMENTING`
+    // used to stand here and is now driven (V2-04).
+    const before = persist(root, { state: 'GIT_PREFLIGHT', currentCommit: SHA_B });
     const agent = cappedAgent(agentCommandResult(), 0);
     const verify = cappedVerify(0);
 

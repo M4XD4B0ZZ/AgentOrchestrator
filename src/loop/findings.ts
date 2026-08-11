@@ -30,12 +30,19 @@
 
 import type { ReviewFinding } from '../agent/codex-reviewer.js';
 import type { TaskState } from '../core/task-state.js';
+import { clampPayload, MAX_AGENT_PAYLOAD_CHARS } from './payload-budget.js';
 
 /** The durable record shape, taken from the state contract rather than restated. */
 export type FindingRecord = TaskState['findingHistory'][number];
 
-/** Characters one remediation payload may occupy. Bounded, like everything an agent is handed. */
-export const MAX_REMEDIATION_PAYLOAD_CHARS = 16_384;
+/**
+ * Characters one remediation payload may occupy.
+ *
+ * The budget itself lives in `payload-budget.ts`, because more than one
+ * builder is held to it. This name is kept for the readers it already has, and
+ * is that budget rather than a second opinion about it.
+ */
+export const MAX_REMEDIATION_PAYLOAD_CHARS = MAX_AGENT_PAYLOAD_CHARS;
 
 /**
  * The durable projection of one review round's findings.
@@ -209,6 +216,5 @@ export function buildResumedRemediationBrief(
 }
 
 function clamp(text: string): string {
-  if (text.length <= MAX_REMEDIATION_PAYLOAD_CHARS) return text;
-  return `${text.slice(0, MAX_REMEDIATION_PAYLOAD_CHARS - 1)}\n`;
+  return clampPayload(text, '\n');
 }

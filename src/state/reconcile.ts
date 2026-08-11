@@ -187,7 +187,22 @@ export function isPreWorkState(state: TaskStateName): boolean {
  *    whole point of `VIA_AUTH_PREFLIGHT` re-entry is that the stored point is
  *    carried through `AUTH_PREFLIGHT` and `GIT_PREFLIGHT` (see
  *    `core/resume-policy.ts`). A worktree that was only just created has none.
- *  - `currentCommit` — a checkpointed HEAD. Only a commit can produce one.
+ *  - `currentCommit` — a checkpointed HEAD.
+ *
+ *    Since V2-03 a freshly started task carries one: `startTask` records the
+ *    base pin it just verified from inside the new worktree. So this no longer
+ *    means "a commit was made", and a production-created `WORKTREE_READY` is
+ *    consequently *not* virgin by this function's reckoning.
+ *
+ *    That costs nothing, and is arguably the better shape. Both checks the
+ *    virgin fallback would have supplied are still made, and made against the
+ *    record rather than against a phase name: step 4 compares the recorded
+ *    `currentCommit` with observed HEAD, and step 5's `dirtyContradictsRecord`
+ *    is already true because such a state records
+ *    `worktreeCleanAtCheckpoint: true`. The record states what it claims and
+ *    the claim is checked — which is the preference this module's header
+ *    describes, with the phase expectation as the fallback for records that
+ *    claim nothing.
  *  - `reviewRound > 0` — a review has completed.
  *  - `findingHistory` — a reviewer has reported something.
  *
