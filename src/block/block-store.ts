@@ -19,12 +19,51 @@
  *
  * ── The same compare-and-swap, deliberately ────────────────────────────────
  *
- * Revision is a digest of the exact bytes on disk; an omitted `expectedRevision`
- * means *creation* and is refused if a ledger already exists; there is no force
+ * Revision is a digest of the exact bytes on disk, and there is no force
  * option. This is the same mechanism as `state-store.ts`, restated here rather
  * than shared because the two write different documents to different places —
  * but the *semantics* are copied on purpose, so a reader who knows one knows the
  * other, and neither can quietly become laxer than its sibling.
+ *
+ * ── Two functions, because they were never one operation ───────────────────
+ *
+ * There used to be one `saveBlockLedger`, and whether a call meant *create* or
+ * *update* was carried by the presence of an optional field. That reads as a
+ * convenience and is actually the hole: an update presented a schema-valid
+ * document plus a current revision, and got a write. A revision proves nobody
+ * else wrote since it was read; it never proved this writer was entitled to
+ * change these fields. So a caller holding nothing but a fresh revision could
+ * rewrite the frozen plan, rename the block, backdate the run, or rewind a
+ * mid-flight task to `PLANNED` with its evidence erased — through the ordinary
+ * public API, with no corruption anywhere.
+ *
+ * {@link createBlockLedger} and {@link updateBlockLedger} are separate so that
+ * the two can no longer be confused by a caller *or* by this module, and so the
+ * update path has somewhere to put the two questions creation cannot ask:
+ *
+ *   - is `next` a legal successor of the ledger actually on disk
+ *     (`assessLedgerSuccession`), and
+ *   - is every claim it newly makes supported by the task records
+ *     (`proveBlockTaskEntry`)?
+ *
+ * The second one is deliberately *here*, at the write, rather than only in
+ * `block-progress.ts`. A proof that lives one layer above the store is a proof
+ * a caller can walk around.
+ *
+ * ── A ledger is bound to the file it came from ─────────────────────────────
+ *
+ * A document found *by* one identity that carries another is not that run's
+ * ledger. The copy/backup shape this module names as its threat model made that
+ * concrete: `run-0001.json` copied to `run-0002.json` loaded happily as run
+ * 0002, and every later write through that value landed back in
+ * `run-0001.json`, a run the caller never opened, under a revision it never
+ * read. Refused on load now, exactly as `state-store.ts` refuses
+ * `TASK_ID_MISMATCH`, and for the same reason.
+ *
+ * The declared `repositoryId` is checked the same way, against the profile the
+ * checkout actually carries. A field a store only ever writes is a field nobody
+ * checks — and this one would otherwise travel intact inside a ledger copied
+ * out of another project.
  */
 
 import { createHash } from 'node:crypto';
@@ -32,12 +71,16 @@ import { mkdirSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
 import { isContained } from '../doctor/safe-write.js';
+import { comparePathIdentity } from '../core/path-identity.js';
 import { isValidTaskId, MAX_TASK_ID_LENGTH } from '../plan/task-id.js';
+import { readDeclaredRepositoryId } from '../repo/declared-identity.js';
 import { REPO_PROFILE_DIR_NAME } from '../repo/profile-location.js';
 import { writeFileAtomically, type ReplaceFn, type TempSuffixFn } from '../state/atomic-file.js';
 import { TASK_RUNTIME_DIR_NAME } from '../state/state-location.js';
 import { safeErrnoCode } from '../core/safe-error.js';
+import { proveBlockTaskEntry, type EntryProofCode } from './block-evidence.js';
 import {
+  assessLedgerSuccession,
   safeParseBlockRunLedger,
   type BlockRunLedger,
 } from './block-ledger.js';
@@ -122,10 +165,31 @@ export type LedgerSaveFailureCode =
   | 'LOCATION_UNSUITABLE'
   /** The ledger describes a different repository than the one being written to. */
   | 'REPOSITORY_ROOT_MISMATCH'
+  /** The recorded repository root is not an absolute path. */
+  | 'REPOSITORY_ROOT_NOT_ABSOLUTE'
+  /** The ledger claims an identity this checkout's profile does not declare. */
+  | 'REPOSITORY_ID_MISMATCH'
+  /** This checkout declares no usable identity to hold the ledger to. */
+  | 'REPOSITORY_PROFILE_UNUSABLE'
   /** The directory could not be created. */
   | 'DIRECTORY_CREATE_FAILED'
   /** Another writer moved the ledger on. Nothing was written. */
   | 'LEDGER_CONFLICT'
+  /**
+   * `next` is not a legal successor of the ledger on disk.
+   *
+   * Distinct from `LEDGER_CONFLICT` on purpose: a conflict says *somebody else
+   * wrote*, and this says *you may not write this*, however current your
+   * revision. Conflating them would let a caller conclude that re-reading and
+   * retrying is the fix.
+   */
+  | 'LEDGER_SUCCESSION_REFUSED'
+  /**
+   * A claim the successor makes is not supported by the task records.
+   *
+   * `detail` carries the {@link EntryProofCode} that stopped it.
+   */
+  | 'ENTRY_NOT_PROVEN'
   /** The document is larger than this build could load back. */
   | 'LEDGER_TOO_LARGE'
   /** The atomic write itself failed. */
@@ -151,68 +215,66 @@ export interface BlockStoreOptions {
   readonly repositoryRoot: string;
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
+}
+
+export interface BlockUpdateOptions extends BlockStoreOptions {
   /**
-   * The revision this writer read.
+   * The revision this writer read. **Required.**
    *
-   * Omitting it means "I read nothing, so I expect nothing" — the creation
-   * case — and the save is refused if a ledger already exists. It does not mean
-   * "overwrite whatever is there", and there is no option that does.
+   * There is no "I did not read anything" update and no force option. An update
+   * is by definition a statement about a document the caller has seen, and a
+   * writer that has not seen it is creating, not updating — which is a
+   * different function.
    */
-  readonly expectedRevision?: string;
+  readonly expectedRevision: string;
 }
 
 function saveFailure(code: LedgerSaveFailureCode, detail: string | null = null): LedgerSaveFailure {
   return Object.freeze({ ok: false as const, code, detail });
 }
 
-/** `null` when the on-disk revision is what the caller expected. */
-function checkExpectedRevision(path: string, expected: string | undefined): string | null {
-  let bytes: Buffer;
-  try {
-    bytes = readFileSync(path);
-  } catch (error) {
-    const code = safeErrnoCode(error);
-    // Absent is exactly what a creation expects, and exactly what an update
-    // does not: a caller holding a revision is describing a file that was there.
-    if (code === 'ENOENT') return expected === undefined ? null : 'LEDGER_ABSENT';
-    return 'UNREADABLE';
-  }
-  if (expected === undefined) return 'LEDGER_EXISTS';
-  return revisionOfBytes(bytes) === expected ? null : 'REVISION_MISMATCH';
-}
+/* ── the checks both paths share ─────────────────────────────────────────── */
 
 /**
- * Persists one ledger, atomically and under compare-and-swap.
+ * The document's own identity claims, held against the checkout it is going to.
  *
- * Never throws for an expected condition. Every refusal writes nothing.
+ * `null` when they agree.
  */
-export function saveBlockLedger(ledger: unknown, options: BlockStoreOptions): LedgerSaveResult {
-  const parsed = safeParseBlockRunLedger(ledger);
-  if (!parsed.success) {
-    return saveFailure('LEDGER_CONTRACT_VIOLATION', parsed.error.issues[0]?.message ?? null);
-  }
-  const value = parsed.data;
+function checkRecordedIdentity(
+  value: BlockRunLedger,
+  repositoryRoot: string,
+): LedgerSaveFailure | null {
+  // Two spellings of the same fact must agree, or the record is somebody
+  // else's. Compared by path identity rather than by string, so this store
+  // answers the question exactly as `state-store.ts` answers it.
+  const recordedRoot = comparePathIdentity(value.repositoryRoot, repositoryRoot);
+  if (recordedRoot === 'NOT_ABSOLUTE') return saveFailure('REPOSITORY_ROOT_NOT_ABSOLUTE');
+  if (recordedRoot === 'DIFFERENT') return saveFailure('REPOSITORY_ROOT_MISMATCH');
 
-  // The document names its repository, and it is being written into one. Two
-  // spellings of the same fact must agree, or the record is somebody else's.
-  if (value.repositoryRoot !== options.repositoryRoot) {
-    return saveFailure('REPOSITORY_ROOT_MISMATCH');
-  }
+  const declared = readDeclaredRepositoryId(repositoryRoot);
+  if (!declared.ok) return saveFailure('REPOSITORY_PROFILE_UNUSABLE');
+  if (declared.id !== value.repositoryId) return saveFailure('REPOSITORY_ID_MISMATCH');
 
-  const location = deriveBlockLedgerLocation(options.repositoryRoot, value.runId);
-  if (!location.ok) return saveFailure('LOCATION_UNSUITABLE', location.code);
+  return null;
+}
 
+/** The serialised bytes of a ledger, or why they may not be written. */
+function encode(value: BlockRunLedger): Buffer | LedgerSaveFailure {
   const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
   if (bytes.byteLength > MAX_BLOCK_LEDGER_BYTES) return saveFailure('LEDGER_TOO_LARGE');
+  return bytes;
+}
 
+function persist(
+  location: BlockLedgerLocation,
+  bytes: Buffer,
+  options: BlockStoreOptions,
+): LedgerSaveResult {
   try {
     mkdirSync(location.directory, { recursive: true });
   } catch (error) {
     return saveFailure('DIRECTORY_CREATE_FAILED', safeErrnoCode(error));
   }
-
-  const conflict = checkExpectedRevision(location.path, options.expectedRevision);
-  if (conflict !== null) return saveFailure('LEDGER_CONFLICT', conflict);
 
   const written = writeFileAtomically({
     directory: location.directory,
@@ -222,9 +284,7 @@ export function saveBlockLedger(ledger: unknown, options: BlockStoreOptions): Le
     ...(options.replace !== undefined ? { replace: options.replace } : {}),
     ...(options.tempSuffix !== undefined ? { tempSuffix: options.tempSuffix } : {}),
   });
-  if (written.code !== 'WRITTEN') {
-    return saveFailure('WRITE_FAILED', written.code);
-  }
+  if (written.code !== 'WRITTEN') return saveFailure('WRITE_FAILED', written.code);
 
   return Object.freeze({
     ok: true as const,
@@ -232,6 +292,186 @@ export function saveBlockLedger(ledger: unknown, options: BlockStoreOptions): Le
     revision: revisionOfBytes(bytes),
   });
 }
+
+/* ── creating ────────────────────────────────────────────────────────────── */
+
+/**
+ * Writes the first ledger of a run, atomically, and only if there is none.
+ *
+ * A run id that already has a ledger is refused rather than overwritten: a
+ * block is not a run, and starting one again must not destroy the record of
+ * what happened last time.
+ *
+ * Nothing is proved against the task records here, because a freshly created
+ * ledger claims nothing about them — every entry is `PLANNED`. The contract
+ * refuses any other shape from a creation.
+ */
+export function createBlockLedger(ledger: unknown, options: BlockStoreOptions): LedgerSaveResult {
+  const parsed = safeParseBlockRunLedger(ledger);
+  if (!parsed.success) {
+    return saveFailure('LEDGER_CONTRACT_VIOLATION', parsed.error.issues[0]?.message ?? null);
+  }
+  const value = parsed.data;
+
+  const identity = checkRecordedIdentity(value, options.repositoryRoot);
+  if (identity !== null) return identity;
+
+  const location = deriveBlockLedgerLocation(options.repositoryRoot, value.runId);
+  if (!location.ok) return saveFailure('LOCATION_UNSUITABLE', location.code);
+
+  const bytes = encode(value);
+  if (!Buffer.isBuffer(bytes)) return bytes;
+
+  // Read rather than `existsSync`: the question is whether a ledger is there,
+  // and an unreadable one is there.
+  try {
+    readFileSync(location.path);
+    return saveFailure('LEDGER_CONFLICT', 'LEDGER_EXISTS');
+  } catch (error) {
+    if (safeErrnoCode(error) !== 'ENOENT') return saveFailure('LEDGER_CONFLICT', 'UNREADABLE');
+  }
+
+  return persist(location, bytes, options);
+}
+
+/* ── updating ────────────────────────────────────────────────────────────── */
+
+/**
+ * Writes a successor of the ledger currently on disk.
+ *
+ * Four gates, in order, and every refusal writes nothing:
+ *
+ *  1. the successor is a valid ledger and names this checkout;
+ *  2. the revision the caller read is still the revision on disk;
+ *  3. the successor may legally change what it changed
+ *     (`assessLedgerSuccession`);
+ *  4. every claim it newly makes is supported by the task records
+ *     (`proveBlockTaskEntry`).
+ *
+ * Gate 4 is scoped to what the successor *asserts that its predecessor did
+ * not*: entries whose disposition moved, and the stop reasons that are claims
+ * about progress. That scope is deliberate in both directions. Narrower would
+ * let a forged `COMPLETE` through — the shape where a hand-edited file of
+ * `SETTLED` entries was accepted as a finished block, because the claim was
+ * checked against the same document that made it. Wider would make a diverged
+ * ledger unwritable, so a run that has detected `LEDGER_DIVERGED` could not
+ * record that it had; a reason that asserts the run *cannot continue* asserts
+ * no progress and needs no proof.
+ */
+export function updateBlockLedger(
+  ledger: unknown,
+  options: BlockUpdateOptions,
+): LedgerSaveResult {
+  const parsed = safeParseBlockRunLedger(ledger);
+  if (!parsed.success) {
+    return saveFailure('LEDGER_CONTRACT_VIOLATION', parsed.error.issues[0]?.message ?? null);
+  }
+  const next = parsed.data;
+
+  const identity = checkRecordedIdentity(next, options.repositoryRoot);
+  if (identity !== null) return identity;
+
+  const location = deriveBlockLedgerLocation(options.repositoryRoot, next.runId);
+  if (!location.ok) return saveFailure('LOCATION_UNSUITABLE', location.code);
+
+  const bytes = encode(next);
+  if (!Buffer.isBuffer(bytes)) return bytes;
+
+  // --- 2. the compare-and-swap ---------------------------------------------
+  let current: Buffer;
+  try {
+    current = readFileSync(location.path);
+  } catch (error) {
+    const errno = safeErrnoCode(error);
+    // A caller holding a revision is describing a file that was there.
+    return saveFailure('LEDGER_CONFLICT', errno === 'ENOENT' ? 'LEDGER_ABSENT' : 'UNREADABLE');
+  }
+  if (revisionOfBytes(current) !== options.expectedRevision) {
+    return saveFailure('LEDGER_CONFLICT', 'REVISION_MISMATCH');
+  }
+
+  // --- 3. succession -------------------------------------------------------
+  // Read back from the bytes rather than taken from the caller: the authority
+  // on what the predecessor said is the file, not the value the caller kept.
+  let document: unknown;
+  try {
+    document = JSON.parse(current.toString('utf8'));
+  } catch {
+    return saveFailure('LEDGER_CONFLICT', 'PREDECESSOR_MALFORMED');
+  }
+  const previous = safeParseBlockRunLedger(document);
+  if (!previous.success) return saveFailure('LEDGER_CONFLICT', 'PREDECESSOR_INVALID');
+
+  const violations = assessLedgerSuccession(previous.data, next);
+  if (violations.length > 0) {
+    return saveFailure('LEDGER_SUCCESSION_REFUSED', violations.join(','));
+  }
+
+  // --- 4. proof ------------------------------------------------------------
+  const unproven = firstUnprovenClaim(previous.data, next, options.repositoryRoot);
+  if (unproven !== null) return saveFailure('ENTRY_NOT_PROVEN', unproven);
+
+  return persist(location, bytes, options);
+}
+
+/**
+ * The proof code of the first newly-made claim the task records do not support,
+ * or `null` when every one of them holds.
+ */
+function firstUnprovenClaim(
+  previous: BlockRunLedger,
+  next: BlockRunLedger,
+  repositoryRoot: string,
+): EntryProofCode | null {
+  const prove = (index: number): EntryProofCode | null => {
+    const entry = next.tasks[index];
+    if (entry === undefined) return null;
+    const { code } = proveBlockTaskEntry(repositoryRoot, entry);
+    return code === 'PROVEN' ? null : code;
+  };
+
+  // Every entry that moved. Succession has already established that the two
+  // lists line up by index.
+  for (let index = 0; index < next.tasks.length; index += 1) {
+    if (next.tasks[index]?.disposition === previous.tasks[index]?.disposition) continue;
+    const failed = prove(index);
+    if (failed !== null) return failed;
+  }
+
+  // Three stop reasons are claims about what the tasks did, so each is proved
+  // against every task — including the ones this write did not touch. Checking
+  // them against the ledger's own entries is asking the liar whether it lied,
+  // which is exactly how a hand-edited file of `SETTLED` entries was once
+  // recorded as a finished block.
+  if (
+    next.stopReason !== null &&
+    next.stopReason !== previous.stopReason &&
+    CLAIMS_PROGRESS.has(next.stopReason)
+  ) {
+    for (let index = 0; index < next.tasks.length; index += 1) {
+      const failed = prove(index);
+      if (failed !== null) return failed;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * The stop reasons that assert something about the tasks rather than about the
+ * run's ability to continue.
+ *
+ * The others — `OPERATOR_STOPPED`, `NO_ELIGIBLE_TASK`, `LEDGER_DIVERGED`,
+ * `STATE_UNUSABLE`, `DEFINITION_DRIFTED` — claim no progress, and must stay
+ * writable over a ledger whose entries are *not* supported. Otherwise a run
+ * that has just detected a divergence could not record that it had, which is
+ * the one thing it must always be able to do.
+ */
+const CLAIMS_PROGRESS: ReadonlySet<string> = new Set<string>([
+  'COMPLETE',
+  'TASK_BLOCKED',
+  'TASK_ABANDONED',
+]);
 
 /* ─────────────────────────────── loading ────────────────────────────────── */
 
@@ -243,6 +483,20 @@ export const LEDGER_LOAD_FAILURE_CODES = [
   'LEDGER_CONTRACT_VIOLATION',
   'LOCATION_UNSUITABLE',
   'REPOSITORY_ROOT_MISMATCH',
+  /** The recorded repository root is not an absolute path. */
+  'REPOSITORY_ROOT_NOT_ABSOLUTE',
+  /** The ledger claims an identity this checkout's profile does not declare. */
+  'REPOSITORY_ID_MISMATCH',
+  /** This checkout declares no usable identity to hold the ledger to. */
+  'REPOSITORY_PROFILE_UNUSABLE',
+  /**
+   * The ledger found at this run's path is another run's.
+   *
+   * Kept apart from every other failure for the same reason `state-store.ts`
+   * keeps `TASK_ID_MISMATCH` apart: the document contradicts its own location,
+   * which is a ledger copied or restored across runs rather than a stale one.
+   */
+  'RUN_ID_MISMATCH',
 ] as const;
 
 export type LedgerLoadFailureCode = (typeof LEDGER_LOAD_FAILURE_CODES)[number];
@@ -303,10 +557,20 @@ export function loadBlockLedger(repositoryRoot: string, runId: string): LedgerLo
   const parsed = safeParseBlockRunLedger(document);
   if (!parsed.success) return loadFailure('LEDGER_CONTRACT_VIOLATION');
 
-  // An intact ledger belonging to another checkout is not this repository's.
-  if (parsed.data.repositoryRoot !== repositoryRoot) {
-    return loadFailure('REPOSITORY_ROOT_MISMATCH');
-  }
+  // The document was found *by* these identities, so a disagreement means its
+  // contents contradict its own location. All three are refused here rather
+  // than deferred to reconciliation, because all three are provable without
+  // resolving anything — and because a value handed back from this function is
+  // what a later write threads its revision through. A ledger loaded under the
+  // wrong run id writes back to the *other* run's file.
+  const recordedRoot = comparePathIdentity(parsed.data.repositoryRoot, repositoryRoot);
+  if (recordedRoot === 'NOT_ABSOLUTE') return loadFailure('REPOSITORY_ROOT_NOT_ABSOLUTE');
+  if (recordedRoot === 'DIFFERENT') return loadFailure('REPOSITORY_ROOT_MISMATCH');
+  if (parsed.data.runId !== runId) return loadFailure('RUN_ID_MISMATCH');
+
+  const declared = readDeclaredRepositoryId(repositoryRoot);
+  if (!declared.ok) return loadFailure('REPOSITORY_PROFILE_UNUSABLE');
+  if (declared.id !== parsed.data.repositoryId) return loadFailure('REPOSITORY_ID_MISMATCH');
 
   return Object.freeze({
     ok: true as const,

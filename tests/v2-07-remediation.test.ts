@@ -44,15 +44,21 @@ import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
-import { defineBlock, fingerprintBlockDefinition } from '../src/block/block-definition.js';
 import {
+  defineBlock,
+  fingerprintBlockDefinition,
+  fingerprintFrozenMembership,
+} from '../src/block/block-definition.js';
+import { safeParseBlockRunLedger } from '../src/block/block-ledger.js';
+import {
+  abandonBlockTask,
   activateBlockTask,
   parkBlockTask,
   settleBlockTask,
   startBlockRun,
   stopBlockRun,
 } from '../src/block/block-progress.js';
-import { loadBlockLedger, saveBlockLedger } from '../src/block/block-store.js';
+import { loadBlockLedger, updateBlockLedger } from '../src/block/block-store.js';
 import { reconcileBlockRun } from '../src/block/reconcile-block.js';
 import { startTask } from '../src/run/start-task.js';
 import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
@@ -183,13 +189,17 @@ describe('cluster 1 — a revision is not a licence to rewrite the run', () => {
     // block, backdates the run, forges a settlement, and declares the whole
     // thing COMPLETE. Every field it touches is one the module header calls
     // written once and never changed.
-    const shrunk = block(['A-001']);
+    //
+    // It is deliberately *internally consistent*: its fingerprint describes the
+    // plan it lists, so no self-contradiction refuses it. The only thing that
+    // can is the question a compare-and-swap never asked — may this successor
+    // change these fields at all?
     const usurper = {
       ...current.ledger,
       blockId: 'V9',
       startedAt: '2020-01-01T00:00:00.000Z',
       frozenTaskIds: ['A-001'],
-      planFingerprint: fingerprintBlockDefinition(shrunk),
+      planFingerprint: fingerprintFrozenMembership('V9', ['A-001']),
       tasks: [
         {
           taskId: 'A-001',
@@ -201,13 +211,17 @@ describe('cluster 1 — a revision is not a licence to rewrite the run', () => {
       ],
       stopReason: 'COMPLETE' as const,
     };
+    expect(safeParseBlockRunLedger(usurper).success).toBe(true);
 
-    const saved = saveBlockLedger(usurper, {
+    const saved = updateBlockLedger(usurper, {
       repositoryRoot: fixture.root,
       expectedRevision: current.revision,
     });
 
     expect(saved.ok).toBe(false);
+    expect(saved.ok ? null : saved.code).toBe('LEDGER_SUCCESSION_REFUSED');
+    expect(saved.ok ? '' : (saved.detail ?? '')).toContain('RUN_IDENTITY_CHANGED');
+    expect(saved.ok ? '' : (saved.detail ?? '')).toContain('FROZEN_PLAN_CHANGED');
 
     // Refused means nothing moved: the frozen plan is still the frozen plan.
     const after = onDisk(fixture.root);
@@ -244,7 +258,7 @@ describe('cluster 1 — a revision is not a licence to rewrite the run', () => {
       ...current.ledger,
       planFingerprint: fingerprintBlockDefinition(reordered),
     };
-    const saved = saveBlockLedger(lying, {
+    const saved = updateBlockLedger(lying, {
       repositoryRoot: fixture.root,
       expectedRevision: current.revision,
     });
@@ -285,12 +299,14 @@ describe('cluster 1 — a revision is not a licence to rewrite the run', () => {
         resultCommit: null,
       })),
     };
-    const saved = saveBlockLedger(rewound, {
+    const saved = updateBlockLedger(rewound, {
       repositoryRoot: fixture.root,
       expectedRevision: current.revision,
     });
 
     expect(saved.ok).toBe(false);
+    expect(saved.ok ? null : saved.code).toBe('LEDGER_SUCCESSION_REFUSED');
+    expect(saved.ok ? '' : (saved.detail ?? '')).toContain('DISPOSITION_REWOUND');
 
     const after = reload(fixture.root);
     expect(after.ledger.activeTaskId).toBe('A-001');
@@ -314,6 +330,7 @@ describe('cluster 1 — a revision is not a licence to rewrite the run', () => {
     // carries is not that run's ledger — the same refusal the task store makes
     // as TASK_ID_MISMATCH, for the same reason.
     expect(asB.ok).toBe(false);
+    expect(asB.ok ? null : asB.code).toBe('RUN_ID_MISMATCH');
 
     // The consequence that makes it load-bearing: a write made through such a
     // load lands in the *other* run's file. Settling A-001 "in run-0002" would
@@ -364,7 +381,9 @@ describe('cluster 2 — no mutating call may persist unproven progress', () => {
     // the ledger's own entries only asks the liar whether it lied; the proof
     // has to come from the task records, at the moment the claim is written —
     // not from a reconciler somebody may or may not run afterwards.
-    expect(stopped.outcome).not.toBe('RECORDED');
+    expect(stopped.outcome).toBe('TASK_NOT_STARTED');
+    expect(stopped.save?.ok).toBe(false);
+    expect(stopped.save?.ok === false ? stopped.save.code : null).toBe('ENTRY_NOT_PROVEN');
     expect(onDisk(fixture.root)['stopReason']).toBeNull();
   }, 180_000);
 
@@ -385,15 +404,36 @@ describe('cluster 2 — no mutating call may persist unproven progress', () => {
       .toBe('TASK_STATE_DOES_NOT_PROVE_IT');
 
     // What must not follow is that the run is wedged. `stopBlockRun` refuses
-    // while a task is ACTIVE, and no call can move that task off ACTIVE, so the
+    // while a task is ACTIVE, and if no call can move that task off ACTIVE the
     // run can never be stopped, never be completed and never be handed to an
     // operator with a reason. A block whose only remaining move is to falsify
     // one of its own records has been driven into a corner by its contract.
-    const stopped = stopBlockRun(reload(fixture.root), 'OPERATOR_STOPPED', {
+    //
+    // The way out records what actually happened and nothing more: the task was
+    // given up on, proven by its own `ABORTED` record and carrying the revision
+    // that proved it.
+    const abandoned = abandonBlockTask(reload(fixture.root), 'A-001', {
       repositoryRoot: fixture.root,
     });
-    expect(stopped.outcome).not.toBe('ANOTHER_TASK_ACTIVE');
-    expect(onDisk(fixture.root)['stopReason']).not.toBeNull();
+    expect(abandoned.outcome).toBe('RECORDED');
+
+    const truth = loadTaskState(fixture.root, 'A-001');
+    if (!truth.ok) throw new Error('fixture: the task state vanished');
+    const entry = reload(fixture.root).ledger.tasks.find((task) => task.taskId === 'A-001');
+    expect(entry?.disposition).toBe('ABANDONED');
+    expect(entry?.evidenceRevision).toBe(truth.revision);
+    expect(entry?.resultCommit).toBeNull();
+
+    const stopped = stopBlockRun(reload(fixture.root), 'TASK_ABANDONED', {
+      repositoryRoot: fixture.root,
+    });
+    expect(stopped.outcome).toBe('RECORDED');
+    expect(onDisk(fixture.root)['stopReason']).toBe('TASK_ABANDONED');
+
+    // And abandoning is not a back door to completion: a block with a task
+    // nobody finished cannot be recorded as finished.
+    expect(reconcileBlockRun(reload(fixture.root).ledger, { repositoryRoot: fixture.root }).verdict)
+      .toBe('CONSISTENT');
   }, 180_000);
 });
 
@@ -418,8 +458,18 @@ describe('cluster 3 — why a run stopped is not a label a later call may edit',
     const second = stopBlockRun(reload(fixture.root), 'OPERATOR_STOPPED', {
       repositoryRoot: fixture.root,
     });
-    expect(second.outcome).not.toBe('RECORDED');
+    expect(second.outcome).toBe('RUN_ALREADY_STOPPED');
     expect(onDisk(fixture.root)['stopReason']).toBe('LEDGER_DIVERGED');
+
+    // Refused at the gate too, not only by the caller's manners: a writer going
+    // straight to the store with a current revision gets the same answer.
+    const current = reload(fixture.root);
+    const relabelled = updateBlockLedger(
+      { ...current.ledger, stopReason: 'OPERATOR_STOPPED' as const },
+      { repositoryRoot: fixture.root, expectedRevision: current.revision },
+    );
+    expect(relabelled.ok).toBe(false);
+    expect(relabelled.ok ? '' : (relabelled.detail ?? '')).toContain('STOP_REASON_RELABELLED');
   }, 180_000);
 });
 
@@ -464,6 +514,9 @@ describe('cluster 4 — a commit field is re-derived, never taken on trust', () 
     });
 
     expect(reconciled.verdict).toBe('DIVERGED');
+    expect(reconciled.findings).toEqual([
+      { taskId: 'A-001', finding: 'COMMIT_NOT_PROVEN_BY_STATE' },
+    ]);
 
     // And reconciliation still only reports: the observation half writes
     // nothing, however wrong the document it was handed.

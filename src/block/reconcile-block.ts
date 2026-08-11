@@ -31,10 +31,9 @@
  * `observe-runtime.ts` is for a task.
  */
 
-import { getStateKind } from '../core/states.js';
-import { loadTaskState } from '../state/state-store.js';
 import { fingerprintBlockDefinition, type BlockDefinition } from './block-definition.js';
-import type { BlockRunLedger } from './block-ledger.js';
+import { proveBlockTaskEntry, type EntryProofCode } from './block-evidence.js';
+import type { BlockRunLedger, TaskDisposition } from './block-ledger.js';
 
 /** Everything a reconciliation can find. A closed set. */
 export const BLOCK_RECONCILIATION_FINDINGS = [
@@ -52,10 +51,24 @@ export const BLOCK_RECONCILIATION_FINDINGS = [
   'EVIDENCE_STALE',
   /** A `BLOCKED` entry whose task is not in a blocking state. */
   'BLOCKED_WITHOUT_BLOCKING_STATE',
+  /** An `ABANDONED` entry whose task record did not reach `ABORTED`. */
+  'ABANDONED_WITHOUT_ABORTED_STATE',
   /** An `ACTIVE` entry with no durable task state at all. */
   'ACTIVE_WITHOUT_TASK_STATE',
   /** A task record exists and cannot be read or validated. */
   'TASK_STATE_UNUSABLE',
+  /**
+   * A `baseCommit` or `resultCommit` is not the one the task record proves.
+   *
+   * The finding this module was missing. `evidenceRevision` was re-checked on
+   * every reconciliation and the commit fields never were, so a hand-edited
+   * `resultCommit` — a perfectly-shaped object name belonging to no task and,
+   * in the reproduced case, to nothing in the repository at all — survived
+   * every later check and reconciled `CONSISTENT`. That field is exactly what
+   * V2-09 intends to make a successor's base, so a forgery there is a forged
+   * dependency edge rather than a cosmetic error.
+   */
+  'COMMIT_NOT_PROVEN_BY_STATE',
   /**
    * A task finished while the ledger still says `PLANNED` or `ACTIVE`.
    *
@@ -74,8 +87,10 @@ const DIVERGENT: ReadonlySet<BlockReconciliationFinding> = new Set([
   'SETTLED_WITHOUT_TERMINAL_STATE',
   'EVIDENCE_STALE',
   'BLOCKED_WITHOUT_BLOCKING_STATE',
+  'ABANDONED_WITHOUT_ABORTED_STATE',
   'ACTIVE_WITHOUT_TASK_STATE',
   'TASK_STATE_UNUSABLE',
+  'COMMIT_NOT_PROVEN_BY_STATE',
   'DEFINITION_DRIFTED',
 ]);
 
@@ -138,52 +153,26 @@ export function reconcileBlockRun(
   }
 
   for (const entry of ledger.tasks) {
-    const state = loadTaskState(options.repositoryRoot, entry.taskId);
+    // The same proof the store applies before it writes anything, asked again
+    // afterwards. One definition of "supported", used by the gate and by the
+    // observer: a reconciler with its own, weaker idea of what a task record
+    // proves is a reconciler that certifies what the gate refused.
+    const { code, state } = proveBlockTaskEntry(options.repositoryRoot, entry);
 
-    if (state.classification === 'STATE_MISSING') {
-      // A task that was never started cannot support a claim about its outcome.
-      if (entry.disposition === 'ACTIVE') {
-        findings.push(record(entry.taskId, 'ACTIVE_WITHOUT_TASK_STATE'));
-      } else if (entry.disposition === 'SETTLED') {
-        findings.push(record(entry.taskId, 'SETTLED_WITHOUT_TERMINAL_STATE'));
-      } else if (entry.disposition === 'BLOCKED') {
-        findings.push(record(entry.taskId, 'BLOCKED_WITHOUT_BLOCKING_STATE'));
-      }
+    if (code !== 'PROVEN') {
+      findings.push(record(entry.taskId, findingFor(code, entry.disposition)));
       continue;
     }
 
-    if (!state.ok) {
-      findings.push(record(entry.taskId, 'TASK_STATE_UNUSABLE'));
-      continue;
-    }
-
-    const taskState = state.state.state;
-
-    switch (entry.disposition) {
-      case 'SETTLED':
-        // The claim, re-derived rather than trusted.
-        if (taskState !== 'READY_FOR_PR') {
-          findings.push(record(entry.taskId, 'SETTLED_WITHOUT_TERMINAL_STATE'));
-        } else if (entry.evidenceRevision !== state.revision) {
-          findings.push(record(entry.taskId, 'EVIDENCE_STALE'));
-        }
-        break;
-      case 'BLOCKED':
-        if (getStateKind(taskState) !== 'BLOCKING') {
-          findings.push(record(entry.taskId, 'BLOCKED_WITHOUT_BLOCKING_STATE'));
-        } else if (entry.evidenceRevision !== state.revision) {
-          findings.push(record(entry.taskId, 'EVIDENCE_STALE'));
-        }
-        break;
-      case 'ACTIVE':
-      case 'PLANNED':
-        // The benign direction: the task finished and the ledger has not caught
-        // up. Reported, never written — see the module header.
-        if (taskState === 'READY_FOR_PR') {
-          findings.push(record(entry.taskId, 'TASK_AHEAD_OF_LEDGER'));
-          progressAvailable = true;
-        }
-        break;
+    // The benign direction: the task finished and the ledger has not caught up.
+    // Nothing false is claimed, so it is reported and never written — see the
+    // module header.
+    if (
+      (entry.disposition === 'PLANNED' || entry.disposition === 'ACTIVE') &&
+      state?.state === 'READY_FOR_PR'
+    ) {
+      findings.push(record(entry.taskId, 'TASK_AHEAD_OF_LEDGER'));
+      progressAvailable = true;
     }
   }
 
@@ -198,4 +187,37 @@ export function reconcileBlockRun(
 
 function record(taskId: string, finding: BlockReconciliationFinding): BlockReconciliationEntry {
   return Object.freeze({ taskId, finding });
+}
+
+/**
+ * The finding a failed proof reads as, for the disposition that failed it.
+ *
+ * The proof answers *why* a claim is unsupported; a finding also says *which
+ * claim*, because an operator reading `SETTLED_WITHOUT_TERMINAL_STATE` and one
+ * reading `ACTIVE_WITHOUT_TASK_STATE` are looking at different problems.
+ */
+function findingFor(
+  code: Exclude<EntryProofCode, 'PROVEN'>,
+  disposition: TaskDisposition,
+): BlockReconciliationFinding {
+  if (code === 'TASK_STATE_UNUSABLE') return 'TASK_STATE_UNUSABLE';
+  if (code === 'EVIDENCE_NOT_CURRENT') return 'EVIDENCE_STALE';
+  if (code === 'COMMIT_NOT_PROVEN_BY_STATE') return 'COMMIT_NOT_PROVEN_BY_STATE';
+
+  // `TASK_NOT_STARTED` and `TASK_STATE_DOES_NOT_PROVE_IT` are both "the record
+  // does not support this disposition", and the disposition names which.
+  switch (disposition) {
+    case 'ACTIVE':
+      return 'ACTIVE_WITHOUT_TASK_STATE';
+    case 'SETTLED':
+      return 'SETTLED_WITHOUT_TERMINAL_STATE';
+    case 'BLOCKED':
+      return 'BLOCKED_WITHOUT_BLOCKING_STATE';
+    case 'ABANDONED':
+      return 'ABANDONED_WITHOUT_ABORTED_STATE';
+    case 'PLANNED':
+      // A planned entry only fails a proof by carrying a base pin, which the
+      // first two arms already answered. Kept exhaustive rather than defaulted.
+      return 'COMMIT_NOT_PROVEN_BY_STATE';
+  }
 }

@@ -25,7 +25,11 @@ import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
-import { defineBlock, fingerprintBlockDefinition } from '../src/block/block-definition.js';
+import {
+  defineBlock,
+  fingerprintBlockDefinition,
+  fingerprintFrozenMembership,
+} from '../src/block/block-definition.js';
 import {
   BLOCK_LEDGER_SCHEMA_VERSION,
   safeParseBlockRunLedger,
@@ -37,7 +41,7 @@ import {
   startBlockRun,
   stopBlockRun,
 } from '../src/block/block-progress.js';
-import { loadBlockLedger, saveBlockLedger } from '../src/block/block-store.js';
+import { createBlockLedger, loadBlockLedger } from '../src/block/block-store.js';
 import { reconcileBlockRun } from '../src/block/reconcile-block.js';
 import { startTask } from '../src/run/start-task.js';
 import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
@@ -217,7 +221,7 @@ describe('the ledger store', () => {
     started(fixture);
     const ledger = reload(fixture.root).ledger;
 
-    const elsewhere = saveBlockLedger(
+    const elsewhere = createBlockLedger(
       { ...ledger, repositoryRoot: join(fixture.root, 'elsewhere') },
       { repositoryRoot: fixture.root },
     );
@@ -239,7 +243,7 @@ describe('the ledger contract', () => {
     runId: RUN_ID,
     startedAt: NOW,
     frozenTaskIds: ['A-001', 'B-001'],
-    planFingerprint: 'a'.repeat(64),
+    planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001']),
     activeTaskId: null,
     tasks: [
       { taskId: 'A-001', disposition: 'PLANNED', evidenceRevision: null, baseCommit: null, resultCommit: null },
