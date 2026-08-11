@@ -234,7 +234,7 @@ describe('CONTEXT_LOADING → IMPLEMENTING', () => {
     const { repository, root, current } = await atContextLoading();
     // Removed from the **worktree**, which is the tree the agent opens and the
     // tree the verdict is about. Deleting it from the source checkout instead
-    // � which is what this test did until the V2-02 remediation � proved
+    // — which is what this test did until the V2-02 remediation — proved
     // nothing about the run, and the gate correctly ignores it now.
     rmSync(join(current.state.worktreePath, 'README.md'));
     expect(existsSync(join(root, 'README.md'))).toBe(true);
