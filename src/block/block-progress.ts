@@ -30,12 +30,14 @@ import { fingerprintBlockDefinition } from './block-definition.js';
 import {
   BLOCK_LEDGER_SCHEMA_VERSION,
   entryFor,
+  PROGRESS_CLAIMING_STOP_REASONS,
   type BlockRunLedger,
   type BlockStopReason,
   type BlockTaskEntry,
 } from './block-ledger.js';
 import {
-  saveBlockLedger,
+  createBlockLedger,
+  updateBlockLedger,
   type LedgerLoadSuccess,
   type LedgerSaveResult,
 } from './block-store.js';
@@ -61,6 +63,14 @@ export const BLOCK_PROGRESS_OUTCOMES = [
   'TASK_NOT_STARTED',
   /** A state exists and cannot be used: broken, or somebody else's. */
   'TASK_STATE_UNUSABLE',
+  /**
+   * The run already stopped, and a stopped run does not progress.
+   *
+   * Kept apart from `DISPOSITION_UNCHANGED`: the task's disposition is not what
+   * refused this, the run's own ending is, and an operator reading the two
+   * would go to different places.
+   */
+  'RUN_ALREADY_STOPPED',
   /** Nothing was written; `save` says why. */
   'NOT_RECORDED',
 ] as const;
@@ -86,20 +96,51 @@ function progress(
   return Object.freeze({ ledger: null, save: null, ...from });
 }
 
-/** Persists `next` as the successor of the ledger that was read. */
+/**
+ * Persists `next` as the successor of the ledger that was read.
+ *
+ * The store is the authority, not this module: it re-proves every claim the
+ * successor newly makes against the task records, so a state that moved between
+ * this module's read and the write is caught there rather than raced past here.
+ * Its refusal is translated back into this module's vocabulary — an unproven
+ * claim is reported as exactly that, never rounded down to "not recorded".
+ */
 function commit(
   current: LedgerLoadSuccess,
   next: BlockRunLedger,
   options: BlockProgressOptions,
 ): BlockProgressResult {
-  const save = saveBlockLedger(next, {
+  const save = updateBlockLedger(next, {
     repositoryRoot: options.repositoryRoot,
     expectedRevision: current.revision,
     ...(options.replace !== undefined ? { replace: options.replace } : {}),
     ...(options.tempSuffix !== undefined ? { tempSuffix: options.tempSuffix } : {}),
   });
-  if (!save.ok) return progress({ outcome: 'NOT_RECORDED', save });
-  return progress({ outcome: 'RECORDED', ledger: next, save });
+  if (save.ok) return progress({ outcome: 'RECORDED', ledger: next, save });
+  if (save.code === 'ENTRY_NOT_PROVEN') {
+    return progress({ outcome: unprovenOutcome(save.detail), save });
+  }
+  return progress({ outcome: 'NOT_RECORDED', save });
+}
+
+/** The store's proof code, in this module's vocabulary. */
+function unprovenOutcome(detail: string | null): BlockProgressOutcome {
+  switch (detail) {
+    case 'TASK_NOT_STARTED':
+      return 'TASK_NOT_STARTED';
+    case 'TASK_STATE_UNUSABLE':
+      return 'TASK_STATE_UNUSABLE';
+    default:
+      // `TASK_STATE_DOES_NOT_PROVE_IT`, `EVIDENCE_NOT_CURRENT` and
+      // `COMMIT_NOT_PROVEN_BY_STATE` are one answer to a caller: the record
+      // does not support what was about to be written.
+      return 'TASK_STATE_DOES_NOT_PROVE_IT';
+  }
+}
+
+/** `true` when this run has already recorded why it is not continuing. */
+function hasStopped(ledger: BlockRunLedger): boolean {
+  return ledger.stopReason !== null;
 }
 
 /** The entries with `taskId`'s replaced. Order is preserved; it is identity. */
@@ -154,7 +195,7 @@ export function startBlockRun(
     stopReason: null,
   };
 
-  return saveBlockLedger(ledger, {
+  return createBlockLedger(ledger, {
     repositoryRoot: request.repositoryRoot,
     ...(options.replace !== undefined ? { replace: options.replace } : {}),
     ...(options.tempSuffix !== undefined ? { tempSuffix: options.tempSuffix } : {}),
@@ -178,6 +219,7 @@ export function activateBlockTask(
   options: BlockProgressOptions,
 ): BlockProgressResult {
   const ledger = current.ledger;
+  if (hasStopped(ledger)) return progress({ outcome: 'RUN_ALREADY_STOPPED' });
   const entry = entryFor(ledger, taskId);
   if (entry === null) return progress({ outcome: 'TASK_NOT_IN_RUN' });
   if (entry.disposition !== 'PLANNED') return progress({ outcome: 'DISPOSITION_UNCHANGED' });
@@ -221,9 +263,12 @@ export function settleBlockTask(
   options: BlockProgressOptions,
 ): BlockProgressResult {
   const ledger = current.ledger;
+  if (hasStopped(ledger)) return progress({ outcome: 'RUN_ALREADY_STOPPED' });
   const entry = entryFor(ledger, taskId);
   if (entry === null) return progress({ outcome: 'TASK_NOT_IN_RUN' });
   if (entry.disposition === 'SETTLED') return progress({ outcome: 'DISPOSITION_UNCHANGED' });
+  // Nothing continues from a task that was given up on.
+  if (entry.disposition === 'ABANDONED') return progress({ outcome: 'DISPOSITION_UNCHANGED' });
 
   const state = loadTaskState(options.repositoryRoot, taskId);
   if (state.classification === 'STATE_MISSING') return progress({ outcome: 'TASK_NOT_STARTED' });
@@ -263,9 +308,14 @@ export function parkBlockTask(
   options: BlockProgressOptions,
 ): BlockProgressResult {
   const ledger = current.ledger;
+  if (hasStopped(ledger)) return progress({ outcome: 'RUN_ALREADY_STOPPED' });
   const entry = entryFor(ledger, taskId);
   if (entry === null) return progress({ outcome: 'TASK_NOT_IN_RUN' });
   if (entry.disposition === 'BLOCKED') return progress({ outcome: 'DISPOSITION_UNCHANGED' });
+  // A finished or abandoned task has a past a later writer does not revise.
+  if (entry.disposition === 'SETTLED' || entry.disposition === 'ABANDONED') {
+    return progress({ outcome: 'DISPOSITION_UNCHANGED' });
+  }
 
   const state = loadTaskState(options.repositoryRoot, taskId);
   if (state.classification === 'STATE_MISSING') return progress({ outcome: 'TASK_NOT_STARTED' });
@@ -290,6 +340,71 @@ export function parkBlockTask(
   return commit(current, next, options);
 }
 
+/* ─────────────────────────────── abandoning ─────────────────────────────── */
+
+/**
+ * Records that a task was given up on — if, and only if, its record says so.
+ *
+ * ── Why this move has to exist ─────────────────────────────────────────────
+ *
+ * `ABORTED` is terminal and not blocking: the task is over, deliberately and
+ * irreversibly, and there is nothing for a human to resolve. Before this
+ * function the ledger had no way to say that. An `ACTIVE` task whose record
+ * reached `ABORTED` could not be settled (it did not finish), could not be
+ * parked (it is not blocked), and while it stayed `ACTIVE` the run could not be
+ * stopped — so the block was wedged, and the only remaining move was to falsify
+ * one of its own records. A contract that leaves inventing progress as the only
+ * escape is a contract that will eventually be escaped that way.
+ *
+ * ── Why it is not `BLOCKED` ────────────────────────────────────────────────
+ *
+ * Reusing `BLOCKED` would have been one line, and would have made "waiting for
+ * a human" and "over" the same word. An operator triaging a stalled roadmap
+ * needs those apart: one is a queue, the other is a decision that was already
+ * taken. And `COMPLETE` requires every task `SETTLED`, so an abandoned task
+ * correctly makes the block uncompletable rather than silently forgivable.
+ *
+ * Evidence-backed exactly as settlement and parking are: the task's own record
+ * must be in `ABORTED`, and the revision that proved it is written into the
+ * entry.
+ */
+export function abandonBlockTask(
+  current: LedgerLoadSuccess,
+  taskId: string,
+  options: BlockProgressOptions,
+): BlockProgressResult {
+  const ledger = current.ledger;
+  if (hasStopped(ledger)) return progress({ outcome: 'RUN_ALREADY_STOPPED' });
+  const entry = entryFor(ledger, taskId);
+  if (entry === null) return progress({ outcome: 'TASK_NOT_IN_RUN' });
+  if (entry.disposition === 'ABANDONED' || entry.disposition === 'SETTLED') {
+    return progress({ outcome: 'DISPOSITION_UNCHANGED' });
+  }
+
+  const state = loadTaskState(options.repositoryRoot, taskId);
+  if (state.classification === 'STATE_MISSING') return progress({ outcome: 'TASK_NOT_STARTED' });
+  if (!state.ok) return progress({ outcome: 'TASK_STATE_UNUSABLE' });
+
+  // The one state that proves it, named rather than derived from a kind:
+  // `READY_FOR_PR` is terminal too, and settling and abandoning must never be
+  // reachable from the same record.
+  if (state.state.state !== 'ABORTED') {
+    return progress({ outcome: 'TASK_STATE_DOES_NOT_PROVE_IT' });
+  }
+
+  const next: BlockRunLedger = {
+    ...ledger,
+    activeTaskId: ledger.activeTaskId === taskId ? null : ledger.activeTaskId,
+    tasks: withEntry(ledger, taskId, {
+      ...entry,
+      disposition: 'ABANDONED',
+      evidenceRevision: state.revision,
+      baseCommit: state.state.basePinnedCommit,
+    }),
+  };
+  return commit(current, next, options);
+}
+
 /* ──────────────────────────────── stopping ──────────────────────────────── */
 
 /**
@@ -300,18 +415,58 @@ export function parkBlockTask(
  * is checked by the contract against every entry, so it cannot be claimed over
  * unfinished work.
  *
- * An **active task must be resolved first** — settled, or parked with its own
- * evidence. Clearing `activeTaskId` here while an entry still said `ACTIVE`
- * would produce a document the contract refuses, and clearing the entry too
- * would be this function inventing an outcome for a task it never looked at.
- * So it refuses, and the caller says what happened to the task.
+ * ── An active task, and the two kinds of ending ────────────────────────────
+ *
+ * A reason that claims the *tasks* did something — `COMPLETE`, `TASK_BLOCKED`,
+ * `TASK_ABANDONED` — still requires the active task to be resolved first, with
+ * its own evidence. Claiming any of the three over a task the run is still
+ * holding would be this function inventing an outcome for a task it never
+ * looked at. So it refuses, and the caller says what happened to the task.
+ *
+ * A reason that claims **no** progress does not require that, and must not.
+ * This once refused every stop while a task was active, and the cost was the
+ * wedge the ledger exists to make impossible: a task whose record has become
+ * unreadable proves neither settlement nor blocking nor abandonment, so no call
+ * could move it off `ACTIVE`, so no stop could be recorded, so a run could see
+ * `STATE_UNUSABLE` and never say so. The remaining move was hand-editing the
+ * ledger.
+ *
+ * Such a stop leaves the entry exactly as it found it. The record then reads:
+ * the block stopped, and this task was still unresolved when it did — which is
+ * what actually happened. `assessLedgerSuccession` holds that write to saying
+ * only that, so the one ending that needs no evidence cannot carry any.
+ *
+ * ── Why it is written once ─────────────────────────────────────────────────
+ *
+ * A stop reason is history, not a label. `LEDGER_DIVERGED` is the most
+ * expensive thing a run can record about itself — the ledger and the task
+ * records disagreed, and the run must not continue — and overwriting it with
+ * `OPERATOR_STOPPED` destroys the only durable trace that a divergence was ever
+ * detected, leaving an operator reading a run that looks deliberately ended.
+ * The store refuses the relabelling outright; this refuses it before writing,
+ * so the caller gets an answer about the run rather than about a save.
+ *
+ * ── What `COMPLETE` costs here ─────────────────────────────────────────────
+ *
+ * Nothing, in this function — and that is the point. `COMPLETE` is a claim
+ * about every task in the run, and the store proves it against every task's own
+ * record before it lands. Checking it here against the ledger's entries, as
+ * this once did, is asking the document that makes the claim whether the claim
+ * is true.
  */
 export function stopBlockRun(
   current: LedgerLoadSuccess,
   reason: BlockStopReason,
   options: BlockProgressOptions,
 ): BlockProgressResult {
-  if (current.ledger.activeTaskId !== null) return progress({ outcome: 'ANOTHER_TASK_ACTIVE' });
+  if (hasStopped(current.ledger)) {
+    // Re-recording the same reason is not a relabelling, and is not progress
+    // either. It changes nothing, and says so.
+    return progress({ outcome: 'RUN_ALREADY_STOPPED' });
+  }
+  if (current.ledger.activeTaskId !== null && PROGRESS_CLAIMING_STOP_REASONS.has(reason)) {
+    return progress({ outcome: 'ANOTHER_TASK_ACTIVE' });
+  }
   const next: BlockRunLedger = { ...current.ledger, stopReason: reason };
   return commit(current, next, options);
 }

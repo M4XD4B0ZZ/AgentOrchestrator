@@ -29,12 +29,34 @@
  *
  * Nothing in this module writes. It is the observation half, exactly as
  * `observe-runtime.ts` is for a task.
+ *
+ * ── One definition of "supported" ──────────────────────────────────────────
+ *
+ * The per-entry check is `block-evidence.ts`, the same proof the store applies
+ * before it writes anything. A reconciler with its own, weaker idea of what a
+ * task record proves is a reconciler that certifies what the gate refused — and
+ * the two did drift: `evidenceRevision` was re-derived here on every pass while
+ * `baseCommit` and `resultCommit` were carried, so a hand-edited result commit
+ * reconciled `CONSISTENT` for as long as anyone cared to look.
+ *
+ * ── Whose repository is this, asked first ──────────────────────────────────
+ *
+ * Before any record is read. `loadBlockLedger` holds both identities, but this
+ * function takes a ledger *value* and a root, and a value did not have to come
+ * through the store to get here — while every task record below is looked up
+ * under that root. A ledger describing another project is not slightly wrong
+ * here; it is asking about somebody else's tasks.
  */
 
-import { getStateKind } from '../core/states.js';
-import { loadTaskState } from '../state/state-store.js';
-import { fingerprintBlockDefinition, type BlockDefinition } from './block-definition.js';
-import type { BlockRunLedger } from './block-ledger.js';
+import { comparePathIdentity } from '../core/path-identity.js';
+import { readDeclaredRepositoryId } from '../repo/declared-identity.js';
+import {
+  fingerprintBlockDefinition,
+  fingerprintFrozenMembership,
+  type BlockDefinition,
+} from './block-definition.js';
+import { proveBlockTaskEntry, type EntryProofCode } from './block-evidence.js';
+import type { BlockRunLedger, TaskDisposition } from './block-ledger.js';
 
 /** Everything a reconciliation can find. A closed set. */
 export const BLOCK_RECONCILIATION_FINDINGS = [
@@ -52,10 +74,24 @@ export const BLOCK_RECONCILIATION_FINDINGS = [
   'EVIDENCE_STALE',
   /** A `BLOCKED` entry whose task is not in a blocking state. */
   'BLOCKED_WITHOUT_BLOCKING_STATE',
+  /** An `ABANDONED` entry whose task record did not reach `ABORTED`. */
+  'ABANDONED_WITHOUT_ABORTED_STATE',
   /** An `ACTIVE` entry with no durable task state at all. */
   'ACTIVE_WITHOUT_TASK_STATE',
   /** A task record exists and cannot be read or validated. */
   'TASK_STATE_UNUSABLE',
+  /**
+   * A `baseCommit` or `resultCommit` is not the one the task record proves.
+   *
+   * The finding this module was missing. `evidenceRevision` was re-checked on
+   * every reconciliation and the commit fields never were, so a hand-edited
+   * `resultCommit` — a perfectly-shaped object name belonging to no task and,
+   * in the reproduced case, to nothing in the repository at all — survived
+   * every later check and reconciled `CONSISTENT`. That field is exactly what
+   * V2-09 intends to make a successor's base, so a forgery there is a forged
+   * dependency edge rather than a cosmetic error.
+   */
+  'COMMIT_NOT_PROVEN_BY_STATE',
   /**
    * A task finished while the ledger still says `PLANNED` or `ACTIVE`.
    *
@@ -65,6 +101,30 @@ export const BLOCK_RECONCILIATION_FINDINGS = [
   'TASK_AHEAD_OF_LEDGER',
   /** The block definition in the repository is no longer the frozen one. */
   'DEFINITION_DRIFTED',
+  /**
+   * The ledger's stored `planFingerprint` is not the digest of the membership
+   * the ledger itself lists.
+   *
+   * A document that came through the store cannot be in this state: the
+   * contract re-derives the field on every create, every update and every load.
+   * So this is a ledger *value* that did not come through it — and it is
+   * reported rather than quietly corrected, because a stored digest describing
+   * a plan the document does not list does not merely lose drift detection, it
+   * inverts it, and every drift answer computed against that field would be a
+   * comparison against a lie.
+   */
+  'PLAN_FINGERPRINT_UNSOUND',
+  /**
+   * The ledger is being reconciled against a repository it does not describe.
+   *
+   * Either the recorded root is not this one, or the identity the profile
+   * declares now is not the one the run was started under. Both make every task
+   * record read below somebody else's, so it is a fact about the whole
+   * reconciliation rather than about a task — and it is checked here as well as
+   * on load, because this function takes a ledger value and a root, and a value
+   * did not have to come through the store to get here.
+   */
+  'REPOSITORY_IDENTITY_DRIFTED',
 ] as const;
 
 export type BlockReconciliationFinding = (typeof BLOCK_RECONCILIATION_FINDINGS)[number];
@@ -74,9 +134,13 @@ const DIVERGENT: ReadonlySet<BlockReconciliationFinding> = new Set([
   'SETTLED_WITHOUT_TERMINAL_STATE',
   'EVIDENCE_STALE',
   'BLOCKED_WITHOUT_BLOCKING_STATE',
+  'ABANDONED_WITHOUT_ABORTED_STATE',
   'ACTIVE_WITHOUT_TASK_STATE',
   'TASK_STATE_UNUSABLE',
+  'COMMIT_NOT_PROVEN_BY_STATE',
   'DEFINITION_DRIFTED',
+  'PLAN_FINGERPRINT_UNSOUND',
+  'REPOSITORY_IDENTITY_DRIFTED',
 ]);
 
 export interface BlockReconciliationEntry {
@@ -127,63 +191,70 @@ export function reconcileBlockRun(
   const findings: BlockReconciliationEntry[] = [];
   let progressAvailable = false;
 
+  // Whose repository is this? Asked before anything is read from it, because
+  // every answer below is a task record looked up under `repositoryRoot`, and
+  // if the ledger is not this checkout's then none of those records is the one
+  // it is talking about.
+  const declared = readDeclaredRepositoryId(options.repositoryRoot);
+  if (
+    comparePathIdentity(ledger.repositoryRoot, options.repositoryRoot) !== 'EQUAL' ||
+    !declared.ok ||
+    declared.id !== ledger.repositoryId
+  ) {
+    findings.push(
+      Object.freeze({ taskId: ledger.blockId, finding: 'REPOSITORY_IDENTITY_DRIFTED' as const }),
+    );
+  }
+
+  // The frozen plan, derived rather than believed.
+  //
+  // `planFingerprint` is a stored field, and this function takes a ledger
+  // *value*: nothing forced it through the schema that re-derives that digest
+  // on every create, update and load. Comparing the current definition against
+  // the stored field therefore compared it against whatever the field happened
+  // to say, and a value carrying the digest of a plan it does not list inverts
+  // the answer — the edited roadmap reports clean and the honest one reports
+  // drifted. That is the failure the store closed for itself, reached through
+  // the one door the store does not stand in.
+  //
+  // So the frozen membership is recomputed here from the two fields that *are*
+  // the plan, and both the ledger's own claim about it and the repository's
+  // current definition are held against that, rather than against each other.
+  const frozen = fingerprintFrozenMembership(ledger.blockId, ledger.frozenTaskIds);
+  if (ledger.planFingerprint !== frozen) {
+    findings.push(record(ledger.blockId, 'PLAN_FINGERPRINT_UNSOUND'));
+  }
   if (
     options.definition !== undefined &&
-    fingerprintBlockDefinition(options.definition) !== ledger.planFingerprint
+    fingerprintBlockDefinition(options.definition) !== frozen
   ) {
     // The membership this run was started against is not the one in front of
     // us. Reported against the block rather than a task, because it is a fact
     // about the plan.
-    findings.push(Object.freeze({ taskId: ledger.blockId, finding: 'DEFINITION_DRIFTED' as const }));
+    findings.push(record(ledger.blockId, 'DEFINITION_DRIFTED'));
   }
 
   for (const entry of ledger.tasks) {
-    const state = loadTaskState(options.repositoryRoot, entry.taskId);
+    // The same proof the store applies before it writes anything, asked again
+    // afterwards. One definition of "supported", used by the gate and by the
+    // observer: a reconciler with its own, weaker idea of what a task record
+    // proves is a reconciler that certifies what the gate refused.
+    const { code, state } = proveBlockTaskEntry(options.repositoryRoot, entry);
 
-    if (state.classification === 'STATE_MISSING') {
-      // A task that was never started cannot support a claim about its outcome.
-      if (entry.disposition === 'ACTIVE') {
-        findings.push(record(entry.taskId, 'ACTIVE_WITHOUT_TASK_STATE'));
-      } else if (entry.disposition === 'SETTLED') {
-        findings.push(record(entry.taskId, 'SETTLED_WITHOUT_TERMINAL_STATE'));
-      } else if (entry.disposition === 'BLOCKED') {
-        findings.push(record(entry.taskId, 'BLOCKED_WITHOUT_BLOCKING_STATE'));
-      }
+    if (code !== 'PROVEN') {
+      findings.push(record(entry.taskId, findingFor(code, entry.disposition)));
       continue;
     }
 
-    if (!state.ok) {
-      findings.push(record(entry.taskId, 'TASK_STATE_UNUSABLE'));
-      continue;
-    }
-
-    const taskState = state.state.state;
-
-    switch (entry.disposition) {
-      case 'SETTLED':
-        // The claim, re-derived rather than trusted.
-        if (taskState !== 'READY_FOR_PR') {
-          findings.push(record(entry.taskId, 'SETTLED_WITHOUT_TERMINAL_STATE'));
-        } else if (entry.evidenceRevision !== state.revision) {
-          findings.push(record(entry.taskId, 'EVIDENCE_STALE'));
-        }
-        break;
-      case 'BLOCKED':
-        if (getStateKind(taskState) !== 'BLOCKING') {
-          findings.push(record(entry.taskId, 'BLOCKED_WITHOUT_BLOCKING_STATE'));
-        } else if (entry.evidenceRevision !== state.revision) {
-          findings.push(record(entry.taskId, 'EVIDENCE_STALE'));
-        }
-        break;
-      case 'ACTIVE':
-      case 'PLANNED':
-        // The benign direction: the task finished and the ledger has not caught
-        // up. Reported, never written — see the module header.
-        if (taskState === 'READY_FOR_PR') {
-          findings.push(record(entry.taskId, 'TASK_AHEAD_OF_LEDGER'));
-          progressAvailable = true;
-        }
-        break;
+    // The benign direction: the task finished and the ledger has not caught up.
+    // Nothing false is claimed, so it is reported and never written — see the
+    // module header.
+    if (
+      (entry.disposition === 'PLANNED' || entry.disposition === 'ACTIVE') &&
+      state?.state === 'READY_FOR_PR'
+    ) {
+      findings.push(record(entry.taskId, 'TASK_AHEAD_OF_LEDGER'));
+      progressAvailable = true;
     }
   }
 
@@ -198,4 +269,37 @@ export function reconcileBlockRun(
 
 function record(taskId: string, finding: BlockReconciliationFinding): BlockReconciliationEntry {
   return Object.freeze({ taskId, finding });
+}
+
+/**
+ * The finding a failed proof reads as, for the disposition that failed it.
+ *
+ * The proof answers *why* a claim is unsupported; a finding also says *which
+ * claim*, because an operator reading `SETTLED_WITHOUT_TERMINAL_STATE` and one
+ * reading `ACTIVE_WITHOUT_TASK_STATE` are looking at different problems.
+ */
+function findingFor(
+  code: Exclude<EntryProofCode, 'PROVEN'>,
+  disposition: TaskDisposition,
+): BlockReconciliationFinding {
+  if (code === 'TASK_STATE_UNUSABLE') return 'TASK_STATE_UNUSABLE';
+  if (code === 'EVIDENCE_NOT_CURRENT') return 'EVIDENCE_STALE';
+  if (code === 'COMMIT_NOT_PROVEN_BY_STATE') return 'COMMIT_NOT_PROVEN_BY_STATE';
+
+  // `TASK_NOT_STARTED` and `TASK_STATE_DOES_NOT_PROVE_IT` are both "the record
+  // does not support this disposition", and the disposition names which.
+  switch (disposition) {
+    case 'ACTIVE':
+      return 'ACTIVE_WITHOUT_TASK_STATE';
+    case 'SETTLED':
+      return 'SETTLED_WITHOUT_TERMINAL_STATE';
+    case 'BLOCKED':
+      return 'BLOCKED_WITHOUT_BLOCKING_STATE';
+    case 'ABANDONED':
+      return 'ABANDONED_WITHOUT_ABORTED_STATE';
+    case 'PLANNED':
+      // A planned entry only fails a proof by carrying a base pin, which the
+      // first two arms already answered. Kept exhaustive rather than defaulted.
+      return 'COMMIT_NOT_PROVEN_BY_STATE';
+  }
 }
