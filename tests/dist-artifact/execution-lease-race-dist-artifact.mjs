@@ -41,9 +41,9 @@ const repoRoot = resolve(scriptDir, '..', '..');
 const distEntry = join(repoRoot, 'dist', 'lease', 'execution-lease.js');
 
 /** How many processes race for one lease. */
-const RACERS = 8;
+const RACERS = 16;
 /** How many independent races are run. A single round can be lucky. */
-const ROUNDS = 5;
+const ROUNDS = 8;
 
 /** @type {string[]} */
 const failures = [];
@@ -71,7 +71,7 @@ if (!existsSync(distEntry)) {
  * reaches stdout, so the parent can read the result without parsing noise.
  */
 const RACER_SOURCE = `
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { acquireRepositoryExecutionLease } from ${JSON.stringify(pathToFileURL(distEntry).href)};
 
 // Read from the environment rather than from argv. With \`node -e\`, argv carries
@@ -81,6 +81,7 @@ import { acquireRepositoryExecutionLease } from ${JSON.stringify(pathToFileURL(d
 const gitCommonDir = process.env.AO_RACE_DIR;
 const start = process.env.AO_RACE_START;
 const finish = process.env.AO_RACE_FINISH;
+const ready = process.env.AO_RACE_READY;
 
 /** Waits for a barrier file, bounded so a harness defect fails rather than hangs. */
 const waitFor = (path, label) => {
@@ -98,8 +99,15 @@ const waitFor = (path, label) => {
   }
 };
 
-// Spin rather than sleep: every process must leave this inside the same
-// scheduling quantum, or the "race" resolves in start order and proves nothing.
+// Announce readiness only after the module is imported and warm, then wait.
+//
+// The first version wrote the start barrier as soon as the spawn loop finished
+// — tens of milliseconds before any child had booted Node and imported the
+// shipped module. Every child found the barrier already present and the race
+// resolved in process-boot order, which proves nothing. The adversarial review
+// measured that; the handshake below is the fix. The parent releases only once
+// every racer is parked on the barrier.
+writeFileSync(ready, 'ready', 'utf8');
 waitFor(start, 'start');
 
 const result = acquireRepositoryExecutionLease(
@@ -124,6 +132,7 @@ async function race(round) {
   const dir = mkdtempSync(join(tmpdir(), `ao-lease-race-${String(round)}-`));
   const start = join(dir, 'start');
   const finish = join(dir, 'finish');
+  const readyOf = (index) => join(dir, `ready-${String(index)}`);
 
   /** @type {import('node:child_process').ChildProcess[]} */
   const children = [];
@@ -136,7 +145,13 @@ async function race(round) {
       const child = spawn(process.execPath, ['--input-type=module', '-e', RACER_SOURCE], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
-        env: { ...process.env, AO_RACE_DIR: dir, AO_RACE_START: start, AO_RACE_FINISH: finish },
+        env: {
+          ...process.env,
+          AO_RACE_DIR: dir,
+          AO_RACE_START: start,
+          AO_RACE_FINISH: finish,
+          AO_RACE_READY: readyOf(index),
+        },
       });
       children.push(child);
       answers.push(
@@ -157,7 +172,21 @@ async function race(round) {
       );
     }
 
-    // Every child is up; release them all at once.
+    // Every child is *parked on the barrier* — not merely spawned — before any
+    // of them is released. Writing the barrier straight after the spawn loop
+    // released children that had not booted yet, so they left the gate in boot
+    // order and the round measured process startup rather than contention.
+    const readyDeadline = Date.now() + 60_000;
+    for (;;) {
+      let parked = 0;
+      for (let index = 0; index < RACERS; index += 1) {
+        if (existsSync(readyOf(index))) parked += 1;
+      }
+      if (parked === RACERS) break;
+      if (Date.now() > readyDeadline) {
+        throw new Error(`only ${String(parked)}/${String(RACERS)} racers reached the barrier`);
+      }
+    }
     writeFileSync(start, 'go', 'utf8');
     const collected = await Promise.all(answers);
     // Everybody has answered, so the owner may stand down.

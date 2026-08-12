@@ -46,6 +46,8 @@
  * the nonce could defend against that its location does not already concede.
  */
 
+import { isAbsolute } from 'node:path';
+
 /** 32 random bytes, hex-encoded. The identity of one claim on one lease file. */
 const NONCE_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -101,6 +103,12 @@ export function mintExecutionLeaseEvidence(
   leasePath: string,
 ): ExecutionLeaseProof | null {
   if (!NONCE_PATTERN.test(nonce)) return null;
-  if (leasePath.trim().length === 0) return null;
+  // Absolute, and checked here rather than described here. This said "a
+  // non-absolute path mints nothing" while testing only for emptiness, which is
+  // the shape of comment that survives the check it describes being removed. A
+  // relative path is not a location — `core/path-identity.ts` sets out why — and
+  // the repository-scoped verification compares this value against a derived
+  // absolute one, so a relative path could never match anything.
+  if (leasePath.trim().length === 0 || !isAbsolute(leasePath)) return null;
   return new ExecutionLeaseProof(nonce, leasePath);
 }

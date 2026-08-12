@@ -39,7 +39,7 @@
  */
 
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
-import { verifyExecutionLeaseHeld } from '../lease/execution-lease.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { planNextTask } from '../plan/plan-next-task.js';
 import { isValidTaskId } from '../plan/task-id.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -190,7 +190,7 @@ export async function releaseTaskWorkspace(
   deps: ReleaseDependencies,
 ): Promise<ReleaseResult> {
   // Authority over the repository, before anything is inspected or removed.
-  const lease = verifyExecutionLeaseHeld(deps.lease);
+  const lease = verifyExecutionLeaseHeldFor(repository, deps.lease);
   if (lease.code !== 'HELD') {
     return result({
       outcome: 'EXECUTION_LEASE_NOT_HELD',

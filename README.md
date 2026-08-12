@@ -3679,13 +3679,42 @@ match, they are deleted. If they do not, the file is put back with `link`, which
 refuses to overwrite — so a third party that acquired in the meantime keeps what
 it took. Both destructive paths share that guard.
 
-What remains is a loss of *availability*, never of safety: a lease detached and
-restored is briefly absent, so a holder checking in that instant sees
-`LEASE_ABSENT` and **stops**. It stops rather than carrying on beside a second
-writer, which is the failure the lease exists to prevent. There is no portable
-atomic compare-and-delete; this is the closest available, and the difference from
-the previous shape is the difference between "somebody's run stopped early" and
-"somebody's run kept going without authority".
+The name is then re-occupied by a placeholder **immediately**, before anything is
+read, so the sequence is detach, occupy, identify, decide. A placeholder is not a
+lease — it does not parse — so an acquirer meeting one refuses rather than wins.
+
+**The residual is stated exactly, because the first version of this paragraph
+overstated it.** It claimed the remainder was "a loss of availability, never of
+safety". The adversarial review reproduced the opposite: with only a rename, the
+name stayed free for as long as it took to read and hash the detached file —
+hundreds of milliseconds for a large one — a third process acquired inside that
+window, the restoring `link` failed `EEXIST`, and the incumbent's lease was
+discarded while the break reported `LEASE_CHANGED`, whose sentence reads "Nothing
+was removed". Two live writers, and a report saying nothing happened.
+
+The placeholder takes the read and the hash out of the window, leaving one rename
+and one exclusive create with nothing between them. It does **not** make the
+window zero. A concurrent acquisition landing between those two syscalls still
+takes the name and the incumbent is out; what is true is that the window is two
+adjacent syscalls rather than a file read, that reaching it needs a *third* party
+acquiring during a break that was going to be refused anyway, and that the
+incumbent then stops at its next checkpoint. Closing it entirely needs an atomic
+compare-and-delete on a directory entry, which no portable filesystem primitive
+offers.
+
+### The boundary that decides how much that residual costs
+
+An incumbent that loses its lease stops **at its next checkpoint**, and the
+driver's checkpoint is the top of an iteration — so the step already in flight
+finishes, including its durable write. That is measured, not assumed: a lease
+deleted during the writing agent let that step complete and record `VERIFYING`
+before the run stopped.
+
+So the exposure of any lost-authority event is one agent invocation plus one
+durable write. Narrowing it means proving the lease *inside* the loop step,
+between the agent returning and the state being advanced — the loop's contract to
+change rather than the driver's, and named here as a known boundary rather than
+implied away. `run-driver.ts` says the same thing where the gate lives.
 
 ### What V2-07L is not
 

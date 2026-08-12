@@ -80,7 +80,7 @@ import {
 } from '../core/states.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
-import { verifyExecutionLeaseHeld } from '../lease/execution-lease.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
@@ -218,10 +218,17 @@ export const RUN_OUTCOMES = [
    * The lease this run took is no longer this run's.
    *
    * Removed underneath it — by an operator breaking a lease they believed
-   * stale, by a wiped administrative directory — or replaced by a successor. The
-   * run stops where it stands rather than finishing "the step it was already
-   * doing": there is no such thing as a little bit of exclusive access, and the
-   * next durable write would be a second writer's.
+   * stale, by a wiped administrative directory — or replaced by a successor.
+   *
+   * **The run stops at the next iteration boundary, and the step already in
+   * flight completes**, including its durable write. That is stated exactly
+   * because an earlier draft claimed the opposite, and the adversarial review
+   * measured it: a lease deleted during the writing agent let that step finish
+   * and record `VERIFYING` before the run stopped. Closing it means proving the
+   * lease inside the loop step, between the agent returning and the state being
+   * advanced, which is the loop's contract to change rather than the driver's.
+   * The exposure is one agent invocation plus one durable write, and it is
+   * reachable only by something removing a live holder's lease.
    */
   'EXECUTION_LEASE_LOST',
 
@@ -251,6 +258,20 @@ const BLOCKING_OUTCOME: Readonly<Record<BlockingState, RunOutcome>> = Object.fre
   RESUME_STATE_DIVERGED: 'RESUME_STATE_DIVERGED',
   HUMAN_DECISION_REQUIRED: 'HUMAN_DECISION_REQUIRED',
 });
+
+/**
+ * The verify codes that mean this run **never** held the lease, as opposed to
+ * having lost one it did hold.
+ *
+ * The two outcomes send an operator to different places, so the split has to be
+ * right: a forged artefact and a genuine lease for *another* repository are both
+ * "you were never the writer here", however real the second one is somewhere
+ * else. Only a lease that was this repository's and has gone is a loss.
+ */
+const NEVER_HELD: ReadonlySet<string> = new Set([
+  'EVIDENCE_INVALID',
+  'LEASE_FOR_ANOTHER_REPOSITORY',
+]);
 
 export interface RunResult {
   readonly outcome: RunOutcome;
@@ -450,11 +471,10 @@ export async function runTask(
     // question. Reconciliation asks whether this task's record matches reality;
     // this asks whether this process may act on the repository at all, and there
     // is no point establishing the first while the second is false.
-    const lease = verifyExecutionLeaseHeld(request.lease);
+    const lease = verifyExecutionLeaseHeldFor(repository, request.lease);
     if (lease.code !== 'HELD') {
       return stop({
-        outcome:
-          lease.code === 'EVIDENCE_INVALID' ? 'EXECUTION_LEASE_NOT_HELD' : 'EXECUTION_LEASE_LOST',
+        outcome: NEVER_HELD.has(lease.code) ? 'EXECUTION_LEASE_NOT_HELD' : 'EXECUTION_LEASE_LOST',
         steps,
         reasonCodes: Object.freeze([lease.code]),
       });
@@ -758,6 +778,23 @@ export async function runTask(
           steps,
         });
     }
+  }
+
+  // The budget ran out, and the last step was never re-proved — the check is at
+  // the *top* of an iteration, so nothing looked after the final one. That
+  // matters here more than it looks: `STEP_BUDGET_EXHAUSTED` is the one outcome
+  // documented as "call again", it exits 5, and a scheduler acts on it. Handing
+  // that back for a run that has lost authority tells the caller everything is
+  // fine and to continue. One syscall says otherwise.
+  const stillHeld = verifyExecutionLeaseHeldFor(repository, request.lease);
+  if (stillHeld.code !== 'HELD') {
+    return stop({
+      outcome: NEVER_HELD.has(stillHeld.code)
+        ? 'EXECUTION_LEASE_NOT_HELD'
+        : 'EXECUTION_LEASE_LOST',
+      steps,
+      reasonCodes: Object.freeze([stillHeld.code]),
+    });
   }
 
   return stop({

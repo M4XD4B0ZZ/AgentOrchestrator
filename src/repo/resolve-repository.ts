@@ -374,6 +374,17 @@ export async function resolveRepository(
   if (commonDir.outcome === 'NONZERO_EXIT' || commonDir.stdout === '') {
     return failure('NOT_A_GIT_REPOSITORY');
   }
+  // The answer must already be absolute, and that is checked rather than
+  // assumed. `--path-format=absolute` is doing all the work here: without it
+  // Git answers `.git` at the root and `../.git` from a subdirectory, and
+  // `resolvePath` would silently adopt `process.cwd()` — so every repository
+  // resolved from one working directory would key on the *orchestrator's* own
+  // `.git`, giving every repository the same execution lease. Dropping the flag
+  // in a refactor is an ordinary-looking edit with that consequence, and one
+  // line makes it fail closed instead. The sibling `--show-toplevel` query above
+  // is cross-checked with `samePath`; this is the equivalent for a value that
+  // becomes a file location rather than a comparison.
+  if (!isAbsolute(commonDir.stdout)) return failure('NOT_A_GIT_REPOSITORY');
   let gitCommonDir: string;
   try {
     gitCommonDir = realpathSync.native(resolvePath(commonDir.stdout));

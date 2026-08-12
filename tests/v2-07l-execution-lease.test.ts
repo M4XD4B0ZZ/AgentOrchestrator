@@ -65,6 +65,7 @@ import {
   inspectRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
   verifyExecutionLeaseHeld,
+  verifyExecutionLeaseHeldFor,
 } from '../src/lease/execution-lease.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { releaseTaskWorkspace } from '../src/run/release-workspace.js';
@@ -328,6 +329,28 @@ describe('lease evidence is produced, never asserted', () => {
     expect(importers).toEqual([join('src', 'lease', 'execution-lease.ts')]);
   });
 
+  it('has the class itself imported only by the module that names the type', () => {
+    // The mint is not the only way to make one. `instanceof` accepts a
+    // *subclass*, so a module that can reach `ExecutionLeaseProof` can extend it,
+    // override `leasePath` and `matchesRecordedNonce`, and pass every gate — the
+    // adversarial review did exactly that and unlinked an arbitrary path with it.
+    // Pinning the mint's importers left that route open, because it never
+    // mentions the mint.
+    //
+    // So the class is pinned too. Exactly one module in `src/` may name it: the
+    // public wrapper, which needs it for the `instanceof` test and exports only a
+    // type alias. The lease store reaches the mint, never the constructor.
+    const importers: string[] = [];
+    for (const file of sourceFiles()) {
+      const text = readFileSync(file, 'utf8');
+      if (/import\s*\{[^}]*\bExecutionLeaseProof\b[^}]*\}/.test(text)) {
+        importers.push(relative(PACKAGE_ROOT, file));
+      }
+    }
+
+    expect(importers.sort()).toEqual([join('src', 'core', 'execution-lease-evidence.ts')]);
+  });
+
   it('is re-exported by no module at all', () => {
     const offenders: string[] = [];
     for (const file of sourceFiles()) {
@@ -450,6 +473,68 @@ describe('no productive writer path runs without the lease', () => {
     expect(existsSync(worktree)).toBe(true);
     expect(released.worktreeRemoved).toBe(false);
     expect(released.branchRemoved).toBe(false);
+  });
+
+  it('refuses a genuine, current lease that belongs to another repository', async () => {
+    // Found by the adversarial review, and it is the finding that most deserved
+    // to exist: nothing here was forged. A real lease over repository E
+    // satisfied the gate for a mutation of repository T, because the check only
+    // ever asked "is the file this artefact names still mine" and never "is that
+    // this repository's file". T then got a branch, a worktree, durable writes
+    // and a spawned agent while T's own lease sat free for a rightful holder to
+    // take — the exact split-brain the module exists to prevent.
+    //
+    // Unreachable from the CLI, which acquires for the repository it then acts
+    // on. That is convention carrying the guarantee, in a slice whose whole
+    // argument is that evidence exists to replace convention — and V2-08, one
+    // lease threaded into several per-task calls, is precisely the shape that
+    // breaks it.
+    const elsewhere = await leasableRepository();
+    const target = await leasableRepository();
+    const foreign = heldLease(elsewhere);
+
+    // Genuine, current, and held — just not here.
+    expect(verifyExecutionLeaseHeld(foreign).code).toBe('HELD');
+    expect(verifyExecutionLeaseHeldFor(elsewhere.repository, foreign).code).toBe('HELD');
+    expect(verifyExecutionLeaseHeldFor(target.repository, foreign).code).toBe(
+      'LEASE_FOR_ANOTHER_REPOSITORY',
+    );
+
+    const started = await startTask(
+      { repository: target.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: foreign,
+      },
+    );
+
+    expect(started.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(started.reasonCodes).toContain('LEASE_FOR_ANOTHER_REPOSITORY');
+    expect(loadTaskState(target.root, TASK_ID).classification).toBe('STATE_MISSING');
+    expect(started.workspace).toBeNull();
+
+    const released = await releaseTaskWorkspace(target.repository, TASK_ID, {
+      git: runGitCommand,
+      lease: foreign,
+    });
+    expect(released.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+
+    const run = await runTask(
+      {
+        repository: target.repository,
+        taskId: TASK_ID,
+        taskBrief: TASK_ID,
+        attendedContinuation: true,
+        authEvidence: provenAuthEvidence(),
+        lease: foreign,
+        maxSteps: 4,
+      },
+      { now: tickingClock(), git: runGitCommand },
+    );
+    expect(run.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(run.steps).toBe(0);
   });
 
   it('requires the lease as a parameter rather than defaulting it', () => {
@@ -652,6 +737,77 @@ describe('breaking a lease names exactly the lease that was inspected', () => {
     expect(refused.code).toBe('LEASE_CHANGED');
     expect(existsSync(observed.path)).toBe(true);
     expect(inspectRepositoryExecutionLease(fixture.repository).runId).toBe('run-0002');
+  });
+
+  it('refuses to break a lease from another build whose owner is running', async () => {
+    // The unparseable branch used to probe no liveness at all, so a lease this
+    // build cannot validate — a newer `schemaVersion`, a field its `.strict()`
+    // schema does not know — was breakable while its owner was driving agents.
+    // Worse, the honest operator was the one refused: naming the real, running
+    // owner gave OWNER_PID_UNEXPECTED, while the command `lease status` printed
+    // for them succeeded. Two orchestrator builds on one machine is all it took.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const path = inspectRepositoryExecutionLease(fixture.repository).path;
+    releaseRepositoryExecutionLease(evidence);
+
+    // A well-formed lease from a build this one does not know, owned by a
+    // process that is certainly running: this one.
+    writeFileSync(
+      path,
+      `${JSON.stringify(
+        {
+          schemaVersion: 2,
+          leaseKey: fixture.repository.gitCommonDir,
+          repositoryRoot: fixture.repository.root,
+          repositoryId: fixture.repository.id,
+          ownerPid: process.pid,
+          ownerNonce: 'a'.repeat(64),
+          acquiredAt: '2026-08-12T10:00:00.000Z',
+          runId: 'run-from-a-newer-build',
+          blockId: null,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+
+    const status = inspectRepositoryExecutionLease(fixture.repository);
+    // The owner is recovered from the bytes even though the document is not
+    // this build's, so the report names who to ask about rather than shrugging.
+    expect(status.state).toBe('UNPARSEABLE');
+    expect(status.ownerPid).toBe(process.pid);
+    expect(status.liveness).toBe('ALIVE');
+
+    expect(
+      breakRepositoryExecutionLease(fixture.repository, {
+        expectedRevision: status.revision,
+        ownerPid: null,
+      }).code,
+    ).toBe('OWNER_PID_REQUIRED');
+
+    expect(
+      breakRepositoryExecutionLease(fixture.repository, {
+        expectedRevision: status.revision,
+        ownerPid: process.pid,
+      }).code,
+    ).toBe('LEASE_OWNER_ALIVE');
+
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it('never offers a break for a lease whose owner is running', async () => {
+    // The report is what walked an operator into the case above, so it is held
+    // to the same rule the command is: a break that would be refused is never
+    // suggested.
+    const fixture = await leasableRepository();
+    heldLease(fixture, 'run-alive');
+
+    const report = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository));
+
+    expect(report).toContain('ALIVE');
+    expect(report).not.toContain('lease break');
   });
 
   it('refuses to break a lease whose owner is observably alive', async () => {
@@ -865,7 +1021,12 @@ describe('the lease report', () => {
   it('tells an operator exactly what a break would have to name', async () => {
     const fixture = await leasableRepository();
     heldLease(fixture, 'run-0009');
-    const inspection = inspectRepositoryExecutionLease(fixture.repository);
+    // A lease a break could actually act on: the report is deliberately silent
+    // about breaking one whose owner is running, so a live lease would prove
+    // nothing here.
+    const inspection = inspectRepositoryExecutionLease(fixture.repository, {
+      processAlive: () => 'NOT_FOUND',
+    });
 
     const report = renderLeaseStatus(inspection);
 
@@ -889,6 +1050,26 @@ describe('the lease report', () => {
 /* ──────────── 10. the block store stays inside a leased run scope ────────── */
 
 describe('the ledger store gains no productive caller outside a leased run', () => {
+  /** Every production module that imports any of `names` by any static route. */
+  function productionImportersOf(names: readonly string[]): string[] {
+    const alternation = names.join('|');
+    const importers: string[] = [];
+    for (const file of sourceFiles()) {
+      const text = readFileSync(file, 'utf8');
+      const reaches =
+        // a named import, alone or among others, on one line or several
+        new RegExp(`import[\\s\\S]{0,400}?\\{[\\s\\S]{0,400}?\\b(${alternation})\\b[\\s\\S]{0,400}?\\}`).test(text) ||
+        // a namespace import of the module, which a named-import scan misses
+        /import\s+\*\s+as\s+\w+\s+from\s+['"][^'"]*block-(store|progress)\.js['"]/.test(text) ||
+        // a dynamic import of it, likewise
+        /await\s+import\(\s*['"][^'"]*block-(store|progress)\.js['"]/.test(text) ||
+        // and a re-export, which would hand the names on without importing them
+        /export\s+\*\s+from\s+['"][^'"]*block-(store|progress)\.js['"]/.test(text);
+      if (reaches) importers.push(relative(PACKAGE_ROOT, file));
+    }
+    return importers.sort();
+  }
+
   it('has its mutating functions imported by no other production module', () => {
     // The lease guarantee is **run-scoped**: V2-08 must hold one lease across a
     // whole block run and perform its ledger writes underneath it. A per-write
@@ -896,14 +1077,32 @@ describe('the ledger store gains no productive caller outside a leased run', () 
     // and this is what stops a productive caller appearing without the decision
     // being made. `block-progress.ts` is the sanctioned in-layer caller; a
     // runner, a CLI command or a driver reaching the store directly breaks here.
-    const importers: string[] = [];
-    for (const file of sourceFiles()) {
-      const text = readFileSync(file, 'utf8');
-      if (/import\s*\{[^}]*(createBlockLedger|updateBlockLedger)[^}]*\}/.test(text)) {
-        importers.push(relative(PACKAGE_ROOT, file));
-      }
-    }
+    expect(productionImportersOf(['createBlockLedger', 'updateBlockLedger'])).toEqual([
+      join('src', 'block', 'block-progress.ts'),
+    ]);
+  });
 
-    expect(importers.sort()).toEqual([join('src', 'block', 'block-progress.ts')]);
+  it('pins the sanctioned progress layer too, which is what a runner would call', () => {
+    // The store pin alone was one layer too low, and the adversarial review said
+    // so. `block-progress.ts` is the API a V2-08 runner is *meant* to use — six
+    // functions that each write a ledger — and nothing stopped a productive
+    // module importing it from outside a leased run scope. Pinning the store
+    // while leaving its own sanctioned caller open guards the door nobody was
+    // going to use.
+    //
+    // Zero production importers today, because the block layer has no productive
+    // caller at all. The point is that gaining one has to be a decision: this
+    // fails the moment a runner appears, and closing it means threading the
+    // lease through that runner rather than editing this list.
+    expect(
+      productionImportersOf([
+        'startBlockRun',
+        'activateBlockTask',
+        'settleBlockTask',
+        'parkBlockTask',
+        'abandonBlockTask',
+        'stopBlockRun',
+      ]),
+    ).toEqual([]);
   });
 });

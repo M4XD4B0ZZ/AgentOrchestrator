@@ -73,8 +73,9 @@ export const START_OUTCOME_SENTENCES: Readonly<Record<StartTaskOutcome, string>>
     '  exists that no task state accounts for. It is reported rather than deleted.',
   EXECUTION_LEASE_NOT_HELD:
     'This invocation does not hold this repository\'s execution lease, so it may not create\n' +
-    '  a branch, a worktree or a durable record here. Nothing was opened. Run\n' +
-    '  `agent-loop lease status` to see who holds it.',
+    '  a branch, a worktree or a durable record here. Nothing was opened. The reason code\n' +
+    '  says which: another invocation holds it, this one never did, or it has since gone.\n' +
+    '  `agent-loop lease status` reports what is actually there.',
 });
 
 /** The one label/value shape every report line uses. Shared with the command. */

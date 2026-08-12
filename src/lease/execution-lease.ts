@@ -201,9 +201,23 @@ export interface ExecutionLeaseDependencies {
    * make NTFS refuse on demand. Without a seam that branch would ship having
    * never run — an untested path in the one mechanism the whole slice rests on.
    *
-   * It cannot widen anything. A substitute that always succeeds still has to
-   * have staged a real record first, and one that always fails only pushes the
-   * claim onto the `wx` path, which is exclusive too.
+   * ── What this seam is, stated exactly ──────────────────────────────────
+   *
+   * It is a **test seam, and it is load-bearing**: exclusivity of the value this
+   * function returns rests on the injected operation being an atomic
+   * create-if-absent. An earlier draft of this comment claimed the seam "cannot
+   * widen anything", on the reasoning that a substitute must still have staged a
+   * real record first. The adversarial review disproved it in one line — staging
+   * is not publishing. `link: () => {}` makes two consecutive acquisitions both
+   * return minted evidence with no lease file on disk at all.
+   *
+   * What actually contains that is downstream, not here: every consumption point
+   * re-proves the lease against the file (`run-driver.ts` on every iteration,
+   * `start-task.ts` and `release-workspace.ts` before anything is created), so
+   * evidence that no file backs stops the run at the next checkpoint rather than
+   * authorising a write. Production never injects this — the package exports only
+   * the CLI — and the honest description is "a seam whose contract the caller
+   * must keep", not "a seam that cannot be abused".
    */
   readonly link?: (from: string, to: string) => void;
 }
@@ -234,6 +248,24 @@ export type LeaseLocationResult = LeaseLocation | LeaseLocationFailure;
 export function deriveExecutionLeaseLocation(repository: LeaseRepository): LeaseLocationResult {
   const key = repository.gitCommonDir;
   if (typeof key !== 'string' || key.trim().length === 0 || !isAbsolute(key)) {
+    return Object.freeze({ ok: false as const, code: 'LEASE_LOCATION_UNSUITABLE' as const });
+  }
+  // `isAbsolute` is not enough on Windows, and this is the one place in the
+  // codebase where that narrowness bites hardest. It answers `true` for a
+  // **drive-relative** root — `\foo`, and `/foo`, which normalises to the same
+  // thing — which is absolute only within whichever volume the process happens
+  // to be standing on. `core/path-identity.ts` records the same gap (F-4) and
+  // deliberately leaves it open, because there the value is only ever a
+  // comparison operand. Here it becomes a *file location*: one key string could
+  // denote two places, which is two repositories sharing one lease or one
+  // repository holding two.
+  //
+  // Refusing only ever narrows, so this cannot make anything reachable that was
+  // not. Nothing in this build can produce such a key — `resolveRepository`
+  // hands over a `realpath` — but `LeaseRepository` is a structural interface on
+  // three public functions, and a guarantee that holds only because today's one
+  // caller is careful is the kind this slice exists to replace.
+  if (process.platform === 'win32' && !/^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/])/.test(key)) {
     return Object.freeze({ ok: false as const, code: 'LEASE_LOCATION_UNSUITABLE' as const });
   }
   return Object.freeze({
@@ -354,16 +386,21 @@ export function inspectRepositoryExecutionLease(
 
   const read = readLeaseFile(location.path, location.key);
   const probe = deps.processAlive ?? osProcessLiveness;
+  // Recovered from the bytes when the document itself will not parse, so a
+  // lease written by another build is reported with the owner it actually
+  // names. Reporting `UNKNOWABLE` there is what previously printed an operator
+  // a break command for a running run.
+  const owner = read.document?.ownerPid ?? legibleOwnerPid(read.bytes);
 
   return inspection({
     state: read.state,
     path: location.path,
     revision: read.bytes === null ? null : revisionOfBytes(read.bytes),
-    ownerPid: read.document?.ownerPid ?? null,
+    ownerPid: owner,
     runId: read.document?.runId ?? null,
     blockId: read.document?.blockId ?? null,
     acquiredAt: read.document?.acquiredAt ?? null,
-    liveness: read.document === null ? 'UNKNOWABLE' : probe(read.document.ownerPid),
+    liveness: owner === null ? 'UNKNOWABLE' : probe(owner),
   });
 }
 
@@ -394,7 +431,15 @@ export const LEASE_ACQUIRE_FAILURE_CODES = [
   'STALE_LEASE_RECOVERY_UNSAFE',
   /** No lease path can be derived for this repository. */
   'LEASE_LOCATION_UNSUITABLE',
-  /** The claim was made and the record could not be written. Nothing is held. */
+  /**
+   * The lease could not be recorded, so nothing is held.
+   *
+   * Covers both halves of the claim, deliberately: the staging write that
+   * happens *before* anything is attempted at the lease path — where no claim
+   * was ever made and nothing was at risk — and a failure after the claim, which
+   * gives the lease back. `detail` distinguishes them by errno. Fail-closed
+   * either way, which is why they share a code.
+   */
   'LEASE_WRITE_FAILED',
 ] as const;
 
@@ -461,7 +506,20 @@ export function acquireRepositoryExecutionLease(
   };
 
   const bytes = Buffer.from(`${JSON.stringify(document, null, 2)}\n`, 'utf8');
-  const claimed = claimLeaseFile(location, bytes, deps.link ?? linkSync);
+
+  // Read back before it is published, not after.
+  //
+  // A lease this build cannot itself parse is the worst artefact this module can
+  // produce: it reads as `UNPARSEABLE`, which means held-and-unsafe, so its own
+  // holder's repository is locked and every diagnosis about it is degraded. The
+  // clock is a seam, and a `now` that returns something the contract refuses is
+  // enough to publish one. Nothing is claimed for a record this build would not
+  // accept back.
+  if (!safeParseExecutionLease(JSON.parse(bytes.toString('utf8'))).success) {
+    return acquireFailure('LEASE_WRITE_FAILED', 'RECORD_NOT_READABLE_BACK');
+  }
+
+  const claimed = claimLeaseFile(location, bytes, deps.link ?? linkSync, nonce);
   if (claimed.code === 'HELD_BY_ANOTHER') return refusalForExistingLease(location, deps);
   if (claimed.code !== 'CLAIMED') return acquireFailure('LEASE_WRITE_FAILED', claimed.detail);
 
@@ -470,11 +528,7 @@ export function acquireRepositoryExecutionLease(
     // Not reachable: the nonce is 32 random bytes hex-encoded and the path is
     // absolute. A fail-closed floor rather than an assertion — and it gives the
     // lease back rather than holding one nobody can prove.
-    try {
-      unlinkSync(location.path);
-    } catch {
-      // As above.
-    }
+    removeVerifiedLease(location.path, (present) => nonceOfBytes(present) === nonce);
     return acquireFailure('LEASE_WRITE_FAILED', 'EVIDENCE_NOT_MINTED');
   }
 
@@ -511,6 +565,7 @@ function claimLeaseFile(
   location: LeaseLocation,
   bytes: Buffer,
   link: (from: string, to: string) => void,
+  ourNonce: string,
 ): ClaimResult {
   const staging = join(
     dirname(location.path),
@@ -533,7 +588,7 @@ function claimLeaseFile(
     // `EEXIST` is the answer this whole design is built on: somebody else got
     // there first, and their record is already complete.
     if (errno === 'EEXIST') return claim('HELD_BY_ANOTHER');
-    return claimViaExclusiveCreate(location, bytes, errno);
+    return claimViaExclusiveCreate(location, bytes, errno, ourNonce);
   }
 }
 
@@ -549,6 +604,7 @@ function claimViaExclusiveCreate(
   location: LeaseLocation,
   bytes: Buffer,
   linkErrno: string,
+  ourNonce: string,
 ): ClaimResult {
   let handle: number;
   try {
@@ -563,7 +619,17 @@ function claimViaExclusiveCreate(
 
   const failure = writeInto(handle, bytes);
   if (failure !== null) {
-    discard(location.path);
+    // Giving back a claim that could not be recorded — by identity, not by
+    // name, for the reason {@link removeVerifiedLease} exists. The fact that
+    // justifies the removal ("I created this file exclusively") was established
+    // several syscalls ago, and in between the lease can have been broken and
+    // legitimately re-acquired; unlinking the name would then destroy a
+    // successor's authority. Removed only if what is there is unreadable — which
+    // is what a failed write leaves — or is still this claim's own record.
+    removeVerifiedLease(location.path, (present) => {
+      const nonce = nonceOfBytes(present);
+      return nonce === null || nonce === ourNonce;
+    });
     return claim('CLAIM_FAILED', failure);
   }
   return claim('CLAIMED');
@@ -646,19 +712,42 @@ type VerifiedRemoval = 'REMOVED' | 'CHANGED' | 'ABSENT' | 'FAILED';
  *
  * ── How it binds ───────────────────────────────────────────────────────────
  *
- * `rename` within a directory atomically detaches whatever is at the name. So
- * the file is detached first and *then* identified: if it is the one that was
- * verified, it is deleted; if it is not, it is put back with `link`, which
- * refuses to overwrite — so a third party that acquired in the meantime keeps
- * what it took.
+ * `rename` within a directory atomically detaches whatever is at the name, and
+ * the name is then **immediately re-occupied by a placeholder** before anything
+ * is read. So the sequence is detach, occupy, identify, decide — and only the
+ * first two steps are in the critical section, with no I/O between them. If the
+ * detached file is the one that was verified it is deleted and the placeholder
+ * with it; if it is not, the original is renamed back over the placeholder, so a
+ * refusal restores exactly what it disturbed.
  *
- * What remains is narrow and is a loss of *availability*, never of safety: a
- * lease detached and restored is briefly absent, and a holder checking in that
- * instant sees `LEASE_ABSENT` and stops. It stops — it does not carry on beside
- * a second writer, which is the failure this module exists to prevent. There is
- * no portable atomic compare-and-delete; this is the closest available, and the
- * difference from the previous shape is the difference between "somebody's run
- * stopped early" and "somebody's run kept going without authority".
+ * ── The residual, stated exactly, because a previous version of this comment
+ * overstated it ────────────────────────────────────────────────────────────
+ *
+ * An earlier draft claimed the remainder was "a loss of availability, never of
+ * safety". That was **false, and the adversarial review reproduced it**: with
+ * only a rename, the name stayed free for as long as it took to read and hash
+ * the detached file — hundreds of milliseconds for a large one — and a third
+ * process acquired inside that window. The restoring `link` then failed
+ * `EEXIST`, the incumbent's lease was discarded, and the break reported
+ * `LEASE_CHANGED`, whose operator sentence reads "Nothing was removed". Two
+ * live writers, and a report saying nothing happened.
+ *
+ * The placeholder removes the read and the hash from the window, leaving one
+ * rename and one exclusive create with nothing between them. It does **not**
+ * make the window zero, and this comment no longer says it does: a concurrent
+ * acquisition landing between those two syscalls still takes the name, the
+ * placeholder create then fails `EEXIST`, and the incumbent is out. What is
+ * true is bounded and worth stating plainly — the window is two adjacent
+ * syscalls rather than a file read, it is reachable only by a *third* party
+ * acquiring during a break that was going to be refused anyway, and the
+ * incumbent stops at its next checkpoint rather than being told it still holds
+ * the lease.
+ *
+ * Closing it entirely needs an atomic compare-and-delete on a directory entry,
+ * which no portable filesystem primitive offers. The remaining exposure is the
+ * incumbent's *next checkpoint* being up to one agent step away — a property of
+ * where the driver re-proves the lease, not of this function — and that is
+ * named as a boundary in `run-driver.ts` rather than implied away here.
  */
 function removeVerifiedLease(
   leasePath: string,
@@ -672,42 +761,61 @@ function removeVerifiedLease(
     return safeErrnoCode(error) === 'ENOENT' ? 'ABSENT' : 'FAILED';
   }
 
-  let bytes: Buffer;
+  // Re-occupy the name at once, before anything is read. This is the whole
+  // narrowing: without it the name stays free for a file read and a digest, and
+  // a third process acquires inside that window. A placeholder is not a lease —
+  // it does not parse — so an acquirer meeting it refuses `STALE_LEASE_RECOVERY_UNSAFE`
+  // rather than winning, and a crash here leaves exactly the state `lease break`
+  // exists to clear.
+  let placeholder = false;
+  try {
+    closeSync(openSync(leasePath, 'wx', 0o600));
+    placeholder = true;
+  } catch {
+    // Somebody took the name in the two syscalls between the rename and this
+    // one. They hold it now; the detached lease is out either way, and the
+    // caller is told the lease changed rather than that it was removed.
+  }
+
+  let bytes: Buffer | null = null;
   try {
     bytes = readFileSync(quarantine);
   } catch {
-    // Detached and unreadable. Putting back something that cannot be read would
-    // restore a lease nobody can prove anything about, so it is dropped and
-    // reported as a failure rather than as a removal.
-    discard(quarantine);
-    return 'FAILED';
+    // Detached and unreadable. There is nothing to identify and nothing worth
+    // restoring, so the placeholder is cleared and the caller is told the
+    // removal failed — a lease that cannot be read is not one this function may
+    // claim to have removed.
   }
 
-  if (matches(bytes)) {
+  if (bytes !== null && matches(bytes)) {
+    if (placeholder) discard(leasePath);
     discard(quarantine);
     return 'REMOVED';
   }
 
-  // Not ours to remove. `link` rather than `rename` on the way back, because it
-  // refuses to overwrite: if somebody acquired the freed name in the meantime,
-  // that acquisition stands and this restore must not clobber it.
-  try {
-    linkSync(quarantine, leasePath);
-  } catch (error) {
-    if (safeErrnoCode(error) !== 'EEXIST') {
-      // A filesystem that will not link. Best effort, and the only case in
-      // which a restore can overwrite a newer acquisition — narrower than the
-      // window it is closing, and stated rather than hidden.
-      try {
-        renameSync(quarantine, leasePath);
-      } catch {
-        // Nothing further to try. The lease is gone; the next invocation
-        // reports an absence rather than taking anything it should not.
-      }
+  // Not ours to remove. The original goes back over the placeholder we are
+  // holding the name with — `rename` is right here precisely *because* the name
+  // is ours: it is the placeholder being overwritten, never a third party's
+  // lease. If the placeholder was lost to a concurrent acquirer, `link` is used
+  // instead so that acquisition stands.
+  if (placeholder) {
+    try {
+      renameSync(quarantine, leasePath);
+      return bytes === null ? 'FAILED' : 'CHANGED';
+    } catch {
+      // The restore failed with the name still ours. Nothing further to try.
+    }
+  } else {
+    try {
+      linkSync(quarantine, leasePath);
+    } catch {
+      // `EEXIST` is the expected answer — somebody else holds the name — and
+      // any other failure leaves it absent, which the next invocation reports
+      // rather than acts on.
     }
   }
   discard(quarantine);
-  return 'CHANGED';
+  return bytes === null ? 'FAILED' : 'CHANGED';
 }
 
 /**
@@ -748,12 +856,37 @@ export const LEASE_VERIFY_CODES = [
   'NOT_OWNER',
   /** Something is there and could not be read. */
   'LEASE_UNREADABLE',
+  /**
+   * The evidence is genuine, current, and for a different repository.
+   *
+   * Its own code because it is a different mistake from every other one here:
+   * nothing is wrong with the lease, and everything is wrong with using it
+   * *here*. See {@link verifyExecutionLeaseHeldFor}.
+   */
+  'LEASE_FOR_ANOTHER_REPOSITORY',
 ] as const;
 
 export type LeaseVerifyCode = (typeof LEASE_VERIFY_CODES)[number];
 
+/**
+ * Everything the *unscoped* check can say.
+ *
+ * Narrower than {@link LeaseVerifyCode} by exactly one member, and the
+ * difference is load-bearing rather than tidy: only the repository-scoped
+ * variant can answer `LEASE_FOR_ANOTHER_REPOSITORY`, because only it was told
+ * which repository to compare against. Splitting the types keeps that fact in
+ * the compiler rather than in a comment — `releaseRepositoryExecutionLease`
+ * forwards this code into its own vocabulary, and a wider union there would be
+ * a code it has no meaning for.
+ */
+export type UnscopedLeaseVerifyCode = Exclude<LeaseVerifyCode, 'LEASE_FOR_ANOTHER_REPOSITORY'>;
+
 export interface LeaseVerifyResult {
   readonly code: LeaseVerifyCode;
+}
+
+export interface UnscopedLeaseVerifyResult {
+  readonly code: UnscopedLeaseVerifyCode;
 }
 
 /**
@@ -767,7 +900,7 @@ export interface LeaseVerifyResult {
  * An unparseable document answers `NOT_OWNER` rather than `HELD`: this holder
  * cannot show the bytes are its own, and "cannot show" is not "is".
  */
-export function verifyExecutionLeaseHeld(evidence: unknown): LeaseVerifyResult {
+export function verifyExecutionLeaseHeld(evidence: unknown): UnscopedLeaseVerifyResult {
   if (!isExecutionLeaseEvidence(evidence)) return Object.freeze({ code: 'EVIDENCE_INVALID' as const });
 
   let bytes: Buffer;
@@ -792,6 +925,46 @@ export function verifyExecutionLeaseHeld(evidence: unknown): LeaseVerifyResult {
       ? ('HELD' as const)
       : ('NOT_OWNER' as const),
   });
+}
+
+/**
+ * Whether this evidence is a current lease **for this repository**.
+ *
+ * ── Why the unscoped question was not enough ───────────────────────────────
+ *
+ * {@link verifyExecutionLeaseHeld} answers "is the file at the path this
+ * artefact names still mine". That is the right question for `release`, which
+ * has no repository in hand and must not be able to point at one. It is the
+ * wrong question for a *writer*, and the adversarial review demonstrated why: a
+ * genuine, current, perfectly held lease for repository A satisfied the gate for
+ * a mutation of repository B, because nothing compared the artefact's path with
+ * the repository about to be written to.
+ *
+ * Nothing reachable from today's CLI does that — each command acquires for the
+ * repository it then acts on. But that is *convention* carrying the guarantee,
+ * in a slice whose entire argument is that opaque evidence exists to replace
+ * convention with structure. The artefact already carries its path, so making it
+ * structural costs one comparison.
+ *
+ * Compared by path identity rather than by string, so separator shape and
+ * Windows' case-insensitivity do not read as a different repository —
+ * `core/path-identity.ts` gives the reasoning, including why a relative path is
+ * refused outright rather than resolved.
+ */
+export function verifyExecutionLeaseHeldFor(
+  repository: LeaseRepository,
+  evidence: unknown,
+): LeaseVerifyResult {
+  if (!isExecutionLeaseEvidence(evidence)) {
+    return Object.freeze({ code: 'EVIDENCE_INVALID' as const });
+  }
+
+  const location = deriveExecutionLeaseLocation(repository);
+  if (!location.ok || comparePathIdentity(evidence.leasePath, location.path) !== 'EQUAL') {
+    return Object.freeze({ code: 'LEASE_FOR_ANOTHER_REPOSITORY' as const });
+  }
+
+  return verifyExecutionLeaseHeld(evidence);
 }
 
 export const LEASE_RELEASE_CODES = [
@@ -841,7 +1014,10 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   if (removed === 'ABSENT') return Object.freeze({ code: 'LEASE_ABSENT' as const, detail: null });
   if (removed === 'CHANGED') return Object.freeze({ code: 'NOT_OWNER' as const, detail: null });
   if (removed === 'FAILED') {
-    return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: null });
+    // `UNREADABLE_AFTER_DETACH` rather than `null`: an operator hitting this has
+    // a file they cannot read where their lease was, and a code with no detail
+    // at all was a regression against the version this replaced.
+    return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: 'UNREADABLE_AFTER_DETACH' });
   }
   return Object.freeze({ code: 'RELEASED' as const, detail: null });
 }
@@ -913,16 +1089,13 @@ export interface LeaseBreakRequest {
  * owner is the one inspected; and that owner cannot be shown to be running.
  * Only then is anything removed.
  *
- * ── The residual window, stated rather than papered over ───────────────────
+ * ── The removal is bound to the bytes ──────────────────────────────────────
  *
- * Between the read that establishes the revision and the `unlink` that acts on
- * it, a legitimate new owner could take the lease — and would then have it
- * removed. The window is a few syscalls wide, and reaching it requires the
- * operator's own premise ("nothing is running here") to have been false, which
- * the liveness gate has already refused on separately. Closing it entirely needs
- * an atomic compare-and-delete, which no portable filesystem primitive offers;
- * `state-store.ts` and `block-store.ts` name their own equivalent windows for
- * the same reason rather than implying they do not exist.
+ * Every gate above is about the *bytes* that were inspected, and the removal is
+ * about those same bytes rather than about the path they were found at — see
+ * {@link removeVerifiedLease}, which also states exactly what residual remains
+ * and does not overstate it. An earlier version unlinked the path, and the
+ * adversarial review destroyed a legitimate successor's lease through it.
  */
 export function breakRepositoryExecutionLease(
   repository: LeaseRepository,
@@ -941,20 +1114,35 @@ export function breakRepositoryExecutionLease(
     return breakResult('LEASE_CHANGED');
   }
 
-  if (read.document === null) {
-    // 2a. An unreadable lease names no owner, so naming one is a claim about a
-    // document the operator did not read. The observed bytes are the only
-    // identification available, and they have already been given.
+  // 2. Whose lease is it? Asked as "can an owner be recovered at all", not as
+  // "does the document satisfy this build's schema" — and the difference is a
+  // defect the adversarial review found.
+  //
+  // Those two questions came apart for the case that matters most. A lease
+  // written by a *different build* — a newer `schemaVersion`, a field this
+  // build's `.strict()` schema does not know — fails to parse here while being
+  // a perfectly well-formed lease with a living owner. Under the old split it
+  // took the "names no owner" branch, which probes no liveness at all: an
+  // operator naming the real, running owner was refused with
+  // `OWNER_PID_UNEXPECTED`, while the command `lease status` printed for them
+  // succeeded and handed the repository to a second writer.
+  //
+  // So the owner is recovered from the bytes wherever one is legible, and the
+  // liveness gate applies to it. Only bytes that yield no owner at all — a
+  // truncated file, a crash between the claim and the record — fall through to
+  // "the operator's exact revision is the only identification available", which
+  // is the exit a genuinely broken lease still needs.
+  const owner = read.document?.ownerPid ?? legibleOwnerPid(read.bytes);
+  if (owner === null) {
     if (request.ownerPid !== null) return breakResult('OWNER_PID_UNEXPECTED');
   } else {
-    // 2b. A readable lease must be identified by its owner as well.
     if (request.ownerPid === null) return breakResult('OWNER_PID_REQUIRED');
-    if (request.ownerPid !== read.document.ownerPid) return breakResult('OWNER_PID_MISMATCH');
+    if (request.ownerPid !== owner) return breakResult('OWNER_PID_MISMATCH');
 
     // 3. And that owner must not be running. Liveness refuses here; it never
     // permits — an operator cannot assert a process away.
     const probe = deps.processAlive ?? osProcessLiveness;
-    const liveness = probe(read.document.ownerPid);
+    const liveness = probe(owner);
     if (liveness === 'ALIVE') return breakResult('LEASE_OWNER_ALIVE');
     if (liveness === 'UNDETERMINED') return breakResult('LEASE_OWNER_LIVENESS_UNDETERMINED');
   }
@@ -970,7 +1158,7 @@ export function breakRepositoryExecutionLease(
   );
   if (removed === 'ABSENT') return breakResult('LEASE_ABSENT');
   if (removed === 'CHANGED') return breakResult('LEASE_CHANGED');
-  if (removed === 'FAILED') return breakResult('LEASE_REMOVE_FAILED');
+  if (removed === 'FAILED') return breakResult('LEASE_REMOVE_FAILED', 'UNREADABLE_AFTER_DETACH');
   return breakResult('BROKEN');
 }
 
@@ -980,6 +1168,28 @@ export function breakRepositoryExecutionLease(
  * Parsed from the detached bytes rather than taken from an earlier reading, so
  * the ownership check and the removal are about the same file.
  */
+/**
+ * A plausible owner pid inside `bytes`, whatever else is wrong with them.
+ *
+ * Deliberately weaker than the schema, and only ever used to *refuse*. A lease
+ * this build cannot validate may still be somebody's — the likeliest reason for
+ * it is another build of this same tool — and the one thing worth recovering
+ * from it is who to ask about. What this returns is never trusted for anything
+ * else: it cannot authorise a break, it only makes one refusable.
+ */
+function legibleOwnerPid(bytes: Buffer | null): number | null {
+  if (bytes === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof value !== 'object' || value === null) return null;
+  const pid: unknown = (value as { ownerPid?: unknown }).ownerPid;
+  return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
 function nonceOfBytes(bytes: Buffer): string | null {
   let value: unknown;
   try {

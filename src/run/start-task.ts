@@ -72,7 +72,7 @@ import {
   type AuthPreflightEvidence,
 } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
-import { verifyExecutionLeaseHeld } from '../lease/execution-lease.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { TASK_STATE_SCHEMA_VERSION } from '../core/internal/task-state-object-schema.js';
 import type { TaskStateInput } from '../core/task-state.js';
 import { planNextTask } from '../plan/plan-next-task.js';
@@ -326,7 +326,7 @@ export async function startTask(
   // Ahead of every other gate, including the cheap syntactic ones. Proven
   // against the file rather than against the artefact alone: evidence is a
   // record of a claim that was made, and a claim can have been cleared since.
-  const lease = verifyExecutionLeaseHeld(deps.lease);
+  const lease = verifyExecutionLeaseHeldFor(repository, deps.lease);
   if (lease.code !== 'HELD') {
     return stop({
       outcome: 'EXECUTION_LEASE_NOT_HELD',

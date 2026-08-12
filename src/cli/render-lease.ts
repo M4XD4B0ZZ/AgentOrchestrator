@@ -79,7 +79,9 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakCode, string>> = O
   LEASE_LOCATION_UNSUITABLE:
     'No lease location could be derived for this repository. Nothing was removed.',
   LEASE_REMOVE_FAILED:
-    'Every check held and the removal itself failed. The lease is still there.',
+    'Every check held and the removal did not complete. Run `lease status` before\n' +
+    '  doing anything else: the detail code says whether the lease is still there or\n' +
+    '  whether it was detached and could not be read back.',
 });
 
 /** One static sentence per inspected state. Closed, and total by type. */
@@ -133,7 +135,15 @@ export function renderLeaseStatus(inspection: LeaseInspection): string {
   // filled in. Not a convenience: the whole point of `--expected-revision` is
   // that an operator names back what they read, and a report that made them
   // retype a 64-character digest would be a report that trains them to skip it.
-  if (inspection.state === 'HELD' || inspection.state === 'UNPARSEABLE') {
+  //
+  // **Never printed for a lease whose owner is running.** A break would refuse
+  // it anyway, so suggesting one is at best noise — and at worst it is what
+  // walks an operator into clearing a healthy run, which is exactly how the
+  // unparseable-lease defect was reachable in practice.
+  if (
+    (inspection.state === 'HELD' || inspection.state === 'UNPARSEABLE') &&
+    inspection.liveness === 'NOT_FOUND'
+  ) {
     lines.push(
       '',
       '  To clear a lease you are certain is stale, name back exactly what you just read:',
