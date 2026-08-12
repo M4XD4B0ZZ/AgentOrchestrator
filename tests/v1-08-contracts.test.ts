@@ -51,7 +51,6 @@ const unusableLeaseRoot = mkdtempSync(join(tmpdir(), 'ao-v1-08-contracts-'));
 describe('the states the loop advertises are the states it dispatches', () => {
   /** Dependencies that make any *executed* step fail loudly rather than run. */
   const unusableDeps = (): LoopDependencies => ({
-    repositoryRoot: '/srv/projects/alpha',
     now: '2026-08-10T10:00:00.000Z',
     authorisedWorktreePath: '/srv/projects/alpha.worktrees/task-0001',
     verification: { phases: [] },

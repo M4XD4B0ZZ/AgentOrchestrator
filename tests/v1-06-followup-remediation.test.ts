@@ -207,7 +207,6 @@ describe('NEW-4: a task already blocked has no interruption to record', () => {
       {
         now: NOW,
         fallback: { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 3 }, reportedResetAt: null },
-        repositoryRoot: root,
         lease: leaseAuthorityAt(root),
       },
     );
@@ -241,7 +240,6 @@ describe('NEW-4: a task already blocked has no interruption to record', () => {
       {
         now: NOW,
         fallback: { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 2 }, reportedResetAt: null },
-        repositoryRoot: root,
         lease: leaseAuthorityAt(root),
       },
     );
@@ -267,7 +265,6 @@ describe('NEW-4: a task already blocked has no interruption to record', () => {
       {
         now: NOW,
         fallback: { blockedAgent: 'claude', resumeFrom: { phase: 'IMPLEMENT', round: 1 }, reportedResetAt: null },
-        repositoryRoot: root,
         lease: leaseAuthorityAt(root),
       },
     );

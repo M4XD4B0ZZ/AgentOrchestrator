@@ -205,7 +205,6 @@ function authorisedWorktree(root: string): string {
 
 function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDependencies {
   return {
-    repositoryRoot: root,
     now: NOW,
     authorisedWorktreePath: authorisedWorktree(root),
     verification: VERIFICATION,

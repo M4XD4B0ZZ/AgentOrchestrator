@@ -440,11 +440,9 @@ export async function runTask(
   }
 
   const advance = Object.freeze({
-    // From the resolved repository, never from the state that is about to be
-    // written: the store compares the two and refuses a disagreement, and
-    // taking both from one side would make that check compare a value with
-    // itself.
-    repositoryRoot: repository.root,
+    // No `repositoryRoot` here. `advanceTaskState` derives the write target from
+    // the authority itself, so there is no second value to keep in step with it.
+    //
     // Threaded into every durable transition this run makes, including the ones
     // `runLoopStep` reaches after an agent has been running for minutes.
     // `advanceTaskState` re-proves it against the file at the write, which is

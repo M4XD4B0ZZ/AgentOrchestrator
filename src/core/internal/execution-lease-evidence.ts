@@ -52,6 +52,26 @@ import { isAbsolute } from 'node:path';
 const NONCE_PATTERN = /^[0-9a-f]{64}$/;
 
 /**
+ * Every artefact the mint has produced, and nothing else.
+ *
+ * The whole authority of the type rests on this set, so it is worth being exact
+ * about why it exists rather than a cheaper check. Three have been tried:
+ *
+ *  1. `instanceof` — walks a prototype chain, and `Object.create` hands anybody
+ *     that prototype. Forged with no imports.
+ *  2. `#nonce in value` — true for anything the constructor built, and the
+ *     constructor is reachable from any genuine artefact through
+ *     `Object.getPrototypeOf(evidence).constructor`. Forged with no imports.
+ *  3. this set — not reachable from an instance, from the prototype, or from the
+ *     class. Re-deriving `ExecutionLeaseProof` by any route produces objects
+ *     that are simply not in it.
+ *
+ * A `WeakSet` rather than a field on the object, because every field an object
+ * carries is a field an attacker who can construct one can carry too.
+ */
+const MINTED = new WeakSet<object>();
+
+/**
  * The artefact. Minted only by {@link mintExecutionLeaseEvidence}, and only for
  * a claim that really performed the exclusive create.
  *
@@ -95,7 +115,22 @@ export class ExecutionLeaseProof {
    * the forgery above now fails at the gate.
    */
   static holds(value: unknown): value is ExecutionLeaseProof {
-    return typeof value === 'object' && value !== null && #nonce in value;
+    // Membership of a module-private registry, **not** a property of the value.
+    //
+    // `#nonce in value` was the previous answer and it is not enough: the class
+    // is reachable from any genuine artefact as
+    // `Object.getPrototypeOf(evidence).constructor`, with no import of anything,
+    // and calling it installs a real `#nonce`. A reviewer forged full write
+    // authority over a live repository that way and deleted its lease, across
+    // process boundaries, three times out of three.
+    //
+    // The private field is a fact about *how an object was built*; what this gate
+    // has to answer is *whether the mint built it*. Those came apart the moment
+    // the constructor became reachable, and no property of the object can close
+    // that — an attacker who can call the constructor can produce any property.
+    // A registry the mint alone writes to cannot be reached from an instance at
+    // all, so re-deriving the class buys nothing.
+    return typeof value === 'object' && value !== null && MINTED.has(value as object);
   }
 
   /**
@@ -141,5 +176,22 @@ export function mintExecutionLeaseEvidence(
   // the repository-scoped verification compares this value against a derived
   // absolute one, so a relative path could never match anything.
   if (leasePath.trim().length === 0 || !isAbsolute(leasePath)) return null;
-  return new ExecutionLeaseProof(nonce, leasePath);
+  const proof = new ExecutionLeaseProof(nonce, leasePath);
+  // The only line in the codebase that admits anything to the registry. Every
+  // other route to the constructor — and there is at least one that needs no
+  // import — produces an object this gate does not recognise.
+  MINTED.add(proof);
+  return proof;
 }
+
+// The class object and its prototype are frozen, and the prototype's back
+// reference to the constructor is removed.
+//
+// Neither is what makes the type safe — the registry above is — and both are
+// cheap, so they are done anyway to close the routes a reviewer actually used.
+// `Object.getPrototypeOf(evidence).constructor` is how the class was reached
+// without importing it, and `ExecutionLeaseProof.holds = () => true` is how the
+// gate was disabled process-wide once it had been.
+Reflect.deleteProperty(ExecutionLeaseProof.prototype, 'constructor');
+Object.freeze(ExecutionLeaseProof.prototype);
+Object.freeze(ExecutionLeaseProof);

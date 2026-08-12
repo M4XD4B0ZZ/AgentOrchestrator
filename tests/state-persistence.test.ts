@@ -996,7 +996,6 @@ describe('advancing a task through the transition contract', () => {
     if (!current.ok) throw new Error('unreachable');
 
     const advanced = advanceTaskState(current, stateIn(root, { state: 'REPOSITORY_RESOLVED' }), {
-      repositoryRoot: root,
       lease: leaseAuthorityAt(root),
     });
 
@@ -1014,7 +1013,6 @@ describe('advancing a task through the transition contract', () => {
 
     // CREATED does not reach IMPLEMENTING: the setup chain has to happen first.
     const jumped = advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), {
-      repositoryRoot: root,
       lease: leaseAuthorityAt(root),
     });
 
@@ -1028,9 +1026,7 @@ describe('advancing a task through the transition contract', () => {
     const current = loadTaskState(root, 'task-0001');
     if (!current.ok) throw new Error('unreachable');
 
-    advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), { repositoryRoot: root,
-  lease: leaseAuthorityAt(root),
-});
+    advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), { lease: leaseAuthorityAt(root) });
 
     const loaded = loadTaskState(root, 'task-0001');
     if (!loaded.ok) throw new Error('unreachable');
@@ -1044,7 +1040,6 @@ describe('advancing a task through the transition contract', () => {
     if (!current.ok) throw new Error('unreachable');
 
     const revived = advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), {
-      repositoryRoot: root,
       lease: leaseAuthorityAt(root),
     });
 
@@ -1061,9 +1056,7 @@ describe('advancing a task through the transition contract', () => {
     const checkpoint = advanceTaskState(
       current,
       stateIn(root, { stateEnteredAt: '2026-07-31T11:00:00.000Z' }),
-      { repositoryRoot: root,
-  lease: leaseAuthorityAt(root),
-},
+      { lease: leaseAuthorityAt(root) },
     );
 
     expect(checkpoint.code).toBe('SAVED');
@@ -1075,12 +1068,10 @@ describe('advancing a task through the transition contract', () => {
     const stale = loadTaskState(root, 'task-0001');
     if (!stale.ok) throw new Error('unreachable');
     advanceTaskState(stale, stateIn(root, { state: 'REPOSITORY_RESOLVED' }), {
-      repositoryRoot: root,
       lease: leaseAuthorityAt(root),
     });
 
     const overtaken = advanceTaskState(stale, stateIn(root, { state: 'ABORTED' }), {
-      repositoryRoot: root,
       lease: leaseAuthorityAt(root),
     });
 

@@ -156,7 +156,6 @@ function record(
   fallback: AgentBlockEvidence = CLAUDE_BLOCK,
 ) {
   return recordAgentInterruption(current, value, {
-    repositoryRoot: root,
     now: NOW,
     fallback,
     lease: leaseAuthorityAt(root),

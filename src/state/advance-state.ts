@@ -101,13 +101,19 @@ import {
  * the state that was read, so a caller cannot advance a task while claiming to
  * have read something else.
  */
-export interface AdvanceOptions extends Omit<StateStoreOptions, 'expectedRevision'> {
+export interface AdvanceOptions
+  extends Omit<StateStoreOptions, 'expectedRevision' | 'repositoryRoot'> {
   /**
    * The execution lease this writer holds, re-proved here against the file.
    *
    * **Required, and deliberately not optional.** See the header: this is the
    * choke point every durable transition passes through, and a parameter is the
    * only form of the requirement that a nineteenth call site cannot forget.
+   *
+   * It is also where the write target comes from. `repositoryRoot` is
+   * deliberately *not* an option here — see the derivation at the end of
+   * {@link advanceTaskState} for why two values that must agree are two values
+   * that can disagree.
    */
   readonly lease: ExecutionLeaseAuthority;
 }
@@ -156,32 +162,6 @@ export function advanceTaskState(
   // checks deliberately: those are facts about the value the caller built and
   // cost nothing, while this one is a fact about *now* and is worth taking as
   // late as it can be taken.
-  // The lease must be for the repository this write lands in.
-  //
-  // `verifyExecutionLeaseHeldFor` binds the *artefact* to the repository it is
-  // handed — and that repository and `repositoryRoot` are two independent fields
-  // on one options object, so nothing made them describe the same place. Two
-  // reviewers reproduced the consequence with no forgery at all: a genuine,
-  // current lease for repository A satisfied a durable transition into
-  // repository B, whose own lease was free at the time. That is the defect this
-  // slice already closed one layer up, left standing at the one function every
-  // durable transition passes through — and `runTask` only *happens* to build
-  // the pair consistently, which is exactly the accident V2-08 is shaped to
-  // break by threading one lease through many per-task calls.
-  const forThisRepository = comparePathIdentity(
-    options.lease.repository.root,
-    options.repositoryRoot,
-  );
-  if (forThisRepository !== 'EQUAL') {
-    return Object.freeze({
-      ok: false as const,
-      code: 'EXECUTION_LEASE_LOST' as const,
-      path: null,
-      detail: 'LEASE_FOR_ANOTHER_REPOSITORY',
-      errnoCode: null,
-    });
-  }
-
   const held = verifyExecutionLeaseHeldFor(options.lease.repository, options.lease.evidence);
   if (held.code !== 'HELD') {
     return Object.freeze({
@@ -193,5 +173,24 @@ export function advanceTaskState(
     });
   }
 
-  return saveTaskState(parsed.data, { ...options, expectedRevision: current.revision });
+  return saveTaskState(parsed.data, {
+    ...options,
+    // Derived from the authority, never taken beside it.
+    //
+    // This used to be a separate `repositoryRoot` option, and two independent
+    // values that must agree are two values that can disagree: a review landed a
+    // durable transition in repository B on the strength of A's lease, and the
+    // guard added for it compared the wrong field — `root` is documented as
+    // "recorded for diagnosis, never the key", while `gitCommonDir` is what
+    // decides which lease is read. Comparing roots neither implies that
+    // invariant nor follows from it, and it would additionally refuse the case
+    // the design requires, since a linked worktree has a different root and the
+    // same key.
+    //
+    // So there is no pair left to compare. The write goes to the root of the
+    // repository whose lease was just proved, and a caller cannot name a
+    // different one because there is nowhere to name it.
+    repositoryRoot: options.lease.repository.root,
+    expectedRevision: current.revision,
+  });
 }

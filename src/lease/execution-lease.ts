@@ -984,6 +984,22 @@ export function verifyExecutionLeaseHeldFor(
   if (read.state === 'UNREADABLE') return Object.freeze({ code: 'LEASE_UNREADABLE' as const });
   if (read.document === null) return Object.freeze({ code: 'NOT_OWNER' as const });
 
+  // The record being verified against must be the one the lease was taken for.
+  //
+  // `LeaseRepository` is a bare structural interface, so nothing ties its three
+  // fields to one place — and a review built a record carrying repository A's
+  // `gitCommonDir` (which is the key, and so decides *which lease is read*)
+  // beside repository B's `root` (which is what callers then write into). Every
+  // value was genuine; only the combination was a lie, and it read as `HELD`.
+  //
+  // The document is what settles it: `repositoryRoot` was written at acquire
+  // time from the acquiring record, so a mixed record disagrees with it. This is
+  // the same argument `block-store.ts` makes about a field a store only ever
+  // writes — a field nobody checks is a field that travels.
+  if (comparePathIdentity(read.document.repositoryRoot, repository.root) !== 'EQUAL') {
+    return Object.freeze({ code: 'LEASE_FOR_ANOTHER_REPOSITORY' as const });
+  }
+
   return Object.freeze({
     code: ExecutionLeaseProof.matchesNonce(evidence, read.document.ownerNonce)
       ? ('HELD' as const)

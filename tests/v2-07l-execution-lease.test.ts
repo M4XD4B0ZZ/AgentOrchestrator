@@ -715,7 +715,6 @@ describe('no durable transition happens after the lease is lost', () => {
       load,
       { ...load.state, state, stateEnteredAt: '2026-08-12T12:00:00.000Z' },
       {
-        repositoryRoot: fixture.repository.root,
         lease: { repository: fixture.repository, evidence },
       },
     );
@@ -788,7 +787,7 @@ describe('no durable transition happens after the lease is lost', () => {
     const second = advanceTaskState(
       load,
       { ...load.state, state: 'IMPLEMENTING', stateEnteredAt: '2026-08-12T12:01:00.000Z' },
-      { repositoryRoot: fixture.repository.root, lease: authority },
+      { lease: authority },
     );
 
     expect(second.ok).toBe(false);

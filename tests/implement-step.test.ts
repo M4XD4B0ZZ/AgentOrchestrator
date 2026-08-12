@@ -105,7 +105,6 @@ function stepDeps(
   overrides: Partial<LoopDependencies> = {},
 ): LoopDependencies {
   return {
-    repositoryRoot: current.state.repositoryRoot,
     now: '2026-08-11T09:00:00.000Z',
     authorisedWorktreePath: current.state.worktreePath,
     verification: repository.verification,
