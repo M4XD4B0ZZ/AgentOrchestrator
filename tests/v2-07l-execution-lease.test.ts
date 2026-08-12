@@ -475,6 +475,27 @@ describe('no productive writer path runs without the lease', () => {
     expect(released.branchRemoved).toBe(false);
   });
 
+  it('reads one lease file the same way every other consumer does', async () => {
+    // Three readers, one answer. `lease status` and `break` refuse a document
+    // whose recorded `leaseKey` names somewhere else; the driver's authority
+    // gate used to call the same file `HELD`, because it compared only the
+    // nonce. One file meaning two things is the shape that decides who may
+    // write, so it is pinned rather than left to coincidence.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture, 'run-0001');
+    const path = inspectRepositoryExecutionLease(fixture.repository).path;
+
+    const document = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      path,
+      `${JSON.stringify({ ...document, leaseKey: join(fixture.root, 'somewhere-else') }, null, 2)}\n`,
+      'utf8',
+    );
+
+    expect(inspectRepositoryExecutionLease(fixture.repository).state).toBe('UNPARSEABLE');
+    expect(verifyExecutionLeaseHeldFor(fixture.repository, evidence).code).toBe('NOT_OWNER');
+  });
+
   it('refuses a genuine, current lease that belongs to another repository', async () => {
     // Found by the adversarial review, and it is the finding that most deserved
     // to exist: nothing here was forged. A real lease over repository E

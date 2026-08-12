@@ -910,6 +910,11 @@ export function verifyExecutionLeaseHeld(evidence: unknown): UnscopedLeaseVerify
     const errno = safeErrnoCode(error);
     return Object.freeze({ code: errno === 'ENOENT' ? ('LEASE_ABSENT' as const) : ('LEASE_UNREADABLE' as const) });
   }
+  // The same ceiling every other reader applies. Without it this one consumer
+  // would parse a document the rest of the module refuses to look at.
+  if (bytes.byteLength > MAX_EXECUTION_LEASE_BYTES) {
+    return Object.freeze({ code: 'NOT_OWNER' as const });
+  }
 
   let value: unknown;
   try {
@@ -964,7 +969,23 @@ export function verifyExecutionLeaseHeldFor(
     return Object.freeze({ code: 'LEASE_FOR_ANOTHER_REPOSITORY' as const });
   }
 
-  return verifyExecutionLeaseHeld(evidence);
+  // Read through the same reader every other consumer uses, so one file cannot
+  // mean three things. `verifyExecutionLeaseHeld` deliberately applies neither
+  // the size cap nor the location binding — it has no repository to bind to —
+  // and the adversarial review found the consequence: a lease whose recorded
+  // `leaseKey` names somewhere else read `UNPARSEABLE` to `lease status` and to
+  // `break`, and `HELD` to the driver's authority gate. Three readers, two
+  // opinions, about the one question that decides who may write.
+  const read = readLeaseFile(location.path, location.key);
+  if (read.state === 'FREE') return Object.freeze({ code: 'LEASE_ABSENT' as const });
+  if (read.state === 'UNREADABLE') return Object.freeze({ code: 'LEASE_UNREADABLE' as const });
+  if (read.document === null) return Object.freeze({ code: 'NOT_OWNER' as const });
+
+  return Object.freeze({
+    code: evidence.matchesRecordedNonce(read.document.ownerNonce)
+      ? ('HELD' as const)
+      : ('NOT_OWNER' as const),
+  });
 }
 
 export const LEASE_RELEASE_CODES = [
