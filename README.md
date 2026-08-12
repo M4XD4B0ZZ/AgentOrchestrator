@@ -89,8 +89,8 @@ environment variables gets the identical answer, and that no remnant of the
 removed PowerShell resolver survives in the shipped artefact.
 
 `test:dist-lease-race` puts the **execution lease** under real concurrency:
-eight OS processes race for one lease, released together from a shared start
-barrier, five times over, and exactly one must win each round. It is a separate
+sixteen OS processes race for one lease, released together from a shared start
+barrier, eight times over, and exactly one must win each round. It is a separate
 gate for the reason the property is: a second `acquire` inside one process proves
 that the exclusive create refuses an existing file, and cannot prove the claim is
 *atomic*, because two synchronous calls in one thread cannot interleave. V2-07's
@@ -3527,10 +3527,10 @@ and refuse the next workspace with `SOURCE_WORKTREE_DIRTY`.
 ### Acquisition is exclusive, and proven so against real processes
 
 The claim is a single exclusive-create operation, not a read followed by a write.
-`tests/dist-artifact/execution-lease-race-dist-artifact.mjs` runs eight real OS
-processes at one lease, five rounds, and requires exactly one winner each time —
+`tests/dist-artifact/execution-lease-race-dist-artifact.mjs` runs sixteen real OS
+processes at one lease, eight rounds, and requires exactly one winner each time —
 and it is itself held to biting: replacing the exclusive create with an
-overwriting one makes all eight win.
+overwriting one makes all sixteen win.
 
 ### The lease appears complete, or not at all
 

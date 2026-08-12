@@ -494,7 +494,7 @@ export async function runVerifyStep(
 
   const report = await runVerification(
     { worktreePath: authorisedWorktreePath, verification },
-    verify === undefined ? {} : { verify },
+    { verify: leasedVerify(deps) },
   );
 
   if (report.verdict === 'PASSED') {
@@ -590,7 +590,7 @@ export async function runReviewStep(
 
   const review = await runCodexReviewer(
     { worktreePath: authorisedWorktreePath, round, payload: buildReviewPayload(taskBrief) },
-    agent === undefined ? {} : { agent },
+    { agent: leasedAgent(deps) },
   );
 
   // Not a review. Every failure code lands here, and none of them may be read
@@ -786,7 +786,7 @@ export async function runRemediateStep(
 
   const writer = await runClaudeWriter(
     { worktreePath: authorisedWorktreePath, phase: 'REMEDIATE', round, payload: brief.payload },
-    agent === undefined ? {} : { agent },
+    { agent: leasedAgent(deps) },
   );
 
   if (!writer.ok) {
@@ -1047,7 +1047,7 @@ export async function runImplementStep(
       round,
       payload: buildImplementPayload(brief.brief, round),
     },
-    agent === undefined ? {} : { agent },
+    { agent: leasedAgent(deps) },
   );
 
   if (!writer.ok) {
@@ -1132,7 +1132,7 @@ export async function runLoopStep(
   current: StateLoadSuccess,
   deps: LoopDependencies,
 ): Promise<LoopStepResult> {
-  return dispatch(current, fencedSpawns(deps));
+  return dispatch(current, deps);
 }
 
 /**
@@ -1163,21 +1163,46 @@ export async function runLoopStep(
  * What this still does **not** claim: that an agent already running stops. That
  * needs owned process containment, and it is a later slice.
  */
-function fencedSpawns(deps: LoopDependencies): LoopDependencies {
-  const held = (): boolean =>
-    verifyExecutionLeaseHeldFor(deps.lease.repository, deps.lease.evidence).code === 'HELD';
+function leaseHolds(deps: LoopDependencies): boolean {
+  return verifyExecutionLeaseHeldFor(deps.lease.repository, deps.lease.evidence).code === 'HELD';
+}
 
-  const agent: AgentRunner = async (id, args, cwd, payload) => {
-    if (!held()) return AGENT_NOT_AUTHORISED;
+/**
+ * The only agent runner any step in this module may start a process with.
+ *
+ * ── Why this is a function and not a wrapped dependency ────────────────────
+ *
+ * It was the latter: `runLoopStep` replaced `deps.agent` with a fenced version
+ * and handed the result down. That fenced every path *through `runLoopStep`* and
+ * nothing else, and a review measured the gap — every step function here is
+ * exported, and a caller that reaches for one directly passes its own
+ * dependencies straight through. Worse, an *absent* seam is the productive case:
+ * `agent === undefined` made `runClaudeWriter` fall back to `runAgentCommand`,
+ * which is the real, unfenced spawn. The module header claimed "a step cannot
+ * start a subprocess except through one of these" and that was false for any
+ * caller other than the one function that did the wrapping.
+ *
+ * No productive caller had made that mistake yet. That is the reason to fix it
+ * now rather than a reason not to: this slice has twice had a rule that held
+ * only where somebody remembered to apply it.
+ *
+ * So the fence is no longer something a caller installs. It is where the seam is
+ * *read*, and it always returns a runner — never `undefined` — so no downstream
+ * default can route around it.
+ */
+function leasedAgent(deps: LoopDependencies): AgentRunner {
+  return async (id, args, cwd, payload) => {
+    if (!leaseHolds(deps)) return AGENT_NOT_AUTHORISED;
     return (deps.agent ?? runAgentCommand)(id, args, cwd, payload);
   };
+}
 
-  const verify: VerificationRunner = async (command, args, cwd) => {
-    if (!held()) return VERIFICATION_NOT_AUTHORISED;
+/** The same, for the verification seam. See {@link leasedAgent}. */
+function leasedVerify(deps: LoopDependencies): VerificationRunner {
+  return async (command, args, cwd) => {
+    if (!leaseHolds(deps)) return VERIFICATION_NOT_AUTHORISED;
     return (deps.verify ?? runVerificationCommand)(command, args, cwd);
   };
-
-  return { ...deps, agent, verify };
 }
 
 /** What a seam answers when this run is no longer the repository's writer. */

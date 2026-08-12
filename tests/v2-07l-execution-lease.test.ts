@@ -72,10 +72,12 @@ import {
 import {
   EXECUTION_LEASE_FILE_NAME,
   acquireRepositoryExecutionLease,
+  deriveExecutionLeaseLocation,
   inspectRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
   verifyExecutionLeaseHeld,
   verifyExecutionLeaseHeldFor,
+  type LeaseInspection,
 } from '../src/lease/execution-lease.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { releaseTaskWorkspace } from '../src/run/release-workspace.js';
@@ -87,10 +89,11 @@ import {
   exitCodeForReleaseOutcome,
   exitCodeForRunOutcome,
 } from '../src/cli/run-exit-codes.js';
-import { runLoopStep } from '../src/loop/loop-step.js';
+import { runImplementStep, runLoopStep, runVerifyStep } from '../src/loop/loop-step.js';
 import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { prepareTaskWorkspace } from '../src/worktree/prepare-workspace.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
+import { removeTaskWorkspace } from '../src/worktree/remove-workspace.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { createRepoFixture, git, removeRepoFixtures } from './helpers/repo-fixtures.js';
 import { e2eProfile, taskFile, tickingClock, writerSuccess } from './helpers/e2e-fixtures.js';
@@ -1761,5 +1764,396 @@ describe('every seam that starts a process is fenced, not just the writer', () =
     expect(run.outcome).not.toBe('STEP_BUDGET_EXHAUSTED');
     // Exit 5 is the one a scheduler reads as "continue".
     expect(exitCodeForRunOutcome(run.outcome)).not.toBe(5);
+  });
+});
+
+/* ─────────── 17. the fence belongs to the seam, not to one caller ───────── */
+
+describe('a step started directly is fenced exactly like one the loop drives', () => {
+  it('starts no writer when the exported step is called on its own', async () => {
+    // `runLoopStep` used to install the fence by replacing `deps.agent` before
+    // dispatching. That fenced every path *through `runLoopStep`* and nothing
+    // else, and every step function here is exported. A review called
+    // `runImplementStep` directly with the lease released and watched it reach
+    // `runClaudeWriter`.
+    //
+    // The absent seam was the productive half of it: `agent === undefined` made
+    // the writer fall back to `runAgentCommand`, the real spawn. So a direct
+    // caller with no injected seam got no fence *and* a live subprocess.
+    //
+    // No productive caller had done that yet, which is the reason to close it
+    // rather than a reason to leave it: this slice has twice shipped a rule that
+    // held only where somebody remembered to apply it.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: evidence },
+    );
+    expect(started.outcome).toBe('STARTED');
+
+    const authority = { repository: fixture.repository, evidence };
+    let current = loadTaskState(fixture.root, TASK_ID);
+    if (!current.ok) throw new Error('task did not start');
+
+    const deps = (overrides: Record<string, unknown> = {}) => ({
+      now: tickingClock()(),
+      authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
+      verification: fixture.repository.verification,
+      taskBrief: TASK_ID,
+      brief: readExecutionBrief(
+        fixture.repository,
+        TASK_ID,
+        current.ok ? current.state.worktreePath : '',
+      ),
+      lease: authority,
+      ...overrides,
+    });
+
+    for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING'] as const) {
+      const advanced = await runLoopStep(current, deps({ agent: async () => writerSuccess() }));
+      expect(advanced.state).toBe(expected);
+      current = loadTaskState(fixture.root, TASK_ID);
+      if (!current.ok) throw new Error('state vanished');
+    }
+
+    releaseRepositoryExecutionLease(evidence);
+
+    let spawns = 0;
+    // The exported step, called the way a future caller would - not through the
+    // one function that used to own the fence.
+    const step = await runImplementStep(
+      current,
+      deps({
+        agent: async () => {
+          spawns += 1;
+          throw new Error('a writing agent must not be started without the lease');
+        },
+      }),
+    );
+
+    expect(spawns).toBe(0);
+    expect(step.outcome).toBe('STATE_NOT_RECORDED');
+  });
+
+  it('starts no verification when the exported step is called on its own', async () => {
+    // The same hole, one seam over. `runVerifyStep` is exported too.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: evidence },
+    );
+    expect(started.outcome).toBe('STARTED');
+
+    const authority = { repository: fixture.repository, evidence };
+    let current = loadTaskState(fixture.root, TASK_ID);
+    if (!current.ok) throw new Error('task did not start');
+
+    const deps = (overrides: Record<string, unknown> = {}) => ({
+      now: tickingClock()(),
+      authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
+      verification: fixture.repository.verification,
+      taskBrief: TASK_ID,
+      brief: readExecutionBrief(
+        fixture.repository,
+        TASK_ID,
+        current.ok ? current.state.worktreePath : '',
+      ),
+      lease: authority,
+      ...overrides,
+    });
+
+    for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING', 'VERIFYING'] as const) {
+      const advanced = await runLoopStep(current, deps({ agent: async () => writerSuccess() }));
+      expect(advanced.state).toBe(expected);
+      current = loadTaskState(fixture.root, TASK_ID);
+      if (!current.ok) throw new Error('state vanished');
+    }
+
+    releaseRepositoryExecutionLease(evidence);
+
+    let spawns = 0;
+    const step = await runVerifyStep(
+      current,
+      deps({
+        verify: async () => {
+          spawns += 1;
+          throw new Error('a verification command must not be started without the lease');
+        },
+      }),
+    );
+
+    expect(spawns).toBe(0);
+    expect(step.outcome).toBe('STATE_NOT_RECORDED');
+  });
+});
+
+/* ─────────── 18. what the reader must never call free ───────────────────── */
+
+describe('an unreadable lease is held-and-unsafe, never free', () => {
+  /** Puts `bytes` at the lease path and reports what the module makes of it. */
+  function inspectWith(fixture: Fixture, bytes: string): LeaseInspection {
+    const location = deriveExecutionLeaseLocation(fixture.repository);
+    if (!location.ok) throw new Error('fixture has no lease location');
+    writeFileSync(location.path, bytes, 'utf8');
+    return inspectRepositoryExecutionLease(fixture.repository);
+  }
+
+  it('classifies a half-written lease as unparseable, and says so to an operator', async () => {
+    // The existing counter-proof for this asserted only what `acquire` answered,
+    // and `acquire` is protected by the atomic create rather than by the
+    // reader's classification. A review changed the parse-failure branch to
+    // return FREE - the exact confusion `LEASE_STATES` calls the one thing this
+    // must never be mistaken for - and all 2650 tests stayed green while
+    // `lease status` began telling operators that an owned repository was free
+    // for the taking.
+    const fixture = await leasableRepository();
+    const truncated = JSON.stringify({ schemaVersion: 1, leaseKey: 'x' }).slice(0, 20);
+
+    const inspection = inspectWith(fixture, truncated);
+
+    expect(inspection.state).toBe('UNPARSEABLE');
+    expect(inspection.state).not.toBe('FREE');
+    // And the operator-facing consequence, which is the part that matters: the
+    // report must not invite the next invocation to take it.
+    const report = renderLeaseStatus(inspection);
+    expect(report).toContain('treated');
+    expect(report).not.toContain('The next one may take the lease.');
+  });
+
+  it('classifies an oversized and a structurally wrong lease the same way', async () => {
+    // The two sibling branches of the same reader. Both survived alone.
+    const fixture = await leasableRepository();
+
+    expect(inspectWith(fixture, `{"padding":"${'a'.repeat(70_000)}"}`).state).not.toBe('FREE');
+    expect(inspectWith(fixture, '{"schemaVersion":1,"notALease":true}').state).not.toBe('FREE');
+    expect(inspectWith(fixture, '').state).not.toBe('FREE');
+  });
+
+  it('reports a genuinely absent lease as free, so the refusal is not universal', async () => {
+    // The control. A reader that answered UNPARSEABLE for everything would pass
+    // every assertion above and lock every repository out permanently.
+    const fixture = await leasableRepository();
+
+    expect(inspectRepositoryExecutionLease(fixture.repository).state).toBe('FREE');
+  });
+});
+
+/* ─────────── 19. the entry gate on the destructive command ──────────────── */
+
+describe('a release refused at its entry removes nothing', () => {
+  it('does not remove a workspace when the lease went before the first command', async () => {
+    // `releaseTaskWorkspace` proves the lease on entry and `removeTaskWorkspace`
+    // proves it again before `worktree remove`. Removing *both* left all 2650
+    // tests green, while the measured effect of removing them is a successor's
+    // workspace deleted off disk. The later gate before `branch -d` was the only
+    // one anything tested.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const crashed = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        replace: () => {
+          throw new Error('simulated crash before the first durable write landed');
+        },
+      },
+    );
+    expect(crashed.outcome).toBe('STATE_NOT_RECORDED');
+    const workspace = crashed.workspace;
+    if (workspace === null) throw new Error('the crashed start left no workspace');
+
+    // Gone before anything destructive is even considered.
+    releaseRepositoryExecutionLease(evidence);
+
+    const destructive: string[] = [];
+    const released = await releaseTaskWorkspace(fixture.repository, TASK_ID, {
+      git: async (cwd, args) => {
+        if (args[0] === 'worktree' && args[1] === 'remove') destructive.push('worktree remove');
+        if (args[0] === 'branch' && args[1] === '-d') destructive.push('branch -d');
+        return runGitCommand(cwd, args);
+      },
+      lease: evidence,
+    });
+
+    expect(released.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(destructive).toEqual([]);
+    expect(released.worktreeRemoved).toBe(false);
+    // The measurement that matters: it is still on disk, for a successor to own.
+    expect(existsSync(workspace.worktreePath)).toBe(true);
+    expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).not.toBe('');
+  });
+});
+
+/* ─────────── 20. every spawner, not every spawner I remembered ──────────── */
+
+describe('the fenced accessor is the only way a step reaches a subprocess', () => {
+  it('passes a leased runner at every spawn site in the loop', () => {
+    // The behavioural counter-proofs above drive two of the four spawn sites,
+    // and that is exactly the gap that has bitten this slice three times: a rule
+    // proven where somebody remembered to prove it. A probe reverted the seam at
+    // `runReviewStep` - which no test calls directly - and the whole suite
+    // stayed green.
+    //
+    // So the *mechanism* is proven behaviourally, and its universality is proven
+    // here, statically, over the whole module. A fifth spawn site added later
+    // fails this without anyone having to remember to extend a list.
+    const source = readFileSync(join(PACKAGE_ROOT, 'src', 'loop', 'loop-step.ts'), 'utf8');
+
+    const spawners = [
+      ...source.matchAll(/\brunClaudeWriter\(|\brunCodexReviewer\(|\brunVerification\(/g),
+    ].length;
+    const leased = [...source.matchAll(/\bleasedAgent\(deps\)|\bleasedVerify\(deps\)/g)].length;
+
+    // Every spawner call receives exactly one leased runner.
+    expect(spawners).toBeGreaterThan(0);
+    expect(leased).toBe(spawners);
+
+    // And no site hands over the raw dependency instead. This is the shape the
+    // module used to have, where an *absent* seam fell through to the real
+    // unfenced spawn — so the dangerous case was the default one.
+    expect(source).not.toMatch(/agent === undefined \? \{\} : \{ agent \}/);
+    expect(source).not.toMatch(/verify === undefined \? \{\} : \{ verify \}/);
+  });
+});
+
+/* ─────────── 21. the second layer of the mixed-record defence ───────────── */
+
+describe('a lease proves the repository it was taken for, not merely a path', () => {
+  it('refuses a genuine lease presented with a foreign root', async () => {
+    // Two independent checks stand between a mixed record and authority: the
+    // lease path derived from `gitCommonDir`, and the document's own
+    // `repositoryRoot`. Acquire now refuses to *create* such a record at all,
+    // which is what made the second check untestable through the front door and
+    // left it unpinned — a probe deleted it and the whole suite stayed green.
+    //
+    // It is still load-bearing: it is what refuses a genuine lease that some
+    // other caller waves at the wrong repository.
+    const owner = await leasableRepository();
+    const other = await leasableRepository();
+    const evidence = heldLease(owner);
+
+    // The lease is real and held. Only the record it is presented with is wrong:
+    // the key half names the repository the lease is genuinely for, so the path
+    // check passes, and the root half names somewhere else entirely.
+    expect(verifyExecutionLeaseHeldFor(owner.repository, evidence).code).toBe('HELD');
+
+    const verdict = verifyExecutionLeaseHeldFor(
+      { id: other.repository.id, root: other.repository.root, gitCommonDir: owner.repository.gitCommonDir },
+      evidence,
+    );
+
+    expect(verdict.code).toBe('LEASE_FOR_ANOTHER_REPOSITORY');
+    expect(verdict.code).not.toBe('HELD');
+  });
+});
+
+/* ─────────── 22. the gate nearest the removal, not the one at the door ─── */
+
+describe('a release that loses the lease before removing anything removes nothing', () => {
+  it('stops between the entry gate and the worktree removal', async () => {
+    // `releaseTaskWorkspace` proves the lease on entry, again immediately before
+    // removal, and `removeTaskWorkspace` proves it once more before each
+    // destructive command. A probe neutralised the middle two — the entry gate
+    // left intact — and all 2650 tests stayed green, while the measured effect
+    // was a successor's workspace deleted off disk.
+    //
+    // The entry gate cannot cover this: adoption is assessed in between, which
+    // is several Git subprocesses, and that is the window a successor acquires
+    // in.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const crashed = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        replace: () => {
+          throw new Error('simulated crash before the first durable write landed');
+        },
+      },
+    );
+    expect(crashed.outcome).toBe('STATE_NOT_RECORDED');
+    const workspace = crashed.workspace;
+    if (workspace === null) throw new Error('the crashed start left no workspace');
+
+    const destructive: string[] = [];
+    const released = await releaseTaskWorkspace(fixture.repository, TASK_ID, {
+      git: async (cwd, args) => {
+        if (args[0] === 'worktree' && args[1] === 'remove') destructive.push('worktree remove');
+        if (args[0] === 'branch' && args[1] === '-d') destructive.push('branch -d');
+        const result = await runGitCommand(cwd, args);
+        // Held at the door, gone by the time anything is deleted: released
+        // during the adoption assessment, which is what runs in between.
+        if (args[0] === 'ls-files') releaseRepositoryExecutionLease(evidence);
+        return result;
+      },
+      lease: evidence,
+    });
+
+    expect(released.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(destructive).toEqual([]);
+    expect(released.worktreeRemoved).toBe(false);
+    // The measurement that matters: still on disk, for whoever owns it now.
+    expect(existsSync(workspace.worktreePath)).toBe(true);
+  });
+});
+
+/* ─────────── 23. the removal, called the way a future caller would ─────── */
+
+describe('the workspace removal is fenced by its own gate, not by its caller', () => {
+  it('removes nothing when called directly without the lease', async () => {
+    // `removeTaskWorkspace` is exported and has exactly one productive caller
+    // today. Neutralising its own gate alone left the suite green, because
+    // `releaseTaskWorkspace` re-proves the lease a few statements earlier and
+    // answered first — real defence in depth, and also the precise shape that
+    // has already bitten this slice once: `runLoopStep` installed the spawn
+    // fence, every step function was exported, and a direct caller got no fence
+    // at all.
+    //
+    // The gate's own comment is the claim under test: *"a gate in a caller is a
+    // gate at whatever distance the caller happens to have"*. That is only true
+    // if it holds with no caller in front of it.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const crashed = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        replace: () => {
+          throw new Error('simulated crash before the first durable write landed');
+        },
+      },
+    );
+    expect(crashed.outcome).toBe('STATE_NOT_RECORDED');
+    const workspace = crashed.workspace;
+    if (workspace === null) throw new Error('the crashed start left no workspace');
+
+    releaseRepositoryExecutionLease(evidence);
+
+    const destructive: string[] = [];
+    const removal = await removeTaskWorkspace(fixture.repository, taskWithId(TASK_ID), {
+      git: async (cwd, args) => {
+        if (args[0] === 'worktree' && args[1] === 'remove') destructive.push('worktree remove');
+        if (args[0] === 'branch' && args[1] === '-d') destructive.push('branch -d');
+        return runGitCommand(cwd, args);
+      },
+      lease: evidence,
+    });
+
+    expect(removal.ok).toBe(false);
+    expect(destructive).toEqual([]);
+    // Still on disk and still on the branch list, for whoever owns them now.
+    expect(existsSync(workspace.worktreePath)).toBe(true);
+    expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).not.toBe('');
   });
 });
