@@ -44,6 +44,12 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
     LEASE_LOCATION_UNSUITABLE:
       'No lease location could be derived for this repository, so no exclusive claim could\n' +
       '  be made. Nothing was started.',
+    REPOSITORY_RECORD_INCOHERENT:
+      'This repository record does not describe one repository: its root and its Git common\n' +
+      '  directory belong to different places, so a lease taken for it would guard the wrong\n' +
+      '  one. Nothing was started. This is a defect in whatever built the record rather than\n' +
+      '  a state of the repository - a working tree Git itself resolves is accepted, including\n' +
+      '  a submodule, a linked worktree and a separate Git directory.',
     LEASE_WRITE_FAILED:
       'The lease claim could not be recorded, so it was given back. Nothing was started.',
   });

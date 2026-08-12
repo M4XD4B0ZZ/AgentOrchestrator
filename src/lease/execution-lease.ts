@@ -114,13 +114,14 @@ import {
   linkSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
   writeSync,
   type Stats,
 } from 'node:fs';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { comparePathIdentity } from '../core/path-identity.js';
 import {
@@ -441,6 +442,18 @@ export const LEASE_ACQUIRE_FAILURE_CODES = [
   /** No lease path can be derived for this repository. */
   'LEASE_LOCATION_UNSUITABLE',
   /**
+   * A lease path exists, and the record it was derived from is not one
+   * repository: its `root` and its `gitCommonDir` describe different places.
+   *
+   * Its own code rather than {@link LEASE_LOCATION_UNSUITABLE}, which it was
+   * folded into at first. That was wrong in a way an operator would feel: the
+   * sentence for that code says no location could be derived, while
+   * `lease status` prints a derived path for the very same repository, so the
+   * two commands contradicted each other and neither said what was actually
+   * wrong. A refusal that misdescribes itself is worse than a verbose one.
+   */
+  'REPOSITORY_RECORD_INCOHERENT',
+  /**
    * The lease could not be recorded, so nothing is held.
    *
    * Covers both halves of the claim, deliberately: the staging write that
@@ -521,70 +534,135 @@ function acquireFailure(
  * Whether a repository record's `root` and `gitCommonDir` are the same
  * repository — asked of the filesystem, not of the record.
  *
- * The two shapes below are Git's own, and they were measured here rather than
- * taken from documentation:
+ * ── Why this asks Git's own question instead of matching shapes ────────────
  *
- *   - an ordinary clone: `<root>/.git` is a **directory**, and it *is* the
- *     common dir;
- *   - a linked worktree: `<root>/.git` is a **file** reading
- *     `gitdir: <common>/worktrees/<name>`, and the common dir is two levels
- *     above that;
- *   - a separate git dir (`git init --separate-git-dir`): `<root>/.git` is a
- *     **file** pointing *straight at* the common dir, with no `worktrees`
- *     segment at all.
+ * The first version enumerated the layouts it had been shown — ordinary clone,
+ * linked worktree, separate git dir — and refused everything else. A review
+ * showed what that costs. A **submodule** working tree, which is Git's own
+ * default for a very ordinary thing, became permanently unrunnable: its `.git`
+ * file carries a *relative* pointer (`gitdir: ../.git/modules/<name>`), and a
+ * rule written from three absolute-pointer samples rejected it. `run --attended`
+ * and `release --attended` could never succeed there, while `lease status`
+ * cheerfully printed a derived path for the same repository. A `.git` that is a
+ * symlink or a junction failed the same way, because only one side of the
+ * comparison was canonicalised and `resolve-repository.ts` canonicalises the
+ * other.
  *
- * The third was not in the first version of this function, and writing the rule
- * from the first two would have refused a legitimate repository outright. It is
- * here because it was measured, which is the only reason any of the three is.
+ * A whitelist of measured shapes presented as a rule fails in exactly that
+ * direction: every layout nobody thought to measure becomes a lockout, and a
+ * lockout is not a safe default — it is an outage. So this no longer matches
+ * shapes. It performs Git's own resolution, which is two questions and no
+ * guessing:
  *
- * The second is why this is not the containment rule it looks like it should
- * be. A linked worktree's root is nowhere near its common dir, and two worktrees
- * of one clone are deliberately *one* execution domain — `deriveExecutionLease-
- * Location` keys on the common dir precisely so they share a lease — so a rule
- * demanding the key sit under the root would refuse the ordinary case.
+ *   1. `<root>/.git` — a **directory** is itself the git dir; a **file** reading
+ *      `gitdir: <target>` names one, and `<target>` may be relative, in which
+ *      case it resolves against `<root>`.
+ *   2. inside that git dir, a **`commondir` file** — present only for a linked
+ *      worktree, holding the path (`../..`) of the common dir it shares. Absent
+ *      means the git dir *is* the common dir.
+ *
+ * Both were measured. Step 2 is why the old `worktrees` basename test is gone:
+ * Git *records* the answer instead of encoding it in a path segment, so reading
+ * the record cannot be fooled by a directory that merely happens to be called
+ * `worktrees`, nor confused by a separate git dir that happens to live under
+ * one.
+ *
+ * This is still not a containment rule, and cannot become one: a linked
+ * worktree's root is nowhere near its common dir, and two worktrees of one clone
+ * are deliberately *one* execution domain — `deriveExecutionLeaseLocation` keys
+ * on the common dir precisely so they share a lease.
  *
  * Synchronous and never throwing, like everything else on the acquire path: it
- * reads two directory entries and at most one small file.
+ * reads at most three directory entries and two small files.
  */
 function repositoryRecordIsCoherent(repository: LeaseRepository): boolean {
-  const marker = join(repository.root, '.git');
+  const derived = commonDirOfWorkTree(repository.root);
+  if (derived === null) return false;
+  return sameDirectoryOnDisk(derived, repository.gitCommonDir);
+}
+
+/** Git's common directory for the work tree at `root`, or `null` if there is none. */
+function commonDirOfWorkTree(root: string): string | null {
+  const marker = join(root, '.git');
 
   let markerStat: Stats;
   try {
     markerStat = statSync(marker);
   } catch {
-    return false;
+    return null;
   }
 
-  if (markerStat.isDirectory()) {
-    return comparePathIdentity(marker, repository.gitCommonDir) === 'EQUAL';
-  }
+  // An ordinary clone. `statSync` follows a link, so a symlinked or junctioned
+  // `.git` lands here too — which is why the comparison canonicalises rather
+  // than trusting this path as it was spelled.
+  if (markerStat.isDirectory()) return commonDirOfGitDir(marker);
 
-  if (!markerStat.isFile()) return false;
-
-  // A `.git` file is tiny; a large one is not a Git pointer and is not read.
-  if (markerStat.size > MAX_GIT_MARKER_BYTES) return false;
+  if (!markerStat.isFile()) return null;
+  // A `.git` pointer is one short line. A large file is not one, and is not read.
+  if (markerStat.size > MAX_GIT_MARKER_BYTES) return null;
 
   let pointer: string;
   try {
     pointer = readFileSync(marker, 'utf8');
   } catch {
-    return false;
+    return null;
   }
 
   const declared = pointer.trim();
-  if (!declared.startsWith(GITDIR_PREFIX)) return false;
-  const worktreeGitDir = declared.slice(GITDIR_PREFIX.length).trim();
-  if (worktreeGitDir.length === 0 || !isAbsolute(worktreeGitDir)) return false;
+  if (!declared.startsWith(GITDIR_PREFIX)) return null;
+  const target = declared.slice(GITDIR_PREFIX.length).trim();
+  if (target.length === 0) return null;
 
-  // A separate git dir points straight at the common dir.
-  if (comparePathIdentity(worktreeGitDir, repository.gitCommonDir) === 'EQUAL') return true;
+  // Relative is not an oddity to be defended against here: it is what Git writes
+  // for a submodule, and refusing it was the defect.
+  return commonDirOfGitDir(isAbsolute(target) ? target : resolve(root, target));
+}
 
-  // Otherwise the only shape left is `<common>/worktrees/<name>` → `<common>`.
-  // The middle segment is checked rather than assumed: without it, any path two
-  // levels below the common dir would satisfy this.
-  if (basename(dirname(worktreeGitDir)) !== 'worktrees') return false;
-  return comparePathIdentity(dirname(dirname(worktreeGitDir)), repository.gitCommonDir) === 'EQUAL';
+/**
+ * The common dir a git dir belongs to.
+ *
+ * A linked worktree's git dir records it in a `commondir` file; every other kind
+ * of git dir is its own common dir. Reading that record is the whole method —
+ * see the header for why a path-segment heuristic was removed in its favour.
+ */
+function commonDirOfGitDir(gitDir: string): string {
+  const record = join(gitDir, 'commondir');
+
+  let recordStat: Stats;
+  try {
+    recordStat = statSync(record);
+  } catch {
+    return gitDir;
+  }
+  if (!recordStat.isFile() || recordStat.size > MAX_GIT_MARKER_BYTES) return gitDir;
+
+  let recorded: string;
+  try {
+    recorded = readFileSync(record, 'utf8').trim();
+  } catch {
+    return gitDir;
+  }
+  if (recorded.length === 0) return gitDir;
+
+  return isAbsolute(recorded) ? recorded : resolve(gitDir, recorded);
+}
+
+/**
+ * Whether two paths name the same directory, links resolved.
+ *
+ * The cheap comparison first, because it settles the ordinary case without
+ * touching the disk. The canonicalising one second, for the case a review found:
+ * a `.git` reached through a junction is a different string and the same
+ * directory, and refusing it locks a legitimate repository out for good.
+ */
+function sameDirectoryOnDisk(left: string, right: string): boolean {
+  if (comparePathIdentity(left, right) === 'EQUAL') return true;
+
+  try {
+    return comparePathIdentity(realpathSync.native(left), realpathSync.native(right)) === 'EQUAL';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -617,7 +695,7 @@ export function acquireRepositoryExecutionLease(
   // the same mixed record*, so the document agrees with the lie it was born
   // from. A field can only settle a question it was not copied from.
   if (!repositoryRecordIsCoherent(repository)) {
-    return acquireFailure('LEASE_LOCATION_UNSUITABLE', 'REPOSITORY_RECORD_INCOHERENT');
+    return acquireFailure('REPOSITORY_RECORD_INCOHERENT');
   }
 
   const nonce = randomBytes(32).toString('hex');

@@ -3619,20 +3619,41 @@ authority over B alongside B's own honest lease.
 
 No field of the record can settle that, because the record's own
 `repositoryRoot` is written *from* the record at acquire time and so agrees with
-it. It is settled against the filesystem instead, in the three shapes Git
-actually produces — all three measured here, not read:
+it. It is settled against the filesystem instead — by performing **Git's own
+resolution**, not by matching layouts:
 
 ```
-<root>/.git is a directory            -> it is the common dir            (ordinary clone)
-<root>/.git reads gitdir: <X>/worktrees/<n> -> the common dir is <X>     (linked worktree)
-<root>/.git reads gitdir: <X>         -> the common dir is <X>           (separate git dir)
+1.  <root>/.git   directory            -> that is the git dir
+                  file "gitdir: <X>"   -> <X> is the git dir, resolved against
+                                          <root> when it is relative
+2.  <git dir>/commondir present        -> the common dir is what it records
+                             absent    -> the git dir is the common dir
 ```
 
-The third was absent from the first draft of that rule, which would have refused
-a legitimate `git init --separate-git-dir` repository outright. The second is why
-this is not the containment check it looks like it should be: a linked worktree's
-root is nowhere near its common dir, and two worktrees of one clone are
-deliberately **one** execution domain.
+The first attempt at this *did* match layouts — it enumerated the three shapes
+someone had thought to measure and refused everything else — and that is worth
+recording, because the failure was not subtle. A **submodule** working tree
+became permanently unrunnable: Git writes its pointer *relative*
+(`gitdir: ../.git/modules/<name>`), a rule inferred from three absolute samples
+rejected it, and `run --attended` and `release --attended` were then refused for
+good while `lease status` printed a derived path for the same repository. A
+`.git` that is a symlink or a junction failed the same way, because only one side
+of the comparison was canonicalised.
+
+A whitelist of measured shapes presented as a rule fails in exactly one
+direction: every layout nobody measured becomes a lockout, and a lockout is not a
+conservative default — it is an outage. Reading `commondir` is what Git itself
+does, so it cannot be fooled by a directory that merely happens to be named
+`worktrees` either.
+
+This is still not the containment check it looks like it should be: a linked
+worktree's root is nowhere near its common dir, and two worktrees of one clone
+are deliberately **one** execution domain.
+
+The refusal has its own code, `REPOSITORY_RECORD_INCOHERENT`. It was folded into
+`LEASE_LOCATION_UNSUITABLE` at first, whose sentence says no location could be
+derived — while `lease status` prints one for the same repository. Two commands
+contradicting each other about one repository is worse than a long refusal.
 
 ### Recovery is refused, and the refusal is measured
 
