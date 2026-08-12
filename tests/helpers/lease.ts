@@ -27,6 +27,9 @@
  * process, one lease, held for the duration.
  */
 
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type { ExecutionLeaseEvidence } from '../../src/core/execution-lease-evidence.js';
 import {
   acquireRepositoryExecutionLease,
@@ -71,14 +74,26 @@ export function leaseFor(repository: LeaseRepository): ExecutionLeaseEvidence {
  * A real lease plus the repository it authorises, for `advanceTaskState`.
  *
  * Every durable transition now requires one (V2-07L / B), so a suite that
- * advances state needs a genuine lease rather than a stand-in. `gitCommonDir`
- * defaults to the root itself, which is what a scratch directory standing in for
- * a repository can honestly offer: the lease only needs a real directory it may
- * create a file in, and using the root keeps each suite's lease inside its own
- * temporary space.
+ * advances state needs a genuine lease rather than a stand-in.
+ *
+ * This used to hand over `{ gitCommonDir: root, root }` — the root standing in
+ * for its own common dir — on the grounds that the lease only needs a directory
+ * it may create a file in. It is now refused, and rightly: acquire proves the
+ * record describes one repository, and no real repository has its common dir
+ * *at* its root. That pairing was the shape a review used to hold two
+ * simultaneous authorities over one repository, so a helper that keeps
+ * producing it is a helper that keeps the defect alive in every suite that
+ * borrows it.
+ *
+ * So the scratch directory is made into the thing it was pretending to be: an
+ * empty `.git` directory beside the work tree, which is exactly an ordinary
+ * clone's shape. Nothing about the suites changes except that what they hand
+ * the lease is now true.
  */
 export function leaseAuthorityAt(root: string, id = 'test-fixture'): ExecutionLeaseAuthority {
-  const repository = { gitCommonDir: root, root, id };
+  const gitCommonDir = join(root, '.git');
+  mkdirSync(gitCommonDir, { recursive: true });
+  const repository = { gitCommonDir, root, id };
   return { repository, evidence: leaseFor(repository) };
 }
 

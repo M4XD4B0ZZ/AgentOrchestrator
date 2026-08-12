@@ -127,7 +127,7 @@ export function renderLeaseStatus(inspection: LeaseInspection): string {
       '       showed the same revision. Between reading and deleting, a lease you have',
       '       just cleared can be legitimately re-acquired by a new run, and deleting',
       '       then destroys the authority of that run. That race is exactly why this is',
-      '       a command.',
+      '       NOT a command.',
       '',
       '  A supported attended recovery flow is a separate piece of work; until it exists,',
       '  step 1 is a judgement this tool cannot make for you.',

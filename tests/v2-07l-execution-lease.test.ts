@@ -59,6 +59,7 @@ import {
   type ExecutionLeaseEvidence,
 } from '../src/core/execution-lease-evidence.js';
 import {
+  EXECUTION_LEASE_FILE_NAME,
   acquireRepositoryExecutionLease,
   inspectRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
@@ -72,6 +73,8 @@ import { startTask } from '../src/run/start-task.js';
 import { advanceTaskState } from '../src/state/advance-state.js';
 import { loadTaskState } from '../src/state/state-store.js';
 import { exitCodeForReleaseOutcome } from '../src/cli/run-exit-codes.js';
+import { runLoopStep } from '../src/loop/loop-step.js';
+import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { prepareTaskWorkspace } from '../src/worktree/prepare-workspace.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
@@ -1074,6 +1077,17 @@ describe('the lease report', () => {
     // says so, which is the opposite of offering one.
     expect(report).not.toMatch(/agent-loop lease (break|clear|force)/);
     expect(report).toContain('no --force');
+    // The ABA hazard, and what it argues for.
+    //
+    // Pinned as a whole sentence rather than by keyword, because the shipped
+    // text lost a single word — "that race is exactly why this is a command",
+    // for a block whose entire purpose is to say no command exists — and every
+    // assertion above passed while it did. A review caught it by reading. A
+    // negation is exactly the kind of claim a keyword search cannot check, so it
+    // is checked against the words that carry it.
+    expect(report).toContain('can be legitimately re-acquired by a new run');
+    expect(report).toContain('That race is exactly why this is\n       NOT a command.');
+    expect(report).not.toMatch(/why this is\s+a command/);
   });
 
   it('never suggests a break for a repository nobody owns', async () => {
@@ -1265,5 +1279,276 @@ describe('a mutation never happens on a lease proved somewhere earlier', () => {
     expect(released.branchRemoved).toBe(false);
     expect(released.reasonCodes).toContain('WORKSPACE_REMOVAL_LOST_LEASE');
     expect(exitCodeForReleaseOutcome(released.outcome)).toBe(3);
+  });
+});
+
+/* ─────────── 12. the rollback is an effect too ──────────────────────────── */
+
+describe('a failed preparation does not delete on a lease it no longer holds', () => {
+  it('removes nothing once the lease is gone, and says so', async () => {
+    // The creation gate was moved to the effect this round; the *undo* was left
+    // where it was. `rollBack` runs `worktree remove` and `branch -d`, and the
+    // nearest proof was the creation gate — with `git worktree add` and the six
+    // probes of `verifyWorkspaceMatches` in between. That is a wider window than
+    // the one judged unacceptable for creation, on the two commands
+    // `remove-workspace.ts` gates individually.
+    //
+    // A review drove it: lose the lease after `worktree add`, let a successor
+    // acquire and adopt the pristine orphan, then fail verification. Both
+    // destructive commands ran and destroyed a workspace the successor owned.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    const destructive: string[] = [];
+    let added = false;
+    const prepared = await prepareTaskWorkspace(fixture.repository, taskWithId(TASK_ID), {
+      git: async (cwd, args) => {
+        if (args[0] === 'worktree' && args[1] === 'remove') destructive.push('worktree remove');
+        if (args[0] === 'branch' && args[1] === '-d') destructive.push('branch -d');
+        const result = await runGitCommand(cwd, args);
+        if (args[0] === 'worktree' && args[1] === 'add') {
+          added = true;
+          // The window: the workspace now exists, and this run stops being the
+          // repository's writer before anything verifies it.
+          releaseRepositoryExecutionLease(evidence);
+        }
+        // Fail the verification that follows, which is what calls the rollback.
+        if (added && args[0] === 'rev-parse') {
+          return Object.freeze({
+            outcome: 'OK' as const,
+            exitCode: 0,
+            signal: null,
+            stdout: '0000000000000000000000000000000000000000',
+            stderr: '',
+            outputTruncated: false,
+            failureCode: null,
+            errnoCode: null,
+            durationMs: 0,
+          });
+        }
+        return result;
+      },
+      lease: evidence,
+    });
+
+    expect(prepared.ok).toBe(false);
+    if (prepared.ok) return;
+    // Nothing was deleted, because deleting is an effect and the authority for
+    // it was gone.
+    expect(destructive).toEqual([]);
+    expect(prepared.code).toBe('WORKTREE_ROLLBACK_NOT_AUTHORISED');
+    // And the leftovers are declared. A successor may legitimately own them now,
+    // so the one thing this must not do is stay quiet about them.
+    expect(prepared.residue).toBe(true);
+  });
+
+  it('stops between the two destructive commands, not after them', async () => {
+    // Losing it *between* `worktree remove` and `branch -d` is the same argument
+    // one command later, and it is why the gate is per command rather than once
+    // at the top of the rollback.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    let added = false;
+    const destructive: string[] = [];
+    const prepared = await prepareTaskWorkspace(fixture.repository, taskWithId(TASK_ID), {
+      git: async (cwd, args) => {
+        if (args[0] === 'branch' && args[1] === '-d') destructive.push('branch -d');
+        const result = await runGitCommand(cwd, args);
+        if (args[0] === 'worktree' && args[1] === 'add') added = true;
+        if (args[0] === 'worktree' && args[1] === 'remove') {
+          destructive.push('worktree remove');
+          releaseRepositoryExecutionLease(evidence);
+        }
+        if (added && args[0] === 'rev-parse') {
+          return Object.freeze({
+            outcome: 'OK' as const,
+            exitCode: 0,
+            signal: null,
+            stdout: '0000000000000000000000000000000000000000',
+            stderr: '',
+            outputTruncated: false,
+            failureCode: null,
+            errnoCode: null,
+            durationMs: 0,
+          });
+        }
+        return result;
+      },
+      lease: evidence,
+    });
+
+    expect(prepared.ok).toBe(false);
+    if (prepared.ok) return;
+    expect(destructive).toEqual(['worktree remove']);
+    expect(prepared.code).toBe('WORKTREE_ROLLBACK_NOT_AUTHORISED');
+    expect(prepared.residue).toBe(true);
+  });
+
+  it('rolls back normally while the lease is held', async () => {
+    // The control. A gate that refuses everything would pass both tests above
+    // and break the product, so this pins that a held lease still cleans up.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    let added = false;
+    const prepared = await prepareTaskWorkspace(fixture.repository, taskWithId(TASK_ID), {
+      git: async (cwd, args) => {
+        const result = await runGitCommand(cwd, args);
+        if (args[0] === 'worktree' && args[1] === 'add') added = true;
+        if (added && args[0] === 'rev-parse') {
+          return Object.freeze({
+            outcome: 'OK' as const,
+            exitCode: 0,
+            signal: null,
+            stdout: '0000000000000000000000000000000000000000',
+            stderr: '',
+            outputTruncated: false,
+            failureCode: null,
+            errnoCode: null,
+            durationMs: 0,
+          });
+        }
+        return result;
+      },
+      lease: evidence,
+    });
+
+    expect(prepared.ok).toBe(false);
+    if (prepared.ok) return;
+    expect(prepared.code).toBe('WORKTREE_VERIFICATION_FAILED');
+    expect(prepared.residue).toBe(false);
+    expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).toBe('');
+  });
+});
+
+/* ─────────── 13. the spawn fence, at a phase that actually spawns ──────── */
+
+describe('the agent seam refuses to start a process without the lease', () => {
+  it('starts no writing agent in IMPLEMENTING once the lease is gone', async () => {
+    // The previous counter-proof for this was vacuous and a review said so: it
+    // asserted "no agent ran" about a run that stopped at `WORKTREE_READY`, a
+    // phase that starts nothing. Removing the guard at the agent seam passed the
+    // whole suite. This one drives the task to `IMPLEMENTING`, which starts the
+    // writer, and fails with the guard removed.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: evidence },
+    );
+    expect(started.outcome).toBe('STARTED');
+
+    let current = loadTaskState(fixture.root, TASK_ID);
+    if (!current.ok) throw new Error('task did not start');
+    const authority = { repository: fixture.repository, evidence };
+    for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING'] as const) {
+      const advanced = await runLoopStep(current, {
+        now: tickingClock()(),
+        authorisedWorktreePath: current.state.worktreePath,
+        verification: fixture.repository.verification,
+        taskBrief: TASK_ID,
+        brief: readExecutionBrief(fixture.repository, TASK_ID, current.state.worktreePath),
+        lease: authority,
+      });
+      expect(advanced.state).toBe(expected);
+      current = loadTaskState(fixture.root, TASK_ID);
+      if (!current.ok) throw new Error('state vanished');
+    }
+    expect(current.state.state).toBe('IMPLEMENTING');
+
+    // The lease goes now — after the task is parked in the phase that starts the
+    // writer, and before the step that would start it.
+    releaseRepositoryExecutionLease(evidence);
+
+    let agentSpawns = 0;
+    const step = await runLoopStep(current, {
+      now: tickingClock()(),
+      authorisedWorktreePath: current.state.worktreePath,
+      verification: fixture.repository.verification,
+      taskBrief: TASK_ID,
+      brief: readExecutionBrief(fixture.repository, TASK_ID, current.state.worktreePath),
+      lease: authority,
+      agent: async () => {
+        agentSpawns += 1;
+        throw new Error('a writing agent must not be started without the lease');
+      },
+    });
+
+    // The seam refused, so the process never started.
+    expect(agentSpawns).toBe(0);
+    // And nothing durable was recorded about a step that did not happen.
+    expect(step.outcome).toBe('STATE_NOT_RECORDED');
+    const after = loadTaskState(fixture.root, TASK_ID);
+    expect(after.ok && after.state.state).toBe('IMPLEMENTING');
+  });
+});
+
+/* ─────────── 14. a repository record has to be one repository ───────────── */
+
+describe('the acquiring record is proved coherent before anything is claimed', () => {
+  it('refuses a record whose key and root are different repositories', async () => {
+    // Every field genuine, only the combination a lie: `gitCommonDir` from A
+    // (which decides *which lease file is read*) beside `root` from B (which is
+    // what callers then write into). A review acquired on that and held two
+    // simultaneous authorities over B - one honest, one mixed - then created a
+    // worktree, a branch and durable state under the second.
+    //
+    // `verifyExecutionLeaseHeldFor` could not catch it: it compares the
+    // document's `repositoryRoot` against `repository.root`, and at acquire time
+    // that field is written from the very same mixed record, so it agreed. The
+    // check has to be at acquire, and it has to be against the filesystem rather
+    // than against another field of the record being doubted.
+    const victim = await leasableRepository();
+    const other = await leasableRepository();
+
+    const mixed = acquireRepositoryExecutionLease(
+      {
+        id: victim.repository.id,
+        root: victim.repository.root,
+        gitCommonDir: other.repository.gitCommonDir,
+      },
+      { runId: null, blockId: null },
+      { now: tickingClock() },
+    );
+
+    expect(mixed.ok).toBe(false);
+    if (mixed.ok) return;
+    expect(mixed.code).toBe('LEASE_LOCATION_UNSUITABLE');
+    expect(mixed.detail).toBe('REPOSITORY_RECORD_INCOHERENT');
+    // And nothing was claimed anywhere.
+    expect(existsSync(join(other.repository.gitCommonDir, EXECUTION_LEASE_FILE_NAME))).toBe(false);
+    expect(existsSync(join(victim.repository.gitCommonDir, EXECUTION_LEASE_FILE_NAME))).toBe(false);
+  });
+
+  it('still accepts a linked worktree, whose root is not above its common dir', async () => {
+    // The control, and the reason the check is a filesystem proof rather than a
+    // containment rule. A linked worktree's root is nowhere near its common dir
+    // - `<root>/.git` is a *file* reading `gitdir: <common>/worktrees/<name>` -
+    // and two worktrees of one clone are deliberately one execution domain, so a
+    // rule demanding containment would refuse the ordinary case.
+    const fixture = await leasableRepository();
+    const linked = join(fixture.root, '..', `ao-linked-${TASK_ID}`);
+    git(fixture.root, ['worktree', 'add', '-q', '-b', 'probe-linked', linked]);
+    try {
+      const commonDir = git(fixture.root, [
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-common-dir',
+      ]).trim();
+      const linkedRoot = git(linked, ['rev-parse', '--path-format=absolute', '--show-toplevel']).trim();
+
+      const acquired = acquireRepositoryExecutionLease(
+        { id: fixture.repository.id, root: linkedRoot, gitCommonDir: commonDir },
+        { runId: null, blockId: null },
+        { now: tickingClock() },
+      );
+
+      expect(acquired.ok).toBe(true);
+      if (!acquired.ok) return;
+      releaseRepositoryExecutionLease(acquired.evidence);
+    } finally {
+      git(fixture.root, ['worktree', 'remove', '--force', linked]);
+    }
   });
 });

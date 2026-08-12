@@ -31,7 +31,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -72,13 +72,14 @@ if (!existsSync(distEntry)) {
  */
 const RACER_SOURCE = `
 import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { acquireRepositoryExecutionLease } from ${JSON.stringify(pathToFileURL(distEntry).href)};
 
 // Read from the environment rather than from argv. With \`node -e\`, argv carries
 // no script path, so the usual \`slice(2)\` silently drops the first value — an
 // off-by-one that produced an undefined barrier path and a child that span
 // forever. The environment has no such ambiguity.
-const gitCommonDir = process.env.AO_RACE_DIR;
+const root = process.env.AO_RACE_DIR;
 const start = process.env.AO_RACE_START;
 const finish = process.env.AO_RACE_FINISH;
 const ready = process.env.AO_RACE_READY;
@@ -110,8 +111,14 @@ const waitFor = (path, label) => {
 writeFileSync(ready, 'ready', 'utf8');
 waitFor(start, 'start');
 
+// The record is a repository shape, not a directory twice.
+//
+// This passed the same directory as both root and common dir until acquire
+// began proving that a record describes one repository - and no clone has its
+// common dir *at* its root. The parent makes the .git directory; every racer
+// names the same pair, which is the point of a race.
 const result = acquireRepositoryExecutionLease(
-  { gitCommonDir, root: gitCommonDir, id: 'race-fixture' },
+  { gitCommonDir: join(root, '.git'), root, id: 'race-fixture' },
   { runId: null, blockId: null },
   { now: () => new Date().toISOString() },
 );
@@ -130,6 +137,10 @@ waitFor(finish, 'finish');
 /** Runs one race and resolves to the racers' answers. */
 async function race(round) {
   const dir = mkdtempSync(join(tmpdir(), `ao-lease-race-${String(round)}-`));
+  // The common dir the racers will name. Made here, once, before any of them
+  // starts: acquire proves the record is a coherent repository, and a race in
+  // which every competitor is refused for the same reason measures nothing.
+  mkdirSync(join(dir, '.git'), { recursive: true });
   const start = join(dir, 'start');
   const finish = join(dir, 'finish');
   const readyOf = (index) => join(dir, `ready-${String(index)}`);

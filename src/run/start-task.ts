@@ -438,6 +438,19 @@ export async function startTask(
   let adopted = false;
 
   if (!prepared.ok) {
+    // A preparation that stopped because the lease went is not a workspace
+    // refusal, and reporting it as one is how the sibling path went wrong: the
+    // outcome named nothing about authority, and the leftovers looked like an
+    // ordinary rejected workspace an operator should tidy up. They may belong to
+    // a successor now.
+    if (prepared.code === 'WORKTREE_ROLLBACK_NOT_AUTHORISED') {
+      return stop({
+        outcome: 'EXECUTION_LEASE_LOST',
+        residue: true,
+        reasonCodes: Object.freeze([prepared.code]),
+      });
+    }
+
     if (!COLLISION_CODES.has(prepared.code)) {
       return stop({
         outcome: 'WORKSPACE_REFUSED',

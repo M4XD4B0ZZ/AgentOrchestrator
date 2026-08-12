@@ -115,10 +115,12 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeSync,
+  type Stats,
 } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 
 import { comparePathIdentity } from '../core/path-identity.js';
 import {
@@ -477,11 +479,112 @@ export interface ExecutionLeaseRequest {
   readonly blockId: string | null;
 }
 
+/**
+ * The lease path an artefact names, or `null` if it cannot yield one.
+ *
+ * Three call sites read that private field and each had invented its own answer
+ * to "what if it throws" — one wrapped, one wrapped later after a review, one
+ * bare. A brand check and a field read are two different questions, and the gap
+ * between them is reachable: hooking `WeakSet.prototype.add` before the first
+ * mint captures the registry, and an arbitrary object added to it satisfies the
+ * brand while owning no private field at all. Nothing is gained by it — every
+ * consumer of this helper fails closed — but the answer belongs in one place.
+ */
+function leasePathOrNull(evidence: ExecutionLeaseEvidence): string | null {
+  try {
+    return ExecutionLeaseProof.leasePathOf(evidence);
+  } catch {
+    return null;
+  }
+}
+
+/** `<root>/.git` as a pointer file. Git's own spelling. */
+const GITDIR_PREFIX = 'gitdir:';
+
+/**
+ * The largest `.git` pointer file this will read.
+ *
+ * A real one is a single line. The cap is here for the same reason the lease
+ * record has one: a path handed in by a caller is not a promise about the size
+ * of what sits at it.
+ */
+const MAX_GIT_MARKER_BYTES = 4096;
+
 function acquireFailure(
   code: LeaseAcquireFailureCode,
   detail: string | null = null,
 ): LeaseAcquireFailure {
   return Object.freeze({ ok: false as const, code, detail });
+}
+
+/**
+ * Whether a repository record's `root` and `gitCommonDir` are the same
+ * repository — asked of the filesystem, not of the record.
+ *
+ * The two shapes below are Git's own, and they were measured here rather than
+ * taken from documentation:
+ *
+ *   - an ordinary clone: `<root>/.git` is a **directory**, and it *is* the
+ *     common dir;
+ *   - a linked worktree: `<root>/.git` is a **file** reading
+ *     `gitdir: <common>/worktrees/<name>`, and the common dir is two levels
+ *     above that;
+ *   - a separate git dir (`git init --separate-git-dir`): `<root>/.git` is a
+ *     **file** pointing *straight at* the common dir, with no `worktrees`
+ *     segment at all.
+ *
+ * The third was not in the first version of this function, and writing the rule
+ * from the first two would have refused a legitimate repository outright. It is
+ * here because it was measured, which is the only reason any of the three is.
+ *
+ * The second is why this is not the containment rule it looks like it should
+ * be. A linked worktree's root is nowhere near its common dir, and two worktrees
+ * of one clone are deliberately *one* execution domain — `deriveExecutionLease-
+ * Location` keys on the common dir precisely so they share a lease — so a rule
+ * demanding the key sit under the root would refuse the ordinary case.
+ *
+ * Synchronous and never throwing, like everything else on the acquire path: it
+ * reads two directory entries and at most one small file.
+ */
+function repositoryRecordIsCoherent(repository: LeaseRepository): boolean {
+  const marker = join(repository.root, '.git');
+
+  let markerStat: Stats;
+  try {
+    markerStat = statSync(marker);
+  } catch {
+    return false;
+  }
+
+  if (markerStat.isDirectory()) {
+    return comparePathIdentity(marker, repository.gitCommonDir) === 'EQUAL';
+  }
+
+  if (!markerStat.isFile()) return false;
+
+  // A `.git` file is tiny; a large one is not a Git pointer and is not read.
+  if (markerStat.size > MAX_GIT_MARKER_BYTES) return false;
+
+  let pointer: string;
+  try {
+    pointer = readFileSync(marker, 'utf8');
+  } catch {
+    return false;
+  }
+
+  const declared = pointer.trim();
+  if (!declared.startsWith(GITDIR_PREFIX)) return false;
+  const worktreeGitDir = declared.slice(GITDIR_PREFIX.length).trim();
+  if (worktreeGitDir.length === 0 || !isAbsolute(worktreeGitDir)) return false;
+
+  // A separate git dir points straight at the common dir.
+  if (comparePathIdentity(worktreeGitDir, repository.gitCommonDir) === 'EQUAL') return true;
+
+  // Otherwise the only shape left is `<common>/worktrees/<name>` → `<common>`.
+  // The middle segment is checked rather than assumed: without it, any path two
+  // levels below the common dir would satisfy this.
+  if (basename(dirname(worktreeGitDir)) !== 'worktrees') return false;
+  return comparePathIdentity(dirname(dirname(worktreeGitDir)), repository.gitCommonDir) === 'EQUAL';
 }
 
 /**
@@ -498,6 +601,24 @@ export function acquireRepositoryExecutionLease(
 ): LeaseAcquireResult {
   const location = deriveExecutionLeaseLocation(repository);
   if (!location.ok) return acquireFailure('LEASE_LOCATION_UNSUITABLE');
+
+  // The record must be *one* repository before anything is claimed for it.
+  //
+  // `LeaseRepository` is a bare structural interface, so nothing ties its fields
+  // to one place, and a review built a record carrying repository A's
+  // `gitCommonDir` — which is the key, and so decides which lease file is read —
+  // beside repository B's `root`, which is what callers then write into. Every
+  // value was genuine; only the pairing was a lie. It acquired, and held a
+  // second simultaneous authority over B beside B's own honest lease.
+  //
+  // `verifyExecutionLeaseHeldFor` cannot be where this is caught, and its
+  // comment used to claim it was: it compares the document's `repositoryRoot`
+  // against `repository.root`, and at acquire time that field is written *from
+  // the same mixed record*, so the document agrees with the lie it was born
+  // from. A field can only settle a question it was not copied from.
+  if (!repositoryRecordIsCoherent(repository)) {
+    return acquireFailure('LEASE_LOCATION_UNSUITABLE', 'REPOSITORY_RECORD_INCOHERENT');
+  }
 
   const nonce = randomBytes(32).toString('hex');
   const document: ExecutionLease = {
@@ -971,9 +1092,17 @@ export function verifyExecutionLeaseHeldFor(
   }
 
   const location = deriveExecutionLeaseLocation(repository);
+  // `leasePathOf` reads a private field, so it throws for anything that passed
+  // the brand check without going through the constructor — which a review
+  // achieved by hooking `WeakSet.prototype.add` before the first mint and
+  // capturing the registry itself. No authority was gained (the read fails, and
+  // a throw is refused everywhere it can surface), but an authority check that
+  // answers by throwing is not answering, so it is asked safely.
+  const claimedPath = leasePathOrNull(evidence);
   if (
+    claimedPath === null ||
     !location.ok ||
-    comparePathIdentity(ExecutionLeaseProof.leasePathOf(evidence), location.path) !== 'EQUAL'
+    comparePathIdentity(claimedPath, location.path) !== 'EQUAL'
   ) {
     return Object.freeze({ code: 'LEASE_FOR_ANOTHER_REPOSITORY' as const });
   }

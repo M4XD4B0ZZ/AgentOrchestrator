@@ -29,7 +29,7 @@
  * cannot be asked to produce on demand.
  */
 
-import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -132,14 +132,19 @@ afterAll(removeRepoFixtures);
  * compare-and-swap refusal would be testing the fixture.
  */
 function repository(root: string): ResolvedRepository {
+  // The lease key, and it has to be a key a real repository could have. This
+  // said "the temporary root stands in for one" and passed `root` itself, which
+  // no clone matches: a common dir sits *beside* the work tree, never at it.
+  // Acquire proves that now — the root-is-its-own-common-dir pairing is what a
+  // review used to hold two authorities over one repository — so the fixture
+  // makes the directory it was only claiming to have.
+  const gitCommonDir = join(root, '.git');
+  mkdirSync(gitCommonDir, { recursive: true });
+
   return Object.freeze({
     root,
     id: 'repo-alpha',
-    // The lease key. A literal fixture has no Git directory to ask, so the
-    // temporary root stands in for one: the lease only needs a real directory
-    // it may create a file in, and using the root keeps each test's lease
-    // inside that test's own scratch space.
-    gitCommonDir: root,
+    gitCommonDir,
     defaultBranch: 'main',
     profilePath: join(root, '.agent-orchestrator', 'repo-profile.yaml'),
     schemaVersion: 1,

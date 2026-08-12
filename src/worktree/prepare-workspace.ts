@@ -107,6 +107,18 @@ export const WORKSPACE_PREPARATION_FAILURE_CODES = [
   'WORKTREE_VERIFICATION_FAILED',
   /** Verification failed *and* the created worktree could not be removed. */
   'WORKTREE_ROLLBACK_INCOMPLETE',
+  /**
+   * Verification failed and the lease was gone before the undo could run, so
+   * nothing was deleted.
+   *
+   * Kept apart from {@link WORKTREE_ROLLBACK_INCOMPLETE}, which they resemble on
+   * disk and not at all in what they mean. That one is Git declining to remove
+   * something this call still owns. This one is this call having stopped being
+   * the repository's writer — so the branch and the worktree may already belong
+   * to a successor that legitimately adopted them, and removing them would
+   * destroy somebody else's workspace rather than clean up its own.
+   */
+  'WORKTREE_ROLLBACK_NOT_AUTHORISED',
 ] as const;
 
 export type WorkspacePreparationFailureCode =
@@ -142,6 +154,8 @@ const PREPARATION_DETAIL: Readonly<Record<WorkspacePreparationFailureCode, strin
       'The created worktree did not match the requested branch, base commit or location, and was removed again.',
     WORKTREE_ROLLBACK_INCOMPLETE:
       'The created worktree failed verification and could not be removed again.',
+    WORKTREE_ROLLBACK_NOT_AUTHORISED:
+      'The created worktree failed verification and this invocation no longer holds the repository execution lease, so nothing was removed.',
   },
 );
 
@@ -299,10 +313,16 @@ export async function prepareTaskWorkspace(
   // not create.
   const verified = await verifyWorkspaceMatches(git, identity, basePinnedCommit);
   if (verified.verdict !== 'MATCHES' || verified.canonicalWorktreePath === null) {
-    const rolledBack = await rollBack(git, identity);
+    const rolledBack = await rollBack(git, identity, repository, options.lease);
+    if (rolledBack === 'ROLLED_BACK') return preparationFailure('WORKTREE_VERIFICATION_FAILED');
+    // Both remaining outcomes leave something behind, and both say so. What
+    // separates them is whether removing it would still have been this call's to
+    // do — which is the difference between "clean this up" and "do not touch it".
     return preparationFailure(
-      rolledBack ? 'WORKTREE_VERIFICATION_FAILED' : 'WORKTREE_ROLLBACK_INCOMPLETE',
-      !rolledBack,
+      rolledBack === 'NOT_AUTHORISED'
+        ? 'WORKTREE_ROLLBACK_NOT_AUTHORISED'
+        : 'WORKTREE_ROLLBACK_INCOMPLETE',
+      true,
     );
   }
 
@@ -583,6 +603,9 @@ export async function verifyWorkspaceMatches(
   return matchResult('MATCHES', canonical);
 }
 
+/** What an undo did. Never a boolean: "nothing removed" has two opposite causes. */
+type RollBackOutcome = 'ROLLED_BACK' | 'INCOMPLETE' | 'NOT_AUTHORISED';
+
 /**
  * Undoes a workspace this call created, after its verification failed.
  *
@@ -591,20 +614,52 @@ export async function verifyWorkspaceMatches(
  * from a code path that has just proven it does not understand the state of the
  * repository — exactly when force is least appropriate. If the plain removal
  * does not work, the caller reports residue instead of pretending.
+ *
+ * ── Why the lease is proved here, twice, and not by the caller ──────────────
+ *
+ * This is the second destructive site in the module and it had no gate at all.
+ * The creation gate above was the nearest proof, and between it and these two
+ * commands lie `git worktree add` — seconds on a cold checkout — and the six
+ * probes of {@link verifyWorkspaceMatches}. That is a *wider* window than the
+ * one that was judged unacceptable for creation, on the very two commands
+ * `remove-workspace.ts` gates one at a time.
+ *
+ * A review drove it end to end: lose the lease after `worktree add`, let a
+ * successor acquire the repository and adopt the pristine orphan, then fail
+ * verification here. Both commands ran, and deleted a workspace and a branch the
+ * successor legitimately owned. Nothing in the report named the lease.
+ *
+ * The failure it can still reach is a *lost* one, and the reachable trigger is
+ * ordinary: any of the six probes answering `UNAVAILABLE`, or a fresh worktree
+ * that reads dirty — which this repository's own fixtures record production Git
+ * doing under a system-wide `core.autocrlf=true`.
  */
-async function rollBack(git: GitRunner, identity: TaskWorkspaceIdentity): Promise<boolean> {
+async function rollBack(
+  git: GitRunner,
+  identity: TaskWorkspaceIdentity,
+  repository: ResolvedRepository,
+  lease: ExecutionLeaseEvidence,
+): Promise<RollBackOutcome> {
+  const authorised = (): boolean =>
+    verifyExecutionLeaseHeldFor(repository, lease).code === 'HELD';
+
+  if (!authorised()) return 'NOT_AUTHORISED';
   const removed = await git(identity.repositoryRoot, [
     'worktree',
     'remove',
     identity.worktreePath,
   ]);
-  if (removed.outcome !== 'OK') return false;
+  if (removed.outcome !== 'OK') return 'INCOMPLETE';
 
+  // Re-proved between the two, for the reason the whole slice re-proves things:
+  // the first command is a subprocess, and authority is a property of the moment
+  // an effect happens rather than of the moment before the previous one.
+  if (!authorised()) return 'NOT_AUTHORISED';
   const branchDeleted = await git(identity.repositoryRoot, [
     'branch',
     '-d',
     '--',
     identity.workBranch,
   ]);
-  return branchDeleted.outcome === 'OK';
+  return branchDeleted.outcome === 'OK' ? 'ROLLED_BACK' : 'INCOMPLETE';
 }

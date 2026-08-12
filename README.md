@@ -3588,6 +3588,52 @@ step was a subprocess that took minutes. A lease removed underneath a run stops 
 with `EXECUTION_LEASE_LOST`, distinct from `EXECUTION_LEASE_NOT_HELD` — "you lost
 it" and "you never had it" send an operator to different places.
 
+Which means the proof sits at the **effect**, not at the entrance to the function
+that eventually performs it. Four review rounds each found the same defect in a
+new place, and each time the fix was to move the proof rather than to widen it:
+
+| Effect | What the window was | Where the proof is now |
+| --- | --- | --- |
+| branch + worktree creation | 6 Git subprocesses, 383 ms after `startTask`'s gate | immediately before `mkdirSync` / `worktree add` |
+| the writing agent | 9 subprocesses, 585 ms after the driver's gate — it landed a real commit | the agent and verify **seams**, so a spawn site added later inherits it |
+| durable state writes | a cached boolean from the caller | immediately before the write, which also derives the write target |
+| worktree + branch **removal** | one gate for two commands | one gate per command |
+| the **rollback** of a failed creation | `worktree add` plus six verification probes — a wider window than the creation one | one gate per command, and it removes nothing without them |
+
+The last row is the one that says why the pattern kept recurring. The rollback is
+an *undo*, and an undo does not read as an effect until it deletes a branch a
+successor has since adopted — which a review then did, end to end. A refusal
+there reports `WORKTREE_ROLLBACK_NOT_AUTHORISED` with residue declared, kept
+apart from `WORKTREE_ROLLBACK_INCOMPLETE`: Git declining to remove something this
+run still owns, and this run no longer being allowed to remove anything, look
+identical on disk and are opposite instructions to a human.
+
+### One repository, proved before anything is claimed for it
+
+The lease key is the Git common directory, and `LeaseRepository` is a structural
+interface, so nothing in the type system ties its fields to one place. A review
+paired repository A's `gitCommonDir` — which decides *which lease file is read* —
+with repository B's `root`, which is what callers then write into. Every field
+was genuine; only the combination was a lie, and it acquired a second live
+authority over B alongside B's own honest lease.
+
+No field of the record can settle that, because the record's own
+`repositoryRoot` is written *from* the record at acquire time and so agrees with
+it. It is settled against the filesystem instead, in the three shapes Git
+actually produces — all three measured here, not read:
+
+```
+<root>/.git is a directory            -> it is the common dir            (ordinary clone)
+<root>/.git reads gitdir: <X>/worktrees/<n> -> the common dir is <X>     (linked worktree)
+<root>/.git reads gitdir: <X>         -> the common dir is <X>           (separate git dir)
+```
+
+The third was absent from the first draft of that rule, which would have refused
+a legitimate `git init --separate-git-dir` repository outright. The second is why
+this is not the containment check it looks like it should be: a linked worktree's
+root is nowhere near its common dir, and two worktrees of one clone are
+deliberately **one** execution domain.
+
 ### Recovery is refused, and the refusal is measured
 
 The question a stale lease asks is whether a dead owner proves no writer survives
