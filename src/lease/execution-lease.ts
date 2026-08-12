@@ -40,7 +40,7 @@
  *
  * The first version claimed with `open(…, 'wx')` and wrote the record through
  * the same handle afterwards. That is exclusive, and it was not enough — proven
- * by the real-process race in `tests/dist-artifact/`, not by reasoning. Eight
+ * by the real-process race in `tests/dist-artifact/`, not by reasoning. Sixteen
  * processes reaching for one lease produced exactly one winner every time, and
  * *some of the losers saw the winner's file before its record was in it*. They
  * refused, correctly, and refused with the wrong word: `STALE_LEASE_RECOVERY_UNSAFE`

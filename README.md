@@ -3728,8 +3728,12 @@ that has never survived a review is worse than none: it carries the tool's
 authority and was wrong every time anyone looked. So the productive path is
 **gone** — no subcommand, no exported function, no exit-code contract, no
 sentence pointing at it. `tests/v2-07l-execution-lease.test.ts` pins that as a
-contract rather than leaving it to tidiness, including that no shipped source
-file mentions such a command.
+contract rather than leaving it to tidiness: no operator-facing text names an
+`agent-loop lease break|clear|force` invocation, and no rendered refusal points
+at a command that does not exist. The source still *discusses* the withdrawn
+command, deliberately — `cli/lease-command.ts` records what each attempt got
+wrong, and the module header sends readers there — because the reason a command
+is absent is worth more than its absence.
 
 What remains for a crashed run is a **manual step, explicitly outside what this
 build guarantees**, printed by `lease status` when the recorded owner cannot be

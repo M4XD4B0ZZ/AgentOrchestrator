@@ -88,6 +88,7 @@ import { loadTaskState } from '../src/state/state-store.js';
 import {
   exitCodeForReleaseOutcome,
   exitCodeForRunOutcome,
+  exitCodeForStartOutcome,
 } from '../src/cli/run-exit-codes.js';
 import { runImplementStep, runLoopStep, runVerifyStep } from '../src/loop/loop-step.js';
 import { readExecutionBrief } from '../src/plan/task-brief.js';
@@ -1999,9 +2000,26 @@ describe('the fenced accessor is the only way a step reaches a subprocess', () =
     // `runReviewStep` - which no test calls directly - and the whole suite
     // stayed green.
     //
-    // So the *mechanism* is proven behaviourally, and its universality is proven
-    // here, statically, over the whole module. A fifth spawn site added later
-    // fails this without anyone having to remember to extend a list.
+    // So the *mechanism* is proven behaviourally, and its universality is
+    // proven here, statically, over the whole module.
+    //
+    // ── What this pin covers, stated exactly ──────────────────────────────
+    //
+    // It said "a fifth spawn site added later fails this without anyone having
+    // to remember to extend a list". A review disproved that in one edit:
+    // inserting a direct `runAgentCommand(...)` call into a step left the pin
+    // green, because the first count only recognises three helpers by name. An
+    // overstated pin is worse than a narrow one — it is a claim nobody rechecks.
+    //
+    // The two counts below now cover two distinct routes to a subprocess:
+    //   1. through one of the three spawn helpers — each must receive a leased
+    //      runner, so a fourth call to any of them fails the equality;
+    //   2. through the raw runners themselves — which may appear only where the
+    //      accessors read them.
+    //
+    // What it still cannot see: a *new* helper in another module that defaults
+    // to a raw runner internally. That is the residue, and it is written down
+    // rather than papered over.
     const source = readFileSync(join(PACKAGE_ROOT, 'src', 'loop', 'loop-step.ts'), 'utf8');
 
     const spawners = [
@@ -2012,6 +2030,18 @@ describe('the fenced accessor is the only way a step reaches a subprocess', () =
     // Every spawner call receives exactly one leased runner.
     expect(spawners).toBeGreaterThan(0);
     expect(leased).toBe(spawners);
+
+    // The raw runners are reachable from exactly one place each: the accessor
+    // that fences them. Anything else calling them directly - which is what a
+    // review inserted, and what the counts above are blind to - fails here.
+    const rawAgentUses = [...source.matchAll(/\brunAgentCommand\b/g)].length;
+    const rawVerifyUses = [...source.matchAll(/\brunVerificationCommand\b/g)].length;
+    // The import, the mention in `leasedAgent`'s header, and the one real use.
+    expect(rawAgentUses).toBe(3);
+    // The import and the one real use.
+    expect(rawVerifyUses).toBe(2);
+    expect(source).toContain('return (deps.agent ?? runAgentCommand)(id, args, cwd, payload);');
+    expect(source).toContain('return (deps.verify ?? runVerificationCommand)(command, args, cwd);');
 
     // And no site hands over the raw dependency instead. This is the shape the
     // module used to have, where an *absent* seam fell through to the real
@@ -2155,5 +2185,87 @@ describe('the workspace removal is fenced by its own gate, not by its caller', (
     // Still on disk and still on the branch list, for whoever owns them now.
     expect(existsSync(workspace.worktreePath)).toBe(true);
     expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).not.toBe('');
+  });
+});
+
+/* ─────────── 24. the entry gate, and the window after it ───────────────── */
+
+describe('a start without the lease opens nothing, and a start that loses it says so', () => {
+  it('runs no preflight and no Git command when the lease was never held', async () => {
+    // The entry gate's comment says it sits "ahead of every other gate,
+    // including the cheap syntactic ones", and the test that covers this
+    // refusal says "refused before anything was opened" - while asserting only
+    // the outcome, the workspace and the residue, all three of which the *next*
+    // gate supplies just as well. A review deleted the entry gate and every
+    // suite stayed green, with one auth preflight and two Git commands now
+    // running before the refusal. In production that preflight starts two real
+    // subscription CLIs.
+    //
+    // So the claim is measured as what it says: nothing was opened.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    // Genuine evidence for a lease that is over - the shape a stale caller has.
+    expect(releaseRepositoryExecutionLease(evidence).code).toBe('RELEASED');
+
+    let preflights = 0;
+    let gitCommands = 0;
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: async (cwd, args) => {
+          gitCommands += 1;
+          return runGitCommand(cwd, args);
+        },
+        now: tickingClock(),
+        authPreflight: async () => {
+          preflights += 1;
+          return authPreflightPasses();
+        },
+        lease: evidence,
+      },
+    );
+
+    expect(started.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(preflights).toBe(0);
+    expect(gitCommands).toBe(0);
+    expect(exitCodeForStartOutcome(started.outcome)).toBe(4);
+  });
+
+  it('reports a lease lost during the preflight as not held, not as a refused workspace', async () => {
+    // The gate before the workspace exists for this window: `deps.authPreflight`
+    // is a capability dump plus two real subscription CLIs, measured at 2552 ms
+    // for the dump alone, and a review released the lease inside it and watched
+    // a branch and a worktree land.
+    //
+    // Removing that gate lands no effect today - `prepareTaskWorkspace` refuses
+    // at its own gate - but it turns exit 4 into exit 3, which is the collapse
+    // `START_TASK_EXIT_CODES` exists to prevent: "nothing is wrong, retry"
+    // becoming "an operator must act". Nothing pinned that.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: async () => {
+          // Gone during the preflight: held at the door, absent by the time the
+          // first repository mutation would happen.
+          releaseRepositoryExecutionLease(evidence);
+          return authPreflightPasses();
+        },
+        lease: evidence,
+      },
+    );
+
+    expect(started.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(started.outcome).not.toBe('WORKSPACE_REFUSED');
+    // Exit 4 is "this invocation may not act here"; exit 3 asks a human to
+    // intervene over a repository where nothing is wrong.
+    expect(exitCodeForStartOutcome(started.outcome)).toBe(4);
+    expect(started.residue).toBe(false);
+    // And nothing was created on the way.
+    expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).toBe('');
   });
 });

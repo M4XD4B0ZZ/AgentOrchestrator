@@ -155,7 +155,7 @@ const PREPARATION_DETAIL: Readonly<Record<WorkspacePreparationFailureCode, strin
     WORKTREE_ROLLBACK_INCOMPLETE:
       'The created worktree failed verification and could not be removed again.',
     WORKTREE_ROLLBACK_NOT_AUTHORISED:
-      'The created worktree failed verification and this invocation no longer holds the repository execution lease, so nothing was removed.',
+      'The created worktree failed verification and this invocation no longer holds the repository execution lease, so the undo stopped where it was. Whatever it had not already removed is still there.',
   },
 );
 
