@@ -179,6 +179,13 @@ const START_TASK_EXIT_CODES = Object.freeze({
   // Nothing was created, nothing is out of place, and the next invocation may
   // well succeed — so a refusal, not an operator condition.
   EXECUTION_LEASE_NOT_HELD: EXIT_RUN_REFUSED,
+  // Lost *after* the workspace was created, so a worktree and a branch exist
+  // that no durable state accounts for. Same reasoning as `STATE_NOT_RECORDED`
+  // below, and deliberately the same code: an operator has to clean it up, so it
+  // is not a 4. A review found this case sharing 4 with the refusal above —
+  // identical residue, opposite advice, and a scheduler that would retry
+  // straight into a `WORKSPACE_COLLISION`.
+  EXECUTION_LEASE_LOST: EXIT_RUN_NEEDS_OPERATOR,
   // An operator must act before anything may run.
   AUTH_PREFLIGHT_FAILED: EXIT_RUN_NEEDS_OPERATOR,
   WORKSPACE_COLLISION: EXIT_RUN_NEEDS_OPERATOR,

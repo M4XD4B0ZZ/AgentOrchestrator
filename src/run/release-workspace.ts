@@ -257,7 +257,10 @@ export async function releaseTaskWorkspace(
     });
   }
 
-  const removal = await removeTaskWorkspace(repository, task, { git: deps.git });
+  const removal = await removeTaskWorkspace(repository, task, {
+    git: deps.git,
+    lease: deps.lease,
+  });
   if (!removal.ok) {
     return result({
       outcome: 'REMOVE_FAILED',

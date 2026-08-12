@@ -33,6 +33,8 @@
  * through an orchestrator primitive.
  */
 
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { localBranchRef, LOCAL_BRANCH_REF_PREFIX } from '../repo/branch-name.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -49,6 +51,14 @@ export const WORKSPACE_REMOVAL_FAILURE_CODES = [
   ...WORKSPACE_IDENTITY_FAILURE_CODES,
   /** A Git command could not be run at all, or its argument was refused. */
   'GIT_UNAVAILABLE',
+  /**
+   * The caller does not hold this repository's execution lease *now*.
+   *
+   * Re-proved at each destructive command rather than inherited from the
+   * caller: this is the boundary where a worktree and a branch are deleted, and
+   * authority is a property of the moment the deletion happens.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
   /**
    * Git does not register a worktree at the derived path for this repository,
    * or registers one holding a different branch. Nothing was touched.
@@ -73,6 +83,8 @@ export const WORKSPACE_REMOVAL_FAILURE_CODES = [
 export type WorkspaceRemovalFailureCode = (typeof WORKSPACE_REMOVAL_FAILURE_CODES)[number];
 
 const REMOVAL_DETAIL: Readonly<Record<WorkspaceRemovalFailureCode, string>> = Object.freeze({
+  EXECUTION_LEASE_NOT_HELD:
+    'This invocation does not hold the repository execution lease, so nothing was removed.',
   TASK_ID_INVALID: 'The task id is not a legal task identifier.',
   REPOSITORY_ROOT_UNSUITABLE:
     'The repository root is not an absolute path with a directory name of its own.',
@@ -119,6 +131,16 @@ export type WorkspaceRemovalResult = WorkspaceRemovalSuccess | WorkspaceRemovalF
 export interface WorkspaceRemovalOptions {
   /** The Git seam. Defaults to the real one. */
   readonly git?: GitRunner;
+  /**
+   * The execution lease, re-proved here at each destructive command.
+   *
+   * **Required**, and not defaulted. A caller that has proved the lease and then
+   * spent several Git subprocesses reaching this function has proved it about a
+   * moment that has passed — measured at 260 ms and three subprocesses for
+   * `releaseTaskWorkspace`, with a successor legitimately acquiring inside the
+   * gap and losing its worktree and branch anyway.
+   */
+  readonly lease: ExecutionLeaseEvidence;
 }
 
 function removalFailure(
@@ -192,8 +214,17 @@ async function classifyAncestry(
 export async function removeTaskWorkspace(
   repository: ResolvedRepository,
   task: TaskDefinition,
-  options: WorkspaceRemovalOptions = {},
+  options: WorkspaceRemovalOptions,
 ): Promise<WorkspaceRemovalResult> {
+  // The authority check lives *here*, at the destructive boundary, rather than
+  // only in the caller.
+  //
+  // `releaseTaskWorkspace` proved the lease before calling this — and a review
+  // measured three more Git subprocesses and 260 ms between that proof and the
+  // `worktree remove` below, then lost the lease to a legitimate successor
+  // inside the gap and watched its worktree and branch deleted anyway. A gate
+  // in a caller is a gate at whatever distance the caller happens to have; a
+  // gate here is a gate at the effect.
   const git = options.git ?? runGitCommand;
 
   const derived = deriveTaskWorkspaceIdentity(repository, task.id);
@@ -252,11 +283,21 @@ export async function removeTaskWorkspace(
   }
 
   // --- Remove, unforced ----------------------------------------------------
+  const beforeRemoval = verifyExecutionLeaseHeldFor(repository, options.lease);
+  if (beforeRemoval.code !== 'HELD') return removalFailure('EXECUTION_LEASE_NOT_HELD');
+
   const removed = await git(root, ['worktree', 'remove', identity.worktreePath]);
   if (removed.outcome !== 'OK') return removalFailure('WORKTREE_REMOVE_FAILED');
 
-  const branchDeleted = await git(root, ['branch', '-d', '--', identity.workBranch]);
-  const branchRemoved = branchDeleted.outcome === 'OK';
+  // And again before the branch. One subprocess apart, and it is a second
+  // destructive command: a lease lost between the two would otherwise still
+  // delete the branch.
+  const beforeBranch = verifyExecutionLeaseHeldFor(repository, options.lease);
+  const branchDeleted =
+    beforeBranch.code === 'HELD'
+      ? await git(root, ['branch', '-d', '--', identity.workBranch])
+      : null;
+  const branchRemoved = branchDeleted !== null && branchDeleted.outcome === 'OK';
 
   return Object.freeze({
     ok: true as const,

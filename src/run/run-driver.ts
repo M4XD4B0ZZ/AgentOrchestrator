@@ -679,7 +679,18 @@ export async function runTask(
       }
       if (!resumed.save.ok) {
         return stop({
-          outcome: resumed.save.code === 'STATE_CONFLICT' ? 'STATE_CONFLICT' : 'STATE_NOT_RECORDED',
+          // The same three-way split as the loop's write below. A review found
+          // this site still folding a lost lease into `STATE_NOT_RECORDED` —
+          // the collapse `RUN_OUTCOMES` exists to prevent — because the fix was
+          // applied to its sibling and not to it. The window is real: the
+          // step-0 gate and this write are separated by a reconciliation and its
+          // Git subprocesses.
+          outcome:
+            resumed.save.code === 'EXECUTION_LEASE_LOST'
+              ? 'EXECUTION_LEASE_LOST'
+              : resumed.save.code === 'STATE_CONFLICT'
+                ? 'STATE_CONFLICT'
+                : 'STATE_NOT_RECORDED',
           state: state.state,
           steps,
           reasonCodes: Object.freeze([resumed.save.code]),

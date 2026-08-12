@@ -18,11 +18,7 @@
  * are prose and are not held to it.
  */
 
-import type {
-  LeaseAcquireFailureCode,
-  LeaseBreakCode,
-  LeaseInspection,
-} from '../lease/execution-lease.js';
+import type { LeaseAcquireFailureCode, LeaseInspection } from '../lease/execution-lease.js';
 import { line } from './render-attended-run.js';
 
 /**
@@ -43,46 +39,14 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
       'A lease is present and this build cannot prove it is safe to take: its owner process\n' +
       '  is not observably running, or the record cannot be read. It is deliberately not\n' +
       '  taken over - a dead owner does not prove that no agent process survived it. Run\n' +
-      '  `agent-loop lease status` and, if you are certain nothing is running, clear it with\n' +
-      '  `agent-loop lease break --attended`.',
+      '  `agent-loop lease status`, which reports what is there and what clearing it would\n' +
+      '  require of you. There is no command that clears a lease, and no --force.',
     LEASE_LOCATION_UNSUITABLE:
       'No lease location could be derived for this repository, so no exclusive claim could\n' +
       '  be made. Nothing was started.',
     LEASE_WRITE_FAILED:
       'The lease claim could not be recorded, so it was given back. Nothing was started.',
   });
-
-/** One static sentence per break outcome. Closed, and total by type. */
-export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakCode, string>> = Object.freeze({
-  BROKEN:
-    'The lease you identified was removed. This repository has no execution owner now, and\n' +
-    '  the next invocation may take one.',
-  LEASE_ABSENT: 'There is no lease to break. This repository already has no execution owner.',
-  LEASE_CHANGED:
-    'The lease on disk is not the one this break named. Nothing was removed: another\n' +
-    '  invocation has taken, released or replaced it since you looked. Inspect it again.',
-  LEASE_OWNER_ALIVE:
-    'The recorded owner process is running, so this is not a stale lease. Nothing was\n' +
-    '  removed - an operator cannot assert a live process away.',
-  LEASE_OWNER_LIVENESS_UNDETERMINED:
-    'Whether the recorded owner is running could not be established, so nothing was\n' +
-    '  removed. A refusal to answer is never read here as an absence.',
-  OWNER_PID_REQUIRED:
-    'This lease records an owner, so a break must name it back with --owner-pid. Nothing\n' +
-    '  was removed.',
-  OWNER_PID_MISMATCH:
-    'The owner named does not match the one this lease records. Nothing was removed.',
-  OWNER_PID_UNEXPECTED:
-    'This lease records no owner - it cannot be read - so --owner-pid claims something you\n' +
-    '  did not observe. Identify it by --expected-revision alone. Nothing was removed.',
-  LEASE_UNREADABLE: 'The lease path could not be read at all. Nothing was removed.',
-  LEASE_LOCATION_UNSUITABLE:
-    'No lease location could be derived for this repository. Nothing was removed.',
-  LEASE_REMOVE_FAILED:
-    'Every check held and the removal did not complete. Run `lease status` before\n' +
-    '  doing anything else: the detail code says whether the lease is still there or\n' +
-    '  whether it was detached and could not be read back.',
-});
 
 /** One static sentence per inspected state. Closed, and total by type. */
 export const LEASE_STATE_SENTENCES: Readonly<Record<LeaseInspection['state'], string>> =
@@ -131,26 +95,38 @@ export function renderLeaseStatus(inspection: LeaseInspection): string {
     line('Acquired', inspection.acquiredAt ?? 'unknown'),
   ];
 
-  // The exact command that would clear this lease, with the values already
-  // filled in. Not a convenience: the whole point of `--expected-revision` is
-  // that an operator names back what they read, and a report that made them
-  // retype a 64-character digest would be a report that trains them to skip it.
+  // Recovery, and it is deliberately **not** a command.
   //
-  // **Never printed for a lease whose owner is running.** A break would refuse
-  // it anyway, so suggesting one is at best noise — and at worst it is what
-  // walks an operator into clearing a healthy run, which is exactly how the
-  // unparseable-lease defect was reachable in practice.
+  // This build ships no way to clear a lease other than its owner releasing it.
+  // An attended break existed here and was withdrawn: three adversarial review
+  // rounds each found a fresh way for it to destroy an authority somebody had
+  // legitimately acquired — an ABA on the removal, then a placeholder that
+  // reintroduced the same defect one level up. Shipping a destructive command
+  // that has never survived a review is worse than shipping none, so what is
+  // offered instead is an instruction to a human, stated as being outside what
+  // the tool guarantees.
+  //
+  // Printed only when the recorded owner cannot be found. For a running owner
+  // there is nothing to recover from, and telling an operator how to delete the
+  // file is how a healthy run gets cleared.
   if (
     (inspection.state === 'HELD' || inspection.state === 'UNPARSEABLE') &&
     inspection.liveness === 'NOT_FOUND'
   ) {
     lines.push(
       '',
-      '  To clear a lease you are certain is stale, name back exactly what you just read:',
-      '    agent-loop lease break --repository <abs path> --attended \\',
-      `      --expected-revision ${inspection.revision ?? '<revision>'}${
-        inspection.ownerPid === null ? '' : ` \\\n      --owner-pid ${String(inspection.ownerPid)}`
-      }`,
+      '  This lease records an owner that is not running. Clearing it is a manual step and',
+      '  is OUTSIDE what this build guarantees - there is no command, and no --force:',
+      '',
+      '    1. establish that no orchestrator process and no agent process of that run is',
+      '       still alive. A process id that is gone does not prove this: an agent can',
+      '       outlive the orchestrator that started it.',
+      '    2. re-run `agent-loop lease status` and confirm it still reports what you just',
+      '       read - in particular the same revision.',
+      '    3. delete the file at the path above, deliberately.',
+      '',
+      '  A supported attended recovery flow is a separate piece of work; until it exists,',
+      '  step 1 is a judgement this tool cannot make for you.',
     );
   }
 

@@ -163,7 +163,7 @@ describe('every run outcome has an exit code', () => {
  * failure mode the V2-01 review found in the run-outcome section above.
  *
  * Because it is written out, this constant is also the place where the *count* is
- * asserted: fifteen. (V2-01 scoped the slice as "fourteen outcomes" and the
+ * asserted: sixteen. (V2-01 scoped the slice as "fourteen outcomes" and the
  * vocabulary actually had thirteen; the tests stated the real number rather than
  * the expected one. V2-06A added `ADOPTED`, which was the fourteenth, and V2-07L
  * added `EXECUTION_LEASE_NOT_HELD` — each arrived at by counting again, not by
@@ -188,6 +188,11 @@ const EXPECTED_START_EXIT_CODES: Readonly<Record<string, number>> = Object.freez
   // Somebody else is this repository's writer, or this invocation never was.
   // Nothing was created, so it is a refusal rather than an operator condition.
   EXECUTION_LEASE_NOT_HELD: 4,
+  // Lost after the workspace existed: a worktree and a branch are on disk that
+  // no state accounts for. Residue is an operator's to clear, so 3 — the same
+  // reasoning `STATE_NOT_RECORDED` carries, and the distinction a review found
+  // collapsed when both lease cases shared one outcome.
+  EXECUTION_LEASE_LOST: 3,
   // An operator must act before anything may run.
   AUTH_PREFLIGHT_FAILED: 3,
   WORKSPACE_COLLISION: 3,
@@ -204,7 +209,7 @@ describe('every start outcome has an exit code', () => {
     const expected = Object.keys(EXPECTED_START_EXIT_CODES).sort();
 
     expect(expected).toEqual(declared);
-    expect(START_TASK_OUTCOMES).toHaveLength(15);
+    expect(START_TASK_OUTCOMES).toHaveLength(16);
     expect(new Set(declared).size).toBe(declared.length);
   });
 
@@ -237,6 +242,7 @@ describe('every start outcome has an exit code', () => {
       ].sort(),
       [EXIT_RUN_NEEDS_OPERATOR]: [
         'AUTH_PREFLIGHT_FAILED',
+        'EXECUTION_LEASE_LOST',
         'STATE_NOT_RECORDED',
         'STATE_UNUSABLE',
         'WORKSPACE_COLLISION',

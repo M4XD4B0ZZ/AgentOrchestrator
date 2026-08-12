@@ -47,10 +47,8 @@ import { join, relative } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
-import { BREAK_ATTENDANCE_WITHHELD_SENTENCE } from '../src/cli/lease-command.js';
 import {
   LEASE_ACQUIRE_SENTENCES,
-  LEASE_BREAK_SENTENCES,
   LEASE_LIVENESS_SENTENCES,
   LEASE_STATE_SENTENCES,
   renderLeaseStatus,
@@ -62,7 +60,6 @@ import {
 } from '../src/core/execution-lease-evidence.js';
 import {
   acquireRepositoryExecutionLease,
-  breakRepositoryExecutionLease,
   inspectRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
   verifyExecutionLeaseHeld,
@@ -880,9 +877,9 @@ describe('a lease nobody released is never taken over automatically', () => {
   });
 });
 
-/* ────────────────────────── 8. the attended break ───────────────────────── */
+/* ──────────── 8. there is no productive way to clear a lease ────────────── */
 
-describe('lease status reports what a break must name', () => {
+describe('lease status reports a stale lease without offering to clear it', () => {
   it('reports a free repository as free, with no revision to name', async () => {
     const fixture = await leasableRepository();
 
@@ -906,318 +903,108 @@ describe('lease status reports what a break must name', () => {
     expect(status.liveness).toBe('ALIVE');
   });
 
-  it('reports a revision for an unparseable lease too, so it has an exit', async () => {
+  it('recovers the owner of a lease written by a build it cannot parse', async () => {
+    // A newer `schemaVersion`, or a field this build's `.strict()` schema does
+    // not know, is a perfectly well-formed lease with a possibly *running*
+    // owner. Reporting `UNKNOWABLE` for it is what once walked an operator into
+    // clearing a healthy run, so the owner is recovered from the bytes and its
+    // liveness reported — for diagnosis only; nothing acts on it.
     const fixture = await leasableRepository();
     const evidence = heldLease(fixture);
     const path = inspectRepositoryExecutionLease(fixture.repository).path;
     releaseRepositoryExecutionLease(evidence);
-    writeFileSync(path, 'not a lease at all', 'utf8');
-
-    const status = inspectRepositoryExecutionLease(fixture.repository);
-
-    expect(status.state).toBe('UNPARSEABLE');
-    expect(status.revision).toBe(revisionOfFile(path));
-    expect(status.ownerPid).toBeNull();
-    // Nothing can be said about a process nobody recorded.
-    expect(status.liveness).toBe('UNKNOWABLE');
-  });
-});
-
-describe('breaking a lease names exactly the lease that was inspected', () => {
-  it('removes a stale lease the operator identified by revision and owner', async () => {
-    const fixture = await leasableRepository();
-    heldLease(fixture, 'run-0001');
-    const status = inspectRepositoryExecutionLease(fixture.repository);
-
-    const broken = breakRepositoryExecutionLease(
-      fixture.repository,
-      { expectedRevision: status.revision, ownerPid: status.ownerPid },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(broken.code).toBe('BROKEN');
-    expect(existsSync(status.path)).toBe(false);
-    expect(acquire(fixture).ok).toBe(true);
-  });
-
-  it('refuses when the lease changed between inspection and break', async () => {
-    const fixture = await leasableRepository();
-    const first = heldLease(fixture, 'run-0001');
-    const observed = inspectRepositoryExecutionLease(fixture.repository);
-
-    // The window `--expected-revision` exists to close: the lease the operator
-    // looked at is gone, and a *different* run holds one now.
-    releaseRepositoryExecutionLease(first);
-    heldLease(fixture, 'run-0002');
-
-    const refused = breakRepositoryExecutionLease(
-      fixture.repository,
-      { expectedRevision: observed.revision, ownerPid: observed.ownerPid },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(refused.code).toBe('LEASE_CHANGED');
-    expect(existsSync(observed.path)).toBe(true);
-    expect(inspectRepositoryExecutionLease(fixture.repository).runId).toBe('run-0002');
-  });
-
-  it('refuses to break a lease from another build whose owner is running', async () => {
-    // The unparseable branch used to probe no liveness at all, so a lease this
-    // build cannot validate — a newer `schemaVersion`, a field its `.strict()`
-    // schema does not know — was breakable while its owner was driving agents.
-    // Worse, the honest operator was the one refused: naming the real, running
-    // owner gave OWNER_PID_UNEXPECTED, while the command `lease status` printed
-    // for them succeeded. Two orchestrator builds on one machine is all it took.
-    const fixture = await leasableRepository();
-    const evidence = heldLease(fixture);
-    const path = inspectRepositoryExecutionLease(fixture.repository).path;
-    releaseRepositoryExecutionLease(evidence);
-
-    // A well-formed lease from a build this one does not know, owned by a
-    // process that is certainly running: this one.
     writeFileSync(
       path,
-      `${JSON.stringify(
-        {
-          schemaVersion: 2,
-          leaseKey: fixture.repository.gitCommonDir,
-          repositoryRoot: fixture.repository.root,
-          repositoryId: fixture.repository.id,
-          ownerPid: process.pid,
-          ownerNonce: 'a'.repeat(64),
-          acquiredAt: '2026-08-12T10:00:00.000Z',
-          runId: 'run-from-a-newer-build',
-          blockId: null,
-        },
-        null,
-        2,
-      )}\n`,
+      `${JSON.stringify({
+        schemaVersion: 2,
+        leaseKey: fixture.repository.gitCommonDir,
+        repositoryRoot: fixture.repository.root,
+        repositoryId: fixture.repository.id,
+        ownerPid: process.pid,
+        ownerNonce: 'a'.repeat(64),
+        acquiredAt: '2026-08-12T10:00:00.000Z',
+        runId: 'run-from-a-newer-build',
+        blockId: null,
+      })}\n`,
       'utf8',
     );
 
     const status = inspectRepositoryExecutionLease(fixture.repository);
-    // The owner is recovered from the bytes even though the document is not
-    // this build's, so the report names who to ask about rather than shrugging.
+
     expect(status.state).toBe('UNPARSEABLE');
     expect(status.ownerPid).toBe(process.pid);
     expect(status.liveness).toBe('ALIVE');
-
-    expect(
-      breakRepositoryExecutionLease(fixture.repository, {
-        expectedRevision: status.revision,
-        ownerPid: null,
-      }).code,
-    ).toBe('OWNER_PID_REQUIRED');
-
-    expect(
-      breakRepositoryExecutionLease(fixture.repository, {
-        expectedRevision: status.revision,
-        ownerPid: process.pid,
-      }).code,
-    ).toBe('LEASE_OWNER_ALIVE');
-
-    expect(existsSync(path)).toBe(true);
   });
 
-  it('never offers a break for a lease whose owner is running', async () => {
-    // The report is what walked an operator into the case above, so it is held
-    // to the same rule the command is: a break that would be refused is never
-    // suggested.
+  it('offers manual recovery only for an owner that is not running', async () => {
     const fixture = await leasableRepository();
-    heldLease(fixture, 'run-alive');
+    heldLease(fixture, 'run-0009');
 
-    const report = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository));
-
-    expect(report).toContain('ALIVE');
-    expect(report).not.toContain('lease break');
-  });
-
-  it('refuses to break a lease whose owner is observably alive', async () => {
-    const fixture = await leasableRepository();
-    heldLease(fixture);
-    const status = inspectRepositoryExecutionLease(fixture.repository);
-
-    // The real probe, against this very process, which is certainly running.
-    const refused = breakRepositoryExecutionLease(fixture.repository, {
-      expectedRevision: status.revision,
-      ownerPid: status.ownerPid,
-    });
-
-    expect(refused.code).toBe('LEASE_OWNER_ALIVE');
-    expect(existsSync(status.path)).toBe(true);
-  });
-
-  it('refuses to break a lease whose owner liveness is undetermined', async () => {
-    const fixture = await leasableRepository();
-    heldLease(fixture);
-    const status = inspectRepositoryExecutionLease(fixture.repository);
-
-    const refused = breakRepositoryExecutionLease(
-      fixture.repository,
-      { expectedRevision: status.revision, ownerPid: status.ownerPid },
-      { processAlive: () => 'UNDETERMINED' },
+    const live = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository));
+    const stale = renderLeaseStatus(
+      inspectRepositoryExecutionLease(fixture.repository, { processAlive: () => 'NOT_FOUND' }),
     );
 
-    expect(refused.code).toBe('LEASE_OWNER_LIVENESS_UNDETERMINED');
-    expect(existsSync(status.path)).toBe(true);
+    // Nothing to recover from while somebody is running, and telling an operator
+    // how to delete the file is how a healthy run gets cleared.
+    expect(live).not.toContain('delete the file');
+    expect(stale).toContain('delete the file');
+    // Stated as being outside the guarantee, and never as a command.
+    expect(stale).toContain('OUTSIDE what this build guarantees');
+    expect(stale).not.toMatch(/agent-loop lease (break|clear|force)/);
+  });
+});
+
+describe('the productive break path is gone, not merely unused', () => {
+  /**
+   * The withdrawal is a *contract*, not a tidy-up.
+   *
+   * Three adversarial review rounds each found a fresh way for an attended
+   * break to destroy an authority somebody had legitimately acquired. A
+   * destructive operator command that has never survived a review is worse than
+   * none, so the whole productive path was removed — and "removed" has to mean
+   * that nothing is left for a caller to find, or the next slice inherits a
+   * half-live API that looks sanctioned.
+   */
+  it('exports no function that removes a lease other than its owner releasing it', async () => {
+    const lease = await import('../src/lease/execution-lease.js');
+
+    const removers = Object.keys(lease).filter((name) => /break|clear|force|takeover/i.test(name));
+    expect(removers).toEqual([]);
+    // The one remover that remains, and it is owner-bound: it takes only the
+    // evidence, so there is no path, no run id and no owner id to supply.
+    expect(typeof lease.releaseRepositoryExecutionLease).toBe('function');
+    expect(lease.releaseRepositoryExecutionLease.length).toBe(1);
   });
 
-  it('refuses a break that does not name the owner of a readable lease', async () => {
-    const fixture = await leasableRepository();
-    heldLease(fixture);
-    const status = inspectRepositoryExecutionLease(fixture.repository);
+  it('leaves no break vocabulary behind in the operator surface', async () => {
+    const render = await import('../src/cli/render-lease.js');
+    const command = await import('../src/cli/lease-command.js');
 
-    const refused = breakRepositoryExecutionLease(
-      fixture.repository,
-      { expectedRevision: status.revision, ownerPid: null },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(refused.code).toBe('OWNER_PID_REQUIRED');
-    expect(existsSync(status.path)).toBe(true);
+    expect(Object.keys(render).filter((name) => /BREAK/i.test(name))).toEqual([]);
+    expect(Object.keys(command).filter((name) => /BREAK/i.test(name))).toEqual([]);
   });
 
-  it('refuses a break that names the wrong owner', async () => {
-    const fixture = await leasableRepository();
-    heldLease(fixture);
-    const status = inspectRepositoryExecutionLease(fixture.repository);
+  it('registers only a read-only lease subcommand', async () => {
+    const { buildProgram } = await import('../src/cli/index.js');
+    const lease = buildProgram()
+      .commands.find((command) => command.name() === 'lease');
 
-    const refused = breakRepositoryExecutionLease(
-      fixture.repository,
-      { expectedRevision: status.revision, ownerPid: deadPid() },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(refused.code).toBe('OWNER_PID_MISMATCH');
-    expect(existsSync(status.path)).toBe(true);
+    expect(lease).toBeDefined();
+    expect(lease?.commands.map((command) => command.name())).toEqual(['status']);
   });
 
-  it('does not destroy a lease acquired after its own check (ABA)', async () => {
-    // The defect this closes, reproduced before it was fixed and kept here so
-    // it stays closed. Every gate of a break is about *bytes*; the removal used
-    // to be about a *name*, and between the two the name can come to hold
-    // something else:
-    //
-    //   operator inspects stale lease A  ->  A is released
-    //     ->  a new legitimate run acquires B  ->  the break unlinks B
-    //
-    // and it reported BROKEN, having satisfied its "never break a living owner"
-    // rule against A's dead owner. That is an authority defect, not a tidiness
-    // one: B's run loses the lease it holds, and a third writer may then take a
-    // repository B is still working in.
-    //
-    // The liveness probe is what makes this deterministic. It is a real syscall
-    // sitting inside the real window, so driving the swap from it reproduces the
-    // production race exactly rather than inventing one.
-    const fixture = await leasableRepository();
-    const a = acquire(fixture, 'run-A');
-    expect(a.ok).toBe(true);
-    if (!a.ok) return;
-    const observed = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-
-    let b: ReturnType<typeof acquire> | null = null;
-    const broken = breakRepositoryExecutionLease(
-      fixture.repository,
-      { expectedRevision: observed.revision, ownerPid: observed.ownerPid },
-      {
-        processAlive: () => {
-          expect(releaseRepositoryExecutionLease(a.evidence).code).toBe('RELEASED');
-          b = acquire(fixture, 'run-B');
-          // The operator's premise is true of A, and A is what they inspected.
-          return 'NOT_FOUND';
-        },
-      },
-    );
-
-    const successor = b as ReturnType<typeof acquire> | null;
-    expect(successor?.ok).toBe(true);
-    expect(broken.code).toBe('LEASE_CHANGED');
-    // The new run still holds what it took.
-    expect(existsSync(observed.path)).toBe(true);
-    if (successor === null || !successor.ok) return;
-    expect(verifyExecutionLeaseHeld(successor.evidence).code).toBe('HELD');
-    expect(inspectRepositoryExecutionLease(fixture.repository).runId).toBe('run-B');
-  });
-
-  it('leaves no quarantine file behind when it puts a lease back', async () => {
-    // The guarded removal detaches before it identifies, so a refusal has to
-    // restore *and* clean up. A `.breaking-` file accumulating in the
-    // administrative directory on every refused break would be residue nothing
-    // ever collects.
-    const fixture = await leasableRepository();
-    const a = acquire(fixture, 'run-A');
-    if (!a.ok) return;
-    const observed = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-
-    breakRepositoryExecutionLease(
-      fixture.repository,
-      { expectedRevision: observed.revision, ownerPid: observed.ownerPid },
-      {
-        processAlive: () => {
-          releaseRepositoryExecutionLease(a.evidence);
-          acquire(fixture, 'run-B');
-          return 'NOT_FOUND';
-        },
-      },
-    );
-
-    const residue = readdirSync(fixture.repository.gitCommonDir).filter((entry) =>
-      entry.includes('.breaking-'),
-    );
-    expect(residue).toEqual([]);
-  });
-
-  it('lets an operator clear an unparseable lease by its observed bytes alone', async () => {
-    const fixture = await leasableRepository();
-    const evidence = heldLease(fixture);
-    const path = inspectRepositoryExecutionLease(fixture.repository).path;
-    releaseRepositoryExecutionLease(evidence);
-    writeFileSync(path, '{"schemaVersion":1,"owner', 'utf8');
-    const status = inspectRepositoryExecutionLease(fixture.repository);
-
-    const broken = breakRepositoryExecutionLease(fixture.repository, {
-      expectedRevision: status.revision,
-      ownerPid: null,
-    });
-
-    expect(broken.code).toBe('BROKEN');
-    expect(existsSync(path)).toBe(false);
-  });
-
-  it('refuses an owner claim about a lease that records no owner', async () => {
-    const fixture = await leasableRepository();
-    const evidence = heldLease(fixture);
-    const path = inspectRepositoryExecutionLease(fixture.repository).path;
-    releaseRepositoryExecutionLease(evidence);
-    writeFileSync(path, 'not a lease at all', 'utf8');
-    const status = inspectRepositoryExecutionLease(fixture.repository);
-
-    const refused = breakRepositoryExecutionLease(fixture.repository, {
-      expectedRevision: status.revision,
-      ownerPid: process.pid,
-    });
-
-    expect(refused.code).toBe('OWNER_PID_UNEXPECTED');
-    expect(existsSync(path)).toBe(true);
-  });
-
-  it('refuses a break that names nothing at all', async () => {
-    const fixture = await leasableRepository();
-    heldLease(fixture);
-    const status = inspectRepositoryExecutionLease(fixture.repository);
-
-    const refused = breakRepositoryExecutionLease(
-      fixture.repository,
-      { expectedRevision: null, ownerPid: status.ownerPid },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(refused.code).toBe('LEASE_CHANGED');
-    expect(existsSync(status.path)).toBe(true);
+  it('mentions no break command anywhere in the shipped source', () => {
+    // A sentence is an interface too. An operator who reads "clear it with
+    // `agent-loop lease break`" in a refusal will go looking for a command that
+    // does not exist, and a maintainer will read it as a feature that regressed.
+    const offenders: string[] = [];
+    for (const file of sourceFiles()) {
+      if (/agent-loop lease (break|clear|force)/.test(readFileSync(file, 'utf8'))) {
+        offenders.push(relative(PACKAGE_ROOT, file));
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
@@ -1231,33 +1018,33 @@ describe('the lease report', () => {
     // printed sentences are.
     const all = [
       ...Object.values(LEASE_ACQUIRE_SENTENCES),
-      ...Object.values(LEASE_BREAK_SENTENCES),
       ...Object.values(LEASE_STATE_SENTENCES),
       ...Object.values(LEASE_LIVENESS_SENTENCES),
-      BREAK_ATTENDANCE_WITHHELD_SENTENCE,
     ].join('');
 
     expect([...all].filter((character) => character.codePointAt(0)! > 0x7f)).toEqual([]);
   });
 
-  it('tells an operator exactly what a break would have to name', async () => {
+  it('tells an operator what clearing a stale lease requires of them', async () => {
     const fixture = await leasableRepository();
     heldLease(fixture, 'run-0009');
-    // A lease a break could actually act on: the report is deliberately silent
-    // about breaking one whose owner is running, so a live lease would prove
-    // nothing here.
     const inspection = inspectRepositoryExecutionLease(fixture.repository, {
       processAlive: () => 'NOT_FOUND',
     });
 
     const report = renderLeaseStatus(inspection);
 
-    // The digest is 64 characters. A report that made an operator retype it is
-    // a report that trains them to skip `--expected-revision`, which is the one
-    // gate standing between a break and a legitimate successor's lease.
-    expect(report).toContain(`--expected-revision ${inspection.revision ?? ''}`);
-    expect(report).toContain(`--owner-pid ${String(process.pid)}`);
-    expect(report).toContain('--attended');
+    // The path, because they cannot act without it — and the judgement they
+    // have to make, because this build cannot make it for them. There is no
+    // command: an attended break was withdrawn after three review rounds each
+    // found a fresh way for it to destroy a legitimately acquired lease.
+    expect(report).toContain(inspection.path);
+    expect(report).toContain('no orchestrator process and no agent process');
+    expect(report).toContain('OUTSIDE what this build guarantees');
+    // No command is offered — the words "no --force" appear because the report
+    // says so, which is the opposite of offering one.
+    expect(report).not.toMatch(/agent-loop lease (break|clear|force)/);
+    expect(report).toContain('no --force');
   });
 
   it('never suggests a break for a repository nobody owns', async () => {

@@ -39,8 +39,10 @@ import {
   taskWithId,
   trackWorkspacesOf,
 } from './helpers/worktree-fixtures.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 
 afterAll(() => {
+  releaseTestLeases();
   removeTrackedWorkspaces();
   removeRepoFixtures();
 });
@@ -363,7 +365,7 @@ describe('I — a clean, owned workspace is released completely', () => {
     const workspace = await prepared(repository, 'V1-03');
     const identity = identityFor(repository, 'V1-03');
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(true);
     if (removal.ok) {
@@ -384,7 +386,7 @@ describe('I — a clean, owned workspace is released completely', () => {
   it('is safe to prepare the same task again afterwards', async () => {
     const repository = await freshRepository();
     await prepared(repository, 'V1-03');
-    await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     const again = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
     expect(again.ok).toBe(true);
@@ -400,7 +402,7 @@ describe('J — a workspace holding work is never destroyed', () => {
     const inProgress = join(workspace.worktreePath, 'in-progress.txt');
     writeFileSync(inProgress, 'half-finished work\n', 'utf8');
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {
@@ -422,7 +424,7 @@ describe('J — a workspace holding work is never destroyed', () => {
     git(workspace.worktreePath, ['commit', '--quiet', '-m', 'task work']);
     const commit = git(workspace.worktreePath, ['rev-parse', 'HEAD']).trim();
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {
@@ -445,7 +447,7 @@ describe('J2 — a base branch that no longer exists', () => {
     git(repository.root, ['switch', '--quiet', '-c', 'parked']);
     git(repository.root, ['branch', '-D', 'main']);
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {
@@ -478,7 +480,7 @@ describe('K — an unrelated worktree or branch is never removed', () => {
       identity.worktreePath,
     ]);
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {
@@ -500,7 +502,7 @@ describe('K — an unrelated worktree or branch is never removed', () => {
     mkdirSync(identity.worktreeParent, { recursive: true });
     git(repository.root, ['worktree', 'add', '--quiet', '--detach', identity.worktreePath, head]);
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {
@@ -517,7 +519,7 @@ describe('K — an unrelated worktree or branch is never removed', () => {
     const bystander = join(identity.worktreePath, 'not-a-worktree.txt');
     writeFileSync(bystander, 'keep\n', 'utf8');
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) expect(removal.code).toBe('WORKTREE_NOT_OWNED');
@@ -527,7 +529,7 @@ describe('K — an unrelated worktree or branch is never removed', () => {
   it('refuses when nothing is there at all', async () => {
     const repository = await freshRepository();
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {
@@ -541,7 +543,7 @@ describe('K — an unrelated worktree or branch is never removed', () => {
     const keep = await prepared(repository, 'V1-04');
     await prepared(repository, 'V1-03');
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'));
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(true);
     expect(existsSync(keep.worktreePath)).toBe(true);
@@ -572,7 +574,7 @@ describe('L — the same task id in two repositories stays independent', () => {
     expect(betaWorkspace.basePinnedCommit).toBe(git(beta.root, ['rev-parse', 'HEAD']).trim());
 
     // Releasing one leaves the other entirely alone.
-    const removal = await removeTaskWorkspace(alpha, taskWithId('SHARED-1'));
+    const removal = await removeTaskWorkspace(alpha, taskWithId('SHARED-1'), { lease: leaseFor(alpha) });
     expect(removal.ok).toBe(true);
     expect(existsSync(alphaWorkspace.worktreePath)).toBe(false);
     expect(existsSync(betaWorkspace.worktreePath)).toBe(true);

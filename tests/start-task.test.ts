@@ -39,6 +39,7 @@ import { createRepoFixture, removeRepoFixtures, git } from './helpers/repo-fixtu
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
+import { releaseRepositoryExecutionLease } from '../src/lease/execution-lease.js';
 import type { ExecutionLeaseEvidence } from '../src/core/execution-lease-evidence.js';
 
 afterEach(() => {
@@ -575,6 +576,41 @@ describe('the remaining refusals', () => {
     // Repairs nothing, and did not reach Git either.
     expect(readFileSync(statePath)).toEqual(before);
     expect(git(root, ['branch', '--list', 'ao/task/V2-03']).trim()).toBe('');
+  });
+
+  it('reports residue when the lease is lost after the workspace exists (V2-07L)', async () => {
+    // The second lease gate, and the one the exit code turns on. `startTask`
+    // proves the lease again immediately before creating the workspace, and
+    // again before the first durable write; losing it between those two leaves a
+    // worktree and a branch that no state accounts for. That is residue, and
+    // residue is an operator's to clear — which is why this is not the same
+    // outcome as being refused at the door.
+    const { repository, root } = await startableRepo();
+    const evidence = leaseFor(repository);
+
+    const result = await started(
+      { repository, taskId: 'V2-03' },
+      deps(repository, {
+        lease: evidence,
+        // The lease goes the instant the worktree exists — which is the window
+        // this gate is for. `replace` would be too late: it runs inside the
+        // atomic write, after the gate has already passed.
+        git: async (cwd, args) => {
+          const result = await runGitCommand(cwd, args);
+          if (args[0] === 'worktree' && args[1] === 'add') {
+            releaseRepositoryExecutionLease(evidence);
+          }
+          return result;
+        },
+      }),
+    );
+
+    expect(result.outcome).toBe('EXECUTION_LEASE_LOST');
+    expect(result.residue).toBe(true);
+    expect(result.workspace).not.toBeNull();
+    // The state was not written, and the workspace really is on disk.
+    expect(loadTaskState(root, 'V2-03').classification).toBe('STATE_MISSING');
+    expect(existsSync(result.workspace?.worktreePath ?? '')).toBe(true);
   });
 
   it('refuses an invocation that does not hold the execution lease (V2-07L)', async () => {

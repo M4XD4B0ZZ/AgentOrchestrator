@@ -115,6 +115,21 @@ export const START_TASK_OUTCOMES = [
    */
   'EXECUTION_LEASE_NOT_HELD',
   /**
+   * The lease was held when this start began and is not held now.
+   *
+   * Kept apart from {@link EXECUTION_LEASE_NOT_HELD} because the two leave the
+   * repository in opposite states, and the exit code follows the *state*, not
+   * the cause. `NOT_HELD` is refused before anything is opened, so nothing is
+   * out of place and a later invocation may simply succeed. This one can only
+   * be reached after the workspace exists, so a worktree and a branch are on
+   * disk that no durable state accounts for — `residue` is `true`, and an
+   * operator has to clean that up, exactly as `STATE_NOT_RECORDED` does.
+   *
+   * A review found both cases sharing one outcome and therefore one exit code:
+   * same residue, opposite advice.
+   */
+  'EXECUTION_LEASE_LOST',
+  /**
    * The same, over a workspace this task's own crashed start had left behind.
    *
    * Reported separately because an operator whose repository just healed itself
@@ -390,6 +405,23 @@ export async function startTask(
   }
 
   // --- 5. The workspace. The first thing that changes anything. ------------
+  //
+  // Proved again here, and this is the gate that matters most on this path.
+  // The entry gate at step 0 is now several seconds old: `deps.authPreflight`
+  // sits between them, and in production that is a capability dump plus two
+  // real subscription CLIs — measured at 2552 ms for the dump alone. A review
+  // released the lease inside that window and watched a branch and a worktree
+  // land with no authority at all, because the only later gate was in front of
+  // the *durable write* and these are repository mutations that happen before
+  // it. Nothing may be created here on a lease that is seconds stale.
+  const leaseBeforeMutation = verifyExecutionLeaseHeldFor(repository, deps.lease);
+  if (leaseBeforeMutation.code !== 'HELD') {
+    return stop({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      reasonCodes: Object.freeze([leaseBeforeMutation.code]),
+    });
+  }
+
   const prepared = await prepareTaskWorkspace(repository, task, { git: deps.git });
 
   // A collision may be this task's own crashed start. Only there is adoption
@@ -438,7 +470,7 @@ export async function startTask(
   const stillHeld = verifyExecutionLeaseHeldFor(repository, deps.lease);
   if (stillHeld.code !== 'HELD') {
     return stop({
-      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      outcome: 'EXECUTION_LEASE_LOST',
       workspace,
       // The workspace exists and no state records it. Reported for the same
       // reason a refused write reports it: an operator whose repository now

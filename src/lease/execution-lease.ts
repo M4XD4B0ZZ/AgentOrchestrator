@@ -45,8 +45,8 @@
  * *some of the losers saw the winner's file before its record was in it*. They
  * refused, correctly, and refused with the wrong word: `STALE_LEASE_RECOVERY_UNSAFE`
  * for a lease whose owner was running perfectly well. That is the one confusion
- * the two codes exist to prevent, and it points an operator straight at `lease
- * break` for a healthy run.
+ * the two codes exist to prevent, and it pointed an operator straight at
+ * clearing a healthy run.
  *
  * So the record is written to a temporary file in the same directory, flushed,
  * closed, and only then **linked** onto the lease name. `link` is atomic and
@@ -85,10 +85,16 @@
  * platform guarantee**, and it is not the orchestrator's to assert. Nothing here
  * takes a lease over automatically. An owner that cannot be shown to be running
  * is reported as {@link STALE_LEASE_RECOVERY_UNSAFE} and the lease is left
- * exactly where it is; clearing it is an operator's decision, made through
- * {@link breakRepositoryExecutionLease} with the lease they actually inspected
- * named back. Automatic recovery needs owned process containment first, and that
- * is a slice of its own — necessarily before unattended running.
+ * exactly where it is.
+ *
+ * This module also ships **no way to clear one** other than its owner releasing
+ * it. An attended break existed and was withdrawn after three adversarial review
+ * rounds each found a fresh way for it to destroy an authority somebody had
+ * legitimately acquired; `cli/lease-command.ts` records what each attempt got
+ * wrong. Recovery from a crash is a manual operator step that `lease status`
+ * spells out and that is explicitly outside what this build guarantees, and a
+ * supported flow for it is its own slice. Automatic recovery additionally needs
+ * owned process containment — necessarily before unattended running.
  *
  * ── Liveness may refuse, and may never permit ──────────────────────────────
  *
@@ -312,8 +318,8 @@ export interface LeaseInspection {
    * Digest of the exact bytes found, or `null` when there were none.
    *
    * Present for `UNPARSEABLE` as well as `HELD`, deliberately: it is what an
-   * operator names back to {@link breakRepositoryExecutionLease}, and a lease
-   * that cannot be parsed is exactly the one that most needs an exit.
+   * operator confirms has not changed before clearing a lease by hand, and a
+   * lease that cannot be parsed is exactly the one that most needs an exit.
    */
   readonly revision: string | null;
   readonly ownerPid: number | null;
@@ -1076,160 +1082,20 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   return Object.freeze({ code: 'RELEASED' as const, detail: null });
 }
 
-/* ──────────────────────────── the attended break ────────────────────────── */
+/* ─────────────────────────── reading raw bytes ──────────────────────────── */
 
-export const LEASE_BREAK_CODES = [
-  /** The lease the operator named was removed. */
-  'BROKEN',
-  /** There is nothing to break. */
-  'LEASE_ABSENT',
-  /** The bytes on disk are not the ones the operator inspected. */
-  'LEASE_CHANGED',
-  /** The recorded owner is running. Nothing an operator asserts changes that. */
-  'LEASE_OWNER_ALIVE',
-  /** Whether the recorded owner is running could not be established. */
-  'LEASE_OWNER_LIVENESS_UNDETERMINED',
-  /** A readable lease names an owner, and the break did not name it back. */
-  'OWNER_PID_REQUIRED',
-  /** The break named an owner the lease does not record. */
-  'OWNER_PID_MISMATCH',
-  /** The break named an owner for a lease that records none. */
-  'OWNER_PID_UNEXPECTED',
-  /** Nothing could be read at the lease path. */
-  'LEASE_UNREADABLE',
-  /** No lease path can be derived for this repository. */
-  'LEASE_LOCATION_UNSUITABLE',
-  /** The removal itself failed. */
-  'LEASE_REMOVE_FAILED',
-] as const;
-
-export type LeaseBreakCode = (typeof LEASE_BREAK_CODES)[number];
-
-export interface LeaseBreakResult {
-  readonly code: LeaseBreakCode;
-  readonly detail: string | null;
-}
-
-export interface LeaseBreakRequest {
-  /**
-   * The digest the operator inspected. **Required**, and there is deliberately
-   * no way to omit it.
-   *
-   * This is what makes a break an act on *the lease that was looked at* rather
-   * than on whatever happens to be there now. Without it an operator who read a
-   * report, went away to think, and came back would remove a lease a legitimate
-   * new run had taken in the meantime.
-   */
-  readonly expectedRevision: string | null;
-  /**
-   * The owner the operator inspected, or `null` for a lease that records none.
-   *
-   * Required when the document is readable and forbidden when it is not — so the
-   * operator has to have looked at the same thing this function is about, in
-   * both directions.
-   */
-  readonly ownerPid: number | null;
-}
-
-/**
- * Removes a lease an operator has identified and taken responsibility for.
- *
- * **This module performs no attendance check**, exactly as `release-workspace.ts`
- * performs none: the operator grant is a property of an *invocation*, and the
- * CLI is what knows whether one was made. There is no `--force` anywhere above
- * it and nothing here reaches past its own gates.
- *
- * What the gates establish, in order: the bytes are the ones inspected; the
- * owner is the one inspected; and that owner cannot be shown to be running.
- * Only then is anything removed.
- *
- * ── The removal is bound to the bytes ──────────────────────────────────────
- *
- * Every gate above is about the *bytes* that were inspected, and the removal is
- * about those same bytes rather than about the path they were found at — see
- * {@link removeVerifiedLease}, which also states exactly what residual remains
- * and does not overstate it. An earlier version unlinked the path, and the
- * adversarial review destroyed a legitimate successor's lease through it.
- */
-export function breakRepositoryExecutionLease(
-  repository: LeaseRepository,
-  request: LeaseBreakRequest,
-  deps: { readonly processAlive?: ProcessLivenessProbe } = {},
-): LeaseBreakResult {
-  const location = deriveExecutionLeaseLocation(repository);
-  if (!location.ok) return breakResult('LEASE_LOCATION_UNSUITABLE');
-
-  const read = readLeaseFile(location.path, location.key);
-  if (read.state === 'FREE') return breakResult('LEASE_ABSENT');
-  if (read.bytes === null) return breakResult('LEASE_UNREADABLE');
-
-  // 1. The bytes the operator inspected, and no others.
-  if (request.expectedRevision === null || revisionOfBytes(read.bytes) !== request.expectedRevision) {
-    return breakResult('LEASE_CHANGED');
-  }
-
-  // 2. Whose lease is it? Asked as "can an owner be recovered at all", not as
-  // "does the document satisfy this build's schema" — and the difference is a
-  // defect the adversarial review found.
-  //
-  // Those two questions came apart for the case that matters most. A lease
-  // written by a *different build* — a newer `schemaVersion`, a field this
-  // build's `.strict()` schema does not know — fails to parse here while being
-  // a perfectly well-formed lease with a living owner. Under the old split it
-  // took the "names no owner" branch, which probes no liveness at all: an
-  // operator naming the real, running owner was refused with
-  // `OWNER_PID_UNEXPECTED`, while the command `lease status` printed for them
-  // succeeded and handed the repository to a second writer.
-  //
-  // So the owner is recovered from the bytes wherever one is legible, and the
-  // liveness gate applies to it. Only bytes that yield no owner at all — a
-  // truncated file, a crash between the claim and the record — fall through to
-  // "the operator's exact revision is the only identification available", which
-  // is the exit a genuinely broken lease still needs.
-  const owner = read.document?.ownerPid ?? legibleOwnerPid(read.bytes);
-  if (owner === null) {
-    if (request.ownerPid !== null) return breakResult('OWNER_PID_UNEXPECTED');
-  } else {
-    if (request.ownerPid === null) return breakResult('OWNER_PID_REQUIRED');
-    if (request.ownerPid !== owner) return breakResult('OWNER_PID_MISMATCH');
-
-    // 3. And that owner must not be running. Liveness refuses here; it never
-    // permits — an operator cannot assert a process away.
-    const probe = deps.processAlive ?? osProcessLiveness;
-    const liveness = probe(owner);
-    if (liveness === 'ALIVE') return breakResult('LEASE_OWNER_ALIVE');
-    if (liveness === 'UNDETERMINED') return breakResult('LEASE_OWNER_LIVENESS_UNDETERMINED');
-  }
-
-  // Every gate above was about bytes; this removes those bytes rather than that
-  // name. Without the binding, the sequence "operator inspects a stale lease →
-  // it is released → a new legitimate run acquires → the break unlinks" destroys
-  // the new run's authority and reports success, with the liveness gate having
-  // been satisfied by the *old* lease's dead owner. Reproduced, then closed.
-  const removed = removeVerifiedLease(
-    location.path,
-    (bytes) => revisionOfBytes(bytes) === request.expectedRevision,
-  );
-  if (removed === 'ABSENT') return breakResult('LEASE_ABSENT');
-  if (removed === 'CHANGED') return breakResult('LEASE_CHANGED');
-  if (removed === 'FAILED') return breakResult('LEASE_REMOVE_FAILED', 'UNREADABLE_AFTER_DETACH');
-  return breakResult('BROKEN');
-}
-
-/**
- * The nonce inside `bytes`, or `null` when they are not a lease.
- *
- * Parsed from the detached bytes rather than taken from an earlier reading, so
- * the ownership check and the removal are about the same file.
- */
 /**
  * A plausible owner pid inside `bytes`, whatever else is wrong with them.
  *
- * Deliberately weaker than the schema, and only ever used to *refuse*. A lease
+ * Deliberately weaker than the schema, and only ever used to *report*. A lease
  * this build cannot validate may still be somebody's — the likeliest reason for
  * it is another build of this same tool — and the one thing worth recovering
- * from it is who to ask about. What this returns is never trusted for anything
- * else: it cannot authorise a break, it only makes one refusable.
+ * from it is who to ask about. `lease status` reports that owner and its
+ * liveness, so an operator looking at an unreadable lease is told whether
+ * anything is still running rather than being told nothing can be said.
+ *
+ * It authorises nothing. There is no path in this build that removes a lease on
+ * the strength of what this returns.
  */
 function legibleOwnerPid(bytes: Buffer | null): number | null {
   if (bytes === null) return null;
@@ -1244,6 +1110,13 @@ function legibleOwnerPid(bytes: Buffer | null): number | null {
   return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
+/**
+ * The nonce inside `bytes`, or `null` when they are not a lease.
+ *
+ * Parsed from the bytes a removal has just detached rather than taken from an
+ * earlier reading, so the ownership check and the removal are about the same
+ * file. That binding is the whole point — see {@link removeVerifiedLease}.
+ */
 function nonceOfBytes(bytes: Buffer): string | null {
   let value: unknown;
   try {
@@ -1253,8 +1126,4 @@ function nonceOfBytes(bytes: Buffer): string | null {
   }
   const parsed = safeParseExecutionLease(value);
   return parsed.success ? parsed.data.ownerNonce : null;
-}
-
-function breakResult(code: LeaseBreakCode, detail: string | null = null): LeaseBreakResult {
-  return Object.freeze({ code, detail });
 }

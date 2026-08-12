@@ -71,6 +71,10 @@ export const START_OUTCOME_SENTENCES: Readonly<Record<StartTaskOutcome, string>>
   STATE_NOT_RECORDED:
     'The workspace was created and the first durable write was then refused, so a worktree\n' +
     '  exists that no task state accounts for. It is reported rather than deleted.',
+  EXECUTION_LEASE_LOST:
+    'This invocation held the execution lease when it began and does not hold it now, so\n' +
+    '  the first durable state was not written. The workspace it had already created is\n' +
+    '  still there and nothing records it: see Residue below.',
   EXECUTION_LEASE_NOT_HELD:
     'This invocation does not hold this repository\'s execution lease, so it may not create\n' +
     '  a branch, a worktree or a durable record here. Nothing was opened. The reason code\n' +
