@@ -108,6 +108,7 @@ import {
   linkSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
@@ -622,6 +623,93 @@ function discard(path: string): void {
   }
 }
 
+/** What became of a guarded removal. */
+type VerifiedRemoval = 'REMOVED' | 'CHANGED' | 'ABSENT' | 'FAILED';
+
+/**
+ * Removes exactly the bytes `matches` accepts, or nothing at all.
+ *
+ * ── The defect this exists to close ────────────────────────────────────────
+ *
+ * Both destructive operations here used to read the lease, decide, and then
+ * `unlink` **the path**. The decision was therefore about bytes and the removal
+ * was about a name, and between the two the name can come to hold something
+ * else. For `break` that is an ABA authority defect, and it was reproduced
+ * rather than theorised: an operator breaks a lease whose owner really is dead,
+ * that lease is released, a **new legitimate run acquires**, and the break's
+ * `unlink` destroys the new run's authority — bypassing the command's own rule
+ * that a lease with a living owner is never broken, because the liveness check
+ * was made against the dead owner of a lease that no longer existed.
+ *
+ * A revision an operator names back closes nothing on its own. It has to be
+ * bound to the destructive step, and this is that binding.
+ *
+ * ── How it binds ───────────────────────────────────────────────────────────
+ *
+ * `rename` within a directory atomically detaches whatever is at the name. So
+ * the file is detached first and *then* identified: if it is the one that was
+ * verified, it is deleted; if it is not, it is put back with `link`, which
+ * refuses to overwrite — so a third party that acquired in the meantime keeps
+ * what it took.
+ *
+ * What remains is narrow and is a loss of *availability*, never of safety: a
+ * lease detached and restored is briefly absent, and a holder checking in that
+ * instant sees `LEASE_ABSENT` and stops. It stops — it does not carry on beside
+ * a second writer, which is the failure this module exists to prevent. There is
+ * no portable atomic compare-and-delete; this is the closest available, and the
+ * difference from the previous shape is the difference between "somebody's run
+ * stopped early" and "somebody's run kept going without authority".
+ */
+function removeVerifiedLease(
+  leasePath: string,
+  matches: (bytes: Buffer) => boolean,
+): VerifiedRemoval {
+  const quarantine = `${leasePath}.breaking-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`;
+
+  try {
+    renameSync(leasePath, quarantine);
+  } catch (error) {
+    return safeErrnoCode(error) === 'ENOENT' ? 'ABSENT' : 'FAILED';
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(quarantine);
+  } catch {
+    // Detached and unreadable. Putting back something that cannot be read would
+    // restore a lease nobody can prove anything about, so it is dropped and
+    // reported as a failure rather than as a removal.
+    discard(quarantine);
+    return 'FAILED';
+  }
+
+  if (matches(bytes)) {
+    discard(quarantine);
+    return 'REMOVED';
+  }
+
+  // Not ours to remove. `link` rather than `rename` on the way back, because it
+  // refuses to overwrite: if somebody acquired the freed name in the meantime,
+  // that acquisition stands and this restore must not clobber it.
+  try {
+    linkSync(quarantine, leasePath);
+  } catch (error) {
+    if (safeErrnoCode(error) !== 'EEXIST') {
+      // A filesystem that will not link. Best effort, and the only case in
+      // which a restore can overwrite a newer acquisition — narrower than the
+      // window it is closing, and stated rather than hidden.
+      try {
+        renameSync(quarantine, leasePath);
+      } catch {
+        // Nothing further to try. The lease is gone; the next invocation
+        // reports an absence rather than taking anything it should not.
+      }
+    }
+  }
+  discard(quarantine);
+  return 'CHANGED';
+}
+
 /**
  * Which refusal an existing lease earns.
  *
@@ -743,10 +831,17 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
     return Object.freeze({ code: 'EVIDENCE_INVALID' as const, detail: null });
   }
 
-  try {
-    unlinkSync(evidence.leasePath);
-  } catch (error) {
-    return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: safeErrnoCode(error) });
+  // Removed by identity, not by name. The nonce is re-checked on the detached
+  // bytes, so a successor that took this path between the verification above and
+  // this line keeps its lease — see {@link removeVerifiedLease}. `NOT_OWNER` is
+  // then the honest answer: what is there is somebody else's.
+  const removed = removeVerifiedLease(evidence.leasePath, (bytes) =>
+    evidence.matchesRecordedNonce(nonceOfBytes(bytes)),
+  );
+  if (removed === 'ABSENT') return Object.freeze({ code: 'LEASE_ABSENT' as const, detail: null });
+  if (removed === 'CHANGED') return Object.freeze({ code: 'NOT_OWNER' as const, detail: null });
+  if (removed === 'FAILED') {
+    return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: null });
   }
   return Object.freeze({ code: 'RELEASED' as const, detail: null });
 }
@@ -864,12 +959,36 @@ export function breakRepositoryExecutionLease(
     if (liveness === 'UNDETERMINED') return breakResult('LEASE_OWNER_LIVENESS_UNDETERMINED');
   }
 
-  try {
-    unlinkSync(location.path);
-  } catch (error) {
-    return breakResult('LEASE_REMOVE_FAILED', safeErrnoCode(error));
-  }
+  // Every gate above was about bytes; this removes those bytes rather than that
+  // name. Without the binding, the sequence "operator inspects a stale lease →
+  // it is released → a new legitimate run acquires → the break unlinks" destroys
+  // the new run's authority and reports success, with the liveness gate having
+  // been satisfied by the *old* lease's dead owner. Reproduced, then closed.
+  const removed = removeVerifiedLease(
+    location.path,
+    (bytes) => revisionOfBytes(bytes) === request.expectedRevision,
+  );
+  if (removed === 'ABSENT') return breakResult('LEASE_ABSENT');
+  if (removed === 'CHANGED') return breakResult('LEASE_CHANGED');
+  if (removed === 'FAILED') return breakResult('LEASE_REMOVE_FAILED');
   return breakResult('BROKEN');
+}
+
+/**
+ * The nonce inside `bytes`, or `null` when they are not a lease.
+ *
+ * Parsed from the detached bytes rather than taken from an earlier reading, so
+ * the ownership check and the removal are about the same file.
+ */
+function nonceOfBytes(bytes: Buffer): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return null;
+  }
+  const parsed = safeParseExecutionLease(value);
+  return parsed.success ? parsed.data.ownerNonce : null;
 }
 
 function breakResult(code: LeaseBreakCode, detail: string | null = null): LeaseBreakResult {

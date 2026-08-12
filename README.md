@@ -3649,12 +3649,43 @@ that using it is a decision:
 - and a lease whose owner is running cannot be broken at all. No flag overrides
   that. **There is no `--force`.**
 
-The residual window is stated rather than papered over: between the read that
-establishes the revision and the `unlink` that acts on it, a legitimate new owner
-could take the lease and have it removed. It is a few syscalls wide, and reaching
-it requires the operator's own premise — that nothing is running here — to have
-been false, which the liveness gate refuses on separately. `state-store.ts` and
-`block-store.ts` name their own equivalent windows for the same reason.
+### The destructive step is bound to the bytes, not to the name (ABA)
+
+The first version of the break did exactly what its gates said and still had an
+authority defect, and the adversarial review is what found it. Every gate was
+about *bytes*; the removal was about a *name*:
+
+```
+operator inspects stale lease A, notes revision A
+        |
+        A is released
+        |
+        a new legitimate run acquires lease B
+        |
+        the break's unlink deletes B  ->  reported BROKEN
+```
+
+The command's own rule — never break a lease whose owner is running — was
+bypassed, because liveness had been checked against A's dead owner while the
+deletion landed on live B. B's run then loses the lease it holds, and a third
+writer may take a repository B is still working in. An `--expected-revision`
+helps only if it is bound to the destructive step; read-check-unlink is not that
+binding.
+
+So removal now detaches first and identifies afterwards. `rename` within the
+directory atomically takes whatever is at the name; the detached bytes are then
+checked against the revision (for a break) or the nonce (for a release). If they
+match, they are deleted. If they do not, the file is put back with `link`, which
+refuses to overwrite — so a third party that acquired in the meantime keeps what
+it took. Both destructive paths share that guard.
+
+What remains is a loss of *availability*, never of safety: a lease detached and
+restored is briefly absent, so a holder checking in that instant sees
+`LEASE_ABSENT` and **stops**. It stops rather than carrying on beside a second
+writer, which is the failure the lease exists to prevent. There is no portable
+atomic compare-and-delete; this is the closest available, and the difference from
+the previous shape is the difference between "somebody's run stopped early" and
+"somebody's run kept going without authority".
 
 ### What V2-07L is not
 

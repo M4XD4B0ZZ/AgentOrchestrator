@@ -714,6 +714,85 @@ describe('breaking a lease names exactly the lease that was inspected', () => {
     expect(existsSync(status.path)).toBe(true);
   });
 
+  it('does not destroy a lease acquired after its own check (ABA)', async () => {
+    // The defect this closes, reproduced before it was fixed and kept here so
+    // it stays closed. Every gate of a break is about *bytes*; the removal used
+    // to be about a *name*, and between the two the name can come to hold
+    // something else:
+    //
+    //   operator inspects stale lease A  ->  A is released
+    //     ->  a new legitimate run acquires B  ->  the break unlinks B
+    //
+    // and it reported BROKEN, having satisfied its "never break a living owner"
+    // rule against A's dead owner. That is an authority defect, not a tidiness
+    // one: B's run loses the lease it holds, and a third writer may then take a
+    // repository B is still working in.
+    //
+    // The liveness probe is what makes this deterministic. It is a real syscall
+    // sitting inside the real window, so driving the swap from it reproduces the
+    // production race exactly rather than inventing one.
+    const fixture = await leasableRepository();
+    const a = acquire(fixture, 'run-A');
+    expect(a.ok).toBe(true);
+    if (!a.ok) return;
+    const observed = inspectRepositoryExecutionLease(fixture.repository, {
+      processAlive: () => 'NOT_FOUND',
+    });
+
+    let b: ReturnType<typeof acquire> | null = null;
+    const broken = breakRepositoryExecutionLease(
+      fixture.repository,
+      { expectedRevision: observed.revision, ownerPid: observed.ownerPid },
+      {
+        processAlive: () => {
+          expect(releaseRepositoryExecutionLease(a.evidence).code).toBe('RELEASED');
+          b = acquire(fixture, 'run-B');
+          // The operator's premise is true of A, and A is what they inspected.
+          return 'NOT_FOUND';
+        },
+      },
+    );
+
+    const successor = b as ReturnType<typeof acquire> | null;
+    expect(successor?.ok).toBe(true);
+    expect(broken.code).toBe('LEASE_CHANGED');
+    // The new run still holds what it took.
+    expect(existsSync(observed.path)).toBe(true);
+    if (successor === null || !successor.ok) return;
+    expect(verifyExecutionLeaseHeld(successor.evidence).code).toBe('HELD');
+    expect(inspectRepositoryExecutionLease(fixture.repository).runId).toBe('run-B');
+  });
+
+  it('leaves no quarantine file behind when it puts a lease back', async () => {
+    // The guarded removal detaches before it identifies, so a refusal has to
+    // restore *and* clean up. A `.breaking-` file accumulating in the
+    // administrative directory on every refused break would be residue nothing
+    // ever collects.
+    const fixture = await leasableRepository();
+    const a = acquire(fixture, 'run-A');
+    if (!a.ok) return;
+    const observed = inspectRepositoryExecutionLease(fixture.repository, {
+      processAlive: () => 'NOT_FOUND',
+    });
+
+    breakRepositoryExecutionLease(
+      fixture.repository,
+      { expectedRevision: observed.revision, ownerPid: observed.ownerPid },
+      {
+        processAlive: () => {
+          releaseRepositoryExecutionLease(a.evidence);
+          acquire(fixture, 'run-B');
+          return 'NOT_FOUND';
+        },
+      },
+    );
+
+    const residue = readdirSync(fixture.repository.gitCommonDir).filter((entry) =>
+      entry.includes('.breaking-'),
+    );
+    expect(residue).toEqual([]);
+  });
+
   it('lets an operator clear an unparseable lease by its observed bytes alone', async () => {
     const fixture = await leasableRepository();
     const evidence = heldLease(fixture);
