@@ -111,6 +111,14 @@ export type StateSaveFailureCode =
    */
   | 'ILLEGAL_TRANSITION'
   /**
+   * The writer no longer holds this repository's execution lease, so it may not
+   * record a new durable truth. Produced only by `advanceTaskState()`, and for
+   * the reason its header gives: a *move* is made after something took time,
+   * and authority is a property of the moment the write happens rather than of
+   * the moment the step began.
+   */
+  | 'EXECUTION_LEASE_LOST'
+  /**
    * The interruption being recorded contradicts the phase it was recorded
    * against — a reviewer's block written down against an implementing task, or
    * a resume phase belonging to a different state.

@@ -32,7 +32,7 @@ import { loadTaskState, type StateLoadSuccess } from '../src/state/state-store.j
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
-import { leaseFor, releaseTestLeases } from './helpers/lease.js';
+import { leaseAuthorityFor, leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, removeRepoFixtures, git, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import { e2eProfile, tickingClock } from './helpers/e2e-fixtures.js';
@@ -136,6 +136,7 @@ function deps(
     verification: repository.verification,
     taskBrief: 'unused here',
     brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
+    lease: leaseAuthorityFor(repository),
     ...overrides,
   };
 }

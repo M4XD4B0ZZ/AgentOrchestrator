@@ -46,6 +46,7 @@ import { reconcileTaskState } from '../src/state/reconcile.js';
 import type { GitCommandResult, GitRunner } from '../src/worktree/git-command.js';
 import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
 import { fingerprint, positiveResumeEvidence, SHA_A, SHA_B, validCreatedState } from './fixtures.js';
+import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 
 const GIT_OK = (stdout = ''): GitCommandResult =>
   Object.freeze({ outcome: 'OK' as const, stdout, exitCode: 0 });
@@ -84,6 +85,7 @@ function repoRoot(): string {
 }
 
 afterEach(() => {
+  releaseTestLeases();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
@@ -157,6 +159,7 @@ function record(
     repositoryRoot: root,
     now: NOW,
     fallback,
+    lease: leaseAuthorityAt(root),
   });
 }
 

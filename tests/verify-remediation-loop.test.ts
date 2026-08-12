@@ -64,6 +64,7 @@ import {
   validCreatedState,
 } from './fixtures.js';
 import { cleanScopeGit } from './helpers/scope-git.js';
+import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 
 const NOW = '2026-08-10T09:00:00.000Z';
 const TASK_ID = 'task-0001';
@@ -77,6 +78,7 @@ function repoRoot(): string {
 }
 
 afterEach(() => {
+  releaseTestLeases();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
@@ -208,6 +210,7 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     authorisedWorktreePath: authorisedWorktree(root),
     verification: VERIFICATION,
     taskBrief: 'Add a widget.',
+    lease: leaseAuthorityAt(root),
     observe: settledObserver,
     // The Git a healthy repository would be, for the same reason `observe`
     // is the observation a healthy `observeRuntime` would make: this root is

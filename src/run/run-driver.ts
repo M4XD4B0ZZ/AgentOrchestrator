@@ -94,7 +94,7 @@ import { planNextTask, type TaskPlanningResult } from '../plan/plan-next-task.js
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { readExecutionBrief } from '../plan/task-brief.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
-import { advanceTaskState } from '../state/advance-state.js';
+import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import {
   reconcileTask,
   stopSpellingFor,
@@ -444,6 +444,11 @@ export async function runTask(
     // taking both from one side would make that check compare a value with
     // itself.
     repositoryRoot: repository.root,
+    // Threaded into every durable transition this run makes, including the ones
+    // `runLoopStep` reaches after an agent has been running for minutes.
+    // `advanceTaskState` re-proves it against the file at the write, which is
+    // the only moment that matters — see its header.
+    lease: Object.freeze({ repository, evidence: request.lease }),
     ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
     ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
   });
@@ -839,7 +844,7 @@ export async function runTask(
 function resumeBlockedTask(
   load: StateLoadSuccess,
   now: string,
-  advance: { readonly repositoryRoot: string; readonly replace?: ReplaceFn; readonly tempSuffix?: TempSuffixFn },
+  advance: AdvanceOptions,
 ): { readonly save: ReturnType<typeof advanceTaskState> } | null {
   const state = load.state;
   if (state.resumeFrom === null) return null;

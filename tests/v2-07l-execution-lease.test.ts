@@ -71,6 +71,7 @@ import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { releaseTaskWorkspace } from '../src/run/release-workspace.js';
 import { runTask } from '../src/run/run-driver.js';
 import { startTask } from '../src/run/start-task.js';
+import { advanceTaskState } from '../src/state/advance-state.js';
 import { loadTaskState } from '../src/state/state-store.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
@@ -618,6 +619,149 @@ describe('a lease acquired minutes ago is not a lease held now', () => {
 
     expect(run.outcome).toBe('EXECUTION_LEASE_LOST');
     expect(run.steps).toBe(0);
+  });
+});
+
+/* ───────── 6b. authority is proved at the write, not at the step ────────── */
+
+describe('no durable transition happens after the lease is lost', () => {
+  /**
+   * A task at `WORKTREE_READY`, started for real, ready to be advanced.
+   *
+   * The transitions under test are the ones `runLoopStep` reaches *after* a long
+   * effect, so what matters is that the state and the lease are genuine: the
+   * check is in `advanceTaskState`, which every one of them passes through.
+   */
+  async function startedTask(): Promise<{
+    readonly fixture: Fixture;
+    readonly evidence: ExecutionLeaseEvidence;
+  }> {
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: evidence },
+    );
+    expect(started.outcome).toBe('STARTED');
+    return { fixture, evidence };
+  }
+
+  function advanceTo(
+    fixture: Fixture,
+    evidence: ExecutionLeaseEvidence,
+    state: 'CONTEXT_LOADING',
+  ): ReturnType<typeof advanceTaskState> {
+    const load = loadTaskState(fixture.root, TASK_ID);
+    if (!load.ok) throw new Error('the task did not start');
+    return advanceTaskState(
+      load,
+      { ...load.state, state, stateEnteredAt: '2026-08-12T12:00:00.000Z' },
+      {
+        repositoryRoot: fixture.repository.root,
+        lease: { repository: fixture.repository, evidence },
+      },
+    );
+  }
+
+  it('refuses the write when the lease was removed during the step', async () => {
+    const { fixture, evidence } = await startedTask();
+    const before = readFileSync(join(fixture.root, '.agent-orchestrator', 'runtime', `${TASK_ID}.json`));
+
+    // The long effect happened; the lease did not survive it.
+    expect(releaseRepositoryExecutionLease(evidence).code).toBe('RELEASED');
+
+    const advanced = advanceTo(fixture, evidence, 'CONTEXT_LOADING');
+
+    expect(advanced.ok).toBe(false);
+    if (advanced.ok) return;
+    expect(advanced.code).toBe('EXECUTION_LEASE_LOST');
+    expect(advanced.detail).toBe('LEASE_ABSENT');
+    // Byte-identical: a refused move writes nothing at all.
+    expect(readFileSync(join(fixture.root, '.agent-orchestrator', 'runtime', `${TASK_ID}.json`))).toEqual(
+      before,
+    );
+  });
+
+  it('refuses the write when a different valid lease replaced it', async () => {
+    const { fixture, evidence } = await startedTask();
+    expect(releaseRepositoryExecutionLease(evidence).code).toBe('RELEASED');
+    // A successor legitimately holds the repository now. The old writer must not
+    // read somebody else's authority as its own.
+    const successor = acquire(fixture, 'run-successor');
+    expect(successor.ok).toBe(true);
+
+    const advanced = advanceTo(fixture, evidence, 'CONTEXT_LOADING');
+
+    expect(advanced.ok).toBe(false);
+    if (advanced.ok) return;
+    expect(advanced.code).toBe('EXECUTION_LEASE_LOST');
+    expect(advanced.detail).toBe('NOT_OWNER');
+  });
+
+  it('still advances normally while the lease is held', async () => {
+    // The control. A gate strong enough to refuse a lost lease is a gate that
+    // can quietly make the legitimate case unreachable, and a suite without this
+    // case would pass just as well against one that always refuses.
+    const { fixture, evidence } = await startedTask();
+
+    const advanced = advanceTo(fixture, evidence, 'CONTEXT_LOADING');
+
+    expect(advanced.ok).toBe(true);
+    const reloaded = loadTaskState(fixture.root, TASK_ID);
+    expect(reloaded.ok).toBe(true);
+    if (!reloaded.ok) return;
+    expect(reloaded.state.state).toBe('CONTEXT_LOADING');
+  });
+
+  it('is proved against the file, never from a value read earlier', async () => {
+    // Two moves with one authority value: the first succeeds, the lease then
+    // goes, and the second must refuse. A check cached at the start of the step
+    // — or anywhere but the write — would let the second one through.
+    const { fixture, evidence } = await startedTask();
+    const authority = { repository: fixture.repository, evidence };
+
+    const first = advanceTo(fixture, evidence, 'CONTEXT_LOADING');
+    expect(first.ok).toBe(true);
+
+    expect(releaseRepositoryExecutionLease(evidence).code).toBe('RELEASED');
+
+    const load = loadTaskState(fixture.root, TASK_ID);
+    if (!load.ok) throw new Error('unreadable after the first move');
+    const second = advanceTaskState(
+      load,
+      { ...load.state, state: 'IMPLEMENTING', stateEnteredAt: '2026-08-12T12:01:00.000Z' },
+      { repositoryRoot: fixture.repository.root, lease: authority },
+    );
+
+    expect(second.ok).toBe(false);
+    if (second.ok) return;
+    expect(second.code).toBe('EXECUTION_LEASE_LOST');
+  });
+
+  it('still catches a loss between iterations at the driver gate', async () => {
+    // The two gates are not duplicates. This one answers "may this iteration
+    // begin at all"; the one above answers "does this writer still have
+    // authority after the long effect". A loss between iterations must be
+    // caught before anything is reconciled or spawned.
+    const { fixture, evidence } = await startedTask();
+    expect(releaseRepositoryExecutionLease(evidence).code).toBe('RELEASED');
+
+    const run = await runTask(
+      {
+        repository: fixture.repository,
+        taskId: TASK_ID,
+        taskBrief: TASK_ID,
+        attendedContinuation: true,
+        authEvidence: provenAuthEvidence(),
+        lease: evidence,
+        maxSteps: 4,
+      },
+      { now: tickingClock(), git: runGitCommand },
+    );
+
+    expect(run.outcome).toBe('EXECUTION_LEASE_LOST');
+    expect(run.steps).toBe(0);
+    expect(run.reasonCodes).toContain('LEASE_ABSENT');
   });
 });
 

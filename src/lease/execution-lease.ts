@@ -988,6 +988,20 @@ export function verifyExecutionLeaseHeldFor(
   });
 }
 
+/**
+ * A held lease together with the repository it authorises.
+ *
+ * The pair, because neither half means anything alone: evidence names a file,
+ * and only a repository says whether that file is *this* repository's. Carried
+ * as one value so a caller cannot thread one and forget the other — which is
+ * precisely the mistake the adversarial review found when the writers took only
+ * the evidence.
+ */
+export interface ExecutionLeaseAuthority {
+  readonly repository: LeaseRepository;
+  readonly evidence: ExecutionLeaseEvidence;
+}
+
 export const LEASE_RELEASE_CODES = [
   'RELEASED',
   'EVIDENCE_INVALID',

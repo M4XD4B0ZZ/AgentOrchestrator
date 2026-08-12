@@ -39,10 +39,49 @@
  * read is threaded straight into {@link saveTaskState}, so a task that moved on
  * underneath this writer is refused with `STATE_CONFLICT` as it is everywhere
  * else.
+ *
+ * ── Authority is proved *here*, at the write (V2-07L / B) ──────────────────
+ *
+ * A move is what a caller makes **after** something took time. `runLoopStep`
+ * starts an agent that thinks for minutes, runs the repository's verification,
+ * or drives a reviewer, and only then advances the state — so the run driver
+ * proving the lease at the top of its iteration proves it about a world that no
+ * longer exists. Measured, not inferred: a lease deleted during the writing
+ * agent let that step finish and record `VERIFYING` before the run stopped.
+ *
+ * The guarantee this closes is exactly one sentence, and it is narrower than it
+ * first looks:
+ *
+ * > After the lease is lost, no further orchestrator-owned durable state
+ * > transition happens.
+ *
+ * It is deliberately **not** the wider claim that nothing else can happen. An
+ * agent subprocess already started may still be writing in the worktree and may
+ * still land a commit on the task branch; stopping *that* needs owned process
+ * containment — a Windows Job Object, a supervised POSIX process group, and
+ * cancellation semantics on top — which is a slice of its own and is not
+ * pretended to be solved by a lease.
+ *
+ * ── Why the check is here and not at each call site ────────────────────────
+ *
+ * Because there are eighteen call sites in `loop-step.ts` alone, and a rule
+ * enforced by remembering is a rule that a nineteenth will break. This is the
+ * one function every durable transition passes through, so the requirement is a
+ * required parameter of it: a caller with no lease to offer does not compile,
+ * and the proof is re-taken from the file on every single move rather than
+ * carried in a boolean somebody set earlier.
+ *
+ * Creation is not covered and does not need to be — `saveTaskState` writes a
+ * first state, `startTask` proves the lease before it creates anything, and the
+ * gap between the two is a handful of Git commands rather than an agent.
  */
 
 import { canTransition } from '../core/transitions.js';
 import { safeParseTaskState } from '../core/task-state.js';
+import {
+  verifyExecutionLeaseHeldFor,
+  type ExecutionLeaseAuthority,
+} from '../lease/execution-lease.js';
 import {
   saveTaskState,
   type StateLoadSuccess,
@@ -55,7 +94,16 @@ import {
  * the state that was read, so a caller cannot advance a task while claiming to
  * have read something else.
  */
-export type AdvanceOptions = Omit<StateStoreOptions, 'expectedRevision'>;
+export interface AdvanceOptions extends Omit<StateStoreOptions, 'expectedRevision'> {
+  /**
+   * The execution lease this writer holds, re-proved here against the file.
+   *
+   * **Required, and deliberately not optional.** See the header: this is the
+   * choke point every durable transition passes through, and a parameter is the
+   * only form of the requirement that a nineteenth call site cannot forget.
+   */
+  readonly lease: ExecutionLeaseAuthority;
+}
 
 /**
  * Persists `next` as the successor of the state in `current`.
@@ -93,6 +141,21 @@ export function advanceTaskState(
       // The states themselves, not a rendered sentence: this is a code path,
       // and the caller already holds both values.
       detail: `${from}->${to}`,
+      errnoCode: null,
+    });
+  }
+
+  // Last, and immediately before the write. Ordered after the cheap contract
+  // checks deliberately: those are facts about the value the caller built and
+  // cost nothing, while this one is a fact about *now* and is worth taking as
+  // late as it can be taken.
+  const held = verifyExecutionLeaseHeldFor(options.lease.repository, options.lease.evidence);
+  if (held.code !== 'HELD') {
+    return Object.freeze({
+      ok: false as const,
+      code: 'EXECUTION_LEASE_LOST' as const,
+      path: null,
+      detail: held.code,
       errnoCode: null,
     });
   }

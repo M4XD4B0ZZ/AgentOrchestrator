@@ -3702,19 +3702,47 @@ incumbent then stops at its next checkpoint. Closing it entirely needs an atomic
 compare-and-delete on a directory entry, which no portable filesystem primitive
 offers.
 
-### The boundary that decides how much that residual costs
+`tests/dist-artifact/` races real breakers against real acquirers and requires
+that an acquirer which won still holds what it took. That is a regression net for
+the invariant and **not** a proof that the placeholder is what holds it: removing
+the placeholder leaves the harness passing, at a 450-byte lease and at a
+four-megabyte one. The reason is the same one that makes the residual hard to
+reach in production — `acquire` stages and *fsyncs* its record before it can
+claim the name, tens of milliseconds, while the whole break completes in a
+fraction of that. The window is real; a real acquirer is too slow to be in it.
 
-An incumbent that loses its lease stops **at its next checkpoint**, and the
-driver's checkpoint is the top of an iteration — so the step already in flight
-finishes, including its durable write. That is measured, not assumed: a lease
-deleted during the writing agent let that step complete and record `VERIFYING`
-before the run stopped.
+### Authority is proved at the write, not at the step
 
-So the exposure of any lost-authority event is one agent invocation plus one
-durable write. Narrowing it means proving the lease *inside* the loop step,
-between the agent returning and the state being advanced — the loop's contract to
-change rather than the driver's, and named here as a known boundary rather than
-implied away. `run-driver.ts` says the same thing where the gate lives.
+The driver proves the lease at the top of every iteration. That answers *may this
+iteration begin* — and it is not enough on its own, because a `runLoopStep` runs
+an agent for minutes and only then advances the state. Measured: a lease deleted
+during the writing agent let that step finish and record `VERIFYING`.
+
+So `advanceTaskState` — the one function every durable transition passes through,
+eighteen call sites in `loop-step.ts` alone — takes the lease as a **required
+parameter** and re-proves it against the file immediately before the write. A
+rule enforced by remembering is a rule a nineteenth call site breaks; a required
+parameter is not.
+
+The two gates are not duplicates:
+
+```
+driver gate  ->  may this iteration begin at all?
+loop gate    ->  does this writer still have authority, after the long effect,
+                 to record new durable truth?
+```
+
+The guarantee this closes is exactly one sentence, and it is narrower than it
+looks:
+
+> After the lease is lost, no further orchestrator-owned durable state
+> transition happens.
+
+It is deliberately **not** the wider claim. An agent subprocess already started
+may still be writing in the worktree and may still land a commit on the task
+branch. Stopping that needs owned process containment — a Windows Job Object, a
+supervised POSIX process group, and cancellation semantics on top — which is a
+slice of its own and is **not** pretended to be solved by a lease.
 
 ### What V2-07L is not
 

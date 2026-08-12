@@ -31,7 +31,7 @@ import { startTask } from '../src/run/start-task.js';
 import { runTask } from '../src/run/run-driver.js';
 import { loadTaskState, type StateLoadSuccess } from '../src/state/state-store.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
-import { leaseFor, releaseTestLeases } from './helpers/lease.js';
+import { leaseAuthorityFor, leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { createRepoFixture, removeRepoFixtures, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture } from './helpers/worktree-fixtures.js';
@@ -111,6 +111,7 @@ function stepDeps(
     verification: repository.verification,
     taskBrief: 'unused by these steps',
     brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
+    lease: leaseAuthorityFor(repository),
     ...overrides,
   };
 }

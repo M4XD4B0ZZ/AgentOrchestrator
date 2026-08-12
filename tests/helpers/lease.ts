@@ -32,6 +32,7 @@ import {
   acquireRepositoryExecutionLease,
   deriveExecutionLeaseLocation,
   releaseRepositoryExecutionLease,
+  type ExecutionLeaseAuthority,
   type LeaseRepository,
 } from '../../src/lease/execution-lease.js';
 
@@ -64,6 +65,26 @@ export function leaseFor(repository: LeaseRepository): ExecutionLeaseEvidence {
 
   held.set(location.path, acquired.evidence);
   return acquired.evidence;
+}
+
+/**
+ * A real lease plus the repository it authorises, for `advanceTaskState`.
+ *
+ * Every durable transition now requires one (V2-07L / B), so a suite that
+ * advances state needs a genuine lease rather than a stand-in. `gitCommonDir`
+ * defaults to the root itself, which is what a scratch directory standing in for
+ * a repository can honestly offer: the lease only needs a real directory it may
+ * create a file in, and using the root keeps each suite's lease inside its own
+ * temporary space.
+ */
+export function leaseAuthorityAt(root: string, id = 'test-fixture'): ExecutionLeaseAuthority {
+  const repository = { gitCommonDir: root, root, id };
+  return { repository, evidence: leaseFor(repository) };
+}
+
+/** The same, for a suite that already holds a resolved repository. */
+export function leaseAuthorityFor(repository: LeaseRepository): ExecutionLeaseAuthority {
+  return { repository, evidence: leaseFor(repository) };
 }
 
 /**

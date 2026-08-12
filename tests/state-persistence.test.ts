@@ -46,6 +46,7 @@ import {
 } from '../src/state/state-store.js';
 import { advanceTaskState } from '../src/state/advance-state.js';
 import { fingerprint, validCreatedState, validUsageLimitState } from './fixtures.js';
+import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 
 const tempDirs: string[] = [];
 
@@ -57,6 +58,7 @@ function repoRoot(): string {
 }
 
 afterEach(() => {
+  releaseTestLeases();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
@@ -995,6 +997,7 @@ describe('advancing a task through the transition contract', () => {
 
     const advanced = advanceTaskState(current, stateIn(root, { state: 'REPOSITORY_RESOLVED' }), {
       repositoryRoot: root,
+      lease: leaseAuthorityAt(root),
     });
 
     expect(advanced.code).toBe('SAVED');
@@ -1012,6 +1015,7 @@ describe('advancing a task through the transition contract', () => {
     // CREATED does not reach IMPLEMENTING: the setup chain has to happen first.
     const jumped = advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), {
       repositoryRoot: root,
+      lease: leaseAuthorityAt(root),
     });
 
     expect(jumped.ok).toBe(false);
@@ -1024,7 +1028,9 @@ describe('advancing a task through the transition contract', () => {
     const current = loadTaskState(root, 'task-0001');
     if (!current.ok) throw new Error('unreachable');
 
-    advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), { repositoryRoot: root });
+    advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), { repositoryRoot: root,
+  lease: leaseAuthorityAt(root),
+});
 
     const loaded = loadTaskState(root, 'task-0001');
     if (!loaded.ok) throw new Error('unreachable');
@@ -1039,6 +1045,7 @@ describe('advancing a task through the transition contract', () => {
 
     const revived = advanceTaskState(current, stateIn(root, { state: 'IMPLEMENTING' }), {
       repositoryRoot: root,
+      lease: leaseAuthorityAt(root),
     });
 
     expect(revived.ok).toBe(false);
@@ -1054,7 +1061,9 @@ describe('advancing a task through the transition contract', () => {
     const checkpoint = advanceTaskState(
       current,
       stateIn(root, { stateEnteredAt: '2026-07-31T11:00:00.000Z' }),
-      { repositoryRoot: root },
+      { repositoryRoot: root,
+  lease: leaseAuthorityAt(root),
+},
     );
 
     expect(checkpoint.code).toBe('SAVED');
@@ -1067,10 +1076,12 @@ describe('advancing a task through the transition contract', () => {
     if (!stale.ok) throw new Error('unreachable');
     advanceTaskState(stale, stateIn(root, { state: 'REPOSITORY_RESOLVED' }), {
       repositoryRoot: root,
+      lease: leaseAuthorityAt(root),
     });
 
     const overtaken = advanceTaskState(stale, stateIn(root, { state: 'ABORTED' }), {
       repositoryRoot: root,
+      lease: leaseAuthorityAt(root),
     });
 
     expect(overtaken.ok).toBe(false);
