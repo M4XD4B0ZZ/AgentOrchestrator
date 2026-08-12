@@ -1140,42 +1140,54 @@ describe('rules that were contract but not yet counter-proved', () => {
 
 /* ────────── the successor contract's own completeness ──────────────────── */
 
-describe('the successor contract is complete by construction, not by memory', () => {
-  /**
-   * A run mid-flight on A-001, built here rather than persisted: these cases
-   * ask about the *relation* between two documents, which is what
-   * `assessLedgerSuccession` answers, and the hostile input below could not
-   * survive the store on its way in.
-   */
-  const midFlight = {
-    schemaVersion: 1,
-    repositoryId: 'fixture',
-    repositoryRoot: 'D:\\repo',
-    blockId: BLOCK_ID,
-    runId: RUN_ID,
-    startedAt: NOW,
-    frozenTaskIds: ['A-001', 'B-001'],
-    planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001']),
-    activeTaskId: 'A-001',
-    tasks: [
-      {
-        taskId: 'A-001',
-        disposition: 'ACTIVE' as const,
-        evidenceRevision: null,
-        baseCommit: 'a'.repeat(40),
-        resultCommit: null,
-      },
-      {
-        taskId: 'B-001',
-        disposition: 'PLANNED' as const,
-        evidenceRevision: null,
-        baseCommit: null,
-        resultCommit: null,
-      },
-    ],
-    stopReason: null,
-  };
+/**
+ * A run mid-flight on A-001, built here rather than persisted: these cases ask
+ * about the *relation* between two documents, which is what
+ * `assessLedgerSuccession` answers, and the hostile inputs below could not
+ * survive the store on their way in.
+ */
+const midFlight = {
+  schemaVersion: 1,
+  repositoryId: 'fixture',
+  repositoryRoot: 'D:\\repo',
+  blockId: BLOCK_ID,
+  runId: RUN_ID,
+  startedAt: NOW,
+  frozenTaskIds: ['A-001', 'B-001'],
+  planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001']),
+  activeTaskId: 'A-001',
+  tasks: [
+    {
+      taskId: 'A-001',
+      disposition: 'ACTIVE' as const,
+      evidenceRevision: null,
+      baseCommit: 'a'.repeat(40),
+      resultCommit: null,
+    },
+    {
+      taskId: 'B-001',
+      disposition: 'PLANNED' as const,
+      evidenceRevision: null,
+      baseCommit: null,
+      resultCommit: null,
+    },
+  ],
+  stopReason: null,
+};
 
+/** The same run after it ended, with nothing left unresolved. */
+const stoppedRun = {
+  ...midFlight,
+  activeTaskId: null,
+  tasks: midFlight.tasks.map((task) => ({
+    ...task,
+    disposition: 'PLANNED' as const,
+    baseCommit: null,
+  })),
+  stopReason: 'NO_ELIGIBLE_TASK' as const,
+};
+
+describe('the successor contract is complete by construction, not by memory', () => {
   it('permits the unresolved stop it exists to allow', () => {
     // The control. Without it the two refusals below could both be passing
     // because the fixture is malformed rather than because the rule works.
@@ -1223,11 +1235,174 @@ describe('the successor contract is complete by construction, not by memory', ()
     expect(assessLedgerSuccession(previous, next)).toContain('RECORDED_ENTRY_CHANGED');
   });
 
-  // The remaining case — a *new top-level* field on an ordinary update — is not
-  // a runtime rule and deliberately not asserted here. It is a compile-time
-  // obligation: `FIELD_AUTHORITY` is `satisfies Record<keyof BlockRunLedger, …>`,
-  // so a field added to the schema without being classified does not typecheck,
-  // and `npm run typecheck` is part of the canonical gate.
+  it('refuses a new entry field that rides out on a legal disposition move', () => {
+    // The gap the two cases above leave, and the reason "one level down" was
+    // not finished by making `sameEntry` structural. That comparison is only
+    // reached when the disposition did *not* move. When it does move, the entry
+    // legitimately changes — so the question is not "did it change" but "did it
+    // change in more than the fields something re-derives from the task record".
+    //
+    // Without that distinction a new entry field mutates freely on every
+    // legitimate step: succession looks only at the disposition, and
+    // `proveBlockTaskEntry` reads five fields by name, so neither gate sees it.
+    const previous = {
+      ...midFlight,
+      tasks: midFlight.tasks.map((task) => ({ ...task, ownerLeaseId: 'lease-1' })),
+    };
+    const settled = {
+      ...previous,
+      activeTaskId: null,
+      tasks: previous.tasks.map((task, index) =>
+        index === 0
+          ? {
+              ...task,
+              disposition: 'SETTLED' as const,
+              evidenceRevision: 'c'.repeat(64),
+              resultCommit: 'd'.repeat(40),
+            }
+          : task,
+      ),
+    };
+
+    // The control: ACTIVE → SETTLED is legal, and the three fields it rewrites
+    // are each re-derived at the write gate, so the move on its own is allowed.
+    expect(assessLedgerSuccession(previous, settled)).toEqual([]);
+
+    // The same move, carrying one field nothing re-derives.
+    const withRider = {
+      ...settled,
+      tasks: settled.tasks.map((task, index) =>
+        index === 0 ? { ...task, ownerLeaseId: 'lease-2-stolen' } : task,
+      ),
+    };
+    expect(assessLedgerSuccession(previous, withRider)).toContain('MOVED_ENTRY_CARRIED_MORE');
+  });
+
+  it('permits a stopped run no successor but the one identical to it', () => {
+    // A run that has ended has a past, not a present — and until now that was
+    // enforced by naming the entries and `activeTaskId`, which is the same
+    // hand-maintained list this file exists to remove, sited at the strictest
+    // state in the contract.
+    expect(safeParseBlockRunLedger(stoppedRun).success).toBe(true);
+    expect(assessLedgerSuccession(stoppedRun, { ...stoppedRun })).toEqual([]);
+
+    const previous = { ...stoppedRun, ownerLeaseId: 'lease-1' };
+    const next = { ...stoppedRun, ownerLeaseId: 'lease-2-stolen' };
+    expect(assessLedgerSuccession(previous, next)).toContain('STOPPED_RUN_PROGRESSED');
+  });
+});
+
+/* ────────── each classification pinned by its own mutation ─────────────── */
+
+describe('every persisted field’s authority is pinned by its own mutation', () => {
+  /**
+   * One mutation per persisted field, each with the verdict it must produce
+   * written out by hand from the documented meaning of the violation codes.
+   *
+   * Nothing here reads `FIELD_AUTHORITY`. The module does not export it, and
+   * reconstructing it would make this file the same map a second time and leave
+   * it unable to catch the one thing the map cannot catch itself. That division
+   * is the point: `satisfies Record<keyof BlockRunLedger, …>` proves every field
+   * was *classified*, and only these cases prove each was classified
+   * **correctly**. Before they existed, moving `startedAt` from `IDENTITY` to
+   * `RECORD` typechecked clean, left the whole suite green, and permitted a run
+   * to be backdated.
+   *
+   * `toEqual` rather than `toContain`, deliberately, and in both directions: a
+   * field demoted to a weaker class loses its code, one promoted to a stronger
+   * class gains an extra one, and only an exact comparison fails for both.
+   *
+   * Several single-field successors are not documents the schema would accept —
+   * the fingerprint is re-derived, the entries mirror the frozen plan, the
+   * version is pinned. Those ask succession directly, which is what it
+   * documents itself to answer, and assert the schema's refusal beside it so
+   * the two gates stay visibly distinct.
+   */
+
+  it('pins schemaVersion to run identity', () => {
+    const next = { ...midFlight, schemaVersion: 2 };
+    expect(safeParseBlockRunLedger(next).success).toBe(false);
+    expect(assessLedgerSuccession(midFlight, next)).toEqual(['RUN_IDENTITY_CHANGED']);
+  });
+
+  it('pins repositoryId to run identity', () => {
+    expect(assessLedgerSuccession(midFlight, { ...midFlight, repositoryId: 'other' }))
+      .toEqual(['RUN_IDENTITY_CHANGED']);
+  });
+
+  it('pins repositoryRoot to run identity', () => {
+    expect(assessLedgerSuccession(midFlight, { ...midFlight, repositoryRoot: 'D:\\elsewhere' }))
+      .toEqual(['RUN_IDENTITY_CHANGED']);
+  });
+
+  it('pins blockId to run identity', () => {
+    // Not a document the schema accepts on its own: rule 1b re-derives the
+    // fingerprint from `blockId`, so a rename alone contradicts it.
+    const next = { ...midFlight, blockId: 'V9' };
+    expect(safeParseBlockRunLedger(next).success).toBe(false);
+    expect(assessLedgerSuccession(midFlight, next)).toEqual(['RUN_IDENTITY_CHANGED']);
+  });
+
+  it('pins runId to run identity', () => {
+    expect(assessLedgerSuccession(midFlight, { ...midFlight, runId: 'run-0002' }))
+      .toEqual(['RUN_IDENTITY_CHANGED']);
+  });
+
+  it('pins startedAt to run identity, so the run cannot be backdated', () => {
+    // Called out separately because `startedAt` is the only identity field with
+    // no second gate anywhere: `repositoryId` and `repositoryRoot` are re-checked
+    // against the checkout in `checkRecordedIdentity`, `runId` decides which file
+    // the write lands in, `schemaVersion` is pinned by the contract, and
+    // `blockId` is tied to the fingerprint. If this classification is ever wrong,
+    // this assertion is the only thing in the repository that says so.
+    expect(assessLedgerSuccession(midFlight, { ...midFlight, startedAt: '2020-01-01T00:00:00.000Z' }))
+      .toEqual(['RUN_IDENTITY_CHANGED']);
+  });
+
+  it('pins frozenTaskIds to the frozen plan', () => {
+    // Alone it contradicts both the mirror rule and the fingerprint.
+    const next = { ...midFlight, frozenTaskIds: ['A-001', 'C-001'] };
+    expect(safeParseBlockRunLedger(next).success).toBe(false);
+    expect(assessLedgerSuccession(midFlight, next)).toEqual(['FROZEN_PLAN_CHANGED']);
+  });
+
+  it('pins planFingerprint to the frozen plan', () => {
+    const next = { ...midFlight, planFingerprint: 'f'.repeat(64) };
+    expect(safeParseBlockRunLedger(next).success).toBe(false);
+    expect(assessLedgerSuccession(midFlight, next)).toEqual(['FROZEN_PLAN_CHANGED']);
+  });
+
+  it('leaves activeTaskId to the contract that already determines it', () => {
+    // Classified as a record field, and succession says nothing about it on an
+    // ordinary update — deliberately, because it carries no freedom the
+    // dispositions do not already carry: rules 2 and 3 admit exactly one value.
+    // Pinning that division is what keeps the classification honest; claiming
+    // succession holds this field would be the token-without-an-effect the
+    // header warns about.
+    const cleared = { ...midFlight, activeTaskId: null };
+    expect(assessLedgerSuccession(midFlight, cleared)).toEqual([]);
+    expect(safeParseBlockRunLedger(cleared).success).toBe(false);
+
+    const misnamed = { ...midFlight, activeTaskId: 'B-001' };
+    expect(assessLedgerSuccession(midFlight, misnamed)).toEqual([]);
+    expect(safeParseBlockRunLedger(misnamed).success).toBe(false);
+  });
+
+  it('pins tasks to the record rules', () => {
+    const next = {
+      ...midFlight,
+      tasks: midFlight.tasks.map((task, index) =>
+        index === 0 ? { ...task, baseCommit: 'b'.repeat(40) } : task,
+      ),
+    };
+    expect(safeParseBlockRunLedger(next).success).toBe(true);
+    expect(assessLedgerSuccession(midFlight, next)).toEqual(['RECORDED_ENTRY_CHANGED']);
+  });
+
+  it('pins stopReason to write-once', () => {
+    expect(assessLedgerSuccession(stoppedRun, { ...stoppedRun, stopReason: 'OPERATOR_STOPPED' }))
+      .toEqual(['STOP_REASON_RELABELLED']);
+  });
 });
 
 /* ───────────────── the fingerprint separator ────────────────────────────── */

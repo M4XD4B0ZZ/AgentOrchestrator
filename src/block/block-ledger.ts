@@ -406,6 +406,16 @@ export const LEDGER_SUCCESSION_VIOLATIONS = [
   'DISPOSITION_REWOUND',
   /** An entry was edited without its disposition changing. */
   'RECORDED_ENTRY_CHANGED',
+  /**
+   * An entry moved forward legally and carried more than the move.
+   *
+   * The counterpart of `RECORDED_ENTRY_CHANGED` for the case that rule cannot
+   * answer. An entry whose disposition moves *must* change — that is what a
+   * move is — so the question is not whether it changed but whether it changed
+   * in anything beyond the fields the write gate re-derives from the task
+   * record.
+   */
+  'MOVED_ENTRY_CARRIED_MORE',
   /** A run that already stopped was given a different reason, or restarted. */
   'STOP_REASON_RELABELLED',
   /** A run that had already recorded its ending changed one of its records. */
@@ -419,23 +429,42 @@ export type LedgerSuccessionViolation = (typeof LEDGER_SUCCESSION_VIOLATIONS)[nu
 /**
  * Which part of the successor contract is answerable for each persisted field.
  *
- * A completeness obligation, made compile-time. Every key of the document
- * appears exactly once, and the `satisfies` is against `keyof BlockRunLedger` —
- * which is inferred from the schema — so adding a field to
- * {@link BlockRunLedgerObjectSchema} without deciding what succession does
- * about it does not compile.
+ * A **completeness** obligation, made compile-time — and nothing more than
+ * that. Every key of the document appears exactly once, and the `satisfies` is
+ * against `keyof BlockRunLedger`, which is inferred from the schema, so adding a
+ * field to {@link BlockRunLedgerObjectSchema} without deciding what succession
+ * does about it does not compile.
  *
- * That matters because the alternative has one failure mode and it is silent.
- * A successor rule that names its fields by hand is complete on the day it is
- * written and fails **open** afterwards: the new field is simply not looked at,
- * every existing test still passes, and a writer may change it unexamined. The
- * two structural predicates below ({@link sameEntry},
- * {@link onlyStopReasonChanged}) cover their own areas by construction; this
- * map is what stops a *new top-level* field from arriving unjudged.
+ * ── What this map does not prove, and what does ────────────────────────────
  *
- * `IDENTITY` is enforced directly from here. `FROZEN_PLAN` and `RECORD` have
- * their own rules below, and `STOP_REASON` is the one field the evidence-exempt
- * unresolved stop may move.
+ * It makes the classification *total*. It cannot make any entry *correct*:
+ * nothing in the type system objects to `startedAt` being called a record
+ * field, and when that was tried the build was clean and the entire suite
+ * stayed green while a run could be backdated through the sanctioned API. A
+ * map like this one relocates the reviewer's prompt; it does not decide the
+ * answer, and reading it as an authority proof is how it would become a new
+ * self-consistent bug.
+ *
+ * So correctness lives where it can actually fail: `tests/v2-07-remediation.ts`
+ * mutates every persisted field on its own and asserts the exact verdict, with
+ * expectations written by hand rather than derived from here. This module
+ * deliberately does not export the map, so that test cannot become a second
+ * copy of it and lose the ability to disagree.
+ *
+ * ── Which classes carry a rule, and which name one kept elsewhere ──────────
+ *
+ * `IDENTITY` and `FROZEN_PLAN` are enforced by derivation from this map, so a
+ * field classified as either is enforced by having been classified.
+ *
+ * `RECORD` and `STOP_REASON` deliberately derive nothing here, and that is
+ * stated rather than implied: their authority is real but sited elsewhere, and
+ * pressing them into a generic rule so that every token "does something" would
+ * buy symmetry with a fiction. `activeTaskId` is fully determined by rules 2
+ * and 3 of the contract above — the dispositions leave it exactly one legal
+ * value — `tasks` is held by {@link sameEntry} and
+ * {@link onlyReprovedFieldsChanged} below, and `stopReason` is write-once at
+ * the check that names it. Each of those is pinned by its own counter-proof, so
+ * a classification token here is never the evidence that a field is guarded.
  */
 const FIELD_AUTHORITY = {
   schemaVersion: 'IDENTITY',
@@ -468,6 +497,47 @@ const IDENTITY_FIELDS = fieldsClassified('IDENTITY');
 
 /** The plan frozen at start, likewise taken from the map. */
 const FROZEN_PLAN_FIELDS = fieldsClassified('FROZEN_PLAN');
+
+/**
+ * The same obligation one level down, for the fields of a single entry.
+ *
+ * `FIELD_AUTHORITY` is keyed on `keyof BlockRunLedger`, so it is silent about
+ * everything inside `tasks` — and an entry is where the ledger keeps its actual
+ * claims. Without this map the authority gap was not closed but moved: a field
+ * added to {@link BlockTaskEntrySchema} compiled without a decision, and then
+ * mutated freely on every legitimate step, because succession stops looking
+ * once a disposition moves and `proveBlockTaskEntry` reads five fields by name.
+ *
+ * Two classes, and the split is the whole rule:
+ *
+ *   `PINNED`     nothing may change it during a move. Enforced by derivation —
+ *                by *not* appearing in the projection below — so a new field
+ *                classified this way is guarded by having been classified.
+ *
+ *   `REPROVED`   it may change during a move, because `block-evidence.ts`
+ *                re-derives it from the task record on the very same write.
+ *                That is a claim about another module, and classifying a field
+ *                this way is asserting it — which is exactly the decision the
+ *                compile error exists to force somebody to make.
+ *
+ * `taskId` is `PINNED` twice over: rule 1 already requires the entries to
+ * mirror the frozen plan, so this restates a guarantee rather than inventing
+ * one, and costs nothing if that rule is ever relaxed.
+ */
+const ENTRY_FIELD_AUTHORITY = {
+  taskId: 'PINNED',
+  disposition: 'REPROVED',
+  evidenceRevision: 'REPROVED',
+  baseCommit: 'REPROVED',
+  resultCommit: 'REPROVED',
+} as const satisfies Record<keyof BlockTaskEntry, 'PINNED' | 'REPROVED'>;
+
+/** The entry fields the write gate re-derives, taken from the map above. */
+const REPROVED_ON_MOVE: readonly (keyof BlockTaskEntry)[] = Object.freeze(
+  (Object.keys(ENTRY_FIELD_AUTHORITY) as (keyof BlockTaskEntry)[]).filter(
+    (field) => ENTRY_FIELD_AUTHORITY[field] === 'REPROVED',
+  ),
+);
 
 /**
  * The dispositions each disposition may move to.
@@ -504,15 +574,26 @@ function sameEntry(a: BlockTaskEntry, b: BlockTaskEntry): boolean {
   return isDeepStrictEqual(a, b);
 }
 
-/** `true` when the two documents hold the same task records, in order. */
-function sameEntries(previous: BlockRunLedger, next: BlockRunLedger): boolean {
-  return (
-    previous.tasks.length === next.tasks.length &&
-    previous.tasks.every((before, index) => {
-      const after = next.tasks[index];
-      return after !== undefined && sameEntry(before, after);
-    })
-  );
+/**
+ * `true` when `after` is `before` with nothing but its re-proved fields moved.
+ *
+ * The question {@link sameEntry} cannot ask. An entry whose disposition moves
+ * *has* to change — recording the move is the point — so "did it change" is the
+ * wrong question and equality is the wrong test. The right question is whether
+ * it changed in anything the write gate will not look at, and that is answered
+ * the same way {@link onlyStopReasonChanged} answers its own: construct the
+ * document the move is entitled to produce and compare it structurally.
+ *
+ * Everything outside {@link REPROVED_ON_MOVE} is therefore covered by
+ * construction, including fields this contract has not been told about yet —
+ * which is what makes it a rule about the schema's future rather than about
+ * today's five field names.
+ */
+function onlyReprovedFieldsChanged(before: BlockTaskEntry, after: BlockTaskEntry): boolean {
+  const projected = { ...before } as Record<string, unknown>;
+  const source = after as unknown as Record<string, unknown>;
+  for (const field of REPROVED_ON_MOVE) projected[field] = source[field];
+  return isDeepStrictEqual(projected, after);
 }
 
 /**
@@ -554,9 +635,17 @@ function onlyStopReasonChanged(previous: BlockRunLedger, next: BlockRunLedger): 
 /**
  * Every way `next` fails to be a legal successor of `previous`.
  *
- * All of them, not the first: a caller refusing a write should be able to say
- * everything that was wrong with it, and a partial answer invites a second
- * attempt that fixes one thing.
+ * Every way it can still be asked about, rather than the first one found: a
+ * caller refusing a write should be able to say what was wrong with it, and a
+ * one-item answer invites a second attempt that fixes one thing.
+ *
+ * There is one deliberate exception, and it is a limit of the question rather
+ * than of the effort. The per-entry rules are skipped when the frozen plan
+ * changed, because they compare `previous.tasks[i]` with `next.tasks[i]` and
+ * that pairing only means anything while both documents mirror the same frozen
+ * membership. Reporting `DISPOSITION_REWOUND` for two entries that are not the
+ * same task would be a *wrong* answer, which is worse than a short one — and
+ * `FROZEN_PLAN_CHANGED` already refuses the write.
  *
  * Both arguments must already satisfy the ledger contract; this asks only about
  * the *relation* between two valid documents.
@@ -594,6 +683,12 @@ export function assessLedgerSuccession(
       if (!LEGAL_SUCCESSION[before.disposition].includes(after.disposition)) {
         violations.add('DISPOSITION_REWOUND');
       }
+      // A legal move is a licence to write what the move proves, and nothing
+      // else. Without this, the one branch where an entry is *expected* to
+      // change was the one branch where anything about it could.
+      if (!onlyReprovedFieldsChanged(before, after)) {
+        violations.add('MOVED_ENTRY_CARRIED_MORE');
+      }
     });
   }
 
@@ -615,13 +710,22 @@ export function assessLedgerSuccession(
   // genuinely proved, which a reconciliation then called consistent.
   //
   // Note what this does *not* say: the stop reason itself is already write-once
-  // above, and an ended run holding an unresolved `ACTIVE` task keeps it. What
-  // is frozen is the record — no disposition moves, no entry is edited, and the
-  // task the run was working on when it ended stays the task it was working on.
-  if (previous.stopReason !== null) {
-    if (!sameEntries(previous, next) || next.activeTaskId !== previous.activeTaskId) {
-      violations.add('STOPPED_RUN_PROGRESSED');
-    }
+  // above, and an ended run holding an unresolved `ACTIVE` task keeps it.
+  //
+  // What is frozen is everything else — asked structurally, and for the reason
+  // spelled out over `onlyStopReasonChanged`. This once named the entries and
+  // `activeTaskId`, which was complete for that day's schema and was the same
+  // hand-maintained allowlist this module removed from its two other gates,
+  // left standing at the strictest state in the contract: an unenumerated field
+  // could be rewritten on a run whose history is supposed to be over.
+  //
+  // Reusing the predicate rather than restating it keeps the two codes apart.
+  // A successor differing in nothing but the reason is not *progress*, so it is
+  // not reported as progress — it is a relabelling, refused just above. What
+  // remains after both rules is exact idempotence: the only successor a stopped
+  // ledger has is the one identical to it.
+  if (previous.stopReason !== null && !onlyStopReasonChanged(previous, next)) {
+    violations.add('STOPPED_RUN_PROGRESSED');
   }
 
   // The escape hatch, held to its own minimum.
