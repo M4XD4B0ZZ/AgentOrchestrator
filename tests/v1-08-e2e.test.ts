@@ -67,6 +67,10 @@ import {
 import { fingerprint, passingReview } from './fixtures.js';
 
 afterAll(() => {
+  // Before the fixtures go: a lease lives inside its repository's own Git
+  // directory, so removing the fixture would take the file and leave this
+  // process still holding an artefact for a path a later fixture could reuse.
+  releaseTestLeases();
   removeTrackedWorkspaces();
   removeRepoFixtures();
 });
