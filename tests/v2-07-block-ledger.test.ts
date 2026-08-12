@@ -48,11 +48,13 @@ import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, removeRepoFixtures, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -105,7 +107,7 @@ function reload(root: string) {
 async function realTask(fixture: Fixture, taskId: string) {
   const result = await startTask(
     { repository: fixture.repository, taskId },
-    { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses },
+    { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
   );
   expect(result.outcome).toBe('STARTED');
 }

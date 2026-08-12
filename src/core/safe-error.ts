@@ -114,10 +114,14 @@ export const UNKNOWN_ERRNO_CODE = 'UNKNOWN';
  * `run-directory.ts`, `run-completion.ts` and `write-access.ts` (`mkdir`,
  * `open` with `wx`, `write`, `fsync`, `close`, `lstat`, `readdir`, `readFile`).
  * Group 2 comes from spawning diagnostic child processes, which happens in
- * `exec.ts` and nowhere else. In particular the trusted profile resolver is not
- * a producer here: it answers in-process and starts no child, and its failures
- * are reported as the `TRUSTED_PROFILE_UNAVAILABLE` domain error rather than as
- * an errno. Nothing else is expected, so nothing else is reportable.
+ * `exec.ts` and nowhere else. Group 3 comes from the execution lease's owner
+ * liveness probe (`lease/execution-lease.ts`), which is `process.kill(pid, 0)`:
+ * it answers `ESRCH` for a process that is gone and `EPERM` for one that exists
+ * and is somebody else's. `EPERM` is already listed above as a filesystem code
+ * and is not repeated. In particular the trusted profile resolver is not a
+ * producer here: it answers in-process and starts no child, and its failures are
+ * reported as the `TRUSTED_PROFILE_UNAVAILABLE` domain error rather than as an
+ * errno. Nothing else is expected, so nothing else is reportable.
  */
 export const ALLOWED_ERRNO_CODES = [
   // Filesystem
@@ -143,6 +147,8 @@ export const ALLOWED_ERRNO_CODES = [
   'ENFILE',
   'ENOMEM',
   'ETIMEDOUT',
+  // Process liveness
+  'ESRCH',
 ] as const;
 
 export type AllowedErrnoCode = (typeof ALLOWED_ERRNO_CODES)[number];

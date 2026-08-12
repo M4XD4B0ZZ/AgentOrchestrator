@@ -27,11 +27,13 @@ import { assessWorkspaceAdoption } from '../src/worktree/adopt-workspace.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, git, removeRepoFixtures, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import { e2eProfile, tickingClock } from './helpers/e2e-fixtures.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -84,6 +86,7 @@ function start(fixture: Fixture, options: { readonly crash?: boolean } = {}) {
       git: runGitCommand,
       now: tickingClock(),
       authPreflight: authPreflightPasses,
+      lease: leaseFor(fixture.repository),
       ...(options.crash === true ? { replace: crashingReplace } : {}),
     },
   );

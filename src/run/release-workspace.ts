@@ -38,6 +38,8 @@
  * driver. A library caller that reaches this function has already decided.
  */
 
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeld } from '../lease/execution-lease.js';
 import { planNextTask } from '../plan/plan-next-task.js';
 import { isValidTaskId } from '../plan/task-id.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -77,6 +79,17 @@ export const RELEASE_OUTCOMES = [
   'IGNORED_CONTENT_UNDETERMINED',
   /** Every proof held and Git still refused to remove the worktree. */
   'REMOVE_FAILED',
+  /**
+   * This invocation does not hold the repository's execution lease.
+   *
+   * A release is a destructive repository effect, and the one this module is
+   * least able to detect on its own: `assessWorkspaceAdoption` proves the
+   * workspace is a *pristine* crash artefact, and a workspace a concurrent run
+   * has only just prepared looks exactly like one. Without the lease this
+   * command could therefore delete the branch and directory of a run that is
+   * about to write in them, having passed every proof it has.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
 ] as const;
 
 export type ReleaseOutcome = (typeof RELEASE_OUTCOMES)[number];
@@ -102,6 +115,15 @@ export interface ReleaseResult {
 export interface ReleaseDependencies {
   /** The Git seam. Required and never defaulted, as `startTask` requires it. */
   readonly git: GitRunner;
+  /**
+   * Proof that this invocation holds the repository's execution lease.
+   *
+   * Required for the same reason `startTask` requires one, and with the same
+   * consequence for a caller that has none: it does not compile. Attendance
+   * stays the *caller's* to establish — see the module header — but authority
+   * over the repository is not, and a lease is not an operator grant.
+   */
+  readonly lease: ExecutionLeaseEvidence;
 }
 
 function result(
@@ -167,6 +189,16 @@ export async function releaseTaskWorkspace(
   taskId: string,
   deps: ReleaseDependencies,
 ): Promise<ReleaseResult> {
+  // Authority over the repository, before anything is inspected or removed.
+  const lease = verifyExecutionLeaseHeld(deps.lease);
+  if (lease.code !== 'HELD') {
+    return result({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      taskId,
+      reasonCodes: Object.freeze([lease.code]),
+    });
+  }
+
   if (!isValidTaskId(taskId)) return result({ outcome: 'TASK_ID_INVALID', taskId });
 
   // The task must still be one this repository declares. `removeTaskWorkspace`

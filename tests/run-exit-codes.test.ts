@@ -125,6 +125,12 @@ describe('every run outcome has an exit code', () => {
       ].sort(),
       [EXIT_RUN_REFUSED]: [
         'CONTINUATION_NOT_AUTHORISED',
+        // Two lease outcomes, one exit code. They stay distinct outcomes
+        // because "you never held it" and "you lost it" send an operator to
+        // different places; they share code 4 because the shell-level answer to
+        // both is the same — nothing durable is wrong, try again later.
+        'EXECUTION_LEASE_LOST',
+        'EXECUTION_LEASE_NOT_HELD',
         'EXECUTION_UNAUTHORISED',
         'NO_PROGRESS',
         'STATE_CONFLICT',
@@ -157,10 +163,11 @@ describe('every run outcome has an exit code', () => {
  * failure mode the V2-01 review found in the run-outcome section above.
  *
  * Because it is written out, this constant is also the place where the *count* is
- * asserted: fourteen. (V2-01 scoped the slice as "fourteen outcomes" and the
+ * asserted: fifteen. (V2-01 scoped the slice as "fourteen outcomes" and the
  * vocabulary actually had thirteen; the tests stated the real number rather than
- * the expected one. V2-06A added `ADOPTED`, which is the fourteenth — arrived at
- * by counting again, not by the earlier estimate coming true.)
+ * the expected one. V2-06A added `ADOPTED`, which was the fourteenth, and V2-07L
+ * added `EXECUTION_LEASE_NOT_HELD` — each arrived at by counting again, not by
+ * an earlier estimate coming true.)
  */
 const EXPECTED_START_EXIT_CODES: Readonly<Record<string, number>> = Object.freeze({
   // Nominal: something drivable exists. None of these ends the attended command.
@@ -178,6 +185,9 @@ const EXPECTED_START_EXIT_CODES: Readonly<Record<string, number>> = Object.freez
   RUNTIME_NOT_IGNORED: 2,
   // Infrastructure could not answer; the next invocation may differ.
   RUNTIME_IGNORE_UNDETERMINED: 4,
+  // Somebody else is this repository's writer, or this invocation never was.
+  // Nothing was created, so it is a refusal rather than an operator condition.
+  EXECUTION_LEASE_NOT_HELD: 4,
   // An operator must act before anything may run.
   AUTH_PREFLIGHT_FAILED: 3,
   WORKSPACE_COLLISION: 3,
@@ -194,7 +204,7 @@ describe('every start outcome has an exit code', () => {
     const expected = Object.keys(EXPECTED_START_EXIT_CODES).sort();
 
     expect(expected).toEqual(declared);
-    expect(START_TASK_OUTCOMES).toHaveLength(14);
+    expect(START_TASK_OUTCOMES).toHaveLength(15);
     expect(new Set(declared).size).toBe(declared.length);
   });
 
@@ -232,7 +242,7 @@ describe('every start outcome has an exit code', () => {
         'WORKSPACE_COLLISION',
         'WORKSPACE_REFUSED',
       ].sort(),
-      [EXIT_RUN_REFUSED]: ['RUNTIME_IGNORE_UNDETERMINED'],
+      [EXIT_RUN_REFUSED]: ['EXECUTION_LEASE_NOT_HELD', 'RUNTIME_IGNORE_UNDETERMINED'].sort(),
     });
   });
 

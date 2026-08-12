@@ -71,6 +71,8 @@ import {
   isAuthPreflightEvidence,
   type AuthPreflightEvidence,
 } from '../core/auth-preflight-evidence.js';
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeld } from '../lease/execution-lease.js';
 import { TASK_STATE_SCHEMA_VERSION } from '../core/internal/task-state-object-schema.js';
 import type { TaskStateInput } from '../core/task-state.js';
 import { planNextTask } from '../plan/plan-next-task.js';
@@ -100,6 +102,18 @@ import {
 export const START_TASK_OUTCOMES = [
   /** The workspace exists and the first durable state was written. */
   'STARTED',
+  /**
+   * This invocation does not hold the repository's execution lease.
+   *
+   * First, and before anything is read or created. Starting a task creates a
+   * branch, a worktree and a durable record, and two invocations doing that at
+   * once in one repository is the split-brain the lease exists to prevent — so
+   * "may I act here at all" is answered before "is this a task".
+   *
+   * Covers both a value that is not minted evidence and a lease that has since
+   * been removed: `reasonCodes` carries which.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
   /**
    * The same, over a workspace this task's own crashed start had left behind.
    *
@@ -194,6 +208,20 @@ export interface StartTaskDependencies {
    * second preflight.
    */
   readonly authPreflight: () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * Proof that this invocation holds the repository's execution lease.
+   *
+   * **Required, and deliberately not defaulted or optional.** A caller with
+   * nothing to hand here cannot compile, which is the point: an execution lease
+   * that some productive path simply does not ask for is not an execution lease.
+   *
+   * It is the same arrangement as {@link authPreflight}'s evidence and for the
+   * same reason — the artefact cannot be written down, so satisfying this means
+   * having really taken the lease. The two prove different things and neither
+   * substitutes for the other: auth says the agents can run, the lease says this
+   * process is the one allowed to run them *here*.
+   */
+  readonly lease: ExecutionLeaseEvidence;
   /** State-store seams, forwarded unchanged. */
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
@@ -293,6 +321,18 @@ export async function startTask(
   const { repository, taskId } = request;
   const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
     result({ taskId, ...from });
+
+  // --- 0. May this invocation act on this repository at all? ---------------
+  // Ahead of every other gate, including the cheap syntactic ones. Proven
+  // against the file rather than against the artefact alone: evidence is a
+  // record of a claim that was made, and a claim can have been cleared since.
+  const lease = verifyExecutionLeaseHeld(deps.lease);
+  if (lease.code !== 'HELD') {
+    return stop({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      reasonCodes: Object.freeze([lease.code]),
+    });
+  }
 
   // --- 1. Is this a task at all, and may it run? ---------------------------
   if (!isValidTaskId(taskId)) return stop({ outcome: 'TASK_ID_INVALID' });

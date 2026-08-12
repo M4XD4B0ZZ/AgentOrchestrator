@@ -12,6 +12,10 @@
  * **A step is never executed from persisted state alone.** Every iteration, in
  * this order and with each gate closing on the one before it:
  *
+ *  0. `verifyExecutionLeaseHeld` — is this process still the repository's one
+ *     writer? Re-proved against the file every iteration, not carried from the
+ *     start of the run, and asked first because it is the only gate that is
+ *     about the repository rather than about this task (V2-07L);
  *  1. `reconcileTask` — load the durable state *and* compare it against what
  *     Git says right now. `RECONCILED` is the only outcome anything continues
  *     from;
@@ -75,6 +79,8 @@ import {
   type TaskStateName,
 } from '../core/states.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeld } from '../lease/execution-lease.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
@@ -199,6 +205,25 @@ export const RUN_OUTCOMES = [
    * and a foreign branch, so reaching this means a gate above it changed.
    */
   'EXECUTION_UNAUTHORISED',
+  /**
+   * This invocation never held the repository's execution lease.
+   *
+   * The value handed to {@link RunRequest.lease} is not minted evidence. Kept
+   * apart from {@link EXECUTION_LEASE_LOST} because they are opposite
+   * situations: this one means a caller asserted authority it never had, and
+   * that one means authority this run really held has gone away.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
+  /**
+   * The lease this run took is no longer this run's.
+   *
+   * Removed underneath it — by an operator breaking a lease they believed
+   * stale, by a wiped administrative directory — or replaced by a successor. The
+   * run stops where it stands rather than finishing "the step it was already
+   * doing": there is no such thing as a little bit of exclusive access, and the
+   * next durable write would be a second writer's.
+   */
+  'EXECUTION_LEASE_LOST',
 
   /* --- nothing to do ----------------------------------------------------- */
   /**
@@ -295,6 +320,19 @@ export interface RunRequest {
    * requirements, and neither substitutes for the other.
    */
   readonly authEvidence: AuthPreflightEvidence | null;
+  /**
+   * Proof that this invocation holds the repository's execution lease.
+   *
+   * **Required, and never nullable** — unlike {@link authEvidence}, which has an
+   * honest `null` for a path that ran no preflight. There is no honest `null`
+   * here: a run that is not the repository's writer must not drive a task at
+   * all, so "no lease" is not a weaker mode of running, it is not running.
+   *
+   * Re-proved against the file on every iteration rather than trusted once. See
+   * the module header: a step is a subprocess that took minutes, and a lease
+   * taken before it is not a lease held after it.
+   */
+  readonly lease: ExecutionLeaseEvidence;
   /**
    * The most durable steps this call may take.
    *
@@ -401,6 +439,27 @@ export async function runTask(
   let remediationPayload: string | undefined;
 
   for (let iteration = 0; iteration < maxSteps; iteration += 1) {
+    // --- 0. Is this run still the repository's writer? -----------------------
+    //
+    // Re-proved every iteration, and *first*, for the same reason
+    // reconciliation is re-run every iteration: the previous iteration was a
+    // subprocess that took minutes, and the world it left behind is not the one
+    // the previous check described. A lease is authority over the present.
+    //
+    // Ahead of reconciliation rather than beside it because it is the wider
+    // question. Reconciliation asks whether this task's record matches reality;
+    // this asks whether this process may act on the repository at all, and there
+    // is no point establishing the first while the second is false.
+    const lease = verifyExecutionLeaseHeld(request.lease);
+    if (lease.code !== 'HELD') {
+      return stop({
+        outcome:
+          lease.code === 'EVIDENCE_INVALID' ? 'EXECUTION_LEASE_NOT_HELD' : 'EXECUTION_LEASE_LOST',
+        steps,
+        reasonCodes: Object.freeze([lease.code]),
+      });
+    }
+
     // --- 1. The record, and the world it claims to describe -----------------
     const reconciliation = await reconcileTask(deps.git, { repository, taskId }, observation);
     const loaded: StateLoadSuccess | null = reconciliation.load.ok ? reconciliation.load : null;
@@ -883,6 +942,7 @@ export async function runNextTask(
       taskBrief: request.taskBrief(task),
       attendedContinuation: request.attendedContinuation,
       authEvidence: request.authEvidence,
+      lease: request.lease,
       maxSteps: request.maxSteps,
     },
     deps,

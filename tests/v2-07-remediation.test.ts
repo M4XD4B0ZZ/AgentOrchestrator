@@ -74,6 +74,7 @@ import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, removeRepoFixtures } from './helpers/repo-fixtures.js';
 import {
   removeTrackedWorkspaces,
@@ -83,6 +84,7 @@ import {
 import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -151,7 +153,7 @@ function startRun(fixture: Fixture, taskIds: readonly string[], runId: string = 
 async function reallyStart(fixture: Fixture, taskId: string): Promise<void> {
   const started = await startTask(
     { repository: fixture.repository, taskId },
-    { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses },
+    { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
   );
   expect(started.outcome).toBe('STARTED');
 }

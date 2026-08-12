@@ -32,11 +32,13 @@ import { loadTaskState, type StateLoadSuccess } from '../src/state/state-store.j
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, removeRepoFixtures, git, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import { e2eProfile, tickingClock } from './helpers/e2e-fixtures.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -105,7 +107,7 @@ async function repoWith(
 async function startedAt(repository: ResolvedRepository, root: string): Promise<StateLoadSuccess> {
   const started = await startTask(
     { repository, taskId: 'V2-02' },
-    { git: runGitCommand, now: tickingClock(), authPreflight: authPassed },
+    { git: runGitCommand, now: tickingClock(), authPreflight: authPassed, lease: leaseFor(repository) },
   );
   expect(started.outcome).toBe('STARTED');
   const loaded = loadTaskState(root, 'V2-02');

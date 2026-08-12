@@ -71,6 +71,7 @@ import {
   removeRepoFixtures,
 } from './helpers/repo-fixtures.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { cleanScopeAnswer } from './helpers/scope-git.js';
 import { resolveFixture } from './helpers/worktree-fixtures.js';
 
@@ -111,6 +112,7 @@ function worktreeOf(root: string): string {
 }
 
 afterEach(() => {
+  releaseTestLeases();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
@@ -133,6 +135,11 @@ function repository(root: string): ResolvedRepository {
   return Object.freeze({
     root,
     id: 'repo-alpha',
+    // The lease key. A literal fixture has no Git directory to ask, so the
+    // temporary root stands in for one: the lease only needs a real directory
+    // it may create a file in, and using the root keeps each test's lease
+    // inside that test's own scratch space.
+    gitCommonDir: root,
     defaultBranch: 'main',
     profilePath: join(root, '.agent-orchestrator', 'repo-profile.yaml'),
     schemaVersion: 1,
@@ -332,12 +339,16 @@ function deps(root: string, overrides: Partial<RunDependencies> = {}): RunDepend
 }
 
 function request(root: string, overrides: Partial<RunRequest> = {}): RunRequest {
+  const repo = repository(root);
   return {
-    repository: repository(root),
+    repository: repo,
     taskId: TASK_ID,
     taskBrief: 'Add a widget.',
     attendedContinuation: true,
     authEvidence: provenAuthEvidence(),
+    // Acquired for real: the driver re-proves it against the file every
+    // iteration, so a fabricated artefact would stop the run on the first one.
+    lease: leaseFor(repo),
     maxSteps: 12,
     ...overrides,
   };
@@ -1676,6 +1687,7 @@ describe('task selection', () => {
         taskBrief: (task) => task.title,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
+        lease: leaseFor(resolved),
         maxSteps: 4,
       },
       {

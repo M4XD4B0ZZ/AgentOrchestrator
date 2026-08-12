@@ -17,6 +17,7 @@ import { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
 import { registerDoctorCommand } from './doctor-command.js';
+import { registerLeaseCommand } from './lease-command.js';
 import { registerReleaseCommand } from './release-command.js';
 import { registerRunCommand } from './run-command.js';
 
@@ -31,14 +32,22 @@ const DESCRIPTION = [
   '  - attended execution of one task: `run --attended`',
   '  - `release --attended`: hand back a workspace a crashed start left behind,',
   '    and only one proven to be that task’s own untouched leftovers',
+  '  - the repository execution lease, and `lease status` / `lease break` to',
+  '    inspect it and, where an operator decides so, clear a stale one',
   '',
-  'Execution requires two independent things, and neither implies the other:',
-  '`--attended`, the operator stating they are present for this invocation, and',
-  'a fresh auth preflight that passes. Without --attended, `run` still only',
-  'reports: it starts no agent, writes no task state and prepares no workspace.',
+  'Execution requires three independent things, and none implies another:',
+  '`--attended`, the operator stating they are present for this invocation; a',
+  'fresh auth preflight that passes; and this repository’s execution lease, which',
+  'makes at most one invocation its writer at a time. Without --attended, `run`',
+  'still only reports: it starts no agent, writes no task state and prepares no',
+  'workspace.',
   '',
-  'Unattended running, multi-task blocks, an execution lease and opening pull',
-  'requests are not in this build.',
+  'A lease whose owner is gone is never taken over automatically: a dead owner',
+  'does not prove that no agent process survived it. Clearing one is an operator',
+  'decision, made through `lease break --attended`.',
+  '',
+  'Unattended running, multi-task blocks and opening pull requests are not in',
+  'this build.',
 ].join('\n');
 
 export function buildProgram(): Command {
@@ -54,6 +63,7 @@ export function buildProgram(): Command {
   registerDoctorCommand(program);
   registerRunCommand(program);
   registerReleaseCommand(program);
+  registerLeaseCommand(program);
 
   return program;
 }
