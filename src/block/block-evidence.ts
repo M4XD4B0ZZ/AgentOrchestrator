@@ -38,6 +38,13 @@
  * free. The task state is the authority for both: `basePinnedCommit` is what
  * the workspace pinned, `currentCommit` is what the task actually ended at.
  *
+ * Read "on every proof" exactly: `baseCommit` is checked for every disposition,
+ * `resultCommit` only for `SETTLED` — because rule 4 of the ledger contract
+ * already pins it to `null` everywhere else, and a field the schema will not
+ * let carry a value needs no second gate. `evidenceRevision` divides the same
+ * way, checked for the three dispositions permitted to carry it. The two
+ * mechanisms are complementary and `ENTRY_FIELD_AUTHORITY` names both.
+ *
  * Nothing here asks Git whether a commit exists. It does not need to: a commit
  * that equals the task record's is as proven as that record, and one that does
  * not is already refused. Whether a settled task's result is *fit to be a

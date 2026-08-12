@@ -47,8 +47,10 @@
  *
  * Each entry carries `baseCommit` and `resultCommit`. Today `baseCommit` is
  * whatever the task was pinned to — for independent tasks, the ordinary default
- * branch pin — and `resultCommit` is populated only when a commit has actually
- * been proven to exist. V2-09 will make one task's `resultCommit` the next
+ * branch pin — and `resultCommit` is populated only when the task's own record
+ * proves it, which means it equals the `currentCommit` that record carries.
+ * Not that the object exists in Git: nothing here asks Git anything, and
+ * `block-evidence.ts` says so where the check lives. V2-09 will make one task's `resultCommit` the next
  * task's `baseCommit`; the fields are here so that doing so needs no new ledger
  * shape, and are deliberately *not* interpreted as a chain by anything yet.
  *
@@ -418,7 +420,15 @@ export const LEDGER_SUCCESSION_VIOLATIONS = [
   'MOVED_ENTRY_CARRIED_MORE',
   /** A run that already stopped was given a different reason, or restarted. */
   'STOP_REASON_RELABELLED',
-  /** A run that had already recorded its ending changed one of its records. */
+  /**
+   * A run that had already recorded its ending was given a different document.
+   *
+   * Named for the case it exists to stop — a stopped run being progressed —
+   * but deliberately wider than that: it fires for *any* difference other than
+   * the stop reason, identity and frozen plan included, because a run with a
+   * past has no field left that a successor may move. The narrower reasons
+   * co-fire when they apply.
+   */
   'STOPPED_RUN_PROGRESSED',
   /** A stop recorded over a still-unresolved active task said more than that. */
   'UNRESOLVED_STOP_CARRIED_MORE',
@@ -445,7 +455,8 @@ export type LedgerSuccessionViolation = (typeof LEDGER_SUCCESSION_VIOLATIONS)[nu
  * answer, and reading it as an authority proof is how it would become a new
  * self-consistent bug.
  *
- * So correctness lives where it can actually fail: `tests/v2-07-remediation.ts`
+ * So correctness lives where it can actually fail:
+ * `tests/v2-07-remediation.test.ts`
  * mutates every persisted field on its own and asserts the exact verdict, with
  * expectations written by hand rather than derived from here. This module
  * deliberately does not export the map, so that test cannot become a second
@@ -514,11 +525,21 @@ const FROZEN_PLAN_FIELDS = fieldsClassified('FROZEN_PLAN');
  *                by *not* appearing in the projection below — so a new field
  *                classified this way is guarded by having been classified.
  *
- *   `REPROVED`   it may change during a move, because `block-evidence.ts`
- *                re-derives it from the task record on the very same write.
- *                That is a claim about another module, and classifying a field
- *                this way is asserting it — which is exactly the decision the
- *                compile error exists to force somebody to make.
+ *   `REPROVED`   it may change during a move, because something else on the
+ *                very same write decides what it is allowed to become. Two
+ *                mechanisms share that job, and naming only the first would
+ *                overstate it: `block-evidence.ts` re-derives the field from
+ *                the task record *where the disposition permits a value*, and
+ *                rule 4 of the contract above pins it to `null` where it does
+ *                not. `disposition` and `baseCommit` are re-derived for every
+ *                disposition; `evidenceRevision` only for the three that carry
+ *                evidence, and `resultCommit` only for `SETTLED` — for the rest
+ *                both are `null` on either side of any move, so there is no
+ *                freedom left to abuse.
+ *
+ *                Either way it is a claim about a rule kept somewhere else, and
+ *                classifying a field this way is asserting it — which is
+ *                exactly the decision the compile error exists to force.
  *
  * `taskId` is `PINNED` twice over: rule 1 already requires the entries to
  * mirror the frozen plan, so this restates a guarantee rather than inventing
@@ -601,12 +622,19 @@ function onlyReprovedFieldsChanged(before: BlockTaskEntry, after: BlockTaskEntry
  *
  * ── Why this is structural and not a list of field names ───────────────────
  *
- * This predicate guards the one write in the module that is deliberately exempt
- * from the evidence proof: a run recording that it stopped while a task is
- * still unresolved. That exemption exists because no evidence is available, so
- * nothing downstream will examine what this write carries. It is therefore the
- * single worst place in the contract for a check that is complete only by
- * somebody remembering to keep it complete.
+ * One structural question, asked by two rules that need opposite predecessors.
+ *
+ * It was written for the write in this module that is deliberately exempt from
+ * the evidence proof: a run recording that it stopped while a task is still
+ * unresolved (`previous.stopReason === null`). That exemption exists because no
+ * evidence is available, so nothing downstream will examine what the write
+ * carries — the single worst place in the contract for a check that is complete
+ * only by somebody remembering to keep it complete.
+ *
+ * The stopped-run rule then wanted the same question for the opposite
+ * predecessor (`previous.stopReason !== null`), and reuses this rather than
+ * restating it. That write is *not* evidence-exempt; what the two share is only
+ * the question, and asking it once is what keeps their two codes apart.
  *
  * It was first written as an exhaustive list of every field but `stopReason`,
  * and that list was complete. The problem is what happens *next*: add a field
@@ -622,11 +650,11 @@ function onlyReprovedFieldsChanged(before: BlockTaskEntry, after: BlockTaskEntry
  * entries, and anything else the schema grows are all covered by construction,
  * because nothing here enumerates what to look at.
  *
- * What this does **not** decide is whether the new `stopReason` is *allowed* —
- * that `previous.stopReason` was null is checked by the caller, and that the
- * reason claims no progress while a task is active is rule 5 of the contract
- * above. Those two keep their own homes; this one asks only about the rest of
- * the document.
+ * What this does **not** decide is whether the new `stopReason` is *allowed*.
+ * Each caller states the predecessor it requires, a stopped run may not be
+ * relabelled at all (`STOP_REASON_RELABELLED`), and that a reason claims no
+ * progress while a task is active is rule 5 of the contract above. Those keep
+ * their own homes; this one asks only about the rest of the document.
  */
 function onlyStopReasonChanged(previous: BlockRunLedger, next: BlockRunLedger): boolean {
   return isDeepStrictEqual({ ...previous, stopReason: next.stopReason }, next);

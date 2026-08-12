@@ -50,7 +50,11 @@ import {
   fingerprintFrozenMembership,
   isValidBlockId,
 } from '../src/block/block-definition.js';
-import { assessLedgerSuccession, safeParseBlockRunLedger } from '../src/block/block-ledger.js';
+import {
+  assessLedgerSuccession,
+  BlockRunLedgerObjectSchema,
+  safeParseBlockRunLedger,
+} from '../src/block/block-ledger.js';
 import {
   abandonBlockTask,
   activateBlockTask,
@@ -1289,6 +1293,144 @@ describe('the successor contract is complete by construction, not by memory', ()
     const previous = { ...stoppedRun, ownerLeaseId: 'lease-1' };
     const next = { ...stoppedRun, ownerLeaseId: 'lease-2-stolen' };
     expect(assessLedgerSuccession(previous, next)).toContain('STOPPED_RUN_PROGRESSED');
+  });
+});
+
+/* ────────── the entry contract's escape hatch, held to its minimum ─────── */
+
+describe('a re-proved entry field is really re-proved', () => {
+  /**
+   * `REPROVED` is the entry contract's one exemption: those fields *may* change
+   * on a legal disposition move, because something else on the same write
+   * decides what they are allowed to become. That is an assertion about a rule
+   * kept in another module — and an assertion nobody checks is exactly how an
+   * escape hatch becomes the widest hole in a contract rather than its narrowest
+   * allowance.
+   *
+   * `PINNED` needs no test like this: it is enforced by derivation, by not
+   * appearing in the projection. This is the other class paying its way.
+   */
+  it('refuses a forged value for every field a move is allowed to rewrite', async () => {
+    const fixture = await repoWithTasks(['A-001', 'B-001']);
+    startRun(fixture, ['A-001', 'B-001']);
+    await reallyStart(fixture, 'A-001');
+    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+    driveToReadyForPr(fixture, 'A-001');
+
+    const current = reload(fixture.root);
+    const before = readFileSync(ledgerPath(fixture.root));
+    const truth = loadTaskState(fixture.root, 'A-001');
+    expect(truth.ok).toBe(true);
+    if (!truth.ok) return;
+
+    // ACTIVE → SETTLED is legal, and rewrites all three non-disposition
+    // REPROVED fields at once. Every value below is the task record's own.
+    const proven = {
+      taskId: 'A-001',
+      disposition: 'SETTLED' as const,
+      evidenceRevision: truth.revision,
+      baseCommit: truth.state.basePinnedCommit,
+      resultCommit: truth.state.currentCommit,
+    };
+    const settledWith = (over: Record<string, unknown>) => ({
+      ...current.ledger,
+      activeTaskId: null,
+      tasks: current.ledger.tasks.map((task) =>
+        task.taskId === 'A-001' ? { ...proven, ...over } : task,
+      ),
+    });
+    const attempt = (over: Record<string, unknown>) =>
+      updateBlockLedger(settledWith(over), {
+        repositoryRoot: fixture.root,
+        expectedRevision: current.revision,
+      });
+
+    // One forgery per field, each riding a move that is otherwise entirely
+    // honest — so nothing but that field's own re-derivation can refuse it.
+    for (const [field, forged] of [
+      ['evidenceRevision', 'c'.repeat(64)],
+      ['baseCommit', FORGED_SHA],
+      ['resultCommit', FORGED_SHA],
+    ] as const) {
+      const saved = attempt({ [field]: forged });
+      expect(saved.ok, field).toBe(false);
+      expect(saved.ok ? null : saved.code, field).toBe('ENTRY_NOT_PROVEN');
+      expect(readFileSync(ledgerPath(fixture.root)).equals(before), field).toBe(true);
+    }
+
+    // The control, last because it is the one that writes: the same move with
+    // nothing forged is accepted. Without it the three refusals above could all
+    // be passing because the move itself was malformed.
+    const honest = attempt({});
+    expect(honest.ok).toBe(true);
+  }, 180_000);
+});
+
+/* ────────── schema growth cannot land without a counter-proof ──────────── */
+
+describe('a new persisted field cannot arrive without one of these tests moving', () => {
+  /**
+   * The half a classification map cannot cover.
+   *
+   * `FIELD_AUTHORITY` and `ENTRY_FIELD_AUTHORITY` force a *decision* about any
+   * field added to the schema — that is a compile error, and it works. Neither
+   * forces that decision to be **right**, and two of the four top-level classes
+   * (`RECORD`, `STOP_REASON`) plus one of the two entry classes (`REPROVED`)
+   * derive no rule at all: a new field placed in any of them compiles, and on an
+   * ordinary update nothing looks at it again.
+   *
+   * That division is deliberate and documented — those classes name authority
+   * kept elsewhere rather than pretending to hold it here. What must not happen
+   * is a field arriving in one of them because it was the quiet option. So the
+   * declared field lists are pinned, and growing either one turns this red with
+   * the obligation written out.
+   *
+   * Read from the schema object rather than from a parsed fixture. A fixture
+   * stops parsing the moment the schema grows a required field, so a document
+   * would make this fail with "the fixture is invalid" — true, useless, and
+   * pointing at the wrong file. The schema always knows its own keys.
+   */
+  const shapeOf = (schema: unknown): string[] =>
+    Object.keys((schema as { shape: Record<string, unknown> }).shape);
+  const entrySchema = (BlockRunLedgerObjectSchema.shape.tasks as unknown as {
+    element: unknown;
+  }).element;
+
+  it('pins the persisted top-level fields', () => {
+    // Grew a top-level field? `FIELD_AUTHORITY` already made you classify it.
+    // If you chose IDENTITY or FROZEN_PLAN it is enforced by that choice — add
+    // it here and to the per-field mutation cases below. If you chose RECORD or
+    // STOP_REASON you have said its authority lives somewhere else: name that
+    // rule in the map's comment and counter-prove it, because succession will
+    // not look at this field again on an ordinary update.
+    expect(shapeOf(BlockRunLedgerObjectSchema)).toEqual([
+      'schemaVersion',
+      'repositoryId',
+      'repositoryRoot',
+      'blockId',
+      'runId',
+      'startedAt',
+      'frozenTaskIds',
+      'planFingerprint',
+      'activeTaskId',
+      'tasks',
+      'stopReason',
+    ]);
+  });
+
+  it('pins the persisted entry fields', () => {
+    // Grew an entry field? PINNED needs nothing but this line: the projection
+    // in `onlyReprovedFieldsChanged` covers it by not mentioning it. REPROVED
+    // needs a counter-proof in the suite above, because that class is an
+    // assertion that another gate re-derives the field — and a REPROVED field
+    // nothing re-derives is persistable, forged, on any legitimate step.
+    expect(shapeOf(entrySchema)).toEqual([
+      'taskId',
+      'disposition',
+      'evidenceRevision',
+      'baseCommit',
+      'resultCommit',
+    ]);
   });
 });
 
