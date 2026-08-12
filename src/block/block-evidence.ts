@@ -213,6 +213,33 @@ const REPROVED_FIELD_PROVERS = {
   },
 } as const satisfies Record<ReprovedEntryField, ReprovedFieldProver>;
 
+/**
+ * The registry's keys are *exactly* the classified fields — neither fewer nor
+ * more, and not merely "some strings".
+ *
+ * `satisfies Record<ReprovedEntryField, …>` says every classified field has a
+ * handler. It does not say the constraint is still meaningful, and there are two
+ * ordinary-looking edits that make it meaningless. Widening the declaration to
+ * `Record<string, ReprovedFieldProver>` drops the obligation entirely; and if
+ * `ENTRY_FIELD_AUTHORITY` loses its literal types over in `block-ledger.ts`,
+ * `ReprovedEntryField` collapses to `never`, `Record<never, …>` becomes `{}`,
+ * and this line accepts anything — including an empty registry.
+ *
+ * An exact key-set comparison refuses both, because either one moves one side
+ * of it and not the other. The comparison is written with the invariant
+ * `(<T>() => T extends A ? 1 : 2)` form rather than mutual `extends`, so a
+ * widened side cannot pass by assignability.
+ */
+type ExactlyKeys<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : { readonly ERROR: 'REPROVED_FIELD_PROVERS no longer covers exactly the REPROVED fields' };
+
+const _proversCoverExactlyTheClassifiedFields: ExactlyKeys<
+  keyof typeof REPROVED_FIELD_PROVERS,
+  ReprovedEntryField
+> = true;
+void _proversCoverExactlyTheClassifiedFields;
+
 /** The verdict of the first prover that refuses, or `null` when all hold. */
 function firstUnprovenField(context: ReprovedFieldContext): EntryProofCode | null {
   // Iterated rather than called one by one, so a prover added to the registry

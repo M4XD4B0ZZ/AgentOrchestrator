@@ -597,6 +597,35 @@ export type ReprovedEntryField = {
     : never;
 }[keyof typeof ENTRY_FIELD_AUTHORITY];
 
+/**
+ * The union above may never be empty — and this is what says so.
+ *
+ * A guarantee has to protect its own foundation or it protects nothing. The
+ * union is read out of `ENTRY_FIELD_AUTHORITY`'s *literal* value type, which
+ * only survives because the map is written `as const satisfies …`. Replace that
+ * with the ordinary-looking annotation
+ *
+ *     const ENTRY_FIELD_AUTHORITY: Record<keyof BlockTaskEntry, EntryFieldAuthority> = { … }
+ *
+ * and every value widens to the union, no key matches `extends 'REPROVED'`, and
+ * this type silently becomes `never`. `Record<never, …>` is `{}`, which every
+ * object satisfies — so the registry in `block-evidence.ts` would accept an
+ * empty one, and a field classified `REPROVED` with no handler at all would
+ * compile clean. Measured: deleting an existing prover while its field stays
+ * `REPROVED` went from a compile error to `exit 0`.
+ *
+ * Nothing else catches that. It is not a type error anywhere, and it looks like
+ * a style change in review. So the emptiness is asserted directly, and the
+ * assertion carries its own diagnosis into the compiler's message.
+ */
+type NonEmptyUnion<T, Why extends string> = [T] extends [never] ? { readonly ERROR: Why } : true;
+
+const _entryAuthorityStillDerivesItsUnion: NonEmptyUnion<
+  ReprovedEntryField,
+  'ENTRY_FIELD_AUTHORITY lost its literal types — restore `as const satisfies`, or every REPROVED field is unguarded'
+> = true;
+void _entryAuthorityStillDerivesItsUnion;
+
 /** The entry fields the write gate re-derives, taken from the map above. */
 const REPROVED_ON_MOVE: readonly ReprovedEntryField[] = Object.freeze(
   (Object.keys(ENTRY_FIELD_AUTHORITY) as (keyof BlockTaskEntry)[]).filter(
