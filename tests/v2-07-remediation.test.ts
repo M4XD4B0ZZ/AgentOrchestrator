@@ -50,7 +50,7 @@ import {
   fingerprintFrozenMembership,
   isValidBlockId,
 } from '../src/block/block-definition.js';
-import { safeParseBlockRunLedger } from '../src/block/block-ledger.js';
+import { assessLedgerSuccession, safeParseBlockRunLedger } from '../src/block/block-ledger.js';
 import {
   abandonBlockTask,
   activateBlockTask,
@@ -1136,6 +1136,98 @@ describe('rules that were contract but not yet counter-proved', () => {
     // block under the same field it uses for findings about a task.
     expect(isValidBlockId('A-001')).toBe(true);
   });
+});
+
+/* ────────── the successor contract's own completeness ──────────────────── */
+
+describe('the successor contract is complete by construction, not by memory', () => {
+  /**
+   * A run mid-flight on A-001, built here rather than persisted: these cases
+   * ask about the *relation* between two documents, which is what
+   * `assessLedgerSuccession` answers, and the hostile input below could not
+   * survive the store on its way in.
+   */
+  const midFlight = {
+    schemaVersion: 1,
+    repositoryId: 'fixture',
+    repositoryRoot: 'D:\\repo',
+    blockId: BLOCK_ID,
+    runId: RUN_ID,
+    startedAt: NOW,
+    frozenTaskIds: ['A-001', 'B-001'],
+    planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001']),
+    activeTaskId: 'A-001',
+    tasks: [
+      {
+        taskId: 'A-001',
+        disposition: 'ACTIVE' as const,
+        evidenceRevision: null,
+        baseCommit: 'a'.repeat(40),
+        resultCommit: null,
+      },
+      {
+        taskId: 'B-001',
+        disposition: 'PLANNED' as const,
+        evidenceRevision: null,
+        baseCommit: null,
+        resultCommit: null,
+      },
+    ],
+    stopReason: null,
+  };
+
+  it('permits the unresolved stop it exists to allow', () => {
+    // The control. Without it the two refusals below could both be passing
+    // because the fixture is malformed rather than because the rule works.
+    expect(safeParseBlockRunLedger(midFlight).success).toBe(true);
+    expect(assessLedgerSuccession(midFlight, { ...midFlight, stopReason: 'STATE_UNUSABLE' }))
+      .toEqual([]);
+  });
+
+  it('refuses a field the contract has never been told about, on the exempt stop', () => {
+    // Both documents carry a field the schema does not declare, and succession
+    // is called directly. That is deliberate, and it is the only way to ask the
+    // question: `.strict()` keeps an unknown key out of every document today, so
+    // this does not stand for a hostile caller. It stands for the day a field is
+    // added to the schema and this gate is not updated with it.
+    //
+    // The write it guards is the one exempt from the evidence proof, because no
+    // evidence is available for it — so nothing downstream will ever examine
+    // what it carried. A gate that is complete only by somebody remembering to
+    // keep it complete fails open exactly where nobody is looking, which is the
+    // same defect class the rest of this file exists to close.
+    const previous = { ...midFlight, ownerLeaseId: 'lease-1' };
+    const next = {
+      ...midFlight,
+      stopReason: 'STATE_UNUSABLE' as const,
+      ownerLeaseId: 'lease-2-stolen',
+    };
+
+    expect(assessLedgerSuccession(previous, next)).toContain('UNRESOLVED_STOP_CARRIED_MORE');
+  });
+
+  it('refuses an unknown field on an entry whose disposition did not move', () => {
+    // The same argument one level down: "a record that did not move did not
+    // change" has to mean the whole record, not the fields somebody listed.
+    const previous = {
+      ...midFlight,
+      tasks: midFlight.tasks.map((task) => ({ ...task, ownerLeaseId: 'lease-1' })),
+    };
+    const next = {
+      ...previous,
+      tasks: previous.tasks.map((task, index) =>
+        index === 0 ? { ...task, ownerLeaseId: 'lease-2-stolen' } : task,
+      ),
+    };
+
+    expect(assessLedgerSuccession(previous, next)).toContain('RECORDED_ENTRY_CHANGED');
+  });
+
+  // The remaining case — a *new top-level* field on an ordinary update — is not
+  // a runtime rule and deliberately not asserted here. It is a compile-time
+  // obligation: `FIELD_AUTHORITY` is `satisfies Record<keyof BlockRunLedger, …>`,
+  // so a field added to the schema without being classified does not typecheck,
+  // and `npm run typecheck` is part of the canonical gate.
 });
 
 /* ───────────────── the fingerprint separator ────────────────────────────── */

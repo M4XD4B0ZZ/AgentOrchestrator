@@ -59,6 +59,8 @@
  * the second is exactly the assumption V2-09 has to earn.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+
 import { z } from 'zod';
 
 import { isValidTaskId } from '../plan/task-id.js';
@@ -415,6 +417,59 @@ export const LEDGER_SUCCESSION_VIOLATIONS = [
 export type LedgerSuccessionViolation = (typeof LEDGER_SUCCESSION_VIOLATIONS)[number];
 
 /**
+ * Which part of the successor contract is answerable for each persisted field.
+ *
+ * A completeness obligation, made compile-time. Every key of the document
+ * appears exactly once, and the `satisfies` is against `keyof BlockRunLedger` —
+ * which is inferred from the schema — so adding a field to
+ * {@link BlockRunLedgerObjectSchema} without deciding what succession does
+ * about it does not compile.
+ *
+ * That matters because the alternative has one failure mode and it is silent.
+ * A successor rule that names its fields by hand is complete on the day it is
+ * written and fails **open** afterwards: the new field is simply not looked at,
+ * every existing test still passes, and a writer may change it unexamined. The
+ * two structural predicates below ({@link sameEntry},
+ * {@link onlyStopReasonChanged}) cover their own areas by construction; this
+ * map is what stops a *new top-level* field from arriving unjudged.
+ *
+ * `IDENTITY` is enforced directly from here. `FROZEN_PLAN` and `RECORD` have
+ * their own rules below, and `STOP_REASON` is the one field the evidence-exempt
+ * unresolved stop may move.
+ */
+const FIELD_AUTHORITY = {
+  schemaVersion: 'IDENTITY',
+  repositoryId: 'IDENTITY',
+  repositoryRoot: 'IDENTITY',
+  blockId: 'IDENTITY',
+  runId: 'IDENTITY',
+  startedAt: 'IDENTITY',
+  frozenTaskIds: 'FROZEN_PLAN',
+  planFingerprint: 'FROZEN_PLAN',
+  activeTaskId: 'RECORD',
+  tasks: 'RECORD',
+  stopReason: 'STOP_REASON',
+} as const satisfies Record<
+  keyof BlockRunLedger,
+  'IDENTITY' | 'FROZEN_PLAN' | 'RECORD' | 'STOP_REASON'
+>;
+
+const fieldsClassified = (
+  authority: (typeof FIELD_AUTHORITY)[keyof typeof FIELD_AUTHORITY],
+): readonly (keyof BlockRunLedger)[] =>
+  Object.freeze(
+    (Object.keys(FIELD_AUTHORITY) as (keyof BlockRunLedger)[]).filter(
+      (field) => FIELD_AUTHORITY[field] === authority,
+    ),
+  );
+
+/** What this run *is*, taken from the map above rather than restated. */
+const IDENTITY_FIELDS = fieldsClassified('IDENTITY');
+
+/** The plan frozen at start, likewise taken from the map. */
+const FROZEN_PLAN_FIELDS = fieldsClassified('FROZEN_PLAN');
+
+/**
  * The dispositions each disposition may move to.
  *
  * Read it as a one-way street. Every forward move is one the progress API can
@@ -437,15 +492,16 @@ const LEGAL_SUCCESSION: Readonly<Record<TaskDisposition, readonly TaskDispositio
     ABANDONED: Object.freeze([] as const),
   });
 
-/** `true` when the two entries are the same record, field for field. */
+/**
+ * `true` when the two entries are the same record.
+ *
+ * Compared structurally rather than field by field, for the reason spelled out
+ * over {@link onlyStopReasonChanged}: a list of field names is a list somebody
+ * has to remember to extend, and the day it is not extended is the day a new
+ * entry field may be rewritten on a record that did not move.
+ */
 function sameEntry(a: BlockTaskEntry, b: BlockTaskEntry): boolean {
-  return (
-    a.taskId === b.taskId &&
-    a.disposition === b.disposition &&
-    a.evidenceRevision === b.evidenceRevision &&
-    a.baseCommit === b.baseCommit &&
-    a.resultCommit === b.resultCommit
-  );
+  return isDeepStrictEqual(a, b);
 }
 
 /** `true` when the two documents hold the same task records, in order. */
@@ -460,29 +516,39 @@ function sameEntries(previous: BlockRunLedger, next: BlockRunLedger): boolean {
 }
 
 /**
- * `true` when `next` is `previous` with nothing but its stop reason set.
+ * `true` when `next` is `previous` with nothing but its stop reason replaced.
  *
- * Every field of the document except `stopReason` is named here, deliberately
- * and exhaustively, in the same spirit as {@link sameEntry}: this is the
- * predicate that keeps the one evidence-exempt write from becoming the one
- * write that can carry anything. A field added to the contract and not added
- * here would be a field that write could change unexamined, so the list is
- * meant to be edited whenever the schema is.
+ * ── Why this is structural and not a list of field names ───────────────────
+ *
+ * This predicate guards the one write in the module that is deliberately exempt
+ * from the evidence proof: a run recording that it stopped while a task is
+ * still unresolved. That exemption exists because no evidence is available, so
+ * nothing downstream will examine what this write carries. It is therefore the
+ * single worst place in the contract for a check that is complete only by
+ * somebody remembering to keep it complete.
+ *
+ * It was first written as an exhaustive list of every field but `stopReason`,
+ * and that list was complete. The problem is what happens *next*: add a field
+ * to {@link BlockRunLedgerObjectSchema} and forget this line, and that field
+ * becomes freely rewritable during a privileged write, with no test failing and
+ * no reviewer prompted. A hand-maintained allowlist guarding an authority
+ * exception fails **open**, which is the same defect class this whole slice
+ * exists to close — only sited at the exception itself.
+ *
+ * So the question asked is the whole one: *is `next` the predecessor with only
+ * its stop reason moved?* Construct that document and compare it structurally.
+ * New top-level fields, new entry fields, entry order, added and removed
+ * entries, and anything else the schema grows are all covered by construction,
+ * because nothing here enumerates what to look at.
+ *
+ * What this does **not** decide is whether the new `stopReason` is *allowed* —
+ * that `previous.stopReason` was null is checked by the caller, and that the
+ * reason claims no progress while a task is active is rule 5 of the contract
+ * above. Those two keep their own homes; this one asks only about the rest of
+ * the document.
  */
 function onlyStopReasonChanged(previous: BlockRunLedger, next: BlockRunLedger): boolean {
-  return (
-    next.schemaVersion === previous.schemaVersion &&
-    next.repositoryId === previous.repositoryId &&
-    next.repositoryRoot === previous.repositoryRoot &&
-    next.blockId === previous.blockId &&
-    next.runId === previous.runId &&
-    next.startedAt === previous.startedAt &&
-    next.planFingerprint === previous.planFingerprint &&
-    next.activeTaskId === previous.activeTaskId &&
-    next.frozenTaskIds.length === previous.frozenTaskIds.length &&
-    next.frozenTaskIds.every((taskId, index) => taskId === previous.frozenTaskIds[index]) &&
-    sameEntries(previous, next)
-  );
+  return isDeepStrictEqual({ ...previous, stopReason: next.stopReason }, next);
 }
 
 /**
@@ -501,25 +567,16 @@ export function assessLedgerSuccession(
 ): readonly LedgerSuccessionViolation[] {
   const violations = new Set<LedgerSuccessionViolation>();
 
-  // Identity: what this run *is*. Written once, at creation.
-  if (
-    next.schemaVersion !== previous.schemaVersion ||
-    next.runId !== previous.runId ||
-    next.repositoryId !== previous.repositoryId ||
-    next.repositoryRoot !== previous.repositoryRoot ||
-    next.blockId !== previous.blockId ||
-    next.startedAt !== previous.startedAt
-  ) {
+  // Identity: what this run *is*. Written once, at creation. The fields are
+  // taken from `FIELD_AUTHORITY` rather than listed again here, so a field
+  // classified as identity is enforced by having been classified.
+  if (IDENTITY_FIELDS.some((field) => !isDeepStrictEqual(previous[field], next[field]))) {
     violations.add('RUN_IDENTITY_CHANGED');
   }
 
   // The frozen plan. The module header calls it written once and never edited;
   // until now nothing enforced that beyond the header.
-  if (
-    next.frozenTaskIds.length !== previous.frozenTaskIds.length ||
-    next.frozenTaskIds.some((taskId, index) => taskId !== previous.frozenTaskIds[index]) ||
-    next.planFingerprint !== previous.planFingerprint
-  ) {
+  if (FROZEN_PLAN_FIELDS.some((field) => !isDeepStrictEqual(previous[field], next[field]))) {
     violations.add('FROZEN_PLAN_CHANGED');
   }
 
