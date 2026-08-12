@@ -429,6 +429,25 @@ export async function startTask(
   // `expectedRevision` is omitted, which is the creation case: the writer read
   // nothing and expects nothing, and the save is refused if a state appeared
   // in the meantime. There is deliberately no force option to reach for.
+  // Proved again, immediately before the write. The entry gate at step 0 is
+  // several seconds old by now: the auth preflight between them starts two real
+  // subscription CLIs. A review released the lease inside that window and
+  // watched a branch, a worktree and a first durable state land with no
+  // authority at all — so the gate that matters is the one nearest the write,
+  // exactly as `advanceTaskState` argues for a move.
+  const stillHeld = verifyExecutionLeaseHeldFor(repository, deps.lease);
+  if (stillHeld.code !== 'HELD') {
+    return stop({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      workspace,
+      // The workspace exists and no state records it. Reported for the same
+      // reason a refused write reports it: an operator whose repository now
+      // holds a worktree nothing accounts for has to be told.
+      residue: true,
+      reasonCodes: Object.freeze([stillHeld.code]),
+    });
+  }
+
   const saved = saveTaskState(firstState(workspace, repository, deps.now()), {
     repositoryRoot: repository.root,
     ...(deps.replace !== undefined ? { replace: deps.replace } : {}),

@@ -116,6 +116,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 
 import { comparePathIdentity } from '../core/path-identity.js';
 import {
+  ExecutionLeaseProof,
   mintExecutionLeaseEvidence,
 } from '../core/internal/execution-lease-evidence.js';
 import {
@@ -712,42 +713,50 @@ type VerifiedRemoval = 'REMOVED' | 'CHANGED' | 'ABSENT' | 'FAILED';
  *
  * ── How it binds ───────────────────────────────────────────────────────────
  *
- * `rename` within a directory atomically detaches whatever is at the name, and
- * the name is then **immediately re-occupied by a placeholder** before anything
- * is read. So the sequence is detach, occupy, identify, decide — and only the
- * first two steps are in the critical section, with no I/O between them. If the
- * detached file is the one that was verified it is deleted and the placeholder
- * with it; if it is not, the original is renamed back over the placeholder, so a
- * refusal restores exactly what it disturbed.
+ * `rename` within a directory atomically detaches whatever is at the name into a
+ * name only this call knows. From that instant the decision is about an *object*
+ * this call owns, and **the lease name is never touched again except through
+ * `link`**, which cannot overwrite. If the detached bytes are the ones that were
+ * verified they are deleted; if they are not, they are linked back — and an
+ * `EEXIST` there means somebody acquired the freed name, which is a real
+ * authority and is left alone.
  *
- * ── The residual, stated exactly, because a previous version of this comment
- * overstated it ────────────────────────────────────────────────────────────
+ * ── Two wrong answers, both reproduced, both worth recording ───────────────
  *
- * An earlier draft claimed the remainder was "a loss of availability, never of
- * safety". That was **false, and the adversarial review reproduced it**: with
- * only a rename, the name stayed free for as long as it took to read and hash
- * the detached file — hundreds of milliseconds for a large one — and a third
- * process acquired inside that window. The restoring `link` then failed
- * `EEXIST`, the incumbent's lease was discarded, and the break reported
- * `LEASE_CHANGED`, whose operator sentence reads "Nothing was removed". Two
- * live writers, and a report saying nothing happened.
+ * The first version read the lease, decided, and then `unlink`ed the *path* — an
+ * ABA defect that destroyed a legitimately acquired successor's lease.
  *
- * The placeholder removes the read and the hash from the window, leaving one
- * rename and one exclusive create with nothing between them. It does **not**
- * make the window zero, and this comment no longer says it does: a concurrent
- * acquisition landing between those two syscalls still takes the name, the
- * placeholder create then fails `EEXIST`, and the incumbent is out. What is
- * true is bounded and worth stating plainly — the window is two adjacent
- * syscalls rather than a file read, it is reachable only by a *third* party
- * acquiring during a break that was going to be refused anyway, and the
- * incumbent stops at its next checkpoint rather than being told it still holds
- * the lease.
+ * The second re-occupied the name with a 0-byte placeholder after the detach and
+ * then acted on the name twice, guarded by a boolean recording that the create
+ * had succeeded. That is the same defect one level up: a belief about a name,
+ * acted on several syscalls later. An empty file is `UNPARSEABLE` with the
+ * constant revision `sha256("")`, so a *second* break identifies it by revision
+ * alone — exactly as the CLI instructs for an unreadable lease — and removes it;
+ * the first break then unlinks or overwrites whatever has taken the freed name.
+ * An adversarial review reproduced that with real processes, twelve times out of
+ * twelve, destroying a lease an acquirer had successfully taken.
  *
- * Closing it entirely needs an atomic compare-and-delete on a directory entry,
- * which no portable filesystem primitive offers. The remaining exposure is the
- * incumbent's *next checkpoint* being up to one agent step away — a property of
- * where the driver re-proves the lease, not of this function — and that is
- * named as a boundary in `run-driver.ts` rather than implied away here.
+ * The rule that survives both is the one stated above, and it is a rule rather
+ * than four correct lines on purpose.
+ *
+ * ── The residual, stated exactly ───────────────────────────────────────────
+ *
+ * Between the gate reads and the `rename`, and again between the `rename` and
+ * the restoring `link`, the name can change hands. What that costs is bounded:
+ *
+ *  - a lease acquired in either window is **never removed or overwritten**,
+ *    because the only operation aimed at the name is a `link` that refuses to
+ *    clobber;
+ *  - a lease that was detached and cannot be put back is **kept**, in the
+ *    quarantine file, rather than deleted — inert, inspectable, recoverable;
+ *  - but a writer that acquired between the gate read and the `rename` is
+ *    *displaced*: its record is detached, and if the name has since been taken
+ *    it stays detached. It loses authority and stops at its next checkpoint.
+ *
+ * Closing that last one needs an atomic compare-and-delete on a directory entry,
+ * which no portable filesystem primitive offers. It is named here rather than
+ * argued away, because the previous two attempts to argue it away were both
+ * wrong.
  */
 function removeVerifiedLease(
   leasePath: string,
@@ -761,58 +770,49 @@ function removeVerifiedLease(
     return safeErrnoCode(error) === 'ENOENT' ? 'ABSENT' : 'FAILED';
   }
 
-  // Re-occupy the name at once, before anything is read. This is the whole
-  // narrowing: without it the name stays free for a file read and a digest, and
-  // a third process acquires inside that window. A placeholder is not a lease —
-  // it does not parse — so an acquirer meeting it refuses `STALE_LEASE_RECOVERY_UNSAFE`
-  // rather than winning, and a crash here leaves exactly the state `lease break`
-  // exists to clear.
-  let placeholder = false;
-  try {
-    closeSync(openSync(leasePath, 'wx', 0o600));
-    placeholder = true;
-  } catch {
-    // Somebody took the name in the two syscalls between the rename and this
-    // one. They hold it now; the detached lease is out either way, and the
-    // caller is told the lease changed rather than that it was removed.
-  }
-
+  // From here the lease name is **never touched again except through `link`**,
+  // which cannot overwrite. That single rule is what this function got wrong
+  // twice, and it is worth stating as a rule rather than as four correct lines.
+  //
+  // The version before this one re-occupied the name with a 0-byte placeholder
+  // and then acted on the name twice — `unlink` on the match path, `rename` on
+  // the restore — guarded by a boolean recording that the create had succeeded
+  // several syscalls earlier. That boolean is a belief about a name, which is
+  // exactly the defect the detach exists to avoid, reintroduced one level up:
+  // an empty file is `UNPARSEABLE` with the constant revision `sha256("")`, so a
+  // *second* break identifies it by revision alone and removes it — and the
+  // first break then unlinks or overwrites whatever took the freed name, which
+  // an adversarial review demonstrated destroying a legitimately acquired lease
+  // with real processes, twelve times out of twelve.
+  //
+  // So: no placeholder. The quarantined file is ours by construction — a name
+  // only this call knows — and every decision below is about *it*.
   let bytes: Buffer | null = null;
   try {
     bytes = readFileSync(quarantine);
   } catch {
-    // Detached and unreadable. There is nothing to identify and nothing worth
-    // restoring, so the placeholder is cleared and the caller is told the
-    // removal failed — a lease that cannot be read is not one this function may
-    // claim to have removed.
+    // Detached and unreadable. Identifying it is impossible, so it is neither
+    // removed nor claimed to have been: the restore below puts it back.
   }
 
   if (bytes !== null && matches(bytes)) {
-    if (placeholder) discard(leasePath);
     discard(quarantine);
     return 'REMOVED';
   }
 
-  // Not ours to remove. The original goes back over the placeholder we are
-  // holding the name with — `rename` is right here precisely *because* the name
-  // is ours: it is the placeholder being overwritten, never a third party's
-  // lease. If the placeholder was lost to a concurrent acquirer, `link` is used
-  // instead so that acquisition stands.
-  if (placeholder) {
-    try {
-      renameSync(quarantine, leasePath);
-      return bytes === null ? 'FAILED' : 'CHANGED';
-    } catch {
-      // The restore failed with the name still ours. Nothing further to try.
-    }
-  } else {
-    try {
-      linkSync(quarantine, leasePath);
-    } catch {
-      // `EEXIST` is the expected answer — somebody else holds the name — and
-      // any other failure leaves it absent, which the next invocation reports
-      // rather than acts on.
-    }
+  // Not ours to remove — put it back. `link` and never `rename`: if somebody
+  // acquired the freed name in the meantime, that acquisition is a real
+  // authority and stands, and `EEXIST` is the answer that says so.
+  try {
+    linkSync(quarantine, leasePath);
+  } catch {
+    // Either somebody holds the name (`EEXIST`) or the filesystem refuses to
+    // link. Both leave the detached file where it is, deliberately: deleting it
+    // would be destroying a record this call has just decided it may not
+    // remove, and a stray file inside the administrative directory is inert,
+    // inspectable and recoverable. An earlier version discarded it here, which
+    // turned a refusal into a deletion.
+    return bytes === null ? 'FAILED' : 'CHANGED';
   }
   discard(quarantine);
   return bytes === null ? 'FAILED' : 'CHANGED';
@@ -905,7 +905,7 @@ export function verifyExecutionLeaseHeld(evidence: unknown): UnscopedLeaseVerify
 
   let bytes: Buffer;
   try {
-    bytes = readFileSync(evidence.leasePath);
+    bytes = readFileSync(ExecutionLeaseProof.leasePathOf(evidence));
   } catch (error) {
     const errno = safeErrnoCode(error);
     return Object.freeze({ code: errno === 'ENOENT' ? ('LEASE_ABSENT' as const) : ('LEASE_UNREADABLE' as const) });
@@ -926,7 +926,7 @@ export function verifyExecutionLeaseHeld(evidence: unknown): UnscopedLeaseVerify
   if (!parsed.success) return Object.freeze({ code: 'NOT_OWNER' as const });
 
   return Object.freeze({
-    code: evidence.matchesRecordedNonce(parsed.data.ownerNonce)
+    code: ExecutionLeaseProof.matchesNonce(evidence, parsed.data.ownerNonce)
       ? ('HELD' as const)
       : ('NOT_OWNER' as const),
   });
@@ -965,7 +965,10 @@ export function verifyExecutionLeaseHeldFor(
   }
 
   const location = deriveExecutionLeaseLocation(repository);
-  if (!location.ok || comparePathIdentity(evidence.leasePath, location.path) !== 'EQUAL') {
+  if (
+    !location.ok ||
+    comparePathIdentity(ExecutionLeaseProof.leasePathOf(evidence), location.path) !== 'EQUAL'
+  ) {
     return Object.freeze({ code: 'LEASE_FOR_ANOTHER_REPOSITORY' as const });
   }
 
@@ -982,7 +985,7 @@ export function verifyExecutionLeaseHeldFor(
   if (read.document === null) return Object.freeze({ code: 'NOT_OWNER' as const });
 
   return Object.freeze({
-    code: evidence.matchesRecordedNonce(read.document.ownerNonce)
+    code: ExecutionLeaseProof.matchesNonce(evidence, read.document.ownerNonce)
       ? ('HELD' as const)
       : ('NOT_OWNER' as const),
   });
@@ -1043,8 +1046,8 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   // bytes, so a successor that took this path between the verification above and
   // this line keeps its lease — see {@link removeVerifiedLease}. `NOT_OWNER` is
   // then the honest answer: what is there is somebody else's.
-  const removed = removeVerifiedLease(evidence.leasePath, (bytes) =>
-    evidence.matchesRecordedNonce(nonceOfBytes(bytes)),
+  const removed = removeVerifiedLease(ExecutionLeaseProof.leasePathOf(evidence), (bytes) =>
+    ExecutionLeaseProof.matchesNonce(evidence, nonceOfBytes(bytes)),
   );
   if (removed === 'ABSENT') return Object.freeze({ code: 'LEASE_ABSENT' as const, detail: null });
   if (removed === 'CHANGED') return Object.freeze({ code: 'NOT_OWNER' as const, detail: null });

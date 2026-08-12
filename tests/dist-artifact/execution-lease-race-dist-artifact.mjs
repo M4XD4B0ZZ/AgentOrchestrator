@@ -270,11 +270,14 @@ for (let round = 0; round < ROUNDS; round += 1) {
  *
  * The reason is worth recording, because it is also the reason the residual is
  * hard to reach in production. `acquire` stages its record and **fsyncs** it
- * before it can claim the name — of the order of tens of milliseconds — while
- * the whole break completes in a fraction of that. An acquirer released at the
- * same instant as a breaker is still writing its staging file when the break is
- * over, so it never attempts the exclusive create inside the window at all. The
- * window is real; a real acquirer is simply too slow to be in it.
+ * before it can claim the name, while the whole break completes in a fraction of
+ * that. Measured over 200 iterations each, on this host: staging write+fsync+close
+ * p50 6.20 ms, whole `acquire` p50 7.49 ms, whole `break` of a 450-byte lease
+ * p50 1.79 ms — a ratio of about 3.5:1. (An earlier draft said "tens of
+ * milliseconds", which was 3-4x optimistic; the inequality the argument rests on
+ * survives the correction, the round number did not.) An acquirer released at
+ * the same instant as a breaker is still writing its staging file when the break
+ * is over, so it never attempts the exclusive create inside the window at all.
  *
  * So the placeholder stays on the argument that it removes a file read and a
  * digest from a critical section for no cost — not on the claim that this

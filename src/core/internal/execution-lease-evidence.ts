@@ -69,14 +69,45 @@ export class ExecutionLeaseProof {
   }
 
   /**
+   * Whether `value` really carries this class's private field.
+   *
+   * ── Why this is not `instanceof`, and why there are no instance members ───
+   *
+   * `instanceof` walks the prototype chain, and a prototype is something any
+   * caller can hand to `Object.create`. An adversarial review built working
+   * evidence out of one genuine artefact and no imports at all:
+   *
+   *     Object.create(Object.getPrototypeOf(realEvidence), {
+   *       leasePath:            { value: someOtherLeasePath },
+   *       matchesRecordedNonce: { value: () => true },
+   *     })
+   *
+   * That value passed `instanceof`, satisfied every gate, advanced durable state
+   * and released a rightful owner's lease. Own properties shadow a prototype
+   * getter and method, so the `#nonce` this class is built around never had to
+   * exist — nothing ever read it.
+   *
+   * No reachability test can catch that: it imports nothing. So the artefact
+   * stops exposing anything to shadow. There is no `leasePath` getter and no
+   * `matchesRecordedNonce` method; the two statics below read the private fields
+   * directly, and `#nonce in value` is true only for an object that really went
+   * through this constructor. `Object.create` does not copy private fields, so
+   * the forgery above now fails at the gate.
+   */
+  static holds(value: unknown): value is ExecutionLeaseProof {
+    return typeof value === 'object' && value !== null && #nonce in value;
+  }
+
+  /**
    * The one file this evidence is about.
    *
-   * Carried on the artefact rather than re-derived by the release path, so that
-   * a caller cannot point a release at a lease it did not take: there is no
+   * A static reading the private field, not a getter — see {@link holds}. It is
+   * carried on the artefact rather than re-derived by the release path so that a
+   * caller cannot point a release at a lease it did not take: there is no
    * argument for "which lease", because the proof already says.
    */
-  get leasePath(): string {
-    return this.#leasePath;
+  static leasePathOf(proof: ExecutionLeaseProof): string {
+    return proof.#leasePath;
   }
 
   /**
@@ -85,8 +116,8 @@ export class ExecutionLeaseProof {
    * Takes `unknown` because the value comes from a parsed file, and a proof that
    * only worked on already-validated input would be checking the wrong thing.
    */
-  matchesRecordedNonce(recorded: unknown): boolean {
-    return typeof recorded === 'string' && recorded === this.#nonce;
+  static matchesNonce(proof: ExecutionLeaseProof, recorded: unknown): boolean {
+    return typeof recorded === 'string' && recorded === proof.#nonce;
   }
 }
 

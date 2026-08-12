@@ -38,5 +38,9 @@ export type ExecutionLeaseEvidence = ExecutionLeaseProof;
  * static type has already been subverted — which is the only place it matters.
  */
 export function isExecutionLeaseEvidence(value: unknown): value is ExecutionLeaseEvidence {
-  return value instanceof ExecutionLeaseProof;
+  // A brand check on the private field, not `instanceof`. See the mint's header:
+  // `instanceof` walks a prototype chain, and `Object.create` hands anybody that
+  // prototype — which an adversarial review turned into working evidence with no
+  // imports at all. A private field is not copied by `Object.create`.
+  return ExecutionLeaseProof.holds(value);
 }

@@ -39,7 +39,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -77,9 +78,11 @@ import { runGitCommand } from '../src/worktree/git-command.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { createRepoFixture, git, removeRepoFixtures } from './helpers/repo-fixtures.js';
 import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
+import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -156,6 +159,45 @@ function sourceFiles(): string[] {
   };
   walk(join(PACKAGE_ROOT, 'src'));
   return files;
+}
+
+/**
+ * Every production module that can reach `name` from the internal evidence
+ * module, by any static route.
+ *
+ * Named imports are the obvious one and were the only route the first version of
+ * these pins saw. A review demonstrated three more that walked straight past it —
+ * a namespace import, an awaited dynamic import, and `export … from` — so all of
+ * them are matched here, plus a computed specifier, which nothing can resolve
+ * statically and is therefore refused outright rather than missed quietly.
+ *
+ * What no importer pin can ever catch is the forgery that imports nothing at
+ * all: `Object.create(Object.getPrototypeOf(realEvidence), …)`. That one is
+ * closed in the artefact itself — the brand check reads a private field instead
+ * of walking a prototype chain — and this pin is deliberately not asked to carry
+ * it. The case below it does.
+ */
+function reachesInternalEvidence(name: string): string[] {
+  const declaringModule = join(PACKAGE_ROOT, 'src', 'core', 'internal', 'execution-lease-evidence.ts');
+  const importers: string[] = [];
+  for (const file of sourceFiles()) {
+    // The module that declares the class does not import it, and a pattern loose
+    // enough to span an unrelated `import` line and the `export class` below it
+    // would count it as its own importer — noise that hides the signal.
+    if (file === declaringModule) continue;
+    const text = readFileSync(file, 'utf8');
+    const namesTheModule = /['"][^'"]*internal\/execution-lease-evidence\.js['"]/.test(text);
+    const named = new RegExp(
+      String.raw`import[\s\S]{0,400}?\{[\s\S]{0,400}?\b${name}\b[\s\S]{0,400}?\}`,
+    ).test(text);
+    const indirect =
+      namesTheModule &&
+      (/import\s*\*\s*as\s+\w+/.test(text) ||
+        /import\s*\(/.test(text) ||
+        /export\s*(\*|\{[^}]*\})\s*from/.test(text));
+    if (named || indirect) importers.push(relative(PACKAGE_ROOT, file));
+  }
+  return importers.sort();
 }
 
 /* ─────────────────── 1. the claim, and a second caller ──────────────────── */
@@ -317,39 +359,55 @@ describe('lease evidence is produced, never asserted', () => {
   });
 
   it('has its mint imported by exactly one module in the product', () => {
-    const importers: string[] = [];
-    for (const file of sourceFiles()) {
-      const text = readFileSync(file, 'utf8');
-      if (/import\s*\{[^}]*mintExecutionLeaseEvidence[^}]*\}/.test(text)) {
-        importers.push(relative(PACKAGE_ROOT, file));
-      }
-    }
-
-    // The lease store is the only producer. A second one would make every case
-    // in this file a statement about only one of them.
-    expect(importers).toEqual([join('src', 'lease', 'execution-lease.ts')]);
+    // Every route, not just the named import: a review showed the first version
+    // of this pin missing namespace imports, dynamic imports and re-exports.
+    // The lease store is the only producer. The public wrapper names the class,
+    // for the brand check, and never the mint — so a caller importing the public
+    // module gets nothing it can construct with.
+    expect(reachesInternalEvidence('mintExecutionLeaseEvidence')).toEqual([
+      join('src', 'lease', 'execution-lease.ts'),
+    ]);
   });
 
-  it('has the class itself imported only by the module that names the type', () => {
-    // The mint is not the only way to make one. `instanceof` accepts a
-    // *subclass*, so a module that can reach `ExecutionLeaseProof` can extend it,
-    // override `leasePath` and `matchesRecordedNonce`, and pass every gate — the
-    // adversarial review did exactly that and unlinked an arbitrary path with it.
-    // Pinning the mint's importers left that route open, because it never
-    // mentions the mint.
+  it('has the class itself reachable from only the two modules that need it', () => {
+    // The mint is not the only way to get one. A *subclass* carries the private
+    // field through `super(…)`, so a module that can reach `ExecutionLeaseProof`
+    // can construct evidence for any path it likes — and pinning the mint's
+    // importers never sees that, because it never mentions the mint.
     //
-    // So the class is pinned too. Exactly one module in `src/` may name it: the
-    // public wrapper, which needs it for the `instanceof` test and exports only a
-    // type alias. The lease store reaches the mint, never the constructor.
-    const importers: string[] = [];
-    for (const file of sourceFiles()) {
-      const text = readFileSync(file, 'utf8');
-      if (/import\s*\{[^}]*\bExecutionLeaseProof\b[^}]*\}/.test(text)) {
-        importers.push(relative(PACKAGE_ROOT, file));
-      }
-    }
+    // Two modules may name the class, and each for a stated reason: the public
+    // wrapper, which needs it for the brand check and exports only a type alias;
+    // and the lease store, which reads the private fields through the statics.
+    // Neither exposes a constructor.
+    expect(reachesInternalEvidence('ExecutionLeaseProof')).toEqual([
+      join('src', 'core', 'execution-lease-evidence.ts'),
+      join('src', 'lease', 'execution-lease.ts'),
+    ]);
+  });
 
-    expect(importers.sort()).toEqual([join('src', 'core', 'execution-lease-evidence.ts')]);
+  it('cannot be forged by an object that only borrows the prototype', () => {
+    // The route no reachability pin can ever catch, because it imports nothing:
+    // one genuine artefact — which every writer already receives as a parameter —
+    // plus `Object.create`, with own properties shadowing the prototype's
+    // members. Against the previous `instanceof` gate this passed everything and
+    // released a rightful owner's lease.
+    //
+    // It fails now because the gate reads a private field the prototype does not
+    // carry, and because the artefact exposes no instance members left to shadow.
+    const genuine = leaseAuthorityAt(
+      mkdtempSync(join(tmpdir(), 'ao-forge-')),
+    ).evidence;
+    expect(isExecutionLeaseEvidence(genuine)).toBe(true);
+
+    const borrowed = Object.create(Object.getPrototypeOf(genuine) as object, {
+      leasePath: { value: 'C:/somewhere/else/agent-orchestrator-execution-lease.json' },
+      matchesRecordedNonce: { value: () => true },
+    }) as unknown;
+
+    expect(borrowed instanceof (Object.getPrototypeOf(genuine) as { constructor: new () => unknown }).constructor).toBe(true);
+    expect(isExecutionLeaseEvidence(borrowed)).toBe(false);
+    expect(verifyExecutionLeaseHeld(borrowed).code).toBe('EVIDENCE_INVALID');
+    expect(releaseRepositoryExecutionLease(borrowed).code).toBe('EVIDENCE_INVALID');
   });
 
   it('is re-exported by no module at all', () => {

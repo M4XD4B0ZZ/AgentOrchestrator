@@ -71,11 +71,18 @@
  * and the proof is re-taken from the file on every single move rather than
  * carried in a boolean somebody set earlier.
  *
- * Creation is not covered and does not need to be — `saveTaskState` writes a
- * first state, `startTask` proves the lease before it creates anything, and the
- * gap between the two is a handful of Git commands rather than an agent.
+ * Creation is `saveTaskState`'s, not this function's, and it is gated in
+ * `start-task.ts` rather than here — immediately before the write, for the same
+ * reason. An earlier version of this sentence dismissed that gap as "a handful
+ * of Git commands rather than an agent"; it is nothing of the kind. Between
+ * `startTask`'s entry gate and its first durable write sits the auth preflight,
+ * which the CLI's own comment calls expensive and which starts two real
+ * subscription CLIs — measured at 2552 ms for the capability dump alone. A
+ * review created a branch, a worktree and a first state through the real entry
+ * points with the lease demonstrably gone in that window.
  */
 
+import { comparePathIdentity } from '../core/path-identity.js';
 import { canTransition } from '../core/transitions.js';
 import { safeParseTaskState } from '../core/task-state.js';
 import {
@@ -149,6 +156,32 @@ export function advanceTaskState(
   // checks deliberately: those are facts about the value the caller built and
   // cost nothing, while this one is a fact about *now* and is worth taking as
   // late as it can be taken.
+  // The lease must be for the repository this write lands in.
+  //
+  // `verifyExecutionLeaseHeldFor` binds the *artefact* to the repository it is
+  // handed — and that repository and `repositoryRoot` are two independent fields
+  // on one options object, so nothing made them describe the same place. Two
+  // reviewers reproduced the consequence with no forgery at all: a genuine,
+  // current lease for repository A satisfied a durable transition into
+  // repository B, whose own lease was free at the time. That is the defect this
+  // slice already closed one layer up, left standing at the one function every
+  // durable transition passes through — and `runTask` only *happens* to build
+  // the pair consistently, which is exactly the accident V2-08 is shaped to
+  // break by threading one lease through many per-task calls.
+  const forThisRepository = comparePathIdentity(
+    options.lease.repository.root,
+    options.repositoryRoot,
+  );
+  if (forThisRepository !== 'EQUAL') {
+    return Object.freeze({
+      ok: false as const,
+      code: 'EXECUTION_LEASE_LOST' as const,
+      path: null,
+      detail: 'LEASE_FOR_ANOTHER_REPOSITORY',
+      errnoCode: null,
+    });
+  }
+
   const held = verifyExecutionLeaseHeldFor(options.lease.repository, options.lease.evidence);
   if (held.code !== 'HELD') {
     return Object.freeze({

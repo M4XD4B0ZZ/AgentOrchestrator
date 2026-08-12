@@ -12,7 +12,7 @@
  * **A step is never executed from persisted state alone.** Every iteration, in
  * this order and with each gate closing on the one before it:
  *
- *  0. `verifyExecutionLeaseHeld` — is this process still the repository's one
+ *  0. `verifyExecutionLeaseHeldFor` — is this process still the repository's one
  *     writer? Re-proved against the file every iteration, not carried from the
  *     start of the run, and asked first because it is the only gate that is
  *     about the repository rather than about this task (V2-07L);
@@ -220,15 +220,16 @@ export const RUN_OUTCOMES = [
    * Removed underneath it — by an operator breaking a lease they believed
    * stale, by a wiped administrative directory — or replaced by a successor.
    *
-   * **The run stops at the next iteration boundary, and the step already in
-   * flight completes**, including its durable write. That is stated exactly
-   * because an earlier draft claimed the opposite, and the adversarial review
-   * measured it: a lease deleted during the writing agent let that step finish
-   * and record `VERIFYING` before the run stopped. Closing it means proving the
-   * lease inside the loop step, between the agent returning and the state being
-   * advanced, which is the loop's contract to change rather than the driver's.
-   * The exposure is one agent invocation plus one durable write, and it is
-   * reachable only by something removing a live holder's lease.
+   * **The step in flight finishes, and its durable write does not land.**
+   * `advanceTaskState` re-proves the lease immediately before every transition,
+   * so a loss during an agent subprocess is caught at the write rather than at
+   * the next iteration — measured, in both directions: the write is refused and
+   * the state file is byte-identical.
+   *
+   * What is *not* claimed is anything about the subprocess itself. An agent
+   * already running may still write in the worktree and may still land a commit
+   * on the task branch; stopping that needs owned process containment, which is
+   * a later slice and is not pretended to be solved here.
    */
   'EXECUTION_LEASE_LOST',
 
@@ -757,10 +758,17 @@ export async function runTask(
 
       case 'STATE_NOT_RECORDED':
         return stop({
+          // A lease lost *during* the step surfaces here, because the write is
+          // where it is caught. It must keep its own outcome: `RUN_OUTCOMES`
+          // separates these precisely because they send an operator to different
+          // places, and folding a lost authority into "a write was refused for
+          // some other reason" is the collapse that vocabulary exists to prevent.
           outcome:
-            step.save !== null && !step.save.ok && step.save.code === 'STATE_CONFLICT'
-              ? 'STATE_CONFLICT'
-              : 'STATE_NOT_RECORDED',
+            step.save !== null && !step.save.ok && step.save.code === 'EXECUTION_LEASE_LOST'
+              ? 'EXECUTION_LEASE_LOST'
+              : step.save !== null && !step.save.ok && step.save.code === 'STATE_CONFLICT'
+                ? 'STATE_CONFLICT'
+                : 'STATE_NOT_RECORDED',
           ...stopped,
           state: state.state,
           steps,

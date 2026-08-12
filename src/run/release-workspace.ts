@@ -241,6 +241,22 @@ export async function releaseTaskWorkspace(
     return result({ outcome: 'HOLDS_IGNORED_CONTENT', taskId, verdict: assessment.verdict });
   }
 
+  // Proved again, immediately before the deletion. The entry gate is several Git
+  // subprocesses old by this point — the plan, the adoption assessment, the
+  // ignored-content query — and what follows destroys a worktree and a branch. A
+  // review lost the lease to a legitimate successor inside that window and
+  // watched both be deleted anyway. The gate that matters is the one nearest the
+  // effect, exactly as `advanceTaskState` argues for a durable move.
+  const stillHeld = verifyExecutionLeaseHeldFor(repository, deps.lease);
+  if (stillHeld.code !== 'HELD') {
+    return result({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      taskId,
+      verdict: assessment.verdict,
+      reasonCodes: Object.freeze([stillHeld.code]),
+    });
+  }
+
   const removal = await removeTaskWorkspace(repository, task, { git: deps.git });
   if (!removal.ok) {
     return result({
