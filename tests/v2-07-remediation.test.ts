@@ -1358,9 +1358,38 @@ describe('a re-proved entry field is really re-proved', () => {
       expect(readFileSync(ledgerPath(fixture.root)).equals(before), field).toBe(true);
     }
 
+    // The fourth prover, which cannot be reached by editing a field of the
+    // settlement: forging `disposition` *is* choosing a different move. A-001's
+    // record proves READY_FOR_PR, so ABANDONED is a legal edge out of ACTIVE
+    // that the record does not support — and it must be the disposition prover
+    // that says so, not the schema, which accepts this document.
+    const abandoned = {
+      ...current.ledger,
+      activeTaskId: null,
+      tasks: current.ledger.tasks.map((task) =>
+        task.taskId === 'A-001'
+          ? {
+              taskId: 'A-001',
+              disposition: 'ABANDONED' as const,
+              evidenceRevision: truth.revision,
+              baseCommit: truth.state.basePinnedCommit,
+              resultCommit: null,
+            }
+          : task,
+      ),
+    };
+    expect(safeParseBlockRunLedger(abandoned).success).toBe(true);
+    const forgedMove = updateBlockLedger(abandoned, {
+      repositoryRoot: fixture.root,
+      expectedRevision: current.revision,
+    });
+    expect(forgedMove.ok).toBe(false);
+    expect(forgedMove.ok ? null : forgedMove.code).toBe('ENTRY_NOT_PROVEN');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+
     // The control, last because it is the one that writes: the same move with
-    // nothing forged is accepted. Without it the three refusals above could all
-    // be passing because the move itself was malformed.
+    // nothing forged is accepted. Without it the refusals above could all be
+    // passing because the move itself was malformed.
     const honest = attempt({});
     expect(honest.ok).toBe(true);
   }, 180_000);

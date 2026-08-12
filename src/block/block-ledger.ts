@@ -105,8 +105,16 @@ export const TASK_DISPOSITIONS = [
 
 export type TaskDisposition = (typeof TASK_DISPOSITIONS)[number];
 
-/** Dispositions that assert an outcome and therefore require evidence. */
-const EVIDENCE_BACKED: ReadonlySet<TaskDisposition> = new Set<TaskDisposition>([
+/**
+ * Dispositions that assert an outcome and therefore require evidence.
+ *
+ * Exported for the same reason {@link PROGRESS_CLAIMING_STOP_REASONS} is: the
+ * contract and the proof both have to answer "does this entry carry evidence?",
+ * and two answers to that question would be two contracts. `block-evidence.ts`
+ * re-derives `evidenceRevision` for exactly this set and for no other
+ * disposition, because rule 4 below pins the field to `null` everywhere else.
+ */
+export const EVIDENCE_BACKED: ReadonlySet<TaskDisposition> = new Set<TaskDisposition>([
   'SETTLED',
   'BLOCKED',
   'ABANDONED',
@@ -537,26 +545,62 @@ const FROZEN_PLAN_FIELDS = fieldsClassified('FROZEN_PLAN');
  *                both are `null` on either side of any move, so there is no
  *                freedom left to abuse.
  *
- *                Either way it is a claim about a rule kept somewhere else, and
- *                classifying a field this way is asserting it — which is
- *                exactly the decision the compile error exists to force.
+ *                For one revision this class was the module's soft spot, and it
+ *                failed exactly where an unchecked assertion always fails. The
+ *                classification was a *promise* that another gate re-derives the
+ *                field, and nothing made the promise keepable: declaring a new
+ *                entry field, writing `REPROVED` beside it and changing nothing
+ *                else compiled clean, and the value was then persisted with a
+ *                stolen value riding a settlement that was itself entirely
+ *                honest — `proveBlockTaskEntry` read five field names and never
+ *                saw it. {@link ReprovedEntryField} closes that: the class now
+ *                *demands* a handler, and `block-evidence.ts` cannot compile
+ *                without one for every member.
  *
  * `taskId` is `PINNED` twice over: rule 1 already requires the entries to
  * mirror the frozen plan, so this restates a guarantee rather than inventing
  * one, and costs nothing if that rule is ever relaxed.
  */
+export type EntryFieldAuthority = 'PINNED' | 'REPROVED';
+
 const ENTRY_FIELD_AUTHORITY = {
   taskId: 'PINNED',
   disposition: 'REPROVED',
   evidenceRevision: 'REPROVED',
   baseCommit: 'REPROVED',
   resultCommit: 'REPROVED',
-} as const satisfies Record<keyof BlockTaskEntry, 'PINNED' | 'REPROVED'>;
+} as const satisfies Record<keyof BlockTaskEntry, EntryFieldAuthority>;
+
+/**
+ * Exactly the entry fields classified `REPROVED`, as a type.
+ *
+ * The other half of that classification's cost, and the reason it is no longer
+ * a promise nobody can be held to. `block-evidence.ts` keeps a registry of
+ * proof handlers `satisfies Record<ReprovedEntryField, …>`, so this union is
+ * what that file must cover: classify a field `REPROVED` and the registry stops
+ * compiling until a handler for it exists; declassify one and the leftover
+ * handler is an excess property. The two files cannot drift, and neither can be
+ * edited into agreement without the other noticing.
+ *
+ * The threshold this sets is deliberate and worth stating, because it is not
+ * the obvious one. It does **not** promise that a handler is *correct* — a
+ * developer can always write a prover that proves nothing, and no type can see
+ * that. What it makes impossible is the failure that actually happened: a field
+ * classified `REPROVED` with **no handler at all**, silently inheriting a proof
+ * written before it existed. Completeness is the type's job; correctness is the
+ * job of the per-field forgery tests in `tests/v2-07-remediation.test.ts`, which
+ * mutate each field against durable evidence and require a refusal.
+ */
+export type ReprovedEntryField = {
+  [K in keyof typeof ENTRY_FIELD_AUTHORITY]: (typeof ENTRY_FIELD_AUTHORITY)[K] extends 'REPROVED'
+    ? K
+    : never;
+}[keyof typeof ENTRY_FIELD_AUTHORITY];
 
 /** The entry fields the write gate re-derives, taken from the map above. */
-const REPROVED_ON_MOVE: readonly (keyof BlockTaskEntry)[] = Object.freeze(
+const REPROVED_ON_MOVE: readonly ReprovedEntryField[] = Object.freeze(
   (Object.keys(ENTRY_FIELD_AUTHORITY) as (keyof BlockTaskEntry)[]).filter(
-    (field) => ENTRY_FIELD_AUTHORITY[field] === 'REPROVED',
+    (field): field is ReprovedEntryField => ENTRY_FIELD_AUTHORITY[field] === 'REPROVED',
   ),
 );
 

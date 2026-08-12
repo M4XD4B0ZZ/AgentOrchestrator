@@ -54,7 +54,8 @@
 import { getStateKind } from '../core/states.js';
 import type { TaskState } from '../core/task-state.js';
 import { loadTaskState } from '../state/state-store.js';
-import type { BlockTaskEntry } from './block-ledger.js';
+import { EVIDENCE_BACKED } from './block-ledger.js';
+import type { BlockTaskEntry, ReprovedEntryField } from './block-ledger.js';
 
 /** Every verdict a single entry's proof can reach. A closed set. */
 export const ENTRY_PROOF_CODES = [
@@ -90,60 +91,172 @@ export interface EntryProof {
 }
 
 /**
+ * What a single field's proof gets to look at.
+ *
+ * The record and its revision travel together because they are one reading of
+ * one file: a prover that re-read the state would risk two answers inside one
+ * proof, which is the divergence this module exists to detect rather than
+ * create.
+ */
+export interface ReprovedFieldContext {
+  readonly entry: BlockTaskEntry;
+  /** The task's durable record, or `null` when it has none yet. */
+  readonly record: TaskState | null;
+  /** The revision of that record, or `null` when there is none. */
+  readonly revision: string | null;
+}
+
+/**
+ * Decides whether one field of `entry` is supported by the task record.
+ *
+ * `null` means supported. Anything else is the verdict that refuses the write,
+ * and it is returned rather than thrown so a prover can never take the decision
+ * away from {@link proveBlockTaskEntry}.
+ */
+export type ReprovedFieldProver = (context: ReprovedFieldContext) => EntryProofCode | null;
+
+/**
+ * A prover for every entry field the ledger classifies `REPROVED`.
+ *
+ * ── Why this is a registry and not four `if`s ──────────────────────────────
+ *
+ * `ENTRY_FIELD_AUTHORITY` forces a decision about any field added to
+ * `BlockTaskEntrySchema`, and `REPROVED` is the decision that says "this field
+ * may move during a legal disposition change, because something re-derives it
+ * here". That was a promise with nothing behind it. A field could be declared,
+ * classified `REPROVED`, and persisted with a forged value on an otherwise
+ * honest settlement — because the proof was four field names written before
+ * that field existed, and it simply never looked.
+ *
+ * `satisfies Record<ReprovedEntryField, ReprovedFieldProver>` makes the promise
+ * keepable and the compiler its enforcer. The union comes from the ledger's own
+ * map, so:
+ *
+ *   a new schema field            must be classified          (block-ledger.ts)
+ *   classified `REPROVED`         must appear here            (this file)
+ *   classified `PINNED`           is covered by construction  (the projection)
+ *
+ * and there is no fourth option. What the type cannot do is judge whether a
+ * handler is any good — nothing can — so each one is separately held to
+ * refusing a forged value against durable evidence in
+ * `tests/v2-07-remediation.test.ts`. Completeness here, correctness there.
+ *
+ * Declaration order is precedence order: the first prover to refuse names the
+ * verdict, and it reproduces the order these checks were written in, so the
+ * code an operator sees for a given forgery does not change.
+ */
+const REPROVED_FIELD_PROVERS = {
+  /**
+   * The disposition is judged by the task contract's own vocabulary rather than
+   * by a second definition kept here. `ABANDONED` names its state instead of
+   * asking for a kind, because `READY_FOR_PR` is terminal too and settling and
+   * abandoning must never be reachable from one record.
+   *
+   * `PLANNED` and `ACTIVE` claim nothing about the record's phase — the first
+   * claims no record at all, the second only that the run is working on a task
+   * that exists — so there is nothing here to re-derive for them.
+   */
+  disposition: ({ entry, record }) => {
+    if (entry.disposition === 'PLANNED' || entry.disposition === 'ACTIVE') return null;
+    if (record === null) return 'TASK_STATE_DOES_NOT_PROVE_IT';
+    const proved =
+      entry.disposition === 'SETTLED'
+        ? record.state === 'READY_FOR_PR'
+        : entry.disposition === 'BLOCKED'
+          ? getStateKind(record.state) === 'BLOCKING'
+          : record.state === 'ABORTED';
+    return proved ? null : 'TASK_STATE_DOES_NOT_PROVE_IT';
+  },
+
+  /**
+   * The evidence must still be the revision that proved it. This is what makes
+   * a claim that *was* justified distinguishable from one that has since
+   * stopped being true — and from one that was simply typed into the file.
+   *
+   * Only the evidence-backed dispositions carry it; rule 4 of the ledger
+   * contract pins it to `null` for the rest, which is checked here too so the
+   * field has one owner rather than two.
+   */
+  evidenceRevision: ({ entry, revision }) =>
+    EVIDENCE_BACKED.has(entry.disposition)
+      ? entry.evidenceRevision === revision
+        ? null
+        : 'EVIDENCE_NOT_CURRENT'
+      : entry.evidenceRevision === null
+        ? null
+        : 'EVIDENCE_NOT_CURRENT',
+
+  /**
+   * A base pin is a claim that this run pinned the task to a tree. A `PLANNED`
+   * entry has none to justify — recording which tree a task is built on needs a
+   * task that was prepared — and every other disposition must match the record.
+   */
+  baseCommit: ({ entry, record }) => {
+    if (entry.disposition === 'PLANNED') {
+      return entry.baseCommit === null ? null : 'COMMIT_NOT_PROVEN_BY_STATE';
+    }
+    if (record === null) return 'COMMIT_NOT_PROVEN_BY_STATE';
+    return entry.baseCommit === record.basePinnedCommit ? null : 'COMMIT_NOT_PROVEN_BY_STATE';
+  },
+
+  /**
+   * Only a `SETTLED` entry may carry one, and it must be the commit the record
+   * says the task ended at. Rule 4 pins it to `null` everywhere else, restated
+   * here for the same reason as the evidence revision.
+   */
+  resultCommit: ({ entry, record }) => {
+    if (entry.disposition !== 'SETTLED') {
+      return entry.resultCommit === null ? null : 'COMMIT_NOT_PROVEN_BY_STATE';
+    }
+    if (record === null) return 'COMMIT_NOT_PROVEN_BY_STATE';
+    return entry.resultCommit === record.currentCommit ? null : 'COMMIT_NOT_PROVEN_BY_STATE';
+  },
+} as const satisfies Record<ReprovedEntryField, ReprovedFieldProver>;
+
+/** The verdict of the first prover that refuses, or `null` when all hold. */
+function firstUnprovenField(context: ReprovedFieldContext): EntryProofCode | null {
+  // Iterated rather than called one by one, so a prover added to the registry
+  // cannot be forgotten by a runner that lists them again.
+  for (const prove of Object.values(REPROVED_FIELD_PROVERS) as ReprovedFieldProver[]) {
+    const code = prove(context);
+    if (code !== null) return code;
+  }
+  return null;
+}
+
+/**
  * Reads `entry`'s task record and says whether it supports the entry.
  *
- * Read-only, synchronous, and never throws for an expected condition.
+ * Read-only, synchronous, and never throws for an expected condition. The
+ * per-field questions live in {@link REPROVED_FIELD_PROVERS}; what stays here
+ * is the reading of the record and the two verdicts that are about the record
+ * existing at all rather than about any one field.
  */
 export function proveBlockTaskEntry(repositoryRoot: string, entry: BlockTaskEntry): EntryProof {
+  const state = loadTaskState(repositoryRoot, entry.taskId);
+
   // A planned entry claims nothing about a record, so a missing state is not a
-  // failure — it is the normal case. What it must not carry is a base pin:
-  // recording which tree a task is built on needs a task that was prepared.
+  // failure — it is the normal case, and the only one where the provers run
+  // against no record at all.
   if (entry.disposition === 'PLANNED') {
-    const state = loadTaskState(repositoryRoot, entry.taskId);
     const record = state.ok ? state.state : null;
-    if (entry.baseCommit !== null) return proof('COMMIT_NOT_PROVEN_BY_STATE', record);
-    return proof('PROVEN', record);
+    const code = firstUnprovenField({
+      entry,
+      record,
+      revision: state.ok ? state.revision : null,
+    });
+    return proof(code ?? 'PROVEN', record);
   }
 
-  const state = loadTaskState(repositoryRoot, entry.taskId);
   if (state.classification === 'STATE_MISSING') return proof('TASK_NOT_STARTED', null);
   if (!state.ok) return proof('TASK_STATE_UNUSABLE', null);
 
-  const record = state.state;
-
-  if (entry.disposition === 'ACTIVE') {
-    // An active entry claims only that the run is working on a task that
-    // exists, plus the tree that task was pinned to.
-    return entry.baseCommit === record.basePinnedCommit
-      ? proof('PROVEN', record)
-      : proof('COMMIT_NOT_PROVEN_BY_STATE', record);
-  }
-
-  // The three outcome dispositions, each judged by the task contract's own
-  // vocabulary rather than by a second definition kept here. `ABANDONED` names
-  // its state rather than asking for a kind, because `READY_FOR_PR` is terminal
-  // too and settling and abandoning must never be reachable from one record.
-  const proved =
-    entry.disposition === 'SETTLED'
-      ? record.state === 'READY_FOR_PR'
-      : entry.disposition === 'BLOCKED'
-        ? getStateKind(record.state) === 'BLOCKING'
-        : record.state === 'ABORTED';
-  if (!proved) return proof('TASK_STATE_DOES_NOT_PROVE_IT', record);
-
-  // The evidence must still be the revision that proved it. This is what makes
-  // a claim that *was* justified distinguishable from one that has since
-  // stopped being true — and from one that was simply typed into the file.
-  if (entry.evidenceRevision !== state.revision) return proof('EVIDENCE_NOT_CURRENT', record);
-
-  if (entry.baseCommit !== record.basePinnedCommit) {
-    return proof('COMMIT_NOT_PROVEN_BY_STATE', record);
-  }
-  if (entry.disposition === 'SETTLED' && entry.resultCommit !== record.currentCommit) {
-    return proof('COMMIT_NOT_PROVEN_BY_STATE', record);
-  }
-
-  return proof('PROVEN', record);
+  const code = firstUnprovenField({
+    entry,
+    record: state.state,
+    revision: state.revision,
+  });
+  return proof(code ?? 'PROVEN', state.state);
 }
 
 function proof(code: EntryProofCode, state: TaskState | null): EntryProof {
