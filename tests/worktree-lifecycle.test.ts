@@ -71,7 +71,7 @@ function identityFor(repository: ResolvedRepository, taskId: string) {
 
 /** Unwraps a preparation that is expected to have succeeded. */
 async function prepared(repository: ResolvedRepository, taskId: string): Promise<TaskWorkspace> {
-  const result = await prepareTaskWorkspace(repository, taskWithId(taskId));
+  const result = await prepareTaskWorkspace(repository, taskWithId(taskId), { lease: leaseFor(repository) });
   if (!result.ok) throw new Error(`expected WORKTREE_READY, got ${result.code}: ${result.detail}`);
   return result.workspace;
 }
@@ -84,7 +84,7 @@ describe('A — a selected task is given an isolated workspace', () => {
     const identity = identityFor(repository, 'V1-03');
     const headBefore = git(repository.root, ['rev-parse', 'HEAD']).trim();
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -159,7 +159,7 @@ describe('C — a dirty source repository is refused', () => {
     const identity = identityFor(repository, 'V1-03');
     dirty(repository.root);
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -178,7 +178,7 @@ describe('D — a source repository not on its declared base is refused', () => 
     const identity = identityFor(repository, 'V1-03');
     git(repository.root, ['switch', '--quiet', '-c', 'somewhere-else']);
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('SOURCE_BRANCH_UNEXPECTED');
@@ -190,7 +190,7 @@ describe('D — a source repository not on its declared base is refused', () => 
     const head = git(repository.root, ['rev-parse', 'HEAD']).trim();
     git(repository.root, ['checkout', '--quiet', '--detach', head]);
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('SOURCE_BRANCH_UNEXPECTED');
@@ -213,7 +213,7 @@ describe('E — an existing task branch is refused and left untouched', () => {
     git(repository.root, ['branch', identity.workBranch, otherCommit]);
     git(repository.root, ['reset', '--quiet', '--hard', 'HEAD~1']);
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -237,7 +237,7 @@ describe('F — an occupied target path is refused with its contents intact', ()
     const bystander = join(identity.worktreePath, 'important.txt');
     writeFileSync(bystander, 'do not delete me\n', 'utf8');
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -263,7 +263,7 @@ describe('G — a worktree registration collision is refused', () => {
     mkdirSync(identity.worktreeParent, { recursive: true });
     git(repository.root, ['worktree', 'add', '--quiet', '-b', identity.workBranch, elsewhere]);
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -301,7 +301,7 @@ describe('G — a worktree registration collision is refused', () => {
     rmSync(identity.worktreePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     expect(existsSync(identity.worktreePath)).toBe(false);
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -320,7 +320,7 @@ describe('H — an unsafe derived lifecycle condition is refused before any Git 
   it('refuses a task id that cannot become a legal branch', async () => {
     const repository = await freshRepository();
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1..03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1..03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -347,7 +347,7 @@ describe('H — an unsafe derived lifecycle condition is refused before any Git 
     const repository = await resolveFixture(root);
     trackWorkspacesOf(repository);
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -388,7 +388,7 @@ describe('I — a clean, owned workspace is released completely', () => {
     await prepared(repository, 'V1-03');
     await removeTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
-    const again = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const again = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
     expect(again.ok).toBe(true);
   });
 });

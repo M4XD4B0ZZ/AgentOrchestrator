@@ -130,7 +130,7 @@ export function exitCodeForRunOutcome(outcome: RunOutcome): CliExitCode {
  *
  * ── Why these codes and not fourteen new ones ──────────────────────────────
  *
- * `START_TASK_OUTCOMES` has fourteen members, and inventing fourteen process
+ * `START_TASK_OUTCOMES` has sixteen members, and inventing sixteen process
  * codes for them would make the command's exit surface a restatement of one
  * module's vocabulary. The codes above already say the six things a caller can
  * act on, so a start outcome is *classified* into them rather than given its
@@ -223,6 +223,11 @@ const RELEASE_EXIT_CODES = Object.freeze({
   // Somebody else is the repository's writer. Nothing was removed, and the
   // release is worth attempting again once they are done.
   EXECUTION_LEASE_NOT_HELD: EXIT_RUN_REFUSED,
+  // Lost partway: the worktree is gone and the branch is not. Identical on disk
+  // to `RELEASED_BRANCH_KEPT` above and deliberately not identical here — that
+  // one exits 0 and invites a hand-deletion, while this left a residue that will
+  // refuse the next start. An operator has to look, so 3.
+  EXECUTION_LEASE_LOST: EXIT_RUN_NEEDS_OPERATOR,
   REMOVE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
 }) satisfies Record<ReleaseOutcome, CliExitCode>;
 

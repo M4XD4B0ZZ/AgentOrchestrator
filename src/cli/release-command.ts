@@ -54,6 +54,11 @@ interface ReleaseOptions {
 /** One static sentence per outcome. Closed, ASCII only, and pinned by test. */
 export const RELEASE_OUTCOME_SENTENCES: Readonly<Record<ReleaseResult['outcome'], string>> =
   Object.freeze({
+    EXECUTION_LEASE_LOST:
+      'The lease was held when this release began and was lost partway through it. The\n' +
+      '  worktree is gone and the branch is not - which looks exactly like a kept branch and\n' +
+      '  is not one: another invocation owns this repository now, and what is left will\n' +
+      '  refuse the next start. Look before you delete anything.',
     EXECUTION_LEASE_NOT_HELD:
       'This invocation does not hold this repository\'s execution lease, so it may not\n' +
       'remove anything here. Nothing was touched.',

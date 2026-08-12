@@ -422,7 +422,14 @@ export async function startTask(
     });
   }
 
-  const prepared = await prepareTaskWorkspace(repository, task, { git: deps.git });
+  // The lease travels *into* the preparation rather than being proved only in
+  // front of it: six Git subprocesses and 383 ms separate this call from the
+  // `worktree add` inside it, and a review created a branch in a successor's
+  // tenure through that window. `prepareTaskWorkspace` proves it at the effect.
+  const prepared = await prepareTaskWorkspace(repository, task, {
+    git: deps.git,
+    lease: deps.lease,
+  });
 
   // A collision may be this task's own crashed start. Only there is adoption
   // even asked about, so the ordinary path is unchanged and costs nothing

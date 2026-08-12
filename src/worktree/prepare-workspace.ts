@@ -46,6 +46,8 @@
 
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { localBranchRef } from '../repo/branch-name.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -91,6 +93,14 @@ export const WORKSPACE_PREPARATION_FAILURE_CODES = [
   'WORKTREE_ALREADY_REGISTERED',
   /** The directory that must hold the workspace could not be created. */
   'WORKTREE_PARENT_UNUSABLE',
+  /**
+   * The caller does not hold this repository's execution lease *now*.
+   *
+   * Proved at the effect rather than inherited: creating a branch and a worktree
+   * is a repository mutation, and authority is a property of the moment it
+   * happens rather than of the moment the caller last looked.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
   /** `git worktree add` refused or failed. Nothing was created. */
   'WORKTREE_CREATE_FAILED',
   /** The created worktree is not what was asked for; it was removed again. */
@@ -104,6 +114,8 @@ export type WorkspacePreparationFailureCode =
 
 const PREPARATION_DETAIL: Readonly<Record<WorkspacePreparationFailureCode, string>> = Object.freeze(
   {
+    EXECUTION_LEASE_NOT_HELD:
+      'This invocation does not hold the repository execution lease, so nothing was created.',
     TASK_ID_INVALID: 'The task id is not a legal task identifier.',
     REPOSITORY_ROOT_UNSUITABLE:
       'The repository root is not an absolute path with a directory name of its own.',
@@ -178,6 +190,20 @@ export type WorkspacePreparationResult =
 export interface WorkspacePreparationOptions {
   /** The Git seam. Defaults to the real one. */
   readonly git?: GitRunner;
+  /**
+   * The execution lease, re-proved here immediately before the branch and the
+   * worktree are created.
+   *
+   * **Required**, and for the reason `remove-workspace.ts` gives about its own
+   * boundary: a gate in a caller is a gate at whatever distance the caller
+   * happens to have. `startTask` proves the lease and then spends six Git
+   * subprocesses — measured at 383 ms — reaching this function, and a review
+   * released the lease inside that window and watched a branch and a worktree
+   * land while a *successor* legitimately held the repository. The removal path
+   * was given a gate at the effect and the creation path was not; this is that
+   * asymmetry closed.
+   */
+  readonly lease: ExecutionLeaseEvidence;
 }
 
 function preparationFailure(
@@ -218,7 +244,7 @@ function pathExists(path: string): boolean {
 export async function prepareTaskWorkspace(
   repository: ResolvedRepository,
   task: TaskDefinition,
-  options: WorkspacePreparationOptions = {},
+  options: WorkspacePreparationOptions,
 ): Promise<WorkspacePreparationResult> {
   const git = options.git ?? runGitCommand;
 
@@ -239,6 +265,11 @@ export async function prepareTaskWorkspace(
   if (collision !== null) return preparationFailure(collision);
 
   // --- 4. Create -----------------------------------------------------------
+  // Authority, at the effect. Everything above this line is a question; the
+  // next statement is the first answer that changes the repository.
+  const held = verifyExecutionLeaseHeldFor(repository, options.lease);
+  if (held.code !== 'HELD') return preparationFailure('EXECUTION_LEASE_NOT_HELD');
+
   try {
     mkdirSync(identity.worktreeParent, { recursive: true });
   } catch {

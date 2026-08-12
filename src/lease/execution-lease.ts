@@ -1068,7 +1068,18 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   // bytes, so a successor that took this path between the verification above and
   // this line keeps its lease — see {@link removeVerifiedLease}. `NOT_OWNER` is
   // then the honest answer: what is there is somebody else's.
-  const removed = removeVerifiedLease(ExecutionLeaseProof.leasePathOf(evidence), (bytes) =>
+  // Read inside the guard, not in front of it. Its sibling in
+  // `verifyExecutionLeaseHeld` is already wrapped, and a review found this one
+  // bare: a value that satisfies the brand check and then fails to yield its
+  // private field turns a refusal into an uncaught `TypeError`.
+  let leasePath: string;
+  try {
+    leasePath = ExecutionLeaseProof.leasePathOf(evidence);
+  } catch {
+    return Object.freeze({ code: 'EVIDENCE_INVALID' as const, detail: null });
+  }
+
+  const removed = removeVerifiedLease(leasePath, (bytes) =>
     ExecutionLeaseProof.matchesNonce(evidence, nonceOfBytes(bytes)),
   );
   if (removed === 'ABSENT') return Object.freeze({ code: 'LEASE_ABSENT' as const, detail: null });

@@ -781,9 +781,17 @@ export async function runTask(
           ...stopped,
           state: state.state,
           steps,
+          // The code *and* its detail: `LEASE_ABSENT`, `NOT_OWNER` and
+          // `LEASE_UNREADABLE` are "cleared", "taken over by a successor" and
+          // "could not be read", which send an operator to three different
+          // places. Forwarding only the code drops that.
           reasonCodes:
             step.save !== null && !step.save.ok
-              ? Object.freeze([step.save.code])
+              ? Object.freeze(
+                  step.save.detail === null
+                    ? [step.save.code]
+                    : [step.save.code, step.save.detail],
+                )
               : Object.freeze([]),
         });
 

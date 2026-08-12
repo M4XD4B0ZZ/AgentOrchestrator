@@ -71,12 +71,19 @@ import { runTask } from '../src/run/run-driver.js';
 import { startTask } from '../src/run/start-task.js';
 import { advanceTaskState } from '../src/state/advance-state.js';
 import { loadTaskState } from '../src/state/state-store.js';
+import { exitCodeForReleaseOutcome } from '../src/cli/run-exit-codes.js';
+import { prepareTaskWorkspace } from '../src/worktree/prepare-workspace.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { createRepoFixture, git, removeRepoFixtures } from './helpers/repo-fixtures.js';
 import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
-import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
+import {
+  removeTrackedWorkspaces,
+  resolveFixture,
+  taskWithId,
+  trackWorkspacesOf,
+} from './helpers/worktree-fixtures.js';
 
 afterEach(() => {
   releaseTestLeases();
@@ -164,9 +171,15 @@ function sourceFiles(): string[] {
  *
  * Named imports are the obvious one and were the only route the first version of
  * these pins saw. A review demonstrated three more that walked straight past it —
- * a namespace import, an awaited dynamic import, and `export … from` — so all of
- * them are matched here, plus a computed specifier, which nothing can resolve
- * statically and is therefore refused outright rather than missed quietly.
+ * a namespace import, an awaited dynamic import, and `export … from`. A *second*
+ * review then found this comment already claiming to refuse a computed specifier
+ * while the function did no such thing: `import(a + b)`, `import(parts.join('/'))`
+ * and `createRequire` all reached the mint. Both halves are now true.
+ *
+ * Reaching the mint is total, which is why the care is warranted: the nonce is
+ * written into the lease file and is not a secret, so
+ * `mintExecutionLeaseEvidence(stolenNonce, victimPath)` is full authority over a
+ * repository somebody else holds.
  *
  * What no importer pin can ever catch is the forgery that imports nothing at
  * all: `Object.create(Object.getPrototypeOf(realEvidence), …)`. That one is
@@ -184,15 +197,26 @@ function reachesInternalEvidence(name: string): string[] {
     if (file === declaringModule) continue;
     const text = readFileSync(file, 'utf8');
     const namesTheModule = /['"][^'"]*internal\/execution-lease-evidence\.js['"]/.test(text);
-    const named = new RegExp(
-      String.raw`import[\s\S]{0,400}?\{[\s\S]{0,400}?\b${name}\b[\s\S]{0,400}?\}`,
-    ).test(text);
+    // Tied to the specifier. Without that this branch matched any file with an
+    // `import` and the name anywhere in it, so it both over- and under-matched.
+    const named =
+      namesTheModule &&
+      new RegExp(
+        String.raw`import[\s\S]{0,400}?\{[\s\S]{0,400}?${name}[\s\S]{0,400}?\}`,
+      ).test(text);
     const indirect =
       namesTheModule &&
       (/import\s*\*\s*as\s+\w+/.test(text) ||
-        /import\s*\(/.test(text) ||
+        /import\s*\(/.test(text) ||
         /export\s*(\*|\{[^}]*\})\s*from/.test(text));
-    if (named || indirect) importers.push(relative(PACKAGE_ROOT, file));
+    // A specifier this scan cannot resolve. `import(a + b)`,
+    // `import(parts.join('/'))` and `createRequire(...)` all reach the mint at
+    // runtime while naming nothing statically — a review demonstrated all three
+    // walking past the previous version of this pin, whose own comment claimed
+    // it refused them. Nothing can resolve these, so they are refused outright.
+    const unresolvable =
+      /import\s*\(\s*[^'")\s]/.test(text) || /createRequire/.test(text);
+    if (named || indirect || unresolvable) importers.push(relative(PACKAGE_ROOT, file));
   }
   return importers.sort();
 }
@@ -401,7 +425,12 @@ describe('lease evidence is produced, never asserted', () => {
       matchesRecordedNonce: { value: () => true },
     }) as unknown;
 
-    expect(borrowed instanceof (Object.getPrototypeOf(genuine) as { constructor: new () => unknown }).constructor).toBe(true);
+    // The prototype's `constructor` is deleted, so this resolves up the chain to
+    // `Object` — which is the point. An earlier version asserted
+    // `borrowed instanceof proto.constructor` to show the forgery still passed a
+    // prototype test; once `constructor` was removed, that line asserted only
+    // that an object is an Object while still reading as a real check.
+    expect((Object.getPrototypeOf(genuine) as object).constructor).toBe(Object);
     expect(isExecutionLeaseEvidence(borrowed)).toBe(false);
     expect(verifyExecutionLeaseHeld(borrowed).code).toBe('EVIDENCE_INVALID');
     expect(releaseRepositoryExecutionLease(borrowed).code).toBe('EVIDENCE_INVALID');
@@ -1113,5 +1142,128 @@ describe('the ledger store gains no productive caller outside a leased run', () 
         'stopBlockRun',
       ]),
     ).toEqual([]);
+  });
+});
+
+/* ─────────── 11. the gate is at the effect, not near it ─────────────────── */
+
+describe('a mutation never happens on a lease proved somewhere earlier', () => {
+  it('creates no branch and no worktree once the lease is gone', async () => {
+    // `startTask` proves the lease, then spends six Git subprocesses — measured
+    // at 383 ms — reaching `git worktree add`. A review released the lease inside
+    // that window and watched a branch and a worktree land while a *successor*
+    // legitimately held the repository. So the proof moved into
+    // `prepareTaskWorkspace`, immediately before the first statement that
+    // changes anything.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    const prepared = await prepareTaskWorkspace(
+      fixture.repository,
+      taskWithId(TASK_ID),
+      {
+        git: async (cwd, args) => {
+          // Gone before the create, and after every question the preparation
+          // asks — which is exactly the window that was open.
+          releaseRepositoryExecutionLease(evidence);
+          return runGitCommand(cwd, args);
+        },
+        lease: evidence,
+      },
+    );
+
+    expect(prepared.ok).toBe(false);
+    if (prepared.ok) return;
+    expect(prepared.code).toBe('EXECUTION_LEASE_NOT_HELD');
+    // Nothing was created: no branch, and no directory.
+    expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).toBe('');
+  });
+
+  it('starts no agent once the lease is gone', async () => {
+    // The other half of the same finding. `advanceTaskState` closed the *write*;
+    // a review then showed the driver proving the lease, spending a whole
+    // reconciliation, and *starting a writing agent* that ran and landed a commit
+    // with the lease demonstrably free. The seams themselves now carry the gate,
+    // so a spawn site added later inherits it.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: evidence },
+    );
+    expect(started.outcome).toBe('STARTED');
+
+    let agentSpawns = 0;
+    const run = await runTask(
+      {
+        repository: fixture.repository,
+        taskId: TASK_ID,
+        taskBrief: TASK_ID,
+        attendedContinuation: true,
+        authEvidence: provenAuthEvidence(),
+        lease: evidence,
+        maxSteps: 6,
+      },
+      {
+        now: tickingClock(),
+        // The lease dies during the reconciliation of the first iteration —
+        // after the driver's gate, before any step could spawn anything.
+        git: async (cwd, args) => {
+          releaseRepositoryExecutionLease(evidence);
+          return runGitCommand(cwd, args);
+        },
+        agent: async () => {
+          agentSpawns += 1;
+          throw new Error('an agent must not be started without the lease');
+        },
+      },
+    );
+
+    expect(agentSpawns).toBe(0);
+    expect(run.outcome).toBe('EXECUTION_LEASE_LOST');
+  });
+
+  it('does not call a release that lost the lease midway a release', async () => {
+    // `removeTaskWorkspace` proves the lease before `worktree remove` and again
+    // before `branch -d`. Losing it between the two spares the branch — and the
+    // result used to be `RELEASED_BRANCH_KEPT` at exit 0, which is nominal and
+    // invites an operator to delete the branch by hand. On disk it is identical
+    // to a branch Git refused to delete; in what it asks of a human it is the
+    // opposite.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const crashed = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        replace: () => {
+          throw new Error('simulated crash before the first durable write landed');
+        },
+      },
+    );
+    expect(crashed.outcome).toBe('STATE_NOT_RECORDED');
+
+    const released = await releaseTaskWorkspace(fixture.repository, TASK_ID, {
+      git: async (cwd, args) => {
+        const result = await runGitCommand(cwd, args);
+        // Gone the instant the worktree is removed, i.e. between the two
+        // destructive commands.
+        if (args[0] === 'worktree' && args[1] === 'remove') {
+          releaseRepositoryExecutionLease(evidence);
+        }
+        return result;
+      },
+      lease: evidence,
+    });
+
+    expect(released.outcome).toBe('EXECUTION_LEASE_LOST');
+    expect(released.worktreeRemoved).toBe(true);
+    // The branch survives, and the outcome says why — which is the whole point.
+    expect(released.branchRemoved).toBe(false);
+    expect(released.reasonCodes).toContain('WORKSPACE_REMOVAL_LOST_LEASE');
+    expect(exitCodeForReleaseOutcome(released.outcome)).toBe(3);
   });
 });

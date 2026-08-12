@@ -112,7 +112,7 @@ export interface WorkspaceRemovalSuccess {
    * not — reported as its own outcome rather than as success, so a leftover
    * branch is never invisible.
    */
-  readonly code: 'WORKSPACE_REMOVED' | 'WORKSPACE_PARTIALLY_REMOVED';
+  readonly code: 'WORKSPACE_REMOVED' | 'WORKSPACE_PARTIALLY_REMOVED' | 'WORKSPACE_REMOVAL_LOST_LEASE';
   readonly worktreeRemoved: boolean;
   readonly branchRemoved: boolean;
 }
@@ -301,9 +301,17 @@ export async function removeTaskWorkspace(
 
   return Object.freeze({
     ok: true as const,
+    // Three endings, not two. A branch that survives because Git refused to
+    // delete it and a branch that survives because *authority was lost midway*
+    // are identical on disk and opposite in what they ask of an operator — and a
+    // review found them sharing one code, one nominal outcome and exit 0, with
+    // nothing anywhere naming the lease. Same collapse this slice fixed on the
+    // start path, left open on the removal path.
     code: branchRemoved
       ? ('WORKSPACE_REMOVED' as const)
-      : ('WORKSPACE_PARTIALLY_REMOVED' as const),
+      : beforeBranch.code === 'HELD'
+        ? ('WORKSPACE_PARTIALLY_REMOVED' as const)
+        : ('WORKSPACE_REMOVAL_LOST_LEASE' as const),
     worktreeRemoved: true,
     branchRemoved,
   });

@@ -72,6 +72,22 @@ const NONCE_PATTERN = /^[0-9a-f]{64}$/;
 const MINTED = new WeakSet<object>();
 
 /**
+ * `MINTED.has`, captured at module load.
+ *
+ * The class is frozen so that `ExecutionLeaseProof.holds = () => true` cannot
+ * disable the gate. A review pointed out that the same move survives one level
+ * down: `MINTED.has(value)` resolves through `WeakSet.prototype` at call time,
+ * so `WeakSet.prototype.has = () => true` anywhere in the process flips it.
+ *
+ * No authority was gained — the `#` fields act as a second brand and every
+ * consumer failed closed — but a gate that can be switched off is not a gate,
+ * and binding it costs one line.
+ */
+const isMinted: (value: object) => boolean = WeakSet.prototype.has.bind(MINTED) as (
+  value: object,
+) => boolean;
+
+/**
  * The artefact. Minted only by {@link mintExecutionLeaseEvidence}, and only for
  * a claim that really performed the exclusive create.
  *
@@ -130,7 +146,7 @@ export class ExecutionLeaseProof {
     // that — an attacker who can call the constructor can produce any property.
     // A registry the mint alone writes to cannot be reached from an instance at
     // all, so re-deriving the class buys nothing.
-    return typeof value === 'object' && value !== null && MINTED.has(value as object);
+    return typeof value === 'object' && value !== null && isMinted(value as object);
   }
 
   /**

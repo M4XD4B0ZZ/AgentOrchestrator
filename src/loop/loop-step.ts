@@ -94,7 +94,11 @@
 import { runClaudeWriter } from '../agent/claude-writer.js';
 import { codexReviewResumePoint, runCodexReviewer } from '../agent/codex-reviewer.js';
 import { interruptedResumePoint, type AgentBlockEvidence } from '../agent/agent-outcome.js';
-import type { AgentRunner } from '../agent/agent-command.js';
+import {
+  runAgentCommand,
+  type AgentCommandResult,
+  type AgentRunner,
+} from '../agent/agent-command.js';
 import { recordAgentInterruption } from '../agent/record-interruption.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { absolutePathsEqual, isComparablePath } from '../core/path-identity.js';
@@ -104,12 +108,17 @@ import type { TaskState } from '../core/task-state.js';
 import type { ResumePhase, TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import { observeRuntime } from '../state/observe-runtime.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
 import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
 import { runVerification, type VerificationReport } from '../verify/run-verification.js';
-import type { VerificationRunner } from '../verify/verify-command.js';
+import {
+  runVerificationCommand,
+  type VerificationCommandResult,
+  type VerificationRunner,
+} from '../verify/verify-command.js';
 import {
   appendFindings,
   buildRemediationPayload,
@@ -1120,6 +1129,83 @@ export function isLoopDrivenState(state: TaskStateName): boolean {
  * which is deliberate — is `NOT_APPLICABLE`, and nothing is run or written.
  */
 export async function runLoopStep(
+  current: StateLoadSuccess,
+  deps: LoopDependencies,
+): Promise<LoopStepResult> {
+  return dispatch(current, fencedSpawns(deps));
+}
+
+/**
+ * The same dependencies, with every subprocess seam fenced by the lease.
+ *
+ * ── Why the wrapper and not a check at each spawn ──────────────────────────
+ *
+ * `advanceTaskState` closed the *write*: after the lease is lost, no durable
+ * state transition happens. That left the other half open, and a review
+ * measured it — the driver proves the lease, reconciliation spends nine Git
+ * subprocesses and 585 ms, and only then is a step entered and a **writing
+ * agent started**. It ran, and it landed a commit on the orchestrator-owned
+ * branch, with the lease demonstrably free. The recorded state was correctly
+ * refused; the effect was not.
+ *
+ * There are four spawn sites in this module today, and gating each one is the
+ * shape that has already failed twice in this slice: a rule enforced by
+ * remembering is a rule the fifth site breaks. So the *seams themselves* carry
+ * the gate. A step cannot start a subprocess except through one of these, and a
+ * spawn site added later inherits the check by construction.
+ *
+ * A refusal is reported as `UNAVAILABLE`, which is the vocabulary both seams
+ * already have for "the process never started, and nothing it printed is
+ * evidence of anything". The step then tries to record something, and
+ * `advanceTaskState` refuses that too, so the run stops with
+ * `EXECUTION_LEASE_LOST` and no durable trace — which is the honest end state.
+ *
+ * What this still does **not** claim: that an agent already running stops. That
+ * needs owned process containment, and it is a later slice.
+ */
+function fencedSpawns(deps: LoopDependencies): LoopDependencies {
+  const held = (): boolean =>
+    verifyExecutionLeaseHeldFor(deps.lease.repository, deps.lease.evidence).code === 'HELD';
+
+  const agent: AgentRunner = async (id, args, cwd, payload) => {
+    if (!held()) return AGENT_NOT_AUTHORISED;
+    return (deps.agent ?? runAgentCommand)(id, args, cwd, payload);
+  };
+
+  const verify: VerificationRunner = async (command, args, cwd) => {
+    if (!held()) return VERIFICATION_NOT_AUTHORISED;
+    return (deps.verify ?? runVerificationCommand)(command, args, cwd);
+  };
+
+  return { ...deps, agent, verify };
+}
+
+/** What a seam answers when this run is no longer the repository's writer. */
+const AGENT_NOT_AUTHORISED: AgentCommandResult = Object.freeze({
+  outcome: 'UNAVAILABLE' as const,
+  exitCode: null,
+  signal: null,
+  stdout: '',
+  stderr: '',
+  outputTruncated: false,
+  failureCode: null,
+  errnoCode: null,
+  durationMs: 0,
+});
+
+const VERIFICATION_NOT_AUTHORISED: VerificationCommandResult = Object.freeze({
+  outcome: 'UNAVAILABLE' as const,
+  exitCode: null,
+  signal: null,
+  stdout: '',
+  stderr: '',
+  outputTruncated: false,
+  failureCode: null,
+  errnoCode: null,
+  durationMs: 0,
+});
+
+async function dispatch(
   current: StateLoadSuccess,
   deps: LoopDependencies,
 ): Promise<LoopStepResult> {

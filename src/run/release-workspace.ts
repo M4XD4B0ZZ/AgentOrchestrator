@@ -90,6 +90,15 @@ export const RELEASE_OUTCOMES = [
    * about to write in them, having passed every proof it has.
    */
   'EXECUTION_LEASE_NOT_HELD',
+  /**
+   * The lease was held when this release began and was lost partway through it.
+   *
+   * Kept apart from `RELEASED_BRANCH_KEPT`, which it resembles exactly on disk.
+   * That one is nominal; this one means authority passed to somebody else
+   * mid-operation. A review found both reported as the same nominal outcome at
+   * exit 0, with no code anywhere naming the lease.
+   */
+  'EXECUTION_LEASE_LOST',
 ] as const;
 
 export type ReleaseOutcome = (typeof RELEASE_OUTCOMES)[number];
@@ -264,6 +273,23 @@ export async function releaseTaskWorkspace(
   if (!removal.ok) {
     return result({
       outcome: 'REMOVE_FAILED',
+      taskId,
+      verdict: assessment.verdict,
+      worktreeRemoved: removal.worktreeRemoved,
+      branchRemoved: removal.branchRemoved,
+      reasonCodes: Object.freeze([removal.code]),
+    });
+  }
+
+  // A removal that lost the lease halfway is not a release. On disk it is
+  // identical to `RELEASED_BRANCH_KEPT` — worktree gone, branch kept — and that
+  // is exactly why it needs its own outcome: the nominal one invites the
+  // operator to delete the branch when they are satisfied, while this one means
+  // authority passed to somebody else mid-operation and the residue will refuse
+  // the next start with `WORKSPACE_COLLISION`.
+  if (removal.code === 'WORKSPACE_REMOVAL_LOST_LEASE') {
+    return result({
+      outcome: 'EXECUTION_LEASE_LOST',
       taskId,
       verdict: assessment.verdict,
       worktreeRemoved: removal.worktreeRemoved,
