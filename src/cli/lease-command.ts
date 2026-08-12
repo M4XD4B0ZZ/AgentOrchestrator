@@ -215,8 +215,11 @@ export function registerLeaseCommand(program: Command): void {
         report([
           `Break        : ${broken.code}`,
           ...(broken.detail === null ? [] : [`Detail       : ${broken.detail}`]),
-          '',
-          LEASE_BREAK_SENTENCES[broken.code],
+          // Indented to match the continuation lines the sentences carry, and
+          // the way `render-lease.ts` prints every other table in this
+          // vocabulary. Without it the first line hangs left of its own
+          // remainder.
+          `  ${LEASE_BREAK_SENTENCES[broken.code]}`,
         ]);
         process.exitCode = LEASE_BREAK_EXIT_CODES[broken.code];
       } catch (error) {
