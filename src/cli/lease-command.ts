@@ -65,6 +65,7 @@ interface LeaseStatusOptions {
 interface LeaseBreakOptions extends LeaseStatusOptions {
   readonly attended?: boolean;
   readonly expectedRevision: string;
+  readonly expectedObject: string;
   readonly ownerPid?: string;
 }
 
@@ -99,11 +100,14 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
     'The lease is not the one you inspected, so nothing was removed. It may have been\n' +
     '  released and legitimately re-acquired by a new run, which is exactly the case this\n' +
     '  refusal exists for. Run `agent-loop lease status` again and decide about what is there\n' +
-    '  now. Do not re-run this command with the revision you already had. If the reason line\n' +
-    '  says RECORD_QUARANTINED, the record that was there could not be put back because the\n' +
-    '  name had been taken in that instant: it is kept beside the lease path under a name\n' +
-    '  ending in .breaking-, its run has lost authority and will stop at its next checkpoint,\n' +
-    '  and nothing was deleted.',
+    '  now. Do not re-run this command with the revision you already had.\n' +
+    '\n' +
+    '  The reason line says what this invocation touched. No reason line: nothing at all -\n' +
+    '  the lease was already not yours before anything was moved. RECORD_RESTORED: a record\n' +
+    '  had been detached before that could be established, and was put back exactly where it\n' +
+    '  was. RECORD_QUARANTINED: it could not be put back, because the name had been taken in\n' +
+    '  that instant - it is kept beside the lease path under a name ending in .breaking-, its\n' +
+    '  run has lost authority and will stop at its next checkpoint, and nothing was deleted.',
   // "Nothing was removed" is the whole promise here, and it is stated without
   // the "and nothing was touched" it used to carry. Most of these refusals are
   // reached before anything is detached; two of them - a running owner, or an
@@ -137,6 +141,13 @@ const ATTENDANCE_WITHHELD_SENTENCE =
   '  nothing was removed. Pass --attended to break. There is no unattended break and no\n' +
   '  --force.';
 
+const OBJECT_UNUSABLE_SENTENCE =
+  'The expected object is not a filesystem object identity. It is the value `agent-loop lease\n' +
+  '  status` prints under Object, and it names the file itself rather than its contents -\n' +
+  '  which, for an empty crash-window record, is all a digest can say. If status printed none,\n' +
+  '  this platform cannot identify the object and the break is refused for that case rather\n' +
+  '  than falling back to something weaker. Nothing was inspected and nothing was removed.';
+
 const REVISION_UNUSABLE_SENTENCE =
   'The expected revision is not a lease revision. It is the digest `agent-loop lease status`\n' +
   '  prints under Revision, and it is how you name the lease you decided about. Nothing was\n' +
@@ -148,6 +159,9 @@ const OWNER_PID_UNUSABLE_SENTENCE =
 
 /** A lease revision is a sha-256 digest, and nothing else is accepted as one. */
 const REVISION = /^[0-9a-f]{64}$/;
+
+/** `<dev>:<ino>`, exactly as `lease status` prints it. */
+const OBJECT_IDENTITY = /^-?[0-9]+:[0-9]+$/;
 
 function report(lines: readonly string[]): void {
   process.stdout.write(`\n${lines.join('\n')}\n\n`);
@@ -215,6 +229,12 @@ export function registerLeaseCommand(program: Command): void {
       'The Revision printed by `agent-loop lease status` for the lease you decided about. ' +
         'Required: it is how this command knows which lease you mean.',
     )
+    .requiredOption(
+      '--expected-object <identity>',
+      'The Object printed for that same lease - the filesystem object itself, not its ' +
+        'contents. Required, because a crash-window record is empty and every empty file ' +
+        'has the same digest.',
+    )
     .option(
       '--owner-pid <pid>',
       'The Owner pid printed for that same lease. Required where one is recorded, and refused ' +
@@ -242,6 +262,12 @@ export function registerLeaseCommand(program: Command): void {
           return;
         }
 
+        if (!OBJECT_IDENTITY.test(options.expectedObject)) {
+          report(['Break        : refused', 'Reason       : EXPECTED_OBJECT_UNUSABLE', '', OBJECT_UNUSABLE_SENTENCE]);
+          process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+          return;
+        }
+
         const expectedOwnerPid = parseOwnerPid(options.ownerPid);
         if (expectedOwnerPid === 'UNUSABLE') {
           report(['Break        : refused', 'Reason       : OWNER_PID_UNUSABLE', '', OWNER_PID_UNUSABLE_SENTENCE]);
@@ -261,6 +287,7 @@ export function registerLeaseCommand(program: Command): void {
 
         const broken = breakInspectedLease(resolution.repository, {
           expectedRevision: options.expectedRevision,
+          expectedObjectId: options.expectedObject,
           expectedOwnerPid,
         });
 

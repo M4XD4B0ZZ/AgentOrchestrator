@@ -3790,8 +3790,26 @@ no carry   every fact the gate established is re-established at the effect;
 
 ```powershell
 agent-loop lease break --repository <abs path> --attended `
-  --expected-revision <digest> --owner-pid <pid>
+  --expected-revision <digest> --expected-object <dev:ino> --owner-pid <pid>
 ```
+
+**The authorisation names an object, not only its contents**, and that is not
+belt-and-braces. The crash-window artefact is a zero-byte file; its digest is the
+constant `sha256("")`; so an authorisation naming only that digest matched *any*
+empty object at the lease name — including the transient one every acquisition
+passes through on a filesystem that refuses hard links, where the name is taken
+by `openSync(path, 'wx')` and the record written through that handle afterwards.
+An independent review reproduced a break removing a live exclusive claim that
+way. Content cannot identify an object whose content is nothing, and time cannot
+either: a modification stamp is rounded to two seconds on some filesystems and is
+trivially shared by a successor.
+
+So `lease status` prints `Object` — device and inode, read as 64-bit values
+because a Windows file index does not fit in a `Number` — the break requires it,
+and it is re-established **on the object the removal has already detached**.
+Where the platform reports no usable identity the lease is not offered as
+recoverable and the break refuses for that case, rather than falling back to the
+digest it just replaced.
 
 `--attended` is required for the reason `release --attended` requires it, and
 there is no `--force`, no unattended break and nothing anywhere that breaks a
@@ -3804,7 +3822,7 @@ answers, and they are five because they ask five different things of an operator
 | --- | --- | --- |
 | `LEASE_REMOVED` | 0 | The lease you inspected is gone. It was still the same record when it was detached. |
 | `LEASE_ALREADY_GONE` | 0 | Nothing was there. **This invocation removed nothing** — a different fact from the one above. |
-| `LEASE_CHANGED_SINCE_INSPECTION` | 4 | Something else is there. Inspect again; do not repeat the command with the old revision. |
+| `LEASE_CHANGED_SINCE_INSPECTION` | 4 | Something else is there. Inspect again; do not repeat with the old revision. The reason line says what was touched: nothing, `RECORD_RESTORED`, or `RECORD_QUARANTINED`. |
 | `LEASE_NOT_BREAKABLE` | 4 | Its owner is running, its liveness is undetermined, the authorisation names another lease, or the filesystem refused the detach. Nothing was removed; a refusal established only *after* the detach puts the record back, or keeps it. |
 | `LEASE_BREAK_VERIFICATION_FAILED` | 3 | A record was detached and could not be read back. It is **kept**, beside the lease path, inert and inspectable. |
 

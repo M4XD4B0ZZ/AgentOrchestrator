@@ -286,7 +286,7 @@ describe('a record this call may not remove survives, and is reported as it is',
       const broken = breakInspectedLease(
         fixture.repository,
         {
-          expectedRevision: inspected.revision ?? '',
+          expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '',
           expectedOwnerPid: inspected.ownerPid,
         },
         {
@@ -399,7 +399,7 @@ describe('a record this call may not remove survives, and is reported as it is',
     let removedUnderneath = false;
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedOwnerPid: inspected.ownerPid },
+      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
       {
         processAlive: () => {
           if (!removedUnderneath) {

@@ -136,7 +136,13 @@ export function assessLeaseRecovery(
   const classification = classifyForRecovery(inspection);
   return Object.freeze({
     classification,
-    breakable: classification === 'STALE_OWNER_GONE' || classification === 'NO_OWNER_RECORDED',
+    // A lease whose object this platform cannot identify is one the break will
+    // refuse, so the report an operator acts on must not call it recoverable.
+    // `status` offering a command that `break` declines is worse than offering
+    // nothing: it spends the operator's trust on a dead end.
+    breakable:
+      (classification === 'STALE_OWNER_GONE' || classification === 'NO_OWNER_RECORDED') &&
+      inspection.objectId !== null,
     inspection,
   });
 }
@@ -195,6 +201,25 @@ export interface LeaseBreakAuthorisation {
    */
   readonly expectedRevision: string;
   /**
+   * Which filesystem object the operator inspected, as `lease status` printed it.
+   *
+   * ── Why a digest was not enough ────────────────────────────────────────
+   *
+   * Because one class of lease has no content to hash. The crash-window artefact
+   * is a zero-byte file; its digest is the constant `sha256("")`; and an
+   * authorisation naming that digest matched *any* empty object at the lease
+   * name — including the transient one every acquisition creates on a filesystem
+   * that refuses hard links. An independent review reproduced a break removing a
+   * live exclusive claim that way.
+   *
+   * So the operator names the object, not just its bytes, and both are
+   * re-established on the record the removal has already detached. Required, and
+   * with no `null` member: where the platform cannot report a usable identity
+   * there is no authorisation to be had and the break refuses for that case. A
+   * fallback to something weaker would be the digest again.
+   */
+  readonly expectedObjectId: string;
+  /**
    * The owner pid those bytes recorded, or `null` when they recorded none.
    *
    * Cross-checked rather than trusted: it is how an operator confirms they are
@@ -205,6 +230,9 @@ export interface LeaseBreakAuthorisation {
    */
   readonly expectedOwnerPid: number | null;
 }
+
+/** `<dev>:<ino>`, exactly as {@link leaseObjectIdentity} spells it. */
+const OBJECT_IDENTITY = /^-?[0-9]+:[0-9]+$/;
 
 /* ─────────────────────────────── the break ──────────────────────────────── */
 
@@ -300,6 +328,20 @@ export function breakInspectedLease(
       break;
   }
 
+  // An authorisation that names no object is not an authorisation. Refused as
+  // its own thing rather than folded into "the lease changed", because the two
+  // send an operator to different places: one re-inspects, the other cannot
+  // proceed on this platform at all.
+  if (!OBJECT_IDENTITY.test(authorisation.expectedObjectId)) {
+    return breakResult('LEASE_NOT_BREAKABLE', 'OBJECT_IDENTITY_UNUSABLE');
+  }
+  if (assessed.inspection.objectId === null) {
+    return breakResult('LEASE_NOT_BREAKABLE', 'OBJECT_IDENTITY_UNVERIFIABLE');
+  }
+  if (assessed.inspection.objectId !== authorisation.expectedObjectId) {
+    return breakResult('LEASE_CHANGED_SINCE_INSPECTION');
+  }
+
   // The owner the operator was shown, before the bytes are checked: a
   // mismatch here is a command line built from a different report, and saying
   // so is more useful than "the lease changed".
@@ -318,7 +360,17 @@ export function breakInspectedLease(
   // carried across syscalls, which is the mistake the second withdrawn break
   // made.
   let refusedBy: string | null = null;
-  const removal = removeVerifiedLease(location.path, (bytes) => {
+  const removal = removeVerifiedLease(location.path, (bytes, objectId) => {
+    // The object first, because it is the identity a digest cannot supply for an
+    // empty record — and it is asked of the thing this call has *detached*, not
+    // of the name it came from. The gate above asked the same question of an
+    // earlier reading; this is the one that decides, immediately before the
+    // deletion, and a mutation probe showed the gate alone leaving it unpinned.
+    if (objectId === null) {
+      refusedBy = 'OBJECT_IDENTITY_UNVERIFIABLE';
+      return false;
+    }
+    if (objectId !== authorisation.expectedObjectId) return false;
     if (revisionOfLeaseBytes(bytes) !== authorisation.expectedRevision) return false;
 
     const owner = legibleOwnerPid(bytes);
@@ -353,7 +405,12 @@ export function breakInspectedLease(
     case 'ABSENT':
       return breakResult('LEASE_ALREADY_GONE');
     case 'CHANGED':
-      return breakResult('LEASE_CHANGED_SINCE_INSPECTION');
+      // Reached only from the effect, and it says so. "The lease changed before
+      // I touched anything" and "I detached a record, found it was not the one
+      // you named, and put it back" are different facts about the repository,
+      // and only the second one moved a file. The gate's refusal above carries
+      // no detail for exactly that reason.
+      return breakResult('LEASE_CHANGED_SINCE_INSPECTION', 'RECORD_RESTORED');
     case 'CHANGED_QUARANTINED':
       // The same refusal, and a materially different repository afterwards: the
       // record that was there is now in a quarantine file, its writer displaced,
