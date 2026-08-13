@@ -95,10 +95,19 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
     '  released and legitimately re-acquired by a new run, which is exactly the case this\n' +
     '  refusal exists for. Run `agent-loop lease status` again and decide about what is there\n' +
     '  now. Do not re-run this command with the revision you already had.',
+  // "Nothing was removed" is the whole promise here, and it is stated without
+  // the "and nothing was touched" it used to carry. Most of these refusals are
+  // reached before anything is detached; two of them - a running owner, or an
+  // owner the record does not name - can only be established *on the detached
+  // bytes*, and claiming an untouched lease for those cases would be false in
+  // exactly the rare situation an operator most needs a true report.
   LEASE_NOT_BREAKABLE:
     'The lease is there and this is not a lease that may be broken: its owner is running, its\n' +
-    '  liveness could not be established, or the authorisation describes a different lease.\n' +
-    '  The reason code says which. Nothing was removed and nothing was touched.',
+    '  liveness could not be established, the authorisation describes a different lease, or the\n' +
+    '  filesystem refused to detach the record. The reason code says which, and nothing was\n' +
+    '  removed. Where the refusal could only be established after the record had been detached,\n' +
+    '  it was put back - or, if the freed name had been taken in that instant, kept beside the\n' +
+    '  lease path under a name ending in .breaking- rather than deleted.',
   LEASE_BREAK_VERIFICATION_FAILED:
     'A record was detached from the lease path and could not be read back, so it was neither\n' +
     '  removed nor claimed to have been. It is kept beside the lease path under a name ending\n' +

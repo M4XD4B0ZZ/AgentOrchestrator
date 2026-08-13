@@ -3805,7 +3805,7 @@ answers, and they are five because they ask five different things of an operator
 | `LEASE_REMOVED` | 0 | The lease you inspected is gone. It was still the same record when it was detached. |
 | `LEASE_ALREADY_GONE` | 0 | Nothing was there. **This invocation removed nothing** — a different fact from the one above. |
 | `LEASE_CHANGED_SINCE_INSPECTION` | 4 | Something else is there. Inspect again; do not repeat the command with the old revision. |
-| `LEASE_NOT_BREAKABLE` | 4 | Its owner is running, its liveness is undetermined, the authorisation names another lease, or the filesystem refused the detach. |
+| `LEASE_NOT_BREAKABLE` | 4 | Its owner is running, its liveness is undetermined, the authorisation names another lease, or the filesystem refused the detach. Nothing was removed; a refusal established only *after* the detach puts the record back, or keeps it. |
 | `LEASE_BREAK_VERIFICATION_FAILED` | 3 | A record was detached and could not be read back. It is **kept**, beside the lease path, inert and inspectable. |
 
 Liveness keeps the rule it has everywhere else: it may refuse and may never
