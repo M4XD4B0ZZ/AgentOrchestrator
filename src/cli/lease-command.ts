@@ -90,11 +90,20 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
   LEASE_ALREADY_GONE:
     'Nothing was at the lease path, so nothing was removed by this invocation. The repository\n' +
     '  is free either way; if you expected to remove something, somebody got there first.',
+  // Two reachable end states behind one outcome, and the `Reason` line is what
+  // separates them: RECORD_QUARANTINED means the record that was there could not
+  // be put back and is now a file inside `.git` rather than the repository's
+  // lease. Saying only "nothing was removed" was true and not the whole truth,
+  // which an independent review reproduced.
   LEASE_CHANGED_SINCE_INSPECTION:
     'The lease is not the one you inspected, so nothing was removed. It may have been\n' +
     '  released and legitimately re-acquired by a new run, which is exactly the case this\n' +
     '  refusal exists for. Run `agent-loop lease status` again and decide about what is there\n' +
-    '  now. Do not re-run this command with the revision you already had.',
+    '  now. Do not re-run this command with the revision you already had. If the reason line\n' +
+    '  says RECORD_QUARANTINED, the record that was there could not be put back because the\n' +
+    '  name had been taken in that instant: it is kept beside the lease path under a name\n' +
+    '  ending in .breaking-, its run has lost authority and will stop at its next checkpoint,\n' +
+    '  and nothing was deleted.',
   // "Nothing was removed" is the whole promise here, and it is stated without
   // the "and nothing was touched" it used to carry. Most of these refusals are
   // reached before anything is detached; two of them - a running owner, or an
@@ -108,10 +117,18 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
     '  removed. Where the refusal could only be established after the record had been detached,\n' +
     '  it was put back - or, if the freed name had been taken in that instant, kept beside the\n' +
     '  lease path under a name ending in .breaking- rather than deleted.',
+  // The sentence used to promise a quarantine file unconditionally. It is only
+  // there on one of the two paths that reach this outcome, and on the other the
+  // same call had already put the record back and deleted the quarantine — so an
+  // operator was sent to inspect a file that did not exist. The reason line now
+  // carries the difference, and the sentence states both.
   LEASE_BREAK_VERIFICATION_FAILED:
     'A record was detached from the lease path and could not be read back, so it was neither\n' +
-    '  removed nor claimed to have been. It is kept beside the lease path under a name ending\n' +
-    '  in .breaking-, inert and inspectable. Look at it before deleting anything by hand.',
+    '  removed nor claimed to have been. UNREADABLE_AND_RESTORED means it was put back where it\n' +
+    '  was and there is nothing to inspect: the repository is as you found it, and something\n' +
+    '  other than this build is stopping the record being read. UNREADABLE_AND_QUARANTINED\n' +
+    '  means it could not be put back and is kept beside the lease path under a name ending in\n' +
+    '  .breaking-, inert and inspectable. Look at it before deleting anything by hand.',
 });
 
 const ATTENDANCE_WITHHELD_SENTENCE =
