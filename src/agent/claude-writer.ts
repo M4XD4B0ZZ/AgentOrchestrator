@@ -49,7 +49,7 @@
 import { isComparablePath } from '../core/path-identity.js';
 import type { ResumePhase } from '../core/states.js';
 import { isShellInertArgument } from '../doctor/exec.js';
-import { runAgentCommand, type AgentRunner } from './agent-command.js';
+import type { AgentRunner } from './agent-command.js';
 import {
   agentDiagnostics,
   agentProcessEvidence,
@@ -111,7 +111,16 @@ export interface ClaudeWriterRequest {
 
 export interface ClaudeWriterOptions {
   /** The execution seam. Defaults to the real one; tests pass their own. */
-  readonly agent?: AgentRunner;
+  /**
+   * The runner this call starts its process with. **Required, deliberately.**
+   *
+   * It was optional, defaulting to the raw command runner. That made the
+   * unfenced spawn the *default* behaviour, so a new call site that simply
+   * forgot the seam got a real subprocess with no authority behind it — which is
+   * exactly the route an adversarial review took. A required argument turns that
+   * mistake into a compile error instead of a silent one.
+   */
+  readonly agent: AgentRunner;
 }
 
 interface ClaudeWriterOutcomeBase {
@@ -153,9 +162,9 @@ export type ClaudeWriterResult = ClaudeWriterCompleted | ClaudeWriterFailed;
  */
 export async function runClaudeWriter(
   request: ClaudeWriterRequest,
-  options: ClaudeWriterOptions = {},
+  options: ClaudeWriterOptions,
 ): Promise<ClaudeWriterResult> {
-  const run = options.agent ?? runAgentCommand;
+  const run = options.agent;
 
   const base = {
     agent: 'claude' as const,

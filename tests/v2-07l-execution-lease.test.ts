@@ -1990,67 +1990,6 @@ describe('a release refused at its entry removes nothing', () => {
   });
 });
 
-/* ─────────── 20. every spawner, not every spawner I remembered ──────────── */
-
-describe('the fenced accessor is the only way a step reaches a subprocess', () => {
-  it('passes a leased runner at every spawn site in the loop', () => {
-    // The behavioural counter-proofs above drive two of the four spawn sites,
-    // and that is exactly the gap that has bitten this slice three times: a rule
-    // proven where somebody remembered to prove it. A probe reverted the seam at
-    // `runReviewStep` - which no test calls directly - and the whole suite
-    // stayed green.
-    //
-    // So the *mechanism* is proven behaviourally, and its universality is
-    // proven here, statically, over the whole module.
-    //
-    // ── What this pin covers, stated exactly ──────────────────────────────
-    //
-    // It said "a fifth spawn site added later fails this without anyone having
-    // to remember to extend a list". A review disproved that in one edit:
-    // inserting a direct `runAgentCommand(...)` call into a step left the pin
-    // green, because the first count only recognises three helpers by name. An
-    // overstated pin is worse than a narrow one — it is a claim nobody rechecks.
-    //
-    // The two counts below now cover two distinct routes to a subprocess:
-    //   1. through one of the three spawn helpers — each must receive a leased
-    //      runner, so a fourth call to any of them fails the equality;
-    //   2. through the raw runners themselves — which may appear only where the
-    //      accessors read them.
-    //
-    // What it still cannot see: a *new* helper in another module that defaults
-    // to a raw runner internally. That is the residue, and it is written down
-    // rather than papered over.
-    const source = readFileSync(join(PACKAGE_ROOT, 'src', 'loop', 'loop-step.ts'), 'utf8');
-
-    const spawners = [
-      ...source.matchAll(/\brunClaudeWriter\(|\brunCodexReviewer\(|\brunVerification\(/g),
-    ].length;
-    const leased = [...source.matchAll(/\bleasedAgent\(deps\)|\bleasedVerify\(deps\)/g)].length;
-
-    // Every spawner call receives exactly one leased runner.
-    expect(spawners).toBeGreaterThan(0);
-    expect(leased).toBe(spawners);
-
-    // The raw runners are reachable from exactly one place each: the accessor
-    // that fences them. Anything else calling them directly - which is what a
-    // review inserted, and what the counts above are blind to - fails here.
-    const rawAgentUses = [...source.matchAll(/\brunAgentCommand\b/g)].length;
-    const rawVerifyUses = [...source.matchAll(/\brunVerificationCommand\b/g)].length;
-    // The import, the mention in `leasedAgent`'s header, and the one real use.
-    expect(rawAgentUses).toBe(3);
-    // The import and the one real use.
-    expect(rawVerifyUses).toBe(2);
-    expect(source).toContain('return (deps.agent ?? runAgentCommand)(id, args, cwd, payload);');
-    expect(source).toContain('return (deps.verify ?? runVerificationCommand)(command, args, cwd);');
-
-    // And no site hands over the raw dependency instead. This is the shape the
-    // module used to have, where an *absent* seam fell through to the real
-    // unfenced spawn — so the dangerous case was the default one.
-    expect(source).not.toMatch(/agent === undefined \? \{\} : \{ agent \}/);
-    expect(source).not.toMatch(/verify === undefined \? \{\} : \{ verify \}/);
-  });
-});
-
 /* ─────────── 21. the second layer of the mixed-record defence ───────────── */
 
 describe('a lease proves the repository it was taken for, not merely a path', () => {
@@ -2267,5 +2206,191 @@ describe('a start without the lease opens nothing, and a start that loses it say
     expect(started.residue).toBe(false);
     // And nothing was created on the way.
     expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).toBe('');
+  });
+});
+
+/* ─────────── 25. the spawn surface, pinned as structure not as spelling ── */
+
+describe('a subprocess cannot be started from anywhere that lacks the lease', () => {
+  /** Every import-like statement in a file: static, dynamic, or `require`. */
+  function importsOf(file: string): readonly { text: string; typeOnly: boolean }[] {
+    const source = readFileSync(file, 'utf8');
+    const statements = [
+      ...source.matchAll(/^import[\s\S]*?from\s*'[^']+';/gm),
+      ...source.matchAll(/\bimport\s*\(\s*'[^']+'\s*\)/g),
+      ...source.matchAll(/\brequire\s*\(\s*'[^']+'\s*\)/g),
+    ].map((match) => match[0]);
+
+    return statements.map((text) => ({
+      text,
+      // `import type …`, and `import { type A, type B }` where every binding is
+      // a type, are erased by the compiler and cannot start anything.
+      typeOnly:
+        /^import\s+type\b/.test(text) ||
+        (/^import\s*\{/.test(text) &&
+          text
+            .slice(text.indexOf('{') + 1, text.indexOf('}'))
+            .split(',')
+            .map((binding) => binding.trim())
+            .filter((binding) => binding.length > 0)
+            .every((binding) => binding.startsWith('type '))),
+    }));
+  }
+
+  /**
+   * Every `src/` module that really *imports* something matching `pattern`.
+   *
+   * Imports, not mentions, and not type-only imports.
+   *
+   * The pin this replaced counted occurrences of a name anywhere in a file's
+   * text. A review spent one of its allowed "slots" by rewording a comment and
+   * smuggled in a direct call to the raw runner. A module can only call what it
+   * imports, so the import is the thing worth pinning — and prose is then free
+   * to explain itself, which is why this file can discuss `runAgentCommand`
+   * without becoming a violation.
+   */
+  function modulesImporting(pattern: RegExp, { values = true } = {}): string[] {
+    return sourceFiles()
+      .filter((file) =>
+        importsOf(file).some(
+          (statement) => pattern.test(statement.text) && (!values || !statement.typeOnly),
+        ),
+      )
+      .map((file) => relative(PACKAGE_ROOT, file))
+      .sort();
+  }
+
+  it('lets exactly one module reach the raw runners', () => {
+    // The fence lives in one module and the raw runners are reachable from
+    // nowhere else. `loop-step.ts` imports only the *types* from those modules,
+    // which are erased and cannot spawn — so a step cannot name a raw runner
+    // even by accident.
+    expect(modulesImporting(/\brunAgentCommand\b|agent-command\.js/)).toEqual([
+      join('src', 'loop', 'leased-spawns.ts'),
+    ]);
+    expect(modulesImporting(/\brunVerificationCommand\b|verify-command\.js/)).toEqual([
+      join('src', 'loop', 'leased-spawns.ts'),
+    ]);
+  });
+
+  it('lets exactly one module start an OS process at all', () => {
+    // The route a count could never have seen: a step reaching for
+    // `child_process` itself. It was already true that one module does this;
+    // nothing said so, so nothing noticed when a review added a second and
+    // started 57 real unfenced processes with the whole suite green.
+    expect(modulesImporting(/node:child_process/, { values: false })).toEqual([
+      join('src', 'doctor', 'exec.ts'),
+    ]);
+  });
+
+  it('keeps every import static, which is what the reachability pins assume', () => {
+    // The assumption under every reachability pin in this suite — this one, the
+    // mint's, and the block store's — is that imports are static and therefore
+    // greppable. A dynamic `await import('node:child_process')` walked straight
+    // past the first version of the pin above for exactly that reason.
+    //
+    // So the assumption is enforced rather than relied upon. There are no
+    // dynamic imports in `src/` today; if one is ever wanted, this failing is
+    // the prompt to decide what it does to the pins, rather than discovering
+    // later that they quietly stopped covering anything.
+    // Comments are stripped first. TypeScript's own `import('…')` *type* syntax
+    // is legitimate inside JSDoc — `doctor/run-completion.ts` uses it to link a
+    // type — and a pin that cannot tell prose from code is a pin that gets
+    // silenced by whoever trips it first.
+    const codeOf = (file: string): string =>
+      readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('//'))
+        .join('\n');
+
+    const dynamic = sourceFiles()
+      .filter((file) => /\bimport\s*\(|\brequire\s*\(/.test(codeOf(file)))
+      .map((file) => relative(PACKAGE_ROOT, file))
+      .sort();
+
+    expect(dynamic).toEqual([]);
+  });
+
+  it('gives the spawn helpers no runner to fall back to', () => {
+    // The third route: an absent seam. `runClaudeWriter`, `runCodexReviewer`
+    // and `runVerification` defaulted to the raw runner, which made the
+    // *unfenced* spawn the behaviour a forgetful caller got. Their runner is a
+    // required argument now, so that mistake does not compile — and this pins
+    // that no default creeps back in.
+    for (const file of [
+      join('src', 'agent', 'claude-writer.ts'),
+      join('src', 'agent', 'codex-reviewer.ts'),
+      join('src', 'verify', 'run-verification.ts'),
+    ]) {
+      const source = readFileSync(join(PACKAGE_ROOT, file), 'utf8');
+      expect(source).not.toMatch(/\?\?\s*runAgentCommand/);
+      expect(source).not.toMatch(/\?\?\s*runVerificationCommand/);
+      expect(source).not.toMatch(/Options\s*=\s*\{\}/);
+    }
+  });
+});
+
+
+/* ─────────── 26. a start whose undo was refused says the lease went ────── */
+
+describe('a rollback stopped by a lost lease is reported as a lost lease', () => {
+  it('does not report leftovers it may not remove as a plain workspace refusal', async () => {
+    // `startTask` maps `WORKTREE_ROLLBACK_NOT_AUTHORISED` to
+    // `EXECUTION_LEASE_LOST`. Deleting that mapping left the whole suite green
+    // while the same run reported `WORKSPACE_REFUSED`, whose operator sentence
+    // is "Workspace preparation was refused. Nothing was started." - said of a
+    // run that has a worktree and a branch on disk and `residue: true`.
+    //
+    // That is the collapse this branch exists to prevent, and it is worse here
+    // than elsewhere: the leftovers may already belong to a successor, so an
+    // operator told "nothing was started" is being invited to tidy up somebody
+    // else's workspace.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    let added = false;
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        git: async (cwd, args) => {
+          const result = await runGitCommand(cwd, args);
+          if (args[0] === 'worktree' && args[1] === 'add') {
+            added = true;
+            // The workspace exists; this run stops being the writer before
+            // anything verifies it, so the undo may not run either.
+            releaseRepositoryExecutionLease(evidence);
+          }
+          // Fail the verification that follows, which is what calls the undo.
+          if (added && args[0] === 'rev-parse') {
+            return Object.freeze({
+              outcome: 'OK' as const,
+              exitCode: 0,
+              signal: null,
+              stdout: '0000000000000000000000000000000000000000',
+              stderr: '',
+              outputTruncated: false,
+              failureCode: null,
+              errnoCode: null,
+              durationMs: 0,
+            });
+          }
+          return result;
+        },
+      },
+    );
+
+    expect(started.outcome).toBe('EXECUTION_LEASE_LOST');
+    expect(started.outcome).not.toBe('WORKSPACE_REFUSED');
+    expect(started.reasonCodes).toContain('WORKTREE_ROLLBACK_NOT_AUTHORISED');
+    // The leftovers are declared, because they are real and are not this run's
+    // to clear.
+    expect(started.residue).toBe(true);
+    expect(exitCodeForStartOutcome(started.outcome)).toBe(3);
+    // And they really are on disk: a successor may legitimately own them.
+    expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).not.toBe('');
   });
 });
