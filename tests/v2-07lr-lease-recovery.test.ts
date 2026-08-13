@@ -877,6 +877,23 @@ describe('there is no way to break a lease that is not this one', () => {
     expect(importers.sort()).toEqual([join('src', 'cli', 'lease-command.ts')]);
   });
 
+  it('hands the guarded removal itself to exactly one module', () => {
+    // The module pin above answers "who can reach the break". This answers the
+    // sharper question the export opened: `removeVerifiedLease` takes its whole
+    // authority as a predicate, so a caller passing `() => true` has written a
+    // plain `unlink` with extra steps. It was private until this slice, and it
+    // is exported now only because the recovery flow lives in its own module —
+    // which is worth nothing unless the primitive stays as narrowly reachable
+    // as the flow does.
+    const importers: string[] = [];
+    for (const file of sourceFiles()) {
+      const text = readFileSync(file, 'utf8');
+      if (file.endsWith(join('lease', 'execution-lease.ts'))) continue;
+      if (/\bremoveVerifiedLease\b/.test(text)) importers.push(relative(PACKAGE_ROOT, file));
+    }
+    expect(importers.sort()).toEqual([join('src', 'lease', 'lease-recovery.ts')]);
+  });
+
   it('removes a lease from nowhere but the one guarded removal', () => {
     // `unlinkSync` and `renameSync` aimed at the lease path are the two calls
     // that can destroy an authority, and they live in exactly one module — the
