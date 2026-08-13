@@ -580,6 +580,30 @@ describe('every guard on the removal path costs a mutant its life', () => {
     expect(existsSync(path)).toBe(true);
   });
 
+  /**
+   * Two guards this file does NOT pin, established by running the mutants.
+   *
+   * **The gate's own pid arm.** Deleting it leaves every assertion here green,
+   * and not because the assertions are weak: the predicate checks the pid again
+   * on the detached record and produces the identical outcome and reason. The
+   * only difference is that the file was detached and put back — same inode,
+   * same bytes, no quarantine left — and nothing in this API can observe that
+   * after the fact. The arm is worth keeping (a refusal should not touch a live
+   * record at all), and it is defence in depth over a check that is pinned.
+   *
+   * **The `leftUnowned` short-circuit in `breakInspectedLease`.** Reaching it
+   * needs the predicate to refuse *and* the restore to fail *and* the lease name
+   * to be free afterwards — and the two ways to get an unowned name are a `bytes
+   * === null` detach, where the predicate never runs at all, or a write failure
+   * on a link-refusing filesystem, which is the compound fault the review could
+   * only produce by injection. The mapping either side of it is pinned:
+   * `removeVerifiedLease` answers `UNIDENTIFIABLE_AND_UNOWNED` above, and the
+   * sentence for it is held to ASCII and to its reason token elsewhere.
+   *
+   * Both are stated here rather than left for the next reviewer to rediscover,
+   * because a suite that looks complete is worse than one that says where it
+   * stops.
+   */
   it('touches nothing when the gate can already see the authorisation is wrong', async () => {
     // Kills the gate's own pid and revision arms. Without them the refusal is
     // still a refusal — and it becomes a real detach and restore of a live
