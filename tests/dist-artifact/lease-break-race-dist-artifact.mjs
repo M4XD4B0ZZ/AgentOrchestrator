@@ -321,7 +321,12 @@ for (;;) {
   }
   if (Date.now() > deadline) break;
 }
-answer('ACQUIRER ' + events.join(','));
+// 'NONE' rather than an empty tail, because the parent trims each answer and a
+// racer that acquired nothing would otherwise print a bare word that no cohort
+// prefix matches. CI found that: on a loaded runner an acquirer really can get
+// nothing in a round, and two rounds failed on cohort accounting rather than on
+// anything about leases.
+answer('ACQUIRER ' + (events.join(',') || 'NONE'));
 waitFor(process.env.AO_RACE_FINISH, 'finish');
 `;
 
@@ -574,14 +579,14 @@ for (let index = 0; index < ROUNDS; index += 1) {
   }
 
   const { answers, surviving, finalRevision } = outcome;
-  const breaks = answers.filter((answer) => answer.startsWith('BREAK '));
-  const inspectors = answers.filter((answer) => answer.startsWith('INSPECTOR '));
-  const acquirers = answers.filter((answer) => answer.startsWith('ACQUIRER '));
+  const breaks = answers.filter((answer) => answer.startsWith('BREAK'));
+  const inspectors = answers.filter((answer) => answer.startsWith('INSPECTOR'));
+  const acquirers = answers.filter((answer) => answer.startsWith('ACQUIRER'));
 
   /** Every outcome:count pair either breaker cohort reported, flattened. */
   const tallies = [
-    ...breaks.map((answer) => answer.slice('BREAK '.length)),
-    ...inspectors.map((answer) => answer.slice('INSPECTOR '.length).split(' | REMOVED')[0] ?? ''),
+    ...breaks.map((answer) => answer.replace(/^BREAK ?/, '')),
+    ...inspectors.map((answer) => answer.replace(/^INSPECTOR ?/, '').split(' | REMOVED')[0] ?? ''),
   ]
     .flatMap((text) => text.split(','))
     .filter((entry) => entry.includes('='))
@@ -599,7 +604,9 @@ for (let index = 0; index < ROUNDS; index += 1) {
     }),
   );
 
-  const events = acquirers.flatMap((answer) => answer.slice('ACQUIRER '.length).split(','));
+  const events = acquirers
+    .flatMap((answer) => answer.replace(/^ACQUIRER ?/, '').split(','))
+    .filter((event) => event !== '' && event !== 'NONE');
   const acquired = events.filter((event) => event.startsWith('A:')).map((event) => event.slice(2));
   const released = new Set(
     events.filter((event) => event.startsWith('R:')).map((event) => event.slice(2)),
