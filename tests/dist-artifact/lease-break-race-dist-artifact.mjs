@@ -85,6 +85,19 @@ const BREAKERS = 6;
 const ACQUIRERS = 6;
 /** How many independent rounds. A single round can be lucky. */
 const ROUNDS = 5;
+/** How long each breaker keeps attempting. The window the race happens in. */
+const BREAK_WINDOW_MS = 3_000;
+/**
+ * How long an acquirer keeps reaching before it reports that it never got in.
+ *
+ * Bounded just past the break window rather than generously, and the difference
+ * is the whole runtime of this check. The lease can only become free while a
+ * break is still attempting, so an acquirer that has not won by then never will
+ * — it would spend the remaining seconds observing `LEASE_HELD` and reporting
+ * exactly what it already knew. At 20 seconds the five losers of each round set
+ * the pace and the harness took 103s; the signal is identical at 5.
+ */
+const ACQUIRE_WINDOW_MS = BREAK_WINDOW_MS + 2_000;
 
 /** @type {string[]} */
 const failures = [];
@@ -146,7 +159,7 @@ waitFor(process.env.AO_RACE_START, 'start');
 // because by the time a successor existed every breaker had already finished.
 // Attempting across the window is what puts a break and a live successor in the
 // same instant.
-const deadline = Date.now() + ${String(3_000)};
+const deadline = Date.now() + ${String(BREAK_WINDOW_MS)};
 const tally = new Map();
 for (;;) {
   const result = breakInspectedLease(
@@ -182,7 +195,7 @@ import { acquireRepositoryExecutionLease, verifyExecutionLeaseHeld } from ${leas
 writeFileSync(process.env.AO_RACE_READY, 'ready', 'utf8');
 waitFor(process.env.AO_RACE_START, 'start');
 
-const deadline = Date.now() + 20_000;
+const deadline = Date.now() + ${String(ACQUIRE_WINDOW_MS)};
 let answer = 'GAVE_UP';
 let evidence = null;
 for (;;) {
