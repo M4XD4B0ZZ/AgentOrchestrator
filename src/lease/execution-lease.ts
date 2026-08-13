@@ -357,12 +357,38 @@ export function deriveExecutionLeaseLocation(repository: LeaseRepository): Lease
  * is no weaker fallback, because the digest *was* the weaker fallback.
  */
 export function leaseObjectIdentity(path: string): string | null {
+  return readObject(path).id;
+}
+
+/**
+ * What is at `path`: its identity, or why there is none.
+ *
+ * Two reasons, and collapsing them was a defect an independent review measured
+ * rather than argued. `leaseObjectIdentity` swallowed every `stat` failure into
+ * the same `null` the platform case uses, so a lease that was *deleted between
+ * the byte read and the stat* was reported as "this platform cannot identify the
+ * object" — the meaning the docstring and the CLI both assign to `Object: none`.
+ *
+ * The measurement, on this host: 551 successful byte reads under churn produced
+ * `ino === 0n` **zero** times and `ENOENT` 181 times. So in practice that report
+ * was never the platform fact it claimed to be; it was always this race. Under
+ * six real breakers on one stale lease, 18 of 36 attempts answered
+ * `OBJECT_IDENTITY_UNVERIFIABLE` with the lease name already empty — at exit 4,
+ * under a sentence beginning "The lease is there", where `LEASE_ALREADY_GONE`
+ * at exit 0 is the truth.
+ *
+ * And the rule it broke was written at its own call site: *a lease that vanishes
+ * in that window must be reported as gone, not as unidentifiable.*
+ */
+function readObject(path: string): { readonly id: string | null; readonly gone: boolean } {
   try {
     const stats = statSync(path, { bigint: true });
-    if (stats.ino === 0n) return null;
-    return `${String(stats.dev)}:${String(stats.ino)}`;
-  } catch {
-    return null;
+    // Zero is what a filesystem without the concept answers, and it is exactly
+    // the answer that must not be mistaken for an identity.
+    if (stats.ino === 0n) return { id: null, gone: false };
+    return { id: `${String(stats.dev)}:${String(stats.ino)}`, gone: false };
+  } catch (error) {
+    return { id: null, gone: safeErrnoCode(error) === 'ENOENT' };
   }
 }
 
@@ -507,9 +533,15 @@ export function inspectRepositoryExecutionLease(
   const read = readLeaseFile(location.path, location.key);
   // The object those bytes came from, read next and not later: the probe below
   // can take milliseconds, and an identity read after it would describe a
-  // different moment from the digest it sits beside. A lease that vanishes in
-  // that window must be reported as gone, not as unidentifiable.
-  const objectId = read.bytes === null ? null : leaseObjectIdentity(location.path);
+  // different moment from the digest it sits beside.
+  const object = read.bytes === null ? { id: null, gone: false } : readObject(location.path);
+  // And a lease that vanished inside that window is reported as **gone**, which
+  // is the rule this comment used to state while the code did the opposite: the
+  // identity read swallowed `ENOENT` into the same answer the platform case
+  // uses, so a repository somebody had just released was reported as held and
+  // unidentifiable — no break command offered for it, and under contention a
+  // refusal at exit 4 saying "the lease is there" about an empty name.
+  if (object.gone) return inspection({ state: 'FREE', path: location.path });
   const probe = deps.processAlive ?? osProcessLiveness;
   // Recovered from the bytes when the document itself will not parse, so a
   // lease written by another build is reported with the owner it actually
@@ -527,7 +559,7 @@ export function inspectRepositoryExecutionLease(
     acquiredAt: read.document?.acquiredAt ?? null,
     liveness: owner === null ? 'UNKNOWABLE' : probe(owner),
     // Reporting it is never authority; the re-check on the detached object is.
-    objectId,
+    objectId: object.id,
   });
 }
 

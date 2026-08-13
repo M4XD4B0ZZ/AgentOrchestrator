@@ -118,8 +118,15 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
   // owner the record does not name - can only be established *on the detached
   // bytes*, and claiming an untouched lease for those cases would be false in
   // exactly the rare situation an operator most needs a true report.
+  // The opening clause no longer asserts that the lease is there.
+  //
+  // It used to, and there is one reachable state where that is false: a refusal
+  // established after the detach, whose restore then could not put the record
+  // back and left the name free. The reason line corrects it — "nothing holds
+  // the lease now" — but a report should not need its own footnote to stop
+  // contradicting itself, and a fourth review found the two clauses side by side.
   LEASE_NOT_BREAKABLE:
-    'The lease is there and this is not a lease that may be broken: its owner is running, its\n' +
+    'This is not a lease that may be broken: its owner is running, its\n' +
     '  liveness could not be established, the authorisation describes a different lease, or the\n' +
     '  filesystem refused to detach the record. The reason code says which, and nothing was\n' +
     '  removed. Where the refusal could only be established after the record had been detached,\n' +

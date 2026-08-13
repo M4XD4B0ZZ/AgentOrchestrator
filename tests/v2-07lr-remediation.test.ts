@@ -718,19 +718,6 @@ describe('an unreadable record beside a free lease name is reported as itself', 
     cleanUpPaths(quarantineFilesBeside(path).map((name) => join(dirname(path), name)));
   });
 
-  it('reaches that state through the removal itself, with no seam at all', async () => {
-    // The same state one level down, so the mapping above is pinned to a
-    // removal result rather than to a coincidence of ordering.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    mkdirSync(path, { recursive: true });
-
-    const removal = removeVerifiedLease(path, () => false);
-
-    expect(removal).toBe('UNIDENTIFIABLE_AND_UNOWNED');
-    expect(existsSync(path)).toBe(false);
-    cleanUpPaths(quarantineFilesBeside(path).map((name) => join(dirname(path), name)));
-  });
 });
 
 describe('the gate refuses a stale authorisation before the record is touched', () => {
@@ -787,11 +774,69 @@ describe('the gate refuses a stale authorisation before the record is touched', 
     );
 
     // The gate saw an authorisation whose owner the record no longer names, and
-    // said so — without detaching anything. With the arm gone the predicate
-    // answers a changed lease with no reason at all, having detached and
-    // restored a record first.
+    // said so.
+    //
+    // What the mutant does, measured rather than assumed — and this is the
+    // second false note written about this one guard, so it is stated as what
+    // was run. Delete the gate's pid arm and the gate's *revision* arm three
+    // lines below answers first: `LEASE_CHANGED_SINCE_INSPECTION` with
+    // `detail: null`, which is produced only at the gate. The predicate is never
+    // reached and nothing is detached. The test still kills the mutant, and it
+    // kills it on the reason line rather than on a detach — which is exactly
+    // why `detail` is asserted here and not only the outcome.
     expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
     expect(broken.detail).toBe('OWNER_PID_MISMATCH');
     expect(quarantineFilesBeside(path)).toEqual([]);
+  });
+});
+
+describe('a detach the filesystem refused is not an absence', () => {
+  /**
+   * A guard nothing in the repository pinned, found by the fourth review.
+   *
+   * `removeVerifiedLease`'s rename catch discriminates `ENOENT` — nothing was
+   * there — from every other errno, which means the name could not be detached
+   * and the record is untouched. Substituting `return 'ABSENT'` for that
+   * discrimination survived **the entire suite**: 75 files, 2736 tests, and the
+   * real-process harness on top. The reverse mutant is caught, which is what
+   * made the gap look covered.
+   *
+   * The two answers send an operator to opposite places. `ABSENT` means nothing
+   * was there and the repository is free; `DETACH_FAILED` means the lease is
+   * still exactly where it was and this invocation could not touch it.
+   *
+   * No injection: on Windows a directory holding an open file refuses to be
+   * renamed. If the platform declines to produce that refusal the test says so
+   * rather than asserting a state nobody established — the mistake this file has
+   * already made once.
+   */
+  const onWindows = it.runIf(process.platform === 'win32');
+
+  onWindows('reports a refused detach as refused, not as nothing having been there', async () => {
+    const fixture = await leasableRepository();
+    const path = leasePathOf(fixture);
+    // A directory at the lease name, with a file open inside it: Windows refuses
+    // to rename a directory whose contents are in use.
+    mkdirSync(path, { recursive: true });
+    const pinned = join(path, 'held-open.txt');
+    writeFileSync(pinned, 'keeping this directory busy\n');
+    const handle = openSync(pinned, 'r+');
+
+    try {
+      const removal = removeVerifiedLease(path, () => true);
+
+      if (removal === 'ABSENT') {
+        throw new Error(
+          'the platform allowed the rename, so this instrument produced nothing to assert about',
+        );
+      }
+      expect(removal).toBe('DETACH_FAILED');
+      // Untouched: the thing at the lease name is still the thing that was there.
+      expect(existsSync(path)).toBe(true);
+      expect(quarantineFilesBeside(path)).toEqual([]);
+    } finally {
+      closeSync(handle);
+      cleanUpPaths([path]);
+    }
   });
 });

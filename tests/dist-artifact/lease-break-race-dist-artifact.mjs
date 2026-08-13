@@ -49,8 +49,15 @@
  *    changes hands constantly — which is what puts a detach and a stranger's
  *    record in the same instant.
  *
- * The current numbers per round: ~270 acquisitions, ~130 removals, 10-25
- * non-matching detaches, and a handful of records kept in quarantine.
+ * The numbers per round on the development host: ~270 acquisitions, ~130
+ * removals, a handful of non-matching detaches and of records kept in
+ * quarantine. On a loaded CI runner they fall by an order of magnitude — 6 to
+ * 200 acquisitions, and whole runs with no detach at all — which is why they are
+ * reported rather than gated.
+ *
+ * "records on disk" does not discriminate on its own: clean runs produce rounds
+ * with zero of them, and so do broken ones. It is context for the accountability
+ * check, never evidence by itself.
  *
  * ── What this gates, and what it only reports ──────────────────────────────
  *
@@ -74,8 +81,16 @@
  * reach is unstated reads as covering everything:
  *
  *  - **no identity binding at all** (the withdrawn v1 shape: decide from the
- *    inspection, remove by name) — every round reports 6 acquisitions and **0
- *    surviving records**. Dies here.
+ *    inspection, remove by name). Dies here — the accountability check fires —
+ *    but **not in every round**, and the margin is thinner than this file used
+ *    to claim. Re-measured by a fourth independent review against a faithful v1
+ *    mutant (the whole guarded removal replaced by a bare unlink): the check
+ *    fired in 3 of 8 rounds in one run and 2 of 8 in another, with 143-286
+ *    acquisitions per round. The figure this file previously stated — "every
+ *    round reports 6 acquisitions and 0 surviving records" — was measured two
+ *    harness generations ago, before the churning acquirer cohort existed, and
+ *    is false of the current one. A run fails if any round fails, so the gate
+ *    holds; what was wrong was the claim about its margin.
  *  - **discarding a record that could not be put back** (the v3 shape) — dies
  *    here, on the accountability check.
  *  - **restoring with `rename` instead of `link`** — **survives this harness.**
