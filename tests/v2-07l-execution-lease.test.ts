@@ -2688,3 +2688,185 @@ describe('the operator text says what happened, for each way of arriving at it',
     expect(refusal).toContain('Wait for it.');
   });
 });
+
+/* ─────────── 30. the gates whose refusal a later gate would repeat ─────── */
+
+describe('a gate is proved by what it stops, when the outcome no longer differs', () => {
+  it('does not enter the removal after the lease goes during the assessment', async () => {
+    // `releaseTaskWorkspace` proves the lease at its entrance, again immediately
+    // before calling `removeTaskWorkspace`, and that function proves it twice
+    // more at its destructive commands. Once every one of them reports
+    // `EXECUTION_LEASE_NOT_HELD`, the middle gate stopped changing any
+    // assertion: the existing test for it releases the lease early enough that
+    // the *inner* gate answers, so it was a counter-proof of the wrong gate and
+    // the whole suite stayed green without it.
+    //
+    // What the middle gate is for is not the outcome. It is that an invocation
+    // which has lost the lease does not go on to run four more Git subprocesses
+    // against a repository it may not act on, and that the reason an operator
+    // reads stays the specific one - `LEASE_ABSENT`, `NOT_OWNER`,
+    // `LEASE_UNREADABLE` - rather than coarsening to the outcome's own name.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const crashed = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        replace: () => {
+          throw new Error('simulated crash before the first durable write landed');
+        },
+      },
+    );
+    expect(crashed.outcome).toBe('STATE_NOT_RECORDED');
+
+    // The lease goes after the entry gate has passed, so only the middle gate
+    // or the inner one can catch it — and which of them did is exactly what the
+    // reason code records. That is the observable this asserts on, rather than a
+    // subprocess count, because the count depends on how many questions the
+    // assessment happens to ask and would re-break whenever that changes.
+    let entered = false;
+    const released = await releaseTaskWorkspace(fixture.repository, TASK_ID, {
+      git: async (cwd, args) => {
+        const result = await runGitCommand(cwd, args);
+        if (!entered) {
+          entered = true;
+          releaseRepositoryExecutionLease(evidence);
+        }
+        return result;
+      },
+      lease: evidence,
+    });
+
+    expect(released.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    // The middle gate answered, so the reason is the specific verification
+    // result. With that gate gone, `removeTaskWorkspace`'s own gate answers
+    // instead and the reason coarsens to the outcome's own name — which tells
+    // an operator nothing about *why* the lease is not held.
+    expect(released.reasonCodes).toContain('LEASE_ABSENT');
+    expect(released.reasonCodes).not.toContain('EXECUTION_LEASE_NOT_HELD');
+    expect(released.worktreeRemoved).toBe(false);
+  });
+
+  it('reports a resume write refused for the lease as a lost lease', async () => {
+    // `run-driver` splits the resume write's failure three ways, and the branch
+    // for a lost lease carries a comment recording that a review once found this
+    // very site folding it into `STATE_NOT_RECORDED` "because the fix was
+    // applied to its sibling and not to it". The fix landed; the counter-proof
+    // did not, and collapsing the branch again left the whole suite green.
+    //
+    // The sibling site is covered. This is the one that was not.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: evidence },
+    );
+    expect(started.outcome).toBe('STARTED');
+
+    // Park the task in a state an unattended resume drives, then lose the lease
+    // during the reconciliation that precedes the resume write.
+    const current = loadTaskState(fixture.root, TASK_ID);
+    if (!current.ok) throw new Error('task did not start');
+
+    const run = await runTask(
+      {
+        repository: fixture.repository,
+        taskId: TASK_ID,
+        taskBrief: TASK_ID,
+        attendedContinuation: true,
+        authEvidence: provenAuthEvidence(),
+        lease: evidence,
+        maxSteps: 4,
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        // The write itself is where the lease has to be gone: the driver's own
+        // gate runs before this, and `advanceTaskState` refuses at the write.
+        replace: (from, to) => {
+          releaseRepositoryExecutionLease(evidence);
+          renameSync(from, to);
+        },
+      },
+    );
+
+    expect(run.outcome).toBe('EXECUTION_LEASE_LOST');
+    expect(run.outcome).not.toBe('STATE_NOT_RECORDED');
+    expect(exitCodeForRunOutcome(run.outcome)).toBe(4);
+  });
+});
+
+/* ─────────── 31. the leftovers a lost lease reports are the real ones ──── */
+
+describe('a lost lease names what is actually left behind', () => {
+  it('does not promise a worktree the rollback had already removed', async () => {
+    // `EXECUTION_LEASE_LOST` said "the workspace it had already created is still
+    // there". Its rollback producer has two exits: before `worktree remove`,
+    // where that is true, and after it succeeded but before `branch -d`, where
+    // the worktree is gone and only the branch remains.
+    //
+    // A review drove the second and watched an operator be sent to look for a
+    // worktree that was not there, while the branch that *was* - the one that
+    // refuses the next start with `WORKSPACE_COLLISION` - went unnamed. Twelve
+    // rounds missed it because the two halves were tested in different files:
+    // one drove the sentence with the early exit, the other drove the late exit
+    // but stopped before any outcome was rendered.
+    const sentence = START_OUTCOME_SENTENCES.EXECUTION_LEASE_LOST;
+
+    expect(sentence).not.toContain('The workspace it had already created is');
+    // True of both exits, and it names the branch, which is the leftover most
+    // easily walked past.
+    expect(sentence).toContain('had not already');
+    expect(sentence).toContain('branch');
+  });
+
+  it('leaves only the branch when the rollback got that far, and says so', async () => {
+    // The behavioural half, in one place this time: drive the *late* rollback
+    // exit through the real `startTask` and check the leftovers against what the
+    // operator is told.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    let added = false;
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        git: async (cwd, args) => {
+          const result = await runGitCommand(cwd, args);
+          if (args[0] === 'worktree' && args[1] === 'add') added = true;
+          // Gone *between* the two destructive commands, which is the exit that
+          // leaves only the branch.
+          if (args[0] === 'worktree' && args[1] === 'remove') {
+            releaseRepositoryExecutionLease(evidence);
+          }
+          if (added && args[0] === 'rev-parse') {
+            return Object.freeze({
+              outcome: 'OK' as const,
+              exitCode: 0,
+              signal: null,
+              stdout: '0000000000000000000000000000000000000000',
+              stderr: '',
+              outputTruncated: false,
+              failureCode: null,
+              errnoCode: null,
+              durationMs: 0,
+            });
+          }
+          return result;
+        },
+      },
+    );
+
+    expect(started.outcome).toBe('EXECUTION_LEASE_LOST');
+    expect(started.residue).toBe(true);
+    // The worktree really is gone and the branch really is there, which is
+    // exactly the combination the old sentence denied.
+    expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).not.toBe('');
+  });
+});

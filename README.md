@@ -2842,6 +2842,22 @@ narrow answer, so changing it has to be deliberate.
 - **RR-F6** — `repo/git-query.ts` still has no injection seam, and V1-08 did not
   add one: the E2E suite uses real repositories throughout, which is the reason
   that seam has not been missed. It remains **open and deferred**.
+- **L-V2-07L-1** — the five acquire refusal codes all exit `EXIT_RUN_REFUSED`,
+  so `LEASE_HELD` ("another run owns this, wait") and
+  `STALE_LEASE_RECOVERY_UNSAFE` ("a human must decide about this by hand") are
+  indistinguishable at the shell. They are two outcomes precisely because they
+  send an operator to two places, and the printed sentences do distinguish them;
+  only the exit code does not. Deferred rather than fixed because widening the
+  exit-code contract is a product decision of its own, and because
+  `STALE_LEASE_RECOVERY_UNSAFE` also covers `UNDETERMINED` liveness, where a
+  retry genuinely can differ. **Scope:** `cli/run-command.ts`,
+  `cli/release-command.ts`, `cli/run-exit-codes.ts`.
+- **L-V2-07L-2** — four of the five acquire refusals end "Nothing was started.",
+  and `release --attended` prints them verbatim. A release starts nothing in any
+  case, and the question its operator has is whether anything was *removed*.
+  Cosmetic: no safety claim is wrong, and the release outcome sentences answer
+  the removal question separately. **Scope:** `cli/render-lease.ts`,
+  `cli/release-command.ts`.
 
 ### What V1-08 is not
 
@@ -3557,9 +3573,18 @@ recovery contract is written for.
 `acquireRepositoryExecutionLease` returns an opaque `ExecutionLeaseEvidence`, and
 a `leaseHeld: true` would have been the `authPreflightPassed: true` defect again
 in a new place. The arrangement is `core/auth-preflight-evidence.ts`'s, verbatim:
-a nominal type with a `#private` field so no literal is assignable, an
-`instanceof` gate so a cast fails closed, and a reachability test pinning that
-exactly one module in `src/` imports the mint.
+a nominal type with a `#private` field so no literal is assignable, a runtime
+gate so a cast fails closed, and a reachability test pinning that exactly one
+module in `src/` imports the mint.
+
+The gate itself had to be replaced twice, and the arrangement is worth stating
+precisely because both earlier versions *looked* sufficient. `instanceof` was
+forged with `Object.create` and the real prototype; `#nonce in value` was forged
+by reaching the class through `Object.getPrototypeOf(evidence).constructor`,
+which needs no import at all. The gate is now membership of a `WeakSet` only the
+mint writes to — not reachable from an instance, a prototype, or the class — so
+re-deriving the artefact by any route produces something the gate does not
+recognise.
 
 Four productive writer paths **require** it, non-optionally:
 

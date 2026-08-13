@@ -17,8 +17,10 @@
  *     field, so no object literal and no structurally identical class is
  *     assignable to it.
  *  2. **A runtime check**, because no type system stops
- *     `x as unknown as ExecutionLeaseEvidence`. Every consumption point is an
- *     `instanceof` gate (`core/execution-lease-evidence.ts`), so a cast buys a
+ *     `x as unknown as ExecutionLeaseEvidence`. Every consumption point asks
+ *     {@link ExecutionLeaseProof.holds} (`core/execution-lease-evidence.ts`),
+ *     which is registry membership — not `instanceof`, and not a private-field
+ *     test; both of those were tried here and both were forged. A cast buys a
  *     caller a refusal rather than a run.
  *  3. **Reachability**, enforced by a test. The mint lives here, and
  *     `tests/v2-07l-execution-lease.test.ts` pins that exactly one module in
@@ -126,9 +128,12 @@ export class ExecutionLeaseProof {
    * No reachability test can catch that: it imports nothing. So the artefact
    * stops exposing anything to shadow. There is no `leasePath` getter and no
    * `matchesRecordedNonce` method; the two statics below read the private fields
-   * directly, and `#nonce in value` is true only for an object that really went
-   * through this constructor. `Object.create` does not copy private fields, so
-   * the forgery above now fails at the gate.
+   * directly.
+   *
+   * The next answer was `#nonce in value`, and this paragraph used to end by
+   * recommending it. It was forged too — see the body below — so the gate is
+   * registry membership instead. The history is kept because each step explains
+   * why the next one is not simpler than it looks.
    */
   static holds(value: unknown): value is ExecutionLeaseProof {
     // Membership of a module-private registry, **not** a property of the value.

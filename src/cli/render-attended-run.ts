@@ -73,8 +73,10 @@ export const START_OUTCOME_SENTENCES: Readonly<Record<StartTaskOutcome, string>>
     '  exists that no task state accounts for. It is reported rather than deleted.',
   EXECUTION_LEASE_LOST:
     'This invocation held the execution lease when it began and does not hold it now, so\n' +
-    '  the first durable state was not written. The workspace it had already created is\n' +
-    '  still there and nothing records it: see Residue below.',
+    '  the first durable state was not written. Whatever it created and had not already\n' +
+    '  removed is still there and nothing records it - a worktree, a branch, or only the\n' +
+    '  branch, which is the one most easily walked past. See Residue below, and look\n' +
+    '  before deleting: another invocation may own these now.',
   EXECUTION_LEASE_NOT_HELD:
     'This invocation does not hold this repository\'s execution lease, so it may not create\n' +
     '  a branch, a worktree or a durable record here. Nothing was created and nothing was\n' +

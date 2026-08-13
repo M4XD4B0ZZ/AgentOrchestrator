@@ -41,8 +41,10 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
       'A lease is present and this build cannot prove it is safe to take: its owner process\n' +
       '  is not observably running, or the record cannot be read. It is deliberately not\n' +
       '  taken over - a dead owner does not prove that no agent process survived it. Run\n' +
-      '  `agent-loop lease status`, which reports what is there and what clearing it would\n' +
-      '  require of you. There is no command that clears a lease, and no --force.',
+      '  `agent-loop lease status` to see what is there. It spells out what clearing the\n' +
+      '  lease would require of you only when the recorded owner is definitely gone; if it\n' +
+      '  cannot even establish that, there is nothing to weigh up and nothing to do but\n' +
+      '  wait. There is no command that clears a lease, and no --force.',
     LEASE_LOCATION_UNSUITABLE:
       'No lease location could be derived for this repository, so no exclusive claim could\n' +
       '  be made. Nothing was started.',

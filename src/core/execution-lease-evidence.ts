@@ -30,17 +30,25 @@ export type ExecutionLeaseEvidence = ExecutionLeaseProof;
 /**
  * Whether this really is minted evidence.
  *
- * The gate every consumer uses, and the reason a cast gains nothing. It is an
- * `instanceof` test rather than a shape test on purpose: a shape test would
- * accept exactly the forgery the nominal type exists to refuse.
+ * The gate every consumer uses, and the reason a cast gains nothing. It asks
+ * whether the **mint** produced this object — membership of a registry only the
+ * mint writes to — rather than anything about the object's shape, prototype or
+ * fields. A shape test would accept exactly the forgery the nominal type exists
+ * to refuse.
  *
  * Accepts `unknown` so that the check is also meaningful at a boundary where the
  * static type has already been subverted — which is the only place it matters.
  */
 export function isExecutionLeaseEvidence(value: unknown): value is ExecutionLeaseEvidence {
-  // A brand check on the private field, not `instanceof`. See the mint's header:
-  // `instanceof` walks a prototype chain, and `Object.create` hands anybody that
-  // prototype — which an adversarial review turned into working evidence with no
-  // imports at all. A private field is not copied by `Object.create`.
+  // Registry membership, and this comment has been wrong twice, so it is worth
+  // being exact. It is **not** `instanceof`: that walks a prototype chain, and
+  // `Object.create` hands anybody the prototype — a review turned that into
+  // working evidence with no imports at all. It is **not** a private-field
+  // check either: `Object.getPrototypeOf(evidence).constructor` reached the
+  // class with no import, and calling it installs a real private field, which a
+  // second review used to delete a rightful owner's lease.
+  //
+  // See the mint's header for why only a set the mint alone writes to answers
+  // the question actually being asked, which is "did the mint build this?".
   return ExecutionLeaseProof.holds(value);
 }

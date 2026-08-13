@@ -121,9 +121,14 @@ export const START_TASK_OUTCOMES = [
    * repository in opposite states, and the exit code follows the *state*, not
    * the cause. `NOT_HELD` is refused before anything is opened, so nothing is
    * out of place and a later invocation may simply succeed. This one can only
-   * be reached after the workspace exists, so a worktree and a branch are on
-   * disk that no durable state accounts for — `residue` is `true`, and an
-   * operator has to clean that up, exactly as `STATE_NOT_RECORDED` does.
+   * be reached once something exists that no durable state accounts for —
+   * `residue` is `true`, and an operator has to deal with it, exactly as
+   * `STATE_NOT_RECORDED` does.
+   *
+   * *What* is left varies by producer, and the operator sentence must not
+   * guess. The rollback path reaches this having already removed the worktree
+   * in one of its two exits, leaving only the branch — which is precisely the
+   * leftover an operator walks past, and which refuses the next start.
    *
    * A review found both cases sharing one outcome and therefore one exit code:
    * same residue, opposite advice.
