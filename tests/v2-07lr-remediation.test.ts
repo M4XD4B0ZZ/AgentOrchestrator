@@ -65,6 +65,7 @@ import {
   verifyExecutionLeaseHeld,
   verifyExecutionLeaseHeldFor,
 } from '../src/lease/execution-lease.js';
+import { exitCodeForLeaseBreakOutcome } from '../src/cli/run-exit-codes.js';
 import { breakInspectedLease } from '../src/lease/lease-recovery.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { removeRepoFixtures, createRepoFixture } from './helpers/repo-fixtures.js';
@@ -581,28 +582,18 @@ describe('every guard on the removal path costs a mutant its life', () => {
   });
 
   /**
-   * Two guards this file does NOT pin, established by running the mutants.
+   * One guard this file does not reach, and one that used to be excused here.
    *
-   * **The gate's own pid arm.** Deleting it leaves every assertion here green,
-   * and not because the assertions are weak: the predicate checks the pid again
-   * on the detached record and produces the identical outcome and reason. The
-   * only difference is that the file was detached and put back — same inode,
-   * same bytes, no quarantine left — and nothing in this API can observe that
-   * after the fact. The arm is worth keeping (a refusal should not touch a live
-   * record at all), and it is defence in depth over a check that is pinned.
+   * The `leftUnowned` short-circuit's own branch — a predicate refusal *and* a
+   * failed restore *and* a free name — still has no reaching test: the two
+   * routes to an unowned name are a `bytes === null` detach, where the predicate
+   * never runs, or a write failure on a link-refusing filesystem. The third
+   * review attacked that reachability claim rather than accepting it and could
+   * not break it either; it stands as a stated gap, not as a proof.
    *
-   * **The `leftUnowned` short-circuit in `breakInspectedLease`.** Reaching it
-   * needs the predicate to refuse *and* the restore to fail *and* the lease name
-   * to be free afterwards — and the two ways to get an unowned name are a `bytes
-   * === null` detach, where the predicate never runs at all, or a write failure
-   * on a link-refusing filesystem, which is the compound fault the review could
-   * only produce by injection. The mapping either side of it is pinned:
-   * `removeVerifiedLease` answers `UNIDENTIFIABLE_AND_UNOWNED` above, and the
-   * sentence for it is held to ASCII and to its reason token elsewhere.
-   *
-   * Both are stated here rather than left for the next reviewer to rediscover,
-   * because a suite that looks complete is worse than one that says where it
-   * stops.
+   * The note that used to sit here claimed the gate's owner-pid arm was
+   * observationally equivalent to the predicate's. That was false, and the third
+   * review proved it with three distinguishing inputs. It is pinned below.
    */
   it('touches nothing when the gate can already see the authorisation is wrong', async () => {
     // Kills the gate's own pid and revision arms. Without them the refusal is
@@ -643,6 +634,137 @@ describe('every guard on the removal path costs a mutant its life', () => {
     );
     expect(wrongOwner.outcome).toBe('LEASE_NOT_BREAKABLE');
     expect(wrongOwner.detail).toBe('OWNER_PID_MISMATCH');
+    expect(quarantineFilesBeside(path)).toEqual([]);
+  });
+});
+
+/* ── R6. what the third independent review found, on the fix for the second ── */
+
+describe('an unreadable record beside a free lease name is reported as itself', () => {
+  /**
+   * The third review's blocking finding, and it is the previous remediation's
+   * own regression one line further down.
+   *
+   * `if (leftUnowned(removal))` was placed *in front of* the switch rather than
+   * inside the refusal it was meant to outrank. `leftUnowned` is true for
+   * exactly the two removal states the switch answers most precisely, so both
+   * arms became dead code, the reason token `UNREADABLE_LEASE_UNOWNED` could
+   * never be printed by any run — while this same commit shipped an operator
+   * sentence for it — and the state below was reported as `LEASE_NOT_BREAKABLE`:
+   * "the lease is there", of a name the same call had measured free, at exit 4,
+   * "re-invoking under other conditions can differ".
+   *
+   * Exit 3 is what `run-exit-codes.ts` reserves for it, verbatim: a record was
+   * detached, could not be identified, and is sitting beside the lease path; no
+   * retry helps and a human has to look. The retry exit 4 invites answers
+   * `LEASE_ALREADY_GONE` at exit 0, with `lease status` reporting nothing to
+   * recover, while the unreadable record is still in `.git`.
+   *
+   * No injection anywhere: a directory at the lease name renames, refuses the
+   * read, and refuses the link.
+   */
+  it('answers verification-failed at the operator exit code, not a refusal at the retry one', async () => {
+    const fixture = await leasableRepository();
+    const path = leasePathOf(fixture);
+    mkdirSync(path, { recursive: true });
+    const inspected = inspectRepositoryExecutionLease(fixture.repository);
+
+    const broken = breakInspectedLease(fixture.repository, {
+      expectedRevision: inspected.revision ?? '',
+      expectedObjectId: inspected.objectId ?? '',
+      expectedOwnerPid: inspected.ownerPid,
+    });
+
+    // Whatever refuses first, the one thing this must never be is the outcome
+    // that says the lease is still there when the name is free.
+    if (broken.outcome === 'LEASE_BREAK_VERIFICATION_FAILED') {
+      expect(broken.detail).toBe('UNREADABLE_LEASE_UNOWNED');
+      expect(exitCodeForLeaseBreakOutcome(broken.outcome)).toBe(3);
+      expect(existsSync(path)).toBe(false);
+      expect(quarantineFilesBeside(path).length).toBe(1);
+    } else {
+      // The gate refused before touching anything — also correct, and then the
+      // name must still be occupied by what was there.
+      expect(existsSync(path)).toBe(true);
+      expect(quarantineFilesBeside(path)).toEqual([]);
+    }
+    cleanUpPaths([path, ...quarantineFilesBeside(path).map((name) => join(dirname(path), name))]);
+  });
+
+  it('reaches that state through the removal itself, with no seam at all', async () => {
+    // The same state one level down, so the mapping above is pinned to a
+    // removal result rather than to a coincidence of ordering.
+    const fixture = await leasableRepository();
+    const path = leasePathOf(fixture);
+    mkdirSync(path, { recursive: true });
+
+    const removal = removeVerifiedLease(path, () => false);
+
+    expect(removal).toBe('UNIDENTIFIABLE_AND_UNOWNED');
+    expect(existsSync(path)).toBe(false);
+    cleanUpPaths(quarantineFilesBeside(path).map((name) => join(dirname(path), name)));
+  });
+});
+
+describe('the gate refuses a stale authorisation before the record is touched', () => {
+  /**
+   * The note this replaces was false, and the third review proved it by running
+   * three distinguishing inputs.
+   *
+   * It claimed the gate's owner-pid arm was observationally equivalent to the
+   * predicate's, differing only by an unobservable touch. It is not: the gate
+   * ranks object, then pid, then revision, while the predicate ranks object,
+   * then revision, then pid. A record rewritten **in place** — which keeps the
+   * inode, so the object identity still matches, and stales both the pid and the
+   * digest — is refused by the gate as `OWNER_PID_MISMATCH` and by the predicate
+   * as a plain revision mismatch. Different outcome, different reason, and no
+   * injection needed to produce it.
+   *
+   * Writing "this cannot be observed" beside a load-bearing guard is the
+   * strongest possible invitation for the next remediation to delete it, which
+   * is why the note is gone rather than softened.
+   */
+  it('names the owner mismatch that a later check would have called a changed lease', async () => {
+    const fixture = await leasableRepository();
+    const path = leasePathOf(fixture);
+    acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-crashed', blockId: null },
+      { now: tickingClock() },
+    );
+    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
+      processAlive: () => 'NOT_FOUND',
+    });
+    const before = statSync(path, { bigint: true });
+
+    // In place: same object, different bytes, and a pid that is no longer the
+    // one the record names.
+    const handle = openSync(path, 'r+');
+    const replacement = Buffer.from(
+      `${JSON.stringify({ schemaVersion: 1, notALease: true })}\n`,
+      'utf8',
+    );
+    writeSync(handle, replacement, 0, replacement.length, 0);
+    ftruncateSync(handle, replacement.length);
+    closeSync(handle);
+    expect(statSync(path, { bigint: true }).ino).toBe(before.ino);
+
+    const broken = breakInspectedLease(
+      fixture.repository,
+      {
+        expectedRevision: inspected.revision ?? '',
+        expectedObjectId: inspected.objectId ?? '',
+        expectedOwnerPid: inspected.ownerPid,
+      },
+      { processAlive: () => 'NOT_FOUND' },
+    );
+
+    // The gate saw an authorisation whose owner the record no longer names, and
+    // said so — without detaching anything. With the arm gone the predicate
+    // answers a changed lease with no reason at all, having detached and
+    // restored a record first.
+    expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
+    expect(broken.detail).toBe('OWNER_PID_MISMATCH');
     expect(quarantineFilesBeside(path)).toEqual([]);
   });
 });

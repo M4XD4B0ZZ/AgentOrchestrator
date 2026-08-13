@@ -411,10 +411,31 @@ export function breakInspectedLease(
   // longer holds anything. A review found this short-circuit discarding exactly
   // that, so the reason line now carries whichever fact the operator must act on
   // first, and the unowned one always wins.
-  if (leftUnowned(removal)) {
-    return breakResult('LEASE_NOT_BREAKABLE', 'RECORD_QUARANTINED_LEASE_UNOWNED');
+  // Inside the refusal, and not in front of it.
+  //
+  // The rule intended here is that "this repository is now unowned" outranks
+  // *the reason a refusal gives*, because an operator told only "its owner is
+  // running" would wait for a run that holds nothing. The first version of it
+  // ranked the fact ahead of the whole switch below, which is a different and
+  // wrong rule: `leftUnowned` is true for exactly the two removal states the
+  // switch answers most precisely, so both arms became dead code and the
+  // unowned-and-unreadable state was reported as `LEASE_NOT_BREAKABLE` — "the
+  // lease is there", of a name this same call had measured free — at exit 4,
+  // "re-invoking under other conditions can differ", instead of the exit 3 that
+  // `run-exit-codes.ts` reserves verbatim for a record detached, unidentifiable
+  // and sitting beside the lease path with no retry that helps.
+  //
+  // Worse, on that route there was nothing to outrank: `matches` is invoked only
+  // when the detached bytes could be read (`execution-lease.ts`), so `refusedBy`
+  // is null by construction whenever `UNIDENTIFIABLE_AND_UNOWNED` is produced.
+  // The third independent review found it, and it is this fix's own regression
+  // one line further down.
+  if (refusedBy !== null) {
+    return breakResult(
+      'LEASE_NOT_BREAKABLE',
+      leftUnowned(removal) ? 'RECORD_QUARANTINED_LEASE_UNOWNED' : refusedBy,
+    );
   }
-  if (refusedBy !== null) return breakResult('LEASE_NOT_BREAKABLE', refusedBy);
 
   switch (removal) {
     case 'REMOVED':

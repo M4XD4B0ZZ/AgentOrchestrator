@@ -106,8 +106,10 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
     '  the lease was already not yours before anything was moved. RECORD_RESTORED: a record\n' +
     '  had been detached before that could be established, and was put back exactly where it\n' +
     '  was. RECORD_QUARANTINED: it could not be put back, because the name had been taken in\n' +
-    '  that instant - it is kept beside the lease path under a name ending in .breaking-, its\n' +
-    '  run has lost authority and will stop at its next checkpoint, and nothing was deleted.\n' +
+    '  that instant - it is kept beside the lease path under a name ending in .breaking-, and\n' +
+    '  nothing was deleted. Read that as "the name is occupied", not necessarily as "a run took\n' +
+    '  it": a storage failure during a claim can leave a record there too, and this build\n' +
+    '  reports what it observed rather than who caused it.\n' +
     '  RECORD_QUARANTINED_LEASE_UNOWNED: the same, except that nothing holds the lease now -\n' +
     '  this repository is unowned, and the next invocation to reach for it will get it.',
   // "Nothing was removed" is the whole promise here, and it is stated without
