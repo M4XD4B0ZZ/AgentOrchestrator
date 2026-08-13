@@ -50,6 +50,7 @@ import {
   acquireRepositoryExecutionLease,
   deriveExecutionLeaseLocation,
   inspectRepositoryExecutionLease,
+  leaseObjectIdentity,
   releaseRepositoryExecutionLease,
   verifyExecutionLeaseHeld,
 } from '../src/lease/execution-lease.js';
@@ -564,7 +565,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
 
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedOwnerPid: inspected.ownerPid },
+      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
       { processAlive: () => 'NOT_FOUND' },
     );
 
@@ -596,7 +597,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
     let successorBytes: Buffer | null = null;
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedOwnerPid: inspected.ownerPid },
+      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
       {
         processAlive: () => {
           if (successorBytes === null) {
@@ -631,7 +632,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
 
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedOwnerPid: inspected.ownerPid },
+      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
       { processAlive: () => 'NOT_FOUND' },
     );
 
@@ -655,7 +656,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
 
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: 'f'.repeat(64), expectedOwnerPid: inspected.ownerPid },
+      { expectedRevision: 'f'.repeat(64), expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
       { processAlive: () => 'NOT_FOUND' },
     );
 
@@ -678,7 +679,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
 
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedOwnerPid: deadPid() },
+      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: deadPid() },
       { processAlive: () => 'NOT_FOUND' },
     );
 
@@ -701,7 +702,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
 
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedOwnerPid: inspected.ownerPid },
+      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
       { processAlive: () => 'ALIVE' },
     );
 
@@ -721,7 +722,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
 
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedOwnerPid: inspected.ownerPid },
+      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
       { processAlive: () => 'UNDETERMINED' },
     );
 
@@ -743,7 +744,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
 
     const broken = breakInspectedLease(
       fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedOwnerPid: inspected.ownerPid },
+      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
       { processAlive: () => 'NOT_FOUND' },
     );
 
@@ -764,7 +765,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
     expect(inspected.ownerPid).toBeNull();
 
     const broken = breakInspectedLease(fixture.repository, {
-      expectedRevision: inspected.revision ?? '',
+      expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '',
       expectedOwnerPid: null,
     });
 
@@ -779,7 +780,7 @@ describe('a break removes the lease that was inspected, or nothing', () => {
     const inspected = inspectRepositoryExecutionLease(fixture.repository);
 
     const broken = breakInspectedLease(fixture.repository, {
-      expectedRevision: inspected.revision ?? '',
+      expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '',
       expectedOwnerPid: deadPid(),
     });
 
@@ -949,7 +950,10 @@ describe('agent-loop lease break', () => {
    * fixture that cannot be produced by acquiring, because acquiring records the
    * live pid of the acquiring process — which is this one.
    */
-  function crashedLease(fixture: Fixture, ownerPid: number): { path: string; revision: string } {
+  function crashedLease(
+    fixture: Fixture,
+    ownerPid: number,
+  ): { path: string; revision: string; objectId: string } {
     const path = leasePathOf(fixture);
     writeFileSync(
       path,
@@ -970,7 +974,7 @@ describe('agent-loop lease break', () => {
       )}\n`,
       'utf8',
     );
-    return { path, revision: revisionOfFile(path) };
+    return { path, revision: revisionOfFile(path), objectId: leaseObjectIdentity(path) ?? '' };
   }
 
   it('inspects nothing and removes nothing without --attended', async () => {
@@ -987,6 +991,8 @@ describe('agent-loop lease break', () => {
       fixture.root,
       '--expected-revision',
       crashed.revision,
+      '--expected-object',
+      crashed.objectId,
     ]);
 
     expect(process.exitCode).toBe(3);
@@ -1006,6 +1012,8 @@ describe('agent-loop lease break', () => {
       '--attended',
       '--expected-revision',
       crashed.revision,
+      '--expected-object',
+      crashed.objectId,
       '--owner-pid',
       String(owner),
     ]);
@@ -1034,6 +1042,8 @@ describe('agent-loop lease break', () => {
       '--attended',
       '--expected-revision',
       revisionOfFile(path),
+      '--expected-object',
+      leaseObjectIdentity(path) ?? '',
       '--owner-pid',
       String(process.pid),
     ]);
@@ -1055,6 +1065,8 @@ describe('agent-loop lease break', () => {
       '--attended',
       '--expected-revision',
       'not-a-digest',
+      '--expected-object',
+      crashed.objectId,
     ]);
 
     expect(stdout.join('')).toContain('EXPECTED_REVISION_UNUSABLE');
@@ -1076,6 +1088,8 @@ describe('agent-loop lease break', () => {
       '--attended',
       '--expected-revision',
       crashed.revision,
+      '--expected-object',
+      crashed.objectId,
       '--owner-pid',
       '12x',
     ]);
@@ -1107,6 +1121,8 @@ describe('agent-loop lease break', () => {
       '--attended',
       '--expected-revision',
       crashed.revision,
+      '--expected-object',
+      crashed.objectId,
       '--owner-pid',
       offered?.[1] ?? '',
     ]);

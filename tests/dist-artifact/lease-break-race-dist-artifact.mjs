@@ -95,6 +95,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -149,6 +150,8 @@ const failures = [];
  * real interleaving and a round can legitimately miss it.
  */
 let quarantinedAcrossTheRun = 0;
+/** How many records were detached and found not to be the authorised one. */
+let detachesAcrossTheRun = 0;
 const check = (condition, message) => {
   if (!condition) failures.push(message);
 };
@@ -226,6 +229,7 @@ for (;;) {
     record,
     {
       expectedRevision: process.env.AO_RACE_REVISION,
+      expectedObjectId: process.env.AO_RACE_OBJECT,
       expectedOwnerPid: Number(process.env.AO_RACE_OWNER),
     },
     { processAlive: () => 'NOT_FOUND' },
@@ -310,6 +314,7 @@ ${BARRIER_SOURCE}
 import { readFileSync as read } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { breakInspectedLease } from ${recoveryHref};
+import { leaseObjectIdentity } from ${leaseHref};
 
 writeFileSync(process.env.AO_RACE_READY, 'ready', 'utf8');
 waitFor(process.env.AO_RACE_START, 'start');
@@ -328,9 +333,12 @@ for (;;) {
       const value = JSON.parse(bytes.toString('utf8'));
       if (typeof value.ownerPid === 'number') ownerPid = value.ownerPid;
     } catch { ownerPid = null; }
+    // Read in the order an operator gets them from a single status report: the
+    // bytes, then the object those bytes are in.
+    const objectId = leaseObjectIdentity(leasePath);
     const result = breakInspectedLease(
       record,
-      { expectedRevision: revision, expectedOwnerPid: ownerPid },
+      { expectedRevision: revision, expectedObjectId: objectId ?? '', expectedOwnerPid: ownerPid },
       { processAlive: () => 'NOT_FOUND' },
     );
     const key = result.outcome + (result.detail === null ? '' : ':' + result.detail);
@@ -406,6 +414,11 @@ async function round(index) {
     const victimBytes = readFileSync(leasePath);
     const victim = JSON.parse(victimBytes.toString('utf8'));
     const revision = digestOf(victimBytes);
+    // The object the fixed cohort is authorised for. Read with `bigint: true`
+    // for the reason the production reader does: a Windows file index is 64 bits
+    // and Number loses its low ones.
+    const victimStats = statSync(leasePath, { bigint: true });
+    const victimObject = `${String(victimStats.dev)}:${String(victimStats.ino)}`;
 
     /** @type {Promise<string>[]} */
     const answers = [];
@@ -422,6 +435,7 @@ async function round(index) {
           AO_RACE_FINISH: finish,
           AO_RACE_READY: readyOf(kind, i),
           AO_RACE_REVISION: revision,
+          AO_RACE_OBJECT: victimObject,
           AO_RACE_OWNER: String(victim.ownerPid),
         },
       });
@@ -550,7 +564,14 @@ for (let index = 0; index < ROUNDS; index += 1) {
   );
 
   const removalCount = countOf('LEASE_REMOVED');
-  const nonMatchingDetaches = countOf('LEASE_CHANGED_SINCE_INSPECTION');
+  // Only the effect-level refusals count as detaches. A gate that refuses on the
+  // object or the revision has touched nothing, and counting those was the first
+  // version of this metric reading 500 per round while the removal itself ran a
+  // handful of times.
+  const nonMatchingDetaches =
+    countOf('LEASE_CHANGED_SINCE_INSPECTION:RECORD_RESTORED') +
+    countOf('LEASE_CHANGED_SINCE_INSPECTION:RECORD_QUARANTINED');
+  detachesAcrossTheRun += nonMatchingDetaches;
   const quarantined =
     countOf('LEASE_CHANGED_SINCE_INSPECTION:RECORD_QUARANTINED') +
     countOf('LEASE_BREAK_VERIFICATION_FAILED:UNREADABLE_AND_QUARANTINED');
@@ -588,12 +609,6 @@ for (let index = 0; index < ROUNDS; index += 1) {
   // authorisation, every attempt after the first removal is refused at the *gate*
   // on the owner pid, so the detach, the restore and the quarantine never ran.
   // A non-matching detach is the proof that they did.
-  check(
-    nonMatchingDetaches >= 1,
-    `round ${String(index)}: no break ever detached a record it was not authorised for, so the ` +
-      `restore this harness exists to test did not run — ${report}`,
-  );
-
   // **The claim: every deletion is accountable to an authorisation.**
   //
   // A record an acquirer wrote may legitimately be gone for exactly two reasons:
@@ -628,18 +643,29 @@ for (let index = 0; index < ROUNDS; index += 1) {
   }
 }
 
-// The restore must have REFUSED somewhere in this run, not merely succeeded.
+// The removal must have RUN somewhere in this run, not merely been refused at
+// the gate.
 //
-// Every check above is satisfied by a restore that always wins the race back to
-// the freed name, and a restore that overwrites instead of refusing wins it
-// every time by construction. This is what tells the two apart: a `link` meeting
-// an occupied name keeps the record in quarantine, and a `rename` can never
-// report that outcome because it never meets an occupied name at all.
+// This is the check the previous version of this harness lacked, and the reason
+// an independent review found it passing while the restore, the EEXIST branch
+// and the quarantine had never executed at all. A detach that finds a record it
+// was not authorised for is the proof that the effect was reached.
 check(
-  quarantinedAcrossTheRun >= 1,
-  'no restore was ever refused in this run, so nothing distinguishes a restore that cannot ' +
-    'overwrite from one that does — either the interleaving did not happen, in which case run ' +
-    'it again, or the restore is no longer refusing',
+  detachesAcrossTheRun >= 1,
+  'no break ever detached a record it was not authorised for, so the removal this harness ' +
+    'exists to test never ran - every refusal came from the gate',
+);
+
+// The quarantine branch - a restore that met an occupied name and kept the
+// record rather than overwriting it - is REPORTED and not gated, and that is a
+// deliberate limit rather than an oversight. It needs the freed name to be taken
+// inside the restore window, which happens a few times in some runs and not at
+// all in others, and a gate that flaky would be turned off within a week. It is
+// pinned deterministically instead, in tests/v2-07lr-remediation.test.ts, by
+// squatting the freed name from inside the removal's own predicate.
+console.log(
+  `  across the run: ${String(detachesAcrossTheRun)} records detached and restored, ` +
+    `${String(quarantinedAcrossTheRun)} kept in quarantine`,
 );
 
 if (failures.length > 0) {

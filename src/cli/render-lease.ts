@@ -107,6 +107,11 @@ export function renderLeaseStatus(inspection: LeaseInspection, breakable: boolea
     `  ${LEASE_STATE_SENTENCES[inspection.state]}`,
     line('Path', inspection.path === '' ? 'not derivable' : inspection.path),
     line('Revision', inspection.revision ?? 'none'),
+    // The object, beside the digest, because for one class of lease the digest
+    // is a constant: a crash-window record is empty, and every empty file hashes
+    // the same. `none` means this platform reports no usable identity, and the
+    // break is refused for that case rather than falling back to the digest.
+    line('Object', inspection.objectId ?? 'none'),
     line('Owner pid', inspection.ownerPid === null ? 'none' : String(inspection.ownerPid)),
     line('Liveness', inspection.liveness),
     `  ${LEASE_LIVENESS_SENTENCES[inspection.liveness]}`,
@@ -153,6 +158,7 @@ export function renderLeaseStatus(inspection: LeaseInspection, breakable: boolea
       '',
       `       agent-loop lease break --repository <path> --attended` +
         ` --expected-revision ${inspection.revision ?? '<revision>'}` +
+        ` --expected-object ${inspection.objectId ?? '<object>'}` +
         (inspection.ownerPid === null ? '' : ` --owner-pid ${String(inspection.ownerPid)}`),
       '',
       '  If the lease changed between this report and that command, the break refuses and',

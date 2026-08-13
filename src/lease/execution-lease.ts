@@ -327,6 +327,46 @@ export function deriveExecutionLeaseLocation(repository: LeaseRepository): Lease
 }
 
 /**
+ * Which filesystem object is at `path` — device and inode — or `null`.
+ *
+ * ── Why content is not identity ────────────────────────────────────────────
+ *
+ * An independent review reproduced the consequence of pretending otherwise. The
+ * crash-window artefact is a **zero-byte file**, its digest is the constant
+ * `sha256("")`, and an authorisation naming that digest therefore matched every
+ * empty object at the lease name — including the one each acquisition passes
+ * through on a filesystem that refuses hard links, where the name is taken by
+ * `openSync(path, 'wx')` and the record written through that handle afterwards.
+ * Content cannot identify an object whose content is nothing.
+ *
+ * Time cannot either, and is deliberately not used: a modification stamp is
+ * rounded to two seconds on some filesystems, is trivially shared by a
+ * successor, and this build refuses to let time carry authority anywhere else.
+ *
+ * ── What this returns, and when it refuses ─────────────────────────────────
+ *
+ * `"<dev>:<ino>"`, read with `bigint: true` because a Windows file index is a
+ * 64-bit value and `Number` loses the low bits of one — measured, not assumed: a
+ * test written against the lossy reading disagreed with this one by exactly one.
+ * On NTFS that index carries a sequence number, so it is not silently reused by
+ * the next file to occupy the same record.
+ *
+ * `null` when the platform reports nothing usable — `ino` of zero is what a
+ * filesystem without the concept answers, and it is exactly the answer that must
+ * not be mistaken for an identity. A caller that cannot get one refuses; there
+ * is no weaker fallback, because the digest *was* the weaker fallback.
+ */
+export function leaseObjectIdentity(path: string): string | null {
+  try {
+    const stats = statSync(path, { bigint: true });
+    if (stats.ino === 0n) return null;
+    return `${String(stats.dev)}:${String(stats.ino)}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The identity of one lease: the digest of its exact bytes.
  *
  * Exported because nothing outside this module may *invent* a second answer to
@@ -392,6 +432,16 @@ export interface LeaseInspection {
    * can ask.
    */
   readonly liveness: ProcessLiveness | 'UNKNOWABLE';
+  /**
+   * Which filesystem object this is, or `null` if the platform cannot say.
+   *
+   * Reported beside the revision because the revision is not identity for every
+   * lease this build can meet: the crash-window artefact is empty, and every
+   * empty object has the same digest. See {@link leaseObjectIdentity}. An
+   * operator authorises a break with both, and both are re-established on the
+   * object the removal detaches.
+   */
+  readonly objectId: string | null;
 }
 
 interface ReadLease {
@@ -455,6 +505,11 @@ export function inspectRepositoryExecutionLease(
   }
 
   const read = readLeaseFile(location.path, location.key);
+  // The object those bytes came from, read next and not later: the probe below
+  // can take milliseconds, and an identity read after it would describe a
+  // different moment from the digest it sits beside. A lease that vanishes in
+  // that window must be reported as gone, not as unidentifiable.
+  const objectId = read.bytes === null ? null : leaseObjectIdentity(location.path);
   const probe = deps.processAlive ?? osProcessLiveness;
   // Recovered from the bytes when the document itself will not parse, so a
   // lease written by another build is reported with the owner it actually
@@ -471,6 +526,8 @@ export function inspectRepositoryExecutionLease(
     blockId: read.document?.blockId ?? null,
     acquiredAt: read.document?.acquiredAt ?? null,
     liveness: owner === null ? 'UNKNOWABLE' : probe(owner),
+    // Reporting it is never authority; the re-check on the detached object is.
+    objectId,
   });
 }
 
@@ -482,6 +539,7 @@ function inspection(from: Partial<LeaseInspection> & { readonly state: LeaseStat
     blockId: null,
     acquiredAt: null,
     liveness: 'UNKNOWABLE' as const,
+    objectId: null,
     ...from,
   });
 }
@@ -1082,7 +1140,7 @@ export type VerifiedRemoval =
  */
 export function removeVerifiedLease(
   leasePath: string,
-  matches: (bytes: Buffer) => boolean,
+  matches: (bytes: Buffer, objectId: string | null) => boolean,
 ): VerifiedRemoval {
   const quarantine = `${leasePath}.breaking-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`;
 
@@ -1137,7 +1195,11 @@ export function removeVerifiedLease(
     // neither removed nor claimed to have been: the restore below puts it back.
   }
 
-  if (bytes !== null && matches(bytes)) {
+  // The identity of the object this call detached, read from a quarantine name
+  // only this call knows. `rename` moves the object rather than its contents, so
+  // this is the identity of whatever was at the lease name — which is what an
+  // authorisation names, and what a digest cannot express for an empty record.
+  if (bytes !== null && matches(bytes, leaseObjectIdentity(quarantine))) {
     discard(quarantine);
     return 'REMOVED';
   }
