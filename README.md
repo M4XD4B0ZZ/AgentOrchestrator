@@ -2852,6 +2852,19 @@ narrow answer, so changing it has to be deliberate.
   `STALE_LEASE_RECOVERY_UNSAFE` also covers `UNDETERMINED` liveness, where a
   retry genuinely can differ. **Scope:** `cli/run-command.ts`,
   `cli/release-command.ts`, `cli/run-exit-codes.ts`.
+- **LF-1** — `loop/leased-spawns.ts:52-53` says the spawn denylist covers `eval`;
+  the regex has no `eval` term, and an indirect `eval` reaching a process passed
+  all five reachability pins. No safety claim is wrong — the same paragraph
+  disclaims the denylist as a bound rather than a barrier, and the lease fence is
+  what actually stops a spawn — but the coverage sentence is false and a
+  maintainer would read it as a guarantee. Not fixed in V2-07LR deliberately:
+  that slice is about ABA/TOCTOU and operator authority, and a comment-versus-regex
+  correction there would dilute exactly the review it needs. **Scope:**
+  `loop/leased-spawns.ts:52-53`, `tests/v2-07l-execution-lease.test.ts:2372-2386`.
+- **LF-4** — editing artefacts: a 153-character run-on in this file whose second
+  clause lost its subject, and a stray double blank line in
+  `loop/loop-step.ts:1122-1131`. Cosmetic, and carried rather than folded into a
+  safety slice for the same reason.
 - **L-V2-07L-2** — four of the five acquire refusals end "Nothing was started.",
   and `release --attended` prints them verbatim. A release starts nothing in any
   case, and the question its operator has is whether anything was *removed*.
@@ -3717,11 +3730,12 @@ agent-loop lease status --repository <abs path>
 ```
 
 Read-only. Reports the state, the owner, the run, the liveness and the revision
-of the exact bytes on disk. For a lease whose owner is *not* running it also
-prints what clearing it would require of an operator — and that is prose, not a
-command.
+of the exact bytes on disk. For a lease that is *recoverable* — nothing
+occupying it can be shown to be running — it also prints the exact break command
+for it, revision and owner pid already filled in. For anything else it prints no
+command at all.
 
-### There is no command that clears a lease, and that is a withdrawal
+### The break was withdrawn once, and came back under a contract (V2-07LR)
 
 An attended `lease break` existed here, shaped so that using it was a decision:
 `--attended`, plus the revision and owner that `status` printed, plus a refusal
@@ -3748,35 +3762,101 @@ v3  detach, restore with link only           -> holds on NTFS; on a filesystem
                                                 "Nothing was removed"
 ```
 
-Each fix was reproduced broken by the next round. A destructive operator command
-that has never survived a review is worse than none: it carries the tool's
-authority and was wrong every time anyone looked. So the productive path is
-**gone** — no subcommand, no exported function, no exit-code contract, no
-sentence pointing at it. `tests/v2-07l-execution-lease.test.ts` pins that as a
-contract rather than leaving it to tidiness: no operator-facing text names an
-`agent-loop lease break|clear|force` invocation, and no rendered refusal points
-at a command that does not exist. The source still *discusses* the withdrawn
-command, deliberately — `cli/lease-command.ts` records what each attempt got
-wrong, and the module header sends readers there — because the reason a command
-is absent is worth more than its absence.
+Each fix was reproduced broken by the next round, and withdrawing it was right: a
+destructive operator command that has never survived a review is worse than none.
 
-What remains for a crashed run is a **manual step, explicitly outside what this
-build guarantees**, printed by `lease status` when the recorded owner cannot be
-found:
+**Leaving it withdrawn was not.** What V2-07L shipped in its place was `lease
+status` printing a manual procedure — establish that nothing is running, re-read
+the revision, then delete the file inside `.git` yourself — together with a
+warning that between the reading and the deleting a lease can be legitimately
+re-acquired, and that deleting then destroys a running invocation's authority.
+That is the *same ABA*, handed to a human who has no way to win it. Refusing to
+ship the destructive operation did not remove the destructive operation; it
+removed the only place where the race could be closed.
 
-1. establish that no orchestrator process and no agent process of that run is
-   still alive — a process id that is gone does not prove this, because an agent
-   can outlive the orchestrator that started it;
-2. re-run `lease status` and confirm it still reports what was read, in
-   particular the same revision;
-3. delete the file at the printed path, deliberately.
+So V2-07LR brings the command back. Three things make it a different command
+from the one that was withdrawn:
 
-Step 1 is a judgement this build cannot make, which is exactly why it is not a
-command. A supported attended recovery flow is its own slice, and its first
-acceptance condition is the one that defeated three attempts here: a stale or
-unreadable lease must be removable by an explicit operator flow **without** any
-possibility that a lease acquired in the meantime is destroyed by an ABA or
-TOCTOU race.
+```
+identity   the operator names the lease by the digest of its bytes, so the
+           command acts on the lease that was inspected, never on "whatever is
+           at the path now"
+effect     that identity is re-established on the bytes the removal has ALREADY
+           DETACHED - the name is never touched again except through a `link`,
+           which cannot overwrite
+no carry   every fact the gate established is re-established at the effect;
+           nothing the gate concluded travels forward as a permission
+```
+
+```powershell
+agent-loop lease break --repository <abs path> --attended `
+  --expected-revision <digest> --owner-pid <pid>
+```
+
+`--attended` is required for the reason `release --attended` requires it, and
+there is no `--force`, no unattended break and nothing anywhere that breaks a
+lease automatically. `--owner-pid` is required where the lease records one and
+refused where it records none — a crash-window artefact names no process and is
+identified by its bytes alone. Every attempt ends in exactly one of five durable
+answers, and they are five because they ask five different things of an operator:
+
+| Outcome | Exit | What it means |
+| --- | --- | --- |
+| `LEASE_REMOVED` | 0 | The lease you inspected is gone. It was still the same record when it was detached. |
+| `LEASE_ALREADY_GONE` | 0 | Nothing was there. **This invocation removed nothing** — a different fact from the one above. |
+| `LEASE_CHANGED_SINCE_INSPECTION` | 4 | Something else is there. Inspect again; do not repeat the command with the old revision. |
+| `LEASE_NOT_BREAKABLE` | 4 | Its owner is running, its liveness is undetermined, the authorisation names another lease, or the filesystem refused the detach. |
+| `LEASE_BREAK_VERIFICATION_FAILED` | 3 | A record was detached and could not be read back. It is **kept**, beside the lease path, inert and inspectable. |
+
+Liveness keeps the rule it has everywhere else: it may refuse and may never
+permit. `ALIVE` and `UNDETERMINED` both stop a break; `NOT_FOUND` does not
+authorise one — the operator's explicit, identity-bound authorisation does.
+Classification and removal authority are separate decisions
+(`assessLeaseRecovery` reports; it authorises nothing), so a lease can be
+classified stale and still fail the removal because ownership changed.
+
+**What the real-process harness measured.** `test:dist-lease-break-race` is a new
+`verify` gate: six breaker processes attempt the same authorisation for three
+seconds while six acquirers take and hold the freed lease. Against the withdrawn
+version's first shape — decide from the inspection, remove by name — every round
+records six acquisitions and **zero surviving records**: each successor's lease
+is deleted the instant it is written. Against this one, the successor's record is
+always still there. It also found two things worth stating plainly:
+
+- on Windows under this concurrency, `rename` can **report success without having
+  moved anything**. The removal therefore reads the result of its own detach
+  instead of trusting the call, and reports "already gone" where it used to
+  report a quarantined record that had never been created;
+- a break attempt can still **displace** a successor that acquired inside the
+  window between the gate read and the rename: its record is detached, and if the
+  freed name has been taken it stays detached. It is *kept*, never deleted, and
+  the displaced writer cannot write — it fails its next authority check, which
+  every effect in this build takes. Closing that needs an atomic compare-and-delete
+  on a directory entry, which no portable filesystem primitive offers. It is named
+  here rather than argued away, because the previous two attempts to argue it away
+  were both wrong.
+
+The destructive entry point lives in its own module, `lease/lease-recovery.ts`,
+and a test pins its importers to exactly one: the CLI command that requires
+`--attended`. `execution-lease.ts` is imported by a dozen modules, and a break
+exported from there would be reachable from every one of them.
+
+### One reading of the authority record (LF-2)
+
+`LeaseRepository` is a structural interface, so nothing said its three fields
+were *values*. A record whose `root` is an accessor answers one repository when
+the authority gate asks and another when the effect asks — both truthfully — and
+an adversarial review drove exactly that through three entry points with nothing
+forged anywhere: a branch and a worktree created in repository B on a lease held
+over A, a workspace *deleted* in B the same way, and a durable transition aimed
+at B.
+
+The fix is that there is no second read: `advanceTaskState`, `startTask`,
+`prepareTaskWorkspace` and `removeTaskWorkspace` each take one frozen reading at
+their top and use only that. What proves it is not the snapshot's existence but
+the effect — `tests/v2-07lr-lease-recovery.test.ts` asserts that the repository
+the gate never saw is byte-identical afterwards, and each of those assertions
+fails on the code as it stood.
 
 ### What V2-07L is not
 
@@ -3815,13 +3895,13 @@ V2-09  dependent tasks / commit chain
 ```
 
 One prerequisite is now explicit that was not before. **Unattended running needs
-owned process containment**, not merely the lease: automatic recovery of a stale
-lease is refused today because a dead owner does not prove that no agent process
+owned process containment**, not merely the lease: *automatic* recovery of a
+stale lease is refused because a dead owner does not prove that no agent process
 survived it, and that stays true until the orchestrator creates the containment
-itself — a Windows Job Object, a supervised POSIX process group. Until then a
-crashed run is cleared by an operator by hand, following the steps `lease status`
-prints — a judgement a scheduled job cannot make, and one this build does not
-offer a command for.
+itself — a Windows Job Object, a supervised POSIX process group. `lease break`
+does not change that and is not a step towards it: it is attended precisely
+because the judgement it depends on ("nothing of that run is still alive") is one
+a scheduled job cannot make.
 
 Inventing a cross-platform atomic file compare-and-swap inside V2-07 was the
 alternative, and it would have burst the slice for a guarantee the lease has to

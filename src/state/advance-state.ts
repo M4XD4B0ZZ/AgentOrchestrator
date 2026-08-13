@@ -86,6 +86,7 @@ import { comparePathIdentity } from '../core/path-identity.js';
 import { canTransition } from '../core/transitions.js';
 import { safeParseTaskState } from '../core/task-state.js';
 import {
+  snapshotRepositoryRecord,
   verifyExecutionLeaseHeldFor,
   type ExecutionLeaseAuthority,
 } from '../lease/execution-lease.js';
@@ -158,11 +159,25 @@ export function advanceTaskState(
     });
   }
 
+  // One reading of the authority record, for the gate and the write to share.
+  //
+  // Not a tidy-up: `LeaseRepository` is a structural interface, and a record
+  // whose `root` is an accessor can name repository A when the gate below asks
+  // and repository B when the write target is derived from it four lines later.
+  // Both answers are true; only the pairing is a lie. The store's own
+  // `REPOSITORY_ROOT_MISMATCH` check happens to stop the write from landing —
+  // the state document names the repository it belongs to — but that is a second
+  // guard catching a first one's mistake, and what it produces is a legitimate
+  // move refused with a code about a repository nobody named. See
+  // {@link snapshotRepositoryRecord}; the workspace paths have no such second
+  // guard, and a review drove a branch and a worktree into B through them.
+  const repository = snapshotRepositoryRecord(options.lease.repository);
+
   // Last, and immediately before the write. Ordered after the cheap contract
   // checks deliberately: those are facts about the value the caller built and
   // cost nothing, while this one is a fact about *now* and is worth taking as
   // late as it can be taken.
-  const held = verifyExecutionLeaseHeldFor(options.lease.repository, options.lease.evidence);
+  const held = verifyExecutionLeaseHeldFor(repository, options.lease.evidence);
   if (held.code !== 'HELD') {
     return Object.freeze({
       ok: false as const,
@@ -188,9 +203,10 @@ export function advanceTaskState(
     // same key.
     //
     // So there is no pair left to compare. The write goes to the root of the
-    // repository whose lease was just proved, and a caller cannot name a
-    // different one because there is nowhere to name it.
-    repositoryRoot: options.lease.repository.root,
+    // repository whose lease was just proved — the same *reading* of it, not a
+    // fresh one — and a caller cannot name a different one because there is
+    // nowhere to name it.
+    repositoryRoot: repository.root,
     expectedRevision: current.revision,
   });
 }

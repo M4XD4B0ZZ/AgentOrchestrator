@@ -999,71 +999,74 @@ describe('lease status reports a stale lease without offering to clear it', () =
     expect(status.liveness).toBe('ALIVE');
   });
 
-  it('offers manual recovery only for an owner that is not running', async () => {
+  it('offers recovery only for an owner that is not running', async () => {
     const fixture = await leasableRepository();
     heldLease(fixture, 'run-0009');
 
-    const live = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository));
+    const live = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository), false);
     const stale = renderLeaseStatus(
       inspectRepositoryExecutionLease(fixture.repository, { processAlive: () => 'NOT_FOUND' }),
+      true,
     );
 
-    // Nothing to recover from while somebody is running, and telling an operator
-    // how to delete the file is how a healthy run gets cleared.
-    expect(live).not.toContain('delete the file');
-    expect(stale).toContain('delete the file');
-    // Stated as being outside the guarantee, and never as a command.
-    expect(stale).toContain('OUTSIDE what this build guarantees');
-    expect(stale).not.toMatch(/agent-loop lease (break|clear|force)/);
+    // Nothing to recover from while somebody is running, and printing a break
+    // command beside a healthy run is how a healthy run gets cleared.
+    //
+    // V2-07LR replaced the manual procedure this used to print with an attended
+    // command; what did not change is *when* it is printed at all.
+    expect(live).not.toContain('lease break');
+    expect(stale).toContain('agent-loop lease break');
+    expect(stale).toContain('--attended');
+    // And still no bypass, in either report.
+    expect(live).not.toContain('--force');
+    expect(stale).toContain('no --force');
   });
 });
 
-describe('the productive break path is gone, not merely unused', () => {
+describe('the owner-only release stays owner-only, whatever recovery exists beside it', () => {
   /**
-   * The withdrawal is a *contract*, not a tidy-up.
+   * V2-07L withdrew the attended break; V2-07LR brought it back under a contract
+   * written from what defeated it, and this describe is what survives of the
+   * withdrawal.
    *
-   * Three adversarial review rounds each found a fresh way for an attended
-   * break to destroy an authority somebody had legitimately acquired. A
-   * destructive operator command that has never survived a review is worse than
-   * none, so the whole productive path was removed — and "removed" has to mean
-   * that nothing is left for a caller to find, or the next slice inherits a
-   * half-live API that looks sanctioned.
+   * The withdrawal's own assertions — no break subcommand, no break vocabulary,
+   * no mention in the source — were pins on an *absence*, and the absence was a
+   * decision this repository has since taken again, deliberately, with the
+   * counter-proofs in `tests/v2-07lr-lease-recovery.test.ts` behind it. What was
+   * never up for revision is below: `release` remains the owner's operation, and
+   * it remains the one that cannot name a victim.
    */
-  it('exports no function that removes a lease other than its owner releasing it', async () => {
+  it('keeps the release owner-bound, with nothing for a caller to name', async () => {
     const lease = await import('../src/lease/execution-lease.js');
 
-    const removers = Object.keys(lease).filter((name) => /break|clear|force|takeover/i.test(name));
-    expect(removers).toEqual([]);
-    // The one remover that remains, and it is owner-bound: it takes only the
-    // evidence, so there is no path, no run id and no owner id to supply.
+    // It takes only the evidence, so there is no path, no run id and no owner id
+    // to supply. A caller holding somebody else's identifiers has nothing this
+    // function accepts.
     expect(typeof lease.releaseRepositoryExecutionLease).toBe('function');
     expect(lease.releaseRepositoryExecutionLease.length).toBe(1);
+    // And the lease module itself still exports no takeover of any kind: the
+    // one destructive primitive it exports is `removeVerifiedLease`, whose whole
+    // argument is the predicate that identifies what may be removed.
+    expect(Object.keys(lease).filter((name) => /force|takeover|steal/i.test(name))).toEqual([]);
   });
 
-  it('leaves no break vocabulary behind in the operator surface', async () => {
-    const render = await import('../src/cli/render-lease.js');
-    const command = await import('../src/cli/lease-command.js');
-
-    expect(Object.keys(render).filter((name) => /BREAK/i.test(name))).toEqual([]);
-    expect(Object.keys(command).filter((name) => /BREAK/i.test(name))).toEqual([]);
-  });
-
-  it('registers only a read-only lease subcommand', async () => {
+  it('registers the read-only subcommand beside the attended one, and nothing else', async () => {
     const { buildProgram } = await import('../src/cli/index.js');
     const lease = buildProgram()
       .commands.find((command) => command.name() === 'lease');
 
     expect(lease).toBeDefined();
-    expect(lease?.commands.map((command) => command.name())).toEqual(['status']);
+    expect(lease?.commands.map((command) => command.name()).sort()).toEqual(['break', 'status']);
   });
 
-  it('mentions no break command anywhere in the shipped source', () => {
+  it('names no command in the shipped source that does not exist', () => {
     // A sentence is an interface too. An operator who reads "clear it with
-    // `agent-loop lease break`" in a refusal will go looking for a command that
+    // `agent-loop lease clear`" in a refusal will go looking for a command that
     // does not exist, and a maintainer will read it as a feature that regressed.
+    // `lease break` is now among the commands that do exist; nothing else is.
     const offenders: string[] = [];
     for (const file of sourceFiles()) {
-      if (/agent-loop lease (break|clear|force)/.test(readFileSync(file, 'utf8'))) {
+      if (/agent-loop lease (clear|force|takeover)/.test(readFileSync(file, 'utf8'))) {
         offenders.push(relative(PACKAGE_ROOT, file));
       }
     }
@@ -1088,43 +1091,44 @@ describe('the lease report', () => {
     expect([...all].filter((character) => character.codePointAt(0)! > 0x7f)).toEqual([]);
   });
 
-  it('tells an operator what clearing a stale lease requires of them', async () => {
+  it('tells an operator what recovering a stale lease requires of them', async () => {
     const fixture = await leasableRepository();
     heldLease(fixture, 'run-0009');
     const inspection = inspectRepositoryExecutionLease(fixture.repository, {
       processAlive: () => 'NOT_FOUND',
     });
 
-    const report = renderLeaseStatus(inspection);
+    const report = renderLeaseStatus(inspection, true);
 
     // The path, because they cannot act without it — and the judgement they
-    // have to make, because this build cannot make it for them. There is no
-    // command: an attended break was withdrawn after three review rounds each
-    // found a fresh way for it to destroy a legitimately acquired lease.
+    // have to make, because the tool cannot make it for them. What changed in
+    // V2-07LR is only the last step: the manual deletion this used to spell out
+    // is now a command, and the race it used to warn about is closed by the
+    // command rather than left to the operator's care.
     expect(report).toContain(inspection.path);
     expect(report).toContain('no orchestrator process and no agent process');
-    expect(report).toContain('OUTSIDE what this build guarantees');
-    // No command is offered — the words "no --force" appear because the report
-    // says so, which is the opposite of offering one.
-    expect(report).not.toMatch(/agent-loop lease (break|clear|force)/);
+    // The command, complete: an operator can run this line.
+    expect(report).toContain('agent-loop lease break --repository <path> --attended');
+    expect(report).toContain(`--expected-revision ${inspection.revision ?? ''}`);
+    expect(report).toContain(`--owner-pid ${String(inspection.ownerPid)}`);
     expect(report).toContain('no --force');
-    // The ABA hazard, and what it argues for.
+    // The ABA hazard, and what is now done about it.
     //
-    // Pinned as a whole sentence rather than by keyword, because the shipped
-    // text lost a single word — "that race is exactly why this is a command",
-    // for a block whose entire purpose is to say no command exists — and every
-    // assertion above passed while it did. A review caught it by reading. A
-    // negation is exactly the kind of claim a keyword search cannot check, so it
-    // is checked against the words that carry it.
-    expect(report).toContain('can be legitimately re-acquired by a new run');
-    expect(report).toContain('That race is exactly why this is\n       NOT a command.');
-    expect(report).not.toMatch(/why this is\s+a command/);
+    // Pinned as whole sentences rather than by keyword, for the reason the
+    // previous version of this test recorded: the shipped text once lost a
+    // single word — "that race is exactly why this is a command", in a block
+    // whose purpose was to say no command existed — and every keyword assertion
+    // passed while it did. A negation is what a keyword search cannot check.
+    expect(report).toContain(
+      'released\n  and legitimately re-acquired in the meantime is left alone rather than destroyed',
+    );
+    expect(report).toContain('Nothing is removed on a revision you did not see');
   });
 
   it('never suggests a break for a repository nobody owns', async () => {
     const fixture = await leasableRepository();
 
-    const report = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository));
+    const report = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository), false);
 
     expect(report).not.toContain('lease break');
   });
@@ -1920,7 +1924,7 @@ describe('an unreadable lease is held-and-unsafe, never free', () => {
     expect(inspection.state).not.toBe('FREE');
     // And the operator-facing consequence, which is the part that matters: the
     // report must not invite the next invocation to take it.
-    const report = renderLeaseStatus(inspection);
+    const report = renderLeaseStatus(inspection, true);
     expect(report).toContain('treated');
     expect(report).not.toContain('The next one may take the lease.');
   });
