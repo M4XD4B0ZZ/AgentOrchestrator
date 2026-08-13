@@ -2212,13 +2212,22 @@ describe('a start without the lease opens nothing, and a start that loses it say
 /* ─────────── 25. the spawn surface, pinned as structure not as spelling ── */
 
 describe('a subprocess cannot be started from anywhere that lacks the lease', () => {
-  /** Every import-like statement in a file: static, dynamic, or `require`. */
+  /**
+   * Every binding-introducing statement in a file: static `import`, `export …
+   * from`, dynamic `import()`, or `require()`, in either quote style.
+   *
+   * Each of those four shapes is here because a review used it to walk past an
+   * earlier version of this scanner. `export { spawnSync as runQuietly } from
+   * 'node:child_process'` is the one worth naming: it introduces the binding
+   * into another module without the word `import` appearing anywhere.
+   */
   function importsOf(file: string): readonly { text: string; typeOnly: boolean }[] {
     const source = readFileSync(file, 'utf8');
     const statements = [
-      ...source.matchAll(/^import[\s\S]*?from\s*'[^']+';/gm),
-      ...source.matchAll(/\bimport\s*\(\s*'[^']+'\s*\)/g),
-      ...source.matchAll(/\brequire\s*\(\s*'[^']+'\s*\)/g),
+      ...source.matchAll(/^import[\s\S]*?from\s*['"][^'"]+['"];/gm),
+      ...source.matchAll(/^export[\s\S]*?from\s*['"][^'"]+['"];/gm),
+      ...source.matchAll(/\bimport\s*\(\s*['"][^'"]+['"]\s*\)/g),
+      ...source.matchAll(/\brequire\s*\(\s*['"][^'"]+['"]\s*\)/g),
     ].map((match) => match[0]);
 
     return statements.map((text) => ({
@@ -2328,6 +2337,56 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
       expect(source).not.toMatch(/\?\?\s*runVerificationCommand/);
       expect(source).not.toMatch(/Options\s*=\s*\{\}/);
     }
+  });
+
+  it('does not reach a process through the routes that need no import', () => {
+    // ── What these pins are, stated after four rounds of being wrong ──────
+    //
+    // The three above were introduced as proof that *no* code in this module
+    // can start an unfenced subprocess. That claim is false and cannot be
+    // repaired by a better scanner. A review demonstrated it with
+    // `process.binding('spawn_sync').spawn(…)`, which starts real processes,
+    // names no module, and is therefore invisible to any pin that reads
+    // imports — measured working on the Node this repository requires.
+    //
+    // So the honest statement of what this section does:
+    //
+    //   * the *seams* are the enforcement. Every productive spawn goes through
+    //     `leasedAgent` / `leasedVerify`, which prove the lease at the call;
+    //   * a missing seam is a **compile error**, which is enforcement rather
+    //     than detection;
+    //   * these pins are **regression detectors for known bypass routes**. They
+    //     catch a reintroduction nobody meant. They do not, and cannot, bound
+    //     what a determined author can write.
+    //
+    // The residue is real and is named here rather than in a comment claiming
+    // otherwise: `process.binding`, `node:worker_threads`, `node:vm` and
+    // indirect `eval` can each reach a process without an import. This adds them
+    // to the denylist because a denylist of known routes is worth having; it is
+    // not a proof, and the difference is why the sentences that called it
+    // structural were removed.
+    // `\.binding\s*\(` rather than `process\.binding`, because the only spelling
+    // a TypeScript author can actually write needs a cast first —
+    // `(process as unknown as { binding: … }).binding('spawn_sync')` — and the
+    // narrower pattern matched none of it. A denylist that misses the sole
+    // writable form of the route is worse than none: it reads as coverage.
+    //
+    // Every occurrence of the word "binding" in `src/` today is prose about
+    // something else, so this matches the call shape rather than the word.
+    const forbidden = /\.binding\s*\(|\bnode:worker_threads\b|\bnode:vm\b|\bnew Function\s*\(/;
+    const codeOf = (file: string): string =>
+      readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('//'))
+        .join('\n');
+
+    const reaching = sourceFiles()
+      .filter((file) => forbidden.test(codeOf(file)))
+      .map((file) => relative(PACKAGE_ROOT, file))
+      .sort();
+
+    expect(reaching).toEqual([]);
   });
 });
 

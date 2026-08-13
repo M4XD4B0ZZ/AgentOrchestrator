@@ -87,7 +87,6 @@ export interface VerificationRequest {
 }
 
 export interface VerificationOptions {
-  /** The execution seam. Defaults to the real one; tests pass their own. */
   /**
    * The runner this call starts its process with. **Required, deliberately.**
    *

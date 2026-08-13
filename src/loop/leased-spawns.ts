@@ -22,21 +22,36 @@
  *     prose mentions the test counted.
  *
  * The lesson is not that the count was too small. It is that a claim about
- * *every* spawn site cannot be carried by counting names in source text, any
- * more than the Git-layout rule earlier in this slice could be carried by the
- * three layouts somebody had measured. So the property is now structural, and
- * the tests pin the structure rather than the spelling:
+ * *every* spawn site cannot be carried by reading source text, any more than the
+ * Git-layout rule earlier in this slice could be carried by the three layouts
+ * somebody had measured. Three things follow, and they are deliberately not
+ * stated as equals:
  *
- *  - **this module is the only place in `src/` that imports the raw runners.**
- *    `loop-step.ts` no longer can, so route 3 stops compiling as a quiet
- *    addition — it needs a new import, and the pin fails on it;
- *  - **`node:child_process` is reachable from exactly one module**
- *    (`doctor/exec.ts`), so route 2 fails the same way;
- *  - **the spawn helpers no longer default.** Their runner is a required
- *    argument, so route 1 is a compile error rather than a silent fallback.
+ *  - **the seams are the enforcement.** Every productive spawn goes through
+ *    {@link leasedAgent} or {@link leasedVerify}, which prove the lease at the
+ *    call rather than at some caller's door;
+ *  - **a missing seam is a compile error.** `runClaudeWriter`,
+ *    `runCodexReviewer` and `runVerification` no longer default their runner, so
+ *    a forgetful call site does not build. This is enforcement;
+ *  - **the import pins are regression detectors.** This module is the only
+ *    importer of the raw runners, and `node:child_process` has exactly one
+ *    importer; tests hold both. That catches a reintroduction nobody meant.
  *
- * None of those three is a rule somebody has to remember. Each is a thing that
- * stops building, or a pin that goes red, when the shape changes.
+ * ── The residue, which is real ─────────────────────────────────────────────
+ *
+ * The third bullet is **not** a proof, and an earlier version of this header
+ * claimed it was. A review disproved that with `process.binding('spawn_sync')`,
+ * which starts real processes, names no module, and is therefore invisible to
+ * any pin that reads imports — verified working on the Node this package
+ * requires. `node:worker_threads`, `node:vm` and indirect `eval` are the same
+ * shape. They are on a denylist in `tests/v2-07l-execution-lease.test.ts`
+ * because a denylist of known routes is worth having, and a denylist is not a
+ * bound on what a determined author can write.
+ *
+ * What that means in practice: this module makes the *accidental* unfenced spawn
+ * impossible and the deliberate one obvious. Bounding the deliberate one needs
+ * owned process containment — the same mechanism the recovery contract already
+ * waits on — and it is not claimed here.
  *
  * ── What the fence does not claim ──────────────────────────────────────────
  *

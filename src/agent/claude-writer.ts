@@ -110,7 +110,6 @@ export interface ClaudeWriterRequest {
 }
 
 export interface ClaudeWriterOptions {
-  /** The execution seam. Defaults to the real one; tests pass their own. */
   /**
    * The runner this call starts its process with. **Required, deliberately.**
    *

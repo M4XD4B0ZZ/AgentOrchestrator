@@ -3595,7 +3595,7 @@ new place, and each time the fix was to move the proof rather than to widen it:
 | Effect | What the window was | Where the proof is now |
 | --- | --- | --- |
 | branch + worktree creation | 6 Git subprocesses, 383 ms after `startTask`'s gate | immediately before `mkdirSync` / `worktree add` |
-| the writing agent | 9 subprocesses, 585 ms after the driver's gate — it landed a real commit | the agent and verify **seams**, so a spawn site added later inherits it |
+| the writing agent | 9 subprocesses, 585 ms after the driver's gate — it landed a real commit | the agent and verify **seams**, proved at the call; a missing seam is a compile error |
 | durable state writes | a cached boolean from the caller | immediately before the write, which also derives the write target |
 | worktree + branch **removal** | one gate for two commands | one gate per command |
 | the **rollback** of a failed creation | `worktree add` plus six verification probes — a wider window than the creation one | one gate per command, and it removes nothing without them |
