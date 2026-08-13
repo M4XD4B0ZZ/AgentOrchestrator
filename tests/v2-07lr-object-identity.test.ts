@@ -132,6 +132,12 @@ describe('a crash-window artefact is identified by which object it is', () => {
     expect(existsSync(path)).toBe(true);
     // The same object, untouched — not merely a file with the same content.
     expect(statSync(path, { bigint: true }).ino).toBe(successor.ino);
+    // And refused *before* anything moved. A mismatch this already visible must
+    // not cost a detach: the reason line is what separates a gate refusal from
+    // one established on a record that had already been detached and put back,
+    // and without this assertion the gate's own check can be deleted while every
+    // other expectation here stays green.
+    expect(broken.detail).toBeNull();
   });
 
   it('removes the exact object it was authorised for', async () => {
@@ -290,6 +296,17 @@ describe('the removal decides about the object it detached', () => {
 });
 
 describe('an object identity this platform cannot establish is not one', () => {
+  /**
+   * One branch here is not reachable on this host, and saying so is the point.
+   *
+   * `ino === 0n` is what a filesystem without the concept answers, and NTFS
+   * always answers with a file index — so a mutation that treats zero as an
+   * identity survives this suite. It is refused in one line, beside a comment
+   * that says why, and the consequence of the refusal is pinned by the tests
+   * above: a lease with no identity is not offered as recoverable, and an
+   * authorisation without one is declined. What cannot be pinned here is the
+   * platform that produces it.
+   */
   it('answers null rather than inventing one', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ao-object-identity-'));
     try {
