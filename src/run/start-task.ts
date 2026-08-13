@@ -451,6 +451,25 @@ export async function startTask(
       });
     }
 
+    // The other half of that same rule, and it was missing.
+    //
+    // `prepareTaskWorkspace` proves the lease immediately before it creates
+    // anything, and a refusal there is the *entire point* of that gate — the
+    // 383 ms window between this function's own check and `git worktree add`.
+    // It was landing in the generic branch below as `WORKSPACE_REFUSED`, which
+    // exits 3 and asks an operator to go and look at a repository where nothing
+    // is out of place. `EXECUTION_LEASE_NOT_HELD` exits 4: this invocation may
+    // not act here, the next one may well succeed.
+    //
+    // Nothing was created either way, so `residue` stays as reported.
+    if (prepared.code === 'EXECUTION_LEASE_NOT_HELD') {
+      return stop({
+        outcome: 'EXECUTION_LEASE_NOT_HELD',
+        residue: prepared.residue,
+        reasonCodes: Object.freeze([prepared.code]),
+      });
+    }
+
     if (!COLLISION_CODES.has(prepared.code)) {
       return stop({
         outcome: 'WORKSPACE_REFUSED',

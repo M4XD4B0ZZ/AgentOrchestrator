@@ -2224,8 +2224,12 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
   function importsOf(file: string): readonly { text: string; typeOnly: boolean }[] {
     const source = readFileSync(file, 'utf8');
     const statements = [
-      ...source.matchAll(/^import[\s\S]*?from\s*['"][^'"]+['"];/gm),
-      ...source.matchAll(/^export[\s\S]*?from\s*['"][^'"]+['"];/gm),
+      // The trailing `;` is optional. It was required, and a review put a
+      // semicolon-less `import { spawnSync } from 'node:child_process'` last in
+      // the file: every pin stayed green while twelve real unfenced processes
+      // ran. ASI makes that valid TypeScript, so the scanner has to accept it.
+      ...source.matchAll(/^import[\s\S]*?from\s*['"][^'"]+['"];?/gm),
+      ...source.matchAll(/^export[\s\S]*?from\s*['"][^'"]+['"];?/gm),
       ...source.matchAll(/\bimport\s*\(\s*['"][^'"]+['"]\s*\)/g),
       ...source.matchAll(/\brequire\s*\(\s*['"][^'"]+['"]\s*\)/g),
     ].map((match) => match[0]);
@@ -2451,5 +2455,92 @@ describe('a rollback stopped by a lost lease is reported as a lost lease', () =>
     expect(exitCodeForStartOutcome(started.outcome)).toBe(3);
     // And they really are on disk: a successor may legitimately own them.
     expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).not.toBe('');
+  });
+});
+
+/* ─────────── 27. an inner gate's refusal keeps its own name ────────────── */
+
+describe('a refusal from an effect gate is reported as a refusal, not as a failure', () => {
+  it('reports a start refused at the creation gate as not held, at exit 4', async () => {
+    // `prepareTaskWorkspace` proves the lease immediately before it creates
+    // anything, which is the whole reason that gate exists - the 383 ms window
+    // between `startTask`'s own check and `git worktree add`. Its refusal was
+    // landing in the generic branch as `WORKSPACE_REFUSED`.
+    //
+    // Nothing is created either way, so this is purely about what an operator is
+    // told: exit 3 says a human must go and look at the repository, exit 4 says
+    // this invocation may not act here and the next one may well succeed. The
+    // repository is in perfect order, so exit 3 sends someone to inspect
+    // nothing.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        git: async (cwd, args) => {
+          // Gone inside the preparation, after its questions and before its
+          // first effect - the window the gate was added for.
+          if (args[0] === 'status') releaseRepositoryExecutionLease(evidence);
+          return runGitCommand(cwd, args);
+        },
+      },
+    );
+
+    expect(started.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(started.outcome).not.toBe('WORKSPACE_REFUSED');
+    expect(started.reasonCodes).toContain('EXECUTION_LEASE_NOT_HELD');
+    expect(exitCodeForStartOutcome(started.outcome)).toBe(4);
+    // Nothing was created, which is what makes exit 3 the wrong answer.
+    expect(started.residue).toBe(false);
+    expect(git(fixture.root, ['branch', '--list', `ao/task/${TASK_ID}`]).trim()).toBe('');
+  });
+
+  it('does not tell an operator Git refused a removal Git was never asked for', async () => {
+    // The same shape on the release path, and worse: `REMOVE_FAILED` declares
+    // itself as "every ownership proof held and Git still refused to remove the
+    // worktree". When `removeTaskWorkspace` refuses at its own lease gate, no
+    // Git removal is attempted at all, so that sentence is not merely
+    // imprecise - it is false about what happened.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const crashed = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        replace: () => {
+          throw new Error('simulated crash before the first durable write landed');
+        },
+      },
+    );
+    expect(crashed.outcome).toBe('STATE_NOT_RECORDED');
+
+    const destructive: string[] = [];
+    const released = await releaseTaskWorkspace(fixture.repository, TASK_ID, {
+      git: async (cwd, args) => {
+        if (args[0] === 'worktree' && args[1] === 'remove') destructive.push('worktree remove');
+        if (args[0] === 'branch' && args[1] === '-d') destructive.push('branch -d');
+        const result = await runGitCommand(cwd, args);
+        // Held at the door, gone inside `removeTaskWorkspace` - after
+        // `releaseTaskWorkspace`'s own gate, before the removal's.
+        if (args[0] === 'merge-base') releaseRepositoryExecutionLease(evidence);
+        return result;
+      },
+      lease: evidence,
+    });
+
+    expect(released.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(released.outcome).not.toBe('REMOVE_FAILED');
+    expect(exitCodeForReleaseOutcome(released.outcome)).toBe(4);
+    // Git really was never asked, which is the part the old sentence got wrong.
+    expect(destructive).toEqual([]);
+    expect(released.worktreeRemoved).toBe(false);
+    expect(released.branchRemoved).toBe(false);
   });
 });

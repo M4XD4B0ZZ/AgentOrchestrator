@@ -102,9 +102,11 @@
  * running — wait" rather than "a run died here — clear it", which are two
  * different places to go. It is never authority: pids are reused, so `ALIVE` can
  * be a stranger. That is safe in exactly one direction, and the direction is
- * enforced here — liveness can only ever *add* a refusal (acquire refuses
- * whatever it says; break refuses on `ALIVE` and on `UNDETERMINED`). No code
- * path anywhere permits an effect because a probe said a process is gone.
+ * enforced here — liveness can only ever *add* a refusal: acquire refuses
+ * whatever it says. (The withdrawn attended break refused on `ALIVE` and on
+ * `UNDETERMINED` for the same reason, and is described in the past tense
+ * because it no longer exists.) No code path anywhere permits an effect
+ * because a probe said a process is gone.
  */
 
 import { createHash, randomBytes } from 'node:crypto';

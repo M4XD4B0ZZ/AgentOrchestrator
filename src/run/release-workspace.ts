@@ -270,6 +270,30 @@ export async function releaseTaskWorkspace(
     git: deps.git,
     lease: deps.lease,
   });
+  // Refused at the removal's own gate, which is not a failure to remove.
+  //
+  // This fell into `REMOVE_FAILED` below, whose declared meaning is "every
+  // ownership proof held and Git still refused to remove the worktree" — and
+  // Git was never asked. The sentence an operator reads was therefore
+  // affirmatively false, and it exits 3, sending someone to inspect a
+  // repository that is in perfect order. `EXECUTION_LEASE_NOT_HELD` already
+  // exists in this outcome vocabulary and already maps to 4; only the branch
+  // was missing.
+  //
+  // Kept apart from `WORKSPACE_REMOVAL_LOST_LEASE` below: that one lost the
+  // lease *partway through* and left a half-removed workspace. This one touched
+  // nothing.
+  if (!removal.ok && removal.code === 'EXECUTION_LEASE_NOT_HELD') {
+    return result({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      taskId,
+      verdict: assessment.verdict,
+      worktreeRemoved: removal.worktreeRemoved,
+      branchRemoved: removal.branchRemoved,
+      reasonCodes: Object.freeze([removal.code]),
+    });
+  }
+
   if (!removal.ok) {
     return result({
       outcome: 'REMOVE_FAILED',

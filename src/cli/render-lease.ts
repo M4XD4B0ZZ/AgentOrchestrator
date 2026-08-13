@@ -76,7 +76,9 @@ export const LEASE_STATE_SENTENCES: Readonly<Record<LeaseInspection['state'], st
  */
 export const LEASE_LIVENESS_SENTENCES: Readonly<Record<LeaseInspection['liveness'], string>> =
   Object.freeze({
-    ALIVE: 'the owner process exists. This lease is not stale.',
+    ALIVE:
+      'a process with that id exists. That is not proof it is the owner - process ids are\n' +
+      '  reused - so it is a reason to wait, never a reason to act. Treat this lease as held.',
     NOT_FOUND:
       'no process with that id exists. That is not proof that nothing of that run survives\n' +
       '  - process ids are reused, and an agent process can outlive the orchestrator that\n' +
