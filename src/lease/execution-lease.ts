@@ -1054,6 +1054,16 @@ export type VerifiedRemoval =
    * `DETACH_FAILED` split had already been made for once.
    */
   | 'CHANGED_QUARANTINED'
+  /**
+   * Something else was there, it could not be put back, and **nothing holds the
+   * lease name now**: the repository is unowned and the record is in quarantine.
+   *
+   * Kept apart from `CHANGED_QUARANTINED` because the two ask opposite things of
+   * an operator — wait for the successor, or notice that this repository has no
+   * owner and re-inspect before anything runs. A review found both being
+   * reported as the second, from a call that had never looked at the name.
+   */
+  | 'CHANGED_AND_UNOWNED'
   /** Nothing was at the name. */
   | 'ABSENT'
   /** The name could not be detached at all. Nothing was touched. */
@@ -1061,7 +1071,9 @@ export type VerifiedRemoval =
   /** Detached, then unreadable, and **put back**. */
   | 'UNIDENTIFIABLE'
   /** Detached, then unreadable, and kept in quarantine: it could not be put back. */
-  | 'UNIDENTIFIABLE_QUARANTINED';
+  | 'UNIDENTIFIABLE_QUARANTINED'
+  /** Detached, unreadable, kept — and the lease name is free. Unowned. */
+  | 'UNIDENTIFIABLE_AND_UNOWNED';
 
 /**
  * Removes exactly the bytes `matches` accepts, or nothing at all.
@@ -1205,9 +1217,15 @@ export function removeVerifiedLease(
   }
 
   // Not ours to remove — put it back.
-  if (putBack(quarantine, leasePath, bytes)) {
+  const restoration = putBack(quarantine, leasePath, bytes);
+  if (restoration === 'RESTORED') {
     discard(quarantine);
     return bytes === null ? 'UNIDENTIFIABLE' : 'CHANGED';
+  }
+  if (restoration === 'NAME_FREE') {
+    // Kept, like every other refusal — and the repository is unowned, which is a
+    // different thing to tell somebody than "a successor holds it now".
+    return bytes === null ? 'UNIDENTIFIABLE_AND_UNOWNED' : 'CHANGED_AND_UNOWNED';
   }
   // It could not be put back, so it is **kept** where it is: deleting it would
   // destroy a record this call has just decided it may not remove, and a stray
@@ -1253,18 +1271,59 @@ export function removeVerifiedLease(
  * Returns whether the record is back at the lease name. `false` means it is
  * still in quarantine, which is a state the caller must report as itself.
  */
-function putBack(quarantine: string, leasePath: string, bytes: Buffer | null): boolean {
+type Restoration =
+  /** The record is back at the lease name. */
+  | 'RESTORED'
+  /** It could not go back because somebody else holds the name. Theirs stands. */
+  | 'NAME_TAKEN'
+  /**
+   * It could not go back and **nothing holds the name**: this repository is now
+   * unowned, and the record is in the quarantine file.
+   *
+   * Its own answer because it is the one an operator has to act on, and because
+   * reporting it as `NAME_TAKEN` is a statement about the world that this call
+   * never checked. An adversarial review reproduced that with no injection at
+   * all — a directory at the lease path detaches, cannot be read, and takes the
+   * `bytes === null` exit below, which attempts no restore — and the operator was
+   * told the name "had been taken in that instant" while the repository sat
+   * unowned and the next acquire succeeded.
+   */
+  | 'NAME_FREE';
+
+function putBack(quarantine: string, leasePath: string, bytes: Buffer | null): Restoration {
   try {
     linkSync(quarantine, leasePath);
-    return true;
+    return 'RESTORED';
   } catch (error) {
-    // Somebody holds the name. That acquisition is a real authority and stands.
-    if (safeErrnoCode(error) === 'EEXIST') return false;
+    // Somebody holds the name. That acquisition is a real authority and stands,
+    // and this is the one errno that *proves* occupancy rather than implying it.
+    if (safeErrnoCode(error) === 'EEXIST') return 'NAME_TAKEN';
     // The filesystem will not link. Without the detached bytes there is nothing
     // to write back — a record this call could not even read is one it cannot
-    // reconstruct — so it stays in quarantine.
-    if (bytes === null) return false;
-    return writeRecord(leasePath, bytes) === null;
+    // reconstruct — so it stays in quarantine, and what is at the name decides
+    // what this call is entitled to say about it.
+    if (bytes === null) return occupancyOf(leasePath);
+    if (writeRecord(leasePath, bytes) === null) return 'RESTORED';
+    return occupancyOf(leasePath);
+  }
+}
+
+/**
+ * Whether anything holds `leasePath`, asked rather than assumed.
+ *
+ * The whole point of the member above: after a failed restore this call knows it
+ * did not put the record back, and knows nothing else. `EEXIST` is proof of
+ * occupancy; every other failure is proof of nothing, and the difference decides
+ * whether an operator is told the repository is unowned or that a successor
+ * holds it. A stat that itself fails answers `NAME_TAKEN`, because the one thing
+ * this must never do is announce a free repository it has not established.
+ */
+function occupancyOf(leasePath: string): Restoration {
+  try {
+    statSync(leasePath);
+    return 'NAME_TAKEN';
+  } catch (error) {
+    return safeErrnoCode(error) === 'ENOENT' ? 'NAME_FREE' : 'NAME_TAKEN';
   }
 }
 
@@ -1549,6 +1608,15 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   }
   if (removed === 'UNIDENTIFIABLE_QUARANTINED') {
     return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: 'RECORD_QUARANTINED' });
+  }
+  if (removed === 'CHANGED_AND_UNOWNED') {
+    return Object.freeze({ code: 'NOT_OWNER' as const, detail: 'RECORD_QUARANTINED_LEASE_UNOWNED' });
+  }
+  if (removed === 'UNIDENTIFIABLE_AND_UNOWNED') {
+    return Object.freeze({
+      code: 'LEASE_REMOVE_FAILED' as const,
+      detail: 'RECORD_QUARANTINED_LEASE_UNOWNED',
+    });
   }
   if (removed === 'UNIDENTIFIABLE') {
     // A detail rather than `null`: an operator hitting this has a file they

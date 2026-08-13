@@ -37,7 +37,21 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, linkSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  ftruncateSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
@@ -101,6 +115,17 @@ function leasePathOf(fixture: Fixture): string {
 
 function digestOf(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+/** Removes probe leftovers. A file or a directory: both are this test's own. */
+function cleanUpPaths(paths: readonly string[]): void {
+  for (const path of paths) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {
+      /* the fixture removal takes whatever is left */
+    }
+  }
 }
 
 function quarantineFilesBeside(leasePath: string): string[] {
@@ -418,5 +443,182 @@ describe('a record this call may not remove survives, and is reported as it is',
     expect(digestOf(Buffer.from(''))).toBe(
       'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
     );
+  });
+});
+
+/* ───── R5. what the second independent review found, and how it is pinned ──── */
+
+describe('a refusal says what it established, and only what it established', () => {
+  /**
+   * The second review's blocking finding, reproduced the way it reproduced it:
+   * with no injection at all.
+   *
+   * `putBack` proved "somebody holds the lease name" from one errno, `EEXIST`.
+   * Every other restore failure — including the `bytes === null` exit, which
+   * attempts no restore whatsoever — returned the same two codes, and nothing
+   * between the failed restore and the returned code ever looked at the name. So
+   * the answers meaning "a successor took it" were also returned when the
+   * repository had been left with **no owner at all**, and the operator was told
+   * the name "had been taken in that instant".
+   *
+   * A directory at the lease path is enough to reach it: `rename` detaches it,
+   * the read fails, and the restore is skipped entirely.
+   */
+  it('reports an unowned repository as unowned, not as a successor holding it', async () => {
+    const fixture = await leasableRepository();
+    const path = leasePathOf(fixture);
+    mkdirSync(path, { recursive: true });
+
+    const removal = removeVerifiedLease(path, () => false);
+
+    // Kept, never deleted — a sibling lens measured that discarding it hands a
+    // second writer over a live repository, so the on-disk choice was right and
+    // only the reporting was wrong.
+    expect(removal).toBe('UNIDENTIFIABLE_AND_UNOWNED');
+    const quarantined = quarantineFilesBeside(path);
+    expect(quarantined.length).toBe(1);
+    // And the fact the previous version asserted without ever checking it.
+    expect(existsSync(path)).toBe(false);
+    cleanUpPaths(quarantined.map((name) => join(dirname(path), name)));
+  });
+});
+
+describe('every guard on the removal path costs a mutant its life', () => {
+  /**
+   * The second review's supporting finding: three destructive-path guards were
+   * written twice and pinned zero times. Each mutant survived all 139 tests of
+   * the four lease suites, the 2725-test foundation run and the real-process
+   * harness — because the fallback's failure branch is entered by nothing, and
+   * because the object identity answers first for every case the older
+   * counter-proofs construct.
+   */
+  it('keeps a record when the restore is refused by an occupied name', async () => {
+    // Kills `writeRecord(...) === null` -> `writeRecord(...); return true`. With
+    // the mutant the fallback claims success, the quarantine is discarded, and a
+    // record the call had just decided it may not remove is deleted.
+    //
+    // No injection: the link is refused by saturating NTFS's 1024-name limit,
+    // and the freed name is then occupied by a directory, which
+    // `openSync(…, 'wx')` refuses exactly as an occupied name should.
+    const fixture = await leasableRepository();
+    const path = leasePathOf(fixture);
+    writeFileSync(path, 'a record that is not ours to remove\n');
+    const kept = readFileSync(path);
+    const extras: string[] = [];
+    for (let index = 0; index < 1023; index += 1) {
+      const name = `${path}.link-${String(index)}`;
+      try {
+        linkSync(path, name);
+      } catch {
+        break;
+      }
+      extras.push(name);
+    }
+
+    try {
+      const removal = removeVerifiedLease(path, () => {
+        mkdirSync(path, { recursive: true });
+        return false;
+      });
+
+      expect(removal).toBe('CHANGED_QUARANTINED');
+      const quarantined = quarantineFilesBeside(path);
+      expect(quarantined.length).toBe(1);
+      expect(readFileSync(join(dirname(path), quarantined[0] ?? ''))).toEqual(kept);
+      cleanUpPaths(quarantined.map((name) => join(dirname(path), name)));
+    } finally {
+      cleanUpPaths(extras);
+      cleanUpPaths([path]);
+    }
+  });
+
+  it('refuses a record rewritten in place, where the object is no evidence at all', async () => {
+    // Kills the effect-bound revision check. A record rewritten through an open
+    // handle keeps its inode, so the object identity matches and only the digest
+    // can refuse. With the check gone the mutant deletes it and reports
+    // LEASE_REMOVED — "still the same record, byte for byte".
+    const fixture = await leasableRepository();
+    const path = leasePathOf(fixture);
+    acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-crashed', blockId: null },
+      { now: tickingClock() },
+    );
+    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
+      processAlive: () => 'NOT_FOUND',
+    });
+    const before = statSync(path, { bigint: true });
+
+    let rewritten = false;
+    const broken = breakInspectedLease(
+      fixture.repository,
+      {
+        expectedRevision: inspected.revision ?? '',
+        expectedObjectId: inspected.objectId ?? '',
+        expectedOwnerPid: inspected.ownerPid,
+      },
+      {
+        processAlive: () => {
+          if (!rewritten) {
+            const handle = openSync(path, 'r+');
+            const replacement = Buffer.from('{"schemaVersion":1}\n', 'utf8');
+            writeSync(handle, replacement, 0, replacement.length, 0);
+            ftruncateSync(handle, replacement.length);
+            closeSync(handle);
+            rewritten = true;
+          }
+          return 'NOT_FOUND';
+        },
+      },
+    );
+
+    expect(rewritten).toBe(true);
+    // The same object, different bytes: the identity holds and the digest refuses.
+    expect(statSync(path, { bigint: true }).ino).toBe(before.ino);
+    expect(broken.outcome).toBe('LEASE_CHANGED_SINCE_INSPECTION');
+    expect(broken.detail).toBe('RECORD_RESTORED');
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it('touches nothing when the gate can already see the authorisation is wrong', async () => {
+    // Kills the gate's own pid and revision arms. Without them the refusal is
+    // still a refusal — and it becomes a real detach and restore of a live
+    // record, whose documented residual is a displaced writer. The reason line
+    // is what separates the two, so it is what this asserts.
+    const fixture = await leasableRepository();
+    const path = leasePathOf(fixture);
+    acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-crashed', blockId: null },
+      { now: tickingClock() },
+    );
+    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
+      processAlive: () => 'NOT_FOUND',
+    });
+
+    const wrongRevision = breakInspectedLease(
+      fixture.repository,
+      {
+        expectedRevision: 'f'.repeat(64),
+        expectedObjectId: inspected.objectId ?? '',
+        expectedOwnerPid: inspected.ownerPid,
+      },
+      { processAlive: () => 'NOT_FOUND' },
+    );
+    expect(wrongRevision.outcome).toBe('LEASE_CHANGED_SINCE_INSPECTION');
+    expect(wrongRevision.detail).toBeNull();
+
+    const wrongOwner = breakInspectedLease(
+      fixture.repository,
+      {
+        expectedRevision: inspected.revision ?? '',
+        expectedObjectId: inspected.objectId ?? '',
+        expectedOwnerPid: (inspected.ownerPid ?? 1) + 1,
+      },
+      { processAlive: () => 'NOT_FOUND' },
+    );
+    expect(wrongOwner.outcome).toBe('LEASE_NOT_BREAKABLE');
+    expect(wrongOwner.detail).toBe('OWNER_PID_MISMATCH');
+    expect(quarantineFilesBeside(path)).toEqual([]);
   });
 });

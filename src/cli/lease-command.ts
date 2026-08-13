@@ -107,7 +107,9 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
     '  had been detached before that could be established, and was put back exactly where it\n' +
     '  was. RECORD_QUARANTINED: it could not be put back, because the name had been taken in\n' +
     '  that instant - it is kept beside the lease path under a name ending in .breaking-, its\n' +
-    '  run has lost authority and will stop at its next checkpoint, and nothing was deleted.',
+    '  run has lost authority and will stop at its next checkpoint, and nothing was deleted.\n' +
+    '  RECORD_QUARANTINED_LEASE_UNOWNED: the same, except that nothing holds the lease now -\n' +
+    '  this repository is unowned, and the next invocation to reach for it will get it.',
   // "Nothing was removed" is the whole promise here, and it is stated without
   // the "and nothing was touched" it used to carry. Most of these refusals are
   // reached before anything is detached; two of them - a running owner, or an
@@ -119,8 +121,11 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
     '  liveness could not be established, the authorisation describes a different lease, or the\n' +
     '  filesystem refused to detach the record. The reason code says which, and nothing was\n' +
     '  removed. Where the refusal could only be established after the record had been detached,\n' +
-    '  it was put back - or, if the freed name had been taken in that instant, kept beside the\n' +
-    '  lease path under a name ending in .breaking- rather than deleted.',
+    '  it was put back - or, if that could not be done, kept beside the lease path under a name\n' +
+    '  ending in .breaking- rather than deleted. A reason of RECORD_QUARANTINED_LEASE_UNOWNED\n' +
+    '  means that happened AND nothing holds the lease now: this repository is unowned, the\n' +
+    '  record is in the .breaking- file, and the next invocation to reach for it will get it.\n' +
+    '  Re-inspect before anything else runs here.',
   // The sentence used to promise a quarantine file unconditionally. It is only
   // there on one of the two paths that reach this outcome, and on the other the
   // same call had already put the record back and deleted the quarantine — so an
@@ -130,7 +135,9 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
     'A record was detached from the lease path and could not be read back, so it was neither\n' +
     '  removed nor claimed to have been. UNREADABLE_AND_RESTORED means it was put back where it\n' +
     '  was and there is nothing to inspect: the repository is as you found it, and something\n' +
-    '  other than this build is stopping the record being read. UNREADABLE_AND_QUARANTINED\n' +
+    '  other than this build is stopping the record being read. UNREADABLE_LEASE_UNOWNED means\n' +
+    '  it could not be put back and nothing holds the lease now: the repository is unowned, and\n' +
+    '  the record is in the .breaking- file. UNREADABLE_AND_QUARANTINED\n' +
     '  means it could not be put back and is kept beside the lease path under a name ending in\n' +
     '  .breaking-, inert and inspectable. Look at it before deleting anything by hand.',
 });

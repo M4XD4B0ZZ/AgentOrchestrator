@@ -68,6 +68,7 @@ import {
   removeVerifiedLease,
   revisionOfLeaseBytes,
   snapshotRepositoryRecord,
+  type VerifiedRemoval,
   type LeaseInspection,
   type LeaseRepository,
   type ProcessLivenessProbe,
@@ -229,6 +230,11 @@ export interface LeaseBreakAuthorisation {
    * that records none is refused rather than ignored.
    */
   readonly expectedOwnerPid: number | null;
+}
+
+/** Whether a removal left the lease name free while keeping what it detached. */
+function leftUnowned(removal: VerifiedRemoval): boolean {
+  return removal === 'CHANGED_AND_UNOWNED' || removal === 'UNIDENTIFIABLE_AND_UNOWNED';
 }
 
 /** `<dev>:<ino>`, exactly as {@link leaseObjectIdentity} spells it. */
@@ -397,6 +403,17 @@ export function breakInspectedLease(
     return true;
   });
 
+  // The refusal, and the one fact that outranks it.
+  //
+  // `refusedBy` says why this call declined to remove the record. If the restore
+  // then failed and left the lease name free, the repository is unowned — and an
+  // operator who is told only "its owner is running" will wait for a run that no
+  // longer holds anything. A review found this short-circuit discarding exactly
+  // that, so the reason line now carries whichever fact the operator must act on
+  // first, and the unowned one always wins.
+  if (leftUnowned(removal)) {
+    return breakResult('LEASE_NOT_BREAKABLE', 'RECORD_QUARANTINED_LEASE_UNOWNED');
+  }
   if (refusedBy !== null) return breakResult('LEASE_NOT_BREAKABLE', refusedBy);
 
   switch (removal) {
@@ -411,6 +428,14 @@ export function breakInspectedLease(
       // and only the second one moved a file. The gate's refusal above carries
       // no detail for exactly that reason.
       return breakResult('LEASE_CHANGED_SINCE_INSPECTION', 'RECORD_RESTORED');
+    case 'CHANGED_AND_UNOWNED':
+      // The record is kept and this repository has no owner. Reported as its own
+      // reason because "somebody else holds it now" and "nobody holds it now"
+      // send an operator to opposite actions, and the previous code answered the
+      // first for both without ever looking at the name.
+      return breakResult('LEASE_CHANGED_SINCE_INSPECTION', 'RECORD_QUARANTINED_LEASE_UNOWNED');
+    case 'UNIDENTIFIABLE_AND_UNOWNED':
+      return breakResult('LEASE_BREAK_VERIFICATION_FAILED', 'UNREADABLE_LEASE_UNOWNED');
     case 'CHANGED_QUARANTINED':
       // The same refusal, and a materially different repository afterwards: the
       // record that was there is now in a quarantine file, its writer displaced,
