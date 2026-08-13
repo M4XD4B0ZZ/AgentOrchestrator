@@ -64,6 +64,8 @@ import {
   renderLeaseRefusal,
   renderLeaseStatus,
 } from '../src/cli/render-lease.js';
+import { RELEASE_OUTCOME_SENTENCES } from '../src/cli/release-command.js';
+import { START_OUTCOME_SENTENCES } from '../src/cli/render-attended-run.js';
 import { PACKAGE_ROOT } from '../src/config/paths.js';
 import {
   isExecutionLeaseEvidence,
@@ -2355,8 +2357,12 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     //
     // So the honest statement of what this section does:
     //
-    //   * the *seams* are the enforcement. Every productive spawn goes through
-    //     `leasedAgent` / `leasedVerify`, which prove the lease at the call;
+    //   * the *seams* are the enforcement for the agent and verification
+    //     subprocesses: every one goes through `leasedAgent` / `leasedVerify`,
+    //     which prove the lease at the call. Not "every productive spawn" — the
+    //     Git mutations are fenced immediately before their effect instead, by a
+    //     different mechanism, and blurring the two sends a reader to the wrong
+    //     gate;
     //   * a missing seam is a **compile error**, which is enforcement rather
     //     than detection;
     //   * these pins are **regression detectors for known bypass routes**. They
@@ -2542,5 +2548,143 @@ describe('a refusal from an effect gate is reported as a refusal, not as a failu
     expect(destructive).toEqual([]);
     expect(released.worktreeRemoved).toBe(false);
     expect(released.branchRemoved).toBe(false);
+  });
+});
+
+/* ─────────── 28. an outer gate earns its keep by the work it avoids ────── */
+
+describe('a gate whose refusal the inner gate would repeat is still doing something', () => {
+  it('does not prepare a workspace after the lease goes during the preflight', async () => {
+    // ── Why this counts subprocesses instead of asserting an outcome ──────
+    //
+    // `startTask` proves the lease at its entrance, again before the workspace,
+    // and `prepareTaskWorkspace` proves it once more at the effect. Once the
+    // middle gate was corrected to report `EXECUTION_LEASE_NOT_HELD` at exit 4 -
+    // the same outcome and exit code the inner gate produces - deleting it
+    // stopped changing any assertion, and the whole suite went green without it.
+    // A review noticed and was right to: the outcome no longer distinguishes
+    // them.
+    //
+    // What still distinguishes them is what runs. The middle gate exists so that
+    // a run which lost the lease during the preflight does not go on to spend
+    // eight Git subprocesses discovering it cannot create anything. That is
+    // measurable, so it is measured.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+
+    let gitAfterPreflight = 0;
+    let preflightDone = false;
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        now: tickingClock(),
+        lease: evidence,
+        authPreflight: async () => {
+          // The window the middle gate is for: held at the entrance, gone by the
+          // time the preflight returns.
+          releaseRepositoryExecutionLease(evidence);
+          preflightDone = true;
+          return authPreflightPasses();
+        },
+        git: async (cwd, args) => {
+          if (preflightDone) gitAfterPreflight += 1;
+          return runGitCommand(cwd, args);
+        },
+      },
+    );
+
+    expect(started.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(exitCodeForStartOutcome(started.outcome)).toBe(4);
+    // The point of the gate: nothing was attempted after the loss.
+    expect(gitAfterPreflight).toBe(0);
+    expect(started.residue).toBe(false);
+  });
+
+  it('does not assess a workspace for adoption after the lease goes', async () => {
+    // The same argument on the release path. `releaseTaskWorkspace` proves the
+    // lease before it inspects anything, and `removeTaskWorkspace` proves it
+    // again at the destructive boundary. With both producing
+    // `EXECUTION_LEASE_NOT_HELD` at exit 4, the earlier gate became invisible to
+    // every assertion - but it is what stops an unauthorised invocation from
+    // running a whole adoption assessment against somebody else's repository.
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const crashed = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: evidence,
+        replace: () => {
+          throw new Error('simulated crash before the first durable write landed');
+        },
+      },
+    );
+    expect(crashed.outcome).toBe('STATE_NOT_RECORDED');
+
+    // Gone before the release is even called.
+    releaseRepositoryExecutionLease(evidence);
+
+    let gitCommands = 0;
+    const released = await releaseTaskWorkspace(fixture.repository, TASK_ID, {
+      git: async (cwd, args) => {
+        gitCommands += 1;
+        return runGitCommand(cwd, args);
+      },
+      lease: evidence,
+    });
+
+    expect(released.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    expect(exitCodeForReleaseOutcome(released.outcome)).toBe(4);
+    // Nothing was inspected, which is what the entry gate is for.
+    expect(gitCommands).toBe(0);
+    expect(released.verdict).toBe(null);
+  });
+});
+
+/* ─────────── 29. an outcome sentence is true of every producer ─────────── */
+
+describe('the operator text says what happened, for each way of arriving at it', () => {
+  it('does not claim Git refused a removal it was never asked to attempt', async () => {
+    // `REMOVE_FAILED` is reached by seven codes and said "every ownership proof
+    // held and Git still refused to remove the worktree" - true of exactly one
+    // of them. A review reproduced `WORKTREE_DIRTY`, where *both* clauses are
+    // false: a proof did not hold, and no removal was attempted.
+    const sentence = RELEASE_OUTCOME_SENTENCES.REMOVE_FAILED;
+
+    expect(sentence).not.toContain('Every ownership proof held');
+    expect(sentence).not.toMatch(/Git still refused/);
+    // It points at the reason code, which is the thing that actually varies.
+    expect(sentence).toContain('the reason code says what stopped it');
+  });
+
+  it('does not tell a start that read a plan and ran a preflight that nothing was opened', () => {
+    // `EXECUTION_LEASE_NOT_HELD` now has two producers: the entry gate, which
+    // really has opened nothing, and the gate before the workspace, by which
+    // point the plan is read, durable state is loaded, an auth preflight has run
+    // - two real subscription CLIs in production - and eight Git subprocesses
+    // have gone by. "Nothing was opened" was true of the first and false of the
+    // second.
+    const sentence = START_OUTCOME_SENTENCES.EXECUTION_LEASE_NOT_HELD;
+
+    expect(sentence).not.toContain('Nothing was opened');
+    // What is true of both producers: nothing was created and nothing written.
+    expect(sentence).toContain('Nothing was created and nothing was\n  written');
+  });
+
+  it('does not invite an operator to stop a process it cannot identify', () => {
+    // The `ALIVE` liveness sentence was corrected to say a matching pid is not
+    // proof of ownership. The acquisition refusal beside it still said the owner
+    // "is running" and offered "wait for it, or stop it" - advice to act on
+    // exactly the identification the other sentence had just disclaimed. Pid
+    // reuse makes them contradictory, and `osProcessLiveness` maps `EPERM` to
+    // `ALIVE`, which is explicitly somebody else's process.
+    const refusal = LEASE_ACQUIRE_SENTENCES.LEASE_HELD;
+
+    expect(refusal).not.toMatch(/stop it\./);
+    expect(refusal).toContain('process ids are reused');
+    // And it still tells the operator the useful thing.
+    expect(refusal).toContain('Wait for it.');
   });
 });

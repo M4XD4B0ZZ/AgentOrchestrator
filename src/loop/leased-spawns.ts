@@ -27,9 +27,15 @@
  * somebody had measured. Three things follow, and they are deliberately not
  * stated as equals:
  *
- *  - **the seams are the enforcement.** Every productive spawn goes through
- *    {@link leasedAgent} or {@link leasedVerify}, which prove the lease at the
- *    call rather than at some caller's door;
+ *  - **the seams are the enforcement.** Every agent and verification subprocess
+ *    goes through {@link leasedAgent} or {@link leasedVerify}, which prove the
+ *    lease at the call rather than at some caller's door. That is narrower than
+ *    "every productive spawn", which is what this said: `git worktree add`,
+ *    `git worktree remove` and `git branch -d` are productive spawns and go
+ *    through neither. They are fenced by `verifyExecutionLeaseHeldFor`
+ *    immediately before the effect — the same property, a different mechanism,
+ *    and worth not blurring, because a reader who believes the seams cover the
+ *    Git mutations will look for the wrong gate;
  *  - **a missing seam is a compile error.** `runClaudeWriter`,
  *    `runCodexReviewer` and `runVerification` no longer default their runner, so
  *    a forgetful call site does not build. This is enforcement;

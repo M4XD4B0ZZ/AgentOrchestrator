@@ -77,9 +77,11 @@ export const START_OUTCOME_SENTENCES: Readonly<Record<StartTaskOutcome, string>>
     '  still there and nothing records it: see Residue below.',
   EXECUTION_LEASE_NOT_HELD:
     'This invocation does not hold this repository\'s execution lease, so it may not create\n' +
-    '  a branch, a worktree or a durable record here. Nothing was opened. The reason code\n' +
-    '  says which: another invocation holds it, this one never did, or it has since gone.\n' +
-    '  `agent-loop lease status` reports what is actually there.',
+    '  a branch, a worktree or a durable record here. Nothing was created and nothing was\n' +
+    '  written. It may have read the plan and run the authentication preflight first: this\n' +
+    '  is refused at the entrance and again immediately before anything would be created,\n' +
+    '  and the second refusal is the one that matters, because the lease can go while the\n' +
+    '  preflight runs. `agent-loop lease status` reports what is actually there.',
 });
 
 /** The one label/value shape every report line uses. Shared with the command. */

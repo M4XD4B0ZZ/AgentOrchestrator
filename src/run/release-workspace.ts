@@ -77,7 +77,16 @@ export const RELEASE_OUTCOMES = [
   'HOLDS_IGNORED_CONTENT',
   /** Git could not be asked whether the workspace holds ignored content. */
   'IGNORED_CONTENT_UNDETERMINED',
-  /** Every proof held and Git still refused to remove the worktree. */
+  /**
+   * The workspace was not removed. The reason code says what stopped it.
+   *
+   * This said "every proof held and Git still refused", which is true of exactly
+   * one of its producers. `WORKTREE_DIRTY` reaches it with an ownership proof
+   * that did *not* hold and with Git never asked to remove anything;
+   * `GIT_UNAVAILABLE` reaches it without a removal being attempted either. An
+   * outcome that narrates one of its causes as though it were all of them sends
+   * an operator looking for the wrong thing.
+   */
   'REMOVE_FAILED',
   /**
    * This invocation does not hold the repository's execution lease.

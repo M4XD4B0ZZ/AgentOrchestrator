@@ -33,8 +33,10 @@ import { line } from './render-attended-run.js';
 export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, string>> =
   Object.freeze({
     LEASE_HELD:
-      'Another orchestrator invocation holds the execution lease for this repository, and\n' +
-      '  its owner process is running. Nothing was started. Wait for it, or stop it.',
+      'Another orchestrator invocation holds the execution lease for this repository, and a\n' +
+      '  process with the recorded id exists. Nothing was started. Wait for it. Do not stop\n' +
+      '  that process on the strength of this: process ids are reused, so the one running\n' +
+      '  now need not be the owner, and this build cannot tell you which it is.',
     STALE_LEASE_RECOVERY_UNSAFE:
       'A lease is present and this build cannot prove it is safe to take: its owner process\n' +
       '  is not observably running, or the record cannot be read. It is deliberately not\n' +
