@@ -25,11 +25,20 @@ jobs:
     name: verify (windows, node 22)
     runs-on: windows-latest
     # `verify` starts real processes, including a detached helper that survives
-    # on purpose, so a defect here can hang rather than fail. The whole gate
-    # takes about 30 seconds locally; this bound is not a performance budget,
-    # only a ceiling that stops a hung probe from holding a runner open
-    # indefinitely.
-    timeout-minutes: 20
+    # on purpose, so a defect here can hang rather than fail. This bound is not a
+    # performance budget, only a ceiling that stops a hung probe from holding a
+    # runner open indefinitely.
+    #
+    # It was 20, with a comment claiming the gate took "about 30 seconds
+    # locally". Both had gone stale: the gate now runs ~2700 tests plus four
+    # dist-artefact checks, two of which are multi-process races, and the last
+    # five green runs on this runner took 9, 14, 18:45, 18:48 and 19:19 minutes.
+    # A ceiling a passing run reaches by chance is not a hang detector — it is a
+    # coin toss whose tails side reports `cancelled`, which this repository's own
+    # merge policy reads as a blocking failure. V2-07LR's break race is what
+    # finally tipped it over, and raising the ceiling is the honest fix rather
+    # than trimming a check to fit under a number.
+    timeout-minutes: 40
 
     steps:
       - name: Check out the repository

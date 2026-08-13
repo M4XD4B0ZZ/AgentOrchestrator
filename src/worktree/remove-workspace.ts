@@ -34,7 +34,10 @@
  */
 
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
-import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
+import {
+  snapshotRepositoryRecord,
+  verifyExecutionLeaseHeldFor,
+} from '../lease/execution-lease.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { localBranchRef, LOCAL_BRANCH_REF_PREFIX } from '../repo/branch-name.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -212,7 +215,7 @@ async function classifyAncestry(
  * otherwise through `worktreeRemoved`.
  */
 export async function removeTaskWorkspace(
-  repository: ResolvedRepository,
+  given: ResolvedRepository,
   task: TaskDefinition,
   options: WorkspaceRemovalOptions,
 ): Promise<WorkspaceRemovalResult> {
@@ -226,6 +229,13 @@ export async function removeTaskWorkspace(
   // in a caller is a gate at whatever distance the caller happens to have; a
   // gate here is a gate at the effect.
   const git = options.git ?? runGitCommand;
+
+  // And one reading of the record, shared by that gate and the removal it
+  // guards. A record whose `root` is an accessor answers B while the identity
+  // below is derived — which is what `worktree remove` and `branch -d` are
+  // aimed at — and A when the gate asks, so a review deleted a workspace in B
+  // on a lease legitimately held over A. See `snapshotRepositoryRecord`.
+  const repository = snapshotRepositoryRecord(given);
 
   const derived = deriveTaskWorkspaceIdentity(repository, task.id);
   if (!derived.ok) return removalFailure(derived.code);

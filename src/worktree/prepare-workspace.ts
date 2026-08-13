@@ -47,7 +47,10 @@
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
-import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
+import {
+  snapshotRepositoryRecord,
+  verifyExecutionLeaseHeldFor,
+} from '../lease/execution-lease.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { localBranchRef } from '../repo/branch-name.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -256,11 +259,21 @@ function pathExists(path: string): boolean {
  * been verified to be all three.
  */
 export async function prepareTaskWorkspace(
-  repository: ResolvedRepository,
+  given: ResolvedRepository,
   task: TaskDefinition,
   options: WorkspacePreparationOptions,
 ): Promise<WorkspacePreparationResult> {
   const git = options.git ?? runGitCommand;
+
+  // One reading of the record, and everything below uses it.
+  //
+  // The identity derived in step 1 is what every Git command here acts on, and
+  // the gate in step 4 asks a *separate* question of the same record. A record
+  // whose `root` is an accessor can answer B for the first and A for the second
+  // — both truthfully, about two genuine repositories — and a review drove
+  // exactly that: `git worktree add` created a branch and a worktree in B while
+  // the gate proved a lease over A. See `snapshotRepositoryRecord`.
+  const repository = snapshotRepositoryRecord(given);
 
   // --- 1. Identity, derived and validated before anything is touched -------
   // Every identity failure code is also a preparation failure code, by

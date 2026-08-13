@@ -88,13 +88,18 @@
  * exactly where it is.
  *
  * This module also ships **no way to clear one** other than its owner releasing
- * it. An attended break existed and was withdrawn after three adversarial review
- * rounds each found a fresh way for it to destroy an authority somebody had
- * legitimately acquired; `cli/lease-command.ts` records what each attempt got
- * wrong. Recovery from a crash is a manual operator step that `lease status`
- * spells out and that is explicitly outside what this build guarantees, and a
- * supported flow for it is its own slice. Automatic recovery additionally needs
- * owned process containment — necessarily before unattended running.
+ * it. Recovery from a crash exists, and it is deliberately not here:
+ * `lease-recovery.ts` holds an attended, identity-bound break, reachable from
+ * one CLI command and from nothing else. That separation is the point — this
+ * module is imported by a dozen others, and a break exported from it would be
+ * reachable from every one of them.
+ *
+ * What has not changed is what a *lease* does on its own: nothing here takes one
+ * over, and no probe result licenses anything. An owner that cannot be shown to
+ * be running is reported as {@link STALE_LEASE_RECOVERY_UNSAFE} and the lease is
+ * left exactly where it is until a human decides otherwise. Automatic recovery
+ * additionally needs owned process containment — necessarily before unattended
+ * running.
  *
  * ── Liveness may refuse, and may never permit ──────────────────────────────
  *
@@ -163,6 +168,40 @@ export interface LeaseRepository {
   readonly root: string;
   /** The profile's declared identity. Recorded for diagnosis, never the key. */
   readonly id: string;
+}
+
+/**
+ * One reading of a repository record, frozen, for a gate and its effect to share.
+ *
+ * ── The defect this closes (LF-2) ──────────────────────────────────────────
+ *
+ * {@link LeaseRepository} is a bare structural interface, so nothing says its
+ * three fields are *values*. A record whose `root` is an accessor answers one
+ * repository when {@link verifyExecutionLeaseHeldFor} asks and another when the
+ * effect that follows asks — and both answers are true, separately. The gate
+ * proves the lease of A; the branch, the worktree or the write lands in B. An
+ * adversarial review reproduced exactly that against `prepareTaskWorkspace`,
+ * `removeTaskWorkspace` and `advanceTaskState`, with nothing forged anywhere:
+ * two genuine repositories and one record that changes its mind.
+ *
+ * No amount of care inside this module can fix it, because the second read is in
+ * the caller. What fixes it is that there is no second read: every entry point
+ * that gates and then acts takes **one** reading at its top and uses only that.
+ *
+ * ── Why a spread, and what it does and does not promise ────────────────────
+ *
+ * The spread reads each own enumerable property exactly once, which is the whole
+ * mechanism, and `freeze` stops the copy acquiring a mind of its own afterwards.
+ * It is a shallow copy: nested policy objects are shared with the original, and
+ * that is deliberate — the fields an authority decision reads are all scalars,
+ * and deep-copying a `ResolvedRepository` would be a different, larger promise.
+ *
+ * An accessor inherited from a *prototype* is not copied at all, so the field
+ * arrives `undefined` and every gate refuses it. Fail-closed, which is the
+ * direction this has to fail in.
+ */
+export function snapshotRepositoryRecord<T extends LeaseRepository>(repository: T): T {
+  return Object.freeze({ ...repository });
 }
 
 /* ───────────────────────────── liveness ─────────────────────────────────── */
@@ -285,6 +324,20 @@ export function deriveExecutionLeaseLocation(repository: LeaseRepository): Lease
     path: join(key, EXECUTION_LEASE_FILE_NAME),
     key,
   });
+}
+
+/**
+ * The identity of one lease: the digest of its exact bytes.
+ *
+ * Exported because nothing outside this module may *invent* a second answer to
+ * the question "is this the same lease". `lease-recovery.ts`
+ * compares what an operator was shown against what a removal detached, and two
+ * independent digest implementations would be two definitions of sameness — the
+ * kind of duplication this repository has already paid for once, in
+ * `verifyExecutionLeaseHeld` reading one file three ways.
+ */
+export function revisionOfLeaseBytes(bytes: Buffer): string {
+  return revisionOfBytes(bytes);
 }
 
 function revisionOfBytes(bytes: Buffer): string {
@@ -897,8 +950,28 @@ function discard(path: string): void {
   }
 }
 
-/** What became of a guarded removal. */
-type VerifiedRemoval = 'REMOVED' | 'CHANGED' | 'ABSENT' | 'FAILED';
+/**
+ * What became of a guarded removal. A closed set, and five rather than four.
+ *
+ * `DETACH_FAILED` and `UNIDENTIFIABLE` were one member called `FAILED` until the
+ * real-process break harness ran: under concurrency on Windows a `rename` of a
+ * file another process has open fails outright, and that is **nothing having
+ * happened** — the lease is still exactly where it was. It shared a code with
+ * "detached, and then unreadable", which is the opposite situation and the one
+ * where a record is sitting in quarantine. The operator sentence for it says to
+ * go and look at a file that, in the common case, did not exist.
+ */
+export type VerifiedRemoval =
+  /** The verified bytes were detached and deleted. */
+  | 'REMOVED'
+  /** Something else was there; it was detached and put back, or left quarantined. */
+  | 'CHANGED'
+  /** Nothing was at the name. */
+  | 'ABSENT'
+  /** The name could not be detached at all. Nothing was touched. */
+  | 'DETACH_FAILED'
+  /** Detached, and then unreadable: neither removed nor identifiable. */
+  | 'UNIDENTIFIABLE';
 
 /**
  * Removes exactly the bytes `matches` accepts, or nothing at all.
@@ -964,8 +1037,18 @@ type VerifiedRemoval = 'REMOVED' | 'CHANGED' | 'ABSENT' | 'FAILED';
  * which no portable filesystem primitive offers. It is named here rather than
  * argued away, because the previous two attempts to argue it away were both
  * wrong.
+ *
+ * ── Exported, and to exactly one caller ────────────────────────────────────
+ *
+ * `releaseRepositoryExecutionLease` is one of its two users; `lease-recovery.ts`
+ * is the other, and it lives in its own module so that "who can destroy an
+ * authority here" is a question with a testable answer. This is the only
+ * function in the build that may unlink a lease, `matches` is the whole of the
+ * authority it takes, and a caller passing `() => true` has written a plain
+ * `unlink` with extra steps — which is why the importer of this name is pinned
+ * by `tests/v2-07lr-lease-recovery.test.ts` rather than left to convention.
  */
-function removeVerifiedLease(
+export function removeVerifiedLease(
   leasePath: string,
   matches: (bytes: Buffer) => boolean,
 ): VerifiedRemoval {
@@ -974,7 +1057,12 @@ function removeVerifiedLease(
   try {
     renameSync(leasePath, quarantine);
   } catch (error) {
-    return safeErrnoCode(error) === 'ENOENT' ? 'ABSENT' : 'FAILED';
+    // Nothing has happened here, and that distinction is load-bearing: the real
+    // break harness produces this constantly, because a `rename` of a file
+    // another process has open is refused on Windows. The lease is untouched,
+    // there is no quarantined record, and telling an operator to go and inspect
+    // one would send them after a file that does not exist.
+    return safeErrnoCode(error) === 'ENOENT' ? 'ABSENT' : 'DETACH_FAILED';
   }
 
   // From here the lease name is **never touched again except through `link`**,
@@ -997,9 +1085,24 @@ function removeVerifiedLease(
   let bytes: Buffer | null = null;
   try {
     bytes = readFileSync(quarantine);
-  } catch {
-    // Detached and unreadable. Identifying it is impossible, so it is neither
-    // removed nor claimed to have been: the restore below puts it back.
+  } catch (error) {
+    // `ENOENT` here means **nothing was detached**, and that is a measurement
+    // rather than a deduction.
+    //
+    // The real-process break harness produced it in five racers out of six: on
+    // this platform a `rename` whose source has just been taken by a competitor
+    // can *return success without having moved anything*, so the only evidence
+    // that a detach really happened is the object being there afterwards. A
+    // plain `rename` of a missing file does throw `ENOENT` — the phantom
+    // success appears under concurrency — which is exactly why the answer has
+    // to be read from the result rather than from the call.
+    //
+    // Reported as `ABSENT`, because that is what it is: the lease was already
+    // gone. Calling it "detached and unreadable" sent an operator looking for a
+    // quarantined record that was never created, in the common case.
+    if (safeErrnoCode(error) === 'ENOENT') return 'ABSENT';
+    // Anything else is a genuine detach this call cannot identify. It is
+    // neither removed nor claimed to have been: the restore below puts it back.
   }
 
   if (bytes !== null && matches(bytes)) {
@@ -1019,10 +1122,10 @@ function removeVerifiedLease(
     // remove, and a stray file inside the administrative directory is inert,
     // inspectable and recoverable. An earlier version discarded it here, which
     // turned a refusal into a deletion.
-    return bytes === null ? 'FAILED' : 'CHANGED';
+    return bytes === null ? 'UNIDENTIFIABLE' : 'CHANGED';
   }
   discard(quarantine);
-  return bytes === null ? 'FAILED' : 'CHANGED';
+  return bytes === null ? 'UNIDENTIFIABLE' : 'CHANGED';
 }
 
 /**
@@ -1293,11 +1396,15 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   );
   if (removed === 'ABSENT') return Object.freeze({ code: 'LEASE_ABSENT' as const, detail: null });
   if (removed === 'CHANGED') return Object.freeze({ code: 'NOT_OWNER' as const, detail: null });
-  if (removed === 'FAILED') {
-    // `UNREADABLE_AFTER_DETACH` rather than `null`: an operator hitting this has
-    // a file they cannot read where their lease was, and a code with no detail
-    // at all was a regression against the version this replaced.
+  if (removed === 'UNIDENTIFIABLE') {
+    // A detail rather than `null`: an operator hitting this has a file they
+    // cannot read where their lease was, and a code with no detail at all was a
+    // regression against the version this replaced. It is kept distinct from
+    // the one below, which is the case where nothing was detached at all.
     return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: 'UNREADABLE_AFTER_DETACH' });
+  }
+  if (removed === 'DETACH_FAILED') {
+    return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: 'DETACH_REFUSED' });
   }
   return Object.freeze({ code: 'RELEASED' as const, detail: null });
 }
@@ -1317,7 +1424,7 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
  * It authorises nothing. There is no path in this build that removes a lease on
  * the strength of what this returns.
  */
-function legibleOwnerPid(bytes: Buffer | null): number | null {
+export function legibleOwnerPid(bytes: Buffer | null): number | null {
   if (bytes === null) return null;
   let value: unknown;
   try {

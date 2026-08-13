@@ -72,7 +72,10 @@ import {
   type AuthPreflightEvidence,
 } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
-import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
+import {
+  snapshotRepositoryRecord,
+  verifyExecutionLeaseHeldFor,
+} from '../lease/execution-lease.js';
 import { TASK_STATE_SCHEMA_VERSION } from '../core/internal/task-state-object-schema.js';
 import type { TaskStateInput } from '../core/task-state.js';
 import { planNextTask } from '../plan/plan-next-task.js';
@@ -338,7 +341,17 @@ export async function startTask(
   request: StartTaskRequest,
   deps: StartTaskDependencies,
 ): Promise<StartTaskResult> {
-  const { repository, taskId } = request;
+  const { taskId } = request;
+  // One reading of the repository record, taken before the first gate and used
+  // by every gate and every effect below it.
+  //
+  // This path has three gates and three effects interleaved between them — a
+  // plan read, a workspace, a first durable write — and a record whose `root` is
+  // an accessor can name the leased repository at each gate and another one at
+  // each effect. Every gate passes and nothing lands where the authority was.
+  // See `snapshotRepositoryRecord`; the review that found this drove a branch, a
+  // worktree and a state file into a repository nobody held.
+  const repository = snapshotRepositoryRecord(request.repository);
   const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
     result({ taskId, ...from });
 
