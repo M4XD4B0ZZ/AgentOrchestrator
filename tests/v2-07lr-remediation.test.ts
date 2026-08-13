@@ -664,31 +664,58 @@ describe('an unreadable record beside a free lease name is reported as itself', 
    * read, and refuses the link.
    */
   it('answers verification-failed at the operator exit code, not a refusal at the retry one', async () => {
+    // The state has to arise BETWEEN the gate and the rename, and the first
+    // version of this test missed that: a directory sitting at the lease path
+    // from the start makes the *gate* refuse with `LEASE_UNREADABLE`, the effect
+    // never runs, and the branch under test is never reached — the mutant that
+    // restores the shipped defect passed it unharmed. Which is the same mistake
+    // in miniature that this whole test exists for: an assertion about a state
+    // nothing had established.
+    //
+    // So the lease is a real one when the gate reads it, and becomes a directory
+    // inside the window the liveness probe opens. The rename then detaches it,
+    // the read fails, no restore is attempted, and the occupancy check finds the
+    // name free.
     const fixture = await leasableRepository();
     const path = leasePathOf(fixture);
-    mkdirSync(path, { recursive: true });
-    const inspected = inspectRepositoryExecutionLease(fixture.repository);
-
-    const broken = breakInspectedLease(fixture.repository, {
-      expectedRevision: inspected.revision ?? '',
-      expectedObjectId: inspected.objectId ?? '',
-      expectedOwnerPid: inspected.ownerPid,
+    acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-crashed', blockId: null },
+      { now: tickingClock() },
+    );
+    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
+      processAlive: () => 'NOT_FOUND',
     });
 
-    // Whatever refuses first, the one thing this must never be is the outcome
-    // that says the lease is still there when the name is free.
-    if (broken.outcome === 'LEASE_BREAK_VERIFICATION_FAILED') {
-      expect(broken.detail).toBe('UNREADABLE_LEASE_UNOWNED');
-      expect(exitCodeForLeaseBreakOutcome(broken.outcome)).toBe(3);
-      expect(existsSync(path)).toBe(false);
-      expect(quarantineFilesBeside(path).length).toBe(1);
-    } else {
-      // The gate refused before touching anything — also correct, and then the
-      // name must still be occupied by what was there.
-      expect(existsSync(path)).toBe(true);
-      expect(quarantineFilesBeside(path)).toEqual([]);
-    }
-    cleanUpPaths([path, ...quarantineFilesBeside(path).map((name) => join(dirname(path), name))]);
+    let swapped = false;
+    const broken = breakInspectedLease(
+      fixture.repository,
+      {
+        expectedRevision: inspected.revision ?? '',
+        expectedObjectId: inspected.objectId ?? '',
+        expectedOwnerPid: inspected.ownerPid,
+      },
+      {
+        processAlive: () => {
+          if (!swapped) {
+            unlinkSync(path);
+            mkdirSync(path, { recursive: true });
+            swapped = true;
+          }
+          return 'NOT_FOUND';
+        },
+      },
+    );
+
+    expect(swapped).toBe(true);
+    expect(broken.outcome).toBe('LEASE_BREAK_VERIFICATION_FAILED');
+    expect(broken.detail).toBe('UNREADABLE_LEASE_UNOWNED');
+    // Exit 3 — a human has to look — and not the 4 that invites the retry which
+    // then reports the repository free while the record is still inside `.git`.
+    expect(exitCodeForLeaseBreakOutcome(broken.outcome)).toBe(3);
+    expect(existsSync(path)).toBe(false);
+    expect(quarantineFilesBeside(path).length).toBe(1);
+    cleanUpPaths(quarantineFilesBeside(path).map((name) => join(dirname(path), name)));
   });
 
   it('reaches that state through the removal itself, with no seam at all', async () => {
