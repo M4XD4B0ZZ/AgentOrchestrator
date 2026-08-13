@@ -104,6 +104,7 @@ import type { TaskState } from '../core/task-state.js';
 import type { ResumePhase, TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
+import { leasedAgent, leasedVerify } from './leased-spawns.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import { observeRuntime } from '../state/observe-runtime.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
@@ -485,7 +486,7 @@ export async function runVerifyStep(
 
   const report = await runVerification(
     { worktreePath: authorisedWorktreePath, verification },
-    verify === undefined ? {} : { verify },
+    { verify: leasedVerify(deps) },
   );
 
   if (report.verdict === 'PASSED') {
@@ -581,7 +582,7 @@ export async function runReviewStep(
 
   const review = await runCodexReviewer(
     { worktreePath: authorisedWorktreePath, round, payload: buildReviewPayload(taskBrief) },
-    agent === undefined ? {} : { agent },
+    { agent: leasedAgent(deps) },
   );
 
   // Not a review. Every failure code lands here, and none of them may be read
@@ -777,7 +778,7 @@ export async function runRemediateStep(
 
   const writer = await runClaudeWriter(
     { worktreePath: authorisedWorktreePath, phase: 'REMEDIATE', round, payload: brief.payload },
-    agent === undefined ? {} : { agent },
+    { agent: leasedAgent(deps) },
   );
 
   if (!writer.ok) {
@@ -1038,7 +1039,7 @@ export async function runImplementStep(
       round,
       payload: buildImplementPayload(brief.brief, round),
     },
-    agent === undefined ? {} : { agent },
+    { agent: leasedAgent(deps) },
   );
 
   if (!writer.ok) {
@@ -1120,6 +1121,14 @@ export function isLoopDrivenState(state: TaskStateName): boolean {
  * which is deliberate — is `NOT_APPLICABLE`, and nothing is run or written.
  */
 export async function runLoopStep(
+  current: StateLoadSuccess,
+  deps: LoopDependencies,
+): Promise<LoopStepResult> {
+  return dispatch(current, deps);
+}
+
+
+async function dispatch(
   current: StateLoadSuccess,
   deps: LoopDependencies,
 ): Promise<LoopStepResult> {

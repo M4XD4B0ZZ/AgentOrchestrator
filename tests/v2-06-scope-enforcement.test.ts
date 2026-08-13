@@ -49,6 +49,7 @@ import { loadTaskState, type StateLoadSuccess } from '../src/state/state-store.j
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
+import { leaseAuthorityFor, leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, git, removeRepoFixtures, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import {
@@ -62,6 +63,7 @@ import {
 import { nulJoin, scriptedGit, untrackedRecords } from './helpers/scope-git.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -170,7 +172,7 @@ async function atImplementing(
 
   const started = await startTask(
     { repository, taskId: TASK_ID },
-    { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses },
+    { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(repository) },
   );
   expect(started.outcome).toBe('STARTED');
 
@@ -202,12 +204,12 @@ function deps(
   overrides: Partial<LoopDependencies> = {},
 ): LoopDependencies {
   return {
-    repositoryRoot: current.state.repositoryRoot,
     now: '2026-08-11T09:00:00.000Z',
     authorisedWorktreePath: current.state.worktreePath,
     verification: repository.verification,
     taskBrief: 'unused by these steps',
     brief: readExecutionBrief(repository, TASK_ID, current.state.worktreePath),
+    lease: leaseAuthorityFor(repository),
     ...overrides,
   };
 }

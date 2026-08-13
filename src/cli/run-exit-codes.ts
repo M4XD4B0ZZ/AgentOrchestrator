@@ -108,6 +108,14 @@ const RUN_EXIT_CODES = Object.freeze({
   STATE_NOT_RECORDED: EXIT_RUN_REFUSED,
   CONTINUATION_NOT_AUTHORISED: EXIT_RUN_REFUSED,
   EXECUTION_UNAUTHORISED: EXIT_RUN_REFUSED,
+  // Both lease outcomes are refusals rather than operator conditions, and for
+  // the reason code 4 names: nothing durable is wrong, and re-invoking under
+  // other conditions — once the other writer has finished, once the lease is
+  // held again — really can differ. They keep their two outcomes because they
+  // send an operator to different places; they share an exit code because the
+  // shell-level answer to both is the same.
+  EXECUTION_LEASE_NOT_HELD: EXIT_RUN_REFUSED,
+  EXECUTION_LEASE_LOST: EXIT_RUN_REFUSED,
   NO_PROGRESS: EXIT_RUN_REFUSED,
   // The only outcome that means "call again".
   STEP_BUDGET_EXHAUSTED: EXIT_RUN_CALL_AGAIN,
@@ -122,7 +130,7 @@ export function exitCodeForRunOutcome(outcome: RunOutcome): CliExitCode {
  *
  * ── Why these codes and not fourteen new ones ──────────────────────────────
  *
- * `START_TASK_OUTCOMES` has fourteen members, and inventing fourteen process
+ * `START_TASK_OUTCOMES` has sixteen members, and inventing sixteen process
  * codes for them would make the command's exit surface a restatement of one
  * module's vocabulary. The codes above already say the six things a caller can
  * act on, so a start outcome is *classified* into them rather than given its
@@ -167,6 +175,18 @@ const START_TASK_EXIT_CODES = Object.freeze({
   // Git could not answer. Nothing is wrong with the input or the state, and the
   // next invocation may well succeed: the definition of code 4.
   RUNTIME_IGNORE_UNDETERMINED: EXIT_RUN_REFUSED,
+  // Somebody else is the repository's writer, or this invocation never was.
+  // Nothing was created, nothing is out of place, and the next invocation may
+  // well succeed — so a refusal, not an operator condition.
+  EXECUTION_LEASE_NOT_HELD: EXIT_RUN_REFUSED,
+  // Lost once something exists that no durable state accounts for — a worktree
+  // and a branch, or only the branch when the rollback had already removed the
+  // worktree. Same reasoning as `STATE_NOT_RECORDED`
+  // below, and deliberately the same code: an operator has to clean it up, so it
+  // is not a 4. A review found this case sharing 4 with the refusal above —
+  // identical residue, opposite advice, and a scheduler that would retry
+  // straight into a `WORKSPACE_COLLISION`.
+  EXECUTION_LEASE_LOST: EXIT_RUN_NEEDS_OPERATOR,
   // An operator must act before anything may run.
   AUTH_PREFLIGHT_FAILED: EXIT_RUN_NEEDS_OPERATOR,
   WORKSPACE_COLLISION: EXIT_RUN_NEEDS_OPERATOR,
@@ -201,6 +221,14 @@ const RELEASE_EXIT_CODES = Object.freeze({
   // Git could not answer. Nothing is wrong with the workspace and the next
   // invocation may well succeed: the definition of code 4.
   IGNORED_CONTENT_UNDETERMINED: EXIT_RUN_REFUSED,
+  // Somebody else is the repository's writer. Nothing was removed, and the
+  // release is worth attempting again once they are done.
+  EXECUTION_LEASE_NOT_HELD: EXIT_RUN_REFUSED,
+  // Lost partway: the worktree is gone and the branch is not. Identical on disk
+  // to `RELEASED_BRANCH_KEPT` above and deliberately not identical here — that
+  // one exits 0 and invites a hand-deletion, while this left a residue that will
+  // refuse the next start. An operator has to look, so 3.
+  EXECUTION_LEASE_LOST: EXIT_RUN_NEEDS_OPERATOR,
   REMOVE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
 }) satisfies Record<ReleaseOutcome, CliExitCode>;
 

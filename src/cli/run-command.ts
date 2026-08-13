@@ -3,7 +3,12 @@ import type { Command } from 'commander';
 import type { AgentRunner } from '../agent/agent-command.js';
 import { runAuthPreflight } from '../auth/auth-preflight.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { formatSafeError } from '../core/safe-error.js';
+import {
+  acquireRepositoryExecutionLease,
+  releaseRepositoryExecutionLease,
+} from '../lease/execution-lease.js';
 import { runCapabilityDump } from '../doctor/capabilities.js';
 import { resolveRepository, type ResolvedRepository } from '../repo/resolve-repository.js';
 import { renderRunPlan, READ_ONLY_TRAILER } from '../run/render-run-plan.js';
@@ -18,8 +23,10 @@ import {
   renderAttendedRun,
   START_OUTCOME_SENTENCES,
 } from './render-attended-run.js';
+import { renderLeaseRefusal } from './render-lease.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
+  EXIT_RUN_REFUSED,
   EXIT_RUN_UNEXPECTED,
   exitCodeForPlan,
   exitCodeForRunOutcome,
@@ -195,6 +202,48 @@ async function executeAttended(
   maxSteps: number,
   seams: RunCommandSeams,
 ): Promise<CliExitCode> {
+  // The lease, before anything at all — and held for the whole of it.
+  //
+  // Taken here rather than around each half because the window between them is
+  // exactly the one an execution lease exists to close: a run that acquired for
+  // `startTask`, released, and acquired again for `runTask` would leave a gap
+  // between preparing a workspace and driving it, into which a second writer
+  // fits perfectly. The same reasoning makes V2-08's lease scope the whole block
+  // run rather than each task in it.
+  const acquired = acquireRepositoryExecutionLease(
+    repository,
+    { runId: null, blockId: null },
+    { now: () => new Date().toISOString() },
+  );
+  if (!acquired.ok) {
+    process.stdout.write(renderLeaseRefusal(acquired.code));
+    return EXIT_RUN_REFUSED;
+  }
+
+  try {
+    return await executeAttendedUnderLease(
+      repository,
+      requestedTaskId,
+      maxSteps,
+      seams,
+      acquired.evidence,
+    );
+  } finally {
+    // Released on every path out, including a throw. A crash that skips this is
+    // the case the recovery contract is about, and it fails closed by design:
+    // the next invocation reports the lease rather than taking it.
+    releaseRepositoryExecutionLease(acquired.evidence);
+  }
+}
+
+/** The attended drive itself, with the lease already established. */
+async function executeAttendedUnderLease(
+  repository: ResolvedRepository,
+  requestedTaskId: string | null,
+  maxSteps: number,
+  seams: RunCommandSeams,
+  lease: ExecutionLeaseEvidence,
+): Promise<CliExitCode> {
   // Which task, decided before anything is created. `--task` wins; otherwise the
   // repository's own selector chooses, and its refusals are the plan's to
   // report — so an invocation with nothing to run falls back to the plan rather
@@ -211,7 +260,7 @@ async function executeAttended(
   const authPreflight = onceOnlyPreflight(seams.authPreflight);
   const start = await startTask(
     { repository, taskId },
-    { git: runGitCommand, now: () => new Date().toISOString(), authPreflight },
+    { git: runGitCommand, now: () => new Date().toISOString(), authPreflight, lease },
   );
 
   if (start.outcome !== 'STARTED' && start.outcome !== 'ALREADY_STARTED') {
@@ -247,6 +296,7 @@ async function executeAttended(
       // when `--attended` was given.
       attendedContinuation: true,
       authEvidence: evidence,
+      lease,
       maxSteps,
     },
     {

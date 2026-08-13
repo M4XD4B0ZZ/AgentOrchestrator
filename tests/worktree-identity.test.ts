@@ -52,6 +52,9 @@ function repositoryAt(
   return Object.freeze({
     root,
     id,
+    // Never read by workspace identity, which takes only three fields — carried
+    // so the literal still satisfies the resolved shape.
+    gitCommonDir: join(root, '.git'),
     defaultBranch,
     profilePath: join(root, '.agent-orchestrator', 'repo-profile.yaml'),
     schemaVersion: 1,

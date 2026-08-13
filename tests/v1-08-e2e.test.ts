@@ -41,6 +41,7 @@ import type { ReplaceFn } from '../src/state/atomic-file.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { removeRepoFixtures, git, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces } from './helpers/worktree-fixtures.js';
 import {
@@ -66,6 +67,10 @@ import {
 import { fingerprint, passingReview } from './fixtures.js';
 
 afterAll(() => {
+  // Before the fixtures go: a lease lives inside its repository's own Git
+  // directory, so removing the fixture would take the file and leave this
+  // process still holding an artefact for a path a later fixture could reuse.
+  releaseTestLeases();
   removeTrackedWorkspaces();
   removeRepoFixtures();
 });
@@ -80,6 +85,8 @@ function request(started: StartedTask, overrides: Record<string, unknown> = {}) 
     taskBrief: 'Make the integrated pipeline behave.',
     attendedContinuation: true,
     authEvidence: provenAuthEvidence(),
+    // Real, and re-proved by the driver on every iteration.
+    lease: leaseFor(started.repository),
     maxSteps: 8,
     ...overrides,
   };
@@ -1015,6 +1022,7 @@ describe('selection reads the repository\'s own task files', () => {
         taskBrief: (task) => `brief for ${task.id}`,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
+        lease: leaseFor(started.repository),
         maxSteps: 8,
       },
       deps({ verify: recordedVerify().runner, agent: recordedAgent({ codex: () => reviewResult(passingReview()) }).runner }),
@@ -1033,6 +1041,7 @@ describe('selection reads the repository\'s own task files', () => {
         taskBrief: (task) => `brief for ${task.id}`,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
+        lease: leaseFor(started.repository),
         maxSteps: 8,
       },
       deps({ verify: recordedVerify().runner, agent: recordedAgent({}).runner }),

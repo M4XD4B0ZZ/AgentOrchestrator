@@ -38,6 +38,8 @@
  * driver. A library caller that reaches this function has already decided.
  */
 
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { planNextTask } from '../plan/plan-next-task.js';
 import { isValidTaskId } from '../plan/task-id.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -75,8 +77,37 @@ export const RELEASE_OUTCOMES = [
   'HOLDS_IGNORED_CONTENT',
   /** Git could not be asked whether the workspace holds ignored content. */
   'IGNORED_CONTENT_UNDETERMINED',
-  /** Every proof held and Git still refused to remove the worktree. */
+  /**
+   * The workspace was not removed. The reason code says what stopped it.
+   *
+   * This said "every proof held and Git still refused", which is true of exactly
+   * one of its producers. `WORKTREE_DIRTY` reaches it with an ownership proof
+   * that did *not* hold and with Git never asked to remove anything;
+   * `GIT_UNAVAILABLE` reaches it without a removal being attempted either. An
+   * outcome that narrates one of its causes as though it were all of them sends
+   * an operator looking for the wrong thing.
+   */
   'REMOVE_FAILED',
+  /**
+   * This invocation does not hold the repository's execution lease.
+   *
+   * A release is a destructive repository effect, and the one this module is
+   * least able to detect on its own: `assessWorkspaceAdoption` proves the
+   * workspace is a *pristine* crash artefact, and a workspace a concurrent run
+   * has only just prepared looks exactly like one. Without the lease this
+   * command could therefore delete the branch and directory of a run that is
+   * about to write in them, having passed every proof it has.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
+  /**
+   * The lease was held when this release began and was lost partway through it.
+   *
+   * Kept apart from `RELEASED_BRANCH_KEPT`, which it resembles exactly on disk.
+   * That one is nominal; this one means authority passed to somebody else
+   * mid-operation. A review found both reported as the same nominal outcome at
+   * exit 0, with no code anywhere naming the lease.
+   */
+  'EXECUTION_LEASE_LOST',
 ] as const;
 
 export type ReleaseOutcome = (typeof RELEASE_OUTCOMES)[number];
@@ -102,6 +133,15 @@ export interface ReleaseResult {
 export interface ReleaseDependencies {
   /** The Git seam. Required and never defaulted, as `startTask` requires it. */
   readonly git: GitRunner;
+  /**
+   * Proof that this invocation holds the repository's execution lease.
+   *
+   * Required for the same reason `startTask` requires one, and with the same
+   * consequence for a caller that has none: it does not compile. Attendance
+   * stays the *caller's* to establish — see the module header — but authority
+   * over the repository is not, and a lease is not an operator grant.
+   */
+  readonly lease: ExecutionLeaseEvidence;
 }
 
 function result(
@@ -167,6 +207,16 @@ export async function releaseTaskWorkspace(
   taskId: string,
   deps: ReleaseDependencies,
 ): Promise<ReleaseResult> {
+  // Authority over the repository, before anything is inspected or removed.
+  const lease = verifyExecutionLeaseHeldFor(repository, deps.lease);
+  if (lease.code !== 'HELD') {
+    return result({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      taskId,
+      reasonCodes: Object.freeze([lease.code]),
+    });
+  }
+
   if (!isValidTaskId(taskId)) return result({ outcome: 'TASK_ID_INVALID', taskId });
 
   // The task must still be one this repository declares. `removeTaskWorkspace`
@@ -209,10 +259,70 @@ export async function releaseTaskWorkspace(
     return result({ outcome: 'HOLDS_IGNORED_CONTENT', taskId, verdict: assessment.verdict });
   }
 
-  const removal = await removeTaskWorkspace(repository, task, { git: deps.git });
+  // Proved again, immediately before the deletion. The entry gate is several Git
+  // subprocesses old by this point — the plan, the adoption assessment, the
+  // ignored-content query — and what follows destroys a worktree and a branch. A
+  // review lost the lease to a legitimate successor inside that window and
+  // watched both be deleted anyway. The gate that matters is the one nearest the
+  // effect, exactly as `advanceTaskState` argues for a durable move.
+  const stillHeld = verifyExecutionLeaseHeldFor(repository, deps.lease);
+  if (stillHeld.code !== 'HELD') {
+    return result({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      taskId,
+      verdict: assessment.verdict,
+      reasonCodes: Object.freeze([stillHeld.code]),
+    });
+  }
+
+  const removal = await removeTaskWorkspace(repository, task, {
+    git: deps.git,
+    lease: deps.lease,
+  });
+  // Refused at the removal's own gate, which is not a failure to remove.
+  //
+  // This fell into `REMOVE_FAILED` below, whose declared meaning is "every
+  // ownership proof held and Git still refused to remove the worktree" — and
+  // Git was never asked. The sentence an operator reads was therefore
+  // affirmatively false, and it exits 3, sending someone to inspect a
+  // repository that is in perfect order. `EXECUTION_LEASE_NOT_HELD` already
+  // exists in this outcome vocabulary and already maps to 4; only the branch
+  // was missing.
+  //
+  // Kept apart from `WORKSPACE_REMOVAL_LOST_LEASE` below: that one lost the
+  // lease *partway through* and left a half-removed workspace. This one touched
+  // nothing.
+  if (!removal.ok && removal.code === 'EXECUTION_LEASE_NOT_HELD') {
+    return result({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      taskId,
+      verdict: assessment.verdict,
+      worktreeRemoved: removal.worktreeRemoved,
+      branchRemoved: removal.branchRemoved,
+      reasonCodes: Object.freeze([removal.code]),
+    });
+  }
+
   if (!removal.ok) {
     return result({
       outcome: 'REMOVE_FAILED',
+      taskId,
+      verdict: assessment.verdict,
+      worktreeRemoved: removal.worktreeRemoved,
+      branchRemoved: removal.branchRemoved,
+      reasonCodes: Object.freeze([removal.code]),
+    });
+  }
+
+  // A removal that lost the lease halfway is not a release. On disk it is
+  // identical to `RELEASED_BRANCH_KEPT` — worktree gone, branch kept — and that
+  // is exactly why it needs its own outcome: the nominal one invites the
+  // operator to delete the branch when they are satisfied, while this one means
+  // authority passed to somebody else mid-operation and the residue will refuse
+  // the next start with `WORKSPACE_COLLISION`.
+  if (removal.code === 'WORKSPACE_REMOVAL_LOST_LEASE') {
+    return result({
+      outcome: 'EXECUTION_LEASE_LOST',
       taskId,
       verdict: assessment.verdict,
       worktreeRemoved: removal.worktreeRemoved,

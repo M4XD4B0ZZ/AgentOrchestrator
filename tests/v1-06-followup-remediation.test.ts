@@ -26,10 +26,12 @@ import { runVerification } from '../src/verify/run-verification.js';
 import type { VerificationRunner } from '../src/verify/verify-command.js';
 import type { ResolvedVerificationPolicy } from '../src/repo/resolve-repository.js';
 import { SHA_A, SHA_B, validCreatedState } from './fixtures.js';
+import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  releaseTestLeases();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
@@ -205,7 +207,7 @@ describe('NEW-4: a task already blocked has no interruption to record', () => {
       {
         now: NOW,
         fallback: { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 3 }, reportedResetAt: null },
-        repositoryRoot: root,
+        lease: leaseAuthorityAt(root),
       },
     );
 
@@ -238,7 +240,7 @@ describe('NEW-4: a task already blocked has no interruption to record', () => {
       {
         now: NOW,
         fallback: { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 2 }, reportedResetAt: null },
-        repositoryRoot: root,
+        lease: leaseAuthorityAt(root),
       },
     );
 
@@ -263,7 +265,7 @@ describe('NEW-4: a task already blocked has no interruption to record', () => {
       {
         now: NOW,
         fallback: { blockedAgent: 'claude', resumeFrom: { phase: 'IMPLEMENT', round: 1 }, reportedResetAt: null },
-        repositoryRoot: root,
+        lease: leaseAuthorityAt(root),
       },
     );
 

@@ -38,8 +38,12 @@ import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { createRepoFixture, removeRepoFixtures, git } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
+import { releaseRepositoryExecutionLease } from '../src/lease/execution-lease.js';
+import type { ExecutionLeaseEvidence } from '../src/core/execution-lease-evidence.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -70,11 +74,18 @@ async function started(
   return result;
 }
 
-function deps(overrides: Partial<Parameters<typeof startTask>[1]> = {}) {
+function deps(
+  repository: ResolvedRepository,
+  overrides: Partial<Parameters<typeof startTask>[1]> = {},
+) {
   return {
     git: runGitCommand,
     now: tickingClock(),
     authPreflight: authPassed,
+    // The real lease, taken through the real entry point. `startTask` refuses
+    // without one, and a helper that fabricated the artefact would be asserting
+    // exactly what V2-07L made unassertable.
+    lease: leaseFor(repository),
     ...overrides,
   };
 }
@@ -106,7 +117,7 @@ describe('startTask — the supported start', () => {
   it('creates the workspace and writes exactly one durable state, at WORKTREE_READY', async () => {
     const { repository, root } = await startableRepo();
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     expect(result.outcome).toBe('STARTED');
     expect(result.workspace).not.toBeNull();
@@ -135,7 +146,7 @@ describe('startTask — the supported start', () => {
     const repository = await resolveFixture(root);
     trackWorkspacesOf(repository);
 
-    await started({ repository, taskId: 'V2-03' }, deps());
+    await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     const loaded = loadTaskState(root, 'V2-03');
     expect(loaded.ok && loaded.state.maxReviewRounds).toBe(7);
@@ -143,7 +154,7 @@ describe('startTask — the supported start', () => {
 
   it('reports an already-started task rather than starting it twice', async () => {
     const { repository, root } = await startableRepo();
-    const first = await started({ repository, taskId: 'V2-03' }, deps());
+    const first = await started({ repository, taskId: 'V2-03' }, deps(repository));
     expect(first.outcome).toBe('STARTED');
 
     const statePath = join(root, '.agent-orchestrator', 'runtime', 'V2-03.json');
@@ -155,7 +166,7 @@ describe('startTask — the supported start', () => {
     let preflightCalls = 0;
     const second = await started(
       { repository, taskId: 'V2-03' },
-      deps({
+      deps(repository, {
         now: tickingClock(Date.parse('2026-08-10T11:00:00.000Z')),
         authPreflight: async () => {
           preflightCalls += 1;
@@ -183,14 +194,14 @@ describe('startTask — the supported start', () => {
       'tasks/V2-04.md': taskFile('V2-04'),
     });
 
-    const first = await started({ repository, taskId: 'V2-03' }, deps());
+    const first = await started({ repository, taskId: 'V2-03' }, deps(repository));
     expect(first.outcome).toBe('STARTED');
 
     // The defect this whole invariant exists to prevent: task one's own state
     // file making task two's workspace preparation impossible.
     expect(git(root, ['status', '--porcelain', '--untracked-files=all']).trim()).toBe('');
 
-    const second = await started({ repository, taskId: 'V2-04' }, deps());
+    const second = await started({ repository, taskId: 'V2-04' }, deps(repository));
     expect(second.outcome).toBe('STARTED');
   });
 });
@@ -199,7 +210,7 @@ describe('invariant 2 — the first state carries derived identity', () => {
   it('spells every identity field exactly as the workspace derivation does', async () => {
     const { repository, root } = await startableRepo();
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
     expect(result.outcome).toBe('STARTED');
 
     const derived = deriveTaskWorkspaceIdentity(repository, 'V2-03');
@@ -222,7 +233,7 @@ describe('invariant 2 — the first state carries derived identity', () => {
     const { repository, root } = await startableRepo();
     const head = git(root, ['rev-parse', 'HEAD']).trim();
 
-    await started({ repository, taskId: 'V2-03' }, deps());
+    await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     const loaded = loadTaskState(root, 'V2-03');
     expect(loaded.ok).toBe(true);
@@ -275,7 +286,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
 
   it('writes nothing when the task id is not a task id', async () => {
     const { repository, root } = await startableRepo();
-    const result = await started({ repository, taskId: '../escape' }, deps());
+    const result = await started({ repository, taskId: '../escape' }, deps(repository));
 
     expect(result.outcome).toBe('TASK_ID_INVALID');
     expect(existsSync(join(root, '.agent-orchestrator', 'runtime'))).toBe(false);
@@ -283,7 +294,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
 
   it('writes nothing when the task is not in the plan', async () => {
     const { repository, root } = await startableRepo();
-    const result = await started({ repository, taskId: 'V2-99' }, deps());
+    const result = await started({ repository, taskId: 'V2-99' }, deps(repository));
 
     expect(result.outcome).toBe('TASK_UNKNOWN');
     expectNothingStarted(root, 'V2-99');
@@ -294,7 +305,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
       'tasks/V2-05.md': taskFile('V2-05', { dependsOn: ['V2-03'] }),
     });
 
-    const result = await started({ repository, taskId: 'V2-05' }, deps());
+    const result = await started({ repository, taskId: 'V2-05' }, deps(repository));
 
     expect(result.outcome).toBe('TASK_INELIGIBLE');
     expect(result.reasonCodes).toEqual(['BLOCKED_BY_DEPENDENCIES']);
@@ -307,7 +318,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
 
     const result = await started(
       { repository, taskId: 'V2-03' },
-      deps({ authPreflight: authPreflightFails }),
+      deps(repository, { authPreflight: authPreflightFails }),
     );
 
     expect(result.outcome).toBe('AUTH_PREFLIGHT_FAILED');
@@ -323,7 +334,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
     // would leave behind.
     git(root, ['branch', 'ao/task/V2-03']);
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     expect(result.outcome).toBe('WORKSPACE_COLLISION');
     // Two codes since V2-06A: what collided, and what the recovery assessor
@@ -342,7 +353,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
     mkdirSync(derived.identity.worktreePath, { recursive: true });
     writeFileSync(join(derived.identity.worktreePath, 'stranger.txt'), 'not ours\n', 'utf8');
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     expect(result.outcome).toBe('WORKSPACE_COLLISION');
     // A stranger's directory at the derived path is registered with nobody.
@@ -367,7 +378,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
     git(root, ['branch', 'ao/task/V2-03', otherBase]);
     git(root, ['reset', '--hard', '--quiet', 'HEAD~1']);
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     expect(result.outcome).toBe('WORKSPACE_COLLISION');
     // The branch exists on a different base and holds no registered worktree,
@@ -384,7 +395,7 @@ describe('invariant 1 — nothing durable before the workspace exists', () => {
     // dirty, so no base state can be pinned.
     writeFileSync(join(root, 'stray.txt'), 'untracked\n', 'utf8');
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     expect(result.outcome).toBe('WORKSPACE_REFUSED');
     expect(result.reasonCodes).toEqual(['SOURCE_WORKTREE_DIRTY']);
@@ -413,7 +424,7 @@ describe('invariant 3 — the runtime directory must be provably ignored', () =>
     // The state file alone would answer "ignored" — the directory does not.
     expect(await checkRuntimeIgnored(runGitCommand, root, 'V2-03')).toBe('NOT_IGNORED');
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
     expect(result.outcome).toBe('RUNTIME_NOT_IGNORED');
     expect(git(root, ['branch', '--list', 'ao/task/V2-03']).trim()).toBe('');
   });
@@ -428,7 +439,7 @@ describe('invariant 3 — the runtime directory must be provably ignored', () =>
     const repository = await resolveFixture(root);
     trackWorkspacesOf(repository);
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     expect(result.outcome).toBe('RUNTIME_NOT_IGNORED');
     // Refused before anything was created — the branch is the evidence.
@@ -441,7 +452,7 @@ describe('invariant 3 — the runtime directory must be provably ignored', () =>
     const blindGit: GitRunner = async () =>
       Object.freeze({ outcome: 'UNAVAILABLE' as const, stdout: '', exitCode: null });
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps({ git: blindGit }));
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository, { git: blindGit }));
 
     expect(result.outcome).toBe('RUNTIME_IGNORE_UNDETERMINED');
     expect(existsSync(join(root, '.agent-orchestrator', 'runtime'))).toBe(false);
@@ -492,7 +503,7 @@ describe('the write that does not land', () => {
     // created deliberately. This is the crash window in slow motion.
     const result = await started(
       { repository, taskId: 'V2-03' },
-      deps({
+      deps(repository, {
         replace: () => {
           throw new Error('write refused');
         },
@@ -516,7 +527,7 @@ describe('the write that does not land', () => {
     const { repository } = await startableRepo();
     await started(
       { repository, taskId: 'V2-03' },
-      deps({
+      deps(repository, {
         replace: () => {
           throw new Error('write refused');
         },
@@ -528,7 +539,7 @@ describe('the write that does not land', () => {
     // something precise to attach to, and it now has: the leftovers are proven
     // to be this task's own untouched workspace and are reused.
     // `tests/v2-06a-workspace-adoption.test.ts` holds the counter-proofs.
-    const retry = await started({ repository, taskId: 'V2-03' }, deps());
+    const retry = await started({ repository, taskId: 'V2-03' }, deps(repository));
     expect(retry.outcome).toBe('ADOPTED');
     expect(retry.residue).toBe(false);
   });
@@ -545,7 +556,7 @@ describe('the remaining refusals', () => {
     const repository = await resolveFixture(root);
     trackWorkspacesOf(repository);
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     expect(result.outcome).toBe('PLANNING_FAILED');
     expect(result.reasonCodes).toEqual(['TASK_SOURCE_NOT_FOUND']);
@@ -559,11 +570,65 @@ describe('the remaining refusals', () => {
     writeFileSync(statePath, 'not a state document\n', 'utf8');
     const before = readFileSync(statePath);
 
-    const result = await started({ repository, taskId: 'V2-03' }, deps());
+    const result = await started({ repository, taskId: 'V2-03' }, deps(repository));
 
     expect(result.outcome).toBe('STATE_UNUSABLE');
     // Repairs nothing, and did not reach Git either.
     expect(readFileSync(statePath)).toEqual(before);
+    expect(git(root, ['branch', '--list', 'ao/task/V2-03']).trim()).toBe('');
+  });
+
+  it('reports residue when the lease is lost after the workspace exists (V2-07L)', async () => {
+    // The second lease gate, and the one the exit code turns on. `startTask`
+    // proves the lease again immediately before creating the workspace, and
+    // again before the first durable write; losing it between those two leaves a
+    // worktree and a branch that no state accounts for. That is residue, and
+    // residue is an operator's to clear — which is why this is not the same
+    // outcome as being refused at the door.
+    const { repository, root } = await startableRepo();
+    const evidence = leaseFor(repository);
+
+    const result = await started(
+      { repository, taskId: 'V2-03' },
+      deps(repository, {
+        lease: evidence,
+        // The lease goes the instant the worktree exists — which is the window
+        // this gate is for. `replace` would be too late: it runs inside the
+        // atomic write, after the gate has already passed.
+        git: async (cwd, args) => {
+          const result = await runGitCommand(cwd, args);
+          if (args[0] === 'worktree' && args[1] === 'add') {
+            releaseRepositoryExecutionLease(evidence);
+          }
+          return result;
+        },
+      }),
+    );
+
+    expect(result.outcome).toBe('EXECUTION_LEASE_LOST');
+    expect(result.residue).toBe(true);
+    expect(result.workspace).not.toBeNull();
+    // The state was not written, and the workspace really is on disk.
+    expect(loadTaskState(root, 'V2-03').classification).toBe('STATE_MISSING');
+    expect(existsSync(result.workspace?.worktreePath ?? '')).toBe(true);
+  });
+
+  it('refuses an invocation that does not hold the execution lease (V2-07L)', async () => {
+    const { repository, root } = await startableRepo();
+
+    const result = await started(
+      { repository, taskId: 'V2-03' },
+      // A forgery is the subject here, so the cast is the point of the case:
+      // the artefact cannot be written down, and a value that pretends to be
+      // one must deny exactly as an absent one does.
+      deps(repository, { lease: { leaseHeld: true } as unknown as ExecutionLeaseEvidence }),
+    );
+
+    expect(result.outcome).toBe('EXECUTION_LEASE_NOT_HELD');
+    // Refused before the plan, the runtime check, the preflight or Git. Nothing
+    // was opened, so nothing can be left behind.
+    expect(result.residue).toBe(false);
+    expect(loadTaskState(root, 'V2-03').classification).toBe('STATE_MISSING');
     expect(git(root, ['branch', '--list', 'ao/task/V2-03']).trim()).toBe('');
   });
 });

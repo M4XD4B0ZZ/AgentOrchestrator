@@ -71,6 +71,19 @@ export const START_OUTCOME_SENTENCES: Readonly<Record<StartTaskOutcome, string>>
   STATE_NOT_RECORDED:
     'The workspace was created and the first durable write was then refused, so a worktree\n' +
     '  exists that no task state accounts for. It is reported rather than deleted.',
+  EXECUTION_LEASE_LOST:
+    'This invocation held the execution lease when it began and does not hold it now, so\n' +
+    '  the first durable state was not written. Whatever it created and had not already\n' +
+    '  removed is still there and nothing records it - a worktree, a branch, or only the\n' +
+    '  branch, which is the one most easily walked past. See Residue below, and look\n' +
+    '  before deleting: another invocation may own these now.',
+  EXECUTION_LEASE_NOT_HELD:
+    'This invocation does not hold this repository\'s execution lease, so it may not create\n' +
+    '  a branch, a worktree or a durable record here. Nothing was created and nothing was\n' +
+    '  written. It may have read the plan and run the authentication preflight first: this\n' +
+    '  is refused at the entrance and again immediately before anything would be created,\n' +
+    '  and the second refusal is the one that matters, because the lease can go while the\n' +
+    '  preflight runs. `agent-loop lease status` reports what is actually there.',
 });
 
 /** The one label/value shape every report line uses. Shared with the command. */

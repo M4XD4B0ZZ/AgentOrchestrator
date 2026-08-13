@@ -29,7 +29,7 @@
  * cannot be asked to produce on demand.
  */
 
-import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -71,6 +71,8 @@ import {
   removeRepoFixtures,
 } from './helpers/repo-fixtures.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
+import { releaseRepositoryExecutionLease } from '../src/lease/execution-lease.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { cleanScopeAnswer } from './helpers/scope-git.js';
 import { resolveFixture } from './helpers/worktree-fixtures.js';
 
@@ -111,6 +113,7 @@ function worktreeOf(root: string): string {
 }
 
 afterEach(() => {
+  releaseTestLeases();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
@@ -130,9 +133,19 @@ afterAll(removeRepoFixtures);
  * compare-and-swap refusal would be testing the fixture.
  */
 function repository(root: string): ResolvedRepository {
+  // The lease key, and it has to be a key a real repository could have. This
+  // said "the temporary root stands in for one" and passed `root` itself, which
+  // no clone matches: a common dir sits *beside* the work tree, never at it.
+  // Acquire proves that now — the root-is-its-own-common-dir pairing is what a
+  // review used to hold two authorities over one repository — so the fixture
+  // makes the directory it was only claiming to have.
+  const gitCommonDir = join(root, '.git');
+  mkdirSync(gitCommonDir, { recursive: true });
+
   return Object.freeze({
     root,
     id: 'repo-alpha',
+    gitCommonDir,
     defaultBranch: 'main',
     profilePath: join(root, '.agent-orchestrator', 'repo-profile.yaml'),
     schemaVersion: 1,
@@ -332,12 +345,16 @@ function deps(root: string, overrides: Partial<RunDependencies> = {}): RunDepend
 }
 
 function request(root: string, overrides: Partial<RunRequest> = {}): RunRequest {
+  const repo = repository(root);
   return {
-    repository: repository(root),
+    repository: repo,
     taskId: TASK_ID,
     taskBrief: 'Add a widget.',
     attendedContinuation: true,
     authEvidence: provenAuthEvidence(),
+    // Acquired for real: the driver re-proves it against the file every
+    // iteration, so a fabricated artefact would stop the run on the first one.
+    lease: leaseFor(repo),
     maxSteps: 12,
     ...overrides,
   };
@@ -739,6 +756,64 @@ describe('the driver never grants itself an authority it does not have', () => {
 
 describe('an authorised quota resume', () => {
   const RESET_PASSED = '2026-08-10T08:00:00.000Z';
+
+  it('reports a resume write refused for the lease as a lost lease (V2-07L)', async () => {
+    // The resume write has its own three-way split, and the branch for a lost
+    // lease carries a comment recording that a review once found *this* site
+    // folding it into `STATE_NOT_RECORDED` "because the fix was applied to its
+    // sibling and not to it". The fix landed; the counter-proof did not, and a
+    // later review deleted the branch again with the whole suite still green.
+    //
+    // The sibling — the loop's own write — is covered. This is the one that was
+    // not, and it needs the resume path specifically: `BLOCKED_USAGE_LIMIT` is
+    // the only state an unattended resume drives, so nothing else reaches here.
+    const root = repoRoot();
+    persist(root, {
+      state: 'BLOCKED_USAGE_LIMIT',
+      blockedAgent: 'claude',
+      resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      reportedResetAt: RESET_PASSED,
+      reviewRound: 1,
+      currentCommit: SHA_B,
+      worktreeCleanAtCheckpoint: true,
+      findingHistory: [DURABLE_FINDING],
+    });
+
+    const repo = repository(root);
+    const lease = leaseFor(repo);
+
+    // The lease has to be gone *before* the resume write proves it, and after
+    // the driver's own gate at the top of the iteration — otherwise that gate
+    // answers first and this branch is never reached. The reconciliation sits
+    // in exactly that window, so the release rides on its first Git call.
+    //
+    // Releasing inside `replace` does not work and is worth recording:
+    // `advanceTaskState` proves the lease *before* handing bytes to the writer,
+    // so the write succeeds and the loss surfaces one iteration later from the
+    // driver's gate instead — the right outcome by the wrong route, which would
+    // have made this a counter-proof of something else.
+    const scripted = scriptedGit(root);
+    let released = false;
+    const run = await runTask(
+      { ...request(root, { maxSteps: 2 }), repository: repo, lease },
+      deps(root, {
+        git: async (cwd, args) => {
+          if (!released) {
+            released = true;
+            releaseRepositoryExecutionLease(lease);
+          }
+          return scripted(cwd, args);
+        },
+      }),
+    );
+
+    expect(released).toBe(true);
+    expect(run.outcome).toBe('EXECUTION_LEASE_LOST');
+    expect(run.outcome).not.toBe('STATE_NOT_RECORDED');
+    // From the resume write itself, not from the next iteration's gate: the
+    // reason code is the save's, which is what distinguishes the two routes.
+    expect(run.reasonCodes).toContain('EXECUTION_LEASE_LOST');
+  });
 
   it('re-enters the phase that was interrupted and spends the resume evidence', async () => {
     const root = repoRoot();
@@ -1676,6 +1751,7 @@ describe('task selection', () => {
         taskBrief: (task) => task.title,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
+        lease: leaseFor(resolved),
         maxSteps: 4,
       },
       {

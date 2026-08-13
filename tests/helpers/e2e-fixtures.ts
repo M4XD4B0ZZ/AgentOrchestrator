@@ -59,6 +59,7 @@ import { prepareTaskWorkspace, type TaskWorkspace } from '../../src/worktree/pre
 import { createRepoFixture, writeRepoFile, git } from './repo-fixtures.js';
 import { resolveFixture, taskWithId, trackWorkspacesOf } from './worktree-fixtures.js';
 import { agentCommandResult, claudeSuccessEnvelope, codexTranscript } from '../fixtures.js';
+import { leaseFor } from './lease.js';
 
 /* ─────────────────────────────── profiles ───────────────────────────────── */
 
@@ -175,7 +176,7 @@ export async function startTask(options: {
 
   // Before any state is seeded — a persisted state is an untracked file, and
   // preparation refuses a dirty source repository.
-  const prepared = await prepareTaskWorkspace(repository, taskWithId(taskId));
+  const prepared = await prepareTaskWorkspace(repository, taskWithId(taskId), { lease: leaseFor(repository) });
   if (!prepared.ok) throw new Error(`workspace did not prepare: ${prepared.code}`);
 
   return { repository, root, workspace: prepared.workspace, taskId };

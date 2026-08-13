@@ -79,8 +79,16 @@
  *
  * Mutual exclusion. Two processes starting the same task concurrently can still
  * race each other for creation or adoption; this module detects *crash
- * artefacts*, it does not prevent *concurrent owners*. An execution lease is a
- * separate mechanism and is still required before unattended block autonomy.
+ * artefacts*, it does not prevent *concurrent owners*. That separation is
+ * deliberate and still holds: mutual exclusion is the execution lease's job
+ * (V2-07L), and every path that reaches this proof — `startTask` and
+ * `releaseTaskWorkspace` — now requires lease evidence before it gets here.
+ *
+ * Which is also why this module must not be read as the thing that makes a
+ * release safe. A workspace a concurrent run has *just* prepared satisfies every
+ * proof below, because it genuinely is a pristine checkout at the base commit
+ * with nothing done in it. Only exclusive ownership tells that apart from a
+ * crash artefact, and it is supplied above rather than approximated here.
  */
 
 import { LOCAL_BRANCH_REF_PREFIX } from '../repo/branch-name.js';

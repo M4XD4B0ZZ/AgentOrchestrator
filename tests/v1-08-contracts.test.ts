@@ -27,6 +27,10 @@ import {
 } from '../src/loop/loop-step.js';
 import { buildResumedRemediationBrief } from '../src/loop/findings.js';
 import { fingerprint, validCreatedState } from './fixtures.js';
+import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /* ═════════ 1. The advertised set is the dispatched set ═════════════════════ */
 
@@ -42,14 +46,21 @@ import { fingerprint, validCreatedState } from './fixtures.js';
  * pinned against each other over every declared state, rather than the set being
  * asserted against a hand-written copy of itself.
  */
+const unusableLeaseRoot = mkdtempSync(join(tmpdir(), 'ao-v1-08-contracts-'));
+
 describe('the states the loop advertises are the states it dispatches', () => {
   /** Dependencies that make any *executed* step fail loudly rather than run. */
   const unusableDeps = (): LoopDependencies => ({
-    repositoryRoot: '/srv/projects/alpha',
     now: '2026-08-10T10:00:00.000Z',
     authorisedWorktreePath: '/srv/projects/alpha.worktrees/task-0001',
     verification: { phases: [] },
     taskBrief: 'brief',
+    // Real evidence for a scratch directory. These deps exist to prove a
+    // *non-driven* state reaches no seam at all, so nothing here should ever
+    // get as far as a durable transition — but the requirement is a parameter,
+    // and satisfying it with a fabricated artefact would be exactly the forgery
+    // the type exists to refuse.
+    lease: leaseAuthorityAt(unusableLeaseRoot),
     verify: () => {
       throw new Error('a non-driven state must not reach the verification seam');
     },

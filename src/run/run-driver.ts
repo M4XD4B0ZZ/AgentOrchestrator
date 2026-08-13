@@ -12,6 +12,10 @@
  * **A step is never executed from persisted state alone.** Every iteration, in
  * this order and with each gate closing on the one before it:
  *
+ *  0. `verifyExecutionLeaseHeldFor` — is this process still the repository's one
+ *     writer? Re-proved against the file every iteration, not carried from the
+ *     start of the run, and asked first because it is the only gate that is
+ *     about the repository rather than about this task (V2-07L);
  *  1. `reconcileTask` — load the durable state *and* compare it against what
  *     Git says right now. `RECONCILED` is the only outcome anything continues
  *     from;
@@ -75,6 +79,8 @@ import {
   type TaskStateName,
 } from '../core/states.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
@@ -88,7 +94,7 @@ import { planNextTask, type TaskPlanningResult } from '../plan/plan-next-task.js
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { readExecutionBrief } from '../plan/task-brief.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
-import { advanceTaskState } from '../state/advance-state.js';
+import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import {
   reconcileTask,
   stopSpellingFor,
@@ -199,6 +205,33 @@ export const RUN_OUTCOMES = [
    * and a foreign branch, so reaching this means a gate above it changed.
    */
   'EXECUTION_UNAUTHORISED',
+  /**
+   * This invocation never held the repository's execution lease.
+   *
+   * The value handed to {@link RunRequest.lease} is not minted evidence. Kept
+   * apart from {@link EXECUTION_LEASE_LOST} because they are opposite
+   * situations: this one means a caller asserted authority it never had, and
+   * that one means authority this run really held has gone away.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
+  /**
+   * The lease this run took is no longer this run's.
+   *
+   * Removed underneath it — by an operator breaking a lease they believed
+   * stale, by a wiped administrative directory — or replaced by a successor.
+   *
+   * **The step in flight finishes, and its durable write does not land.**
+   * `advanceTaskState` re-proves the lease immediately before every transition,
+   * so a loss during an agent subprocess is caught at the write rather than at
+   * the next iteration — measured, in both directions: the write is refused and
+   * the state file is byte-identical.
+   *
+   * What is *not* claimed is anything about the subprocess itself. An agent
+   * already running may still write in the worktree and may still land a commit
+   * on the task branch; stopping that needs owned process containment, which is
+   * a later slice and is not pretended to be solved here.
+   */
+  'EXECUTION_LEASE_LOST',
 
   /* --- nothing to do ----------------------------------------------------- */
   /**
@@ -226,6 +259,20 @@ const BLOCKING_OUTCOME: Readonly<Record<BlockingState, RunOutcome>> = Object.fre
   RESUME_STATE_DIVERGED: 'RESUME_STATE_DIVERGED',
   HUMAN_DECISION_REQUIRED: 'HUMAN_DECISION_REQUIRED',
 });
+
+/**
+ * The verify codes that mean this run **never** held the lease, as opposed to
+ * having lost one it did hold.
+ *
+ * The two outcomes send an operator to different places, so the split has to be
+ * right: a forged artefact and a genuine lease for *another* repository are both
+ * "you were never the writer here", however real the second one is somewhere
+ * else. Only a lease that was this repository's and has gone is a loss.
+ */
+const NEVER_HELD: ReadonlySet<string> = new Set([
+  'EVIDENCE_INVALID',
+  'LEASE_FOR_ANOTHER_REPOSITORY',
+]);
 
 export interface RunResult {
   readonly outcome: RunOutcome;
@@ -295,6 +342,19 @@ export interface RunRequest {
    * requirements, and neither substitutes for the other.
    */
   readonly authEvidence: AuthPreflightEvidence | null;
+  /**
+   * Proof that this invocation holds the repository's execution lease.
+   *
+   * **Required, and never nullable** — unlike {@link authEvidence}, which has an
+   * honest `null` for a path that ran no preflight. There is no honest `null`
+   * here: a run that is not the repository's writer must not drive a task at
+   * all, so "no lease" is not a weaker mode of running, it is not running.
+   *
+   * Re-proved against the file on every iteration rather than trusted once. See
+   * the module header: a step is a subprocess that took minutes, and a lease
+   * taken before it is not a lease held after it.
+   */
+  readonly lease: ExecutionLeaseEvidence;
   /**
    * The most durable steps this call may take.
    *
@@ -380,11 +440,14 @@ export async function runTask(
   }
 
   const advance = Object.freeze({
-    // From the resolved repository, never from the state that is about to be
-    // written: the store compares the two and refuses a disagreement, and
-    // taking both from one side would make that check compare a value with
-    // itself.
-    repositoryRoot: repository.root,
+    // No `repositoryRoot` here. `advanceTaskState` derives the write target from
+    // the authority itself, so there is no second value to keep in step with it.
+    //
+    // Threaded into every durable transition this run makes, including the ones
+    // `runLoopStep` reaches after an agent has been running for minutes.
+    // `advanceTaskState` re-proves it against the file at the write, which is
+    // the only moment that matters — see its header.
+    lease: Object.freeze({ repository, evidence: request.lease }),
     ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
     ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
   });
@@ -401,6 +464,26 @@ export async function runTask(
   let remediationPayload: string | undefined;
 
   for (let iteration = 0; iteration < maxSteps; iteration += 1) {
+    // --- 0. Is this run still the repository's writer? -----------------------
+    //
+    // Re-proved every iteration, and *first*, for the same reason
+    // reconciliation is re-run every iteration: the previous iteration was a
+    // subprocess that took minutes, and the world it left behind is not the one
+    // the previous check described. A lease is authority over the present.
+    //
+    // Ahead of reconciliation rather than beside it because it is the wider
+    // question. Reconciliation asks whether this task's record matches reality;
+    // this asks whether this process may act on the repository at all, and there
+    // is no point establishing the first while the second is false.
+    const lease = verifyExecutionLeaseHeldFor(repository, request.lease);
+    if (lease.code !== 'HELD') {
+      return stop({
+        outcome: NEVER_HELD.has(lease.code) ? 'EXECUTION_LEASE_NOT_HELD' : 'EXECUTION_LEASE_LOST',
+        steps,
+        reasonCodes: Object.freeze([lease.code]),
+      });
+    }
+
     // --- 1. The record, and the world it claims to describe -----------------
     const reconciliation = await reconcileTask(deps.git, { repository, taskId }, observation);
     const loaded: StateLoadSuccess | null = reconciliation.load.ok ? reconciliation.load : null;
@@ -596,7 +679,18 @@ export async function runTask(
       }
       if (!resumed.save.ok) {
         return stop({
-          outcome: resumed.save.code === 'STATE_CONFLICT' ? 'STATE_CONFLICT' : 'STATE_NOT_RECORDED',
+          // The same three-way split as the loop's write below. A review found
+          // this site still folding a lost lease into `STATE_NOT_RECORDED` —
+          // the collapse `RUN_OUTCOMES` exists to prevent — because the fix was
+          // applied to its sibling and not to it. The window is real: the
+          // step-0 gate and this write are separated by a reconciliation and its
+          // Git subprocesses.
+          outcome:
+            resumed.save.code === 'EXECUTION_LEASE_LOST'
+              ? 'EXECUTION_LEASE_LOST'
+              : resumed.save.code === 'STATE_CONFLICT'
+                ? 'STATE_CONFLICT'
+                : 'STATE_NOT_RECORDED',
           state: state.state,
           steps,
           reasonCodes: Object.freeze([resumed.save.code]),
@@ -673,16 +767,31 @@ export async function runTask(
 
       case 'STATE_NOT_RECORDED':
         return stop({
+          // A lease lost *during* the step surfaces here, because the write is
+          // where it is caught. It must keep its own outcome: `RUN_OUTCOMES`
+          // separates these precisely because they send an operator to different
+          // places, and folding a lost authority into "a write was refused for
+          // some other reason" is the collapse that vocabulary exists to prevent.
           outcome:
-            step.save !== null && !step.save.ok && step.save.code === 'STATE_CONFLICT'
-              ? 'STATE_CONFLICT'
-              : 'STATE_NOT_RECORDED',
+            step.save !== null && !step.save.ok && step.save.code === 'EXECUTION_LEASE_LOST'
+              ? 'EXECUTION_LEASE_LOST'
+              : step.save !== null && !step.save.ok && step.save.code === 'STATE_CONFLICT'
+                ? 'STATE_CONFLICT'
+                : 'STATE_NOT_RECORDED',
           ...stopped,
           state: state.state,
           steps,
+          // The code *and* its detail: `LEASE_ABSENT`, `NOT_OWNER` and
+          // `LEASE_UNREADABLE` are "cleared", "taken over by a successor" and
+          // "could not be read", which send an operator to three different
+          // places. Forwarding only the code drops that.
           reasonCodes:
             step.save !== null && !step.save.ok
-              ? Object.freeze([step.save.code])
+              ? Object.freeze(
+                  step.save.detail === null
+                    ? [step.save.code]
+                    : [step.save.code, step.save.detail],
+                )
               : Object.freeze([]),
         });
 
@@ -699,6 +808,23 @@ export async function runTask(
           steps,
         });
     }
+  }
+
+  // The budget ran out, and the last step was never re-proved — the check is at
+  // the *top* of an iteration, so nothing looked after the final one. That
+  // matters here more than it looks: `STEP_BUDGET_EXHAUSTED` is the one outcome
+  // documented as "call again", it exits 5, and a scheduler acts on it. Handing
+  // that back for a run that has lost authority tells the caller everything is
+  // fine and to continue. One syscall says otherwise.
+  const stillHeld = verifyExecutionLeaseHeldFor(repository, request.lease);
+  if (stillHeld.code !== 'HELD') {
+    return stop({
+      outcome: NEVER_HELD.has(stillHeld.code)
+        ? 'EXECUTION_LEASE_NOT_HELD'
+        : 'EXECUTION_LEASE_LOST',
+      steps,
+      reasonCodes: Object.freeze([stillHeld.code]),
+    });
   }
 
   return stop({
@@ -743,7 +869,7 @@ export async function runTask(
 function resumeBlockedTask(
   load: StateLoadSuccess,
   now: string,
-  advance: { readonly repositoryRoot: string; readonly replace?: ReplaceFn; readonly tempSuffix?: TempSuffixFn },
+  advance: AdvanceOptions,
 ): { readonly save: ReturnType<typeof advanceTaskState> } | null {
   const state = load.state;
   if (state.resumeFrom === null) return null;
@@ -883,6 +1009,7 @@ export async function runNextTask(
       taskBrief: request.taskBrief(task),
       attendedContinuation: request.attendedContinuation,
       authEvidence: request.authEvidence,
+      lease: request.lease,
       maxSteps: request.maxSteps,
     },
     deps,

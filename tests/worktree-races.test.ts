@@ -38,8 +38,10 @@ import {
   taskWithId,
   trackWorkspacesOf,
 } from './helpers/worktree-fixtures.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 
 afterAll(() => {
+  releaseTestLeases();
   removeTrackedWorkspaces();
   removeRepoFixtures();
 });
@@ -105,7 +107,7 @@ describe('a race lost between the check and the create', () => {
       return null;
     });
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(injected).toBe(true);
     expect(result.ok).toBe(false);
@@ -133,7 +135,7 @@ describe('a race lost between the check and the create', () => {
       return null;
     });
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(injected).toBe(true);
     expect(result.ok).toBe(false);
@@ -164,7 +166,7 @@ describe('a base branch that moves after it was pinned', () => {
       return null;
     });
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(moved).toBe(true);
     expect(result.ok).toBe(true);
@@ -197,7 +199,7 @@ describe('a worktree that is not what was asked for', () => {
       return null;
     });
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -223,7 +225,7 @@ describe('a worktree that is not what was asked for', () => {
       return null;
     });
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -260,13 +262,11 @@ describe('classifying `merge-base --is-ancestor`', () => {
     ['a Git that could not be run', UNAVAILABLE, 'GIT_UNAVAILABLE'],
   ])('reads %s', async (_label, answer, expected) => {
     const repository = await freshRepository();
-    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
     expect(prepared.ok).toBe(true);
     const identity = identityFor(repository, 'V1-03');
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
-      git: ancestryAnswering(answer),
-    });
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: ancestryAnswering(answer), lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {
@@ -283,12 +283,10 @@ describe('classifying `merge-base --is-ancestor`', () => {
     // not 1 is Git declining to answer, and must not be reported as "your
     // branch holds unmerged work" — a reason that would simply be false.
     const repository = await freshRepository();
-    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
     expect(prepared.ok).toBe(true);
 
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
-      git: ancestryAnswering(NONZERO(128)),
-    });
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: ancestryAnswering(NONZERO(128)), lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) expect(removal.code).not.toBe('TASK_BRANCH_HAS_UNMERGED_WORK');
@@ -306,7 +304,7 @@ describe('Git that cannot answer', () => {
     const repository = await freshRepository();
     const runner = intercepting((_cwd, args) => (startsWith(args, prefix) ? UNAVAILABLE : null));
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('GIT_UNAVAILABLE');
@@ -324,7 +322,7 @@ describe('Git that cannot answer', () => {
         : null,
     );
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('GIT_UNAVAILABLE');
@@ -360,7 +358,7 @@ describe('Git that cannot answer', () => {
     const identity = identityFor(repository, 'V1-03');
     const runner = intercepting(buildHook(identity));
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -376,7 +374,7 @@ describe('Git that cannot answer', () => {
     // A regular file sitting exactly where the workspace directory must go.
     writeFileSync(identity.worktreeParent, 'not a directory\n', 'utf8');
 
-    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const result = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -387,14 +385,14 @@ describe('Git that cannot answer', () => {
 
   it('reports WORKTREE_REMOVE_FAILED without deleting the branch', async () => {
     const repository = await freshRepository();
-    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
     expect(prepared.ok).toBe(true);
     const identity = identityFor(repository, 'V1-03');
 
     const runner = intercepting((_cwd, args) =>
       startsWith(args, ['worktree', 'remove']) ? NONZERO() : null,
     );
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {
@@ -408,13 +406,13 @@ describe('Git that cannot answer', () => {
 
   it('reports a partial removal rather than calling a leftover branch success', async () => {
     const repository = await freshRepository();
-    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
     expect(prepared.ok).toBe(true);
 
     const runner = intercepting((_cwd, args) =>
       startsWith(args, ['branch', '-d']) ? NONZERO() : null,
     );
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(true);
     if (removal.ok) {
@@ -426,13 +424,13 @@ describe('Git that cannot answer', () => {
 
   it('never reads a non-zero exit as a successful answer during removal', async () => {
     const repository = await freshRepository();
-    const workspace = await prepareTaskWorkspace(repository, taskWithId('V1-03'));
+    const workspace = await prepareTaskWorkspace(repository, taskWithId('V1-03'), { lease: leaseFor(repository) });
     expect(workspace.ok).toBe(true);
 
     const runner = intercepting((_cwd, args) =>
       startsWith(args, ['worktree', 'list']) ? UNAVAILABLE : null,
     );
-    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner });
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), { git: runner, lease: leaseFor(repository) });
 
     expect(removal.ok).toBe(false);
     if (!removal.ok) {

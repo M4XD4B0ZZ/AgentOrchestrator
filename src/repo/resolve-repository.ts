@@ -223,6 +223,21 @@ export interface ResolvedRepository {
   readonly root: string;
   /** Stable identity from the profile; suitable for `TaskState.repositoryId`. */
   readonly id: string;
+  /**
+   * The **local Git administrative identity**: the canonical, absolute
+   * `git-common-dir` of this checkout.
+   *
+   * Distinct from {@link id}, and the distinction is the whole reason this field
+   * exists. `id` is *declared logical* identity, so two clones of one remote
+   * answer the same `id` while being two independent local execution domains,
+   * and two worktrees of one clone answer the same `id` while being one. Only
+   * the common directory separates those cases — it is what proved worktree
+   * membership in V2-06A, and it is what the execution lease is keyed on.
+   *
+   * Resolved here rather than queried by the lease, so that *which repository
+   * this is* has one answer produced by the one module whose job that is.
+   */
+  readonly gitCommonDir: string;
   /** Validated, locally existing default branch. */
   readonly defaultBranch: string;
   /** Canonical absolute path of the profile that produced this value. */
@@ -344,6 +359,36 @@ export async function resolveRepository(
   const gitDir = await gitQuery(root, ['rev-parse', '--git-dir']);
   if (gitDir.outcome === 'UNAVAILABLE') return failure('GIT_UNAVAILABLE');
   if (gitDir.outcome === 'NONZERO_EXIT' || gitDir.stdout === '') {
+    return failure('NOT_A_GIT_REPOSITORY');
+  }
+
+  // The local administrative identity, asked for separately and left as its own
+  // query rather than folded into the check above. The two answer different
+  // questions — "does this checkout have a Git directory" and "which clone is it
+  // part of" — and for a linked worktree they are different paths. Canonicalised
+  // the same way `--show-toplevel` is, because Git answers with forward slashes
+  // on Windows and a lease path is built from this value rather than merely
+  // compared with it.
+  const commonDir = await gitQuery(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (commonDir.outcome === 'UNAVAILABLE') return failure('GIT_UNAVAILABLE');
+  if (commonDir.outcome === 'NONZERO_EXIT' || commonDir.stdout === '') {
+    return failure('NOT_A_GIT_REPOSITORY');
+  }
+  // The answer must already be absolute, and that is checked rather than
+  // assumed. `--path-format=absolute` is doing all the work here: without it
+  // Git answers `.git` at the root and `../.git` from a subdirectory, and
+  // `resolvePath` would silently adopt `process.cwd()` — so every repository
+  // resolved from one working directory would key on the *orchestrator's* own
+  // `.git`, giving every repository the same execution lease. Dropping the flag
+  // in a refactor is an ordinary-looking edit with that consequence, and one
+  // line makes it fail closed instead. The sibling `--show-toplevel` query above
+  // is cross-checked with `samePath`; this is the equivalent for a value that
+  // becomes a file location rather than a comparison.
+  if (!isAbsolute(commonDir.stdout)) return failure('NOT_A_GIT_REPOSITORY');
+  let gitCommonDir: string;
+  try {
+    gitCommonDir = realpathSync.native(resolvePath(commonDir.stdout));
+  } catch {
     return failure('NOT_A_GIT_REPOSITORY');
   }
 
@@ -489,6 +534,7 @@ export async function resolveRepository(
   const repository: ResolvedRepository = Object.freeze({
     root,
     id: profile.repository.id,
+    gitCommonDir,
     defaultBranch,
     profilePath: canonicalProfilePath,
     schemaVersion: profile.schemaVersion,

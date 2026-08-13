@@ -45,12 +45,7 @@ import { agentDiagnostics, type AgentDiagnostics } from '../agent/agent-outcome.
 import { isComparablePath } from '../core/path-identity.js';
 import { isShellInertArgument } from '../doctor/exec.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
-import {
-  runVerificationCommand,
-  type VerificationCommandOutcome,
-  type VerificationCommandResult,
-  type VerificationRunner,
-} from './verify-command.js';
+import { type VerificationCommandOutcome, type VerificationCommandResult, type VerificationRunner } from './verify-command.js';
 
 /** The three answers a verification run may produce. Never a message. */
 export type VerificationVerdict = 'PASSED' | 'FAILED' | 'UNAVAILABLE';
@@ -92,8 +87,16 @@ export interface VerificationRequest {
 }
 
 export interface VerificationOptions {
-  /** The execution seam. Defaults to the real one; tests pass their own. */
-  readonly verify?: VerificationRunner;
+  /**
+   * The runner this call starts its process with. **Required, deliberately.**
+   *
+   * It was optional, defaulting to the raw command runner. That made the
+   * unfenced spawn the *default* behaviour, so a new call site that simply
+   * forgot the seam got a real subprocess with no authority behind it — which is
+   * exactly the route an adversarial review took. A required argument turns that
+   * mistake into a compile error instead of a silent one.
+   */
+  readonly verify: VerificationRunner;
 }
 
 const NO_DIAGNOSTICS: AgentDiagnostics = Object.freeze({
@@ -121,9 +124,9 @@ function phaseReport(
  */
 export async function runVerification(
   request: VerificationRequest,
-  options: VerificationOptions = {},
+  options: VerificationOptions,
 ): Promise<VerificationReport> {
-  const run = options.verify ?? runVerificationCommand;
+  const run = options.verify;
   const declared = request.verification.phases;
 
   // Unrepresentable through the schema, and still not treated as a pass. See

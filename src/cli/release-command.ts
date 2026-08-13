@@ -29,12 +29,18 @@
 import type { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
+import {
+  acquireRepositoryExecutionLease,
+  releaseRepositoryExecutionLease,
+} from '../lease/execution-lease.js';
 import { resolveRepository } from '../repo/resolve-repository.js';
 import { releaseTaskWorkspace, type ReleaseResult } from '../run/release-workspace.js';
 import { runGitCommand } from '../worktree/git-command.js';
+import { renderLeaseRefusal } from './render-lease.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_NEEDS_OPERATOR,
+  EXIT_RUN_REFUSED,
   EXIT_RUN_UNEXPECTED,
   exitCodeForReleaseOutcome,
 } from './run-exit-codes.js';
@@ -48,6 +54,14 @@ interface ReleaseOptions {
 /** One static sentence per outcome. Closed, ASCII only, and pinned by test. */
 export const RELEASE_OUTCOME_SENTENCES: Readonly<Record<ReleaseResult['outcome'], string>> =
   Object.freeze({
+    EXECUTION_LEASE_LOST:
+      'The lease was held when this release began and was lost partway through it. The\n' +
+      '  worktree is gone and the branch is not - which looks exactly like a kept branch and\n' +
+      '  is not one: another invocation owns this repository now, and what is left will\n' +
+      '  refuse the next start. Look before you delete anything.',
+    EXECUTION_LEASE_NOT_HELD:
+      'This invocation does not hold this repository\'s execution lease, so it may not\n' +
+      'remove anything here. Nothing was touched.',
     RELEASED: 'The worktree and the task branch were removed.',
     RELEASED_BRANCH_KEPT:
       'The worktree was removed and the task branch was not. Nothing occupies the path now;\n' +
@@ -68,8 +82,10 @@ export const RELEASE_OUTCOME_SENTENCES: Readonly<Record<ReleaseResult['outcome']
     IGNORED_CONTENT_UNDETERMINED:
       'Git could not say whether the workspace holds ignored content, so nothing was removed.',
     REMOVE_FAILED:
-      'Every ownership proof held and Git still refused to remove the worktree. Nothing was\n' +
-      '  forced; the workspace is as it was.',
+      'The workspace was not removed, and the reason code says what stopped it: an ownership\n' +
+      '  proof that did not hold, a Git command that could not be completed, or a removal Git\n' +
+      '  itself refused. Nothing was forced. Only the last of those means Git was asked at\n' +
+      '  all, so read the code before concluding the repository is in a strange state.',
   });
 
 const ATTENDANCE_WITHHELD_SENTENCE =
@@ -124,9 +140,30 @@ export function registerReleaseCommand(program: Command): void {
           return;
         }
 
-        const released = await releaseTaskWorkspace(resolution.repository, options.task, {
-          git: runGitCommand,
-        });
+        // The lease, held across the whole removal. A release deletes a branch
+        // and a directory, and `assessWorkspaceAdoption` cannot tell a crashed
+        // run's leftovers from a concurrent run's freshly prepared workspace —
+        // they look identical. Only exclusive ownership separates them.
+        const acquired = acquireRepositoryExecutionLease(
+          resolution.repository,
+          { runId: null, blockId: null },
+          { now: () => new Date().toISOString() },
+        );
+        if (!acquired.ok) {
+          process.stdout.write(renderLeaseRefusal(acquired.code));
+          process.exitCode = EXIT_RUN_REFUSED;
+          return;
+        }
+
+        let released;
+        try {
+          released = await releaseTaskWorkspace(resolution.repository, options.task, {
+            git: runGitCommand,
+            lease: acquired.evidence,
+          });
+        } finally {
+          releaseRepositoryExecutionLease(acquired.evidence);
+        }
 
         report([
           `Task         : ${released.taskId}`,

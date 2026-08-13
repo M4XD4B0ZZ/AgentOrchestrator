@@ -31,6 +31,7 @@ import { startTask } from '../src/run/start-task.js';
 import { runTask } from '../src/run/run-driver.js';
 import { loadTaskState, type StateLoadSuccess } from '../src/state/state-store.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
+import { leaseAuthorityFor, leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { createRepoFixture, removeRepoFixtures, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture } from './helpers/worktree-fixtures.js';
@@ -46,6 +47,7 @@ import {
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -89,7 +91,7 @@ async function startedAt(
 ): Promise<StateLoadSuccess> {
   const result = await startTask(
     { repository, taskId: 'V2-04' },
-    { git: runGitCommand, now: tickingClock(), authPreflight: authPassed },
+    { git: runGitCommand, now: tickingClock(), authPreflight: authPassed, lease: leaseFor(repository) },
   );
   expect(result.outcome).toBe('STARTED');
   const loaded = loadTaskState(root, 'V2-04');
@@ -103,12 +105,12 @@ function stepDeps(
   overrides: Partial<LoopDependencies> = {},
 ): LoopDependencies {
   return {
-    repositoryRoot: current.state.repositoryRoot,
     now: '2026-08-11T09:00:00.000Z',
     authorisedWorktreePath: current.state.worktreePath,
     verification: repository.verification,
     taskBrief: 'unused by these steps',
     brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
+    lease: leaseAuthorityFor(repository),
     ...overrides,
   };
 }
@@ -470,7 +472,7 @@ describe('a task created by production code now runs', () => {
     const { repository, root } = await readyRepo();
     const start = await startTask(
       { repository, taskId: 'V2-04' },
-      { git: runGitCommand, now: tickingClock(), authPreflight: authPassed },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPassed, lease: leaseFor(repository) },
     );
     expect(start.outcome).toBe('STARTED');
 
@@ -487,6 +489,7 @@ describe('a task created by production code now runs', () => {
         taskBrief: 'unused: the implement step reads the repository',
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
+        lease: leaseFor(repository),
         maxSteps: 3,
       },
       { now: tickingClock(), git: runGitCommand, agent: agent.runner, verify: verify.runner },

@@ -29,11 +29,13 @@ import { startTask } from '../src/run/start-task.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, git, removeRepoFixtures, writeRepoFile } from './helpers/repo-fixtures.js';
 import { removeTrackedWorkspaces, resolveFixture, trackWorkspacesOf } from './helpers/worktree-fixtures.js';
 import { e2eProfile, tickingClock } from './helpers/e2e-fixtures.js';
 
 afterEach(() => {
+  releaseTestLeases();
   removeRepoFixtures();
 });
 
@@ -84,6 +86,7 @@ async function afterCrashedStart(): Promise<Orphan> {
       git: runGitCommand,
       now: tickingClock(),
       authPreflight: authPreflightPasses,
+      lease: leaseFor(repository),
       replace: crashingReplace,
     },
   );
@@ -95,7 +98,10 @@ async function afterCrashedStart(): Promise<Orphan> {
 }
 
 function release(fixture: Orphan) {
-  return releaseTaskWorkspace(fixture.repository, TASK_ID, { git: runGitCommand });
+  return releaseTaskWorkspace(fixture.repository, TASK_ID, {
+    git: runGitCommand,
+    lease: leaseFor(fixture.repository),
+  });
 }
 
 describe('releasing a pristine orphan', () => {
@@ -125,7 +131,12 @@ describe('releasing a pristine orphan', () => {
 
     const restarted = await startTask(
       { repository: fixture.repository, taskId: TASK_ID },
-      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: leaseFor(fixture.repository),
+      },
     );
 
     // Not adopted — there is nothing left to adopt. An ordinary fresh start.
@@ -180,7 +191,12 @@ describe('release refuses whatever adoption refuses', () => {
     // crash artefact any more, and releasing it would delete a live task's tree.
     const adopted = await startTask(
       { repository: fixture.repository, taskId: TASK_ID },
-      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: leaseFor(fixture.repository),
+      },
     );
     expect(adopted.outcome).toBe('ADOPTED');
 
@@ -227,6 +243,7 @@ describe('release refuses whatever adoption refuses', () => {
 
     const result = await releaseTaskWorkspace(fixture.repository, 'V9-99', {
       git: runGitCommand,
+      lease: leaseFor(fixture.repository),
     });
 
     expect(result.outcome).toBe('TASK_UNKNOWN');
@@ -238,6 +255,7 @@ describe('release refuses whatever adoption refuses', () => {
 
     const result = await releaseTaskWorkspace(fixture.repository, 'not a task id', {
       git: runGitCommand,
+      lease: leaseFor(fixture.repository),
     });
 
     expect(result.outcome).toBe('TASK_ID_INVALID');

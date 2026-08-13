@@ -75,18 +75,29 @@ npm run verify
 
 `verify` is the canonical full Foundation verify command. It runs, in this
 order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
-`test:dist-trusted-profile`, `test:foundation-safe`,
-`test:windows-tree-kill-tool-release`. `build` runs immediately before the two
-dist artefact checks, so both always run against a fresh build, never a stale
-or missing one, and there is only ever one build per `verify` run. The two test
-gates run **sequentially**, in that order — the real-process harness never runs
-alongside the foundation set.
+`test:dist-trusted-profile`, `test:dist-lease-race`, `test:foundation-safe`,
+`test:windows-tree-kill-tool-release`. `build` runs immediately before the three
+dist artefact checks, so all of them always run against a fresh build, never a
+stale or missing one, and there is only ever one build per `verify` run. The two
+vitest gates run **sequentially**, in that order — the real-process harness never
+runs alongside the foundation set.
 
 `test:dist-trusted-profile` checks the *built* trusted-profile module
 (`dist/config/internal/trusted-profile.js`): that it resolves the OS user
 profile through `os.userInfo()`, that a child process with spoofed profile
 environment variables gets the identical answer, and that no remnant of the
 removed PowerShell resolver survives in the shipped artefact.
+
+`test:dist-lease-race` puts the **execution lease** under real concurrency:
+sixteen OS processes race for one lease, released together from a shared start
+barrier, eight times over, and exactly one must win each round. It is a separate
+gate for the reason the property is: a second `acquire` inside one process proves
+that the exclusive create refuses an existing file, and cannot prove the claim is
+*atomic*, because two synchronous calls in one thread cannot interleave. V2-07's
+compare-and-swap passed every single-process test it had and lost writes to a
+concurrent second caller; this is the check that would have caught it, pointed at
+the mechanism that replaced it. It found a real defect on its first run — see
+"The lease appears complete, or not at all" below.
 
 **`test:foundation-safe` is not "all tests", but it is the full regression
 set.** It runs every vitest file except one:
@@ -127,6 +138,7 @@ npm run test:windows-tree-kill-tool-release
                               # serially (--no-file-parallelism); the gate
                               # `verify` runs last
 npm run build                # emit dist/ (Node-executable CLI)
+npm run test:dist-lease-race  # only the real-process execution-lease race
 npm run test:dist-doctor     # run only the dist-artefact child check
                               # (tests/dist-artifact/run-completion-dist-artifact.mjs),
                               # against whatever dist/ already exists — no build
@@ -2830,6 +2842,22 @@ narrow answer, so changing it has to be deliberate.
 - **RR-F6** — `repo/git-query.ts` still has no injection seam, and V1-08 did not
   add one: the E2E suite uses real repositories throughout, which is the reason
   that seam has not been missed. It remains **open and deferred**.
+- **L-V2-07L-1** — the five acquire refusal codes all exit `EXIT_RUN_REFUSED`,
+  so `LEASE_HELD` ("another run owns this, wait") and
+  `STALE_LEASE_RECOVERY_UNSAFE` ("a human must decide about this by hand") are
+  indistinguishable at the shell. They are two outcomes precisely because they
+  send an operator to two places, and the printed sentences do distinguish them;
+  only the exit code does not. Deferred rather than fixed because widening the
+  exit-code contract is a product decision of its own, and because
+  `STALE_LEASE_RECOVERY_UNSAFE` also covers `UNDETERMINED` liveness, where a
+  retry genuinely can differ. **Scope:** `cli/run-command.ts`,
+  `cli/release-command.ts`, `cli/run-exit-codes.ts`.
+- **L-V2-07L-2** — four of the five acquire refusals end "Nothing was started.",
+  and `release --attended` prints them verbatim. A release starts nothing in any
+  case, and the question its operator has is whether anything was *removed*.
+  Cosmetic: no safety claim is wrong, and the release outcome sentences answer
+  the removal question separately. **Scope:** `cli/render-lease.ts`,
+  `cli/release-command.ts`.
 
 ### What V1-08 is not
 
@@ -3112,7 +3140,7 @@ refused with the verdict that refused it.
 
 **Mutual exclusion.** Two processes starting the same task concurrently can
 still race for creation or adoption. This slice detects *crash artefacts*; it
-does not prevent *concurrent owners*. An execution lease is a separate mechanism
+does not prevent *concurrent owners* on its own. That is the execution lease's job (V2-07L), and `release --attended` now holds one for the whole removal
 and is still required before unattended block autonomy.
 
 ## The block-run ledger (V2-07)
@@ -3297,10 +3325,13 @@ no longer claims to.
 complete and valid, merely superseded. That reasoning does **not** carry over
 here, because the loser is a run's whole recorded history rather than one task's
 latest state. Closing it properly needs a repository-wide owner — the execution
-lease — so until that exists, **one writer per ledger is a prerequisite this
-store depends on and cannot enforce**. `tests/v2-07-remediation.test.ts` pins the
-limitation with a deliberate two-writer counter-proof, so that it stays a known
-boundary rather than becoming a surprise.
+lease. **One writer per ledger is a prerequisite this store depends on and
+cannot enforce**, and `tests/v2-07-remediation.test.ts` pins that limitation with
+a deliberate two-writer counter-proof so it stays a known boundary rather than
+becoming a surprise. V2-07L now *supplies* the prerequisite from outside: the
+lease makes at most one invocation the writer of a repository, and V2-08 holds one
+across a whole block run with its ledger writes underneath it. The store's own
+window is unchanged — it is guarded, not closed.
 
 A block id may also not collide with one of its own task ids. The two grammars
 are deliberately one rule, so an id alone never says which of the two it names —
@@ -3387,7 +3418,7 @@ exactly the absence of a repository-wide owner.
 
 That is **not** a ledger defect and is deliberately not fixed here. Deciding
 which process may produce effects for a task is repository-wide execution
-ownership — the execution lease's contract, keyed on the local Git
+ownership — the execution lease's contract (V2-07L), keyed on the local Git
 administrative identity (the normalised `git-common-dir`, the same information
 that proved two worktrees belong to one repository in V2-06A) rather than on the
 profile's `repositoryId`. `tests/v2-07-remediation.test.ts` pins both halves:
@@ -3464,7 +3495,9 @@ Two things a later slice must not read into the ledger, neither of them defects:
 ### What V2-07 is not
 
 No block execution: nothing here drives a run. No dependent commit chain. No
-execution lease — the ledger orchestrates no agent and no Git effect.
+execution lease — the ledger orchestrates no agent and no Git effect, and the
+lease that supplies its missing single-writer prerequisite is V2-07L's, sited
+outside this store rather than smuggled into it.
 
 What the remediation established is narrower than it first looked, and worth
 stating exactly: a compare-and-swap plus a successor contract is sufficient for
@@ -3474,27 +3507,321 @@ about two writers sharing one ledger either. The lease was previously described
 here as required before *unattended* running. That was wrong by one slice; see
 below.
 
+## The execution lease (V2-07L)
+
+> For one repository, at most one productive orchestrator writer holds authority
+> at a time.
+
+That sentence is the whole slice. V2-07 proved it was missing — two run ledgers
+in one repository can each hold the same task `ACTIVE`, and neither document is
+wrong — and it proved the ledger could not supply it: a store that writes one
+run's record cannot decide which process may write at all.
+
+### Keyed on the local Git domain, never on `repositoryId`
+
+`repository.id` is *declared logical* identity. Two clones of one remote answer
+the same id and are two independent local execution domains that must not exclude
+each other; two worktrees of one clone answer the same id and are one domain that
+must. Only the local Git administrative identity separates those, so the lease is
+keyed on the normalised, absolute `git-common-dir` — the same information that
+proved worktree membership in V2-06A. `ResolvedRepository` now carries it as
+`gitCommonDir`, resolved once by the module whose job identity already is.
+
+The file lives in that directory:
+
+```
+<git common dir>/agent-orchestrator-execution-lease.json
+```
+
+Every worktree of a clone resolves to it, including the orchestrator's own
+`<root>.worktrees/<task>` workspaces. It is deliberately not under
+`~/.agent-orchestrator/`: a per-OS-user lock would let two users of one checkout
+each hold "the" lease, which is the split-brain the lease exists to prevent. And
+it is deliberately not inside any working tree, where it would dirty the checkout
+and refuse the next workspace with `SOURCE_WORKTREE_DIRTY`.
+
+### Acquisition is exclusive, and proven so against real processes
+
+The claim is a single exclusive-create operation, not a read followed by a write.
+`tests/dist-artifact/execution-lease-race-dist-artifact.mjs` runs sixteen real OS
+processes at one lease, eight rounds, and requires exactly one winner each time —
+and it is itself held to biting: replacing the exclusive create with an
+overwriting one makes all sixteen win.
+
+### The lease appears complete, or not at all
+
+The first version claimed with `open(…, 'wx')` and wrote the record through the
+same handle afterwards. That is exclusive, and it was not enough — and the race
+harness is what said so, on its first run, rather than a review. Some losers saw
+the winner's file *before its record was in it*, and refused with
+`STALE_LEASE_RECOVERY_UNSAFE` for a lease whose owner was running perfectly well.
+Fail-closed, and the wrong word: that code points an operator straight at `lease
+break` for a healthy run, which is exactly the confusion the two codes exist to
+prevent.
+
+So the record is now written to a temporary file beside the target, flushed, and
+**linked** onto the lease name. `link` is atomic and fails with `EEXIST` when the
+target exists, so it is exclusive *and* publishes the whole record in one
+instant. A filesystem that will not link falls back to the `wx` claim, which is
+still exclusive and only reopens that narrow window. A crash before the link
+leaves an orphan temporary file nothing reads; a crash after it leaves a
+complete, parseable lease with a dead owner — which is precisely the case the
+recovery contract is written for.
+
+### Evidence, not assertion
+
+`acquireRepositoryExecutionLease` returns an opaque `ExecutionLeaseEvidence`, and
+a `leaseHeld: true` would have been the `authPreflightPassed: true` defect again
+in a new place. The arrangement is `core/auth-preflight-evidence.ts`'s, verbatim:
+a nominal type with a `#private` field so no literal is assignable, a runtime
+gate so a cast fails closed, and a reachability test pinning that exactly one
+module in `src/` imports the mint.
+
+The gate itself had to be replaced twice, and the arrangement is worth stating
+precisely because both earlier versions *looked* sufficient. `instanceof` was
+forged with `Object.create` and the real prototype; `#nonce in value` was forged
+by reaching the class through `Object.getPrototypeOf(evidence).constructor`,
+which needs no import at all. The gate is now membership of a `WeakSet` only the
+mint writes to — not reachable from an instance, a prototype, or the class — so
+re-deriving the artefact by any route produces something the gate does not
+recognise.
+
+Four productive writer paths **require** it, non-optionally:
+
+```
+startTask · runTask · runNextTask · releaseTaskWorkspace
+```
+
+`releaseTaskWorkspace` is on that list for a specific reason.
+`assessWorkspaceAdoption` proves a workspace is a *pristine* crash artefact — and
+a workspace a concurrent run has only just prepared looks exactly like one. Only
+exclusive ownership separates them, so leaving `release --attended` outside the
+lease would have been a genuine split-brain hole, not a tidiness question.
+
+The block store keeps its signature. The lease guarantee is **run-scoped** — V2-08
+must hold one lease across a whole block run and perform its ledger writes
+underneath it — and a per-write lease parameter would misstate that. What stops a
+future runner reaching the store from outside a leased scope is an architecture
+test: `createBlockLedger` and `updateBlockLedger` are pinned to exactly one
+importer in `src/`, so a second one is a deliberate act that breaks the build.
+
+### A lease acquired minutes ago is not a lease held now
+
+The driver re-proves the lease against the file **every iteration**, before
+anything else, for the same reason it re-reconciles every iteration: the previous
+step was a subprocess that took minutes. A lease removed underneath a run stops it
+with `EXECUTION_LEASE_LOST`, distinct from `EXECUTION_LEASE_NOT_HELD` — "you lost
+it" and "you never had it" send an operator to different places.
+
+Which means the proof sits at the **effect**, not at the entrance to the function
+that eventually performs it. Four review rounds each found the same defect in a
+new place, and each time the fix was to move the proof rather than to widen it:
+
+| Effect | What the window was | Where the proof is now |
+| --- | --- | --- |
+| branch + worktree creation | 6 Git subprocesses, 383 ms after `startTask`'s gate | immediately before `mkdirSync` / `worktree add` |
+| the writing agent | 9 subprocesses, 585 ms after the driver's gate — it landed a real commit | the agent and verify **seams**, proved at the call; a missing seam is a compile error |
+| durable state writes | a cached boolean from the caller | immediately before the write, which also derives the write target |
+| worktree + branch **removal** | one gate for two commands | one gate per command |
+| the **rollback** of a failed creation | `worktree add` plus six verification probes — a wider window than the creation one | one gate per command, and it removes nothing without them |
+
+The last row is the one that says why the pattern kept recurring. The rollback is
+an *undo*, and an undo does not read as an effect until it deletes a branch a
+successor has since adopted — which a review then did, end to end. A refusal
+there reports `WORKTREE_ROLLBACK_NOT_AUTHORISED` with residue declared, kept
+apart from `WORKTREE_ROLLBACK_INCOMPLETE`: Git declining to remove something this
+run still owns, and this run no longer being allowed to remove anything, look
+identical on disk and are opposite instructions to a human.
+
+### One repository, proved before anything is claimed for it
+
+The lease key is the Git common directory, and `LeaseRepository` is a structural
+interface, so nothing in the type system ties its fields to one place. A review
+paired repository A's `gitCommonDir` — which decides *which lease file is read* —
+with repository B's `root`, which is what callers then write into. Every field
+was genuine; only the combination was a lie, and it acquired a second live
+authority over B alongside B's own honest lease.
+
+No field of the record can settle that, because the record's own
+`repositoryRoot` is written *from* the record at acquire time and so agrees with
+it. It is settled against the filesystem instead — by performing **Git's own
+resolution**, not by matching layouts:
+
+```
+1.  <root>/.git   directory            -> that is the git dir
+                  file "gitdir: <X>"   -> <X> is the git dir, resolved against
+                                          <root> when it is relative
+2.  <git dir>/commondir present        -> the common dir is what it records
+                             absent    -> the git dir is the common dir
+```
+
+The first attempt at this *did* match layouts — it enumerated the three shapes
+someone had thought to measure and refused everything else — and that is worth
+recording, because the failure was not subtle. A **submodule** working tree
+became permanently unrunnable: Git writes its pointer *relative*
+(`gitdir: ../.git/modules/<name>`), a rule inferred from three absolute samples
+rejected it, and `run --attended` and `release --attended` were then refused for
+good while `lease status` printed a derived path for the same repository. A
+`.git` that is a symlink or a junction failed the same way, because only one side
+of the comparison was canonicalised.
+
+A whitelist of measured shapes presented as a rule fails in exactly one
+direction: every layout nobody measured becomes a lockout, and a lockout is not a
+conservative default — it is an outage. Reading `commondir` is what Git itself
+does, so it cannot be fooled by a directory that merely happens to be named
+`worktrees` either.
+
+This is still not the containment check it looks like it should be: a linked
+worktree's root is nowhere near its common dir, and two worktrees of one clone
+are deliberately **one** execution domain.
+
+The refusal has its own code, `REPOSITORY_RECORD_INCOHERENT`. It was folded into
+`LEASE_LOCATION_UNSUITABLE` at first, whose sentence says no location could be
+derived — while `lease status` prints one for the same repository. Two commands
+contradicting each other about one repository is worse than a long refusal.
+
+### Recovery is refused, and the refusal is measured
+
+The question a stale lease asks is whether a dead owner proves no writer survives
+it. That was measured against this build's spawn path rather than read out of
+documentation:
+
+- killing **only** the orchestrator process did take its whole agent tree with it
+  on the Windows host this was measured on — three launch paths, same result;
+- and every process involved was inside a **Job Object the orchestrator did not
+  create**, inherited from whatever launched it. `IsProcessInJob` says so
+  directly, and `src/doctor/exec.ts` disclaims owning the tree in its own header:
+  kernel-enforced ownership "would need … a Windows Job Object, which is a
+  separate architecture and deliberately not part of this module";
+- on POSIX the agent is spawned `detached`, making it a process-group leader —
+  the opposite of a lifetime tied to its parent's.
+
+**That is a platform observation, not a platform guarantee**, and it is not the
+orchestrator's to assert. So nothing takes a lease over automatically:
+
+```
+owner observably running   -> LEASE_HELD                   -> wait
+owner not observably there -> STALE_LEASE_RECOVERY_UNSAFE  -> operator decides
+liveness undetermined      -> STALE_LEASE_RECOVERY_UNSAFE  -> operator decides
+```
+
+Liveness may **refuse and may never permit**. It exists so an operator is told
+"somebody is running" rather than "a run died here", and no path anywhere permits
+an effect because a probe said a process is gone — pids are reused, so `ALIVE` can
+be a stranger and `NOT_FOUND` can be a lie.
+
+### `agent-loop lease status`
+
+```powershell
+agent-loop lease status --repository <abs path>
+```
+
+Read-only. Reports the state, the owner, the run, the liveness and the revision
+of the exact bytes on disk. For a lease whose owner is *not* running it also
+prints what clearing it would require of an operator — and that is prose, not a
+command.
+
+### There is no command that clears a lease, and that is a withdrawal
+
+An attended `lease break` existed here, shaped so that using it was a decision:
+`--attended`, plus the revision and owner that `status` printed, plus a refusal
+for any lease whose owner was running, and no `--force`.
+
+**Three independent adversarial review rounds each found a fresh way for it to
+destroy an authority somebody had legitimately acquired.**
+
+```
+v1  read, decide, unlink the PATH            -> ABA: destroyed a successor's lease
+v2  detach, re-occupy with a placeholder     -> the same defect one level up: a
+                                                0-byte placeholder is UNPARSEABLE
+                                                with the constant revision
+                                                sha256(""), so a second break
+                                                removed it and the first then
+                                                destroyed whatever took the name
+                                                (12/12, real processes)
+v3  detach, restore with link only           -> holds on NTFS; on a filesystem
+                                                that refuses hard links, which
+                                                this module explicitly claims to
+                                                support, every non-matching
+                                                detach becomes an unconditional
+                                                destruction reported as
+                                                "Nothing was removed"
+```
+
+Each fix was reproduced broken by the next round. A destructive operator command
+that has never survived a review is worse than none: it carries the tool's
+authority and was wrong every time anyone looked. So the productive path is
+**gone** — no subcommand, no exported function, no exit-code contract, no
+sentence pointing at it. `tests/v2-07l-execution-lease.test.ts` pins that as a
+contract rather than leaving it to tidiness: no operator-facing text names an
+`agent-loop lease break|clear|force` invocation, and no rendered refusal points
+at a command that does not exist. The source still *discusses* the withdrawn
+command, deliberately — `cli/lease-command.ts` records what each attempt got
+wrong, and the module header sends readers there — because the reason a command
+is absent is worth more than its absence.
+
+What remains for a crashed run is a **manual step, explicitly outside what this
+build guarantees**, printed by `lease status` when the recorded owner cannot be
+found:
+
+1. establish that no orchestrator process and no agent process of that run is
+   still alive — a process id that is gone does not prove this, because an agent
+   can outlive the orchestrator that started it;
+2. re-run `lease status` and confirm it still reports what was read, in
+   particular the same revision;
+3. delete the file at the printed path, deliberately.
+
+Step 1 is a judgement this build cannot make, which is exactly why it is not a
+command. A supported attended recovery flow is its own slice, and its first
+acceptance condition is the one that defeated three attempts here: a stale or
+unreadable lease must be removable by an explicit operator flow **without** any
+possibility that a lease acquired in the meantime is destroyed by an ABA or
+TOCTOU race.
+
+### What V2-07L is not
+
+No owned process containment: the orchestrator still does not create a Job Object
+on Windows or supervise a process group on POSIX, so it cannot assert that its
+agents die with it. That is the missing mechanism, and automatic stale-lease
+recovery needs it first — necessarily before unattended running.
+
+No TTL and no renewal. A lease does not expire, because time alone is never
+evidence that a writer has stopped: a suspended or badly delayed writer can wake
+up and write beside its successor. No block runner, and no change to what the
+ledger means.
+
 ## Not implemented yet
 
 Still missing, deliberately: block execution (V2-08); the dependent commit chain
-(V2-09); unattended operation; an execution lease; and any product-side
+(V2-09); unattended operation; owned process containment; and any product-side
 PR/CI/merge automation.
 
-**The lease now comes before the block runner, not after it**, and V2-07 is what
-forced that change of order. The ledger's compare-and-swap is advisory, so two
-concurrent writers of one ledger can each be told they succeeded while one of the
-two records is silently lost — and "attended" is not mutual exclusion: two
-terminals, two remote-control calls, or one accidental double start are enough. A
-block runner built on this ledger before the lease exists would be building on a
-record that can lose writes. So the order is:
+**The lease came before the block runner, not after it**, and V2-07 is what forced
+that change of order. The ledger's compare-and-swap is advisory, so two concurrent
+writers of one ledger can each be told they succeeded while one of the two records
+is silently lost — and "attended" is not mutual exclusion: two terminals, two
+remote-control calls, or one accidental double start are enough. A block runner
+built on this ledger before the lease existed would have been building on a record
+that can lose writes. So the order was, and the remaining order is:
 
 ```
-V2-07 ledger authority
-        ↓
-execution lease / ownership
-        ↓
-V2-08 attended block runner
+V2-07  ledger authority
+         |
+V2-07L execution lease / ownership          <- shipped
+         |
+V2-08  attended block runner
+         |
+V2-09  dependent tasks / commit chain
 ```
+
+One prerequisite is now explicit that was not before. **Unattended running needs
+owned process containment**, not merely the lease: automatic recovery of a stale
+lease is refused today because a dead owner does not prove that no agent process
+survived it, and that stays true until the orchestrator creates the containment
+itself — a Windows Job Object, a supervised POSIX process group. Until then a
+crashed run is cleared by an operator by hand, following the steps `lease status`
+prints — a judgement a scheduled job cannot make, and one this build does not
+offer a command for.
 
 Inventing a cross-platform atomic file compare-and-swap inside V2-07 was the
 alternative, and it would have burst the slice for a guarantee the lease has to

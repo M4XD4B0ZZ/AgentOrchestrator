@@ -71,6 +71,8 @@ import {
   isAuthPreflightEvidence,
   type AuthPreflightEvidence,
 } from '../core/auth-preflight-evidence.js';
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { TASK_STATE_SCHEMA_VERSION } from '../core/internal/task-state-object-schema.js';
 import type { TaskStateInput } from '../core/task-state.js';
 import { planNextTask } from '../plan/plan-next-task.js';
@@ -100,6 +102,38 @@ import {
 export const START_TASK_OUTCOMES = [
   /** The workspace exists and the first durable state was written. */
   'STARTED',
+  /**
+   * This invocation does not hold the repository's execution lease.
+   *
+   * First, and before anything is read or created. Starting a task creates a
+   * branch, a worktree and a durable record, and two invocations doing that at
+   * once in one repository is the split-brain the lease exists to prevent — so
+   * "may I act here at all" is answered before "is this a task".
+   *
+   * Covers both a value that is not minted evidence and a lease that has since
+   * been removed: `reasonCodes` carries which.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
+  /**
+   * The lease was held when this start began and is not held now.
+   *
+   * Kept apart from {@link EXECUTION_LEASE_NOT_HELD} because the two leave the
+   * repository in opposite states, and the exit code follows the *state*, not
+   * the cause. `NOT_HELD` is refused before anything is opened, so nothing is
+   * out of place and a later invocation may simply succeed. This one can only
+   * be reached once something exists that no durable state accounts for —
+   * `residue` is `true`, and an operator has to deal with it, exactly as
+   * `STATE_NOT_RECORDED` does.
+   *
+   * *What* is left varies by producer, and the operator sentence must not
+   * guess. The rollback path reaches this having already removed the worktree
+   * in one of its two exits, leaving only the branch — which is precisely the
+   * leftover an operator walks past, and which refuses the next start.
+   *
+   * A review found both cases sharing one outcome and therefore one exit code:
+   * same residue, opposite advice.
+   */
+  'EXECUTION_LEASE_LOST',
   /**
    * The same, over a workspace this task's own crashed start had left behind.
    *
@@ -194,6 +228,20 @@ export interface StartTaskDependencies {
    * second preflight.
    */
   readonly authPreflight: () => Promise<AuthPreflightEvidence | null>;
+  /**
+   * Proof that this invocation holds the repository's execution lease.
+   *
+   * **Required, and deliberately not defaulted or optional.** A caller with
+   * nothing to hand here cannot compile, which is the point: an execution lease
+   * that some productive path simply does not ask for is not an execution lease.
+   *
+   * It is the same arrangement as {@link authPreflight}'s evidence and for the
+   * same reason — the artefact cannot be written down, so satisfying this means
+   * having really taken the lease. The two prove different things and neither
+   * substitutes for the other: auth says the agents can run, the lease says this
+   * process is the one allowed to run them *here*.
+   */
+  readonly lease: ExecutionLeaseEvidence;
   /** State-store seams, forwarded unchanged. */
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
@@ -294,6 +342,18 @@ export async function startTask(
   const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
     result({ taskId, ...from });
 
+  // --- 0. May this invocation act on this repository at all? ---------------
+  // Ahead of every other gate, including the cheap syntactic ones. Proven
+  // against the file rather than against the artefact alone: evidence is a
+  // record of a claim that was made, and a claim can have been cleared since.
+  const lease = verifyExecutionLeaseHeldFor(repository, deps.lease);
+  if (lease.code !== 'HELD') {
+    return stop({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      reasonCodes: Object.freeze([lease.code]),
+    });
+  }
+
   // --- 1. Is this a task at all, and may it run? ---------------------------
   if (!isValidTaskId(taskId)) return stop({ outcome: 'TASK_ID_INVALID' });
 
@@ -350,7 +410,31 @@ export async function startTask(
   }
 
   // --- 5. The workspace. The first thing that changes anything. ------------
-  const prepared = await prepareTaskWorkspace(repository, task, { git: deps.git });
+  //
+  // Proved again here, and this is the gate that matters most on this path.
+  // The entry gate at step 0 is now several seconds old: `deps.authPreflight`
+  // sits between them, and in production that is a capability dump plus two
+  // real subscription CLIs — measured at 2552 ms for the dump alone. A review
+  // released the lease inside that window and watched a branch and a worktree
+  // land with no authority at all, because the only later gate was in front of
+  // the *durable write* and these are repository mutations that happen before
+  // it. Nothing may be created here on a lease that is seconds stale.
+  const leaseBeforeMutation = verifyExecutionLeaseHeldFor(repository, deps.lease);
+  if (leaseBeforeMutation.code !== 'HELD') {
+    return stop({
+      outcome: 'EXECUTION_LEASE_NOT_HELD',
+      reasonCodes: Object.freeze([leaseBeforeMutation.code]),
+    });
+  }
+
+  // The lease travels *into* the preparation rather than being proved only in
+  // front of it: six Git subprocesses and 383 ms separate this call from the
+  // `worktree add` inside it, and a review created a branch in a successor's
+  // tenure through that window. `prepareTaskWorkspace` proves it at the effect.
+  const prepared = await prepareTaskWorkspace(repository, task, {
+    git: deps.git,
+    lease: deps.lease,
+  });
 
   // A collision may be this task's own crashed start. Only there is adoption
   // even asked about, so the ordinary path is unchanged and costs nothing
@@ -359,6 +443,38 @@ export async function startTask(
   let adopted = false;
 
   if (!prepared.ok) {
+    // A preparation that stopped because the lease went is not a workspace
+    // refusal, and reporting it as one is how the sibling path went wrong: the
+    // outcome named nothing about authority, and the leftovers looked like an
+    // ordinary rejected workspace an operator should tidy up. They may belong to
+    // a successor now.
+    if (prepared.code === 'WORKTREE_ROLLBACK_NOT_AUTHORISED') {
+      return stop({
+        outcome: 'EXECUTION_LEASE_LOST',
+        residue: true,
+        reasonCodes: Object.freeze([prepared.code]),
+      });
+    }
+
+    // The other half of that same rule, and it was missing.
+    //
+    // `prepareTaskWorkspace` proves the lease immediately before it creates
+    // anything, and a refusal there is the *entire point* of that gate — the
+    // 383 ms window between this function's own check and `git worktree add`.
+    // It was landing in the generic branch below as `WORKSPACE_REFUSED`, which
+    // exits 3 and asks an operator to go and look at a repository where nothing
+    // is out of place. `EXECUTION_LEASE_NOT_HELD` exits 4: this invocation may
+    // not act here, the next one may well succeed.
+    //
+    // Nothing was created either way, so `residue` stays as reported.
+    if (prepared.code === 'EXECUTION_LEASE_NOT_HELD') {
+      return stop({
+        outcome: 'EXECUTION_LEASE_NOT_HELD',
+        residue: prepared.residue,
+        reasonCodes: Object.freeze([prepared.code]),
+      });
+    }
+
     if (!COLLISION_CODES.has(prepared.code)) {
       return stop({
         outcome: 'WORKSPACE_REFUSED',
@@ -389,6 +505,25 @@ export async function startTask(
   // `expectedRevision` is omitted, which is the creation case: the writer read
   // nothing and expects nothing, and the save is refused if a state appeared
   // in the meantime. There is deliberately no force option to reach for.
+  // Proved again, immediately before the write. The entry gate at step 0 is
+  // several seconds old by now: the auth preflight between them starts two real
+  // subscription CLIs. A review released the lease inside that window and
+  // watched a branch, a worktree and a first durable state land with no
+  // authority at all — so the gate that matters is the one nearest the write,
+  // exactly as `advanceTaskState` argues for a move.
+  const stillHeld = verifyExecutionLeaseHeldFor(repository, deps.lease);
+  if (stillHeld.code !== 'HELD') {
+    return stop({
+      outcome: 'EXECUTION_LEASE_LOST',
+      workspace,
+      // The workspace exists and no state records it. Reported for the same
+      // reason a refused write reports it: an operator whose repository now
+      // holds a worktree nothing accounts for has to be told.
+      residue: true,
+      reasonCodes: Object.freeze([stillHeld.code]),
+    });
+  }
+
   const saved = saveTaskState(firstState(workspace, repository, deps.now()), {
     repositoryRoot: repository.root,
     ...(deps.replace !== undefined ? { replace: deps.replace } : {}),

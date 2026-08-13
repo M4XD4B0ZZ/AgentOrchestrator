@@ -46,6 +46,8 @@
 
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 
+import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
+import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { localBranchRef } from '../repo/branch-name.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -91,12 +93,32 @@ export const WORKSPACE_PREPARATION_FAILURE_CODES = [
   'WORKTREE_ALREADY_REGISTERED',
   /** The directory that must hold the workspace could not be created. */
   'WORKTREE_PARENT_UNUSABLE',
+  /**
+   * The caller does not hold this repository's execution lease *now*.
+   *
+   * Proved at the effect rather than inherited: creating a branch and a worktree
+   * is a repository mutation, and authority is a property of the moment it
+   * happens rather than of the moment the caller last looked.
+   */
+  'EXECUTION_LEASE_NOT_HELD',
   /** `git worktree add` refused or failed. Nothing was created. */
   'WORKTREE_CREATE_FAILED',
   /** The created worktree is not what was asked for; it was removed again. */
   'WORKTREE_VERIFICATION_FAILED',
   /** Verification failed *and* the created worktree could not be removed. */
   'WORKTREE_ROLLBACK_INCOMPLETE',
+  /**
+   * Verification failed and the lease was gone before the undo could run, so
+   * nothing was deleted.
+   *
+   * Kept apart from {@link WORKTREE_ROLLBACK_INCOMPLETE}, which they resemble on
+   * disk and not at all in what they mean. That one is Git declining to remove
+   * something this call still owns. This one is this call having stopped being
+   * the repository's writer — so the branch and the worktree may already belong
+   * to a successor that legitimately adopted them, and removing them would
+   * destroy somebody else's workspace rather than clean up its own.
+   */
+  'WORKTREE_ROLLBACK_NOT_AUTHORISED',
 ] as const;
 
 export type WorkspacePreparationFailureCode =
@@ -104,6 +126,8 @@ export type WorkspacePreparationFailureCode =
 
 const PREPARATION_DETAIL: Readonly<Record<WorkspacePreparationFailureCode, string>> = Object.freeze(
   {
+    EXECUTION_LEASE_NOT_HELD:
+      'This invocation does not hold the repository execution lease, so nothing was created.',
     TASK_ID_INVALID: 'The task id is not a legal task identifier.',
     REPOSITORY_ROOT_UNSUITABLE:
       'The repository root is not an absolute path with a directory name of its own.',
@@ -130,6 +154,8 @@ const PREPARATION_DETAIL: Readonly<Record<WorkspacePreparationFailureCode, strin
       'The created worktree did not match the requested branch, base commit or location, and was removed again.',
     WORKTREE_ROLLBACK_INCOMPLETE:
       'The created worktree failed verification and could not be removed again.',
+    WORKTREE_ROLLBACK_NOT_AUTHORISED:
+      'The created worktree failed verification and this invocation no longer holds the repository execution lease, so the undo stopped where it was. Whatever it had not already removed is still there.',
   },
 );
 
@@ -178,6 +204,20 @@ export type WorkspacePreparationResult =
 export interface WorkspacePreparationOptions {
   /** The Git seam. Defaults to the real one. */
   readonly git?: GitRunner;
+  /**
+   * The execution lease, re-proved here immediately before the branch and the
+   * worktree are created.
+   *
+   * **Required**, and for the reason `remove-workspace.ts` gives about its own
+   * boundary: a gate in a caller is a gate at whatever distance the caller
+   * happens to have. `startTask` proves the lease and then spends six Git
+   * subprocesses — measured at 383 ms — reaching this function, and a review
+   * released the lease inside that window and watched a branch and a worktree
+   * land while a *successor* legitimately held the repository. The removal path
+   * was given a gate at the effect and the creation path was not; this is that
+   * asymmetry closed.
+   */
+  readonly lease: ExecutionLeaseEvidence;
 }
 
 function preparationFailure(
@@ -218,7 +258,7 @@ function pathExists(path: string): boolean {
 export async function prepareTaskWorkspace(
   repository: ResolvedRepository,
   task: TaskDefinition,
-  options: WorkspacePreparationOptions = {},
+  options: WorkspacePreparationOptions,
 ): Promise<WorkspacePreparationResult> {
   const git = options.git ?? runGitCommand;
 
@@ -239,6 +279,11 @@ export async function prepareTaskWorkspace(
   if (collision !== null) return preparationFailure(collision);
 
   // --- 4. Create -----------------------------------------------------------
+  // Authority, at the effect. Everything above this line is a question; the
+  // next statement is the first answer that changes the repository.
+  const held = verifyExecutionLeaseHeldFor(repository, options.lease);
+  if (held.code !== 'HELD') return preparationFailure('EXECUTION_LEASE_NOT_HELD');
+
   try {
     mkdirSync(identity.worktreeParent, { recursive: true });
   } catch {
@@ -268,10 +313,16 @@ export async function prepareTaskWorkspace(
   // not create.
   const verified = await verifyWorkspaceMatches(git, identity, basePinnedCommit);
   if (verified.verdict !== 'MATCHES' || verified.canonicalWorktreePath === null) {
-    const rolledBack = await rollBack(git, identity);
+    const rolledBack = await rollBack(git, identity, repository, options.lease);
+    if (rolledBack === 'ROLLED_BACK') return preparationFailure('WORKTREE_VERIFICATION_FAILED');
+    // Both remaining outcomes leave something behind, and both say so. What
+    // separates them is whether removing it would still have been this call's to
+    // do — which is the difference between "clean this up" and "do not touch it".
     return preparationFailure(
-      rolledBack ? 'WORKTREE_VERIFICATION_FAILED' : 'WORKTREE_ROLLBACK_INCOMPLETE',
-      !rolledBack,
+      rolledBack === 'NOT_AUTHORISED'
+        ? 'WORKTREE_ROLLBACK_NOT_AUTHORISED'
+        : 'WORKTREE_ROLLBACK_INCOMPLETE',
+      true,
     );
   }
 
@@ -552,6 +603,9 @@ export async function verifyWorkspaceMatches(
   return matchResult('MATCHES', canonical);
 }
 
+/** What an undo did. Never a boolean: "nothing removed" has two opposite causes. */
+type RollBackOutcome = 'ROLLED_BACK' | 'INCOMPLETE' | 'NOT_AUTHORISED';
+
 /**
  * Undoes a workspace this call created, after its verification failed.
  *
@@ -560,20 +614,52 @@ export async function verifyWorkspaceMatches(
  * from a code path that has just proven it does not understand the state of the
  * repository — exactly when force is least appropriate. If the plain removal
  * does not work, the caller reports residue instead of pretending.
+ *
+ * ── Why the lease is proved here, twice, and not by the caller ──────────────
+ *
+ * This is the second destructive site in the module and it had no gate at all.
+ * The creation gate above was the nearest proof, and between it and these two
+ * commands lie `git worktree add` — seconds on a cold checkout — and the six
+ * probes of {@link verifyWorkspaceMatches}. That is a *wider* window than the
+ * one that was judged unacceptable for creation, on the very two commands
+ * `remove-workspace.ts` gates one at a time.
+ *
+ * A review drove it end to end: lose the lease after `worktree add`, let a
+ * successor acquire the repository and adopt the pristine orphan, then fail
+ * verification here. Both commands ran, and deleted a workspace and a branch the
+ * successor legitimately owned. Nothing in the report named the lease.
+ *
+ * The failure it can still reach is a *lost* one, and the reachable trigger is
+ * ordinary: any of the six probes answering `UNAVAILABLE`, or a fresh worktree
+ * that reads dirty — which this repository's own fixtures record production Git
+ * doing under a system-wide `core.autocrlf=true`.
  */
-async function rollBack(git: GitRunner, identity: TaskWorkspaceIdentity): Promise<boolean> {
+async function rollBack(
+  git: GitRunner,
+  identity: TaskWorkspaceIdentity,
+  repository: ResolvedRepository,
+  lease: ExecutionLeaseEvidence,
+): Promise<RollBackOutcome> {
+  const authorised = (): boolean =>
+    verifyExecutionLeaseHeldFor(repository, lease).code === 'HELD';
+
+  if (!authorised()) return 'NOT_AUTHORISED';
   const removed = await git(identity.repositoryRoot, [
     'worktree',
     'remove',
     identity.worktreePath,
   ]);
-  if (removed.outcome !== 'OK') return false;
+  if (removed.outcome !== 'OK') return 'INCOMPLETE';
 
+  // Re-proved between the two, for the reason the whole slice re-proves things:
+  // the first command is a subprocess, and authority is a property of the moment
+  // an effect happens rather than of the moment before the previous one.
+  if (!authorised()) return 'NOT_AUTHORISED';
   const branchDeleted = await git(identity.repositoryRoot, [
     'branch',
     '-d',
     '--',
     identity.workBranch,
   ]);
-  return branchDeleted.outcome === 'OK';
+  return branchDeleted.outcome === 'OK' ? 'ROLLED_BACK' : 'INCOMPLETE';
 }
