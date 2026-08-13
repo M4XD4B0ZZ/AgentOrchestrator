@@ -790,6 +790,26 @@ describe('the gate refuses a stale authorisation before the record is touched', 
   });
 });
 
+/**
+ * One fix in this file's commit that no test here pins, stated rather than left.
+ *
+ * `readObject` now distinguishes `ENOENT` — the lease was deleted between the
+ * byte read and the stat — from the platform case that reports no usable
+ * identity, and `inspectRepositoryExecutionLease` reports the first as `FREE`.
+ * Reverting that discrimination leaves this suite green, and deliberately so:
+ * the window is between two syscalls inside one function with no seam between
+ * them, so there is no deterministic instrument for it in process.
+ *
+ * What established it was contention, not construction: the fourth review
+ * measured 551 byte reads under churn producing `ino === 0n` **zero** times and
+ * `ENOENT` 181 times, and 18 of 36 barrier-released break attempts answering
+ * `OBJECT_IDENTITY_UNVERIFIABLE` with the name already empty. A test that
+ * reproduced that would be a race with a timeout, which is the kind of gate this
+ * repository has already had to remove once for firing at random.
+ *
+ * So it is pinned by the reviewer's measurement and by nothing here. The next
+ * round should attack that, not accept it.
+ */
 describe('a detach the filesystem refused is not an absence', () => {
   /**
    * A guard nothing in the repository pinned, found by the fourth review.
