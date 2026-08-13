@@ -441,9 +441,14 @@ function readLeaseFile(path: string, key: string): ReadLease {
 
 /** Reads the current lease state without changing anything. Never throws. */
 export function inspectRepositoryExecutionLease(
-  repository: LeaseRepository,
+  given: LeaseRepository,
   deps: { readonly processAlive?: ProcessLivenessProbe } = {},
 ): LeaseInspection {
+  // Read once here too. This one only reports, so a shifting record could not
+  // grant anything - but an inspection is what an operator then acts on, and a
+  // report about one repository under another's name is a lie whether or not it
+  // is a privileged one.
+  const repository = snapshotRepositoryRecord(given);
   const location = deriveExecutionLeaseLocation(repository);
   if (!location.ok) {
     return inspection({ state: 'LOCATION_UNSUITABLE', path: '' });
@@ -728,10 +733,22 @@ function sameDirectoryOnDisk(left: string, right: string): boolean {
  * interleave with. Never throws.
  */
 export function acquireRepositoryExecutionLease(
-  repository: LeaseRepository,
+  given: LeaseRepository,
   request: ExecutionLeaseRequest,
   deps: ExecutionLeaseDependencies,
 ): LeaseAcquireResult {
+  // One reading of the record, before the gate below and before the document
+  // built from it (LF-2, and the one entry point the original fix missed).
+  //
+  // An independent review reproduced the consequence: `repositoryRecordIsCoherent`
+  // reads `root` and answers about repository A, and the durable record is then
+  // written from a second read that answers B. Nothing is forged - both roots
+  // are genuine - and the result is a lease at A's key whose document names B,
+  // which `verifyExecutionLeaseHeldFor` then reads back as `HELD` for B. That is
+  // the second simultaneous authority the coherence gate exists to prevent,
+  // reached *through* it. A gate and the effect it guards must read one value.
+  const repository = snapshotRepositoryRecord(given);
+
   const location = deriveExecutionLeaseLocation(repository);
   if (!location.ok) return acquireFailure('LEASE_LOCATION_UNSUITABLE');
 
@@ -964,14 +981,29 @@ function discard(path: string): void {
 export type VerifiedRemoval =
   /** The verified bytes were detached and deleted. */
   | 'REMOVED'
-  /** Something else was there; it was detached and put back, or left quarantined. */
+  /** Something else was there. It was detached and **put back**. */
   | 'CHANGED'
+  /**
+   * Something else was there, and it could not be put back: the freed name had
+   * been taken. The record is **kept** in the quarantine file, never deleted.
+   *
+   * Its own member rather than a shade of `CHANGED`, because the two are
+   * opposite states of the repository - one leaves the lease exactly as it was
+   * found, the other leaves a writer displaced and a file inside the
+   * administrative directory. An independent review found the collapsed version
+   * telling an operator to inspect a `.breaking-` file the same call had
+   * deleted, which is the same "one code for two end states" defect the
+   * `DETACH_FAILED` split had already been made for once.
+   */
+  | 'CHANGED_QUARANTINED'
   /** Nothing was at the name. */
   | 'ABSENT'
   /** The name could not be detached at all. Nothing was touched. */
   | 'DETACH_FAILED'
-  /** Detached, and then unreadable: neither removed nor identifiable. */
-  | 'UNIDENTIFIABLE';
+  /** Detached, then unreadable, and **put back**. */
+  | 'UNIDENTIFIABLE'
+  /** Detached, then unreadable, and kept in quarantine: it could not be put back. */
+  | 'UNIDENTIFIABLE_QUARANTINED';
 
 /**
  * Removes exactly the bytes `matches` accepts, or nothing at all.
@@ -1110,22 +1142,68 @@ export function removeVerifiedLease(
     return 'REMOVED';
   }
 
-  // Not ours to remove — put it back. `link` and never `rename`: if somebody
-  // acquired the freed name in the meantime, that acquisition is a real
-  // authority and stands, and `EEXIST` is the answer that says so.
-  try {
-    linkSync(quarantine, leasePath);
-  } catch {
-    // Either somebody holds the name (`EEXIST`) or the filesystem refuses to
-    // link. Both leave the detached file where it is, deliberately: deleting it
-    // would be destroying a record this call has just decided it may not
-    // remove, and a stray file inside the administrative directory is inert,
-    // inspectable and recoverable. An earlier version discarded it here, which
-    // turned a refusal into a deletion.
+  // Not ours to remove — put it back.
+  if (putBack(quarantine, leasePath, bytes)) {
+    discard(quarantine);
     return bytes === null ? 'UNIDENTIFIABLE' : 'CHANGED';
   }
-  discard(quarantine);
-  return bytes === null ? 'UNIDENTIFIABLE' : 'CHANGED';
+  // It could not be put back, so it is **kept** where it is: deleting it would
+  // destroy a record this call has just decided it may not remove, and a stray
+  // file inside the administrative directory is inert, inspectable and
+  // recoverable. An earlier version discarded it here, which turned a refusal
+  // into a deletion.
+  return bytes === null ? 'UNIDENTIFIABLE_QUARANTINED' : 'CHANGED_QUARANTINED';
+}
+
+/**
+ * Puts a detached record back at the lease name, without ever overwriting.
+ *
+ * ── Why this needed a second mechanism ─────────────────────────────────────
+ *
+ * The restore was a bare `linkSync`, chosen because `link` cannot clobber: if
+ * somebody acquired the freed name, `EEXIST` says so and their authority
+ * stands. That is right, and it was not enough. `link` is unavailable on whole
+ * filesystems — FAT and some network mounts — and this module *ships an entire
+ * acquire fallback for exactly those*, so on them the restore could never
+ * succeed. Every refusal established after the detach therefore left the lease
+ * name **empty** while reporting that nothing had been removed, and the next
+ * writer took a repository whose owner was still running.
+ *
+ * An independent review reproduced that without mocking anything, by saturating
+ * NTFS's 1024-name limit on the very inode being restored. It is the third
+ * withdrawn attempt's defect, shipped: the README named that attempt's flaw as
+ * "on a filesystem that refuses hard links … every non-matching detach becomes
+ * an unconditional destruction", and the fix at the time closed the *deletion*
+ * half while leaving the *dispossession* half in place.
+ *
+ * So the restore now mirrors the claim it undoes. `link` first, because it is
+ * atomic and publishes the whole record; an **exclusive create** second, which
+ * is what `claimViaExclusiveCreate` uses on the same filesystems and for the
+ * same reason. Both refuse to overwrite — `EEXIST` from either means the name
+ * belongs to somebody else now — so the rule the detach exists to enforce is
+ * unchanged: *the lease name is never touched by an operation that can clobber*.
+ *
+ * The fallback writes a copy rather than relinking the object, so the restored
+ * record is a different inode carrying identical bytes. Nothing reads a lease by
+ * inode — identity here is the nonce inside the record — so the holder's next
+ * `verifyExecutionLeaseHeld` answers `HELD` exactly as before.
+ *
+ * Returns whether the record is back at the lease name. `false` means it is
+ * still in quarantine, which is a state the caller must report as itself.
+ */
+function putBack(quarantine: string, leasePath: string, bytes: Buffer | null): boolean {
+  try {
+    linkSync(quarantine, leasePath);
+    return true;
+  } catch (error) {
+    // Somebody holds the name. That acquisition is a real authority and stands.
+    if (safeErrnoCode(error) === 'EEXIST') return false;
+    // The filesystem will not link. Without the detached bytes there is nothing
+    // to write back — a record this call could not even read is one it cannot
+    // reconstruct — so it stays in quarantine.
+    if (bytes === null) return false;
+    return writeRecord(leasePath, bytes) === null;
+  }
 }
 
 /**
@@ -1267,13 +1345,17 @@ export function verifyExecutionLeaseHeld(evidence: unknown): UnscopedLeaseVerify
  * refused outright rather than resolved.
  */
 export function verifyExecutionLeaseHeldFor(
-  repository: LeaseRepository,
+  given: LeaseRepository,
   evidence: unknown,
 ): LeaseVerifyResult {
   if (!isExecutionLeaseEvidence(evidence)) {
     return Object.freeze({ code: 'EVIDENCE_INVALID' as const });
   }
 
+  // The two reads this makes - the key it derives a path from, and the root it
+  // compares the document against - must be of one reading. Callers snapshot
+  // before calling, and this closes the same hole for the ones that do not.
+  const repository = snapshotRepositoryRecord(given);
   const location = deriveExecutionLeaseLocation(repository);
   // `leasePathOf` reads a private field, so it throws for anything that passed
   // the brand check without going through the constructor — which a review
@@ -1396,6 +1478,16 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   );
   if (removed === 'ABSENT') return Object.freeze({ code: 'LEASE_ABSENT' as const, detail: null });
   if (removed === 'CHANGED') return Object.freeze({ code: 'NOT_OWNER' as const, detail: null });
+  if (removed === 'CHANGED_QUARANTINED') {
+    // Somebody else's record, detached and not restorable because the freed name
+    // was taken in that instant. `NOT_OWNER` is still the honest headline — this
+    // holder does not own what is there — and the detail says the part an
+    // operator would otherwise discover only by looking inside `.git`.
+    return Object.freeze({ code: 'NOT_OWNER' as const, detail: 'RECORD_QUARANTINED' });
+  }
+  if (removed === 'UNIDENTIFIABLE_QUARANTINED') {
+    return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: 'RECORD_QUARANTINED' });
+  }
   if (removed === 'UNIDENTIFIABLE') {
     // A detail rather than `null`: an operator hitting this has a file they
     // cannot read where their lease was, and a code with no detail at all was a

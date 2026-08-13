@@ -354,6 +354,13 @@ export function breakInspectedLease(
       return breakResult('LEASE_ALREADY_GONE');
     case 'CHANGED':
       return breakResult('LEASE_CHANGED_SINCE_INSPECTION');
+    case 'CHANGED_QUARANTINED':
+      // The same refusal, and a materially different repository afterwards: the
+      // record that was there is now in a quarantine file, its writer displaced,
+      // and the lease name belongs to whoever took it. The operator is told,
+      // because the alternative is that they find a `.breaking-` file inside
+      // `.git` with nothing in the build accounting for it.
+      return breakResult('LEASE_CHANGED_SINCE_INSPECTION', 'RECORD_QUARANTINED');
     case 'DETACH_FAILED':
       // Nothing happened: the filesystem refused to detach the record, which on
       // Windows is what a file another process has open answers. The lease is
@@ -363,6 +370,10 @@ export function breakInspectedLease(
       // hunting for a file that was never created.
       return breakResult('LEASE_NOT_BREAKABLE', 'DETACH_REFUSED');
     case 'UNIDENTIFIABLE':
-      return breakResult('LEASE_BREAK_VERIFICATION_FAILED', 'UNREADABLE_AFTER_DETACH');
+      // Detached, unreadable, and **put back**. There is no quarantine file to
+      // send anybody to, and the sentence for this outcome used to promise one.
+      return breakResult('LEASE_BREAK_VERIFICATION_FAILED', 'UNREADABLE_AND_RESTORED');
+    case 'UNIDENTIFIABLE_QUARANTINED':
+      return breakResult('LEASE_BREAK_VERIFICATION_FAILED', 'UNREADABLE_AND_QUARANTINED');
   }
 }
