@@ -75,12 +75,12 @@ npm run verify
 
 `verify` is the canonical full Foundation verify command. It runs, in this
 order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
-`test:dist-trusted-profile`, `test:dist-lease-race`, `test:foundation-safe`,
-`test:windows-tree-kill-tool-release`. `build` runs immediately before the three
-dist artefact checks, so all of them always run against a fresh build, never a
-stale or missing one, and there is only ever one build per `verify` run. The two
-vitest gates run **sequentially**, in that order — the real-process harness never
-runs alongside the foundation set.
+`test:dist-trusted-profile`, `test:dist-lease-race`, `test:dist-lease-release`,
+`test:foundation-safe`, `test:windows-tree-kill-tool-release`. `build` runs
+immediately before the four dist artefact checks, so all of them always run
+against a fresh build, never a stale or missing one, and there is only ever one
+build per `verify` run. The two vitest gates run **sequentially**, in that order
+— the real-process harness never runs alongside the foundation set.
 
 `test:dist-trusted-profile` checks the *built* trusted-profile module
 (`dist/config/internal/trusted-profile.js`): that it resolves the OS user
@@ -98,6 +98,23 @@ compare-and-swap passed every single-process test it had and lost writes to a
 concurrent second caller; this is the check that would have caught it, pointed at
 the mechanism that replaced it. It found a real defect on its first run — see
 "The lease appears complete, or not at all" below.
+
+`test:dist-lease-release` measures the **other half of a lease's life**: six OS
+processes contend, the winner gives the lease back, and the directory is then
+read. Four properties per round — exactly one owner, every loser refused with
+`LEASE_HELD`, a reported release having actually destroyed the lease, and
+nothing of the protocol left in the Git administrative directory afterwards —
+and then the same six contend again, so "the file is gone" is distinguished from
+"the file is gone and the protocol still works".
+
+It is a separate gate for the same reason its sibling is: a release is an
+**effect on a directory several writers share**, and no return value can show it
+happened. `removeVerifiedLease` reduced to `return 'REMOVED'` satisfies every
+in-process assertion in this repository and fails this check — that mutant is
+the gate's acceptance criterion, not an illustration. It exists because the only
+real-process measurement of the release effect used to be incidental to the
+attended-break harness, and was lost when that harness was withdrawn with the
+break: a coverage regression a green gate cannot show you.
 
 **`test:foundation-safe` is not "all tests", but it is the full regression
 set.** It runs every vitest file except one:
@@ -139,6 +156,9 @@ npm run test:windows-tree-kill-tool-release
                               # `verify` runs last
 npm run build                # emit dist/ (Node-executable CLI)
 npm run test:dist-lease-race  # only the real-process execution-lease race
+npm run test:dist-lease-release # only the real-process acquire -> release check
+                              # (tests/dist-artifact/execution-lease-release-dist-artifact.mjs),
+                              # against whatever dist/ already exists — no build
 npm run test:dist-doctor     # run only the dist-artefact child check
                               # (tests/dist-artifact/run-completion-dist-artifact.mjs),
                               # against whatever dist/ already exists — no build
@@ -152,10 +172,12 @@ npm run verify:dist-trusted-profile # build, then check the *built* trusted-prof
                               # module (dist/config/internal/trusted-profile.js)
 ```
 
-Both dist artefact checks are plain Node scripts, not vitest test files, so
-they are never picked up by vitest's default `tests/**/*.test.ts` glob and a
+Every dist artefact check is a plain Node script, not a vitest test file, so
+none of them is picked up by vitest's default `tests/**/*.test.ts` glob and a
 plain `npm test` on a clean checkout (no `dist/` yet) does not depend on a
-prior build.
+prior build. (This paragraph said "both" while there were three of them, which
+is the same class of stale count this repository keeps having to correct: the
+authority is the `verify` chain above.)
 
 `schemas/task-state.schema.json` is **generated**. Do not edit it by hand — a
 test fails if it no longer matches the Zod schema in `src/core/task-state.ts`.
@@ -3729,20 +3751,15 @@ be a stranger and `NOT_FOUND` can be a lie.
 agent-loop lease status --repository <abs path>
 ```
 
-Read-only. Reports the state, the owner, the run, the liveness and the revision
-of the exact bytes on disk. For a lease that is *recoverable* — nothing
-occupying it can be shown to be running — it also prints the exact break command
-for it, revision and owner pid already filled in. For anything else it prints no
-command at all.
+Read-only. Reports the state, the owner, the run, the liveness, the revision of
+the exact bytes on disk, and the filesystem object they are in. It prints no
+command to act on any of it, and this build has none.
 
-### The break was withdrawn once, and came back under a contract (V2-07LR)
+### The break was withdrawn, brought back, and withdrawn again (V2-07LR-Y)
 
-An attended `lease break` existed here, shaped so that using it was a decision:
-`--attended`, plus the revision and owner that `status` printed, plus a refusal
-for any lease whose owner was running, and no `--force`.
-
-**Three independent adversarial review rounds each found a fresh way for it to
-destroy an authority somebody had legitimately acquired.**
+An attended `lease break` existed here twice. The first time, three independent
+adversarial review rounds each found a fresh way for it to destroy an authority
+somebody had legitimately acquired:
 
 ```
 v1  read, decide, unlink the PATH            -> ABA: destroyed a successor's lease
@@ -3762,102 +3779,193 @@ v3  detach, restore with link only           -> holds on NTFS; on a filesystem
                                                 "Nothing was removed"
 ```
 
-Each fix was reproduced broken by the next round, and withdrawing it was right: a
-destructive operator command that has never survived a review is worse than none.
+It came back in V2-07LR under a contract written from what had defeated it: the
+operator naming the lease by the digest of its bytes **and** by the filesystem
+object, both re-established on the record the removal had already detached. The
+argument for bringing it back was that refusing to ship the destructive operation
+did not remove the destructive operation — `status` printed a manual procedure
+instead — it only removed the place where the race could be closed.
 
-**Leaving it withdrawn was not.** What V2-07L shipped in its place was `lease
-status` printing a manual procedure — establish that nothing is running, re-read
-the revision, then delete the file inside `.git` yourself — together with a
-warning that between the reading and the deleting a lease can be legitimately
-re-acquired, and that deleting then destroys a running invocation's authority.
-That is the *same ABA*, handed to a human who has no way to win it. Refusing to
-ship the destructive operation did not remove the destructive operation; it
-removed the only place where the race could be closed.
-
-So V2-07LR brings the command back. Three things make it a different command
-from the one that was withdrawn:
+**That argument was wrong, and a sixth review proved it by closing nothing.**
+The race could not be closed there either.
 
 ```
-identity   the operator names the lease by the digest of its bytes, so the
-           command acts on the lease that was inspected, never on "whatever is
-           at the path now"
-effect     that identity is re-established on the bytes the removal has ALREADY
-           DETACHED - the name is never touched again except through a `link`,
-           which cannot overwrite
-no carry   every fact the gate established is re-established at the effect;
-           nothing the gate concluded travels forward as a permission
+v4  digest + object identity, re-established  -> removed a LEGITIMATELY ACQUIRED
+    on the detached record                       lease, reproduced end to end
 ```
 
-```powershell
-agent-loop lease break --repository <abs path> --attended `
-  --expected-revision <digest> --expected-object <dev:ino> --owner-pid <pid>
+**Why the contract cannot be written.** A break has to name one object and still
+be acting on that same object after the window between an operator reading a
+report and the removal running. For the record that most needs recovering — the
+zero-byte artefact a crash leaves between taking the name and writing the record
+— every available fact collapses at once:
+
+```
+owner pid   absent, so the in-predicate liveness re-check is skipped entirely
+revision    sha256(""), a constant every empty file in existence shares
+object id   a (dev,ino) pair, on a module that then still shipped fallbacks for
+            FAT and network mounts, where such pairs are reused promptly
 ```
 
-**The authorisation names an object, not only its contents**, and that is not
-belt-and-braces. The crash-window artefact is a zero-byte file; its digest is the
-constant `sha256("")`; so an authorisation naming only that digest matched *any*
-empty object at the lease name — including the transient one every acquisition
-passes through on a filesystem that refuses hard links, where the name is taken
-by `openSync(path, 'wx')` and the record written through that handle afterwards.
-An independent review reproduced a break removing a live exclusive claim that
-way. Content cannot identify an object whose content is nothing, and time cannot
-either: a modification stamp is rounded to two seconds on some filesystems and is
-trivially shared by a successor.
+The two conditions were not an unlucky coincidence. The transient empty lease name
+existed because `link` failed and the claim fell back to `openSync(path,'wx')` —
+so it arose on exactly the filesystems where the index is reusable. That fallback
+has since been withdrawn too (below), which removes the empty-name class; the
+break was already gone by then, and it is the collapse of all three facts at once
+that is the reason, not any one of them being separately repairable. Closing this
+needs an atomic compare-and-delete on a directory entry, which no portable
+filesystem primitive offers. **A contract that requires a primitive which does
+not exist is not repaired by asking harder**, and four consecutive rounds of
+asking harder is the evidence.
 
-So `lease status` prints `Object` — device and inode, read as 64-bit values
-because a Windows file index does not fit in a `Number` — the break requires it,
-and it is re-established **on the object the removal has already detached**.
-Where the platform reports no usable identity the lease is not offered as
-recoverable and the break refuses for that case, rather than falling back to the
-digest it just replaced.
+So there is no `lease break`, no `--force`, no unattended break, no environment
+variable and no API back door. `status` does not print a manual procedure either:
+a printed procedure is the same destructive operation with the tool's help
+removed. Clearing a dead lease is a decision outside this build.
 
-`--attended` is required for the reason `release --attended` requires it, and
-there is no `--force`, no unattended break and nothing anywhere that breaks a
-lease automatically. `--owner-pid` is required where the lease records one and
-refused where it records none — a crash-window artefact names no process and is
-identified by its bytes alone. Every attempt ends in exactly one of five durable
-answers, and they are five because they ask five different things of an operator:
+**The renderer was not merely a caller of the unsafe operation.** For a
+crash-window record it filled the constant `sha256("")` into a ready-made command
+line under the heading "This lease is recoverable", and then stated "Nothing is
+removed on a revision you did not see" — a guarantee that is empty for exactly
+that class — and "the revision is the lease's identity", which contradicts the
+module that computes the identity. The tool supplied the fact that made the
+authorisation vacuous and described it as the fact that made it safe. That is why
+a report here may state what was observed and may not offer a destructive next
+step.
 
-| Outcome | Exit | What it means |
-| --- | --- | --- |
-| `LEASE_REMOVED` | 0 | The lease you inspected is gone. It was still the same record when it was detached. |
-| `LEASE_ALREADY_GONE` | 0 | Nothing was there. **This invocation removed nothing** — a different fact from the one above. |
-| `LEASE_CHANGED_SINCE_INSPECTION` | 4 | Something else is there. Inspect again; do not repeat with the old revision. The reason line says what was touched: nothing, `RECORD_RESTORED`, or `RECORD_QUARANTINED`. |
-| `LEASE_NOT_BREAKABLE` | 4 | Its owner is running, its liveness is undetermined, the authorisation names another lease, or the filesystem refused the detach. Nothing was removed; a refusal established only *after* the detach puts the record back, or keeps it. |
-| `LEASE_BREAK_VERIFICATION_FAILED` | 3 | A record was detached and could not be read back. It is **kept**, beside the lease path, inert and inspectable. |
+A later recovery is a different design — quarantine-and-report, which never
+unlinks, taking its second confirmation against a quarantine name only that call
+knows — and it is a product decision of its own, not a fifth patch.
 
-Liveness keeps the rule it has everywhere else: it may refuse and may never
-permit. `ALIVE` and `UNDETERMINED` both stop a break; `NOT_FOUND` does not
-authorise one — the operator's explicit, identity-bound authorisation does.
-Classification and removal authority are separate decisions
-(`assessLeaseRecovery` reports; it authorises nothing), so a lease can be
-classified stale and still fail the removal because ownership changed.
+### The acquire fallback is withdrawn, and the lease now needs hard links (V2-07LR-Y)
 
-**What the real-process harness measured.** `test:dist-lease-break-race` is a new
-`verify` gate: six breaker processes attempt the same authorisation for three
-seconds while six acquirers take and hold the freed lease. Against the withdrawn
-version's first shape — decide from the inspection, remove by name — every round
-records six acquisitions and **zero surviving records**: each successor's lease
-is deleted the instant it is written. Against this one, the successor's record is
-always still there. It also found two things worth stating plainly:
+Independent of the break, and the change that closes the class rather than one
+caller. `claimViaExclusiveCreate` was the second claim mechanism: where `link`
+failed it took the lease name with `openSync(path,'wx')` and wrote the record
+afterwards. Two defects were reproduced on the object it produced, and a third
+was one path difference away.
 
-- on Windows under this concurrency, `rename` can **report success without having
-  moved anything**. The removal therefore reads the result of its own detach
-  instead of trusting the call, and reports "already gone" where it used to
-  report a quarantined record that had never been created;
-- a break attempt can still **displace** a successor that acquired inside the
-  window between the gate read and the rename: its record is detached, and if the
-  freed name has been taken it stays detached. It is *kept*, never deleted, and
-  the displaced writer cannot write — it fails its next authority check, which
-  every effect in this build takes. Closing that needs an atomic compare-and-delete
-  on a directory entry, which no portable filesystem primitive offers. It is named
-  here rather than argued away, because the previous two attempts to argue it away
-  were both wrong.
+**One.** Its rollback gave the claim back with
 
-The destructive entry point lives in its own module, `lease/lease-recovery.ts`,
-and a test pins its importers to exactly one: the CLI command that requires
-`--attended`. `execution-lease.ts` is imported by a dozen modules, and a break
-exported from there would be reachable from every one of them.
+```
+(present) => nonceOfBytes(present) === null || nonce === ourNonce
+```
+
+and `nonceOfBytes` answers `null` for anything unparseable — including an empty
+file, because `JSON.parse('')` throws. The empty file at that name is not
+necessarily ours: it is exactly what a *competing* acquirer leaves while it sits
+in its own pre-write window. Reproduced with **measurably different inodes**, so
+no identity collision and no filesystem assumption were involved: P1's rollback
+deleted P2's file, P2 kept its descriptor and still believed it held the claim,
+and the lease name was left free for a third writer.
+
+**Two.** Fixing that predicate was not enough. `removeVerifiedLease` detaches a
+record by `rename`, and when it may not remove it, puts it back by `link`. On a
+filesystem with no links the restore falls back to writing a **copy** and the
+caller then discards the detached original — destroying the object of a writer
+that still holds its descriptor. Measured end state: the victim writes its record
+into an orphaned inode, the lease name holds a different permanently-empty file,
+every later acquirer is refused, and nothing in the build can clear it. That
+artefact is not a crash window: no run died, the build created it.
+
+**Three.** `release` reaches the same code by the same route.
+
+So the mechanism is gone rather than patched a fourth time:
+
+```
+hard-link path available      -> lease lifecycle supported
+hard-link path unavailable    -> no exclusive-create substitute
+                              -> fail closed BEFORE a lease exists
+                              -> LEASE_FILESYSTEM_UNSUPPORTED, with the errno
+```
+
+**This is a stated reduction in supported platforms, not a silent one.** FAT,
+exFAT and some network or container-mounted paths can no longer host a
+repository's execution lease, and `agent-loop run --attended` refuses there
+before creating anything. The alternative was an acquisition whose release and
+rollback could not be implemented safely — a supported-looking lease whose
+destructive operations lack the primitive they need. A named unsupported
+filesystem is the better product.
+
+Three consequences worth stating plainly:
+
+- the lease name now only ever appears **already complete**, published by a
+  `link` of a fully written staged record. No acquirer ever holds it with an
+  unwritten file, which is what makes the copying restore in `putBack` safe: its
+  victim class no longer exists;
+- `putBack` keeps that copying fallback anyway, for the link failure that is an
+  anomaly rather than a platform fact — NTFS's 1024-name limit on the object
+  being restored, or a permission refusal. Without it a refused restore leaves
+  the lease name free while reporting that nothing was removed, which is the
+  dispossession defect the fallback was added to close;
+- the acquire rollback predicate is strict regardless: `nonceOfBytes` answering
+  `null` is the **absence** of an ownership fact, never one. A failed write leaves
+  its own half-written file at the lease name rather than risking a stranger's.
+  **A crash artefact left behind is strictly better than two writers.**
+
+`removeVerifiedLease` now has two call sites, both inside `execution-lease.ts` —
+the evidence-mint rollback and `release` — and a test pins that no module outside
+it calls the function, scanning code with comments stripped so that explaining
+the mechanism is not mistaken for reaching it.
+
+### The release contract is pinned by value and by effect (V2-07LR-AA)
+
+This round changed **no release behaviour**. It is a remediation of the
+*observability* of behaviour that was already correct, and it is here because
+for an authority layer that distinction does not lower the bar: a guarantee
+nothing can break is a guarantee nobody is keeping.
+
+Two gaps, both established by mutation against the shipped head rather than by
+reading:
+
+**One — the failure half of the release map was pinned by outcome type only.**
+`releaseRepositoryExecutionLease` maps nine `VerifiedRemoval` states onto six
+codes and five `detail` tokens, and the suite asserted `result.code` alone.
+Every token could be exchanged for another, or for `null`, with the whole suite
+green — and those tokens are the difference between *"a successor holds this
+repository"*, *"this repository has no owner and there is a record in
+quarantine"*, and *"the lease is still exactly where it was"*. Three sentences
+that send an operator to three different places.
+
+The map is one-to-one, which is what makes it pinnable: each of the nine states
+produces a distinct `(code, detail)` pair, so a test that asserts the pair has
+named the state. `tests/v2-07lr-release-window.test.ts` asserts all nine as
+whole values, reaching four of them through the window between the read that
+proves the lease and the syscall that removes it — the `vi.mock('node:fs')`
+after-read hook `tests/v2-07lr-enoent-window.test.ts` already established, with
+no sleep, no barrier and no child process. Where a real refusal is available it
+is used rather than injected: the `DETACH_REFUSED` case renames a directory
+Windows will not rename.
+
+**Two — a release was never checked to have had an effect.** The `discard` that
+deletes the detached record after a successful removal could be dropped
+entirely: the lease name is free either way, so every assertion still held —
+while every release left a full copy of a live lease record under a
+`.breaking-…` name inside the Git administrative directory, permanently, with
+nothing in the build that removes it. So the rule now is that a release is read
+from the *directory*: after every successful one, no entry whose name this
+protocol owns may remain — not the lease, not a quarantine record, not a staging
+file.
+
+That is also why `test:dist-lease-release` exists. The only real-process
+measurement of the release effect used to be incidental to the attended-break
+harness and was deleted with it, which is the coverage class this round is
+really about: **when a test or harness is removed, the question is not only
+which of its assertions were replaced, but which production claims cite it as
+their only instrument.** Nothing load-bearing was deleted knowingly; the
+measurement went anyway.
+
+Nineteen mutants of the release path — every `detail` token, both directions of
+the `ENOENT` discriminations in the detach and in the read of the detached
+object, the removal predicate, both `discard` calls, `occupancyOf`'s fail-closed
+answer, and `removeVerifiedLease` reduced to `return 'REMOVED'` — are killed by
+the two new vitest files. The last of those is separately the acceptance
+criterion of the real-process gate, and fails it four ways per round.
+
+One documentation defect went with it: the `ENOENT` arm of the detached-object
+read cited the break harness as its empirical record, and that harness is no
+longer in the repository. The measurement stands as history and now says so,
+beside the instrument that pins the branch today.
 
 ### One reading of the authority record (LF-2)
 
@@ -3916,15 +4024,19 @@ One prerequisite is now explicit that was not before. **Unattended running needs
 owned process containment**, not merely the lease: *automatic* recovery of a
 stale lease is refused because a dead owner does not prove that no agent process
 survived it, and that stays true until the orchestrator creates the containment
-itself — a Windows Job Object, a supervised POSIX process group. `lease break`
-does not change that and is not a step towards it: it is attended precisely
-because the judgement it depends on ("nothing of that run is still alive") is one
-a scheduled job cannot make.
+itself — a Windows Job Object, a supervised POSIX process group.
+
+Recovering a dead lease does not change that and was never a step towards it: the
+judgement it depends on ("nothing of that run is still alive") is one a scheduled
+job cannot make, which is why every attempt at it was attended. With the break
+withdrawn a second time, the crash window is **open again and stated as open** —
+a repository whose run died between claiming the lease and recording it needs a
+human to clear the file, and this build will not do it or tell them how.
 
 Inventing a cross-platform atomic file compare-and-swap inside V2-07 was the
 alternative, and it would have burst the slice for a guarantee the lease has to
-provide anyway. Recovery closed the crash window, which is a different problem
-and was the one blocking a block runner from being *restartable*.
+provide anyway. It is also, as it turns out, the primitive an attended break
+would have needed: see the withdrawal above.
 
 V2-07 sharpened what the lease has to be, in three ways. It showed the gap
 concretely — two run ledgers in one repository can each hold the same task

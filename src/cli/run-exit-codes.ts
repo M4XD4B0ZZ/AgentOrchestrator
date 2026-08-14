@@ -28,11 +28,6 @@
  * outcome itself is the execution slice's decision, not this table's.
  */
 
-// A type-only import, and it stays one: `verbatimModuleSyntax` erases it
-// entirely, so this table can name the recovery vocabulary without becoming a
-// route to the function that removes a lease. The importer pin in
-// `tests/v2-07lr-lease-recovery.test.ts` distinguishes the two deliberately.
-import type { LeaseBreakOutcome } from '../lease/lease-recovery.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
 import type { RunOutcome } from '../run/run-driver.js';
 import type { RunPlanConclusion } from '../run/run-plan.js';
@@ -241,36 +236,12 @@ export function exitCodeForReleaseOutcome(outcome: ReleaseOutcome): CliExitCode 
   return RELEASE_EXIT_CODES[outcome];
 }
 
-/**
- * What `lease break` exits with (V2-07LR).
+/*
+ * There is deliberately no `lease break` table here any more.
  *
- * Two judgements are worth stating, because both were tempting to get wrong.
- *
- * `LEASE_ALREADY_GONE` is 0. The end state an operator asked for — nothing
- * occupying the lease path — is the end state they have, and a script that
- * breaks before starting must not treat "there was nothing to break" as a
- * failure. The *report* still says plainly that this invocation removed nothing,
- * because that is a different fact from having removed something.
- *
- * `LEASE_CHANGED_SINCE_INSPECTION` is 4 and not 3. Nothing is out of place: the
- * likeliest reason for it is that a successor legitimately acquired the lease,
- * which is the healthy case this refusal exists to protect. Re-inspecting and
- * deciding again may well succeed, which is exactly what code 4 means. It is
- * emphatically not an invitation to retry with the same revision, and the
- * sentence says so.
- *
- * `LEASE_BREAK_VERIFICATION_FAILED` is 3, alone among these: a record was
- * detached, could not be identified, and is sitting beside the lease path. No
- * retry helps, and a human has to look at it.
+ * It mapped five break outcomes onto exit codes, and it was the last place in
+ * this file that named the recovery vocabulary. The break was withdrawn — see
+ * `lease/lease-recovery.ts` for why the authorisation contract could not be
+ * written — so the outcomes it graded no longer exist. `lease status` exits 0
+ * whatever it finds, because a held lease is a condition and not an error.
  */
-const LEASE_BREAK_EXIT_CODES = Object.freeze({
-  LEASE_REMOVED: EXIT_RUN_OK,
-  LEASE_ALREADY_GONE: EXIT_RUN_OK,
-  LEASE_CHANGED_SINCE_INSPECTION: EXIT_RUN_REFUSED,
-  LEASE_NOT_BREAKABLE: EXIT_RUN_REFUSED,
-  LEASE_BREAK_VERIFICATION_FAILED: EXIT_RUN_NEEDS_OPERATOR,
-}) satisfies Record<LeaseBreakOutcome, CliExitCode>;
-
-export function exitCodeForLeaseBreakOutcome(outcome: LeaseBreakOutcome): CliExitCode {
-  return LEASE_BREAK_EXIT_CODES[outcome];
-}

@@ -26,7 +26,13 @@
  * redundant. It is the same guard `block-store.ts` puts on `repositoryRoot`: a
  * document found *by* one identity that carries another has been copied, and a
  * lease restored from a backup into a different clone would otherwise read as
- * that clone's own. Held to its location on every read.
+ * that clone's own. Held to its location by every reader that has a repository to
+ * bind to — which is `readLeaseFile`, and therefore acquire, inspect and the
+ * scoped verify. `verifyExecutionLeaseHeld` is the exception and cannot be
+ * otherwise: it is handed evidence rather than a repository, so it has nothing to
+ * compare `leaseKey` against. This said "on every read", which was false for that
+ * one reader and false in the direction that matters, since it is the reader the
+ * driver's authority gate goes through.
  */
 
 import { z } from 'zod';

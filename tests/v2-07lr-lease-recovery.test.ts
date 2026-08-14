@@ -13,16 +13,26 @@
  *
  *  2. **LF-3 — two live guards that no test pinned.** The win32 drive-relative
  *     refusal, and `removeVerifiedLease`'s detach/verify/restore. The second is
- *     the mechanism the whole recovery contract rests on, and no in-process seam
- *     distinguishes it from a plain `unlink`: only its behaviour under a
- *     successor does.
+ *     the mechanism the whole recovery contract rests on. This header claimed no
+ *     in-process seam distinguished it from a plain `unlink`; the body of this
+ *     file now records why that is false — the `matches` predicate is the seam —
+ *     and the two sat one file apart saying opposite things, which is the third
+ *     time in this slice a correction was written without retiring the sentence
+ *     it corrected.
  *
- *  3. **Lease recovery / attended break.** An attended break existed here, was
- *     found broken by three consecutive adversarial reviews, and was withdrawn.
- *     It comes back under a contract that names what defeated it, and the first
- *     test written for it was the ABA counter-proof — inspect A, let A go, let B
- *     legitimately acquire, then continue the authorised break. B must be
- *     untouched.
+ *  3. **What is left where the attended break was.** It came back under a
+ *     contract that named what had defeated it, and a sixth adversarial review
+ *     broke that too — reproducing the removal of a *legitimately acquired*
+ *     lease, and separately a rollback that deleted a competing acquirer's file
+ *     with no identity check at all. It is withdrawn again, and this time on a
+ *     finding about the contract rather than about an implementation: for the
+ *     zero-byte crash artefact the digest is a shared constant, the record names
+ *     no owner, and the object identity is a `(dev,ino)` pair on a module that
+ *     ships fallbacks for filesystems which reuse those. There is no fact left to
+ *     name the object with. See `src/lease/lease-recovery.ts`.
+ *
+ *     What remains here is the classification, and the pins that nothing in the
+ *     build removes a lease it did not create.
  *
  * Nothing here fabricates `ExecutionLeaseEvidence`. Every held lease is a real
  * one, taken through the real entry point, exactly as the V2-07L suite does.
@@ -42,23 +52,16 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import { Command } from 'commander';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { LEASE_BREAK_SENTENCES, registerLeaseCommand } from '../src/cli/lease-command.js';
-import { exitCodeForLeaseBreakOutcome } from '../src/cli/run-exit-codes.js';
 import { PACKAGE_ROOT } from '../src/config/paths.js';
 import type { ExecutionLeaseEvidence } from '../src/core/execution-lease-evidence.js';
 import {
   acquireRepositoryExecutionLease,
   deriveExecutionLeaseLocation,
   inspectRepositoryExecutionLease,
-  leaseObjectIdentity,
   releaseRepositoryExecutionLease,
   verifyExecutionLeaseHeld,
 } from '../src/lease/execution-lease.js';
-import {
-  LEASE_BREAK_OUTCOMES,
-  assessLeaseRecovery,
-  breakInspectedLease,
-} from '../src/lease/lease-recovery.js';
+import { assessLeaseRecovery } from '../src/lease/lease-recovery.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { startTask } from '../src/run/start-task.js';
 import { advanceTaskState } from '../src/state/advance-state.js';
@@ -467,10 +470,16 @@ describe('a removal decided about bytes is carried out on those bytes', () => {
    *
    * `removeVerifiedLease` detaches the lease with `rename` into a name only that
    * call knows, decides about the *detached object*, and either deletes it or
-   * links it back — and the lease name is never touched again except through a
-   * `link`, which cannot overwrite. No in-process seam distinguishes that from
-   * "read, decide, `unlink` the path": both refuse, and both leave the same
-   * result when nothing else is happening.
+   * puts it back — by `link`, or by an exclusive create where the filesystem has
+   * no links. The rule is that the lease name is never touched by an operation
+   * that can clobber; the shorter "never except through a `link`" this used to
+   * copy from the source was falsified by the restore's own fallback.
+   *
+   * The claim that "no in-process seam distinguishes that from read-decide-unlink"
+   * is dropped too, and it is the fourth untestability claim in this slice to turn
+   * out wrong. The predicate *is* the seam: a successor acquired from inside it
+   * reaches states — a restored stranger's record, a quarantined one, a refused
+   * detach — that no name-aimed `unlink` can produce.
    *
    * What distinguishes them is a *successor*. A removal that acts on the name
    * destroys whatever has taken it; a removal that acts on the object it
@@ -524,280 +533,16 @@ describe('a removal decided about bytes is carried out on those bytes', () => {
   });
 });
 
-/* ─────────── 3. attended recovery, under the contract that names ──────────
- *              what defeated the three withdrawn attempts               */
+/* ──────── 3. what is left where the attended recovery used to be ────────── */
 
-describe('a break removes the lease that was inspected, or nothing', () => {
+describe('classification says what is there and authorises nothing', () => {
   /**
-   * Contract 4 — **ABA must fail closed** — and it is written first on purpose.
-   *
-   * Inspect A. A disappears. B legitimately acquires the same path. The operator
-   * confirms the break they authorised for A. B must be untouched.
-   *
-   * This is the defect that killed the first withdrawn attempt: the decision was
-   * about bytes and the removal was about a name, so the `unlink` destroyed
-   * whatever had taken the name in between — a lease somebody had *legitimately*
-   * acquired, with a living owner, past a liveness check made about a dead one.
-   *
-   * The liveness probe answers `NOT_FOUND` throughout, deliberately. It removes
-   * the one refusal that would stop the break early, so nothing but the identity
-   * binding stands between the authorisation and B's record. A test where the
-   * successor's own liveness saved it would prove the wrong thing.
+   * `assessLeaseRecovery` survived the withdrawal, and the reason it survived is
+   * the reason it was safe: it never authorised anything. What went with the
+   * break is `breakable` — a field that *was* a permission, and that the renderer
+   * read in order to print a ready-made destructive command.
    */
-  it('never removes a lease acquired after the inspection it was authorised for', async () => {
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    const victim = heldLease(fixture, 'run-victim');
-
-    // What the operator read, and what they will name back.
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    expect(inspected.state).toBe('HELD');
-    expect(inspected.revision).not.toBeNull();
-
-    // A goes; B legitimately acquires the same path, with its own ownership.
-    expect(releaseRepositoryExecutionLease(victim).code).toBe('RELEASED');
-    const successor = acquire(fixture, 'run-successor');
-    expect(successor.ok).toBe(true);
-    if (!successor.ok) return;
-    const successorBytes = readFileSync(path);
-
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(broken.outcome).toBe('LEASE_CHANGED_SINCE_INSPECTION');
-    // B still has its authority, and its record was not even rewritten.
-    expect(readFileSync(path)).toEqual(successorBytes);
-    expect(verifyExecutionLeaseHeld(successor.evidence).code).toBe('HELD');
-    expect(quarantineFilesBeside(path)).toEqual([]);
-  });
-
-  /**
-   * The same defect, closed at the *effect* rather than at the gate (contract 5).
-   *
-   * The test above changes the world before the break is called, so an
-   * implementation that merely re-read the revision at its entry would pass it.
-   * This one changes the world **inside** the break — from the liveness probe,
-   * which is the one seam this module takes and which is called after the
-   * classifying read and before the detach. What is left to save B is the check
-   * on the bytes the detach itself produced, and nothing else.
-   */
-  it('never removes a lease acquired between its own gate and its own effect', async () => {
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    const victim = heldLease(fixture, 'run-victim');
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-
-    let successorBytes: Buffer | null = null;
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
-      {
-        processAlive: () => {
-          if (successorBytes === null) {
-            // The window, opened by hand: the lease the gate has just read is
-            // released and re-acquired before the removal reaches the disk.
-            expect(releaseRepositoryExecutionLease(victim).code).toBe('RELEASED');
-            const successor = acquire(fixture, 'run-successor');
-            expect(successor.ok).toBe(true);
-            successorBytes = readFileSync(path);
-          }
-          return 'NOT_FOUND';
-        },
-      },
-    );
-
-    expect(broken.outcome).toBe('LEASE_CHANGED_SINCE_INSPECTION');
-    expect(successorBytes).not.toBeNull();
-    expect(readFileSync(path)).toEqual(successorBytes);
-    expect(quarantineFilesBeside(path)).toEqual([]);
-  });
-
-  it('removes the exact lease an operator inspected, and says so', async () => {
-    // The control, and the reason the command exists: a repository whose first
-    // crash would otherwise be terminal until somebody hand-deletes a file
-    // inside `.git`.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    heldLease(fixture, 'run-crashed');
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(broken.outcome).toBe('LEASE_REMOVED');
-    expect(existsSync(path)).toBe(false);
-    expect(quarantineFilesBeside(path)).toEqual([]);
-    // And the repository is usable again, which is the whole point.
-    expect(acquire(fixture, 'run-next').ok).toBe(true);
-  });
-
-  it('refuses a revision the operator never saw', async () => {
-    // Contract 2: observation is not authority, and neither is a guess. The
-    // revision is how the operator names *which* lease they decided about.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    heldLease(fixture, 'run-crashed');
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    const bytes = readFileSync(path);
-
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: 'f'.repeat(64), expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(broken.outcome).toBe('LEASE_CHANGED_SINCE_INSPECTION');
-    expect(readFileSync(path)).toEqual(bytes);
-  });
-
-  it('refuses an owner the inspected bytes do not name', async () => {
-    // Contract 3: the removal must prove it is removing the lease the operator
-    // inspected. The revision alone settles the bytes; the pid is what the
-    // operator was *shown*, and a mismatch means they are describing a different
-    // lease from the one that is there — a copied command line, most likely.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    heldLease(fixture, 'run-crashed');
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    const bytes = readFileSync(path);
-
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: deadPid() },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
-    expect(broken.detail).toBe('OWNER_PID_MISMATCH');
-    expect(readFileSync(path)).toEqual(bytes);
-  });
-
-  it('refuses a lease whose owner is observably running, whatever was authorised', async () => {
-    // Contract 6: stale-or-not and may-this-be-removed are two decisions. This
-    // authorisation is perfect — the right revision, the right pid — and the
-    // owner is alive, so the removal is refused anyway.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    heldLease(fixture, 'run-live');
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    const bytes = readFileSync(path);
-
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
-      { processAlive: () => 'ALIVE' },
-    );
-
-    expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
-    expect(broken.detail).toBe('OWNER_RUNNING');
-    expect(readFileSync(path)).toEqual(bytes);
-  });
-
-  it('refuses a lease whose owner liveness cannot be established', async () => {
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    heldLease(fixture, 'run-unknown');
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    const bytes = readFileSync(path);
-
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
-      { processAlive: () => 'UNDETERMINED' },
-    );
-
-    expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
-    expect(broken.detail).toBe('OWNER_LIVENESS_UNDETERMINED');
-    expect(readFileSync(path)).toEqual(bytes);
-  });
-
-  it('reports a lease that is already gone as gone, not as removed', async () => {
-    // Contract 7: five durable answers, and this one matters most to a script.
-    // "I removed it" and "it was not there" are different facts, and only one of
-    // them says this invocation destroyed something.
-    const fixture = await leasableRepository();
-    const evidence = heldLease(fixture, 'run-gone');
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    expect(releaseRepositoryExecutionLease(evidence).code).toBe('RELEASED');
-
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    expect(broken.outcome).toBe('LEASE_ALREADY_GONE');
-  });
-
-  it('breaks a crash-window lease that names no owner, by its bytes alone', async () => {
-    // The artefact a crash between the exclusive create and the record write
-    // leaves: something at the lease path that this build cannot parse and that
-    // names no process at all. It is the case an operator most needs an exit
-    // from, and it is identified by its revision, because there is nothing else.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    writeFileSync(path, '');
-
-    const inspected = inspectRepositoryExecutionLease(fixture.repository);
-    expect(inspected.state).toBe('UNPARSEABLE');
-    expect(inspected.ownerPid).toBeNull();
-
-    const broken = breakInspectedLease(fixture.repository, {
-      expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '',
-      expectedOwnerPid: null,
-    });
-
-    expect(broken.outcome).toBe('LEASE_REMOVED');
-    expect(existsSync(path)).toBe(false);
-  });
-
-  it('refuses an owner pid offered for a lease that records none', async () => {
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    writeFileSync(path, '');
-    const inspected = inspectRepositoryExecutionLease(fixture.repository);
-
-    const broken = breakInspectedLease(fixture.repository, {
-      expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '',
-      expectedOwnerPid: deadPid(),
-    });
-
-    expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
-    expect(broken.detail).toBe('OWNER_PID_MISMATCH');
-    expect(existsSync(path)).toBe(true);
-  });
-});
-
-describe('classification and removal authority are two decisions', () => {
-  /**
-   * Contract 6, stated as a type rather than as a habit: `assessLeaseRecovery`
-   * says what is there; it never says who may remove it. A caller holding a
-   * `STALE_OWNER_GONE` assessment still has to satisfy the break, and the break
-   * re-establishes every fact for itself.
-   */
-  it('classifies a stale lease as stale without authorising anything', async () => {
+  it('classifies a stale lease as stale, and offers nothing to act on', async () => {
     const fixture = await leasableRepository();
     heldLease(fixture, 'run-stale');
 
@@ -806,43 +551,41 @@ describe('classification and removal authority are two decisions', () => {
     });
 
     expect(assessed.classification).toBe('STALE_OWNER_GONE');
-    expect(assessed.breakable).toBe(true);
-    // The assessment is a report. Nothing in it is an argument any removal takes.
-    expect(Object.keys(assessed).sort()).toEqual(['breakable', 'classification', 'inspection']);
+    // The assessment is a report, and now it is only a report: no field of it is
+    // an argument any removal takes, because there is no removal to take one.
+    expect(Object.keys(assessed).sort()).toEqual(['classification', 'inspection']);
   });
 
-  it('classifies a running owner as not breakable', async () => {
+  it('classifies a running owner as running', async () => {
     const fixture = await leasableRepository();
     heldLease(fixture, 'run-live');
 
     const assessed = assessLeaseRecovery(fixture.repository, { processAlive: () => 'ALIVE' });
 
     expect(assessed.classification).toBe('OWNER_RUNNING');
-    expect(assessed.breakable).toBe(false);
   });
 
   it('classifies a free repository as having nothing to recover', async () => {
     const fixture = await leasableRepository();
 
-    const assessed = assessLeaseRecovery(fixture.repository);
-
-    expect(assessed.classification).toBe('NOTHING_TO_RECOVER');
-    expect(assessed.breakable).toBe(false);
+    expect(assessLeaseRecovery(fixture.repository).classification).toBe('NOTHING_TO_RECOVER');
   });
 });
 
-describe('there is no way to break a lease that is not this one', () => {
-  it('offers no force, no automatic and no unattended break', async () => {
-    // Contract 1. The vocabulary is checked as well as the surface: a `--force`
-    // that exists only in a help string is still a promise to an operator.
+describe('nothing in this build removes a lease it did not create', () => {
+  it('offers no break, no force, no automatic and no unattended clearing', async () => {
+    // The vocabulary is checked as well as the surface: a `--force` that exists
+    // only in a help string is still a promise to an operator.
     const recovery = await import('../src/lease/lease-recovery.js');
 
-    expect(Object.keys(recovery).filter((name) => /force|auto|clear/i.test(name))).toEqual([]);
+    expect(
+      Object.keys(recovery).filter((name) => /break|force|auto|clear|remove/i.test(name)),
+    ).toEqual([]);
 
     // Declared options only. The words `--force` and `--unattended` appear all
-    // over this build's prose, and every one of those occurrences says the
-    // thing does not exist; what would be a promise is an option registered on
-    // a command.
+    // over this build's prose, and every one of those occurrences says the thing
+    // does not exist; what would be a promise is an option registered on a
+    // command.
     const offenders: string[] = [];
     for (const file of sourceFiles()) {
       const declared = readFileSync(file, 'utf8').match(/\.option\(\s*['"][^'"]+['"]/g) ?? [];
@@ -853,46 +596,46 @@ describe('there is no way to break a lease that is not this one', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('is reachable from exactly one command, which requires an operator', () => {
-    // The destructive entry point lives in its own module so that this pin can
-    // exist at all: `execution-lease.js` is imported by a dozen modules, and a
-    // break exported from it would be reachable from every one of them.
+  it('registers no command that removes a lease', async () => {
+    const { buildProgram } = await import('../src/cli/index.js');
+    const names: string[] = [];
+    const walk = (command: { name: () => string; commands: unknown[] }): void => {
+      names.push(command.name());
+      for (const child of command.commands) {
+        walk(child as { name: () => string; commands: unknown[] });
+      }
+    };
+    walk(buildProgram() as unknown as { name: () => string; commands: unknown[] });
+
+    // Reached through the real program rather than by reading source, because
+    // the thing an operator can run is the thing that matters. `break` is the
+    // name that has now been registered and withdrawn twice.
+    expect(names).not.toContain('break');
+  });
+
+  it('leaves the guarded removal reachable from nowhere outside its own module', () => {
+    // This pin used to expect `lease-recovery.ts`, because that module held the
+    // break. With the break withdrawn, `removeVerifiedLease` has no caller at
+    // all outside its own module: the three that remain are the two acquire
+    // rollbacks and `release`, all inside `execution-lease.ts`. A module
+    // appearing here is a second one claiming the right to remove a lease.
     //
-    // A `import type … from` is not a route: `verbatimModuleSyntax` erases it,
-    // so the exit-code table can name the outcome vocabulary without being able
-    // to call anything. Judged per statement rather than per file, so a type
-    // import and a value import in one file are two different answers.
-    const specifier = /['"][^'"]*lease-recovery\.js['"]/;
-    const importers: string[] = [];
+    // Comments are stripped before the scan, and that distinction earned itself
+    // immediately: `lease-recovery.ts` still *names* the function in the
+    // paragraph explaining why the break cannot be written, and a scan that
+    // counted prose would report the module as a caller. What this measures is
+    // reachability. Explaining a mechanism is not importing it — and a pin that
+    // forbade the explanation would push the reasoning out of the file that
+    // needs it most.
+    const callers: string[] = [];
     for (const file of sourceFiles()) {
-      // Comments first, or a paragraph *about* type imports decides the answer:
-      // the statement this scan reads must be code and nothing else.
+      if (file.endsWith(join('lease', 'execution-lease.ts'))) continue;
       const code = readFileSync(file, 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .replace(/^[^\n]*\/\/.*$/gm, '');
-      const reaches = code
-        .split(';')
-        .some((statement) => specifier.test(statement) && !/^\s*import\s+type\b/.test(statement));
-      if (reaches) importers.push(relative(PACKAGE_ROOT, file));
+      if (/\bremoveVerifiedLease\b/.test(code)) callers.push(relative(PACKAGE_ROOT, file));
     }
-    expect(importers.sort()).toEqual([join('src', 'cli', 'lease-command.ts')]);
-  });
-
-  it('hands the guarded removal itself to exactly one module', () => {
-    // The module pin above answers "who can reach the break". This answers the
-    // sharper question the export opened: `removeVerifiedLease` takes its whole
-    // authority as a predicate, so a caller passing `() => true` has written a
-    // plain `unlink` with extra steps. It was private until this slice, and it
-    // is exported now only because the recovery flow lives in its own module —
-    // which is worth nothing unless the primitive stays as narrowly reachable
-    // as the flow does.
-    const importers: string[] = [];
-    for (const file of sourceFiles()) {
-      const text = readFileSync(file, 'utf8');
-      if (file.endsWith(join('lease', 'execution-lease.ts'))) continue;
-      if (/\bremoveVerifiedLease\b/.test(text)) importers.push(relative(PACKAGE_ROOT, file));
-    }
-    expect(importers.sort()).toEqual([join('src', 'lease', 'lease-recovery.ts')]);
+    expect(callers.sort()).toEqual([]);
   });
 
   it('removes a lease from nowhere but the one guarded removal', () => {
@@ -907,248 +650,5 @@ describe('there is no way to break a lease that is not this one', () => {
     expect(destructive.map((file) => relative(PACKAGE_ROOT, file))).toEqual([
       join('src', 'lease', 'execution-lease.ts'),
     ]);
-  });
-});
-
-/* ─────────── 4. the command an operator actually types, end to end ───────── */
-
-describe('agent-loop lease break', () => {
-  let stdout: string[] = [];
-  let stderr: string[] = [];
-
-  beforeEach(() => {
-    stdout = [];
-    stderr = [];
-    process.exitCode = undefined;
-    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown): boolean => {
-      stdout.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write);
-    vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown): boolean => {
-      stderr.push(String(chunk));
-      return true;
-    }) as typeof process.stderr.write);
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    process.exitCode = undefined;
-  });
-
-  async function invoke(args: readonly string[]): Promise<void> {
-    const program = new Command();
-    program.exitOverride();
-    registerLeaseCommand(program);
-    await program.parseAsync(['lease', ...args], { from: 'user' });
-  }
-
-  /**
-   * A lease with a dead owner, written as a real lease document.
-   *
-   * Not a seam: the pid is a process this test started and waited for, and
-   * everything below runs through the *real* liveness probe. It is the one
-   * fixture that cannot be produced by acquiring, because acquiring records the
-   * live pid of the acquiring process — which is this one.
-   */
-  function crashedLease(
-    fixture: Fixture,
-    ownerPid: number,
-  ): { path: string; revision: string; objectId: string } {
-    const path = leasePathOf(fixture);
-    writeFileSync(
-      path,
-      `${JSON.stringify(
-        {
-          schemaVersion: 1,
-          leaseKey: fixture.repository.gitCommonDir,
-          repositoryRoot: fixture.repository.root,
-          repositoryId: fixture.repository.id,
-          ownerPid,
-          ownerNonce: 'b'.repeat(64),
-          acquiredAt: '2026-08-13T10:00:00.000Z',
-          runId: 'run-crashed',
-          blockId: null,
-        },
-        null,
-        2,
-      )}\n`,
-      'utf8',
-    );
-    return { path, revision: revisionOfFile(path), objectId: leaseObjectIdentity(path) ?? '' };
-  }
-
-  it('inspects nothing and removes nothing without --attended', async () => {
-    // Contract 1, and the ordering matters: the refusal happens before the
-    // repository is resolved and before the lease is read, so an unattended
-    // invocation never begins an inspection in order to say it was never going
-    // to act.
-    const fixture = await leasableRepository();
-    const crashed = crashedLease(fixture, deadPid());
-
-    await invoke([
-      'break',
-      '--repository',
-      fixture.root,
-      '--expected-revision',
-      crashed.revision,
-      '--expected-object',
-      crashed.objectId,
-    ]);
-
-    expect(process.exitCode).toBe(3);
-    expect(stdout.join('')).toContain('Pass --attended');
-    expect(existsSync(crashed.path)).toBe(true);
-  });
-
-  it('removes the lease an operator names, through the real probe', async () => {
-    const fixture = await leasableRepository();
-    const owner = deadPid();
-    const crashed = crashedLease(fixture, owner);
-
-    await invoke([
-      'break',
-      '--repository',
-      fixture.root,
-      '--attended',
-      '--expected-revision',
-      crashed.revision,
-      '--expected-object',
-      crashed.objectId,
-      '--owner-pid',
-      String(owner),
-    ]);
-
-    expect(stderr.join('')).toBe('');
-    expect(stdout.join('')).toContain('LEASE_REMOVED');
-    expect(process.exitCode).toBe(0);
-    expect(existsSync(crashed.path)).toBe(false);
-    // The repository is runnable again, which is the entire purpose.
-    expect(acquire(fixture, 'run-after-recovery').ok).toBe(true);
-  });
-
-  it('refuses a lease whose owner is this very process', async () => {
-    // The same command, the same authorisation shape, a living owner. No probe
-    // is injected anywhere on this path: the pid recorded is the pid running the
-    // test, so `process.kill(pid, 0)` answers for itself.
-    const fixture = await leasableRepository();
-    heldLease(fixture, 'run-live');
-    const path = leasePathOf(fixture);
-    const bytes = readFileSync(path);
-
-    await invoke([
-      'break',
-      '--repository',
-      fixture.root,
-      '--attended',
-      '--expected-revision',
-      revisionOfFile(path),
-      '--expected-object',
-      leaseObjectIdentity(path) ?? '',
-      '--owner-pid',
-      String(process.pid),
-    ]);
-
-    expect(stdout.join('')).toContain('LEASE_NOT_BREAKABLE');
-    expect(stdout.join('')).toContain('OWNER_RUNNING');
-    expect(process.exitCode).toBe(4);
-    expect(readFileSync(path)).toEqual(bytes);
-  });
-
-  it('refuses an expected revision that is not one, before touching anything', async () => {
-    const fixture = await leasableRepository();
-    const crashed = crashedLease(fixture, deadPid());
-
-    await invoke([
-      'break',
-      '--repository',
-      fixture.root,
-      '--attended',
-      '--expected-revision',
-      'not-a-digest',
-      '--expected-object',
-      crashed.objectId,
-    ]);
-
-    expect(stdout.join('')).toContain('EXPECTED_REVISION_UNUSABLE');
-    expect(process.exitCode).toBe(2);
-    expect(existsSync(crashed.path)).toBe(true);
-  });
-
-  it('refuses a mistyped owner pid rather than reading it as none', async () => {
-    // `--owner-pid 12x` is an operator who meant to name a process. Treating it
-    // as "no pid was recorded" would authorise a break for a different class of
-    // lease entirely — the crash-window artefact that names no owner.
-    const fixture = await leasableRepository();
-    const crashed = crashedLease(fixture, deadPid());
-
-    await invoke([
-      'break',
-      '--repository',
-      fixture.root,
-      '--attended',
-      '--expected-revision',
-      crashed.revision,
-      '--expected-object',
-      crashed.objectId,
-      '--owner-pid',
-      '12x',
-    ]);
-
-    expect(stdout.join('')).toContain('OWNER_PID_UNUSABLE');
-    expect(process.exitCode).toBe(2);
-    expect(existsSync(crashed.path)).toBe(true);
-  });
-
-  it('prints the break command status offered, with the revision already in it', async () => {
-    // The two halves of the flow have to agree: what `status` prints is what
-    // `break` accepts. A report offering a command the command refuses is worse
-    // than no report.
-    const fixture = await leasableRepository();
-    const crashed = crashedLease(fixture, deadPid());
-
-    await invoke(['status', '--repository', fixture.root]);
-    const report = stdout.join('');
-
-    expect(report).toContain(`--expected-revision ${crashed.revision}`);
-    const offered = report.match(/--owner-pid (\d+)/);
-    expect(offered).not.toBeNull();
-
-    stdout = [];
-    await invoke([
-      'break',
-      '--repository',
-      fixture.root,
-      '--attended',
-      '--expected-revision',
-      crashed.revision,
-      '--expected-object',
-      crashed.objectId,
-      '--owner-pid',
-      offered?.[1] ?? '',
-    ]);
-
-    expect(stdout.join('')).toContain('LEASE_REMOVED');
-    expect(existsSync(crashed.path)).toBe(false);
-  });
-
-  it('prints only ASCII, whichever way the break ended', () => {
-    // Same reason the acquire vocabulary is held to it: this repository has
-    // twice had text damaged by a re-encoding pass, and a destructive command's
-    // report is the worst place for that.
-    const all = Object.values(LEASE_BREAK_SENTENCES).join('');
-
-    expect([...all].filter((character) => character.codePointAt(0)! > 0x7f)).toEqual([]);
-  });
-
-  it('has an exit code for every outcome, and no outcome shares 0 with a refusal', () => {
-    for (const outcome of LEASE_BREAK_OUTCOMES) {
-      const code = exitCodeForLeaseBreakOutcome(outcome);
-      expect([0, 3, 4]).toContain(code);
-      // The one thing a script must be able to tell apart: an invocation that
-      // ended with the lease still there never exits 0.
-      if (outcome !== 'LEASE_REMOVED' && outcome !== 'LEASE_ALREADY_GONE') {
-        expect(code).not.toBe(0);
-      }
-    }
   });
 });

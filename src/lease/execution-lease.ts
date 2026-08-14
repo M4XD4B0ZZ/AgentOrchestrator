@@ -87,12 +87,17 @@
  * is reported as {@link STALE_LEASE_RECOVERY_UNSAFE} and the lease is left
  * exactly where it is.
  *
- * This module also ships **no way to clear one** other than its owner releasing
- * it. Recovery from a crash exists, and it is deliberately not here:
- * `lease-recovery.ts` holds an attended, identity-bound break, reachable from
- * one CLI command and from nothing else. That separation is the point — this
- * module is imported by a dozen others, and a break exported from it would be
- * reachable from every one of them.
+ * This module ships **no policy for clearing one** other than its owner
+ * releasing it, and as of the second withdrawal of the attended break there is no
+ * such policy anywhere in the build. The guarded primitive is here —
+ * {@link removeVerifiedLease}, whose whole authority is the predicate it is
+ * handed — and its four call sites are all in this file: two acquire rollbacks
+ * and `release`.
+ *
+ * This paragraph used to say the module ships "no way to clear one", which was
+ * false in the plainest sense: it exports the removal primitive and always did.
+ * What it meant was that the *decision* to clear somebody else's lease lived
+ * elsewhere. It no longer lives anywhere; `lease-recovery.ts` now only classifies.
  *
  * What has not changed is what a *lease* does on its own: nothing here takes one
  * over, and no probe result licenses anything. An owner that cannot be shown to
@@ -108,10 +113,17 @@
  * different places to go. It is never authority: pids are reused, so `ALIVE` can
  * be a stranger. That is safe in exactly one direction, and the direction is
  * enforced here — liveness can only ever *add* a refusal: acquire refuses
- * whatever it says. (The withdrawn attended break refused on `ALIVE` and on
- * `UNDETERMINED` for the same reason, and is described in the past tense
- * because it no longer exists.) No code path anywhere permits an effect
- * because a probe said a process is gone.
+ * whatever it says.
+ *
+ * With the attended break withdrawn, no code path anywhere consults a probe
+ * before an effect at all. The claim that stood here — "no code path anywhere
+ * permits an effect because a probe said a process is gone" — was false while the
+ * break existed: its gate *required* `STALE_OWNER_GONE`, so a `NOT_FOUND` was a
+ * necessary condition for the removal. It was not sufficient, since an operator
+ * also had to authorise, and that is what the sentence was reaching for. Stating
+ * it as "no code path anywhere" made a load-bearing safety property out of
+ * something the code did not do, which is the worst direction for such a claim to
+ * be wrong in: it invites deleting the gate arm as decorative.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
@@ -351,35 +363,89 @@ export function deriveExecutionLeaseLocation(repository: LeaseRepository): Lease
  * On NTFS that index carries a sequence number, so it is not silently reused by
  * the next file to occupy the same record.
  *
+ * **That last sentence was about NTFS while this module still supported
+ * filesystems that are not, and that gap is now closed from the other end.** The
+ * exclusive-create claim that served FAT and network mounts is withdrawn, and an
+ * acquisition on a filesystem whose `link` refuses is refused outright — see
+ * {@link LEASE_FILESYSTEM_UNSUPPORTED}. So a lease exists only where `link`
+ * works, which is where this identity is strong.
+ *
+ * That is a platform boundary, not a proof about every such filesystem, and the
+ * distinction is worth keeping: the boundary is enforced by the acquire path
+ * refusing, not by anything here. Nothing in this module may treat a
+ * `(dev,ino)` pair as an authority — the sixth review reproduced a removal of a
+ * legitimately acquired lease that way, and it is why the attended break is gone.
+ * This value is reported, never compared to decide an effect.
+ *
  * `null` when the platform reports nothing usable — `ino` of zero is what a
  * filesystem without the concept answers, and it is exactly the answer that must
  * not be mistaken for an identity. A caller that cannot get one refuses; there
  * is no weaker fallback, because the digest *was* the weaker fallback.
+ *
+ * ── Not exported, and that is the point ───────────────────────────────────
+ *
+ * There was an exported `leaseObjectIdentity(path)` here. It existed so the
+ * attended break could name an object, and with the break withdrawn it had no
+ * production caller at all — `inspectRepositoryExecutionLease` reads
+ * {@link readObject} directly. An exported reader of exactly the value a
+ * withdrawn authority was built on is the affordance that authority leaves
+ * behind: a review reconnected the break from outside this module by composing
+ * it with {@link removeVerifiedLease}, and reached a real removal of a
+ * legitimately held lease. The plumbing was removed from the predicate; this is
+ * the rest of it.
+ *
+ * The identity is still *reported* — `lease status` prints it, from the
+ * inspection — because telling an operator which object they are looking at is
+ * not the same as handing them a way to act on it.
+ *
+ * ── Two reasons for `null`, and collapsing them was a defect ───────────────
+ *
+ * Measured by an independent review rather than argued. The reader used to
+ * swallow every `stat` failure into the same `null` the platform case uses, so a
+ * lease *deleted between the byte read and the stat* was reported as "this
+ * platform cannot identify the object" — the meaning the CLI assigns to
+ * `Object: none`.
+ *
+ * The measurement, on this host: 551 successful byte reads under churn produced
+ * `ino === 0n` **zero** times and `ENOENT` 181 times. So in practice that report
+ * was never the platform fact it claimed to be; it was always this race. It was
+ * then reproduced reaching an operator: half of the break attempts in a
+ * real-process harness reported a lease as present-but-unidentifiable while its
+ * name was already empty, where "already gone" was the truth. The break and its
+ * reason codes are withdrawn, so that consequence is history — but the
+ * discrimination it argued for is not, because `inspect` still answers `FREE`
+ * against `HELD` on it, and that answer decides whether the next invocation may
+ * take the lease.
+ *
+ * And the rule it broke was written at its own call site: *a lease that vanishes
+ * in that window must be reported as gone, not as unidentifiable.*
  */
-export function leaseObjectIdentity(path: string): string | null {
+function readObject(path: string): { readonly id: string | null; readonly gone: boolean } {
   try {
     const stats = statSync(path, { bigint: true });
-    if (stats.ino === 0n) return null;
-    return `${String(stats.dev)}:${String(stats.ino)}`;
-  } catch {
-    return null;
+    // Zero is what a filesystem without the concept answers, and it is exactly
+    // the answer that must not be mistaken for an identity.
+    if (stats.ino === 0n) return { id: null, gone: false };
+    return { id: `${String(stats.dev)}:${String(stats.ino)}`, gone: false };
+  } catch (error) {
+    return { id: null, gone: safeErrnoCode(error) === 'ENOENT' };
   }
 }
 
 /**
  * The identity of one lease: the digest of its exact bytes.
  *
- * Exported because nothing outside this module may *invent* a second answer to
- * the question "is this the same lease". `lease-recovery.ts`
- * compares what an operator was shown against what a removal detached, and two
- * independent digest implementations would be two definitions of sameness — the
- * kind of duplication this repository has already paid for once, in
- * `verifyExecutionLeaseHeld` reading one file three ways.
+ * There was an exported `revisionOfLeaseBytes` wrapper here, justified by the
+ * rule that nothing outside this module may invent a second answer to "is this
+ * the same lease" — because `lease-recovery.ts` compared what an operator had
+ * been shown against what a removal had detached. That comparison went with the
+ * attended break, and the wrapper was left with no importer anywhere in the
+ * repository, still carrying a docstring naming a caller that no longer exists.
+ *
+ * Unexported rather than kept "in case": an exported digest-of-a-lease is a piece
+ * of the withdrawn authorisation model, and the rule it enforced has no subject
+ * while nothing outside this file decides which lease is which.
  */
-export function revisionOfLeaseBytes(bytes: Buffer): string {
-  return revisionOfBytes(bytes);
-}
-
 function revisionOfBytes(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -507,9 +573,15 @@ export function inspectRepositoryExecutionLease(
   const read = readLeaseFile(location.path, location.key);
   // The object those bytes came from, read next and not later: the probe below
   // can take milliseconds, and an identity read after it would describe a
-  // different moment from the digest it sits beside. A lease that vanishes in
-  // that window must be reported as gone, not as unidentifiable.
-  const objectId = read.bytes === null ? null : leaseObjectIdentity(location.path);
+  // different moment from the digest it sits beside.
+  const object = read.bytes === null ? { id: null, gone: false } : readObject(location.path);
+  // And a lease that vanished inside that window is reported as **gone**, which
+  // is the rule this comment used to state while the code did the opposite: the
+  // identity read swallowed `ENOENT` into the same answer the platform case
+  // uses, so a repository somebody had just released was reported as held and
+  // unidentifiable — no break command offered for it, and under contention a
+  // refusal at exit 4 saying "the lease is there" about an empty name.
+  if (object.gone) return inspection({ state: 'FREE', path: location.path });
   const probe = deps.processAlive ?? osProcessLiveness;
   // Recovered from the bytes when the document itself will not parse, so a
   // lease written by another build is reported with the owner it actually
@@ -527,7 +599,7 @@ export function inspectRepositoryExecutionLease(
     acquiredAt: read.document?.acquiredAt ?? null,
     liveness: owner === null ? 'UNKNOWABLE' : probe(owner),
     // Reporting it is never authority; the re-check on the detached object is.
-    objectId,
+    objectId: object.id,
   });
 }
 
@@ -581,6 +653,36 @@ export const LEASE_ACQUIRE_FAILURE_CODES = [
    * either way, which is why they share a code.
    */
   'LEASE_WRITE_FAILED',
+  /**
+   * This filesystem cannot carry an execution lease, so none was taken.
+   *
+   * ── The platform boundary, drawn deliberately ──────────────────────────────
+   *
+   * The lease's whole safety argument rests on binding a decision to a
+   * filesystem **object** rather than to a name, and every non-destructive step
+   * that binding needs is a hard link: the claim publishes a finished record by
+   * linking a staged file into place, and {@link removeVerifiedLease} puts back
+   * a record it may not remove by linking the object it detached. Where `link`
+   * is unavailable neither is possible, and this module used to answer that with
+   * an exclusive-create fallback plus a copying restore.
+   *
+   * Six adversarial review rounds established that the fallback creates a class
+   * of lease object for which the rest of the protocol has no safe complete
+   * lifecycle. The attended break could not be authorised on it and was
+   * withdrawn. The acquire rollback dispossessed a competing acquirer on it. And
+   * the restore, having no link, writes a *copy* and then discards the detached
+   * original — destroying the object of a writer that still holds its descriptor,
+   * with `release` one small path difference from the same fault.
+   *
+   * So the fallback is gone, and this is what replaces it: **fail closed before a
+   * lease exists at all**, rather than offer an acquisition whose release and
+   * rollback cannot be implemented safely. A named unsupported filesystem is a
+   * better product than a supported-looking one whose destructive operations
+   * lack the primitive they need.
+   *
+   * `detail` carries the errno the link refused with.
+   */
+  'LEASE_FILESYSTEM_UNSUPPORTED',
 ] as const;
 
 export type LeaseAcquireFailureCode = (typeof LEASE_ACQUIRE_FAILURE_CODES)[number];
@@ -855,8 +957,16 @@ export function acquireRepositoryExecutionLease(
     return acquireFailure('LEASE_WRITE_FAILED', 'RECORD_NOT_READABLE_BACK');
   }
 
-  const claimed = claimLeaseFile(location, bytes, deps.link ?? linkSync, nonce);
+  const claimed = claimLeaseFile(location, bytes, deps.link ?? linkSync);
   if (claimed.code === 'HELD_BY_ANOTHER') return refusalForExistingLease(location, deps);
+  if (claimed.code === 'FILESYSTEM_UNSUPPORTED') {
+    // Nothing was created: the staged file is discarded and the lease name was
+    // never occupied. This is the one refusal that is about the *platform*
+    // rather than about the repository's state, and it is deliberately not
+    // folded into `LEASE_WRITE_FAILED` — that code means a claim was attempted
+    // and given back, and an operator who reads it will retry.
+    return acquireFailure('LEASE_FILESYSTEM_UNSUPPORTED', claimed.detail);
+  }
   if (claimed.code !== 'CLAIMED') return acquireFailure('LEASE_WRITE_FAILED', claimed.detail);
 
   const evidence = mintExecutionLeaseEvidence(nonce, location.path);
@@ -878,7 +988,7 @@ export function acquireRepositoryExecutionLease(
 }
 
 interface ClaimResult {
-  readonly code: 'CLAIMED' | 'HELD_BY_ANOTHER' | 'CLAIM_FAILED';
+  readonly code: 'CLAIMED' | 'HELD_BY_ANOTHER' | 'CLAIM_FAILED' | 'FILESYSTEM_UNSUPPORTED';
   readonly detail: string | null;
 }
 
@@ -889,10 +999,12 @@ function claim(code: ClaimResult['code'], detail: string | null = null): ClaimRe
 /**
  * Writes `bytes` and makes them the lease, in that order, exclusively.
  *
- * Two mechanisms, and the module header says why both exist. `link` publishes a
- * finished record atomically and is what the ordinary case uses; the `wx` claim
- * is the fallback for a filesystem that will not link, and is exclusive but
- * briefly visible before its record is whole.
+ * **One mechanism, and only one.** A staged file is written whole and then
+ * `link`ed into place, so the lease name appears already complete and never
+ * exists as a half-written record. There is no second mechanism: the
+ * exclusive-create fallback that used to catch a filesystem refusing to link is
+ * withdrawn, and a link failure that is not `EEXIST` now refuses the acquisition
+ * outright. {@link LEASE_FILESYSTEM_UNSUPPORTED} states why.
  *
  * Never throws. A failure removes whatever it created, because a lease nobody
  * holds is worse than no lease: it would be reported as unsafe forever.
@@ -901,7 +1013,6 @@ function claimLeaseFile(
   location: LeaseLocation,
   bytes: Buffer,
   link: (from: string, to: string) => void,
-  ourNonce: string,
 ): ClaimResult {
   const staging = join(
     dirname(location.path),
@@ -924,51 +1035,13 @@ function claimLeaseFile(
     // `EEXIST` is the answer this whole design is built on: somebody else got
     // there first, and their record is already complete.
     if (errno === 'EEXIST') return claim('HELD_BY_ANOTHER');
-    return claimViaExclusiveCreate(location, bytes, errno, ourNonce);
+    // Any other refusal means this filesystem will not link, and the lease
+    // protocol needs `link` twice — here, and in the restore that puts back a
+    // record it may not remove. The staged file is already discarded and the
+    // lease name was never touched, so refusing here leaves the repository
+    // exactly as it was found.
+    return claim('FILESYSTEM_UNSUPPORTED', errno);
   }
-}
-
-/**
- * The fallback claim, for a filesystem that refused to link.
- *
- * Exclusive, and honest about the one thing it cannot offer: between the create
- * and the write, a competing acquirer sees a lease with no record in it and
- * reports it as unsafe rather than as held. That is a worse message, never a
- * weaker guarantee.
- */
-function claimViaExclusiveCreate(
-  location: LeaseLocation,
-  bytes: Buffer,
-  linkErrno: string,
-  ourNonce: string,
-): ClaimResult {
-  let handle: number;
-  try {
-    handle = openSync(location.path, 'wx', 0o600);
-  } catch (error) {
-    const errno = safeErrnoCode(error);
-    if (errno === 'EEXIST') return claim('HELD_BY_ANOTHER');
-    // Neither mechanism worked. The link's errno is the more informative of
-    // the two, and is what is reported.
-    return claim('CLAIM_FAILED', linkErrno);
-  }
-
-  const failure = writeInto(handle, bytes);
-  if (failure !== null) {
-    // Giving back a claim that could not be recorded — by identity, not by
-    // name, for the reason {@link removeVerifiedLease} exists. The fact that
-    // justifies the removal ("I created this file exclusively") was established
-    // several syscalls ago, and in between the lease can have been broken and
-    // legitimately re-acquired; unlinking the name would then destroy a
-    // successor's authority. Removed only if what is there is unreadable — which
-    // is what a failed write leaves — or is still this claim's own record.
-    removeVerifiedLease(location.path, (present) => {
-      const nonce = nonceOfBytes(present);
-      return nonce === null || nonce === ourNonce;
-    });
-    return claim('CLAIM_FAILED', failure);
-  }
-  return claim('CLAIMED');
 }
 
 /** Creates `path` exclusively and writes `bytes` into it. `null` on success. */
@@ -1026,15 +1099,35 @@ function discard(path: string): void {
 }
 
 /**
- * What became of a guarded removal. A closed set, and five rather than four.
+ * What became of a guarded removal. A closed set of nine.
+ *
+ * The count is stated because it was wrong here: this line read "five rather than
+ * four" while the union had nine members, having been written when it had five
+ * and never revisited. It is the same class of defect as the stale test counts
+ * this slice removed from its prose — a number that describes the code sitting
+ * beside the code, with nothing keeping the two in step. The union below is the
+ * authority; if these disagree again, the union is right.
  *
  * `DETACH_FAILED` and `UNIDENTIFIABLE` were one member called `FAILED` until the
- * real-process break harness ran: under concurrency on Windows a `rename` of a
- * file another process has open fails outright, and that is **nothing having
- * happened** — the lease is still exactly where it was. It shared a code with
- * "detached, and then unreadable", which is the opposite situation and the one
- * where a record is sitting in quarantine. The operator sentence for it says to
- * go and look at a file that, in the common case, did not exist.
+ * real-process break harness ran: a `rename` can fail outright, and that is
+ * **nothing having happened** — the lease is still exactly where it was. It
+ * shared a code with "detached, and then unreadable", which is the opposite
+ * situation and the one where a record is sitting in quarantine. The operator
+ * sentence for it said to go and look at a file that, in the common case, did
+ * not exist.
+ *
+ * The cause this paragraph used to give — "a `rename` of a file another process
+ * has open fails outright on Windows" — was measured false, cross-process
+ * included, and is removed rather than restated: what the harness established is
+ * that the two end states are different, not why the refusal happens.
+ *
+ * That harness is no longer in the repository — it was withdrawn with the
+ * attended break — so the two references to it above are history rather than
+ * something to go and read. Each of the nine members is pinned in process, by
+ * value, in `tests/v2-07lr-release-window.test.ts`; the mapping onto
+ * {@link LeaseReleaseResult} is one-to-one, so a test that names the pair names
+ * the member. The effect the shipped artefact has on a real directory is
+ * measured by `tests/dist-artifact/execution-lease-release-dist-artifact.mjs`.
  */
 export type VerifiedRemoval =
   /** The verified bytes were detached and deleted. */
@@ -1054,6 +1147,16 @@ export type VerifiedRemoval =
    * `DETACH_FAILED` split had already been made for once.
    */
   | 'CHANGED_QUARANTINED'
+  /**
+   * Something else was there, it could not be put back, and **nothing holds the
+   * lease name now**: the repository is unowned and the record is in quarantine.
+   *
+   * Kept apart from `CHANGED_QUARANTINED` because the two ask opposite things of
+   * an operator — wait for the successor, or notice that this repository has no
+   * owner and re-inspect before anything runs. A review found both being
+   * reported as the second, from a call that had never looked at the name.
+   */
+  | 'CHANGED_AND_UNOWNED'
   /** Nothing was at the name. */
   | 'ABSENT'
   /** The name could not be detached at all. Nothing was touched. */
@@ -1061,7 +1164,9 @@ export type VerifiedRemoval =
   /** Detached, then unreadable, and **put back**. */
   | 'UNIDENTIFIABLE'
   /** Detached, then unreadable, and kept in quarantine: it could not be put back. */
-  | 'UNIDENTIFIABLE_QUARANTINED';
+  | 'UNIDENTIFIABLE_QUARANTINED'
+  /** Detached, unreadable, kept — and the lease name is free. Unowned. */
+  | 'UNIDENTIFIABLE_AND_UNOWNED';
 
 /**
  * Removes exactly the bytes `matches` accepts, or nothing at all.
@@ -1085,11 +1190,18 @@ export type VerifiedRemoval =
  *
  * `rename` within a directory atomically detaches whatever is at the name into a
  * name only this call knows. From that instant the decision is about an *object*
- * this call owns, and **the lease name is never touched again except through
- * `link`**, which cannot overwrite. If the detached bytes are the ones that were
- * verified they are deleted; if they are not, they are linked back — and an
- * `EEXIST` there means somebody acquired the freed name, which is a real
- * authority and is left alone.
+ * this call owns, and **the lease name is never touched by an operation that can
+ * clobber**. If the detached bytes are the ones that were verified they are
+ * deleted; if they are not, they are put back — by `link`, or on a filesystem
+ * that refuses one by an exclusive create — and an `EEXIST` from either means
+ * somebody acquired the freed name, which is a real authority and is left alone.
+ *
+ * That sentence used to read "never touched again except through `link`", and it
+ * was false in five places at once: `putBack`'s fallback reaches `writeRecord`,
+ * which is an `openSync(path,'wx')` aimed at the lease name. The rule was
+ * correctly restated here when the fallback was added and the four copies of the
+ * slogan were left behind — which is what a rule repeated for emphasis does, since
+ * a slogan has no back-reference to the mechanism it describes.
  *
  * ── Two wrong answers, both reproduced, both worth recording ───────────────
  *
@@ -1115,8 +1227,8 @@ export type VerifiedRemoval =
  * the restoring `link`, the name can change hands. What that costs is bounded:
  *
  *  - a lease acquired in either window is **never removed or overwritten**,
- *    because the only operation aimed at the name is a `link` that refuses to
- *    clobber;
+ *    because every operation aimed at the name — the restoring `link`, and the
+ *    exclusive create it falls back to — refuses to clobber;
  *  - a lease that was detached and cannot be put back is **kept**, in the
  *    quarantine file, rather than deleted — inert, inspectable, recoverable;
  *  - but a writer that acquired between the gate read and the `rename` is
@@ -1128,36 +1240,71 @@ export type VerifiedRemoval =
  * argued away, because the previous two attempts to argue it away were both
  * wrong.
  *
- * ── Exported, and to exactly one caller ────────────────────────────────────
+ * ── Its callers, counted rather than described ─────────────────────────────
  *
- * `releaseRepositoryExecutionLease` is one of its two users; `lease-recovery.ts`
- * is the other, and it lives in its own module so that "who can destroy an
- * authority here" is a question with a testable answer. This is the only
- * function in the build that may unlink a lease, `matches` is the whole of the
- * authority it takes, and a caller passing `() => true` has written a plain
- * `unlink` with extra steps — which is why the importer of this name is pinned
- * by `tests/v2-07lr-lease-recovery.test.ts` rather than left to convention.
+ * **Two call sites, both inside this file**: the acquire rollback for a lease
+ * whose evidence could not be minted, and `releaseRepositoryExecutionLease`.
+ *
+ * Counted rather than described, because the count has been wrong in every
+ * previous form of this paragraph. It said "one of its two users" under a
+ * heading saying "to exactly one caller" while there were four; the correction
+ * then said "four call sites, all inside this file" and enumerated three, naming
+ * the fourth as being in another file. The class it kept omitting was rollback
+ * paths — and one of those held the defect that outlived the break. There are
+ * two now because the exclusive-create claim's rollback went with the fallback.
+ *
+ * This is the only function in the build that may detach or delete a lease.
+ * `matches` is the whole of the authority it takes, and a caller passing
+ * `() => true` has written a plain `unlink` with extra steps — which is why
+ * `tests/v2-07lr-lease-recovery.test.ts` pins that no module outside this one
+ * calls it, rather than leaving it to convention. Note what does *not* follow
+ * from that pin: "only one function unlinks a lease" is a fact about reachability
+ * and not a safety property, because the predicate is where the safety lives.
+ *
+ * ── Why the predicate no longer sees an object identity ────────────────────
+ *
+ * It used to be `(bytes, objectId) => boolean`, and the object identity was the
+ * authority the attended break rested on. With the break withdrawn — see
+ * `lease-recovery.ts` for why the contract could not be written — all three
+ * remaining callers ignored the argument, and what was left was a parameter that
+ * handed every future caller the exact mechanism that had just been found
+ * unsound. An affordance for a withdrawn operation is how the operation comes
+ * back. Identity here is the nonce inside the record, which a successor cannot
+ * accidentally share; `leaseObjectIdentity` remains, for `lease status` to report.
  */
 export function removeVerifiedLease(
   leasePath: string,
-  matches: (bytes: Buffer, objectId: string | null) => boolean,
+  matches: (bytes: Buffer) => boolean,
 ): VerifiedRemoval {
   const quarantine = `${leasePath}.breaking-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`;
 
   try {
     renameSync(leasePath, quarantine);
   } catch (error) {
-    // Nothing has happened here, and that distinction is load-bearing: the real
-    // break harness produces this constantly, because a `rename` of a file
-    // another process has open is refused on Windows. The lease is untouched,
-    // there is no quarantined record, and telling an operator to go and inspect
-    // one would send them after a file that does not exist.
+    // Nothing has happened here, and that distinction is load-bearing: the lease
+    // is untouched, there is no quarantined record, and telling an operator to
+    // go and inspect one would send them after a file that does not exist.
+    //
+    // The stated cause used to be "a `rename` of a file another process has open
+    // is refused on Windows". That was **measured false**, cross-process
+    // included: libuv opens with delete sharing, so renaming a lease file another
+    // of this build's acquirers holds open succeeds. The refusals the harness
+    // produced were real; this was not their cause, and the discrimination is
+    // kept because the *distinction* is right whatever produces it. (The
+    // instrument that pins it — a directory holding an open file, which Windows
+    // genuinely does refuse to rename — is a different mechanism and unaffected.)
     return safeErrnoCode(error) === 'ENOENT' ? 'ABSENT' : 'DETACH_FAILED';
   }
 
-  // From here the lease name is **never touched again except through `link`**,
-  // which cannot overwrite. That single rule is what this function got wrong
-  // twice, and it is worth stating as a rule rather than as four correct lines.
+  // From here the lease name is **never touched by an operation that can
+  // clobber** — the restoring `link`, or the exclusive create it falls back to on
+  // a filesystem that has no links. That single rule is what this function got
+  // wrong twice.
+  //
+  // Stated in the form the mechanism actually has, rather than the shorter
+  // "except through `link`" it carried in four other places: that wording was
+  // written before `putBack` gained its fallback, and an `openSync(path,'wx')`
+  // aimed at the lease name falsified it everywhere it had been copied to.
   //
   // The version before this one re-occupied the name with a 0-byte placeholder
   // and then acted on the name twice — `unlink` on the match path, `rename` on
@@ -1179,13 +1326,22 @@ export function removeVerifiedLease(
     // `ENOENT` here means **nothing was detached**, and that is a measurement
     // rather than a deduction.
     //
-    // The real-process break harness produced it in five racers out of six: on
-    // this platform a `rename` whose source has just been taken by a competitor
-    // can *return success without having moved anything*, so the only evidence
-    // that a detach really happened is the object being there afterwards. A
-    // plain `rename` of a missing file does throw `ENOENT` — the phantom
-    // success appears under concurrency — which is exactly why the answer has
-    // to be read from the result rather than from the call.
+    // It was measured, in five racers out of six: on this platform a `rename`
+    // whose source has just been taken by a competitor can *return success
+    // without having moved anything*, so the only evidence that a detach really
+    // happened is the object being there afterwards. A plain `rename` of a
+    // missing file does throw `ENOENT` — the phantom success appears under
+    // concurrency — which is exactly why the answer has to be read from the
+    // result rather than from the call.
+    //
+    // **The instrument that measured it is not in this repository.** It was the
+    // real-process break harness, and it was deleted with the attended break it
+    // existed for — so this paragraph cited an empirical record a reader could
+    // not reach, which is the same defect as a stale test count. The
+    // measurement stands as history; what pins the *branch* is
+    // `tests/v2-07lr-release-window.test.ts`, which produces the state the
+    // phantom leaves (the detached object is not there) and lets the real
+    // `ENOENT` follow. Nothing in the build reproduces the concurrency itself.
     //
     // Reported as `ABSENT`, because that is what it is: the lease was already
     // gone. Calling it "detached and unreadable" sent an operator looking for a
@@ -1195,19 +1351,25 @@ export function removeVerifiedLease(
     // neither removed nor claimed to have been: the restore below puts it back.
   }
 
-  // The identity of the object this call detached, read from a quarantine name
-  // only this call knows. `rename` moves the object rather than its contents, so
-  // this is the identity of whatever was at the lease name — which is what an
-  // authorisation names, and what a digest cannot express for an empty record.
-  if (bytes !== null && matches(bytes, leaseObjectIdentity(quarantine))) {
+  // The decision, on the object this call detached rather than on the name it
+  // came from. The predicate is handed the bytes and nothing else: it used to
+  // also receive `leaseObjectIdentity(quarantine)`, which was the attended
+  // break's authority and is now no caller's.
+  if (bytes !== null && matches(bytes)) {
     discard(quarantine);
     return 'REMOVED';
   }
 
   // Not ours to remove — put it back.
-  if (putBack(quarantine, leasePath, bytes)) {
+  const restoration = putBack(quarantine, leasePath, bytes);
+  if (restoration === 'RESTORED') {
     discard(quarantine);
     return bytes === null ? 'UNIDENTIFIABLE' : 'CHANGED';
+  }
+  if (restoration === 'NAME_FREE') {
+    // Kept, like every other refusal — and the repository is unowned, which is a
+    // different thing to tell somebody than "a successor holds it now".
+    return bytes === null ? 'UNIDENTIFIABLE_AND_UNOWNED' : 'CHANGED_AND_UNOWNED';
   }
   // It could not be put back, so it is **kept** where it is: deleting it would
   // destroy a record this call has just decided it may not remove, and a stray
@@ -1238,33 +1400,102 @@ export function removeVerifiedLease(
  * an unconditional destruction", and the fix at the time closed the *deletion*
  * half while leaving the *dispossession* half in place.
  *
- * So the restore now mirrors the claim it undoes. `link` first, because it is
- * atomic and publishes the whole record; an **exclusive create** second, which
- * is what `claimViaExclusiveCreate` uses on the same filesystems and for the
- * same reason. Both refuse to overwrite — `EEXIST` from either means the name
- * belongs to somebody else now — so the rule the detach exists to enforce is
- * unchanged: *the lease name is never touched by an operation that can clobber*.
+ * So the restore keeps two mechanisms even though the claim no longer does.
+ * `link` first, because it is atomic and publishes the whole record; an
+ * **exclusive create** second. Both refuse to overwrite — `EEXIST` from either
+ * means the name belongs to somebody else now — so the rule the detach exists to
+ * enforce is unchanged: *the lease name is never touched by an operation that can
+ * clobber*.
  *
- * The fallback writes a copy rather than relinking the object, so the restored
- * record is a different inode carrying identical bytes. Nothing reads a lease by
- * inode — identity here is the nonce inside the record — so the holder's next
- * `verifyExecutionLeaseHeld` answers `HELD` exactly as before.
+ * ── Why the copying restore is safe now, and was not before ────────────────
  *
- * Returns whether the record is back at the lease name. `false` means it is
- * still in quarantine, which is a state the caller must report as itself.
+ * The fallback writes a copy rather than relinking the object, and the caller
+ * then discards the detached original. On a filesystem with no links at all that
+ * **destroys** the original — and a sixth review reproduced the harm: a competing
+ * acquirer sitting in the exclusive-create claim's pre-write window had its
+ * object deleted out from under a descriptor it still held, wrote its record into
+ * an orphaned inode, and left the lease name holding a permanently empty file
+ * that nothing in the build could clear.
+ *
+ * What removed that is not a change here. It is that **no acquirer ever holds
+ * the lease name with an unwritten record any more**: the exclusive-create claim
+ * is withdrawn, so the name only ever appears already complete, by `link`. The
+ * detached original is therefore always a finished record, a copy of it carries
+ * the same bytes, and ownership is decided by the nonce inside — so the holder's
+ * next `verifyExecutionLeaseHeld` answers `HELD` exactly as before.
+ *
+ * The remaining reachable link failure here is an anomaly rather than a platform
+ * fact — NTFS's 1024-name limit on the object being restored, which a review
+ * reproduced without mocking, or a permission refusal. Keeping the fallback for
+ * those is what stops the *dispossession* half: without it a refused restore
+ * leaves the lease name free while reporting that nothing was removed, which is
+ * the defect the fallback was added to close.
+ *
+ * That sentence read "nothing reads a lease by inode", which was false while the
+ * attended break read it twice and decided a deletion on it. The break is gone
+ * and the claim would now be nearly true, but "reads" was never the point:
+ * `lease status` still reports the object, and reporting is not deciding.
+ *
+ * Returns a {@link Restoration}: `RESTORED`, or `NAME_TAKEN` / `NAME_FREE`, which
+ * are two states the caller must tell apart — "somebody else holds it now" and
+ * "nobody holds it now" send an operator to opposite actions. This paragraph
+ * described a `boolean` return for three commits after the union replaced it,
+ * because it sits above `type Restoration` rather than above `putBack`, where
+ * nothing associates it with the signature it documents.
  */
-function putBack(quarantine: string, leasePath: string, bytes: Buffer | null): boolean {
+type Restoration =
+  /** The record is back at the lease name. */
+  | 'RESTORED'
+  /** It could not go back because somebody else holds the name. Theirs stands. */
+  | 'NAME_TAKEN'
+  /**
+   * It could not go back and **nothing holds the name**: this repository is now
+   * unowned, and the record is in the quarantine file.
+   *
+   * Its own answer because it is the one an operator has to act on, and because
+   * reporting it as `NAME_TAKEN` is a statement about the world that this call
+   * never checked. An adversarial review reproduced that with no injection at
+   * all — a directory at the lease path detaches, cannot be read, and takes the
+   * `bytes === null` exit below, which attempts no restore — and the operator was
+   * told the name "had been taken in that instant" while the repository sat
+   * unowned and the next acquire succeeded.
+   */
+  | 'NAME_FREE';
+
+function putBack(quarantine: string, leasePath: string, bytes: Buffer | null): Restoration {
   try {
     linkSync(quarantine, leasePath);
-    return true;
+    return 'RESTORED';
   } catch (error) {
-    // Somebody holds the name. That acquisition is a real authority and stands.
-    if (safeErrnoCode(error) === 'EEXIST') return false;
+    // Somebody holds the name. That acquisition is a real authority and stands,
+    // and this is the one errno that *proves* occupancy rather than implying it.
+    if (safeErrnoCode(error) === 'EEXIST') return 'NAME_TAKEN';
     // The filesystem will not link. Without the detached bytes there is nothing
     // to write back — a record this call could not even read is one it cannot
-    // reconstruct — so it stays in quarantine.
-    if (bytes === null) return false;
-    return writeRecord(leasePath, bytes) === null;
+    // reconstruct — so it stays in quarantine, and what is at the name decides
+    // what this call is entitled to say about it.
+    if (bytes === null) return occupancyOf(leasePath);
+    if (writeRecord(leasePath, bytes) === null) return 'RESTORED';
+    return occupancyOf(leasePath);
+  }
+}
+
+/**
+ * Whether anything holds `leasePath`, asked rather than assumed.
+ *
+ * The whole point of the member above: after a failed restore this call knows it
+ * did not put the record back, and knows nothing else. `EEXIST` is proof of
+ * occupancy; every other failure is proof of nothing, and the difference decides
+ * whether an operator is told the repository is unowned or that a successor
+ * holds it. A stat that itself fails answers `NAME_TAKEN`, because the one thing
+ * this must never do is announce a free repository it has not established.
+ */
+function occupancyOf(leasePath: string): Restoration {
+  try {
+    statSync(leasePath);
+    return 'NAME_TAKEN';
+  } catch (error) {
+    return safeErrnoCode(error) === 'ENOENT' ? 'NAME_FREE' : 'NAME_TAKEN';
   }
 }
 
@@ -1435,8 +1666,10 @@ export function verifyExecutionLeaseHeldFor(
   }
 
   // Read through the same reader every other consumer uses, so one file cannot
-  // mean three things. `verifyExecutionLeaseHeld` deliberately applies neither
-  // the size cap nor the location binding — it has no repository to bind to —
+  // mean three things. `verifyExecutionLeaseHeld` applies the size cap — the same
+  // ceiling every other reader applies — but deliberately not the location
+  // binding, because it has no repository to bind to. This comment claimed it
+  // applied neither, which was half false and in the reassuring direction —
   // and the adversarial review found the consequence: a lease whose recorded
   // `leaseKey` names somewhere else read `UNPARSEABLE` to `lease status` and to
   // `break`, and `HELD` to the driver's authority gate. Three readers, two
@@ -1549,6 +1782,15 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   }
   if (removed === 'UNIDENTIFIABLE_QUARANTINED') {
     return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: 'RECORD_QUARANTINED' });
+  }
+  if (removed === 'CHANGED_AND_UNOWNED') {
+    return Object.freeze({ code: 'NOT_OWNER' as const, detail: 'RECORD_QUARANTINED_LEASE_UNOWNED' });
+  }
+  if (removed === 'UNIDENTIFIABLE_AND_UNOWNED') {
+    return Object.freeze({
+      code: 'LEASE_REMOVE_FAILED' as const,
+      detail: 'RECORD_QUARANTINED_LEASE_UNOWNED',
+    });
   }
   if (removed === 'UNIDENTIFIABLE') {
     // A detail rather than `null`: an operator hitting this has a file they
