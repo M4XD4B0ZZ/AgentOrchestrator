@@ -75,12 +75,12 @@ npm run verify
 
 `verify` is the canonical full Foundation verify command. It runs, in this
 order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
-`test:dist-trusted-profile`, `test:dist-lease-race`, `test:foundation-safe`,
-`test:windows-tree-kill-tool-release`. `build` runs immediately before the three
-dist artefact checks, so all of them always run against a fresh build, never a
-stale or missing one, and there is only ever one build per `verify` run. The two
-vitest gates run **sequentially**, in that order — the real-process harness never
-runs alongside the foundation set.
+`test:dist-trusted-profile`, `test:dist-lease-race`, `test:dist-lease-release`,
+`test:foundation-safe`, `test:windows-tree-kill-tool-release`. `build` runs
+immediately before the four dist artefact checks, so all of them always run
+against a fresh build, never a stale or missing one, and there is only ever one
+build per `verify` run. The two vitest gates run **sequentially**, in that order
+— the real-process harness never runs alongside the foundation set.
 
 `test:dist-trusted-profile` checks the *built* trusted-profile module
 (`dist/config/internal/trusted-profile.js`): that it resolves the OS user
@@ -98,6 +98,23 @@ compare-and-swap passed every single-process test it had and lost writes to a
 concurrent second caller; this is the check that would have caught it, pointed at
 the mechanism that replaced it. It found a real defect on its first run — see
 "The lease appears complete, or not at all" below.
+
+`test:dist-lease-release` measures the **other half of a lease's life**: six OS
+processes contend, the winner gives the lease back, and the directory is then
+read. Four properties per round — exactly one owner, every loser refused with
+`LEASE_HELD`, a reported release having actually destroyed the lease, and
+nothing of the protocol left in the Git administrative directory afterwards —
+and then the same six contend again, so "the file is gone" is distinguished from
+"the file is gone and the protocol still works".
+
+It is a separate gate for the same reason its sibling is: a release is an
+**effect on a directory several writers share**, and no return value can show it
+happened. `removeVerifiedLease` reduced to `return 'REMOVED'` satisfies every
+in-process assertion in this repository and fails this check — that mutant is
+the gate's acceptance criterion, not an illustration. It exists because the only
+real-process measurement of the release effect used to be incidental to the
+attended-break harness, and was lost when that harness was withdrawn with the
+break: a coverage regression a green gate cannot show you.
 
 **`test:foundation-safe` is not "all tests", but it is the full regression
 set.** It runs every vitest file except one:
@@ -139,6 +156,9 @@ npm run test:windows-tree-kill-tool-release
                               # `verify` runs last
 npm run build                # emit dist/ (Node-executable CLI)
 npm run test:dist-lease-race  # only the real-process execution-lease race
+npm run test:dist-lease-release # only the real-process acquire -> release check
+                              # (tests/dist-artifact/execution-lease-release-dist-artifact.mjs),
+                              # against whatever dist/ already exists — no build
 npm run test:dist-doctor     # run only the dist-artefact child check
                               # (tests/dist-artifact/run-completion-dist-artifact.mjs),
                               # against whatever dist/ already exists — no build
@@ -152,10 +172,12 @@ npm run verify:dist-trusted-profile # build, then check the *built* trusted-prof
                               # module (dist/config/internal/trusted-profile.js)
 ```
 
-Both dist artefact checks are plain Node scripts, not vitest test files, so
-they are never picked up by vitest's default `tests/**/*.test.ts` glob and a
+Every dist artefact check is a plain Node script, not a vitest test file, so
+none of them is picked up by vitest's default `tests/**/*.test.ts` glob and a
 plain `npm test` on a clean checkout (no `dist/` yet) does not depend on a
-prior build.
+prior build. (This paragraph said "both" while there were three of them, which
+is the same class of stale count this repository keeps having to correct: the
+authority is the `verify` chain above.)
 
 `schemas/task-state.schema.json` is **generated**. Do not edit it by hand — a
 test fails if it no longer matches the Zod schema in `src/core/task-state.ts`.
@@ -3885,6 +3907,65 @@ Three consequences worth stating plainly:
 the evidence-mint rollback and `release` — and a test pins that no module outside
 it calls the function, scanning code with comments stripped so that explaining
 the mechanism is not mistaken for reaching it.
+
+### The release contract is pinned by value and by effect (V2-07LR-AA)
+
+This round changed **no release behaviour**. It is a remediation of the
+*observability* of behaviour that was already correct, and it is here because
+for an authority layer that distinction does not lower the bar: a guarantee
+nothing can break is a guarantee nobody is keeping.
+
+Two gaps, both established by mutation against the shipped head rather than by
+reading:
+
+**One — the failure half of the release map was pinned by outcome type only.**
+`releaseRepositoryExecutionLease` maps nine `VerifiedRemoval` states onto six
+codes and five `detail` tokens, and the suite asserted `result.code` alone.
+Every token could be exchanged for another, or for `null`, with the whole suite
+green — and those tokens are the difference between *"a successor holds this
+repository"*, *"this repository has no owner and there is a record in
+quarantine"*, and *"the lease is still exactly where it was"*. Three sentences
+that send an operator to three different places.
+
+The map is one-to-one, which is what makes it pinnable: each of the nine states
+produces a distinct `(code, detail)` pair, so a test that asserts the pair has
+named the state. `tests/v2-07lr-release-window.test.ts` asserts all nine as
+whole values, reaching four of them through the window between the read that
+proves the lease and the syscall that removes it — the `vi.mock('node:fs')`
+after-read hook `tests/v2-07lr-enoent-window.test.ts` already established, with
+no sleep, no barrier and no child process. Where a real refusal is available it
+is used rather than injected: the `DETACH_REFUSED` case renames a directory
+Windows will not rename.
+
+**Two — a release was never checked to have had an effect.** The `discard` that
+deletes the detached record after a successful removal could be dropped
+entirely: the lease name is free either way, so every assertion still held —
+while every release left a full copy of a live lease record under a
+`.breaking-…` name inside the Git administrative directory, permanently, with
+nothing in the build that removes it. So the rule now is that a release is read
+from the *directory*: after every successful one, no entry whose name this
+protocol owns may remain — not the lease, not a quarantine record, not a staging
+file.
+
+That is also why `test:dist-lease-release` exists. The only real-process
+measurement of the release effect used to be incidental to the attended-break
+harness and was deleted with it, which is the coverage class this round is
+really about: **when a test or harness is removed, the question is not only
+which of its assertions were replaced, but which production claims cite it as
+their only instrument.** Nothing load-bearing was deleted knowingly; the
+measurement went anyway.
+
+Nineteen mutants of the release path — every `detail` token, both directions of
+the `ENOENT` discriminations in the detach and in the read of the detached
+object, the removal predicate, both `discard` calls, `occupancyOf`'s fail-closed
+answer, and `removeVerifiedLease` reduced to `return 'REMOVED'` — are killed by
+the two new vitest files. The last of those is separately the acceptance
+criterion of the real-process gate, and fails it four ways per round.
+
+One documentation defect went with it: the `ENOENT` arm of the detached-object
+read cited the break harness as its empirical record, and that harness is no
+longer in the repository. The measurement stands as history and now says so,
+beside the instrument that pins the branch today.
 
 ### One reading of the authority record (LF-2)
 

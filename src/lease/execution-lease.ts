@@ -1120,6 +1120,14 @@ function discard(path: string): void {
  * has open fails outright on Windows" — was measured false, cross-process
  * included, and is removed rather than restated: what the harness established is
  * that the two end states are different, not why the refusal happens.
+ *
+ * That harness is no longer in the repository — it was withdrawn with the
+ * attended break — so the two references to it above are history rather than
+ * something to go and read. Each of the nine members is pinned in process, by
+ * value, in `tests/v2-07lr-release-window.test.ts`; the mapping onto
+ * {@link LeaseReleaseResult} is one-to-one, so a test that names the pair names
+ * the member. The effect the shipped artefact has on a real directory is
+ * measured by `tests/dist-artifact/execution-lease-release-dist-artifact.mjs`.
  */
 export type VerifiedRemoval =
   /** The verified bytes were detached and deleted. */
@@ -1318,13 +1326,22 @@ export function removeVerifiedLease(
     // `ENOENT` here means **nothing was detached**, and that is a measurement
     // rather than a deduction.
     //
-    // The real-process break harness produced it in five racers out of six: on
-    // this platform a `rename` whose source has just been taken by a competitor
-    // can *return success without having moved anything*, so the only evidence
-    // that a detach really happened is the object being there afterwards. A
-    // plain `rename` of a missing file does throw `ENOENT` — the phantom
-    // success appears under concurrency — which is exactly why the answer has
-    // to be read from the result rather than from the call.
+    // It was measured, in five racers out of six: on this platform a `rename`
+    // whose source has just been taken by a competitor can *return success
+    // without having moved anything*, so the only evidence that a detach really
+    // happened is the object being there afterwards. A plain `rename` of a
+    // missing file does throw `ENOENT` — the phantom success appears under
+    // concurrency — which is exactly why the answer has to be read from the
+    // result rather than from the call.
+    //
+    // **The instrument that measured it is not in this repository.** It was the
+    // real-process break harness, and it was deleted with the attended break it
+    // existed for — so this paragraph cited an empirical record a reader could
+    // not reach, which is the same defect as a stale test count. The
+    // measurement stands as history; what pins the *branch* is
+    // `tests/v2-07lr-release-window.test.ts`, which produces the state the
+    // phantom leaves (the detached object is not there) and lets the real
+    // `ENOENT` follow. Nothing in the build reproduces the concurrency itself.
     //
     // Reported as `ABSENT`, because that is what it is: the lease was already
     // gone. Calling it "detached and unreadable" sent an operator looking for a
