@@ -476,8 +476,9 @@ describe('lease status describes the refusal it actually met', () => {
     const actual = renderLeaseStatus(inspect('\\\\server\\share\\repo\\.git'));
     const expected = expectedReport(
       'LOCATION_NETWORK_UNSUPPORTED',
-      'This repository is on a UNC or network path, which V2 does not support, so it has no\n' +
-        '  lease location. This is a refusal, not a failure to understand the path.',
+      "This repository's Git common directory is on a UNC or network path, which V2 does not\n" +
+        '  support, so it has no lease location. This is a refusal, not a failure to understand\n' +
+        '  the path.',
       'refused (UNC or network path)',
     );
     expect(actual).toBe(expected);
@@ -487,8 +488,8 @@ describe('lease status describes the refusal it actually met', () => {
     const actual = renderLeaseStatus(inspect('\\\\.\\PhysicalDrive0'));
     const expected = expectedReport(
       'LOCATION_DEVICE_NAMESPACE',
-      'This repository path is in the Windows device namespace, which is not a place a lease\n' +
-        '  can be kept.',
+      "This repository's Git common directory is in the Windows device namespace, which is not\n" +
+        '  a place a lease can be kept.',
       'refused (Windows device path)',
     );
     expect(actual).toBe(expected);
@@ -524,6 +525,32 @@ describe('lease status describes the refusal it actually met', () => {
     );
     const expected = expectedReport('LOCATION_UNSUITABLE', UNSUITABLE_SENTENCE, 'no usable location');
     expect(actual).toBe(expected);
+  });
+
+  // Every location refusal is decided from `gitCommonDir` alone, so every
+  // location refusal has to name it. Two of these sentences used to say "this
+  // repository" and "this repository path", which is false exactly when the
+  // two differ: `git init --separate-git-dir \\server\share\r.git` under
+  // `C:\work\repo` is a coherent record this build accepts, and its operator
+  // was told their repository is on a network path while looking at a working
+  // tree on C:. The two renderers disagreed with each other about the same
+  // refusal - the acquire path named the common directory, the status report
+  // named the repository - which is how the drift stayed invisible.
+  it('names the object the decision was made from, in both renderers', () => {
+    for (const state of [
+      'LOCATION_UNSUITABLE',
+      'LOCATION_NETWORK_UNSUPPORTED',
+      'LOCATION_DEVICE_NAMESPACE',
+    ] as const) {
+      expect(LEASE_STATE_SENTENCES[state]).toContain("repository's Git common directory");
+    }
+    for (const code of [
+      'LEASE_LOCATION_UNSUITABLE',
+      'LEASE_LOCATION_NETWORK_UNSUPPORTED',
+      'LEASE_LOCATION_DEVICE_NAMESPACE',
+    ] as const) {
+      expect(LEASE_ACQUIRE_SENTENCES[code]).toContain("repository's Git common directory");
+    }
   });
 });
 

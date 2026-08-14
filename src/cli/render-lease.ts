@@ -110,12 +110,20 @@ export const LEASE_STATE_SENTENCES: Readonly<Record<LeaseInspection['state'], st
     LOCATION_UNSUITABLE:
       "This repository's Git common directory has no usable lease location: either none\n" +
       '  could be derived from it, or its shape is one this build has not verified.',
+    // "This repository" and "this repository path" would both name the wrong
+    // object: the decision is made from `gitCommonDir` alone, and the two can
+    // be on different volumes. `git init --separate-git-dir \\server\share\r.git`
+    // under `C:\work\repo` is a coherent record this build accepts, and telling
+    // that operator "this repository is on a UNC path" is false of the working
+    // tree they are looking at. The acquire-side sentence for the identical
+    // condition already names the common directory; these two now agree with it.
     LOCATION_NETWORK_UNSUPPORTED:
-      'This repository is on a UNC or network path, which V2 does not support, so it has no\n' +
-      '  lease location. This is a refusal, not a failure to understand the path.',
+      "This repository's Git common directory is on a UNC or network path, which V2 does not\n" +
+      '  support, so it has no lease location. This is a refusal, not a failure to understand\n' +
+      '  the path.',
     LOCATION_DEVICE_NAMESPACE:
-      'This repository path is in the Windows device namespace, which is not a place a lease\n' +
-      '  can be kept.',
+      "This repository's Git common directory is in the Windows device namespace, which is not\n" +
+      '  a place a lease can be kept.',
   });
 
 /**
