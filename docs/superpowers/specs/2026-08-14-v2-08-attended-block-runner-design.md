@@ -31,7 +31,7 @@ defect this design exists to prevent.
 | | class 1 — *a task failed* | class 2 — *the run cannot safely continue* |
 | --- | --- | --- |
 | what it is about | one task's own outcome | the run's ability to make any further durable claim |
-| durability | recorded in the ledger, with evidence | recorded as a stop, claiming no progress |
+| durability | recorded in the ledger, with evidence | recorded as a stop claiming no progress — or, where the run cannot honestly write at all, reported without touching the ledger (section 3) |
 | effect on the block | the run continues with tasks already known to be independent | the whole block stops immediately |
 | example | the agent could not finish task A; a human must resolve it | the lease is no longer certainly held |
 
@@ -78,7 +78,7 @@ task outcome is why"**. They stay in `PROGRESS_CLAIMING_STOP_REASONS`, because
 they still assert something about the tasks and must still be proved against
 every task record before being written.
 
-## 3. Stop reasons: what exists, and the gap
+## 3. Stop reasons, and what a stop reason may not claim
 
 Existing `BLOCK_STOP_REASONS`, sorted into the two classes:
 
@@ -86,41 +86,97 @@ Existing `BLOCK_STOP_REASONS`, sorted into the two classes:
   `TASK_ABANDONED`
 - **class 2, run cannot continue** — `OPERATOR_STOPPED`, `LEDGER_DIVERGED`,
   `STATE_UNUSABLE`, `DEFINITION_DRIFTED`
-- **neither, and needs a decision** — `NO_ELIGIBLE_TASK`
+- **an end-of-run reason of last resort** — `NO_ELIGIBLE_TASK`, placed in
+  section 6
 
-The decided class-2 list is not fully expressible today. Mapping each stated
-condition to its reason:
+The decided class-2 list is not fully expressible today, and the reason it
+cannot simply be *made* expressible is the load-bearing insight of this slice:
 
-| condition | reason today | verdict |
+> **A ledger `stopReason` is itself a durable claim.** When the condition *is*
+> that the run has no write authority, or no durable write capability at all,
+> the runner must not pretend the cause still has to be written into the ledger.
+
+So class 2 splits by **representability**, not by severity. A condition is a
+persisted `stopReason` only if writing it is something the run can still
+honestly do:
+
+| condition | representation | ledger write |
 | --- | --- | --- |
-| operator stops | `OPERATOR_STOPPED` | covered |
-| ledger and records disagree | `LEDGER_DIVERGED` | covered |
-| a task record is broken or somebody else's | `STATE_UNUSABLE` | covered |
-| frozen plan no longer matches the definition | `DEFINITION_DRIFTED` | covered |
-| **lease/ownership no longer certain** | — | **missing** |
-| **a durable write is not possible** | — | **missing** |
-| **a repository/auth/runtime-wide gate fails** | — | **missing** |
-| **an unresolved `ACTIVE` cannot be safely concluded** | `STATE_UNUSABLE`? | **needs a decision** |
+| operator stops | `OPERATOR_STOPPED` | yes |
+| ledger and records disagree | `LEDGER_DIVERGED` | yes |
+| a task record is broken or somebody else's | `STATE_UNUSABLE` | yes |
+| frozen plan no longer matches the definition | `DEFINITION_DRIFTED` | yes |
+| an unresolved `ACTIVE` cannot be safely concluded | **`ACTIVE_TASK_UNRESOLVED`** — new reason | yes |
+| lease/ownership no longer certain | **`LEASE_AUTHORITY_UNCERTAIN`** — runner outcome | **no** |
+| a durable write is not possible | **`DURABLE_WRITE_FAILED`** — runner outcome | **no** |
+| a repository/auth/runtime-wide gate fails | **runner outcome**, gate code in its detail | **no** |
 
-Adding members to `BLOCK_STOP_REASONS` is a change to a persisted schema
-(`BLOCK_LEDGER_SCHEMA_VERSION = 1`) and to the classification set beside it. Two
-constraints follow, and the plan must carry both:
+### `ACTIVE_TASK_UNRESOLVED` — the one new persisted reason
 
-1. a new reason must be sorted into `PROGRESS_CLAIMING_STOP_REASONS` or
+`STATE_UNUSABLE` says something about the task *state*: damaged, foreign, not
+trustworthy. A task can hold entirely legitimate prior evidence and still end in
+a condition whose outcome cannot be determined after an interruption. That is a
+**different fact**, and folding it into `STATE_UNUSABLE` is exactly the
+misdescription class V2-07P spent three review rounds deleting.
+
+Its contract:
+
+- class 2, non-progress-claiming;
+- it **may coexist** with `ACTIVE` and an unchanged `activeTaskId` — it does not
+  require the run to first invent a disposition for the task it could not
+  conclude;
+- it drags **no** task disposition and **no** commit evidence with it;
+- it means one thing only: *the run must end, because the outcome of the active
+  task cannot be safely established.*
+
+### Three runner outcomes, deliberately not three reasons
+
+`LEASE_AUTHORITY_UNCERTAIN`, `DURABLE_WRITE_FAILED` and the repository/auth/
+runtime-wide gate failure are **terminal runner outcomes**, reported through the
+runner's result and the CLI. None of them writes the ledger.
+
+They stay three, not one generic `RUN_UNSAFE`, because they demand three
+different operator reactions: find out who else holds the lease, fix the disk or
+permissions, satisfy the gate. A single code would make the runner's report as
+imprecise as the refusal codes V2-07P split apart.
+
+For the first two the no-write rule is not a preference but a consequence:
+
+- `LEASE_AUTHORITY_UNCERTAIN` — the run may no longer be the writer, so any
+  further ledger mutation is precisely the act it has lost the authority for;
+- `DURABLE_WRITE_FAILED` — the run cannot presuppose a successful stop write,
+  because the failed write is the condition being reported.
+
+In both cases **the ledger stays at its last provably durable state**, and the
+truth reaches the operator through the runner's report instead. A "best effort"
+stop write here would be the run's least trustworthy claim made at its least
+trustworthy moment.
+
+The gate failure follows the same model boundary: it is a run abort, not task
+progress, and the specific underlying gate code belongs in the runner outcome's
+detail rather than growing an ever-larger persisted stop vocabulary.
+
+### Schema version
+
+`ACTIVE_TASK_UNRESOLVED` is a new member of a persisted, closed-validated
+vocabulary, so it is a schema change: **`BLOCK_LEDGER_SCHEMA_VERSION` is bumped
+once for this slice.** Not once per new value, and with no "the enum grew but
+the version stayed" exception — a reader of the old version genuinely cannot
+understand the new document, and pretending otherwise is the kind of convenient
+untruth this repository keeps removing. The three runner outcomes do not touch
+the persisted schema and trigger no further bump.
+
+Two constraints the plan must carry regardless:
+
+1. the new reason must be sorted into `PROGRESS_CLAIMING_STOP_REASONS` or
    deliberately kept out, and **the sorting needs a correctness test, not a
    completeness test** — `satisfies Record<keyof T>` proves every member was
    considered and proves nothing about whether each landed on the right side;
-2. every class-2 reason must stay writable over a ledger whose entries are *not*
-   supported, because a run that has just detected that it cannot trust the
-   ledger has to be able to say so. That is exactly why the non-progress-claiming
-   set exists, and a new reason that quietly acquires a proof obligation would
-   wedge the run in the case it was added for.
-
-Whether the last row is `STATE_UNUSABLE` or its own reason is **left open for
-the plan**, deliberately. "An `ACTIVE` task whose fate cannot be determined" is
-not obviously "a task record that is broken or somebody else's", and rounding it
-to a neighbouring code is the misdescription class V2-07P spent three review
-rounds deleting.
+2. every persisted class-2 reason must stay writable over a ledger whose entries
+   are *not* supported, because a run that has just detected that it cannot trust
+   the ledger has to be able to say so. That is why the non-progress-claiming set
+   exists, and a new reason that quietly acquired a proof obligation would wedge
+   the run in the case it was added for.
 
 ## 4. Independence is consumed, never inferred
 
@@ -151,13 +207,21 @@ attended block run
     choose the next eligible task
     activateBlockTask                               <- at most one ACTIVE, enforced
     drive that task to a terminal task state
-    settle / park / abandon, from its durable state
-    class 2 condition at any point -> stopBlockRun and return
-  stopBlockRun with the end-of-run summary reason
+    settle / park / abandon, from its durable state   <- a task-local failure ends here
+    recordable class-2 condition   -> stopBlockRun(reason), return
+    unrecordable class-2 condition -> return the runner outcome, WRITING NOTHING
+  stopBlockRun with the end reason chosen by the table in section 6
   release the lease
 ```
 
-Three properties this shape is chosen for:
+Note the two distinct exits. A recordable class-2 condition ends the run *in the
+ledger*; an unrecordable one ends it *in the report*, leaving the ledger on its
+last provably durable state. A runner that funnelled both through
+`stopBlockRun` would, in the two cases where writing is exactly what it cannot
+do, either fail loudly at the wrong moment or emit a claim it had no authority
+to make.
+
+Four properties this shape is chosen for:
 
 **One lease across the whole run.** `README.md:3789` states the lease guarantee
 is run-scoped and that V2-08 must hold one lease across a whole block run and
@@ -177,21 +241,55 @@ V2-08 is the *attended* block runner precisely so it needs none of that. This is
 the single most important scope line in the slice: staying attended is what
 keeps the recovery surface closed.
 
-## 6. `NO_ELIGIBLE_TASK`, and the reconciliation question V2-08 inherits
+## 6. How a run ends: cause beats consequence
 
-`NO_ELIGIBLE_TASK` — "no frozen task is currently eligible to run" — sits
-awkwardly between the two classes and V2-08 has to place it. Under the new
-policy it is reachable in a way it was not before: after A fails locally and B
-and C are settled, a block with no remaining eligible task is *finished*, not
-obstructed. The plan must decide whether that end is `NO_ELIGIBLE_TASK` or the
-task-outcome reason that actually explains it (`TASK_BLOCKED`), and the honest
-answer is likely the latter — an operator told "no eligible task" learns nothing
-about why.
+`NO_ELIGIBLE_TASK` — "no frozen task is currently eligible to run" — becomes
+reachable under the new policy in a way it was not before: after A fails locally
+and B and C settle, a block with nothing left to run is *finished*, not
+obstructed. It must not become the generic "the loop ended" code, because an
+operator told "no eligible task" learns the consequence and not the cause.
 
-Separately, `README.md:3588` records that **which positive reconciliations may
-safely be applied on their own is V2-08's decision.** This slice therefore
-inherits an open question rather than a settled one. It is named here so the
-plan allocates a task to it instead of discovering it mid-implementation.
+**The end reason is therefore the most specific task disposition that explains
+the ending**, checked in this order:
+
+| condition | reason |
+| --- | --- |
+| every required task settled | `COMPLETE` |
+| at least one `BLOCKED`, nothing runnable left | `TASK_BLOCKED` |
+| no `BLOCKED`, at least one `ABANDONED`, nothing runnable left | `TASK_ABANDONED` |
+| no task disposition explains why nothing is eligible | `NO_ELIGIBLE_TASK` |
+
+So the worked example — `A = BLOCKED`, `B = SETTLED`, `C = SETTLED`, nothing
+left — ends as `TASK_BLOCKED`. `NO_ELIGIBLE_TASK` is reserved for a genuine
+eligibility or selection dead end that no persisted disposition accounts for.
+
+## 6a. Positive reconciliation: monotone, forced, and never a direct write
+
+`README.md:3588` assigns this slice the decision of which positive
+reconciliations may be applied on their own. Decided:
+
+**V2-08 may apply a positive reconciliation only through the existing
+authoritative primitive, never by writing the ledger directly.** The primitives
+already refuse a claim the task's own state does not prove, and a reconciliation
+path that bypassed them would be a second, weaker way to assert progress — the
+one thing the ledger exists to prevent.
+
+A reconciliation is permitted only when **all six** hold:
+
+1. it is fully determined by durable authoritative evidence that already exists;
+2. there is exactly one admissible successor state;
+3. the change is monotone — no history is wound back;
+4. no new evidence is invented;
+5. the ordinary ledger/task-state primitive accepts the same change on its
+   existing proofs;
+6. applying it repeatedly is idempotent.
+
+The moment any selection, interpretation, or choice between competing plausible
+truths would be required: **do not repair — stop the block and report.**
+
+This does permit recognising an already-present terminal task state as truth
+even when this process did not produce it. It never permits the ledger to
+reconstruct progress from mere plausibility.
 
 ## 7. Explicitly out of scope
 
@@ -219,9 +317,25 @@ The suite must distinguish the two classes by *effect*, not by reading a label:
    further tasks *are* eligible, so the assertion is that the remaining tasks
    are untouched. A stop that happens to coincide with the end of the block
    proves nothing;
-3. **each class-2 condition, separately** — one case per reason. A shared
-   parametrised case passes against a runner that maps every condition to one
-   reason, which is the misdescription defect in its natural habitat;
+3. **each class-2 condition, separately** — one case per reason *and* per runner
+   outcome. A shared parametrised case passes against a runner that maps every
+   condition to one reason, which is the misdescription defect in its natural
+   habitat;
+3a. **the two no-write outcomes leave the ledger byte-identical** — drive
+   `LEASE_AUTHORITY_UNCERTAIN` and `DURABLE_WRITE_FAILED` and compare the
+   persisted ledger before and after, byte for byte. Asserting "no stop reason
+   was written" is weaker: it passes against a run that mutated the ledger some
+   other way. This is the control that fails against a best-effort stop write;
+3b. **`ACTIVE_TASK_UNRESOLVED` coexists with an unchanged `ACTIVE`** — after it,
+   the entry is still `ACTIVE` with the same `activeTaskId`, and no disposition
+   or commit evidence was invented for the task that could not be concluded;
+3c. **the end reason names the cause, not the consequence** — the worked example
+   ends `TASK_BLOCKED`, and a case with no explaining disposition ends
+   `NO_ELIGIBLE_TASK`. Both are needed: only the pair proves the ordering rather
+   than a constant;
+3d. **reconciliation refuses where a choice would be required** — one case that
+   is forced and monotone and is applied, one that is ambiguous and stops the
+   block. Also that applying the permitted one twice changes nothing;
 4. **the block is not `COMPLETE` when a task is `BLOCKED`** — asserted on the
    persisted ledger, not on an in-memory value;
 5. **no continuation without established independence** — a block whose
@@ -240,21 +354,37 @@ The suite must distinguish the two classes by *effect*, not by reading a label:
   invocation, under one lease;
 - a task-local failure is recorded durably with its evidence and does not end
   the run;
-- every class-2 condition ends the run immediately, each under a reason that
-  names it, and none of them claims progress;
+- every class-2 condition ends the run immediately, each under a reason or
+  runner outcome that names it, and none of them claims progress;
+- where the run cannot honestly write — lease authority uncertain, durable write
+  failed — the ledger is left byte-identical and the truth reaches the operator
+  through the report instead;
 - the two classes are distinguishable in the ledger by an operator who was not
   present;
 - `npm run verify` green, and CI green on Windows for both supported Node
   majors.
 
-## 10. Open questions for the plan
+## 10. Decisions taken before planning
 
-1. Where does "an unresolved `ACTIVE` cannot be safely concluded" belong —
-   `STATE_UNUSABLE`, or its own reason?
-2. Which end-of-run reason does a block with a blocked task and no remaining
-   eligible task carry: `TASK_BLOCKED` or `NO_ELIGIBLE_TASK`?
-3. Which positive reconciliations may be applied on their own
-   (`README.md:3588`)?
-4. Do the three missing class-2 reasons (lease uncertainty, durable-write
-   failure, repository-wide gate failure) need three reasons or fewer, and does
-   adding any of them bump `BLOCK_LEDGER_SCHEMA_VERSION`?
+All four questions this design opened were decided deliberately, before the plan
+was written, rather than left for a planner to settle implicitly.
+
+| # | question | decision |
+| --- | --- | --- |
+| 1 | where does an unresolved `ACTIVE` belong? | its **own** reason, `ACTIVE_TASK_UNRESOLVED`. Not `STATE_UNUSABLE` — no semantic overloading of an existing code |
+| 2 | blocked task, nothing runnable: which reason? | `TASK_BLOCKED`. Cause beats consequence; `NO_ELIGIBLE_TASK` is reserved for a real dead end no disposition explains |
+| 3 | which positive reconciliations may be applied alone? | only monotone, forced, evidence-backed ones, through the existing primitive — the six conditions in section 6a. Anything else stops the block |
+| 4 | how many new reasons, and a schema bump? | **one** new persisted reason and **three** runner outcomes that write nothing. One bump of `BLOCK_LEDGER_SCHEMA_VERSION` for the slice |
+
+The insight that reshaped question 4, and with it the runner's exit paths: a
+ledger `stopReason` is itself a durable claim, so a condition asserting that the
+run *cannot make durable claims* must not be represented as one. That is why
+lease uncertainty and durable-write failure became runner outcomes rather than
+reasons, and why the design has two distinct exits instead of one.
+
+### Sequencing note for the plan
+
+`DURABLE_WRITE_FAILED` is the only one of the three runner outcomes that can
+also strike the stop write itself, so it needs a reporting path that stays
+honest with no durable write available at all. It is a different animal from the
+other two and **must not share a task with them.**
