@@ -125,11 +125,19 @@ export const LEASE_BREAK_SENTENCES: Readonly<Record<LeaseBreakOutcome, string>> 
   // back and left the name free. The reason line corrects it — "nothing holds
   // the lease now" — but a report should not need its own footnote to stop
   // contradicting itself, and a fourth review found the two clauses side by side.
+  // The enumeration is gone as well, and for the same reason the opening clause
+  // went. It listed four causes while nine reason codes reach this outcome —
+  // LOCATION_UNSUITABLE, LEASE_UNREADABLE, OBJECT_IDENTITY_UNUSABLE,
+  // OBJECT_IDENTITY_UNVERIFIABLE and RECORD_QUARANTINED_LEASE_UNOWNED are none
+  // of the four — so for five of them the sentence described a state that had
+  // not occurred. A fifth review counted them. The reason code was always the
+  // authority here; the prose now says so instead of paraphrasing a subset of it.
   LEASE_NOT_BREAKABLE:
-    'This is not a lease that may be broken: its owner is running, its\n' +
-    '  liveness could not be established, the authorisation describes a different lease, or the\n' +
-    '  filesystem refused to detach the record. The reason code says which, and nothing was\n' +
-    '  removed. Where the refusal could only be established after the record had been detached,\n' +
+    'This is not a lease that may be broken, and nothing was removed. The reason code says\n' +
+    '  which of the possible causes applied: a running or unestablished owner, an authorisation\n' +
+    '  that describes a different lease or object, a lease this build cannot read, a location it\n' +
+    '  cannot derive, or a record the filesystem refused to detach.\n' +
+    '  Where the refusal could only be established after the record had been detached,\n' +
     '  it was put back - or, if that could not be done, kept beside the lease path under a name\n' +
     '  ending in .breaking- rather than deleted. A reason of RECORD_QUARANTINED_LEASE_UNOWNED\n' +
     '  means that happened AND nothing holds the lease now: this repository is unowned, the\n' +

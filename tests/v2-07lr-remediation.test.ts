@@ -776,14 +776,19 @@ describe('the gate refuses a stale authorisation before the record is touched', 
     // The gate saw an authorisation whose owner the record no longer names, and
     // said so.
     //
-    // What the mutant does, measured rather than assumed — and this is the
-    // second false note written about this one guard, so it is stated as what
-    // was run. Delete the gate's pid arm and the gate's *revision* arm three
-    // lines below answers first: `LEASE_CHANGED_SINCE_INSPECTION` with
-    // `detail: null`, which is produced only at the gate. The predicate is never
-    // reached and nothing is detached. The test still kills the mutant, and it
-    // kills it on the reason line rather than on a detach — which is exactly
-    // why `detail` is asserted here and not only the outcome.
+    // What the mutant does, measured rather than assumed — and this is now the
+    // third note written about this one guard, the first two having been false,
+    // so it says only what was run. Delete the gate's pid arm and the gate's
+    // *revision* arm three lines below answers first: the outcome becomes
+    // `LEASE_CHANGED_SINCE_INSPECTION` and the reason becomes `null`. The
+    // predicate is never reached and nothing is detached.
+    //
+    // Which assertion catches it: the outcome one, on the line below, because it
+    // is evaluated first. The `detail` assertion is not what kills this mutant —
+    // the second note claimed it was — and it earns its place for a different
+    // reason: `OWNER_PID_MISMATCH` is produced at the gate and by the predicate
+    // alike, so without it a refusal that had detached and restored a record
+    // would read the same as one that touched nothing.
     expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
     expect(broken.detail).toBe('OWNER_PID_MISMATCH');
     expect(quarantineFilesBeside(path)).toEqual([]);

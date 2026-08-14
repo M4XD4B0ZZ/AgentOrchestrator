@@ -351,6 +351,17 @@ export function deriveExecutionLeaseLocation(repository: LeaseRepository): Lease
  * On NTFS that index carries a sequence number, so it is not silently reused by
  * the next file to occupy the same record.
  *
+ * **That last sentence is about NTFS, and this module deliberately supports
+ * filesystems that are not.** `claimViaExclusiveCreate` and `putBack`'s fallback
+ * exist for FAT and network mounts, and `deriveExecutionLeaseLocation` has a UNC
+ * arm. Where inode numbers are reused promptly, this identity is weaker than it
+ * is here, and the digest is what remains: both must match, so a reused number
+ * carrying different bytes is still refused. The case that survives both is the
+ * **empty** record — every empty file hashes alike — on a filesystem that both
+ * reuses numbers quickly and reports a non-zero one. A fifth review raised it;
+ * its verification did not run, so it is written down rather than settled, and
+ * it is the first thing the next round should decide.
+ *
  * `null` when the platform reports nothing usable — `ino` of zero is what a
  * filesystem without the concept answers, and it is exactly the answer that must
  * not be mistaken for an identity. A caller that cannot get one refuses; there
