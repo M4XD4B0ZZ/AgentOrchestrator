@@ -2989,6 +2989,44 @@ and because the failure mode it describes — a command that cannot start is
   `STALE_LEASE_RECOVERY_UNSAFE` also covers `UNDETERMINED` liveness, where a
   retry genuinely can differ. **Scope:** `cli/run-command.ts`,
   `cli/release-command.ts`, `cli/run-exit-codes.ts`.
+  **V2-07P sharpened this rather than closing it:** the two new location
+  refusals, `LEASE_LOCATION_NETWORK_UNSUPPORTED` and
+  `LEASE_LOCATION_DEVICE_NAMESPACE`, also exit `EXIT_RUN_REFUSED`, whose
+  contract reads "the state may be fine … re-invoking under other conditions
+  can differ". For these two nothing can ever differ — the path shape is
+  fixed — so a scheduler that retries on 4 loops forever against a UNC-hosted
+  repository. The runtime gate got its own code 6 for exactly this reason;
+  the lease-location gate makes the same class of statement and did not.
+- **L-V2-07P-1** — `classifyWindowsKey` lost its `process.platform === 'win32'`
+  guard, so it now classifies on every platform: a POSIX `gitCommonDir`
+  normalises to a shape matching none of the accept rules and every repository
+  on Linux or macOS is refused a lease location, described as "a shape this
+  build has not verified". That is consistent with V2 being Windows-only and is
+  unreachable through `agent-loop`, because the runtime gate refuses POSIX
+  first — but it is stated nowhere at the call site and nothing measures it.
+  The positive control in `tests/v2-07lr-lease-recovery.test.ts` is
+  `it.runIf(win32)`, so the suite stays green on POSIX against a lease module
+  that refuses everything. **Scope:** `lease/execution-lease.ts`.
+- **L-V2-07P-2** — `writeAllSync` in `cli/runtime-gate.ts` retries `EAGAIN` by
+  re-entering `writeSync` immediately, with no yield, backoff or attempt cap.
+  The one platform where a non-blocking fd 2 is real is POSIX, which is exactly
+  where this function always runs, because every POSIX invocation is refused
+  there. With a pipe whose reader is not draining, the process pins a core
+  inside the function whose purpose is to fail fast and exit. **Scope:**
+  `cli/runtime-gate.ts`.
+- **L-V2-07P-3** — `tests/v2-07p-platform-contract.test.ts` imports
+  `src/cli/index.js` to reach `buildProgram`, and that module calls `main()` at
+  load, so the import runs the whole CLI against vitest's own argv: it prints
+  the command table and an `[UNEXPECTED_ERROR]` line into the gate's log, and
+  sets `process.exitCode = 1` asynchronously — possibly after the test's
+  `finally` has restored its snapshot. `tests/run-command.test.ts` and
+  `tests/v2-06a-release.test.ts` both avoid the import for this reason, but
+  neither substitute works here: the runtime gate is installed by
+  `buildProgram` itself, so a bare `Command` would make the positive control
+  vacuous. Closing it properly means deciding whether `cli/index.ts` stays
+  "an executable entry point, not a library", which is a contract decision and
+  not a test fix. **Scope:** `cli/index.ts`,
+  `tests/v2-07p-platform-contract.test.ts`.
 - **LF-1** — `loop/leased-spawns.ts:52-53` says the spawn denylist covers `eval`;
   the regex has no `eval` term, and an indirect `eval` reaching a process passed
   all five reachability pins. No safety claim is wrong — the same paragraph
