@@ -363,42 +363,59 @@ export function deriveExecutionLeaseLocation(repository: LeaseRepository): Lease
  * On NTFS that index carries a sequence number, so it is not silently reused by
  * the next file to occupy the same record.
  *
- * **That last sentence is about NTFS, and this module deliberately supports
- * filesystems that are not.** `claimViaExclusiveCreate` and `putBack`'s fallback
- * exist for FAT and network mounts, and `deriveExecutionLeaseLocation` has a UNC
- * arm. Where inode numbers are reused promptly, this identity is weaker than it
- * is here, and the digest is what remains: both must match, so a reused number
- * carrying different bytes is still refused. The case that survives both is the
- * **empty** record — every empty file hashes alike — on a filesystem that both
- * reuses numbers quickly and reports a non-zero one. A fifth review raised it;
- * its verification did not run, so it is written down rather than settled, and
- * it is the first thing the next round should decide.
+ * **That last sentence was about NTFS while this module still supported
+ * filesystems that are not, and that gap is now closed from the other end.** The
+ * exclusive-create claim that served FAT and network mounts is withdrawn, and an
+ * acquisition on a filesystem whose `link` refuses is refused outright — see
+ * {@link LEASE_FILESYSTEM_UNSUPPORTED}. So a lease exists only where `link`
+ * works, which is where this identity is strong.
+ *
+ * That is a platform boundary, not a proof about every such filesystem, and the
+ * distinction is worth keeping: the boundary is enforced by the acquire path
+ * refusing, not by anything here. Nothing in this module may treat a
+ * `(dev,ino)` pair as an authority — the sixth review reproduced a removal of a
+ * legitimately acquired lease that way, and it is why the attended break is gone.
+ * This value is reported, never compared to decide an effect.
  *
  * `null` when the platform reports nothing usable — `ino` of zero is what a
  * filesystem without the concept answers, and it is exactly the answer that must
  * not be mistaken for an identity. A caller that cannot get one refuses; there
  * is no weaker fallback, because the digest *was* the weaker fallback.
- */
-export function leaseObjectIdentity(path: string): string | null {
-  return readObject(path).id;
-}
-
-/**
- * What is at `path`: its identity, or why there is none.
  *
- * Two reasons, and collapsing them was a defect an independent review measured
- * rather than argued. `leaseObjectIdentity` swallowed every `stat` failure into
- * the same `null` the platform case uses, so a lease that was *deleted between
- * the byte read and the stat* was reported as "this platform cannot identify the
- * object" — the meaning the docstring and the CLI both assign to `Object: none`.
+ * ── Not exported, and that is the point ───────────────────────────────────
+ *
+ * There was an exported `leaseObjectIdentity(path)` here. It existed so the
+ * attended break could name an object, and with the break withdrawn it had no
+ * production caller at all — `inspectRepositoryExecutionLease` reads
+ * {@link readObject} directly. An exported reader of exactly the value a
+ * withdrawn authority was built on is the affordance that authority leaves
+ * behind: a review reconnected the break from outside this module by composing
+ * it with {@link removeVerifiedLease}, and reached a real removal of a
+ * legitimately held lease. The plumbing was removed from the predicate; this is
+ * the rest of it.
+ *
+ * The identity is still *reported* — `lease status` prints it, from the
+ * inspection — because telling an operator which object they are looking at is
+ * not the same as handing them a way to act on it.
+ *
+ * ── Two reasons for `null`, and collapsing them was a defect ───────────────
+ *
+ * Measured by an independent review rather than argued. The reader used to
+ * swallow every `stat` failure into the same `null` the platform case uses, so a
+ * lease *deleted between the byte read and the stat* was reported as "this
+ * platform cannot identify the object" — the meaning the CLI assigns to
+ * `Object: none`.
  *
  * The measurement, on this host: 551 successful byte reads under churn produced
  * `ino === 0n` **zero** times and `ENOENT` 181 times. So in practice that report
- * was never the platform fact it claimed to be; it was always this race. Under
- * six real breakers on one stale lease, 18 of 36 attempts answered
- * `OBJECT_IDENTITY_UNVERIFIABLE` with the lease name already empty — at exit 4,
- * under a sentence beginning "The lease is there", where `LEASE_ALREADY_GONE`
- * at exit 0 is the truth.
+ * was never the platform fact it claimed to be; it was always this race. It was
+ * then reproduced reaching an operator: half of the break attempts in a
+ * real-process harness reported a lease as present-but-unidentifiable while its
+ * name was already empty, where "already gone" was the truth. The break and its
+ * reason codes are withdrawn, so that consequence is history — but the
+ * discrimination it argued for is not, because `inspect` still answers `FREE`
+ * against `HELD` on it, and that answer decides whether the next invocation may
+ * take the lease.
  *
  * And the rule it broke was written at its own call site: *a lease that vanishes
  * in that window must be reported as gone, not as unidentifiable.*
@@ -418,17 +435,17 @@ function readObject(path: string): { readonly id: string | null; readonly gone: 
 /**
  * The identity of one lease: the digest of its exact bytes.
  *
- * Exported because nothing outside this module may *invent* a second answer to
- * the question "is this the same lease". `lease-recovery.ts`
- * compares what an operator was shown against what a removal detached, and two
- * independent digest implementations would be two definitions of sameness — the
- * kind of duplication this repository has already paid for once, in
- * `verifyExecutionLeaseHeld` reading one file three ways.
+ * There was an exported `revisionOfLeaseBytes` wrapper here, justified by the
+ * rule that nothing outside this module may invent a second answer to "is this
+ * the same lease" — because `lease-recovery.ts` compared what an operator had
+ * been shown against what a removal had detached. That comparison went with the
+ * attended break, and the wrapper was left with no importer anywhere in the
+ * repository, still carrying a docstring naming a caller that no longer exists.
+ *
+ * Unexported rather than kept "in case": an exported digest-of-a-lease is a piece
+ * of the withdrawn authorisation model, and the rule it enforced has no subject
+ * while nothing outside this file decides which lease is which.
  */
-export function revisionOfLeaseBytes(bytes: Buffer): string {
-  return revisionOfBytes(bytes);
-}
-
 function revisionOfBytes(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -636,6 +653,36 @@ export const LEASE_ACQUIRE_FAILURE_CODES = [
    * either way, which is why they share a code.
    */
   'LEASE_WRITE_FAILED',
+  /**
+   * This filesystem cannot carry an execution lease, so none was taken.
+   *
+   * ── The platform boundary, drawn deliberately ──────────────────────────────
+   *
+   * The lease's whole safety argument rests on binding a decision to a
+   * filesystem **object** rather than to a name, and every non-destructive step
+   * that binding needs is a hard link: the claim publishes a finished record by
+   * linking a staged file into place, and {@link removeVerifiedLease} puts back
+   * a record it may not remove by linking the object it detached. Where `link`
+   * is unavailable neither is possible, and this module used to answer that with
+   * an exclusive-create fallback plus a copying restore.
+   *
+   * Six adversarial review rounds established that the fallback creates a class
+   * of lease object for which the rest of the protocol has no safe complete
+   * lifecycle. The attended break could not be authorised on it and was
+   * withdrawn. The acquire rollback dispossessed a competing acquirer on it. And
+   * the restore, having no link, writes a *copy* and then discards the detached
+   * original — destroying the object of a writer that still holds its descriptor,
+   * with `release` one small path difference from the same fault.
+   *
+   * So the fallback is gone, and this is what replaces it: **fail closed before a
+   * lease exists at all**, rather than offer an acquisition whose release and
+   * rollback cannot be implemented safely. A named unsupported filesystem is a
+   * better product than a supported-looking one whose destructive operations
+   * lack the primitive they need.
+   *
+   * `detail` carries the errno the link refused with.
+   */
+  'LEASE_FILESYSTEM_UNSUPPORTED',
 ] as const;
 
 export type LeaseAcquireFailureCode = (typeof LEASE_ACQUIRE_FAILURE_CODES)[number];
@@ -910,8 +957,16 @@ export function acquireRepositoryExecutionLease(
     return acquireFailure('LEASE_WRITE_FAILED', 'RECORD_NOT_READABLE_BACK');
   }
 
-  const claimed = claimLeaseFile(location, bytes, deps.link ?? linkSync, nonce);
+  const claimed = claimLeaseFile(location, bytes, deps.link ?? linkSync);
   if (claimed.code === 'HELD_BY_ANOTHER') return refusalForExistingLease(location, deps);
+  if (claimed.code === 'FILESYSTEM_UNSUPPORTED') {
+    // Nothing was created: the staged file is discarded and the lease name was
+    // never occupied. This is the one refusal that is about the *platform*
+    // rather than about the repository's state, and it is deliberately not
+    // folded into `LEASE_WRITE_FAILED` — that code means a claim was attempted
+    // and given back, and an operator who reads it will retry.
+    return acquireFailure('LEASE_FILESYSTEM_UNSUPPORTED', claimed.detail);
+  }
   if (claimed.code !== 'CLAIMED') return acquireFailure('LEASE_WRITE_FAILED', claimed.detail);
 
   const evidence = mintExecutionLeaseEvidence(nonce, location.path);
@@ -933,7 +988,7 @@ export function acquireRepositoryExecutionLease(
 }
 
 interface ClaimResult {
-  readonly code: 'CLAIMED' | 'HELD_BY_ANOTHER' | 'CLAIM_FAILED';
+  readonly code: 'CLAIMED' | 'HELD_BY_ANOTHER' | 'CLAIM_FAILED' | 'FILESYSTEM_UNSUPPORTED';
   readonly detail: string | null;
 }
 
@@ -944,10 +999,12 @@ function claim(code: ClaimResult['code'], detail: string | null = null): ClaimRe
 /**
  * Writes `bytes` and makes them the lease, in that order, exclusively.
  *
- * Two mechanisms, and the module header says why both exist. `link` publishes a
- * finished record atomically and is what the ordinary case uses; the `wx` claim
- * is the fallback for a filesystem that will not link, and is exclusive but
- * briefly visible before its record is whole.
+ * **One mechanism, and only one.** A staged file is written whole and then
+ * `link`ed into place, so the lease name appears already complete and never
+ * exists as a half-written record. There is no second mechanism: the
+ * exclusive-create fallback that used to catch a filesystem refusing to link is
+ * withdrawn, and a link failure that is not `EEXIST` now refuses the acquisition
+ * outright. {@link LEASE_FILESYSTEM_UNSUPPORTED} states why.
  *
  * Never throws. A failure removes whatever it created, because a lease nobody
  * holds is worse than no lease: it would be reported as unsafe forever.
@@ -956,7 +1013,6 @@ function claimLeaseFile(
   location: LeaseLocation,
   bytes: Buffer,
   link: (from: string, to: string) => void,
-  ourNonce: string,
 ): ClaimResult {
   const staging = join(
     dirname(location.path),
@@ -979,80 +1035,13 @@ function claimLeaseFile(
     // `EEXIST` is the answer this whole design is built on: somebody else got
     // there first, and their record is already complete.
     if (errno === 'EEXIST') return claim('HELD_BY_ANOTHER');
-    return claimViaExclusiveCreate(location, bytes, errno, ourNonce);
+    // Any other refusal means this filesystem will not link, and the lease
+    // protocol needs `link` twice — here, and in the restore that puts back a
+    // record it may not remove. The staged file is already discarded and the
+    // lease name was never touched, so refusing here leaves the repository
+    // exactly as it was found.
+    return claim('FILESYSTEM_UNSUPPORTED', errno);
   }
-}
-
-/**
- * The fallback claim, for a filesystem that refused to link.
- *
- * Exclusive, and honest about the one thing it cannot offer: between the create
- * and the write, a competing acquirer sees a lease with no record in it and
- * reports it as unsafe rather than as held. That is a worse message, never a
- * weaker guarantee.
- */
-function claimViaExclusiveCreate(
-  location: LeaseLocation,
-  bytes: Buffer,
-  linkErrno: string,
-  ourNonce: string,
-): ClaimResult {
-  let handle: number;
-  try {
-    handle = openSync(location.path, 'wx', 0o600);
-  } catch (error) {
-    const errno = safeErrnoCode(error);
-    if (errno === 'EEXIST') return claim('HELD_BY_ANOTHER');
-    // Neither mechanism worked. The link's errno is the more informative of
-    // the two, and is what is reported.
-    return claim('CLAIM_FAILED', linkErrno);
-  }
-
-  const failure = writeInto(handle, bytes);
-  if (failure !== null) {
-    // Giving back a claim that could not be recorded — by identity, not by
-    // name, for the reason {@link removeVerifiedLease} exists. The fact that
-    // justifies the removal ("I created this file exclusively") was established
-    // several syscalls ago, and in between the lease can have been broken and
-    // legitimately re-acquired; unlinking the name would then destroy a
-    // successor's authority.
-    //
-    // ── Why an unreadable record is not removed here ───────────────────────
-    //
-    // This predicate used to read `nonce === null || nonce === ourNonce`, and
-    // the `null` arm was a defect an independent review reproduced with real
-    // processes and no mocked identity. `nonceOfBytes` answers `null` for
-    // anything it cannot parse — including an *empty* file, because
-    // `JSON.parse('')` throws — and the empty file at this name is not
-    // necessarily ours: it is exactly what a **competing** acquirer leaves
-    // while it sits between its own `openSync(path,'wx')` above and its own
-    // record write. Reproduced: P1's failed write rolled back and deleted P2's
-    // file, with measurably different inodes, so no identity collision was
-    // needed. P2 kept its descriptor, believed it held the claim, and the lease
-    // name was left free for a third writer.
-    //
-    // So the rule is now the one the other two rollbacks already keep:
-    // **`nonceOfBytes` answering `null` is the absence of an ownership fact,
-    // never an ownership fact of its own.** Only a legible record carrying this
-    // claim's own nonce is removed.
-    //
-    // The deliberate cost: when this call's own write fails partway, the
-    // half-written file it created stays at the lease name. That is a crash
-    // artefact the next acquirer reports as unsafe rather than takes — the same
-    // artefact a power failure one syscall earlier would have left. Leaving one
-    // behind is strictly better than deleting a record this call cannot prove
-    // is its own, because the second mistake ends with two writers.
-    //
-    // Note what is *not* used to close this: the identity of the object this
-    // call created. `fstat` on the handle would supply one, but comparing it
-    // later re-derives authority from a `(dev,ino)` pair — and this module
-    // ships fallbacks for filesystems that reuse those promptly, which is the
-    // reason the attended break was withdrawn. The nonce is a fact about the
-    // record's *content* that a successor cannot accidentally share.
-    removeVerifiedLease(location.path, (present) => nonceOfBytes(present) === ourNonce);
-    return claim('CLAIM_FAILED', failure);
-  }
-  return claim('CLAIMED');
 }
 
 /** Creates `path` exclusively and writes `bytes` into it. `null` on success. */
@@ -1110,7 +1099,14 @@ function discard(path: string): void {
 }
 
 /**
- * What became of a guarded removal. A closed set, and five rather than four.
+ * What became of a guarded removal. A closed set of nine.
+ *
+ * The count is stated because it was wrong here: this line read "five rather than
+ * four" while the union had nine members, having been written when it had five
+ * and never revisited. It is the same class of defect as the stale test counts
+ * this slice removed from its prose — a number that describes the code sitting
+ * beside the code, with nothing keeping the two in step. The union below is the
+ * authority; if these disagree again, the union is right.
  *
  * `DETACH_FAILED` and `UNIDENTIFIABLE` were one member called `FAILED` until the
  * real-process break harness ran: a `rename` can fail outright, and that is
@@ -1238,16 +1234,16 @@ export type VerifiedRemoval =
  *
  * ── Its callers, counted rather than described ─────────────────────────────
  *
- * Four call sites, all inside this file: the two acquire rollbacks (`:910` when
- * evidence cannot be minted, and `claimViaExclusiveCreate`'s failed write), and
- * `releaseRepositoryExecutionLease`. The fourth was `lease-recovery.ts`'s
- * attended break, and it is gone with the break.
+ * **Two call sites, both inside this file**: the acquire rollback for a lease
+ * whose evidence could not be minted, and `releaseRepositoryExecutionLease`.
  *
- * This paragraph said "one of its two users" while four call sites existed, and
- * its own heading said "to exactly one caller" — three numbers, none of them the
- * code's. The two it omitted were both rollback paths, which is exactly the class
- * that gets forgotten when destructive callers are enumerated, and one of them
- * turned out to hold the defect that outlived the break.
+ * Counted rather than described, because the count has been wrong in every
+ * previous form of this paragraph. It said "one of its two users" under a
+ * heading saying "to exactly one caller" while there were four; the correction
+ * then said "four call sites, all inside this file" and enumerated three, naming
+ * the fourth as being in another file. The class it kept omitting was rollback
+ * paths — and one of those held the defect that outlived the break. There are
+ * two now because the exclusive-create claim's rollback went with the fallback.
  *
  * This is the only function in the build that may detach or delete a lease.
  * `matches` is the whole of the authority it takes, and a caller passing
@@ -1387,17 +1383,36 @@ export function removeVerifiedLease(
  * an unconditional destruction", and the fix at the time closed the *deletion*
  * half while leaving the *dispossession* half in place.
  *
- * So the restore now mirrors the claim it undoes. `link` first, because it is
- * atomic and publishes the whole record; an **exclusive create** second, which
- * is what `claimViaExclusiveCreate` uses on the same filesystems and for the
- * same reason. Both refuse to overwrite — `EEXIST` from either means the name
- * belongs to somebody else now — so the rule the detach exists to enforce is
- * unchanged: *the lease name is never touched by an operation that can clobber*.
+ * So the restore keeps two mechanisms even though the claim no longer does.
+ * `link` first, because it is atomic and publishes the whole record; an
+ * **exclusive create** second. Both refuse to overwrite — `EEXIST` from either
+ * means the name belongs to somebody else now — so the rule the detach exists to
+ * enforce is unchanged: *the lease name is never touched by an operation that can
+ * clobber*.
  *
- * The fallback writes a copy rather than relinking the object, so the restored
- * record is a different inode carrying identical bytes. Nothing decides ownership
- * by inode — identity here is the nonce inside the record — so the holder's next
- * `verifyExecutionLeaseHeld` answers `HELD` exactly as before.
+ * ── Why the copying restore is safe now, and was not before ────────────────
+ *
+ * The fallback writes a copy rather than relinking the object, and the caller
+ * then discards the detached original. On a filesystem with no links at all that
+ * **destroys** the original — and a sixth review reproduced the harm: a competing
+ * acquirer sitting in the exclusive-create claim's pre-write window had its
+ * object deleted out from under a descriptor it still held, wrote its record into
+ * an orphaned inode, and left the lease name holding a permanently empty file
+ * that nothing in the build could clear.
+ *
+ * What removed that is not a change here. It is that **no acquirer ever holds
+ * the lease name with an unwritten record any more**: the exclusive-create claim
+ * is withdrawn, so the name only ever appears already complete, by `link`. The
+ * detached original is therefore always a finished record, a copy of it carries
+ * the same bytes, and ownership is decided by the nonce inside — so the holder's
+ * next `verifyExecutionLeaseHeld` answers `HELD` exactly as before.
+ *
+ * The remaining reachable link failure here is an anomaly rather than a platform
+ * fact — NTFS's 1024-name limit on the object being restored, which a review
+ * reproduced without mocking, or a permission refusal. Keeping the fallback for
+ * those is what stops the *dispossession* half: without it a refused restore
+ * leaves the lease name free while reporting that nothing was removed, which is
+ * the defect the fallback was added to close.
  *
  * That sentence read "nothing reads a lease by inode", which was false while the
  * attended break read it twice and decided a deletion on it. The break is gone

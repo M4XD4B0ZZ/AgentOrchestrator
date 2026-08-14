@@ -57,14 +57,12 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-const { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } = await import(
+const { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } = await import(
   'node:fs'
 );
 const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
-const { inspectRepositoryExecutionLease, leaseObjectIdentity } = await import(
-  '../src/lease/execution-lease.js'
-);
+const { inspectRepositoryExecutionLease } = await import('../src/lease/execution-lease.js');
 
 const created: string[] = [];
 
@@ -152,13 +150,24 @@ describe('a lease that vanishes between the read and the stat', () => {
 
     expect(inspection.state).toBe('HELD');
     expect(inspection.objectId).not.toBeNull();
-    expect(inspection.objectId).toBe(leaseObjectIdentity(fixture.leasePath));
+    // Compared against the filesystem, not against the reader under test.
+    //
+    // This assertion used to read `toBe(leaseObjectIdentity(path))`, which routed
+    // both sides through the same function: a symmetric degradation — the reader
+    // returning a constant — satisfied it, so it pinned that the two call paths
+    // agreed and never that the value was right. `leaseObjectIdentity` has since
+    // been unexported as residue of the withdrawn break, which forced this to be
+    // written the way it should always have been.
+    const stats = statSync(fixture.leasePath, { bigint: true });
+    expect(inspection.objectId).toBe(`${String(stats.dev)}:${String(stats.ino)}`);
   });
 
   it('answers nothing for a path that never existed', () => {
     const fixture = leasableDirectory();
 
-    expect(leaseObjectIdentity(fixture.leasePath)).toBeNull();
-    expect(inspectRepositoryExecutionLease(fixture.repository).state).toBe('FREE');
+    const inspection = inspectRepositoryExecutionLease(fixture.repository);
+
+    expect(inspection.state).toBe('FREE');
+    expect(inspection.objectId).toBeNull();
   });
 });

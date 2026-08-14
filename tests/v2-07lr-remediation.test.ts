@@ -29,7 +29,7 @@
  *      discarding rather than keeping a record that could not be put back, both
  *      survived the whole slice suite *and* the real-process break harness that
  *      then existed. Those two mutants are the v1 and v3 defects that withdrew
- *      the attended break, which has since been withdrawn a third time and for
+ *      the attended break, which has since been withdrawn a second time and for
  *      good; its harness went with it.
  *
  *      Stated without the counts it used to carry ("34 tests", "five rounds",

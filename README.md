@@ -3781,13 +3781,16 @@ zero-byte artefact a crash leaves between taking the name and writing the record
 ```
 owner pid   absent, so the in-predicate liveness re-check is skipped entirely
 revision    sha256(""), a constant every empty file in existence shares
-object id   a (dev,ino) pair, on a module that ships fallbacks for FAT and
-            network mounts, where such pairs are reused promptly
+object id   a (dev,ino) pair, on a module that then still shipped fallbacks for
+            FAT and network mounts, where such pairs are reused promptly
 ```
 
-The two conditions are not an unlucky coincidence. The transient empty lease name
-exists because `link` failed and the claim fell back to `openSync(path,'wx')` —
-so it arises on exactly the filesystems where the index is reusable. Closing this
+The two conditions were not an unlucky coincidence. The transient empty lease name
+existed because `link` failed and the claim fell back to `openSync(path,'wx')` —
+so it arose on exactly the filesystems where the index is reusable. That fallback
+has since been withdrawn too (below), which removes the empty-name class; the
+break was already gone by then, and it is the collapse of all three facts at once
+that is the reason, not any one of them being separately repairable. Closing this
 needs an atomic compare-and-delete on a directory entry, which no portable
 filesystem primitive offers. **A contract that requires a primitive which does
 not exist is not repaired by asking harder**, and four consecutive rounds of
@@ -3812,18 +3815,21 @@ A later recovery is a different design — quarantine-and-report, which never
 unlinks, taking its second confirmation against a quarantine name only that call
 knows — and it is a product decision of its own, not a fifth patch.
 
-### The acquire rollback could dispossess a competing acquirer (V2-07LR-Y)
+### The acquire fallback is withdrawn, and the lease now needs hard links (V2-07LR-Y)
 
-Independent of the break, and shipping whether or not it did.
-`claimViaExclusiveCreate` takes the lease name with `openSync(path,'wx')` and
-writes the record afterwards. When that write failed it gave the claim back with
-this predicate:
+Independent of the break, and the change that closes the class rather than one
+caller. `claimViaExclusiveCreate` was the second claim mechanism: where `link`
+failed it took the lease name with `openSync(path,'wx')` and wrote the record
+afterwards. Two defects were reproduced on the object it produced, and a third
+was one path difference away.
+
+**One.** Its rollback gave the claim back with
 
 ```
 (present) => nonceOfBytes(present) === null || nonce === ourNonce
 ```
 
-`nonceOfBytes` answers `null` for anything it cannot parse — including an empty
+and `nonceOfBytes` answers `null` for anything unparseable — including an empty
 file, because `JSON.parse('')` throws. The empty file at that name is not
 necessarily ours: it is exactly what a *competing* acquirer leaves while it sits
 in its own pre-write window. Reproduced with **measurably different inodes**, so
@@ -3831,17 +3837,54 @@ no identity collision and no filesystem assumption were involved: P1's rollback
 deleted P2's file, P2 kept its descriptor and still believed it held the claim,
 and the lease name was left free for a third writer.
 
-The `null` arm is gone. `nonceOfBytes` answering `null` is the **absence** of an
-ownership fact, never an ownership fact of its own, and only a legible record
-carrying this claim's own nonce is removed. The deliberate cost: a failed write
-leaves its own half-written file at the lease name, which the next acquirer
-reports as unsafe rather than taking. **A crash artefact left behind is strictly
-better than two writers.**
+**Two.** Fixing that predicate was not enough. `removeVerifiedLease` detaches a
+record by `rename`, and when it may not remove it, puts it back by `link`. On a
+filesystem with no links the restore falls back to writing a **copy** and the
+caller then discards the detached original — destroying the object of a writer
+that still holds its descriptor. Measured end state: the victim writes its record
+into an orphaned inode, the lease name holds a different permanently-empty file,
+every later acquirer is refused, and nothing in the build can clear it. That
+artefact is not a crash window: no run died, the build created it.
 
-`removeVerifiedLease` now has no caller outside `execution-lease.ts` — the two
-acquire rollbacks and `release` — and a test pins that, scanning code with
-comments stripped so that explaining the mechanism is not mistaken for reaching
-it.
+**Three.** `release` reaches the same code by the same route.
+
+So the mechanism is gone rather than patched a fourth time:
+
+```
+hard-link path available      -> lease lifecycle supported
+hard-link path unavailable    -> no exclusive-create substitute
+                              -> fail closed BEFORE a lease exists
+                              -> LEASE_FILESYSTEM_UNSUPPORTED, with the errno
+```
+
+**This is a stated reduction in supported platforms, not a silent one.** FAT,
+exFAT and some network or container-mounted paths can no longer host a
+repository's execution lease, and `agent-loop run --attended` refuses there
+before creating anything. The alternative was an acquisition whose release and
+rollback could not be implemented safely — a supported-looking lease whose
+destructive operations lack the primitive they need. A named unsupported
+filesystem is the better product.
+
+Three consequences worth stating plainly:
+
+- the lease name now only ever appears **already complete**, published by a
+  `link` of a fully written staged record. No acquirer ever holds it with an
+  unwritten file, which is what makes the copying restore in `putBack` safe: its
+  victim class no longer exists;
+- `putBack` keeps that copying fallback anyway, for the link failure that is an
+  anomaly rather than a platform fact — NTFS's 1024-name limit on the object
+  being restored, or a permission refusal. Without it a refused restore leaves
+  the lease name free while reporting that nothing was removed, which is the
+  dispossession defect the fallback was added to close;
+- the acquire rollback predicate is strict regardless: `nonceOfBytes` answering
+  `null` is the **absence** of an ownership fact, never one. A failed write leaves
+  its own half-written file at the lease name rather than risking a stranger's.
+  **A crash artefact left behind is strictly better than two writers.**
+
+`removeVerifiedLease` now has two call sites, both inside `execution-lease.ts` —
+the evidence-mint rollback and `release` — and a test pins that no module outside
+it calls the function, scanning code with comments stripped so that explaining
+the mechanism is not mistaken for reaching it.
 
 ### One reading of the authority record (LF-2)
 

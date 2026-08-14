@@ -278,17 +278,21 @@ describe('the lease is exclusive per local Git domain', () => {
     expect(revisionOfFile(first.path)).toBe(before);
   });
 
-  it('is still exclusive on a filesystem that refuses to link', async () => {
-    // The fallback exists for FAT and for network mounts that will not hard
-    // link, and the seam is how that branch gets to run at all.
+  it('takes no lease at all on a filesystem that refuses to link', async () => {
+    // This test used to assert the opposite: that an exclusive-create fallback
+    // acquired the lease here, and that the fallback was "still exclusive".
+    // Exclusive it was. What it could not do was give that lease a safe complete
+    // lifecycle — the attended break could not be authorised on the object it
+    // produced, its own rollback dispossessed a competing acquirer, and the
+    // restore that puts back a record it may not remove copies and then discards
+    // the original, destroying a live writer's object. Three review rounds, one
+    // primitive gap: no portable atomic compare-and-delete.
     //
-    // The claim here used to be that "no test can make NTFS refuse on demand".
-    // That is too strong and was falsified inside this repository: saturating
-    // NTFS's 1024-name limit makes a real `linkSync` refuse, with no mock, and
-    // the remediation suite does exactly that. What it cannot reach is *this*
-    // link, whose source is a staging file created moments earlier with one
-    // link — an attacker cannot saturate it, which is a property worth having
-    // and a different statement from "no test can".
+    // So the fallback is withdrawn and the platform boundary is drawn at the
+    // acquire, which is the only place it can be drawn without leaving an object
+    // behind that nothing can safely clear. `tests/v2-07lr-filesystem-boundary
+    // .test.ts` carries the full contract; this is the V2-07L suite's own pin
+    // that the claim has exactly one mechanism.
     const fixture = await leasableRepository();
     const refuseToLink = () => {
       const error: NodeJS.ErrnoException = new Error('link is not supported here');
@@ -296,28 +300,22 @@ describe('the lease is exclusive per local Git domain', () => {
       throw error;
     };
 
-    const first = acquireRepositoryExecutionLease(
+    const attempt = acquireRepositoryExecutionLease(
       fixture.repository,
       { runId: 'run-0001', blockId: null },
       { now: tickingClock(), link: refuseToLink },
     );
-    expect(first.ok).toBe(true);
-    if (!first.ok) return;
 
-    // The record is whole, so the claim is not merely exclusive but usable: a
-    // fallback that produced an unreadable lease would be worse than failing.
-    const status = inspectRepositoryExecutionLease(fixture.repository);
-    expect(status.state).toBe('HELD');
-    expect(status.runId).toBe('run-0001');
+    expect(attempt.ok).toBe(false);
+    if (attempt.ok) return;
+    expect(attempt.code).toBe('LEASE_FILESYSTEM_UNSUPPORTED');
+    // The errno the link refused with, so an operator can tell a permission
+    // problem from a filesystem that has no links at all.
+    expect(attempt.detail).toBe('EPERM');
 
-    const second = acquireRepositoryExecutionLease(
-      fixture.repository,
-      { runId: 'run-0002', blockId: null },
-      { now: tickingClock(), link: refuseToLink },
-    );
-    expect(second.ok).toBe(false);
-    if (second.ok) return;
-    expect(second.code).toBe('LEASE_HELD');
+    // Nothing was created, which is the whole point of refusing here rather than
+    // at the first destructive operation: the repository is exactly as found.
+    expect(inspectRepositoryExecutionLease(fixture.repository).state).toBe('FREE');
 
     // And it leaves nothing behind: a staging file per failed claim would
     // accumulate inside the administrative directory forever.
@@ -1090,15 +1088,44 @@ describe('the owner-only release stays owner-only, and nothing beside it removes
     expect(lease?.commands.map((command) => command.name()).sort()).toEqual(['status']);
   });
 
-  it('names no command in the shipped source that does not exist', () => {
+  it('names no command in the shipped source that does not exist', async () => {
     // A sentence is an interface too. An operator who reads "clear it with
     // `agent-loop lease clear`" in a refusal will go looking for a command that
     // does not exist, and a maintainer will read it as a feature that regressed.
-    // `lease break` is now among the commands that do exist; nothing else is.
+    //
+    // ── Why the accepted set is derived and not written down ────────────────
+    //
+    // It used to be a literal whitelist, `/agent-loop lease (clear|force|
+    // takeover)/`, with a comment saying "`lease break` is now among the commands
+    // that do exist". When the break was withdrawn the whitelist was not updated,
+    // so this test — written for exactly this defect — walked straight past
+    // `agent-loop --help` advertising `lease break --attended` for a command that
+    // had been deleted. Three independent reviewers found it; this test did not.
+    //
+    // The set now comes from the program itself, so withdrawing or adding a
+    // subcommand cannot leave the pin describing the previous build. The pattern
+    // also no longer requires the `agent-loop ` prefix, because the sentence that
+    // slipped through was written without it.
+    const { buildProgram } = await import('../src/cli/index.js');
+    const lease = buildProgram().commands.find((command) => command.name() === 'lease');
+    const real = new Set((lease?.commands ?? []).map((command) => command.name()));
+
+    // Comments are stripped first, and that is the load-bearing part rather than
+    // a convenience. The sentence that slipped through was a **string literal**
+    // in the program's own description — text the CLI prints. A docstring saying
+    // "an attended `lease break` existed here and was withdrawn" is the opposite:
+    // it is the explanation a maintainer needs, and a pin that forbade it would
+    // push the reasoning out of the files that must carry it. What this measures
+    // is what an operator can be shown, not what the source may discuss.
     const offenders: string[] = [];
     for (const file of sourceFiles()) {
-      if (/agent-loop lease (clear|force|takeover)/.test(readFileSync(file, 'utf8'))) {
-        offenders.push(relative(PACKAGE_ROOT, file));
+      const emitted = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^[^\n]*\/\/.*$/gm, '');
+      for (const [, named] of emitted.matchAll(/`(?:agent-loop )?lease ([a-z][a-z-]*)/g)) {
+        if (named !== undefined && !real.has(named)) {
+          offenders.push(`${relative(PACKAGE_ROOT, file)}: lease ${named}`);
+        }
       }
     }
     expect(offenders).toEqual([]);

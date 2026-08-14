@@ -27,8 +27,12 @@
  *     shares, so it distinguishes nothing;
  *   - the record names no owner, so the pid cross-check compares `null` with
  *     `null` and the liveness re-check is skipped entirely;
- *   - the object identity is a `(dev,ino)` pair, and this module's own acquire
- *     path ships fallbacks for filesystems that reuse those promptly.
+ *   - the object identity is a `(dev,ino)` pair, and `execution-lease.ts`'s
+ *     acquire path shipped fallbacks for filesystems that reuse those promptly.
+ *     (That fallback has since been withdrawn too, and a lease now exists only
+ *     where hard links work — but the break was already gone by then, and it is
+ *     the *collapse of all three facts at once* that is the reason, not any one
+ *     of them being repairable.)
  *
  * A sixth independent review reproduced the consequence end to end: an
  * authorisation minted for artefact A removed a **legitimately acquired** lease B
@@ -62,7 +66,13 @@ import {
   type ProcessLivenessProbe,
 } from './execution-lease.js';
 
-/** The seam this module takes. The same one, and the only one, `acquire` takes. */
+/**
+ * The seam this module takes: the liveness probe, and nothing else.
+ *
+ * `acquire` takes three — its clock, this probe, and the `link` that publishes
+ * the record. This comment claimed it took "the same one, and the only one"
+ * `acquire` takes, which was false on both halves.
+ */
 export interface LeaseRecoveryDependencies {
   readonly processAlive?: ProcessLivenessProbe;
 }

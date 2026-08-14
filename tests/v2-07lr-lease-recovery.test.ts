@@ -13,9 +13,12 @@
  *
  *  2. **LF-3 — two live guards that no test pinned.** The win32 drive-relative
  *     refusal, and `removeVerifiedLease`'s detach/verify/restore. The second is
- *     the mechanism the whole recovery contract rests on, and no in-process seam
- *     distinguishes it from a plain `unlink`: only its behaviour under a
- *     successor does.
+ *     the mechanism the whole recovery contract rests on. This header claimed no
+ *     in-process seam distinguished it from a plain `unlink`; the body of this
+ *     file now records why that is false — the `matches` predicate is the seam —
+ *     and the two sat one file apart saying opposite things, which is the third
+ *     time in this slice a correction was written without retiring the sentence
+ *     it corrected.
  *
  *  3. **What is left where the attended break was.** It came back under a
  *     contract that named what had defeated it, and a sixth adversarial review
@@ -55,7 +58,6 @@ import {
   acquireRepositoryExecutionLease,
   deriveExecutionLeaseLocation,
   inspectRepositoryExecutionLease,
-  leaseObjectIdentity,
   releaseRepositoryExecutionLease,
   verifyExecutionLeaseHeld,
 } from '../src/lease/execution-lease.js';

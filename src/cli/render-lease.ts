@@ -56,6 +56,18 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
       '  a submodule, a linked worktree and a separate Git directory.',
     LEASE_WRITE_FAILED:
       'The lease claim could not be recorded, so it was given back. Nothing was started.',
+    LEASE_FILESYSTEM_UNSUPPORTED:
+      'This repository is on a filesystem that cannot carry an execution lease, so nothing\n' +
+      '  was started and nothing was created. The lease is published by hard-linking a\n' +
+      '  finished record into place, and a record this build may not remove is put back the\n' +
+      '  same way; where the filesystem refuses to link, neither is possible. This build used\n' +
+      '  to fall back to an exclusive create here. That fallback is withdrawn: it produced a\n' +
+      '  lease whose release and rollback could not be carried out safely, and reviews\n' +
+      '  reproduced it destroying a claim another invocation had legitimately taken. A named\n' +
+      '  unsupported filesystem is the honest answer. FAT, exFAT and some network or\n' +
+      '  container-mounted paths are the usual causes; move the repository, or its Git common\n' +
+      '  directory, onto a local filesystem that supports hard links. The reason line carries\n' +
+      '  the errno the link was refused with.',
   });
 
 /** One static sentence per inspected state. Closed, and total by type. */
