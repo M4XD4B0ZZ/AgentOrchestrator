@@ -74,9 +74,17 @@ const UNSUPPORTED_NODE = { V2_07P_FAKE_NODE_VERSION: 'v20.11.1' };
  * reached, which would make every check below pass or fail for the wrong
  * reason.
  *
- * The other three dist-artefact harnesses in this directory already solve this
- * by never depending on the outer checkout: each builds its own real, throwaway
- * Git repository under the OS temp directory. This harness does the same, so
+ * The other two dist-artefact harnesses that stand a repository up do not need
+ * a *resolvable* one, because neither drives the CLI through
+ * `resolveRepository()`: `execution-lease-release-dist-artifact.mjs` fabricates
+ * an in-process `{ gitCommonDir, root, id }` record by hand and calls the lease
+ * module directly, and `execution-lease-race-dist-artifact.mjs` only
+ * `mkdirSync`s a bare `.git` directory — enough for the lease code, which reads
+ * no profile. This harness is different: it exercises `dist/cli/index.js` end
+ * to end, so `lease status` has to reach a real, fully resolvable repository —
+ * an actual `git init`, a real commit, and a schema-valid profile on disk — or
+ * there is nothing for it to print. Neither sibling technique transfers, so
+ * this harness builds that repository itself, under the OS temp directory, so
  * what it proves about the gate does not depend on this repository's own
  * onboarding state, on this machine or on any other.
  */
@@ -182,13 +190,39 @@ try {
       `unsupported ${label}: the refusal reached stderr truncated`,
     );
 
-    // THE EFFECT. Not "a message was printed" — that the action never ran. On a
-    // supported runtime this exact invocation prints the lease report; its
-    // absence is what proves the gate stopped the command rather than merely
-    // complaining alongside it.
+    // THE EFFECT. Not "a message was printed" — that the action never ran.
+    //
+    // The two cases are not symmetric, and pretending otherwise would make half
+    // of this proof vacuous. Spoofing `process.version` disturbs nothing else:
+    // on a supported runtime this exact invocation prints the lease report, so
+    // the node-version case is the one where "Lease is absent from stdout"
+    // genuinely shows the gate stopped the command.
+    //
+    // Spoofing `process.platform` to a non-`win32` value does not leave the
+    // rest of the CLI undisturbed. `resolveOnPath` in `src/doctor/exec.ts`
+    // branches its PATHEXT search on `process.platform === 'win32'`, so with
+    // the platform faked the CLI resolves `git` without `.exe` and
+    // `resolveRepository()` fails at `GIT_UNAVAILABLE` before any report could
+    // ever be written — independently of whether the gate ran at all. For that
+    // case, `!refused.stdout.includes('Lease')` would hold even with the gate
+    // fully disabled, so it is not load-bearing on its own.
+    //
+    // What *is* load-bearing for both cases: the real gate writes to fd 2 and
+    // exits before Commander's action ever runs, so stdout is untouched -
+    // empty, not "empty of the word Lease". A build with the gate stubbed out
+    // always writes *something* to stdout for this invocation, whether that is
+    // the lease report or the `could not be resolved` / `GIT_UNAVAILABLE`
+    // failure text a broken git resolution produces. Asserting emptiness is
+    // therefore the one check that cannot be satisfied by an unrelated failure,
+    // and it is kept alongside the `Lease`-absence check because the latter is
+    // still what an operator would actually have seen.
     check(
       !refused.stdout.includes('Lease'),
       `unsupported ${label}: the lease action ran anyway and wrote its report`,
+    );
+    check(
+      refused.stdout.trim() === '',
+      `unsupported ${label}: stdout was not empty, so something ran and wrote to it: ${JSON.stringify(refused.stdout)}`,
     );
   }
 } finally {
