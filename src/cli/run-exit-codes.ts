@@ -41,6 +41,22 @@ export const EXIT_RUN_REFUSED = 4;
 export const EXIT_RUN_CALL_AGAIN = 5;
 
 /**
+ * The runtime is outside the V2 support contract, so no command ran.
+ *
+ * Housed here because this is where every exit code this binary can produce
+ * lives, and a code allocated anywhere else is a code that eventually collides.
+ *
+ * **Deliberately not a member of {@link CliExitCode}.** That union is the
+ * exit-code contract of `agent-loop run` — the codomain of three total mappings
+ * from run outcomes — and this is not a run outcome. It is a refusal that
+ * happens *before* any command begins, on a machine where no run is possible at
+ * all. Folding it into the union would invite a future outcome to be mapped
+ * onto it, which would tell an operator their task failed when in fact their
+ * runtime was never supported.
+ */
+export const EXIT_RUNTIME_UNSUPPORTED = 6;
+
+/**
  * The closed set of codes this command may exit with.
  *
  * Named as a type so the three tables below can be written with `satisfies`,

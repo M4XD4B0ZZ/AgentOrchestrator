@@ -20,6 +20,7 @@ import { registerDoctorCommand } from './doctor-command.js';
 import { registerLeaseCommand } from './lease-command.js';
 import { registerReleaseCommand } from './release-command.js';
 import { registerRunCommand } from './run-command.js';
+import { enforceSupportedRuntime } from './runtime-gate.js';
 
 const DESCRIPTION = [
   'Repository-agnostic orchestrator for a writing agent and a read-only reviewer.',
@@ -62,6 +63,21 @@ export function buildProgram(): Command {
     .version('0.1.0', '-v, --version', 'Output the version number')
     .showHelpAfterError('(run `agent-loop --help` for usage)')
     .showSuggestionAfterError(true);
+
+  // The V2 runtime gate. `preAction` runs after Commander has parsed, so
+  // `--help` and `--version` — which Commander resolves during parse — are
+  // still reachable on a machine this build refuses to run on. Refusing to
+  // print help is not a safety property, and the operator who most needs the
+  // help output is exactly the one whose runtime is unsupported.
+  //
+  // Whether this hook is inherited by nested subcommands (`lease status`) is a
+  // property of Commander that is *measured* rather than assumed, by
+  // tests/dist-artifact/runtime-gate-dist-artifact.mjs. If a future Commander
+  // stops inheriting it, that harness fails on the nested case rather than this
+  // gate quietly covering only the top level.
+  program.hook('preAction', () => {
+    enforceSupportedRuntime();
+  });
 
   registerDoctorCommand(program);
   registerRunCommand(program);
