@@ -814,3 +814,172 @@ describe('a task-local failure is recorded and does not end the run', () => {
     ).toBe('TASK_STATE_DOES_NOT_PROVE_IT');
   }, 180_000);
 });
+
+import {
+  conclusionForRunOutcome,
+  endReasonFor,
+  independenceIsEstablished,
+  recordingResultFor,
+} from '../src/block/block-conclusion.js';
+import { BLOCK_PROGRESS_OUTCOMES, type BlockProgressOutcome } from '../src/block/block-progress.js';
+import { RUN_OUTCOMES, type RunOutcome } from '../src/run/run-driver.js';
+import type { BlockTaskEntry, TaskDisposition } from '../src/block/block-ledger.js';
+
+describe('a run outcome decides what the ledger may be told', () => {
+  /**
+   * Hand-written, outcome by outcome. Derived from the production map this
+   * would be a copy that cannot disagree; the point of the table is that a
+   * reviewer graded each row and a future member cannot inherit a grade.
+   */
+  const EXPECTED: Readonly<Record<RunOutcome, string>> = {
+    // The task's own record proves an outcome.
+    TASK_COMPLETED: 'SETTLE',
+    TASK_ABORTED: 'ABANDON',
+    BLOCKED_USAGE_LIMIT: 'PARK',
+    BLOCKED_VERIFY: 'PARK',
+    BLOCKED_AUTH: 'PARK',
+    SCOPE_VIOLATION: 'PARK',
+    RESUME_STATE_DIVERGED: 'PARK',
+    HUMAN_DECISION_REQUIRED: 'PARK',
+    // The run's authority is in doubt. Nothing may be written at all.
+    EXECUTION_LEASE_NOT_HELD: 'LEASE_UNCERTAIN',
+    EXECUTION_LEASE_LOST: 'LEASE_UNCERTAIN',
+    // A task record exists and cannot be used. That is its own class-2 reason.
+    STATE_UNUSABLE: 'STATE_UNUSABLE',
+    // Durable progress happened and the driver's per-call bound was reached.
+    // The one grade that is not an ending at all: the runner drives the same
+    // task again under the same lease. Graded any other way, a scheduling limit
+    // becomes a claim about a task's outcome — and graded as an ending of the
+    // invocation it would need a block run that outlives its lease holder.
+    STEP_BUDGET_EXHAUSTED: 'CONTINUE',
+    // Everything else leaves the task's outcome undetermined. Each is a real
+    // situation and none of them proves settle, park or abandon.
+    STATE_DIVERGED: 'UNRESOLVED',
+    STATE_UNOBSERVABLE: 'UNRESOLVED',
+    TASK_NOT_STARTED: 'UNRESOLVED',
+    STATE_CONFLICT: 'UNRESOLVED',
+    STATE_NOT_RECORDED: 'UNRESOLVED',
+    CONTINUATION_NOT_AUTHORISED: 'UNRESOLVED',
+    EXECUTION_UNAUTHORISED: 'UNRESOLVED',
+    NO_PROGRESS: 'UNRESOLVED',
+  };
+
+  it('grades every run outcome, and only the run outcomes', () => {
+    expect([...RUN_OUTCOMES].sort()).toEqual(Object.keys(EXPECTED).sort());
+  });
+
+  for (const [outcome, conclusion] of Object.entries(EXPECTED)) {
+    it(`${outcome} -> ${conclusion}`, () => {
+      expect(conclusionForRunOutcome(outcome as RunOutcome)).toBe(conclusion);
+    });
+  }
+});
+
+describe('a progress outcome decides whether anything landed', () => {
+  const EXPECTED: Readonly<Record<BlockProgressOutcome, string>> = {
+    RECORDED: 'RECORDED',
+    // The write itself could not be made. The run cannot presuppose a
+    // successful stop write either, so this is the no-write exit.
+    NOT_RECORDED: 'WRITE_FAILED',
+    // Every refusal that is *about the claim* rather than about the write. The
+    // task's outcome is not established, and the honest end is a stop that says
+    // so rather than a second attempt at a claim the records refuse.
+    TASK_NOT_IN_RUN: 'UNRESOLVED',
+    DISPOSITION_UNCHANGED: 'UNRESOLVED',
+    ANOTHER_TASK_ACTIVE: 'UNRESOLVED',
+    TASK_STATE_DOES_NOT_PROVE_IT: 'UNRESOLVED',
+    TASK_NOT_STARTED: 'UNRESOLVED',
+    TASK_STATE_UNUSABLE: 'STATE_UNUSABLE',
+    RUN_ALREADY_STOPPED: 'UNRESOLVED',
+  };
+
+  it('grades every progress outcome', () => {
+    expect([...BLOCK_PROGRESS_OUTCOMES].sort()).toEqual(Object.keys(EXPECTED).sort());
+  });
+
+  for (const [outcome, result] of Object.entries(EXPECTED)) {
+    it(`${outcome} -> ${result}`, () => {
+      expect(recordingResultFor(outcome as BlockProgressOutcome)).toBe(result);
+    });
+  }
+});
+
+describe('the end reason names the cause, not the consequence', () => {
+  const entry = (taskId: string, disposition: TaskDisposition): BlockTaskEntry => ({
+    taskId,
+    disposition,
+    evidenceRevision: disposition === 'PLANNED' || disposition === 'ACTIVE' ? null : 'f'.repeat(64),
+    baseCommit: null,
+    resultCommit: null,
+  });
+
+  it('is COMPLETE when every task settled', () => {
+    expect(endReasonFor([entry('A-001', 'SETTLED'), entry('B-001', 'SETTLED')])).toBe('COMPLETE');
+  });
+
+  // The worked example from the design. A block that did as much as could
+  // honestly be done ends naming the task outcome that explains the remainder.
+  it('is TASK_BLOCKED when a task is blocked and nothing runnable is left', () => {
+    expect(
+      endReasonFor([
+        entry('A-001', 'BLOCKED'),
+        entry('B-001', 'SETTLED'),
+        entry('C-001', 'SETTLED'),
+      ]),
+    ).toBe('TASK_BLOCKED');
+  });
+
+  it('prefers BLOCKED over ABANDONED when both are present', () => {
+    // Ordered, not arbitrary: a human can act on a blocked task, and nobody can
+    // act on an abandoned one. The reason should send them to the one that has
+    // a next step.
+    expect(endReasonFor([entry('A-001', 'BLOCKED'), entry('B-001', 'ABANDONED')])).toBe(
+      'TASK_BLOCKED',
+    );
+  });
+
+  it('is TASK_ABANDONED when only an abandonment explains the ending', () => {
+    expect(endReasonFor([entry('A-001', 'ABANDONED'), entry('B-001', 'SETTLED')])).toBe(
+      'TASK_ABANDONED',
+    );
+  });
+
+  // The other half of the pair. Only both cases together prove an ordering
+  // rather than a constant.
+  it('is NO_ELIGIBLE_TASK when no disposition explains why nothing is eligible', () => {
+    expect(endReasonFor([entry('A-001', 'PLANNED'), entry('B-001', 'SETTLED')])).toBe(
+      'NO_ELIGIBLE_TASK',
+    );
+  });
+});
+
+describe('independence is read from the frozen plan', () => {
+  it('is established only when no member depends on a member', () => {
+    expect(
+      independenceIsEstablished([
+        { taskId: 'A-001', dependsOn: [] },
+        { taskId: 'B-001', dependsOn: [] },
+      ]),
+    ).toBe(true);
+    expect(
+      independenceIsEstablished([
+        { taskId: 'A-001', dependsOn: [] },
+        { taskId: 'B-001', dependsOn: ['A-001'] },
+      ]),
+    ).toBe(false);
+  });
+
+  it('does not care which member the edge is on', () => {
+    // A relation with any edge at all is dependent execution, which is V2-09.
+    // There is no partial answer here and deliberately no per-pair one: "these
+    // two are independent, so run them and skip the rest" is the improvised
+    // scheduling this slice refuses.
+    expect(
+      independenceIsEstablished([
+        { taskId: 'A-001', dependsOn: ['C-001'] },
+        { taskId: 'B-001', dependsOn: [] },
+        { taskId: 'C-001', dependsOn: [] },
+      ]),
+    ).toBe(false);
+  });
+});
