@@ -137,8 +137,9 @@ export const LEASE_LIVENESS_SENTENCES: Readonly<Record<LeaseInspection['liveness
  * the operator, and then told them "Nothing is removed on a revision you did not
  * see" — a guarantee that is vacuous for exactly the class of lease the command
  * was being offered for. It also asserted "the revision is the lease's identity",
- * which contradicts `leaseObjectIdentity`'s own reasoning that content cannot
- * identify an object whose content is nothing. So the tool supplied the fact that
+ * which contradicts the reasoning recorded on `readObject` in
+ * `lease/execution-lease.ts` — that content cannot identify an object whose
+ * content is nothing. So the tool supplied the fact that
  * made the authorisation empty, and described it as the fact that made it safe.
  *
  * That is why a report may state what was observed and may not offer a

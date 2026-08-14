@@ -353,8 +353,9 @@ export function deriveExecutionLeaseLocation(repository: LeaseRepository): Lease
  * ── Why `isAbsolute` is not enough, and which case it does catch ───────────
  *
  * `isAbsolute` answers `false` for a genuinely **drive-relative** key —
- * `C:repo\.git`, relative to the current directory of that drive — so line 313
- * above already refuses that one. What it answers `true` for, and this function
+ * `C:repo\.git`, relative to the current directory of that drive — so the
+ * `isAbsolute` check in {@link deriveExecutionLeaseLocation} above already
+ * refuses that one. What it answers `true` for, and this function
  * must refuse, is a **root-relative** key: `\foo`, and `/foo` which normalises
  * to the same thing, absolute only within whichever volume the process happens
  * to be standing on. One such key could denote two places, which is two
@@ -562,7 +563,8 @@ export interface LeaseInspection {
    *
    * Reported beside the revision because the revision is not identity for every
    * lease this build can meet: the crash-window artefact is empty, and every
-   * empty object has the same digest. See {@link leaseObjectIdentity}. An
+   * empty object has the same digest. See {@link readObject}, which produces
+   * this value. An
    * operator authorises a break with both, and both are re-established on the
    * object the removal detaches.
    */
@@ -1369,7 +1371,10 @@ export type VerifiedRemoval =
  * handed every future caller the exact mechanism that had just been found
  * unsound. An affordance for a withdrawn operation is how the operation comes
  * back. Identity here is the nonce inside the record, which a successor cannot
- * accidentally share; `leaseObjectIdentity` remains, for `lease status` to report.
+ * accidentally share. The object identity is still *reported* — `lease status`
+ * prints it — but no function by that name remains: the inspection reads
+ * {@link readObject} directly. An exported reader of exactly the value a
+ * withdrawn authority rested on is the affordance that authority leaves behind.
  */
 export function removeVerifiedLease(
   leasePath: string,
@@ -1452,8 +1457,10 @@ export function removeVerifiedLease(
 
   // The decision, on the object this call detached rather than on the name it
   // came from. The predicate is handed the bytes and nothing else: it used to
-  // also receive `leaseObjectIdentity(quarantine)`, which was the attended
-  // break's authority and is now no caller's.
+  // also receive the quarantined file's `(dev,ino)` identity, read by a
+  // since-removed `leaseObjectIdentity` helper. That was the attended break's
+  // authority; the break is withdrawn and so is the helper, and neither name
+  // resolves to anything in this build.
   if (bytes !== null && matches(bytes)) {
     discard(quarantine);
     return 'REMOVED';

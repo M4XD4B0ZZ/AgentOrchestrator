@@ -2859,7 +2859,8 @@ narrow answer, so changing it has to be deliberate.
 
 ### Carried forward, deliberately
 
-- **F-4** — on Windows `isAbsolute` accepts a drive-relative root (`\foo`), so
+- **F-4** — on Windows `isAbsolute` accepts a root-relative path (`\foo` —
+  absolute within whichever volume the process is standing on), so
   two states recording it compare equal while naming different volumes. No
   producer can emit such a path, and the one axis on which a hand-written value
   could have reached a spawned `cwd` is now closed upstream by the derived
