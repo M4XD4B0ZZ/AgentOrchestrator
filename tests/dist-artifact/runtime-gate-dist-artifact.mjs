@@ -229,11 +229,19 @@ try {
   rmSync(leaseFixtureRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
-// ── 3. Nested commands are gated too ─────────────────────────────────────────
+// ── 3. Help stays reachable at a nested command, on an unsupported runtime ──
 //
-// This settles empirically whether Commander inherits a program-level
-// `preAction` hook into subcommands. If it does not, this fails here rather
-// than the gate silently covering only the top level.
+// This proves only that `release --help` — a nested command — is NOT refused
+// when the runtime is unsupported. It does NOT settle whether Commander
+// inherits the program-level `preAction` hook into subcommands at all: a gate
+// that never fired for any nested command would make this exact assertion
+// pass too, for the wrong reason, since an unfired gate refuses nothing.
+//
+// The nested-command guarantee is really pinned in section 2 above, not here:
+// `lease status` — an actual nested *action*, not `--help` — is asserted to
+// exit `EXIT_RUNTIME_UNSUPPORTED` there. That is the check that would fail if
+// the hook did not reach subcommands; this one only confirms that when it
+// does reach them, help still gets out.
 {
   const nested = runCli(['release', '--help'], UNSUPPORTED_PLATFORM);
   check(

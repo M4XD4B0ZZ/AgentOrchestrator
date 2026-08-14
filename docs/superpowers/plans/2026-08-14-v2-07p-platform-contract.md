@@ -16,7 +16,7 @@ Every task's requirements implicitly include this section.
 
 - **Supported Node majors are the whitelist `[22, 24]`.** Never a floor. `>= 22` is wrong: it admits 23 and 25.
 - **Supported platform is `win32` only.**
-- **Refusal order is fixed:** write the complete message to fd 2 synchronously → terminate with exit code 6 → no command action may begin.
+- **The runtime gate's refusal order is fixed:** write the complete message to fd 2 synchronously → terminate with exit code 6 → no command action may begin. This is the runtime gate's own contract; the lease-location refusal for an explicit UNC or device-namespace path is a different mechanism, at lease acquisition, with its own pre-existing exit-code contract, not this one. "Enforced" does not mean "enforced by the same mechanism" — see the design spec §1.
 - `--help`, `--version` and `help <command>` must keep working on an unsupported runtime, at every nesting level.
 - **No filesystem measurement in the runtime gate.** No `GetDriveType`, no `net use`, no NTFS probe. Nothing added here may read as "the filesystem was checked at startup, so this effect is safe".
 - **No POSIX code is deleted in this slice.** `exec.ts`, `path-identity.ts`, `safe-write.ts` and the POSIX profile resolver keep their branches. Out of scope, deliberately.
@@ -1724,11 +1724,22 @@ kept apart on purpose, because they have different strengths:
 directory is on a local NTFS volume. This is the configuration the project is
 measured on: `verify` runs on `windows-latest` against Node 22 *and* Node 24.
 
-**Enforced** — Windows, Node major in `{22, 24}`, and no explicit UNC or device
-path for the repository. This is what the build refuses to run outside of, and
-it is what can be decided from process-constant facts and the shape of a path.
-The refusal happens at the CLI entry, before any command action begins, with
-exit code 6; `--help` and `--version` keep working.
+**Enforced** splits into two commitments, because they are decided and
+refused by two different mechanisms — naming both separately is the point,
+since "enforced" does not mean "enforced by the same mechanism":
+
+**Runtime enforced** — Windows, and Node major in `{22, 24}`. Decided from
+process-constant facts alone (`process.platform`, `process.version`) by the
+**runtime gate**, which refuses at the CLI entry, before any command action
+begins, with exit code 6; `--help` and `--version` keep working.
+
+**Lease-location enforced** — no explicit UNC or device-namespace path for
+the repository's Git common directory. Decided from the shape of a path, and
+refused by a different mechanism at a different point — the **lease-location
+gate**, where the command attempts to acquire the repository execution
+lease, after the repository has already been resolved — through the
+lease-acquisition refusal path and its own exit-code contract, not the
+runtime gate's.
 
 **Proved at the effect** — the lease's own filesystem capability, checked at the
 hard link that needs it, answering `LEASE_FILESYSTEM_UNSUPPORTED` with the errno

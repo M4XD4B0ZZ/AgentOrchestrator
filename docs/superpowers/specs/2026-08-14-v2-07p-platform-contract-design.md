@@ -57,6 +57,19 @@ apart:
   this design and would be a truthfulness defect of exactly the kind this
   repository keeps finding in its own prose.
 
+**`enforced` names a claim strength, not a single mechanism — and "enforced"
+does not mean "enforced by the same mechanism".** The Node/platform fact and
+the path-shape fact are both `enforced`, but by two different gates, at two
+different call sites, with two different exit codes: §4's runtime gate reads
+`process.platform` / `process.version` and terminates at the CLI entry, before
+any command action begins, with `EXIT_RUNTIME_UNSUPPORTED`; §5's path-shape
+classification is read later, inside the command, when it attempts to acquire
+the repository execution lease, and is refused through the lease-acquisition
+path with its own exit-code contract — not the runtime gate's. Writing one
+sentence that gives both facts one call site and one exit code would be the
+same collapse this section exists to prevent, one level down from where it is
+prevented above.
+
 ### Not part of the V2 support contract
 
 FAT · exFAT · SMB and other network filesystems · UNC-hosted repository storage

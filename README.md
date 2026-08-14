@@ -77,11 +77,22 @@ kept apart on purpose, because they have different strengths:
 directory is on a local NTFS volume. This is the configuration the project is
 measured on: `verify` runs on `windows-latest` against Node 22 *and* Node 24.
 
-**Enforced** — Windows, Node major in `{22, 24}`, and no explicit UNC or device
-path for the repository. This is what the build refuses to run outside of, and
-it is what can be decided from process-constant facts and the shape of a path.
-The refusal happens at the CLI entry, before any command action begins, with
-exit code 6; `--help` and `--version` keep working.
+**Enforced** splits into two commitments, because they are decided and
+refused by two different mechanisms — naming both separately is the point,
+since "enforced" does not mean "enforced by the same mechanism":
+
+**Runtime enforced** — Windows, and Node major in `{22, 24}`. Decided from
+process-constant facts alone (`process.platform`, `process.version`) by the
+**runtime gate**, which refuses at the CLI entry, before any command action
+begins, with exit code 6; `--help` and `--version` keep working.
+
+**Lease-location enforced** — no explicit UNC or device-namespace path for
+the repository's Git common directory. Decided from the shape of a path, and
+refused by a different mechanism at a different point — the **lease-location
+gate**, where the command attempts to acquire the repository execution
+lease, after the repository has already been resolved — through the
+lease-acquisition refusal path and its own exit-code contract, not the
+runtime gate's.
 
 **Proved at the effect** — the lease's own filesystem capability, checked at the
 hard link that needs it, answering `LEASE_FILESYSTEM_UNSUPPORTED` with the errno
