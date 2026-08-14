@@ -12,6 +12,7 @@ import {
   inspectRepositoryExecutionLease,
 } from '../src/lease/execution-lease.js';
 import { LEASE_ACQUIRE_SENTENCES, LEASE_STATE_SENTENCES } from '../src/cli/render-lease.js';
+import { assessLeaseRecovery } from '../src/lease/lease-recovery.js';
 
 describe('the runtime support decision is a whitelist, not a floor', () => {
   // The two rows that matter most are 23 and 25. `includes(major)` and
@@ -259,5 +260,34 @@ describe('every new code carries its own sentence', () => {
       LEASE_STATE_SENTENCES.LOCATION_DEVICE_NAMESPACE,
     ];
     expect(new Set(sentences).size).toBe(3);
+  });
+});
+
+describe('lease recovery classifies a network or device path as such, never as the crash-window artefact', () => {
+  // `classifyForRecovery` (src/lease/lease-recovery.ts) switches on
+  // `inspection.state`. Before this test existed, the two new location states
+  // matched no case in that switch, fell through into the liveness switch, and
+  // — because `inspection()` defaults an undetermined `liveness` to
+  // `UNKNOWABLE` — came out as `NO_OWNER_RECORDED`: the classification
+  // documented as "the artefact a crash between the exclusive create and the
+  // record write leaves behind". For a UNC or device path nothing was ever
+  // created there at all, so that is the same misdescription this task exists
+  // to delete, reintroduced one module over.
+  it('classifies a network path as the network refusal, not as an unowned crash artefact', () => {
+    const assessed = assessLeaseRecovery({
+      gitCommonDir: '\\\\server\\share\\repo\\.git',
+      root: 'C:\\repo',
+      id: 'network',
+    });
+    expect(assessed.classification).toBe('LOCATION_NETWORK_UNSUPPORTED');
+  });
+
+  it('classifies a device path as the device refusal, not as an unowned crash artefact', () => {
+    const assessed = assessLeaseRecovery({
+      gitCommonDir: '\\\\.\\PhysicalDrive0',
+      root: 'C:\\repo',
+      id: 'device',
+    });
+    expect(assessed.classification).toBe('LOCATION_DEVICE_NAMESPACE');
   });
 });
