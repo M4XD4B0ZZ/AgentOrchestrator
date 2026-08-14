@@ -48,6 +48,19 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
     LEASE_LOCATION_UNSUITABLE:
       'No lease location could be derived for this repository, so no exclusive claim could\n' +
       '  be made. Nothing was started.',
+    LEASE_LOCATION_NETWORK_UNSUPPORTED:
+      "This repository's Git common directory is on a UNC or network path, which is outside\n" +
+      '  the V2 support contract. Nothing was started and nothing was created. V2 is built and\n' +
+      '  verified for one configuration: Windows, Node 22 or 24, and a repository whose Git\n' +
+      '  common directory is on a local NTFS volume. Move the repository, or its Git common\n' +
+      '  directory, onto a local volume. Note what this refusal does not claim: a repository\n' +
+      '  reached through a drive letter is accepted, and this build cannot tell whether such a\n' +
+      '  letter is a mapped network share.',
+    LEASE_LOCATION_DEVICE_NAMESPACE:
+      "This repository's Git common directory is a Windows device path (\\\\.\\...), which is\n" +
+      '  not a filesystem location a lease can be kept in. Nothing was started and nothing was\n' +
+      '  created. This is reported apart from the network refusal because it is a different\n' +
+      '  thing: a device path is not network storage.',
     REPOSITORY_RECORD_INCOHERENT:
       'This repository record does not describe one repository: its root and its Git common\n' +
       '  directory belong to different places, so a lease taken for it would guard the wrong\n' +
@@ -81,6 +94,12 @@ export const LEASE_STATE_SENTENCES: Readonly<Record<LeaseInspection['state'], st
       '  recording it leaves behind.',
     UNREADABLE: 'Something is at the lease path and could not be read at all.',
     LOCATION_UNSUITABLE: 'No lease location could be derived for this repository.',
+    LOCATION_NETWORK_UNSUPPORTED:
+      'This repository is on a UNC or network path, which V2 does not support, so it has no\n' +
+      '  lease location. This is a refusal, not a failure to understand the path.',
+    LOCATION_DEVICE_NAMESPACE:
+      'This repository path is in the Windows device namespace, which is not a place a lease\n' +
+      '  can be kept.',
   });
 
 /**

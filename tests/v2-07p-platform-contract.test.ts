@@ -7,6 +7,11 @@ import {
 } from '../src/platform/runtime-support.js';
 import { EXIT_RUNTIME_UNSUPPORTED } from '../src/cli/run-exit-codes.js';
 import { renderRuntimeRefusal } from '../src/cli/runtime-gate.js';
+import {
+  deriveExecutionLeaseLocation,
+  inspectRepositoryExecutionLease,
+} from '../src/lease/execution-lease.js';
+import { LEASE_ACQUIRE_SENTENCES, LEASE_STATE_SENTENCES } from '../src/cli/render-lease.js';
 
 describe('the runtime support decision is a whitelist, not a floor', () => {
   // The two rows that matter most are 23 and 25. `includes(major)` and
@@ -168,5 +173,91 @@ describe('the gate does not disturb the supported path', () => {
     const output = written.join('');
     expect(output.length).toBeGreaterThan(0);
     expect(/could not be resolved|Lease/.test(output)).toBe(true);
+  });
+});
+
+describe('the lease location refuses network and device paths, and says which', () => {
+  const derive = (key: string) =>
+    deriveExecutionLeaseLocation({ gitCommonDir: key, root: 'C:\\repo', id: 'shape' });
+
+  const refused: ReadonlyArray<readonly [string, string]> = [
+    ['\\\\server\\share\\repo\\.git', 'LEASE_LOCATION_NETWORK_UNSUPPORTED'],
+    ['//server/share/repo/.git', 'LEASE_LOCATION_NETWORK_UNSUPPORTED'],
+    ['\\\\?\\UNC\\server\\share\\repo\\.git', 'LEASE_LOCATION_NETWORK_UNSUPPORTED'],
+    ['\\\\?\\unc\\server\\share\\repo\\.git', 'LEASE_LOCATION_NETWORK_UNSUPPORTED'],
+    ['\\\\.\\PhysicalDrive0', 'LEASE_LOCATION_DEVICE_NAMESPACE'],
+    ['\\\\.\\C:\\repo\\.git', 'LEASE_LOCATION_DEVICE_NAMESPACE'],
+    ['\\repo\\.git', 'LEASE_LOCATION_UNSUITABLE'],
+    ['/repo/.git', 'LEASE_LOCATION_UNSUITABLE'],
+    ['\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\r', 'LEASE_LOCATION_UNSUITABLE'],
+  ];
+
+  for (const [key, code] of refused) {
+    it(`${key} -> ${code}`, () => {
+      const derived = derive(key);
+      expect(derived.ok).toBe(false);
+      if (derived.ok) return;
+      // The specific code, never merely `ok === false`: a refusal that
+      // misdescribes itself is worse than a verbose one, and the whole point of
+      // splitting these classes is that they are told apart.
+      expect(derived.code).toBe(code);
+    });
+  }
+
+  // The control against an over-broad refusal. Without it, an implementation
+  // that refuses every Windows path passes every case above.
+  for (const key of ['C:\\repo\\.git', 'c:/repo/.git', '\\\\?\\C:\\repo\\.git']) {
+    it(`${key} is still accepted`, () => {
+      expect(derive(key).ok).toBe(true);
+    });
+  }
+
+  it('an extended-length drive path is accepted without claiming the volume is local', () => {
+    // Stated as a test because it is the ACCEPTED LIMIT: a drive letter can be
+    // a mapped network share in either form, and neither is detected.
+    const extended = derive('\\\\?\\C:\\repo\\.git');
+    const plain = derive('C:\\repo\\.git');
+    expect(extended.ok).toBe(true);
+    expect(plain.ok).toBe(true);
+  });
+});
+
+describe('lease status describes the refusal it actually met', () => {
+  const inspect = (key: string) =>
+    inspectRepositoryExecutionLease({ gitCommonDir: key, root: 'C:\\repo', id: 'shape' });
+
+  it('reports a network path as such, not as "no location could be derived"', () => {
+    expect(inspect('\\\\server\\share\\repo\\.git').state).toBe('LOCATION_NETWORK_UNSUPPORTED');
+  });
+
+  it('reports a device path as such', () => {
+    expect(inspect('\\\\.\\PhysicalDrive0').state).toBe('LOCATION_DEVICE_NAMESPACE');
+  });
+
+  it('still reports an underivable location as underivable', () => {
+    expect(inspect('\\repo\\.git').state).toBe('LOCATION_UNSUITABLE');
+  });
+});
+
+describe('every new code carries its own sentence', () => {
+  it('names the network refusal as network storage outside the contract', () => {
+    const sentence = LEASE_ACQUIRE_SENTENCES.LEASE_LOCATION_NETWORK_UNSUPPORTED;
+    expect(sentence).toMatch(/UNC|network/i);
+    expect(sentence).not.toContain('No lease location could be derived');
+  });
+
+  it('names the device refusal without calling it UNC', () => {
+    const sentence = LEASE_ACQUIRE_SENTENCES.LEASE_LOCATION_DEVICE_NAMESPACE;
+    expect(sentence).toMatch(/device/i);
+    expect(sentence).not.toMatch(/UNC/);
+  });
+
+  it('gives each new inspection state a distinct sentence', () => {
+    const sentences = [
+      LEASE_STATE_SENTENCES.LOCATION_UNSUITABLE,
+      LEASE_STATE_SENTENCES.LOCATION_NETWORK_UNSUPPORTED,
+      LEASE_STATE_SENTENCES.LOCATION_DEVICE_NAMESPACE,
+    ];
+    expect(new Set(sentences).size).toBe(3);
   });
 });

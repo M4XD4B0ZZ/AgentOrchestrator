@@ -293,9 +293,24 @@ export interface LeaseLocation {
   readonly key: string;
 }
 
+/**
+ * Why no lease location exists for a repository. A closed set.
+ *
+ * Three codes rather than one, following the reasoning already recorded for
+ * `REPOSITORY_RECORD_INCOHERENT` below: a refusal that misdescribes itself is
+ * worse than a verbose one. `LEASE_LOCATION_UNSUITABLE`'s sentence says no
+ * location could be derived, which is plainly false for a UNC path that
+ * resolves perfectly well and is refused because V2 does not support network
+ * storage.
+ */
+export type LeaseLocationFailureCode =
+  | 'LEASE_LOCATION_UNSUITABLE'
+  | 'LEASE_LOCATION_NETWORK_UNSUPPORTED'
+  | 'LEASE_LOCATION_DEVICE_NAMESPACE';
+
 export interface LeaseLocationFailure {
   readonly ok: false;
-  readonly code: 'LEASE_LOCATION_UNSUITABLE';
+  readonly code: LeaseLocationFailureCode;
 }
 
 export type LeaseLocationResult = LeaseLocation | LeaseLocationFailure;
@@ -313,29 +328,69 @@ export function deriveExecutionLeaseLocation(repository: LeaseRepository): Lease
   if (typeof key !== 'string' || key.trim().length === 0 || !isAbsolute(key)) {
     return Object.freeze({ ok: false as const, code: 'LEASE_LOCATION_UNSUITABLE' as const });
   }
-  // `isAbsolute` is not enough on Windows, and this is the one place in the
-  // codebase where that narrowness bites hardest. It answers `true` for a
-  // **drive-relative** root — `\foo`, and `/foo`, which normalises to the same
-  // thing — which is absolute only within whichever volume the process happens
-  // to be standing on. `core/path-identity.ts` records the same gap (F-4) and
-  // deliberately leaves it open, because there the value is only ever a
-  // comparison operand. Here it becomes a *file location*: one key string could
-  // denote two places, which is two repositories sharing one lease or one
-  // repository holding two.
-  //
-  // Refusing only ever narrows, so this cannot make anything reachable that was
-  // not. Nothing in this build can produce such a key — `resolveRepository`
-  // hands over a `realpath` — but `LeaseRepository` is a structural interface on
-  // three public functions, and a guarantee that holds only because today's one
-  // caller is careful is the kind this slice exists to replace.
-  if (process.platform === 'win32' && !/^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/])/.test(key)) {
-    return Object.freeze({ ok: false as const, code: 'LEASE_LOCATION_UNSUITABLE' as const });
+  const shapeFailure = classifyWindowsKey(key);
+  if (shapeFailure !== null) {
+    return Object.freeze({ ok: false as const, code: shapeFailure });
   }
   return Object.freeze({
     ok: true as const,
     path: join(key, EXECUTION_LEASE_FILE_NAME),
     key,
   });
+}
+
+/**
+ * Which V2 path class this key is, or `null` when it is one V2 supports.
+ *
+ * Purely syntactic: no filesystem is consulted, nothing is measured, and the
+ * answer for a given string never changes. That is what keeps it out of the
+ * class of check that has to sit at its effect — and it is *not* a statement
+ * about the volume. A drive letter can be a mapped network share, in the plain
+ * and the extended form alike, and neither is detected here or anywhere else in
+ * this build. See the ACCEPTED LIMIT in README's supported-runtime section; the
+ * real protection for that case is the link refusal at the acquire effect.
+ *
+ * ── Why `isAbsolute` is not enough, and which case it does catch ───────────
+ *
+ * `isAbsolute` answers `false` for a genuinely **drive-relative** key —
+ * `C:repo\.git`, relative to the current directory of that drive — so line 313
+ * above already refuses that one. What it answers `true` for, and this function
+ * must refuse, is a **root-relative** key: `\foo`, and `/foo` which normalises
+ * to the same thing, absolute only within whichever volume the process happens
+ * to be standing on. One such key could denote two places, which is two
+ * repositories sharing one lease or one repository holding two. (`F-4` in the
+ * README records the same gap for `core/path-identity.ts`, where the value is
+ * only ever a comparison operand and the gap stays open.)
+ *
+ * Refusing only ever narrows, so nothing here can make reachable what was not.
+ */
+function classifyWindowsKey(key: string): LeaseLocationFailureCode | null {
+  // One normalisation, because every rule below is about shape and none of them
+  // is about which separator character was used. Windows accepts both.
+  const shape = key.replace(/\//g, '\\');
+
+  if (shape.startsWith('\\\\?\\')) {
+    // The extended-length namespace carries both a local and a network form.
+    if (/^\\\\\?\\UNC\\/i.test(shape)) return 'LEASE_LOCATION_NETWORK_UNSUPPORTED';
+    if (/^\\\\\?\\[A-Za-z]:\\/.test(shape)) return null;
+    // `\\?\Volume{…}` and anything else in that namespace: not refused as
+    // network, not accepted either. V2 supports the drive-letter forms, and a
+    // shape nobody has verified is not one of them.
+    return 'LEASE_LOCATION_UNSUITABLE';
+  }
+
+  // `\\.\…` — the device namespace. Its own code: subsuming it under "UNC"
+  // would make the network code as imprecise as the one it replaces.
+  if (shape.startsWith('\\\\.\\')) return 'LEASE_LOCATION_DEVICE_NAMESPACE';
+
+  // `\\server\share\…` — plain UNC.
+  if (/^\\\\[^\\]/.test(shape)) return 'LEASE_LOCATION_NETWORK_UNSUPPORTED';
+
+  // `C:\…` — the supported shape, and the only one.
+  if (/^[A-Za-z]:\\/.test(shape)) return null;
+
+  // Root-relative, and anything else `isAbsolute` let through.
+  return 'LEASE_LOCATION_UNSUITABLE';
 }
 
 /**
@@ -470,6 +525,10 @@ export const LEASE_STATES = [
   'UNREADABLE',
   /** No lease path can be derived for this repository. */
   'LOCATION_UNSUITABLE',
+  /** The location is a UNC/network path, which V2 does not support. */
+  'LOCATION_NETWORK_UNSUPPORTED',
+  /** The location is in the Windows device namespace. */
+  'LOCATION_DEVICE_NAMESPACE',
 ] as const;
 
 export type LeaseState = (typeof LEASE_STATES)[number];
@@ -510,8 +569,14 @@ export interface LeaseInspection {
   readonly objectId: string | null;
 }
 
+/** The states that mean "there is no lease path", as opposed to what is at one. */
+export type LeaseLocationState =
+  | 'LOCATION_UNSUITABLE'
+  | 'LOCATION_NETWORK_UNSUPPORTED'
+  | 'LOCATION_DEVICE_NAMESPACE';
+
 interface ReadLease {
-  readonly state: Exclude<LeaseState, 'LOCATION_UNSUITABLE'>;
+  readonly state: Exclude<LeaseState, LeaseLocationState>;
   readonly bytes: Buffer | null;
   readonly document: ExecutionLease | null;
 }
@@ -555,6 +620,14 @@ function readLeaseFile(path: string, key: string): ReadLease {
   return { state: 'HELD', bytes, document: parsed.data };
 }
 
+/** One inspection state per location failure. Total by type. */
+const LOCATION_STATE_FOR: Readonly<Record<LeaseLocationFailureCode, LeaseLocationState>> =
+  Object.freeze({
+    LEASE_LOCATION_UNSUITABLE: 'LOCATION_UNSUITABLE',
+    LEASE_LOCATION_NETWORK_UNSUPPORTED: 'LOCATION_NETWORK_UNSUPPORTED',
+    LEASE_LOCATION_DEVICE_NAMESPACE: 'LOCATION_DEVICE_NAMESPACE',
+  });
+
 /** Reads the current lease state without changing anything. Never throws. */
 export function inspectRepositoryExecutionLease(
   given: LeaseRepository,
@@ -567,7 +640,11 @@ export function inspectRepositoryExecutionLease(
   const repository = snapshotRepositoryRecord(given);
   const location = deriveExecutionLeaseLocation(repository);
   if (!location.ok) {
-    return inspection({ state: 'LOCATION_UNSUITABLE', path: '' });
+    // The state that matches the refusal, so `lease status` and a refused
+    // `run --attended` tell an operator the same story about the same
+    // repository. Reporting "no location could be derived" for a UNC path the
+    // tool understood perfectly well is the misdescription this slice removes.
+    return inspection({ state: LOCATION_STATE_FOR[location.code], path: '' });
   }
 
   const read = readLeaseFile(location.path, location.key);
@@ -631,6 +708,25 @@ export const LEASE_ACQUIRE_FAILURE_CODES = [
   'STALE_LEASE_RECOVERY_UNSAFE',
   /** No lease path can be derived for this repository. */
   'LEASE_LOCATION_UNSUITABLE',
+  /**
+   * The repository's Git common directory is on an explicitly unsupported
+   * UNC/network path.
+   *
+   * A location was derived perfectly well; V2 does not support network storage
+   * for it. Its own code rather than {@link LEASE_LOCATION_UNSUITABLE} for the
+   * reason recorded on `REPOSITORY_RECORD_INCOHERENT`: that code's sentence
+   * says no location could be derived, and `lease status` would print a path
+   * for the very same repository.
+   */
+  'LEASE_LOCATION_NETWORK_UNSUPPORTED',
+  /**
+   * The key is in the Windows device namespace (`\\.\…`).
+   *
+   * Kept apart from the network code deliberately. A device path is not network
+   * storage, and one code covering both would be exactly the over-broad refusal
+   * this vocabulary exists to avoid.
+   */
+  'LEASE_LOCATION_DEVICE_NAMESPACE',
   /**
    * A lease path exists, and the record it was derived from is not one
    * repository: its `root` and its `gitCommonDir` describe different places.
@@ -910,7 +1006,10 @@ export function acquireRepositoryExecutionLease(
   const repository = snapshotRepositoryRecord(given);
 
   const location = deriveExecutionLeaseLocation(repository);
-  if (!location.ok) return acquireFailure('LEASE_LOCATION_UNSUITABLE');
+  // The code the derivation produced, not a fresh one. Collapsing three
+  // distinct refusals into the vaguest of them is the defect this slice removes
+  // one layer up; re-introducing it here would put it back.
+  if (!location.ok) return acquireFailure(location.code);
 
   // The record must be *one* repository before anything is claimed for it.
   //
