@@ -305,6 +305,24 @@ export function settleBlockTask(
  * Evidence-backed in the same way settlement is, and for the same reason: a
  * ledger that could declare a task blocked without its record saying so would
  * be able to stall a run on a fact nobody established.
+ *
+ * ── What this deliberately no longer does ──────────────────────────────────
+ *
+ * It used to write `stopReason: 'TASK_BLOCKED'` into the same successor, so
+ * parking a task *was* ending the run. V2-08 separates the two: a task's own
+ * failure is one fact, and whether the run can continue is another.
+ *
+ * Continuing is safe here — and only here — because every continuation is still
+ * gated by the same proof. `settleBlockTask` will not record a settlement the
+ * next task's own state does not support, whatever happened to a sibling, so a
+ * blocked A cannot make a false claim about B possible. What ends a run instead
+ * is a condition that puts *the machinery which would catch a false claim* in
+ * doubt, and those are the runner's to detect.
+ *
+ * `TASK_BLOCKED` survives as an end-of-run reason with its meaning narrowed
+ * from "abort now" to "this run ended without completing, and a task outcome is
+ * why". The runner writes it once, at the end, when nothing runnable is left —
+ * see `block-conclusion.ts` for why that reason beats `NO_ELIGIBLE_TASK`.
  */
 export function parkBlockTask(
   current: LedgerLoadSuccess,
@@ -333,7 +351,6 @@ export function parkBlockTask(
   const next: BlockRunLedger = {
     ...ledger,
     activeTaskId: ledger.activeTaskId === taskId ? null : ledger.activeTaskId,
-    stopReason: 'TASK_BLOCKED',
     tasks: withEntry(ledger, taskId, {
       ...entry,
       disposition: 'BLOCKED',

@@ -749,7 +749,7 @@ describe('a tightened gate still passes an honest run', () => {
       .toEqual({ verdict: 'CONSISTENT', findings: [], progressAvailable: false });
   }, 180_000);
 
-  it('records a genuinely blocked task, and then refuses to progress the run', async () => {
+  it('records a genuinely blocked task, and leaves the run open', async () => {
     const fixture = await repoWithTasks(['A-001', 'B-001']);
     startRun(fixture, ['A-001', 'B-001']);
     await reallyStart(fixture, 'A-001');
@@ -774,13 +774,11 @@ describe('a tightened gate still passes an honest run', () => {
 
     expect(parkBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome)
       .toBe('RECORDED');
-    expect(onDisk(fixture.root)['stopReason']).toBe('TASK_BLOCKED');
-
-    // A stopped run does not quietly keep going. Refused as its own outcome,
-    // because the task's disposition is not what stands in the way — the run's
-    // own ending is, and an operator reading the two goes to different places.
-    expect(activateBlockTask(reload(fixture.root), 'B-001', { repositoryRoot: fixture.root }).outcome)
-      .toBe('RUN_ALREADY_STOPPED');
+    // V2-08 reversed this. The park used to write TASK_BLOCKED, which ended the
+    // run; the disposition and its evidence are unchanged, and only the run's
+    // reaction to them moved. The continuation case itself lives in
+    // tests/v2-08-attended-block-runner.test.ts, beside the policy it belongs to.
+    expect(onDisk(fixture.root)['stopReason']).toBeNull();
   }, 180_000);
 });
 

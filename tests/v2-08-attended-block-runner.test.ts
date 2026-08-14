@@ -740,3 +740,77 @@ describe('a class-2 stop is writable over a ledger whose entries are not proved'
     expect(entries[0]?.['resultCommit']).toBeNull();
   }, 180_000);
 });
+
+import { parkBlockTask } from '../src/block/block-progress.js';
+import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
+
+/** Drives a real task's durable state into a blocking one. */
+function driveToBlocking(fixture: Fixture, taskId: string): void {
+  const loaded = loadTaskState(fixture.root, taskId);
+  if (!loaded.ok) throw new Error('fixture: the task never started');
+  // `SCOPE_VIOLATION` rather than one of the resumable blocks: it is blocking
+  // by the state contract's own classification and carries no resume point, so
+  // the fixture states one fact and not three.
+  const saved = saveTaskState(
+    {
+      ...loaded.state,
+      state: 'SCOPE_VIOLATION',
+      stateEnteredAt: '2026-08-14T12:00:00.000Z',
+      blockedAgent: 'claude',
+    },
+    { repositoryRoot: fixture.root, expectedRevision: loaded.revision },
+  );
+  if (!saved.ok) throw new Error(`fixture could not reach a blocking state: ${saved.code}`);
+}
+
+describe('a task-local failure is recorded and does not end the run', () => {
+  it('parks a task without writing a stop reason', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    expect(
+      activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('RECORDED');
+    driveToBlocking(fixture, 'A-001');
+
+    expect(
+      parkBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('RECORDED');
+
+    const after = onDisk(fixture.root);
+    // The evidence-backed disposition is unchanged. Only the run's reaction to
+    // it is what V2-08 reverses.
+    expect((after['tasks'] as readonly Record<string, unknown>[])[0]?.['disposition']).toBe('BLOCKED');
+    expect((after['tasks'] as readonly Record<string, unknown>[])[0]?.['evidenceRevision']).not.toBeNull();
+    expect(after['stopReason']).toBeNull();
+    expect(after['activeTaskId']).toBeNull();
+  }, 180_000);
+
+  it('lets the next task be activated afterwards', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+    driveToBlocking(fixture, 'A-001');
+    parkBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+    await reallyStart(fixture, 'B-001');
+
+    // This is the assertion that fails against V2-07's policy, so it is the one
+    // that proves the reversal actually happened. Under V2-07 the park wrote
+    // TASK_BLOCKED and this answered RUN_ALREADY_STOPPED.
+    expect(
+      activateBlockTask(reload(fixture.root), 'B-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('RECORDED');
+  }, 180_000);
+
+  it('still refuses to park a task whose record does not prove it', async () => {
+    // The reversal changes the run's reaction, never the evidence rule.
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+
+    expect(
+      parkBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('TASK_STATE_DOES_NOT_PROVE_IT');
+  }, 180_000);
+});

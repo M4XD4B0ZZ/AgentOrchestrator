@@ -99,22 +99,40 @@ export const TASK_DISPOSITIONS = [
   'ACTIVE',
   /** Finished, on the strength of a task state that proved it. */
   'SETTLED',
-  /** Stopped on something a human must resolve. Also evidence-backed. */
+  /**
+   * Stopped on something a human must resolve. Also evidence-backed.
+   *
+   * Terminal for this task and **not** for the run. Until V2-08 this was
+   * documented the other way round — "a blocked task is waiting for a human and
+   * stops the run as a matter of policy" — and `parkBlockTask` implemented it by
+   * writing a stop reason. Both are gone. A block of independent tasks in which
+   * one fails locally is not a wasted run: the remaining tasks are still
+   * provable on their own records, and stopping would have thrown away work
+   * nothing was wrong with.
+   *
+   * What did not change: this disposition is still `EVIDENCE_BACKED`, still
+   * terminal for the task, and still unrecordable without the task state that
+   * proves it.
+   */
   'BLOCKED',
   /**
    * Given up on, on the strength of a task state that reached `ABORTED`.
    *
    * Terminal, and deliberately **not** `BLOCKED`. The two look similar and are
-   * opposite: a blocked task is waiting for a human and stops the run as a
-   * matter of policy, while an abandoned one is over — nothing continues from
-   * `ABORTED`, and there is nothing for a human to resolve.
+   * opposite: a blocked task is waiting for a human, while an abandoned one is
+   * over — nothing continues from `ABORTED`, and there is nothing for a human to
+   * resolve.
    *
    * Without it the run has no legal move at all when its active task aborts:
    * settling would claim work that did not finish, parking would claim a block
-   * that does not exist, and `stopBlockRun` refuses while a task is `ACTIVE`.
-   * A contract whose only remaining move is to falsify one of its own records
-   * has wedged the run, and inventing progress to escape is exactly what this
-   * ledger exists to prevent.
+   * that does not exist, and `stopBlockRun` refuses a progress-claiming reason
+   * while a task is `ACTIVE`. A contract whose only remaining move is to falsify
+   * one of its own records has wedged the run, and inventing progress to escape
+   * is exactly what this ledger exists to prevent.
+   *
+   * Like `BLOCKED`, it no longer ends the run by itself (V2-08). `COMPLETE`
+   * still requires every task `SETTLED`, so an abandoned task correctly makes
+   * the block uncompletable rather than silently forgivable.
    */
   'ABANDONED',
 ] as const;
