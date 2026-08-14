@@ -1231,10 +1231,23 @@ describe('the ledger store gains no productive caller outside a leased run', () 
     // while leaving its own sanctioned caller open guards the door nobody was
     // going to use.
     //
-    // Zero production importers today, because the block layer has no productive
-    // caller at all. The point is that gaining one has to be a decision: this
-    // fails the moment a runner appears, and closing it means threading the
-    // lease through that runner rather than editing this list.
+    // The runner V2-08 promised has arrived, and this list is now one entry long
+    // rather than empty. It was closed the way the previous wording asked for —
+    // by threading the lease through that runner, not by widening the list.
+    // `AttendedBlockRequest.lease` is required and never nullable, it is taken by
+    // the caller for the *whole* block rather than per task, and
+    // `runAttendedBlock` re-proves it against the file at the top of every
+    // iteration and again between two continuations of one task. So every one of
+    // these six writes happens inside a run scope whose authority was proved,
+    // not merely asserted, moments earlier.
+    //
+    // The pin's job is unchanged and its bar has not moved: a **second**
+    // productive caller — a CLI command, a renderer, a helper reaching past the
+    // runner — still fails here, and the fix is still to route that caller
+    // through the runner rather than to lengthen this list. A block run is the
+    // unit the lease guarantee is stated over, so a writer that is not one is a
+    // decision that has to be made deliberately, in the open, with this
+    // expectation edited in the same commit that justifies it.
     expect(
       productionImportersOf([
         'startBlockRun',
@@ -1244,7 +1257,7 @@ describe('the ledger store gains no productive caller outside a leased run', () 
         'abandonBlockTask',
         'stopBlockRun',
       ]),
-    ).toEqual([]);
+    ).toEqual([join('src', 'block', 'block-runner.ts')]);
   });
 });
 

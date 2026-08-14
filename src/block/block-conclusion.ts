@@ -27,6 +27,7 @@ import type { FrozenTaskDependency } from './block-definition.js';
 import type { BlockStopReason, BlockTaskEntry } from './block-ledger.js';
 import type { BlockProgressOutcome } from './block-progress.js';
 import type { RunOutcome } from '../run/run-driver.js';
+import type { StartTaskOutcome } from '../run/start-task.js';
 
 /* ─────────────────── 1. what a run outcome entitles ──────────────────────── */
 
@@ -216,4 +217,67 @@ export function independenceIsEstablished(
   dependencies: readonly FrozenTaskDependency[],
 ): boolean {
   return dependencies.every((row) => row.dependsOn.length === 0);
+}
+
+/* ─────────────────── 5. what a start attempt entitles ────────────────────── */
+
+/** What `startTask`'s answer means for a block run. A closed set. */
+export const START_CONCLUSIONS = [
+  /** A durable state exists and the task may be driven. */
+  'DRIVE',
+  /** This run may no longer be the repository's writer. Write nothing. */
+  'LEASE_UNCERTAIN',
+  /** A state exists and cannot be used. The run ends `STATE_UNUSABLE`. */
+  'STATE_UNUSABLE',
+  /**
+   * A repository, auth or workspace gate refused the start.
+   *
+   * The run ends **in the report**, not in the ledger, and the entry stays
+   * `PLANNED` — which is true: nothing was started for it. None of these
+   * refusals is a claim about the task's *outcome*, so none of them may be
+   * recorded as one, and `ACTIVE_TASK_UNRESOLVED` would misdescribe a task that
+   * was never active.
+   */
+  'GATE_REFUSED',
+] as const;
+
+export type StartConclusion = (typeof START_CONCLUSIONS)[number];
+
+const START_CONCLUSION_FOR = Object.freeze({
+  STARTED: 'DRIVE',
+  ADOPTED: 'DRIVE',
+  ALREADY_STARTED: 'DRIVE',
+
+  EXECUTION_LEASE_NOT_HELD: 'LEASE_UNCERTAIN',
+  EXECUTION_LEASE_LOST: 'LEASE_UNCERTAIN',
+
+  STATE_UNUSABLE: 'STATE_UNUSABLE',
+
+  // Gates, listed one by one rather than caught by a default arm. Each is a
+  // condition an operator fixes outside this run: a plan that cannot be read, a
+  // task that is not eligible, a runtime directory the repository does not
+  // ignore, credentials that are not there, a workspace that is occupied, or a
+  // first durable write that was refused after the workspace was made.
+  //
+  // Two of these are graded rather than reached. `PLANNING_FAILED` cannot come
+  // back from `startPlannedTask` at all — its caller holds a planning result, so
+  // the planning already succeeded — and `TASK_INELIGIBLE` cannot come back for
+  // a task this runner chose, because `chooseTask` filters by the same frozen
+  // reading the start path gates against. Both stay graded: a vocabulary member
+  // left ungraded because "it cannot happen" is how a fail-open arm gets added
+  // the day it does.
+  TASK_ID_INVALID: 'GATE_REFUSED',
+  PLANNING_FAILED: 'GATE_REFUSED',
+  TASK_UNKNOWN: 'GATE_REFUSED',
+  TASK_INELIGIBLE: 'GATE_REFUSED',
+  RUNTIME_NOT_IGNORED: 'GATE_REFUSED',
+  RUNTIME_IGNORE_UNDETERMINED: 'GATE_REFUSED',
+  AUTH_PREFLIGHT_FAILED: 'GATE_REFUSED',
+  WORKSPACE_COLLISION: 'GATE_REFUSED',
+  WORKSPACE_REFUSED: 'GATE_REFUSED',
+  STATE_NOT_RECORDED: 'GATE_REFUSED',
+}) satisfies Record<StartTaskOutcome, StartConclusion>;
+
+export function startConclusionFor(outcome: StartTaskOutcome): StartConclusion {
+  return START_CONCLUSION_FOR[outcome];
 }

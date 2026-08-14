@@ -1078,3 +1078,567 @@ describe('a start may be authorised by a planning result it did not take', () =>
     expect(started.outcome).toBe('TASK_INELIGIBLE');
   }, 600_000);
 });
+
+import { START_TASK_OUTCOMES, type StartTaskOutcome } from '../src/run/start-task.js';
+import { START_CONCLUSIONS, startConclusionFor } from '../src/block/block-conclusion.js';
+
+describe('a start outcome decides what the block run may do next', () => {
+  /**
+   * Hand-written, outcome by outcome, for the reason the two tables above give:
+   * a table derived from the production map agrees with it by construction.
+   */
+  const EXPECTED: Readonly<Record<StartTaskOutcome, string>> = {
+    // A durable state exists, however this invocation came by it.
+    STARTED: 'DRIVE',
+    ADOPTED: 'DRIVE',
+    ALREADY_STARTED: 'DRIVE',
+    // Authority, not outcome. Nothing may be written at all.
+    EXECUTION_LEASE_NOT_HELD: 'LEASE_UNCERTAIN',
+    EXECUTION_LEASE_LOST: 'LEASE_UNCERTAIN',
+    // A record that exists and cannot be used has its own persisted reason.
+    STATE_UNUSABLE: 'STATE_UNUSABLE',
+    // Every gate. None of these is a claim about the task's *outcome*, so none
+    // may be recorded as one and the entry stays PLANNED — which is true.
+    TASK_ID_INVALID: 'GATE_REFUSED',
+    PLANNING_FAILED: 'GATE_REFUSED',
+    TASK_UNKNOWN: 'GATE_REFUSED',
+    TASK_INELIGIBLE: 'GATE_REFUSED',
+    RUNTIME_NOT_IGNORED: 'GATE_REFUSED',
+    RUNTIME_IGNORE_UNDETERMINED: 'GATE_REFUSED',
+    AUTH_PREFLIGHT_FAILED: 'GATE_REFUSED',
+    WORKSPACE_COLLISION: 'GATE_REFUSED',
+    WORKSPACE_REFUSED: 'GATE_REFUSED',
+    STATE_NOT_RECORDED: 'GATE_REFUSED',
+  };
+
+  it('grades every start outcome, and only the start outcomes', () => {
+    expect([...START_TASK_OUTCOMES].sort()).toEqual(Object.keys(EXPECTED).sort());
+  });
+
+  it('knows exactly these conclusions', () => {
+    expect([...START_CONCLUSIONS].sort()).toEqual([...new Set(Object.values(EXPECTED))].sort());
+  });
+
+  for (const [outcome, conclusion] of Object.entries(EXPECTED)) {
+    it(`${outcome} -> ${conclusion}`, () => {
+      expect(startConclusionFor(outcome as StartTaskOutcome)).toBe(conclusion);
+    });
+  }
+});
+
+import { BLOCK_RUN_OUTCOMES, runAttendedBlock } from '../src/block/block-runner.js';
+import {
+  acquireRepositoryExecutionLease,
+  deriveExecutionLeaseLocation,
+  releaseRepositoryExecutionLease,
+} from '../src/lease/execution-lease.js';
+import type { GitRunner } from '../src/worktree/git-command.js';
+import { passingReview } from './fixtures.js';
+import { recordedAgent, recordedVerify, reviewResult, writerSuccess } from './helpers/e2e-fixtures.js';
+
+/** Seams that drive a task all the way to `READY_FOR_PR`. */
+function drivingSeams() {
+  const agent = recordedAgent({
+    claude: () => writerSuccess(),
+    codex: () => reviewResult(passingReview()),
+  });
+  const verify = recordedVerify();
+  return { agent: agent.runner, verify: verify.runner, agentCalls: agent };
+}
+
+/**
+ * A writer that reports success while having written outside its scope.
+ *
+ * Produces a real `SCOPE_VIOLATION`, through the real scope check, rather than
+ * a state file edited into place: the task-local failure this suite is about
+ * has to be one the product itself produced. The mechanism is the one
+ * `tests/v2-06-scope-enforcement.test.ts` drives for its untracked
+ * out-of-scope-file case — the fixture profile allows `src` and nothing else,
+ * so a file left at the worktree root is a real, measured offence.
+ */
+function scopeViolatingWriter() {
+  return (call: { readonly cwd: string }) => {
+    writeRepoFile(call.cwd, 'outside-scope.txt', 'written where the profile does not allow');
+    return writerSuccess();
+  };
+}
+
+/**
+ * `planningOf` — added in Task 6B — is the one reading of the roadmap every case
+ * below hands to the runner.
+ *
+ * There is deliberately no second helper producing a list of eligible ids: the
+ * runner derives that list from the snapshot itself, so a suite that built one
+ * separately would be exercising a shape production does not have.
+ */
+
+async function runBlock(
+  fixture: Fixture,
+  definition = independentBlock(['A-001', 'B-001']),
+  overrides: Partial<Parameters<typeof runAttendedBlock>[1]> = {},
+) {
+  const seams = drivingSeams();
+  return runAttendedBlock(
+    {
+      repository: fixture.repository,
+      definition,
+      runId: RUN_ID,
+      lease: leaseFor(fixture.repository),
+      maxStepsPerTask: 8,
+      planning: planningOf(fixture),
+    },
+    {
+      now: tickingClock(),
+      git: runGitCommand,
+      authPreflight: authPreflightPasses,
+      agent: seams.agent,
+      verify: seams.verify,
+      ...overrides,
+    },
+  );
+}
+
+describe('the attended block runner', () => {
+  it('runs a block of independent tasks to the end under one lease', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+
+    const result = await runBlock(fixture);
+
+    expect(result.outcome).toBe('BLOCK_RUN_ENDED');
+    expect(result.stopReason).toBe('COMPLETE');
+    const after = onDisk(fixture.root);
+    expect(
+      (after['tasks'] as readonly Record<string, unknown>[]).map((t) => t['disposition']),
+    ).toEqual(['SETTLED', 'SETTLED']);
+    expect(after['stopReason']).toBe('COMPLETE');
+  }, 600_000);
+
+  // Design §8.1 — the control that fails against V2-07's policy, driven through
+  // the runner rather than through the primitives.
+  it('does not stop when one task fails locally', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
+    const definition = independentBlock(['A-001', 'B-001', 'C-001']);
+    const seams = drivingSeams();
+    // A-001's writer refuses for scope, which is blocking and carries no resume
+    // point. B-001 and C-001 are driven normally.
+    const agent = recordedAgent({
+      claude: (call) =>
+        call.cwd.includes('A-001') ? scopeViolatingWriter()(call) : writerSuccess(),
+      codex: () => reviewResult(passingReview()),
+    });
+
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition,
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 8,
+        planning: planningOf(fixture),
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: seams.verify,
+      },
+    );
+
+    const after = onDisk(fixture.root);
+    const dispositions = (after['tasks'] as readonly Record<string, unknown>[]).map(
+      (task) => task['disposition'],
+    );
+    // Design §8.4: asserted on the persisted ledger, not on an in-memory value.
+    expect(dispositions).toEqual(['BLOCKED', 'SETTLED', 'SETTLED']);
+    expect(after['stopReason']).not.toBe('COMPLETE');
+    // Design §8.3c: the end reason names the cause.
+    expect(after['stopReason']).toBe('TASK_BLOCKED');
+    expect(result.stopReason).toBe('TASK_BLOCKED');
+  }, 900_000);
+
+  // Design §8.5.
+  it('stops at the first local failure when independence is not established', async () => {
+    // `A <- X <- B`, with X outside the block: the shape a direct intra-block
+    // edge check cannot see. X is `DONE`, and that is what makes this case
+    // *discriminate* rather than merely pass — B-001 is then eligible in the
+    // frozen reading, so a runner that ignored the frozen relation would go on
+    // and drive it. With X-001 left `OPEN`, B-001 is ineligible and `chooseTask`
+    // skips it for a reason that has nothing to do with independence, and the
+    // case stays green against a runner with no independence check at all.
+    // Measured by mutant rather than argued; see the task report.
+    const fixture = await repoWith({ 'A-001': [], 'B-001': ['X-001'] });
+    writeRepoFile(
+      fixture.root,
+      'tasks/X-001.md',
+      taskFile('X-001', { dependsOn: ['A-001'], status: 'DONE' }),
+    );
+    git(fixture.root, ['add', '--all']);
+    git(fixture.root, ['commit', '--quiet', '-m', 'the non-member between A and B']);
+
+    // One reading, projected from and run against — exactly as the CLI does it.
+    const frozen = planningOf(fixture);
+    // The premise of the premise: both members are eligible right now, so
+    // nothing but the frozen relation can stop B-001 being driven.
+    expect(frozen.selection.eligibility.find((e) => e.taskId === 'A-001')?.eligible).toBe(true);
+    expect(frozen.selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible).toBe(true);
+    const projected = projectBlockDependencies(frozen.graph, ['A-001', 'B-001']);
+    if (!projected.ok) throw new Error('fixture projection failed');
+    const defined = defineBlock(BLOCK_ID, ['A-001', 'B-001'], projected.dependencies);
+    if (!defined.ok) throw new Error('fixture block is not a block');
+    // The premise: the projection saw the dependency through the non-member.
+    expect(defined.definition.dependencies[1]?.dependsOn).toEqual(['A-001']);
+
+    const agent = recordedAgent({
+      claude: (call) => scopeViolatingWriter()(call),
+      codex: () => reviewResult(passingReview()),
+    });
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: defined.definition,
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 8,
+        planning: frozen,
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    expect(result.stopReason).toBe('TASK_BLOCKED');
+    const dispositions = (onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[]).map(
+      (task) => task['disposition'],
+    );
+    // B-001 was never touched. Without established independence the run stops
+    // at the first local failure, exactly as V2-07 does.
+    expect(dispositions).toEqual(['BLOCKED', 'PLANNED']);
+    // The same fact measured on the other side of the seam: a run that had
+    // continued would have prepared a second worktree and started a second
+    // writer in it.
+    expect(agent.countFor('claude')).toBe(1);
+  }, 600_000);
+
+  // Design §8.6, measured by effect rather than by reading the code.
+  it('holds one lease for the whole run, not one per task', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const attempts: string[] = [];
+    const agent = recordedAgent({
+      claude: () => {
+        // A second acquirer, inside the drive of *each* task. A per-task lease
+        // would leave a window between tasks; this measures the answer during
+        // both of them.
+        const second = acquireRepositoryExecutionLease(
+          fixture.repository,
+          { runId: 'run-0002', blockId: BLOCK_ID },
+          { now: () => new Date().toISOString() },
+        );
+        attempts.push(second.ok ? 'ACQUIRED' : second.code);
+        return writerSuccess();
+      },
+      codex: () => reviewResult(passingReview()),
+    });
+
+    await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001']),
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 8,
+        planning: planningOf(fixture),
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    expect(attempts.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(attempts)).toEqual(new Set(['LEASE_HELD']));
+  }, 600_000);
+});
+
+describe('the invocation absorbs the driver budget rather than ending on it', () => {
+  it('drives the same task again when only the per-call bound was reached', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    // maxStepsPerTask of 1 makes the driver stop after its first durable write
+    // on every call, so a task that needs several reaches STEP_BUDGET_EXHAUSTED
+    // repeatedly — the exact condition that used to end the invocation.
+    const seams = drivingSeams();
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001']),
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 1,
+        planning: planningOf(fixture),
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: seams.agent,
+        verify: seams.verify,
+      },
+    );
+
+    // The block still finishes, under one lease, in one invocation.
+    expect(result.outcome).toBe('BLOCK_RUN_ENDED');
+    expect(result.stopReason).toBe('COMPLETE');
+    // And a scheduling limit never became a claim about a task.
+    expect(result.stopReason).not.toBe('ACTIVE_TASK_UNRESOLVED');
+    expect(onDisk(fixture.root)['stopReason']).toBe('COMPLETE');
+    // The bound really was reached, or this case proves nothing: several
+    // durable steps landed for a budget of one per call.
+    expect(result.steps).toBeGreaterThan(2);
+  }, 900_000);
+
+  it('is not a block-run outcome at all', () => {
+    // The vocabulary itself, so a future edit that reintroduces the outcome
+    // fails here rather than in a behaviour case somebody may not run.
+    expect([...BLOCK_RUN_OUTCOMES]).not.toContain('STEP_BUDGET_EXHAUSTED');
+  });
+
+  /**
+   * The other half of `CONTINUE`'s claim: *under the same lease*.
+   *
+   * The case above proves the task is driven again; on its own it says nothing
+   * about whose authority the continuation runs on. A runner that gave the lease
+   * back between two `runTask` calls and took it again would finish the block
+   * just the same, having opened — several times over — exactly the window an
+   * execution lease exists to close.
+   *
+   * Two instruments, because neither is sufficient alone.
+   *
+   * The **lease document's own bytes**, compared across the whole run, are the
+   * claim stated directly: a lease given back and taken again is a different
+   * lease, carrying a fresh owner nonce and a fresh acquisition time, and the
+   * file says so. Nothing in a run rewrites that file — every consumer reads it
+   * — so byte identity is exactly "this is still the lease the run opened with".
+   *
+   * A **competing acquirer**, sampled at every Git call, is the second: it asks
+   * whether anyone *else* could have taken the repository, and the first thing a
+   * continuation does is reconcile, which is Git. Its blind spot is stated
+   * rather than papered over: a window between two `runTask` calls that contains
+   * no Git call at all is invisible to it, and that is why the byte comparison
+   * above carries the claim.
+   */
+  it('makes every continuation under the lease the run opened with', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const leaseLocation = deriveExecutionLeaseLocation(fixture.repository);
+    if (!leaseLocation.ok) throw new Error('fixture has no lease location');
+    const attempts: string[] = [];
+    const sampling: GitRunner = async (cwd, args) => {
+      const second = acquireRepositoryExecutionLease(
+        fixture.repository,
+        { runId: 'run-0003', blockId: BLOCK_ID },
+        { now: () => new Date().toISOString() },
+      );
+      attempts.push(second.ok ? 'ACQUIRED' : second.code);
+      return runGitCommand(cwd, args);
+    };
+    const seams = drivingSeams();
+    // Read after the lease is taken and before the run: the document this
+    // invocation's authority *is*.
+    const evidence = leaseFor(fixture.repository);
+    const leaseBefore = readFileSync(leaseLocation.path);
+
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001']),
+        runId: RUN_ID,
+        lease: evidence,
+        maxStepsPerTask: 1,
+        planning: planningOf(fixture),
+      },
+      {
+        now: tickingClock(),
+        git: sampling,
+        authPreflight: authPreflightPasses,
+        agent: seams.agent,
+        verify: seams.verify,
+      },
+    );
+
+    // The claim this case is named for, asserted first because it is the claim:
+    // the lease on disk is the very document the run opened with.
+    expect(readFileSync(leaseLocation.path).equals(leaseBefore)).toBe(true);
+    // The premise: continuations really happened, and the block really finished.
+    expect(result.stopReason).toBe('COMPLETE');
+    expect(result.steps).toBeGreaterThan(2);
+    // The second instrument, and it is not a handful of samples.
+    expect(attempts.length).toBeGreaterThan(20);
+    expect(new Set(attempts)).toEqual(new Set(['LEASE_HELD']));
+  }, 900_000);
+});
+
+/**
+ * `LEASE_UNCERTAIN` forbids the write, and not merely the claim.
+ *
+ * `block-conclusion.ts` states it, and nothing consumed that module until this
+ * task, so it was an unproved assertion. The distinction is not decorative: a
+ * runner that treated lost authority as "an ending that must be recorded" would
+ * write a stop reason into a repository it may no longer be the writer of, which
+ * is precisely the act it has lost the authority for. Measured on the bytes,
+ * across the condition — not against an empty file, because the run had already
+ * legitimately recorded an activation before the lease went, and that record is
+ * true and stays.
+ */
+describe('a run that may have stopped being the writer writes nothing at all', () => {
+  it('leaves the ledger byte for byte and reports the ending instead', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const evidence = leaseFor(fixture.repository);
+    const atRelease: Buffer[] = [];
+    const agent = recordedAgent({
+      claude: () => {
+        // The last provably durable state this run reached: A-001 activated.
+        atRelease.push(readFileSync(ledgerPath(fixture.root)));
+        // The repository stops being this invocation's to write.
+        releaseRepositoryExecutionLease(evidence);
+        return writerSuccess();
+      },
+      codex: () => reviewResult(passingReview()),
+    });
+
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001']),
+        runId: RUN_ID,
+        lease: evidence,
+        maxStepsPerTask: 8,
+        planning: planningOf(fixture),
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    expect(result.outcome).toBe('LEASE_AUTHORITY_UNCERTAIN');
+    // Reported, never recorded.
+    expect(result.stopReason).toBeNull();
+
+    const before = atRelease[0];
+    if (before === undefined) throw new Error('the fixture never reached the writer');
+    // The whole claim, on the bytes: not one further write was made.
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+    const after = onDisk(fixture.root);
+    expect(after['stopReason']).toBeNull();
+    // And what stands is true: the run was holding A-001 when its authority
+    // became uncertain, and it says so rather than inventing an outcome for it.
+    expect(after['activeTaskId']).toBe('A-001');
+    expect((after['tasks'] as readonly Record<string, unknown>[])[0]?.['disposition']).toBe(
+      'ACTIVE',
+    );
+  }, 600_000);
+});
+
+describe('the invocation acts on the plan as it was when it opened', () => {
+  // The counter-proof for the snapshot rule, and the case that discriminates:
+  // it fails with RUN_GATE_REFUSED against any implementation in which a start
+  // path plans again — which is what `startTask` did before Task 6B, one layer
+  // below a runner that imports no planner and looks correct.
+  it('does not let a mid-run roadmap edit change what runs next', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const snapshot = planningOf(fixture);
+    const seams = drivingSeams();
+    let edited = false;
+    const agent = recordedAgent({
+      claude: () => {
+        if (!edited) {
+          edited = true;
+          // B-001 gains a dependency on a task that is not DONE. Anything that
+          // re-read the roadmap would now find it ineligible: a runner doing so
+          // would end NO_ELIGIBLE_TASK, and a *start path* doing so would answer
+          // TASK_INELIGIBLE and end the run RUN_GATE_REFUSED.
+          writeRepoFile(fixture.root, 'tasks/GATE-001.md', taskFile('GATE-001'));
+          writeRepoFile(
+            fixture.root,
+            'tasks/B-001.md',
+            taskFile('B-001', { dependsOn: ['GATE-001'] }),
+          );
+          // Committed, and that is not decoration. `prepareTaskWorkspace`
+          // refuses a dirty source checkout with `SOURCE_WORKTREE_DIRTY` and
+          // counts untracked files, and B-001's workspace is prepared *after*
+          // this edit — so left uncommitted, this case would end
+          // RUN_GATE_REFUSED, which is exactly the answer a re-planning start
+          // path produces. It would look like the defect had been caught while
+          // actually reporting a broken fixture. Committing changes nothing
+          // either planning sees, because discovery lists the working tree with
+          // `readdirSync` rather than asking Git; and an operator's mid-run
+          // roadmap edit is a commit anyway.
+          git(fixture.root, ['add', '--all']);
+          git(fixture.root, ['commit', '--quiet', '-m', 'the roadmap moves under the frozen plan']);
+        }
+        return writerSuccess();
+      },
+      codex: () => reviewResult(passingReview()),
+    });
+
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001']),
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 8,
+        planning: snapshot,
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: seams.verify,
+      },
+    );
+
+    // The premise: the edit really did change what the planner would say.
+    expect(
+      planningOf(fixture).selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible,
+    ).toBe(false);
+    // And the run acted on the snapshot regardless. Asserted as COMPLETE and
+    // *not* as "not RUN_GATE_REFUSED", because the two failure modes this
+    // discriminates against produce two different wrong answers and only the
+    // finished block excludes both.
+    expect(result.outcome).toBe('BLOCK_RUN_ENDED');
+    expect(result.stopReason).toBe('COMPLETE');
+    expect(
+      (onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[]).map(
+        (task) => task['disposition'],
+      ),
+    ).toEqual(['SETTLED', 'SETTLED']);
+  }, 900_000);
+});
+
+describe('a run id is used once', () => {
+  it('refuses a second invocation of the same run id rather than continuing it', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const first = await runBlock(fixture);
+    expect(first.stopReason).toBe('COMPLETE');
+    const after = readFileSync(ledgerPath(fixture.root));
+
+    const second = await runBlock(fixture);
+
+    // A block run's lifetime is its invocation's lifetime, so there is nothing
+    // to continue — and the record of what the first one did is not overwritten.
+    expect(second.outcome).toBe('RUN_GATE_REFUSED');
+    expect(second.detail).toBe('RUN_ID_ALREADY_USED');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(after)).toBe(true);
+  }, 900_000);
+});
