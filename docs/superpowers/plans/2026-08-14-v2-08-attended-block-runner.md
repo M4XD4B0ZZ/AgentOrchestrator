@@ -24,13 +24,47 @@ Every task's requirements implicitly include this section.
   already has a ledger is refused rather than continued, and a step budget is
   absorbed inside the invocation instead of ending it. See "The contradiction
   this plan had to resolve" below.
-- **The runner reads the roadmap zero times.** The eligibility snapshot is taken
-  once by the caller, from the same `planNextTask` result the projection came
-  from, and handed in. A runner that re-read the plan between tasks would let a
-  mid-run edit change which task runs next, even though no fingerprint was
-  recomputed.
+- **The roadmap is read exactly once, under the lease, and every later gate
+  consults that one reading.** The order is `resolve → lease → planNextTask →
+  project → define → run → release`. One `planNextTask` result feeds all four
+  consumers — the transitive projection, the frozen definition, the eligibility
+  snapshot and the **start path** — so no two of them can disagree, and no edit
+  between them can change what runs.
+
+  Structural rather than disciplinary, in two places. `src/block/` never calls
+  `planNextTask` (Task 7 greps for it), and the start path the runner uses is
+  `startPlannedTask`, which *takes* a planning result and has no way to produce
+  one (Task 6B). A runner that re-read the plan between tasks — or that called a
+  primitive which did — would let a mid-run edit change which task runs next,
+  even though no fingerprint was recomputed.
+
+  Measured, so the size of the fix is not guessed: `planNextTask` has three call
+  sites in `src/` besides its own definition — `release-workspace.ts:225`,
+  `run-driver.ts:938` (inside `selectRunTask`) and `start-task.ts:373`. Only
+  `start-task.ts:373` is reachable from a block run; `runTask` does not read the
+  plan at all. That one surface is the whole of Task 6B.
 - **One schema bump for the whole slice.** `BLOCK_LEDGER_SCHEMA_VERSION: 1 → 2`, once, covering both `frozenDependencies` and `ACTIVE_TASK_UNRESOLVED`. A version-1 document is **refused, never migrated**, under its own load code.
-- **Three runner outcomes write nothing.** `LEASE_AUTHORITY_UNCERTAIN`, `DURABLE_WRITE_FAILED` and `RUN_GATE_REFUSED` leave the ledger byte-identical and reach the operator through the report. No best-effort stop write on any of the three.
+- **Four runner outcomes are not recorded as an ending.**
+  `LEASE_AUTHORITY_UNCERTAIN`, `DURABLE_WRITE_FAILED`, `RUN_GATE_REFUSED` and
+  `RECONCILIATION_UNRESOLVED` reach the operator through the report, and the
+  ledger is left byte-identical **across the condition**: it stands at its last
+  provably durable state.
+
+  That is deliberately not the sentence *"nothing was written"*. **All four are
+  reachable after the ledger exists and after earlier tasks have been recorded in
+  it** — a run that settled A and then met one of them wrote A's settlement, and
+  is right to keep it. Two of them are *also* reachable with no ledger at all
+  (`RUN_GATE_REFUSED` from the auth gate ahead of `openRun`, and
+  `DURABLE_WRITE_FAILED` when the failure strikes the creation), which is a fact
+  about where the condition arose and never about the outcome. So "nothing was
+  written" is true of no outcome in general, and the two cases where it happens
+  to hold are asserted as `existsSync(...) === false` at their own sites rather
+  than promoted into the vocabulary's meaning.
+
+  What none of the four may do is add a stop claim, so there is no best-effort
+  stop write on any of them; and the byte-identity controls therefore compare the
+  ledger immediately **before and after** the condition rather than against an
+  empty file.
 - **`ACTIVE_TASK_UNRESOLVED` stays out of `PROGRESS_CLAIMING_STOP_REASONS`,** and the sorting is pinned by a hand-written correctness test plus an effect test (it must be writable over a ledger whose entries are not supported).
 - **V2-08 opens no new platform, ownership or recovery surface.** No unattended mode, no stale-lease recovery, no process containment, no parallel task execution, no commit chain, no outgoing transition from `READY_FOR_PR`.
 - Repository delivery policy is `PR_REQUIRED` + `CI_REQUIRED` (`CLAUDE.md`). Never commit to `main`. The branch is `feat/v2-08-attended-block-runner`, which already exists and already carries the three design commits.
@@ -39,7 +73,15 @@ Every task's requirements implicitly include this section.
   Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01BaE9b5RWjuCCPZqapWPSXK
   ```
-- Run `npm run typecheck` before every commit. The canonical gate is `npm run verify`; run it at Task 12 and before opening the PR.
+- Run `npm run typecheck` before every commit, and **every commit compiles.**
+  Tasks 1–3 are therefore one commit rather than three: the three-argument
+  definition API cannot be introduced and its call sites repaired in the same
+  step without patching them with an empty relation, which is the one default
+  this slice exists to make impossible. So they stay three implementation steps
+  and become one commit, taken at Task 3. A deliberately red commit is not the
+  price — bisect and `git log -S` are worth more than three commit boundaries.
+  The canonical gate is `npm run verify`; run it at Task 12 and before opening
+  the PR.
 
 ## The contradiction this plan had to resolve
 
@@ -90,6 +132,58 @@ argued away:
   closed, and honest: the record says which task was `ACTIVE` when the run
   stopped being driven, and no later process claims authority over it.
 
+## The second contradiction: a snapshot that was not frozen
+
+A review of this plan found the same shape of defect one layer down, and it is
+recorded here because the fix — Task 6B — exists for no other reason.
+
+The plan asserted that the runner acts on one snapshot of the roadmap, and it
+made that structural on the runner's own side: `block-runner.ts` imports no
+planner. But the runner starts each task through `startTask`, and `startTask`
+calls `planNextTask` itself (`src/run/start-task.ts:373`) and refuses
+`TASK_INELIGIBLE` from *that* reading. So:
+
+```
+freeze:  B is eligible
+A runs
+the roadmap is edited; B is now ineligible
+the runner picks B from the snapshot
+        ↓
+startTask plans again
+        ↓
+TASK_INELIGIBLE  →  GATE_REFUSED  →  RUN_GATE_REFUSED
+```
+
+The mid-run edit changed the run's behaviour after all — it just did it behind a
+primitive instead of in the loop. The plan already carried the counter-proof
+that would have caught it: *"does not let a mid-run roadmap edit change what runs
+next"* (Task 7, Step 5) edits `B-001` to depend on an unfinished task and expects
+the block to reach `COMPLETE`. Against the code as planned, that case fails with
+`RUN_GATE_REFUSED`. The test was right and the implementation contradicted it.
+
+A second window sat above it: the CLI froze the plan **before** taking the
+execution lease, so a legitimate other writer could edit the roadmap between the
+reading the block was frozen from and the moment this invocation became the
+writer.
+
+**Decided: one reading of the roadmap, taken under the lease, consulted by every
+gate.**
+
+- The lease is acquired first, and `planNextTask` runs under it —
+  `run-command.ts:205-217` already does exactly this for the single-task path,
+  so the block command was the anomaly, not the correction. The cost is that an
+  unusable `--tasks` argument is now refused while holding the lease for a few
+  milliseconds; that is cheaper than freezing a plan nobody was yet the writer
+  of.
+- `startTask` splits (Task 6B). `startPlannedTask` takes the planning result and
+  cannot produce one; `startTask` keeps its signature, reads the plan once and
+  delegates. The block runner uses only the former, so the second planner read
+  is not hidden — it is absent.
+- The runner takes the whole `TaskPlanningSuccess` rather than a list of
+  eligible ids, so the list it filters by and the reading `startPlannedTask`
+  gates against are the same object. There is no second list that could widen or
+  narrow the first.
+
 ## File Structure
 
 | File | Responsibility |
@@ -100,6 +194,7 @@ argued away:
 | `src/block/block-store.ts` *(modify)* | `LEDGER_SCHEMA_UNSUPPORTED` on load; a predecessor-version detail on update. |
 | `src/block/block-progress.ts` *(modify)* | `startBlockRun` freezes the relation; `parkBlockTask` stops writing a stop reason. |
 | `src/block/block-conclusion.ts` *(create)* | Pure: run outcome → what may be recorded; progress outcome → recorded/unresolved/write-failed; the end-reason table; the independence question. |
+| `src/run/start-task.ts` *(modify)* | `startPlannedTask`, which starts against a planning result it is given; `startTask` keeps its signature and becomes the one caller that reads a plan. |
 | `src/block/block-runner.ts` *(create)* | The attended block run. Sequences primitives; owns the two exits. |
 | `src/cli/block-command.ts` *(create)* | `agent-loop block`: freeze, lease, run, render. |
 | `src/cli/render-block-run.ts` *(create)* | The report, and one sentence per outcome and per stop reason. |
@@ -141,9 +236,12 @@ Create `tests/v2-08-attended-block-runner.test.ts`:
  *    plan.
  *
  * So every case here is driven by effect. A stop is asserted on the persisted
- * ledger, never on an in-memory value; a no-write outcome is asserted by
- * comparing the file byte for byte; and the independence cases include the one
- * shape a direct intra-block edge check cannot see.
+ * ledger, never on an in-memory value; an outcome that is *not* recorded is
+ * asserted by comparing the file byte for byte **across the condition** — not
+ * against an empty file, because a run that settled a task before meeting one
+ * of those outcomes wrote that settlement and is right to keep it; and the
+ * independence cases include the one shape a direct intra-block edge check
+ * cannot see.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -503,39 +601,15 @@ Expected: PASS.
 Run: `npm run typecheck`
 Expected: FAIL, in exactly three places — `src/block/block-ledger.ts:264` and `src/block/reconcile-block.ts:223,229` call the two-argument `fingerprintFrozenMembership`, and `src/block/block-progress.ts:186` builds a definition without a relation. Those are Task 3's. Leave them failing; do not patch them here with a `[]` third argument, which would freeze "everything is independent" as a default and is the one shape this task exists to make impossible.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Do not commit yet**
 
-```bash
-git add src/block/block-definition.ts tests/v2-08-attended-block-runner.test.ts
-git commit
-```
+The tree does not compile, and this repository does not take deliberately red
+commits — see Global Constraints. The three call sites above cannot be repaired
+without either this task's type or an empty-relation default, so Tasks 1–3 are
+one commit, taken at **Task 3, Step 10**, whose message covers all three.
 
-Message:
-
-```
-feat: the frozen block plan carries its dependency relation (V2-08)
-
-BlockDefinition was blockId plus taskIds, and the fingerprint covered exactly
-those, so V2-08 could not prove independence from its own authoritative input
-and continue-on-task-local-failure would have been dead code in every block.
-
-The relation is frozen as evidence rather than as an `independent: true`
-judgement: a flag would freeze the conclusion while leaving what it came from
-free to move. It is bound into the fingerprint, so an edge added or removed
-under a running block is drift rather than a silent change of authority — the
-canonical encoding needs three separators rather than one, because with a
-single separator {A:[B],B:[]} and {A:[],B:[A]} are permutations of one token
-list.
-
-Five failure codes rather than one: a missing row, a row for a stranger, two
-rows for one member, an edge to a non-member and a self-edge are five different
-mistakes with five different fixes.
-
-This commit deliberately leaves `npm run typecheck` failing at the three call
-sites that build or re-derive a fingerprint. Patching them with an empty
-relation would default to "everything is independent", which is the claim this
-slice exists to stop assuming.
-```
+Leave the work in the tree and go on to Task 2. Nothing here is staged, so
+nothing has to be unstaged if Task 2 or Task 3 sends you back.
 
 ---
 
@@ -875,34 +949,11 @@ Expected: PASS.
 
 `npm run typecheck` still fails at the three Task 3 call sites. That is expected and is not this task's to fix.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Do not commit yet**
 
-```bash
-git add src/block/block-dependencies.ts tests/v2-08-attended-block-runner.test.ts
-git commit
-```
-
-Message:
-
-```
-feat: project the block's dependency relation transitively (V2-08)
-
-Measured against task-graph.ts: normalizeTaskGraph stores each definition's own
-edge list and its direct reverse and computes no transitive closure anywhere,
-over the whole discovered task set. A block is an arbitrary subset of that DAG,
-so A <- X <- B with X outside the block has no intra-block edge while B still
-depends on A. The walk therefore goes up the whole graph and restricts to
-members at the end.
-
-An unknown member is refused rather than projected as an empty row: "independent
-of everything" is the worst possible answer about a task nobody can find.
-
-Called at freeze time and nowhere else, and that is pinned by the call sites
-rather than by one import edge - a helper importing the projection and a runner
-importing the helper would walk past an import check. A run that recomputed the
-relation would take its continuation authority from a roadmap an operator can
-edit mid-run.
-```
+Same reason as Task 1, Step 7: the tree still does not compile, and Task 3 is
+what makes it compile again. Tasks 1–3 land as one commit at **Task 3, Step
+10**.
 
 ---
 
@@ -1429,33 +1480,72 @@ Expected: clean — this is what proves no call site still builds a two-part fin
 Run: `npx vitest run tests/v2-08-attended-block-runner.test.ts tests/v2-07-block-ledger.test.ts tests/v2-07-remediation.test.ts`
 Expected: PASS. One case still asserts V2-07's policy and still passes here — `tests/v2-07-remediation.test.ts:741` ("records a genuinely blocked task, and then refuses to progress the run"). Task 5 inverts it; leave it alone now.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 10: Commit — Tasks 1, 2 and 3 together**
+
+This is the first commit of the slice, and it is the first moment the tree
+compiles. Tasks 1 and 2 introduced the three-argument definition API and the
+projection that fills it; this task repaired every call site without ever
+defaulting one to an empty relation.
 
 ```bash
 git add src/block tests/v2-07-block-ledger.test.ts tests/v2-07-remediation.test.ts tests/v2-08-attended-block-runner.test.ts
 git commit
 ```
 
+Check `git status` before committing: `src/block/block-definition.ts` and
+`src/block/block-dependencies.ts` from Tasks 1 and 2 must be in this commit. A
+run of `npm run typecheck` that is clean is what says the set is complete.
+
 Message:
 
 ```
-feat: ledger schema 2 - the frozen relation, and no migration (V2-08)
+feat: the frozen block plan carries its dependency relation (V2-08)
 
-frozenDependencies is the single persisted image of the relation. No dependents
-copy sits beside it: two spellings of one fact are two facts that can disagree,
-and the one a continuation decision reads would be whichever the caller looked
-at. It is classified FROZEN_PLAN in FIELD_AUTHORITY, so succession refuses an
-edit to it by derivation rather than by a new rule, and planFingerprint is
-re-derived from all three parts on every create, update and load.
+BlockDefinition was blockId plus taskIds, and the fingerprint covered exactly
+those, so V2-08 could not prove independence from its own authoritative input
+and continue-on-task-local-failure would have been dead code in every block.
+
+The relation is frozen as evidence rather than as an `independent: true`
+judgement: a flag would freeze the conclusion while leaving what it came from
+free to move. It is bound into the fingerprint, so an edge added or removed
+under a running block is drift rather than a silent change of authority - the
+canonical encoding needs three separators rather than one, because with a
+single separator {A:[B],B:[]} and {A:[],B:[A]} are permutations of one token
+list. Five failure codes rather than one: a missing row, a row for a stranger,
+two rows for one member, an edge to a non-member and a self-edge are five
+different mistakes with five different fixes.
+
+The relation is the transitive projection, computed once at freeze time.
+Measured against task-graph.ts: normalizeTaskGraph stores each definition's own
+edge list and its direct reverse and computes no transitive closure anywhere. A
+block is an arbitrary subset of that DAG, so A <- X <- B with X outside the
+block has no intra-block edge while B still depends on A. The walk goes up the
+whole graph and restricts to members at the end, and an unknown member is
+refused rather than projected as an empty row - "independent of everything" is
+the worst possible answer about a task nobody can find. Freeze-time-only is
+pinned by the call sites rather than by one import edge, because a helper
+importing the projection and a runner importing the helper would walk past an
+import check.
+
+frozenDependencies is the single persisted image of it. No dependents copy sits
+beside it: two spellings of one fact are two facts that can disagree, and the
+one a continuation decision reads would be whichever the caller looked at. It is
+classified FROZEN_PLAN in FIELD_AUTHORITY, so succession refuses an edit to it
+by derivation rather than by a new rule, and planFingerprint is re-derived from
+all three parts on every create, update and load.
 
 A version-1 document is refused under LEDGER_SCHEMA_UNSUPPORTED and never
 migrated. It carries no relation, and the only way to give it one is to invent
 it - handing the run authority to continue after a task-local failure on a
-relation nobody froze. Refusing costs an operator one new run id.
+relation nobody froze. Refusing costs an operator one new run id. One bump for
+the slice, covering this field and the stop reason that follows; a version-1
+reader genuinely cannot read a version-2 document, so "the enum grew but the
+version stayed" was not available.
 
-One bump for the slice, covering this field and the stop reason that follows.
-A version-1 reader genuinely cannot read a version-2 document, so "the enum
-grew but the version stayed" was not available.
+Three implementation steps, one commit: the new definition API and its call
+sites cannot be separated without patching the sites with an empty relation,
+which would default to "everything is independent" - the claim this slice exists
+to stop assuming.
 ```
 
 ---
@@ -2390,6 +2480,218 @@ refuses.
 
 ---
 
+### Task 6B: A start path that cannot read the roadmap
+
+**Files:**
+- Modify: `src/run/start-task.ts` (lines 340–392, and the module header)
+- Modify: `tests/v2-08-attended-block-runner.test.ts`
+
+**Interfaces:**
+- Produces: `startPlannedTask(request: PlannedStartRequest, deps: StartTaskDependencies): Promise<StartTaskResult>`; `type PlannedStartRequest = StartTaskRequest & { readonly planning: TaskPlanningSuccess }`.
+- Consumes: `TaskPlanningSuccess` from `src/plan/plan-next-task.ts`.
+
+> **Measured premise.** `startTask` calls `planNextTask(repository)` at
+> `src/run/start-task.ts:373` and refuses `TASK_INELIGIBLE` from *that* reading
+> (line 380). A runner that took its eligibility from a frozen snapshot and then
+> started through `startTask` would still be re-reading the roadmap, one layer
+> down — see "The second contradiction" above. `planNextTask` has three call
+> sites in `src/` outside its own module (`release-workspace.ts:225`,
+> `run-driver.ts:938`, `start-task.ts:373`) and only the last is reachable from
+> a block run, so this task is the whole of the fix.
+
+This task exists to make the frozen snapshot **true**, not merely asserted. It
+adds no capability: the same gates run, in the same order, against a planning
+result that was read once instead of once per task.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `tests/v2-08-attended-block-runner.test.ts`:
+
+```ts
+import { planNextTask, type TaskPlanningSuccess } from '../src/plan/plan-next-task.js';
+import { startPlannedTask } from '../src/run/start-task.js';
+
+describe('a start may be authorised by a planning result it did not take', () => {
+  it('starts a task the roadmap has since made ineligible', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const frozen = planningOf(fixture);
+    // The premise: B-001 is eligible in the frozen reading.
+    expect(frozen.selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible).toBe(true);
+
+    // The roadmap moves underneath. A fresh planning now refuses B-001.
+    writeRepoFile(fixture.root, 'tasks/GATE-001.md', taskFile('GATE-001'));
+    writeRepoFile(fixture.root, 'tasks/B-001.md', taskFile('B-001', { dependsOn: ['GATE-001'] }));
+    expect(planningOf(fixture).selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible)
+      .toBe(false);
+
+    const started = await startPlannedTask(
+      { repository: fixture.repository, taskId: 'B-001', planning: frozen },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
+    );
+
+    // The frozen reading is the authority. A path that planned again would
+    // answer TASK_INELIGIBLE here, which is exactly the hidden second read.
+    expect(started.outcome).toBe('STARTED');
+  }, 600_000);
+
+  it('still refuses a task the frozen reading itself calls ineligible', async () => {
+    // The other half, and without it the case above passes against a function
+    // that skipped the eligibility gate altogether rather than moving it.
+    const fixture = await repoWith({ 'A-001': [], 'B-001': ['A-001'] });
+    const frozen = planningOf(fixture);
+    expect(frozen.selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible).toBe(false);
+
+    const started = await startPlannedTask(
+      { repository: fixture.repository, taskId: 'B-001', planning: frozen },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
+    );
+
+    expect(started.outcome).toBe('TASK_INELIGIBLE');
+  }, 600_000);
+
+  it('prepares the workspace from the frozen definition, not the current file', async () => {
+    // The consequence worth stating: the task definition the workspace is built
+    // from comes out of the same graph the eligibility answer did. One instant,
+    // one plan — a start that gated on the frozen reading and then built from an
+    // edited file would be the same split authority in a quieter place.
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const frozen = planningOf(fixture);
+    expect(frozen.graph.node('B-001')?.definition).toBeDefined();
+  });
+});
+```
+
+with the snapshot helper the rest of the suite now uses:
+
+```ts
+/**
+ * One reading of the roadmap, exactly as `block-command.ts` takes it.
+ *
+ * The whole `TaskPlanningSuccess`, not a list of eligible ids: the runner filters
+ * by it *and* hands it to the start path, so a suite that produced two values
+ * would be testing a shape production does not have.
+ */
+function planningOf(fixture: Fixture): TaskPlanningSuccess {
+  const planned = planNextTask(fixture.repository);
+  if (!planned.ok) throw new Error(`fixture repository does not plan: ${planned.code}`);
+  return planned;
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `npx vitest run tests/v2-08-attended-block-runner.test.ts`
+Expected: FAIL — `startPlannedTask` is not exported.
+
+- [ ] **Step 3: Split the start path**
+
+In `src/run/start-task.ts`, factor the body so that the planning read sits in
+exactly one of the two entry points. The shape:
+
+```ts
+/**
+ * Starts one task against a planning result **the caller already took**.
+ *
+ * Same gates, same order, same refusals as {@link startTask} — the single
+ * difference is where the plan came from. It exists because a block run freezes
+ * one reading of the roadmap under its lease and every gate below that must
+ * consult *that* reading: a start that planned again would answer
+ * `TASK_INELIGIBLE` from a roadmap edited after the block was frozen, and the
+ * frozen plan would be an assertion rather than an authority.
+ *
+ * `PLANNING_FAILED` is unreachable here by construction — the caller holds a
+ * `TaskPlanningSuccess`, so the planning already succeeded. The outcome stays in
+ * the shared vocabulary, which is what keeps `startConclusionFor` total.
+ */
+export async function startPlannedTask(
+  request: PlannedStartRequest,
+  deps: StartTaskDependencies,
+): Promise<StartTaskResult> {
+  const repository = snapshotRepositoryRecord(request.repository);
+  const gated = gateStart(repository, request.taskId, deps);
+  if (gated !== null) return gated;
+  return startAgainstPlan(repository, request.taskId, request.planning, deps);
+}
+
+export async function startTask(
+  request: StartTaskRequest,
+  deps: StartTaskDependencies,
+): Promise<StartTaskResult> {
+  const repository = snapshotRepositoryRecord(request.repository);
+  const gated = gateStart(repository, request.taskId, deps);
+  if (gated !== null) return gated;
+
+  const planning = planNextTask(repository);
+  if (!planning.ok) {
+    return result({ taskId: request.taskId, outcome: 'PLANNING_FAILED', reasonCodes: Object.freeze([planning.code]) });
+  }
+  return startAgainstPlan(repository, request.taskId, planning, deps);
+}
+```
+
+Four constraints on the refactor, each of which the existing file already earned
+the hard way:
+
+1. **`gateStart` holds steps 0 and 1 unchanged** — the lease proof against the
+   file, then `isValidTaskId`. The lease stays *ahead* of the plan read on the
+   `startTask` path, so an invocation that is not the writer still hears
+   `EXECUTION_LEASE_NOT_HELD` rather than `PLANNING_FAILED`. Moving the plan read
+   in front of the gate would be a behaviour change nobody asked for.
+2. **`snapshotRepositoryRecord` is taken once per entry point** and the snapshot
+   — never `request.repository` — is what flows onward. The comment at line 345
+   says why: a record whose `root` is an accessor can name one repository at each
+   gate and another at each effect.
+3. **`startAgainstPlan` is private and takes the plan as a value.** It must not
+   import or call `planNextTask`. It is the whole of the old body from the
+   eligibility lookup (line 378) down, including the second lease proof before
+   `prepareTaskWorkspace`, which stays exactly where it is.
+4. **`startTask` keeps its signature and its behaviour.** Its one existing caller
+   (`src/cli/run-command.ts:261`) is not touched by this task, and
+   `tests/` must show that.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `npx vitest run tests/v2-08-attended-block-runner.test.ts tests/v2-05-attended-cli.test.ts tests/run-command.test.ts`
+Expected: PASS. The two existing suites are the control on constraint 4: `startTask`'s behaviour is unchanged, so a failure there is a refactor defect and not a new decision.
+
+Run: `npm run test:foundation-safe`
+Expected: PASS.
+
+Run: `npm run typecheck`
+Expected: clean.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/run/start-task.ts tests/v2-08-attended-block-runner.test.ts
+git commit
+```
+
+Message:
+
+```
+feat: a start path authorised by a planning result it did not take (V2-08)
+
+startTask read the roadmap itself and refused TASK_INELIGIBLE from that reading.
+A block run freezes one reading under its lease and starts every member through
+this path, so the frozen snapshot would have been overruled by a mid-run edit
+one layer below the runner - and the runner's own counter-proof, "does not let a
+mid-run roadmap edit change what runs next", would have failed with
+RUN_GATE_REFUSED.
+
+startPlannedTask takes the planning result; startTask keeps its signature, reads
+the plan once and delegates. Same gates, same order, same refusals - the lease is
+still proved before the plan is read and again before the workspace is created.
+PLANNING_FAILED becomes unreachable through the new entry point by construction,
+and stays in the shared vocabulary so the block runner's grading stays total.
+
+Measured: planNextTask has three call sites in src/ outside its own module and
+only this one is reachable from a block run, so this is the whole of the second
+read rather than the first of several.
+```
+
+---
+
 ### Task 7: The runner
 
 **Files:**
@@ -2398,7 +2700,7 @@ refuses.
 - Modify: `tests/v2-08-attended-block-runner.test.ts`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–6; `startTask`/`StartTaskOutcome`; `runTask`/`RunResult`; `verifyExecutionLeaseHeldFor`; `planNextTask`; `reconcileBlockRun`.
+- Consumes: everything from Tasks 1–6B; `startPlannedTask`/`StartTaskOutcome`; `runTask`/`RunResult`; `verifyExecutionLeaseHeldFor`; `TaskPlanningSuccess` (as a type, never as a call); `reconcileBlockRun`.
 - Produces: `BLOCK_RUN_OUTCOMES`; `type BlockRunOutcome`; `interface BlockTaskReport`; `interface AttendedBlockResult`; `interface AttendedBlockRequest`; `interface AttendedBlockDependencies`; `runAttendedBlock(request, deps): Promise<AttendedBlockResult>`; and in `block-conclusion.ts`, `START_CONCLUSIONS` / `startConclusionFor`.
 
 - [ ] **Step 1: Grade the start outcomes**
@@ -2445,6 +2747,14 @@ const START_CONCLUSION_FOR = Object.freeze({
   // task that is not eligible, a runtime directory the repository does not
   // ignore, credentials that are not there, a workspace that is occupied, or a
   // first durable write that was refused after the workspace was made.
+  //
+  // Two of these are graded rather than reached. `PLANNING_FAILED` cannot come
+  // back from `startPlannedTask` at all — its caller holds a planning result, so
+  // the planning already succeeded — and `TASK_INELIGIBLE` cannot come back for
+  // a task this runner chose, because `chooseTask` filters by the same frozen
+  // reading the start path gates against. Both stay graded: a vocabulary member
+  // left ungraded because "it cannot happen" is how a fail-open arm gets added
+  // the day it does.
   TASK_ID_INVALID: 'GATE_REFUSED',
   PLANNING_FAILED: 'GATE_REFUSED',
   TASK_UNKNOWN: 'GATE_REFUSED',
@@ -2486,17 +2796,13 @@ function drivingSeams() {
 }
 
 /**
- * The eligible task ids as the repository states them now.
+ * `planningOf` — added in Task 6B — is the one reading of the roadmap every case
+ * below hands to the runner.
  *
- * The caller's single reading, exactly as `block-command.ts` takes it: the
- * runner imports no planner, so a suite that wants a snapshot has to produce
- * one the same way production does.
+ * There is deliberately no second helper producing a list of eligible ids: the
+ * runner derives that list from the snapshot itself, so a suite that built one
+ * separately would be exercising a shape production does not have.
  */
-function eligibleNow(fixture: Fixture): readonly string[] {
-  const planned = planNextTask(fixture.repository);
-  if (!planned.ok) throw new Error(`fixture repository does not plan: ${planned.code}`);
-  return planned.selection.eligibility.filter((entry) => entry.eligible).map((entry) => entry.taskId);
-}
 
 async function runBlock(
   fixture: Fixture,
@@ -2511,7 +2817,7 @@ async function runBlock(
       runId: RUN_ID,
       lease: leaseFor(fixture.repository),
       maxStepsPerTask: 8,
-      eligibleTaskIds: eligibleNow(fixture),
+      planning: planningOf(fixture),
     },
     {
       now: tickingClock(),
@@ -2558,7 +2864,7 @@ describe('the attended block runner', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
-        eligibleTaskIds: eligibleNow(fixture),
+        planning: planningOf(fixture),
       },
       {
         now: tickingClock(),
@@ -2584,10 +2890,9 @@ describe('the attended block runner', () => {
   // Design §8.5.
   it('stops at the first local failure when independence is not established', async () => {
     const fixture = await repoWith({ 'A-001': [], 'X-001': ['A-001'], 'B-001': ['X-001'] });
-    const projected = projectBlockDependencies(
-      graphOfRepository(fixture),
-      ['A-001', 'B-001'],
-    );
+    // One reading, projected from and run against — exactly as the CLI does it.
+    const frozen = planningOf(fixture);
+    const projected = projectBlockDependencies(frozen.graph, ['A-001', 'B-001']);
     if (!projected.ok) throw new Error('fixture projection failed');
     const defined = defineBlock(BLOCK_ID, ['A-001', 'B-001'], projected.dependencies);
     if (!defined.ok) throw new Error('fixture block is not a block');
@@ -2605,7 +2910,7 @@ describe('the attended block runner', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
-        eligibleTaskIds: eligibleNow(fixture),
+        planning: frozen,
       },
       {
         now: tickingClock(),
@@ -2652,7 +2957,7 @@ describe('the attended block runner', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
-        eligibleTaskIds: eligibleNow(fixture),
+        planning: planningOf(fixture),
       },
       {
         now: tickingClock(),
@@ -2669,19 +2974,14 @@ describe('the attended block runner', () => {
 });
 ```
 
-Add the two helpers this suite now needs:
+Add the helper this suite now needs. The graph a projection is taken from comes
+out of `planningOf(fixture).graph` — the same reading the run is handed — rather
+than from a second helper of its own, because two readings in one case is the
+defect the case is about:
 
 ```ts
 import { acquireRepositoryExecutionLease } from '../src/lease/execution-lease.js';
-import { planNextTask } from '../src/plan/plan-next-task.js';
 import { agentCommandResult } from './fixtures.js';
-
-/** The repository's own normalised graph, for a freeze-time projection. */
-function graphOfRepository(fixture: Fixture) {
-  const planned = planNextTask(fixture.repository);
-  if (!planned.ok) throw new Error(`fixture repository does not plan: ${planned.code}`);
-  return planned.graph;
-}
 
 /**
  * A writer that reports success while having written outside its scope.
@@ -2752,13 +3052,22 @@ Create `src/block/block-runner.ts`:
  *                 DURABLE_WRITE_FAILED — the run cannot presuppose a successful
  *                 stop write, because the failed write is the condition;
  *                 RUN_GATE_REFUSED — a repository, auth or runtime gate refused,
- *                 which is a run abort and not task progress
+ *                 which is a run abort and not task progress;
+ *                 RECONCILIATION_UNRESOLVED — a forced reconciliation was no
+ *                 longer forced when the primitive checked it
  *                 -> the ledger is left on its last provably durable state and
  *                 the truth reaches the operator through the report
  *
  * A runner that funnelled both through `stopBlockRun` would, in exactly the
  * cases where writing is what it cannot do, either fail loudly at the worst
  * moment or emit a claim it had no authority to make.
+ *
+ * "Left on its last provably durable state" is the exact claim, and it is
+ * weaker than "nothing was written" on purpose. Every one of the four can strike
+ * after this run has already recorded settlements — those are true and they
+ * stay. What is missing from the ledger is only the ending. Two of them can
+ * additionally strike before any ledger exists, which is a fact about where the
+ * condition arose and not about what the outcome means.
  *
  * ── Attended only, and one task at a time ──────────────────────────────────
  *
@@ -2781,12 +3090,21 @@ Create `src/block/block-runner.ts`:
  * opposite of frozen-plan authority. It reads `ledger.frozenDependencies` and
  * asks `independenceIsEstablished` a question.
  *
- * One consequence, stated rather than left to be discovered: **drift is checked
- * when an invocation opens a run, and not between tasks.** The caller freezes a
- * definition from the repository as it is now, and a resumed run compares that
- * fingerprint with the persisted one. Inside one invocation nothing re-reads the
- * roadmap, so a mid-run edit is not noticed until the next invocation. That is
- * the cost of the rule above and it is recorded in the follow-up register.
+ * The plan, either. This module never calls `planNextTask`; it receives the
+ * caller's single reading as {@link AttendedBlockRequest.planning} and both
+ * filters by it and hands it to `startPlannedTask`, so there is no gate below
+ * here that could consult a second reading. Forbidding the import is not enough
+ * on its own — the reason `startPlannedTask` exists is that `startTask` planned
+ * again on its own account, which put a mid-run roadmap edit back in charge of
+ * what runs while every module in `src/block/` looked innocent.
+ *
+ * One consequence, stated rather than left to be discovered: **a mid-run edit is
+ * invisible to this invocation, in both directions.** It cannot stop a member
+ * that was eligible when the operator asked, and it cannot make one runnable
+ * that was not. There is no drift check between tasks, and none when the run
+ * opens either: the ledger is created from the plan the caller just froze, so
+ * there is nothing to compare it against. That is the cost of the rule above and
+ * it is recorded in the follow-up register as F-B1.
  */
 
 import type { AgentRunner } from '../agent/agent-command.js';
@@ -2794,8 +3112,9 @@ import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
+import type { TaskPlanningSuccess } from '../plan/plan-next-task.js';
 import { runTask, type RunOutcome, type RunResult } from '../run/run-driver.js';
-import { startTask } from '../run/start-task.js';
+import { startPlannedTask } from '../run/start-task.js';
 import type { ReplaceFn, TempSuffixFn } from '../state/atomic-file.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import type { GitRunner } from '../worktree/git-command.js';
@@ -2826,16 +3145,61 @@ import {
 import { loadBlockLedger, type LedgerLoadSuccess } from './block-store.js';
 import { reconcileBlockRun } from './reconcile-block.js';
 
-/** How an attended block run ended. A closed set. */
+/**
+ * How an attended block run ended. A closed set.
+ *
+ * One outcome is recorded in the ledger and four are not. **"Not recorded" is
+ * not "nothing was written":** every one of the four is reachable after tasks
+ * have already been settled, parked or abandoned in this run, and those records
+ * are true and stay. What none of the four does is add a stop claim — the ledger
+ * is left at its last provably durable state, byte for byte across the
+ * condition, and the ending reaches the operator through the report instead.
+ */
 export const BLOCK_RUN_OUTCOMES = [
   /** The ledger carries the ending. {@link AttendedBlockResult.stopReason} says which. */
   'BLOCK_RUN_ENDED',
-  /** This run may no longer be the repository's writer. Nothing was written. */
+  /**
+   * This run may no longer be the repository's writer.
+   *
+   * Not recorded: any further mutation is precisely the act the run has lost the
+   * authority for. Whatever it recorded while it *was* the writer stands.
+   */
   'LEASE_AUTHORITY_UNCERTAIN',
-  /** A durable write was not possible. Nothing was written. */
+  /**
+   * A durable write was not possible.
+   *
+   * Not recorded, and it could not be: the failed write is the condition. The
+   * ledger is whatever last landed — possibly nothing at all, if the failure
+   * struck the creation.
+   */
   'DURABLE_WRITE_FAILED',
-  /** A repository, auth or runtime gate refused. Nothing was written. */
+  /**
+   * A repository, auth or runtime gate refused.
+   *
+   * Not recorded, because a gate refusal is a run abort and not task progress —
+   * and not a claim about the outcome of the task it refused to start, which
+   * stays `PLANNED`. Reachable both before the ledger exists (the auth preflight,
+   * ahead of `openRun`) and after it (a workspace, runtime or auth gate met
+   * between two tasks), so it says nothing about how much this run wrote — only
+   * that the refusal itself was not written down as an ending.
+   */
   'RUN_GATE_REFUSED',
+  /**
+   * A reconciliation that was forced when it was read was not forced when it was
+   * applied.
+   *
+   * The evidence moved between the reconciliation read and the authoritative
+   * primitive's own check: the primitive refused the claim the reconciliation had
+   * established. Nothing is repaired and nothing is retried — a second read and a
+   * second decision is how a refusal gets laundered.
+   *
+   * Its own outcome rather than `DURABLE_WRITE_FAILED`, which would tell an
+   * operator to go and fix a disk that is working, and rather than
+   * `ACTIVE_TASK_UNRESOLVED`, which is a persisted claim about an `ACTIVE` task
+   * while forced reconciliation only ever touches `PLANNED` ones. Not persisted,
+   * so it needs no ledger schema change.
+   */
+  'RECONCILIATION_UNRESOLVED',
 ] as const;
 
 export type BlockRunOutcome = (typeof BLOCK_RUN_OUTCOMES)[number];
@@ -2871,8 +3235,9 @@ export interface AttendedBlockRequest {
   /**
    * The plan, **already frozen**. This module never projects one.
    *
-   * On a resumed run its fingerprint is compared with the persisted one, and a
-   * difference is drift.
+   * Frozen by the caller from {@link planning}, under the same lease, before the
+   * run opened. It is not compared against anything here: there is no resume, so
+   * there is no persisted predecessor a fingerprint could differ from.
    */
   readonly definition: BlockDefinition;
   /** Identity of this run. A previous run's record is never overwritten. */
@@ -2896,22 +3261,29 @@ export interface AttendedBlockRequest {
    */
   readonly maxStepsPerTask: number;
   /**
-   * The eligible task ids, as the caller's **one** reading of the roadmap saw
-   * them.
+   * The caller's **one** reading of the roadmap, taken under the lease.
    *
-   * Handed in rather than computed, and that is what makes "the runner does not
-   * re-read the plan" structural instead of disciplinary: this module imports
-   * no planner at all, so there is no moment at which a mid-run edit could
-   * change which task runs next. The caller takes this from the same
-   * `planNextTask` result it projected the frozen relation from, so the two are
-   * one snapshot at one instant.
+   * The whole `TaskPlanningSuccess`, not a list of eligible ids. Two things come
+   * out of it and they must come out of the same object: the set this runner
+   * filters candidates by, and the authority `startPlannedTask` gates each start
+   * against. A list handed in beside a plan read somewhere else is two readings
+   * that can disagree, and the disagreement would surface as `TASK_INELIGIBLE`
+   * for a task this run had already chosen.
    *
-   * It can only ever narrow what runs. A caller that widened it — claiming a
-   * task eligible that the repository says is not — gains nothing: `startTask`
-   * asks the planner again and answers `TASK_INELIGIBLE`, which is a gate
-   * refusal that writes nothing.
+   * Handed in rather than computed, which is what makes "the runner does not
+   * re-read the plan" structural instead of disciplinary: this module imports no
+   * planner, and the start path it uses cannot take a reading of its own. The
+   * caller projects the frozen relation from this same result, so plan,
+   * relation, eligibility and every start gate are one snapshot at one instant.
+   *
+   * A caller cannot widen it in any useful way either. Eligibility is read from
+   * `planning.selection.eligibility` here and again inside `startPlannedTask`,
+   * and the workspace is prepared from `planning.graph`'s definition — so a
+   * forged snapshot is not a task started against the repository's plan, it is a
+   * task started against a plan the caller wrote, which the lease and the
+   * repository's own files still bound.
    */
-  readonly eligibleTaskIds: readonly string[];
+  readonly planning: TaskPlanningSuccess;
 }
 
 export interface AttendedBlockDependencies {
@@ -2966,8 +3338,13 @@ export async function runAttendedBlock(
   let current = opened.ledger;
   state.seen(current.ledger);
 
-  // The eligibility snapshot, read once by the caller and not re-read here.
-  const eligible = new Set(request.eligibleTaskIds);
+  // The eligibility snapshot, derived from the caller's one reading and not
+  // re-read here — nor taken as a second argument that could disagree with it.
+  const eligible = new Set(
+    request.planning.selection.eligibility
+      .filter((entry) => entry.eligible)
+      .map((entry) => entry.taskId),
+  );
 
   for (;;) {
     // The lease, re-proved every iteration rather than trusted once. A step is
@@ -3284,12 +3661,26 @@ function applyForcedProgress(
 
     const settled = settleBlockTask(ledger, forced.taskId, options);
     const graded = recordingResultFor(settled.outcome);
+    // Four grades, four endings. Collapsing the last three into one would report
+    // a proof race as a broken disk, which is the misdescription class this
+    // whole slice is organised against — an operator told DURABLE_WRITE_FAILED
+    // goes to look at permissions, and there is nothing wrong with the disk.
     if (graded === 'WRITE_FAILED') return ended('DURABLE_WRITE_FAILED', saveDetail(settled));
+    // A record that exists and cannot be used is a fact about the record, and
+    // the ledger has a persisted reason for exactly that.
+    if (graded === 'STATE_UNUSABLE') return stopStep(ledger, 'STATE_UNUSABLE', options);
     if (graded !== 'RECORDED') {
-      // The reconciliation looked forced and the primitive disagreed, which
-      // means the evidence moved between the two reads. Do not repair, and do
-      // not try again: the caller stops the block.
-      return ended('DURABLE_WRITE_FAILED', settled.outcome);
+      // The reconciliation was forced when it was read and the authoritative
+      // primitive did not confirm it at the commit: the evidence moved between
+      // the two reads. Do not repair, and do not try again — a second read and a
+      // second decision is how a refusal gets laundered.
+      //
+      // Reported rather than recorded, and under its own name.
+      // `ACTIVE_TASK_UNRESOLVED` would be wrong twice over: this entry is
+      // `PLANNED`, never `ACTIVE` — `applyForcedProgress` refuses `ACTIVE`
+      // entries by construction — and it is a persisted claim, which is the one
+      // thing a run whose evidence just moved under it should not be making.
+      return ended('RECONCILIATION_UNRESOLVED', settled.outcome);
     }
 
     const reloaded = loadBlockLedger(repositoryRoot, ledger.ledger.runId);
@@ -3314,9 +3705,11 @@ function applyForcedProgress(
  * eligibility; folding either into the other loses one of the two.
  *
  * And it is a snapshot rather than a fresh reading. This module imports no
- * planner, so there is no moment at which an edited roadmap could change which
- * task runs next — the invocation acts on the plan as it was when the operator
- * asked for it, which is the same instant the relation was frozen at.
+ * planner, and the task it picks is started through `startPlannedTask`, which
+ * gates against the very same reading — so there is no moment at which an edited
+ * roadmap could change which task runs next, in this function or below it. The
+ * invocation acts on the plan as it was when the operator asked for it, which is
+ * the same instant the relation was frozen at and the lease was taken.
  *
  * There is no `ACTIVE` arm, and there cannot be one: a task becomes `ACTIVE`
  * only when this loop activates it, and it is concluded before the next
@@ -3359,8 +3752,12 @@ async function driveOneTask(
   const { repository, lease, maxStepsPerTask } = request;
   const nothing = (step: RunStep): DrivenStep => ({ step, runOutcome: null, steps: 0 });
 
-  const start = await startTask(
-    { repository, taskId },
+  // `startPlannedTask`, never `startTask`: the gates below this line are
+  // answered from the reading the block was frozen against. A start that planned
+  // again would refuse `TASK_INELIGIBLE` for a task this run legitimately chose,
+  // and a roadmap edited mid-run would be back in charge of what runs.
+  const start = await startPlannedTask(
+    { repository, taskId, planning: request.planning },
     { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease },
   );
   const startConclusion = startConclusionFor(start.outcome);
@@ -3374,7 +3771,10 @@ async function driveOneTask(
     return nothing(ended('RUN_GATE_REFUSED', start.outcome));
   }
 
-  // Activation, unless this is a resume of a task the ledger already holds.
+  // Activation. The guard is a fail-closed floor rather than a branch that runs:
+  // `chooseTask` only ever returns a `PLANNED` entry, and a `PLANNED` entry is
+  // never the active one. There is no resume, so there is no path on which this
+  // run finds its own task already `ACTIVE`.
   let ledger = current;
   if (ledger.ledger.activeTaskId !== taskId) {
     const activated = activateBlockTask(ledger, taskId, options);
@@ -3521,7 +3921,7 @@ describe('the invocation absorbs the driver’s budget rather than ending on it'
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 1,
-        eligibleTaskIds: eligibleNow(fixture),
+        planning: planningOf(fixture),
       },
       {
         now: tickingClock(),
@@ -3551,18 +3951,23 @@ describe('the invocation absorbs the driver’s budget rather than ending on it'
 });
 
 describe('the invocation acts on the plan as it was when it opened', () => {
+  // The counter-proof for the snapshot rule, and the case that discriminates:
+  // it fails with RUN_GATE_REFUSED against any implementation in which a start
+  // path plans again — which is what `startTask` did before Task 6B, one layer
+  // below a runner that imports no planner and looks correct.
   it('does not let a mid-run roadmap edit change what runs next', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
-    const snapshot = eligibleNow(fixture);
+    const snapshot = planningOf(fixture);
     const seams = drivingSeams();
     let edited = false;
     const agent = recordedAgent({
       claude: () => {
         if (!edited) {
           edited = true;
-          // B-001 gains a dependency on a task that is not DONE, so a runner
-          // that re-read the roadmap would find it ineligible and end the run
-          // NO_ELIGIBLE_TASK instead of driving it.
+          // B-001 gains a dependency on a task that is not DONE. Anything that
+          // re-read the roadmap would now find it ineligible: a runner doing so
+          // would end NO_ELIGIBLE_TASK, and a *start path* doing so would answer
+          // TASK_INELIGIBLE and end the run RUN_GATE_REFUSED.
           writeRepoFile(fixture.root, 'tasks/GATE-001.md', taskFile('GATE-001'));
           writeRepoFile(fixture.root, 'tasks/B-001.md', taskFile('B-001', { dependsOn: ['GATE-001'] }));
         }
@@ -3578,7 +3983,7 @@ describe('the invocation acts on the plan as it was when it opened', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
-        eligibleTaskIds: snapshot,
+        planning: snapshot,
       },
       {
         now: tickingClock(),
@@ -3590,8 +3995,13 @@ describe('the invocation acts on the plan as it was when it opened', () => {
     );
 
     // The premise: the edit really did change what the planner would say.
-    expect(eligibleNow(fixture)).not.toEqual(snapshot);
-    // And the run acted on the snapshot regardless.
+    expect(planningOf(fixture).selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible)
+      .toBe(false);
+    // And the run acted on the snapshot regardless. Asserted as COMPLETE and
+    // *not* as "not RUN_GATE_REFUSED", because the two failure modes this
+    // discriminates against produce two different wrong answers and only the
+    // finished block excludes both.
+    expect(result.outcome).toBe('BLOCK_RUN_ENDED');
     expect(result.stopReason).toBe('COMPLETE');
     expect((onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[])
       .map((task) => task['disposition'])).toEqual(['SETTLED', 'SETTLED']);
@@ -3663,12 +4073,22 @@ Expected: PASS. If the pin reports a *second* importer, something reached the
 progress layer from outside the runner — the CLI, a renderer, a helper — and the
 fix is to route it through the runner, never to lengthen the list.
 
-- [ ] **Step 8: Prove the runner does not compute the relation**
+- [ ] **Step 8: Prove the runner computes neither the relation nor the plan**
 
 Run: `git grep -n "block-dependencies" -- src/`
 Expected: exactly one match, in `src/cli/block-command.ts` once Task 11 lands — and **none** in `src/block/block-runner.ts`. Until then, no match in `src/` at all.
 
-This is the structural form of the rule. It is checked with a grep rather than a test because the property is "this module does not depend on that one", which a runtime assertion cannot see.
+Run: `git grep -n "planNextTask" -- src/block/`
+Expected: **no match at all**, now and after Task 11. The runner receives a
+`TaskPlanningSuccess` and imports the type; a call would mean the block layer had
+taken a reading of its own, which is the authority inversion Task 6B exists to
+close one layer down.
+
+Both are checked with a grep rather than a test because the property is "this
+module does not depend on that one", which a runtime assertion cannot see. What a
+grep cannot see is the *reachable* second read — `startPlannedTask` is in a
+module that still contains `planNextTask` for `startTask`'s sake — and that is
+why the mid-run-edit case in Step 5 is an effect test rather than a comment.
 
 - [ ] **Step 9: Commit**
 
@@ -3689,15 +4109,20 @@ record.
 
 Two exits, because a ledger stopReason is itself a durable claim. A condition
 whose content is "this run can no longer make durable claims" must not be
-expressed as one, so lease uncertainty, a failed durable write and a refused
-gate end the run in the report with the ledger left on its last provably
-durable state.
+expressed as one, so lease uncertainty, a failed durable write, a refused gate
+and a reconciliation the primitive did not confirm end the run in the report
+with the ledger left on its last provably durable state. That is not "nothing
+was written": all four can strike after tasks have been settled in this
+run, and those records stand. What is missing is only the ending.
 
 Independence is read from the frozen plan and never derived: this module does
 not import block-dependencies.ts, and the grep that says so is in the plan. The
-cost is stated rather than hidden - drift is answered when an invocation opens
-a run, not between tasks, so a mid-run roadmap edit waits for the next
-invocation.
+plan itself is read the same way - the runner takes the caller's one
+TaskPlanningSuccess, filters candidates by it and hands it to startPlannedTask,
+so no gate below the runner can consult a second reading. The cost is stated
+rather than hidden: a mid-run roadmap edit is invisible to this invocation in
+both directions, and there is no drift check to notice it, because with no
+resume there is no persisted predecessor to compare against.
 
 The lease is re-proved every iteration, and between continuations of one task
 too. A step is a subprocess that took minutes, and a lease taken before it is
@@ -3727,14 +4152,27 @@ edited.
 
 Design §8.3 says it plainly: *one case per reason and per runner outcome*. A shared parametrised case passes against a runner that maps every condition to one reason, which is the misdescription defect in its natural habitat. So the cases below are separate by construction, and each drives its condition **at a point where further tasks are still eligible**, so that "the run stopped" is distinguishable from "the block happened to end".
 
+`RUN_GATE_REFUSED` gets **two** cases, not one, because the outcome is reachable
+on both sides of the ledger's creation and the two are not the same claim: the
+auth gate ahead of `openRun` leaves no ledger at all, while a start gate met
+between two tasks leaves a ledger holding a settled task that must survive the
+refusal untouched. One case for the convenient half is how "nothing was written"
+became a sentence nobody had tested.
+
+The fifth runner outcome, `RECONCILIATION_UNRESOLVED`, is pinned in Task 10 at
+the function that produces it. It is named here so that a reader walking "one
+case per runner outcome" does not conclude it was forgotten.
+
 - [ ] **Step 1: Write the failing tests**
 
 Append to `tests/v2-08-attended-block-runner.test.ts`:
 
 ```ts
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, renameSync, rmSync } from 'node:fs';
 
 import { releaseRepositoryExecutionLease, deriveExecutionLeaseLocation } from '../src/lease/execution-lease.js';
+import type { AttendedBlockDependencies } from '../src/block/block-runner.js';
+import type { ReplaceFn } from '../src/state/atomic-file.js';
 
 /**
  * A three-task block whose first task is driven, and a hook that fires while
@@ -3748,6 +4186,7 @@ import { releaseRepositoryExecutionLease, deriveExecutionLeaseLocation } from '.
 async function runWithHookAfterFirstTask(
   fixture: Fixture,
   hook: () => void,
+  overrides: Partial<AttendedBlockDependencies> = {},
 ): Promise<AttendedBlockResult> {
   let driven = 0;
   const agent = recordedAgent({
@@ -3765,7 +4204,7 @@ async function runWithHookAfterFirstTask(
       runId: RUN_ID,
       lease: leaseFor(fixture.repository),
       maxStepsPerTask: 8,
-      eligibleTaskIds: eligibleNow(fixture),
+      planning: planningOf(fixture),
     },
     {
       now: tickingClock(),
@@ -3773,8 +4212,32 @@ async function runWithHookAfterFirstTask(
       authPreflight: authPreflightPasses,
       agent: agent.runner,
       verify: recordedVerify().runner,
+      ...overrides,
     },
   );
+}
+
+/**
+ * A ledger replace seam that does the real rename and remembers what went past.
+ *
+ * Two questions need two records. `staged()` is every document the run *tried*
+ * to write, which is how a best-effort stop write is caught even when it never
+ * landed; `last()` is the bytes on disk after the last write that succeeded,
+ * which is the only honest anchor for "the ledger did not move across this
+ * condition" when the condition is reached some time after the last write.
+ */
+function recordingLedgerReplace(root: string) {
+  const stagedDocuments: string[] = [];
+  let landed: Buffer | null = null;
+  return {
+    replace: ((from, to) => {
+      stagedDocuments.push(readFileSync(from, 'utf8'));
+      renameSync(from, to);
+      landed = readFileSync(ledgerPath(root));
+    }) as ReplaceFn,
+    staged: (): readonly string[] => stagedDocuments,
+    last: (): Buffer | null => landed,
+  };
 }
 
 describe('each class-2 condition ends the run under its own name', () => {
@@ -3828,9 +4291,9 @@ describe('each class-2 condition ends the run under its own name', () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
     // A second writer moves the task on while it is being driven, so the
     // driver's own next write meets a revision that is no longer the one it
-    // read. `STATE_CONFLICT` is graded UNRESOLVED: nothing was written, the
-    // task's outcome is not established, and re-reading and deciding again is
-    // exactly how a stale-writer refusal gets laundered.
+    // read. `STATE_CONFLICT` is graded UNRESOLVED: the driver's write did not
+    // land, the task's outcome is not established, and re-reading and deciding
+    // again is exactly how a stale-writer refusal gets laundered.
     const agent = recordedAgent({
       claude: () => {
         movedByAnotherWriter(fixture, 'A-001');
@@ -3846,7 +4309,7 @@ describe('each class-2 condition ends the run under its own name', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
-        eligibleTaskIds: eligibleNow(fixture),
+        planning: planningOf(fixture),
       },
       {
         now: tickingClock(),
@@ -3869,7 +4332,7 @@ describe('each class-2 condition ends the run under its own name', () => {
     expect(entries.slice(1).map((task) => task['disposition'])).toEqual(['PLANNED', 'PLANNED']);
   }, 900_000);
 
-  it('RUN_GATE_REFUSED — auth is not there, and nothing is written', async () => {
+  it('RUN_GATE_REFUSED — auth is not there, and no ledger is created', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
 
     const result = await runBlock(fixture, independentBlock(['A-001', 'B-001']), {
@@ -3879,15 +4342,72 @@ describe('each class-2 condition ends the run under its own name', () => {
     expect(result.outcome).toBe('RUN_GATE_REFUSED');
     expect(result.stopReason).toBeNull();
     expect(result.detail).toBe('AUTH_PREFLIGHT_FAILED');
-    // The gate is answered before the first ledger is created, so there is not
-    // even a file to be byte-identical with.
+    // This gate is answered before the first ledger is created, so there is not
+    // even a file to be byte-identical with. That is a property of *this* gate
+    // and not of the outcome — see the case below, which is the same outcome
+    // over a ledger that exists and carries a settled task.
     expect(existsSync(ledgerPath(fixture.root))).toBe(false);
   }, 600_000);
+
+  // The case the outcome's own wording used to hide. `RUN_GATE_REFUSED` said
+  // "nothing was written", and the only case pinning it met the gate ahead of
+  // `openRun` — so the claim was true of the convenient half and untested on the
+  // other. A start gate met *between two tasks* ends the run under the same
+  // outcome with a ledger that exists, carries A-001's settlement, and must not
+  // gain a stop claim about the refusal.
+  it('RUN_GATE_REFUSED — a start gate refuses after the ledger exists', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
+    // The anchor has to be the last write the run made, not a value read at hook
+    // time: the hook fires while A-001 is still being driven, and A-001's
+    // settlement lands after it. `landed` therefore holds the ledger exactly as
+    // it stood when the gate was reached, because a gate refusal writes nothing.
+    const landed = recordingLedgerReplace(fixture.root);
+
+    const result = await runWithHookAfterFirstTask(
+      fixture,
+      () => {
+        // The repository stops ignoring its own runtime directory, so the next
+        // start refuses RUNTIME_NOT_IGNORED. A real misconfiguration an operator
+        // fixes outside the run — not a stubbed refusal, and not a condition
+        // that would have ended the block anyway: B-001 and C-001 are eligible.
+        writeFileSync(join(fixture.root, '.gitignore'), '# nothing ignored\n', 'utf8');
+      },
+      { ledgerReplace: landed.replace },
+    );
+
+    expect(result.outcome).toBe('RUN_GATE_REFUSED');
+    expect(result.detail).toBe('RUNTIME_NOT_IGNORED');
+    expect(result.stopReason).toBeNull();
+
+    // Byte for byte across the gate. Not "the file is empty" and not "no stop
+    // reason was written": the ledger holds A-001's settlement, that record is
+    // true, and it stays. What must not appear is an ending.
+    const before = landed.last();
+    if (before === null) throw new Error('the run never wrote a ledger, so nothing was measured');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+
+    const document = JSON.parse(before.toString('utf8')) as Record<string, unknown>;
+    expect(document['stopReason']).toBeNull();
+    const entries = document['tasks'] as readonly Record<string, unknown>[];
+    expect(entries.map((task) => task['disposition'])).toEqual(['SETTLED', 'PLANNED', 'PLANNED']);
+    // Every document the run staged, not only the last: a best-effort stop write
+    // that was attempted and lost would be invisible in the file.
+    for (const staged of landed.staged()) {
+      expect((JSON.parse(staged) as Record<string, unknown>)['stopReason']).toBeNull();
+    }
+    // And the report carries the ending the ledger deliberately does not.
+    expect(result.tasks[0]?.disposition).toBe('SETTLED');
+  }, 900_000);
 });
 
 // Design §8.3a. Asserting "no stop reason was written" is weaker: it passes
 // against a run that mutated the ledger some other way.
-describe('a no-write outcome leaves the ledger byte-identical', () => {
+//
+// "Byte-identical" is always *across the condition* — the ledger before it and
+// the ledger after it. Never "byte-identical with an empty file": a run that
+// settled a task before meeting one of these outcomes wrote that settlement, and
+// it is true.
+describe('an unrecorded outcome leaves the ledger byte-identical across it', () => {
   it('LEASE_AUTHORITY_UNCERTAIN', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
     let before: Buffer | null = null;
@@ -4118,7 +4638,8 @@ describe('a durable write that is not possible is reported, never claimed', () =
 });
 ```
 
-Add `import { renameSync } from 'node:fs';` and `import type { ReplaceFn } from '../src/state/atomic-file.js';`.
+`renameSync` and `ReplaceFn` are already imported — Task 8's post-open gate case
+brought both in.
 
 Note what the third case measures that the second cannot: the second asserts the *file* has no stop reason, which is also true of a run that staged one and failed to move it. The third reads what was staged, so a best-effort stop write is visible even when it never landed.
 
@@ -4280,6 +4801,47 @@ describe('positive reconciliation is applied only where it is forced', () => {
     expect(entries[0]?.['evidenceRevision']).not.toBeNull();
   }, 600_000);
 
+  // The classification that Task 7's first draft got wrong: every non-RECORDED
+  // grade was reported as DURABLE_WRITE_FAILED, which sends an operator to look
+  // at a disk that is working. `recordingResultFor` distinguishes four classes
+  // and `applyForcedProgress` must keep all four apart.
+  it('reports a reconciliation the primitive did not confirm under its own name', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+    // The ledger stops, so the reconciliation still reads as forced — A-001 is
+    // PLANNED and its record says READY_FOR_PR — while the primitive refuses it
+    // (`RUN_ALREADY_STOPPED`, graded UNRESOLVED).
+    stopBlockRun(reload(fixture.root), 'OPERATOR_STOPPED', { repositoryRoot: fixture.root });
+    const before = readFileSync(ledgerPath(fixture.root));
+
+    const step = applyForcedProgress(reload(fixture.root), fixture.root, {
+      repositoryRoot: fixture.root,
+    });
+
+    expect(step.kind).toBe('ENDED');
+    if (step.kind !== 'ENDED') return;
+    // Its own outcome. Not DURABLE_WRITE_FAILED — nothing is wrong with the
+    // disk — and not ACTIVE_TASK_UNRESOLVED, which is a persisted claim about an
+    // ACTIVE task while this entry is PLANNED.
+    expect(step.outcome).toBe('RECONCILIATION_UNRESOLVED');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+  }, 600_000);
+});
+
+// What the case above does and does not establish, written down rather than
+// assumed: it pins the *classification* — an UNRESOLVED grade from the forced
+// path is reported as RECONCILIATION_UNRESOLVED and nothing is repaired or
+// retried. It does not reproduce the condition an operator will actually meet,
+// which is evidence moving between the reconciliation read and the primitive's
+// own check (`TASK_STATE_DOES_NOT_PROVE_IT`). That is a race, and a case that
+// tried to arrange it deterministically would need a seam inside
+// `applyForcedProgress` — a seam whose only purpose is to make a test pass is
+// a hole in the function it is testing. The stopped-ledger route reaches the
+// same branch through a condition the runner grades as a fail-closed floor.
+
+describe('positive reconciliation stops rather than guessing', () => {
   it('stops rather than choosing when the evidence supports no single successor', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
     // A second writer moves the task on mid-drive, so this run's own write is
@@ -4300,7 +4862,7 @@ describe('positive reconciliation is applied only where it is forced', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
-        eligibleTaskIds: eligibleNow(fixture),
+        planning: planningOf(fixture),
       },
       {
         now: tickingClock(),
@@ -4320,7 +4882,10 @@ describe('positive reconciliation is applied only where it is forced', () => {
 });
 ```
 
-Add the state helper (`movedByAnotherWriter` is already in the file from Task 8):
+The cases above call `applyForcedProgress`, `settleBlockTask`, `activateBlockTask`
+and `stopBlockRun` directly; add whichever of those four the file does not import
+yet. Add the state helper (`movedByAnotherWriter` is already in the file from
+Task 8):
 
 ```ts
 /** Moves a real task's durable state to `READY_FOR_PR`, the settlement proof. */
@@ -4367,7 +4932,7 @@ export function applyForcedProgress(
 - [ ] **Step 3: Run the tests**
 
 Run: `npx vitest run tests/v2-08-attended-block-runner.test.ts`
-Expected: PASS. A failure in the ACTIVE case — the entry settled — means `applyForcedProgress` is not restricted to `PLANNED` entries, which is the repair-versus-choice line.
+Expected: PASS. A failure in the ACTIVE case — the entry settled — means `applyForcedProgress` is not restricted to `PLANNED` entries, which is the repair-versus-choice line. A `RECONCILIATION_UNRESOLVED` case reporting `DURABLE_WRITE_FAILED` means the four grades of `recordingResultFor` were collapsed on the way out; fix the classification in `block-runner.ts`, never the assertion.
 
 Run: `npm run test:foundation-safe`
 Expected: PASS.
@@ -4404,6 +4969,14 @@ implementation that reconciles nothing.
 
 Where the evidence supports no single successor the block stops with
 ACTIVE_TASK_UNRESOLVED and invents nothing.
+
+And the four grades a recording attempt can carry stay four on the way out. A
+reconciliation that read as forced and was refused by the primitive is
+RECONCILIATION_UNRESOLVED - the evidence moved between the two reads, nothing is
+repaired and nothing is retried. Reporting it as DURABLE_WRITE_FAILED would send
+an operator to look at a disk that is working, and ACTIVE_TASK_UNRESOLVED would
+be a persisted claim about an ACTIVE task when forced reconciliation only ever
+touches PLANNED ones.
 ```
 
 ---
@@ -4473,24 +5046,28 @@ describe('the exit code says what an operator should do next', () => {
     expect(code('BLOCK_RUN_ENDED', 'NO_ELIGIBLE_TASK')).toBe(EXIT_RUN_INPUT_UNUSABLE);
   });
 
-  it('grades the three no-write outcomes by what the operator must do', () => {
+  it('grades the four unrecorded outcomes by what the operator must do', () => {
     // Lease and gate: nothing durable is wrong and re-invoking under other
-    // conditions can differ. A failed durable write is not like that — a disk
-    // or a permission has to be fixed before anything will ever run.
+    // conditions can differ. The other two are not like that — a disk or a
+    // permission has to be fixed before anything will ever run, and a
+    // reconciliation the primitive refused means somebody or something moved
+    // task state under a held lease.
     expect(code('LEASE_AUTHORITY_UNCERTAIN', null)).toBe(EXIT_RUN_REFUSED);
     expect(code('RUN_GATE_REFUSED', null)).toBe(EXIT_RUN_REFUSED);
     expect(code('DURABLE_WRITE_FAILED', null)).toBe(EXIT_RUN_NEEDS_OPERATOR);
+    expect(code('RECONCILIATION_UNRESOLVED', null)).toBe(EXIT_RUN_NEEDS_OPERATOR);
   });
 
   it('never tells an operator to call again, because nothing would continue', () => {
     // A block run does not outlive its invocation. Exit 5 means "everything is
     // on disk, call again to continue", and there is nothing here that a second
-    // call would continue — the run id is spent.
+    // call would continue — the run id is spent. Written over the vocabularies
+    // rather than over a hand-listed set, so a new outcome is graded here too.
     const everyCode = [
       ...BLOCK_STOP_REASONS.map((reason) => code('BLOCK_RUN_ENDED', reason)),
-      code('LEASE_AUTHORITY_UNCERTAIN', null),
-      code('DURABLE_WRITE_FAILED', null),
-      code('RUN_GATE_REFUSED', null),
+      ...BLOCK_RUN_OUTCOMES.filter((outcome) => outcome !== 'BLOCK_RUN_ENDED').map((outcome) =>
+        code(outcome, null),
+      ),
     ];
     expect(everyCode).not.toContain(EXIT_RUN_CALL_AGAIN);
   });
@@ -4500,10 +5077,21 @@ describe('every outcome and every reason has its own sentence', () => {
   it('covers the outcome vocabulary, distinctly', () => {
     const sentences = BLOCK_RUN_OUTCOMES.map((outcome) => BLOCK_OUTCOME_SENTENCES[outcome]);
     expect(sentences.every((sentence) => sentence.length > 0)).toBe(true);
-    // Distinct, because three no-write outcomes that read alike are three
+    // Distinct, because four unrecorded outcomes that read alike are four
     // outcomes an operator cannot act on differently — which is the whole
-    // reason they are three and not one generic RUN_UNSAFE.
+    // reason they are four and not one generic RUN_UNSAFE.
     expect(new Set(sentences).size).toBe(BLOCK_RUN_OUTCOMES.length);
+  });
+
+  it('does not claim that nothing was written', () => {
+    // The sentence that was wrong: every one of the four unrecorded outcomes is
+    // reachable after this run has settled tasks, and telling an operator
+    // "nothing was written" sends them looking for a ledger that is there, or
+    // stops them looking at one that is. What the sentences may say is that the
+    // *ending* was not recorded.
+    for (const outcome of BLOCK_RUN_OUTCOMES) {
+      expect(BLOCK_OUTCOME_SENTENCES[outcome]).not.toMatch(/nothing was written/i);
+    }
   });
 
   it('covers the stop-reason vocabulary, distinctly', () => {
@@ -4511,10 +5099,11 @@ describe('every outcome and every reason has its own sentence', () => {
     expect(new Set(sentences).size).toBe(BLOCK_STOP_REASONS.length);
   });
 
-  it('tells an operator which of the three no-write outcomes they met', () => {
+  it('tells an operator which of the four unrecorded outcomes they met', () => {
     expect(BLOCK_OUTCOME_SENTENCES.LEASE_AUTHORITY_UNCERTAIN).toMatch(/lease|writer/i);
     expect(BLOCK_OUTCOME_SENTENCES.DURABLE_WRITE_FAILED).toMatch(/write|disk|permission/i);
     expect(BLOCK_OUTCOME_SENTENCES.RUN_GATE_REFUSED).toMatch(/gate|refused/i);
+    expect(BLOCK_OUTCOME_SENTENCES.RECONCILIATION_UNRESOLVED).toMatch(/evidence|record|moved/i);
   });
 });
 
@@ -4535,9 +5124,18 @@ describe('the command', () => {
     // And it says what it *would* freeze, including whether the members are
     // independent — the property the whole slice turns on.
     expect(stdout.join('')).toMatch(/independent/i);
+    // No lease either. A report is not a claim on the repository's turn as
+    // writer, and the plan it printed authorises nothing.
+    const free = acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-0002', blockId: BLOCK_ID },
+      { now: () => new Date().toISOString() },
+    );
+    expect(free.ok).toBe(true);
+    if (free.ok) releaseRepositoryExecutionLease(free.evidence);
   }, 600_000);
 
-  it('refuses a member the repository does not declare, before taking a lease', async () => {
+  it('refuses a member the repository does not declare, and gives the lease back', async () => {
     const fixture = await repoWith({ 'A-001': [] });
 
     await invokeBlock([
@@ -4551,6 +5149,17 @@ describe('the command', () => {
     expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
     expect(stdout.join('')).toContain('TASK_NOT_IN_GRAPH');
     expect(existsSync(ledgerPath(fixture.root))).toBe(false);
+    // The refusal now happens *under* the lease, because the plan it refuses is
+    // read under the lease. So the property that matters is not "no lease was
+    // taken" but "the lease did not survive the refusal": the next invocation
+    // must not find this one still holding it.
+    const after = acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-0002', blockId: BLOCK_ID },
+      { now: () => new Date().toISOString() },
+    );
+    expect(after.ok).toBe(true);
+    if (after.ok) releaseRepositoryExecutionLease(after.evidence);
   }, 600_000);
 
   it('drives a block end to end and exits on its reason', async () => {
@@ -4601,12 +5210,15 @@ Append to `src/cli/run-exit-codes.ts`:
  * `NO_ELIGIBLE_TASK` is 2, matching `PLAN_EXIT_CODES` above. The same fact
  * learned on the way to executing is still the same fact.
  *
- * `DURABLE_WRITE_FAILED` is 3 while the other two no-write outcomes are 4. Code
- * 4 says "nothing durable is wrong, and re-invoking under other conditions can
- * differ", which is true of a lease somebody else holds and of a gate that was
- * not satisfied. It is not true of a disk or a permission that refused a write:
- * an operator has to go and fix something, and a scheduler told 4 would retry
- * into the same refusal forever.
+ * `DURABLE_WRITE_FAILED` and `RECONCILIATION_UNRESOLVED` are 3 while the other
+ * two unrecorded outcomes are 4. Code 4 says "nothing durable is wrong, and
+ * re-invoking under other conditions can differ", which is true of a lease
+ * somebody else holds and of a gate that was not satisfied. It is not true of a
+ * disk or a permission that refused a write — an operator has to go and fix
+ * something, and a scheduler told 4 would retry into the same refusal forever —
+ * and it is not true of a reconciliation the authoritative primitive refused
+ * either: task state moved under a held execution lease, which is a fact about
+ * this repository that another invocation will meet again.
  *
  * `ACTIVE_TASK_UNRESOLVED` is 3 rather than 5. The run is over — a stop reason
  * is written once — so "call again" would be advice that cannot be taken.
@@ -4633,6 +5245,7 @@ const BLOCK_OUTCOME_EXIT_CODES = Object.freeze({
   LEASE_AUTHORITY_UNCERTAIN: EXIT_RUN_REFUSED,
   DURABLE_WRITE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
   RUN_GATE_REFUSED: EXIT_RUN_REFUSED,
+  RECONCILIATION_UNRESOLVED: EXIT_RUN_NEEDS_OPERATOR,
 }) satisfies Record<Exclude<BlockRunOutcome, 'BLOCK_RUN_ENDED'>, CliExitCode>;
 
 export function exitCodeForBlockRun(result: AttendedBlockResult): CliExitCode {
@@ -4671,9 +5284,14 @@ Steps        : <n>
 
 Three rules for the sentences, each of which a test above pins:
 
-1. every outcome and every reason gets its own, and no two are equal — three no-write outcomes that read alike are three outcomes an operator cannot act on differently, which is the whole reason they are three rather than one generic `RUN_UNSAFE`;
-2. the no-write ones say **that nothing was written**, because an operator who cannot tell whether the ledger moved will go looking for state that is not there;
+1. every outcome and every reason gets its own, and no two are equal — four unrecorded outcomes that read alike are four outcomes an operator cannot act on differently, which is the whole reason they are four rather than one generic `RUN_UNSAFE`;
+2. the unrecorded ones say **that the ending was not recorded and the ledger stands at its last durable state** — never that nothing was written. All four are reachable after tasks have been settled in this run, and an operator told "nothing was written" would go looking for a record that is there, or ignore one that is. The report is where the ending lives, and the sentence has to say so: *"the run ended here and the ledger does not carry that ending; what it does carry is every task outcome recorded before this point."* Whether a ledger exists at all is a fact about the individual run, and the report shows it by listing what the ledger holds — not by a sentence attached to the outcome.
 3. no path, no exception message, no untrusted text (AO-002). The detail is an allow-listed code from another module's closed vocabulary and is printed as one.
+
+Rule 2 is why the task table in the report is not decoration. For three of the
+four unrecorded outcomes the ledger is the authority on what happened *up to* the
+condition and silent about the condition itself, so the report is the only place
+the two are visible together.
 
 - [ ] **Step 5: Write the command**
 
@@ -4693,15 +5311,34 @@ Create `src/cli/block-command.ts`. It is the same two-mode shape as `run-command
  *
  * ── Where the plan is frozen, and why it is here ───────────────────────────
  *
- * This is the one place `projectBlockDependencies` is called. The runner never
- * computes the relation — see its module header — so freezing is the caller's
- * job, and doing it here means the relation is taken from the repository as it
- * is at the moment the operator asked, once, and then bound into the
- * fingerprint.
+ * This is the one place `projectBlockDependencies` is called, and the one place
+ * `planNextTask` is called for a block run. The runner computes neither — see
+ * its module header — so freezing is the caller's job, and doing it here means
+ * the roadmap is read once and everything downstream consults that reading: the
+ * projection, the definition's fingerprint, the eligibility filter, and each
+ * task's own start gate.
  *
- * The order is: resolve → plan → project → define → **lease** → run → release.
- * Every refusal above the lease line happens before anything is taken, so an
- * unusable input never costs another invocation its turn as writer.
+ * ── The order, and why the lease comes first ───────────────────────────────
+ *
+ *   attended:  resolve → **lease** → plan → project → define → run → release
+ *   default:   resolve → plan → project → define → report   (no lease, no writes)
+ *
+ * An earlier draft froze the plan before taking the lease, which left a window
+ * in which a legitimate other writer could edit the roadmap between the reading
+ * the block was frozen from and the moment this invocation became the writer —
+ * a frozen plan that was never authoritative. `run-command.ts:205` already takes
+ * the lease before it selects a task, for the same reason.
+ *
+ * The cost is that an unusable `--tasks` argument — a member the repository does
+ * not declare — is now refused while the lease is held, for the few milliseconds
+ * it takes to plan and project. Accepted: `finally` gives the lease back on
+ * every path including a throw, and the alternative is freezing a plan on
+ * authority this invocation did not yet have. Argument checks that need no
+ * repository at all still happen above the lease line.
+ *
+ * Without `--attended` nothing is taken at all. The report is a report; a
+ * command that wrote nothing and drove nothing has no claim on the repository's
+ * turn as writer, and the snapshot it prints authorises nothing.
  */
 ```
 
@@ -4711,18 +5348,12 @@ The action body:
 const resolution = await resolveRepository({ repositoryPath: options.repository });
 // ... the same refusal shape run-command.ts uses, exit EXIT_RUN_INPUT_UNUSABLE
 
-const planned = planNextTask(repository);
-if (!planned.ok) { /* print planned.code + planned.detail; exit EXIT_RUN_INPUT_UNUSABLE */ }
-
-const projected = projectBlockDependencies(planned.graph, options.tasks);
-if (!projected.ok) { /* print projected.code and projected.taskId; exit EXIT_RUN_INPUT_UNUSABLE */ }
-
-const defined = defineBlock(options.block, options.tasks, projected.dependencies);
-if (!defined.ok) { /* print defined.code; exit EXIT_RUN_INPUT_UNUSABLE */ }
-
+// The read-only mode. It takes no lease, so it freezes nothing that authorises
+// anything — the plan it prints is a description of what a run *would* be
+// started against, and the run that starts takes its own reading under its own
+// lease.
 if (options.attended !== true) {
-  process.stdout.write(renderFrozenPlan(repository, defined.definition));
-  process.exitCode = EXIT_RUN_OK;
+  process.exitCode = reportFrozenPlan(repository, options);
   return;
 }
 
@@ -4733,6 +5364,19 @@ if (!acquired.ok) {
   return;
 }
 try {
+  // Everything below is under the lease, including the input refusals. A plan
+  // frozen before this line could be edited by a legitimate writer between the
+  // reading and the acquisition, and this invocation would then run a block
+  // frozen on a roadmap it was never the writer of.
+  const planned = planNextTask(repository);
+  if (!planned.ok) { /* print planned.code + planned.detail; exit EXIT_RUN_INPUT_UNUSABLE; return */ }
+
+  const projected = projectBlockDependencies(planned.graph, options.tasks);
+  if (!projected.ok) { /* print projected.code and projected.taskId; exit EXIT_RUN_INPUT_UNUSABLE; return */ }
+
+  const defined = defineBlock(options.block, options.tasks, projected.dependencies);
+  if (!defined.ok) { /* print defined.code; exit EXIT_RUN_INPUT_UNUSABLE; return */ }
+
   const result = await runAttendedBlock(
     {
       repository,
@@ -4740,11 +5384,10 @@ try {
       runId: options.run,
       lease: acquired.evidence,
       maxStepsPerTask: maxSteps,
-      // The same `planned` the projection came from, so the frozen relation and
-      // the eligibility snapshot are one reading of the roadmap at one instant.
-      eligibleTaskIds: planned.selection.eligibility
-        .filter((entry) => entry.eligible)
-        .map((entry) => entry.taskId),
+      // The same `planned` the projection came from — handed on whole, so the
+      // frozen relation, the eligibility filter and every task's start gate are
+      // one reading of the roadmap at one instant, taken under this lease.
+      planning: planned,
     },
     {
       now: () => new Date().toISOString(),
@@ -4757,12 +5400,19 @@ try {
   process.stdout.write(renderBlockRun(repository, result));
   process.exitCode = exitCodeForBlockRun(result);
 } finally {
-  // Released on every path out, including a throw. The lease is taken once for
-  // the whole block run and given back once — never per task, which would leave
-  // a window between tasks that a second writer fits into perfectly.
+  // Released on every path out, including a throw and including the input
+  // refusals above. The lease is taken once for the whole block run and given
+  // back once — never per task, which would leave a window between tasks that a
+  // second writer fits into perfectly.
   releaseRepositoryExecutionLease(acquired.evidence);
 }
 ```
+
+`reportFrozenPlan` is the read-only half, factored out so the two modes cannot
+share a planning read by accident: it plans, projects, defines and prints, and
+the value it prints never reaches `runAttendedBlock`. Two readings in one
+invocation would be one reading too many, and the way to make that impossible is
+for the read-only path to keep nothing.
 
 `onceOnlyPreflight` is the memoising helper `run-command.ts:148` already owns. **Export it from there and import it** rather than writing a second one: two memoising preflights are two chances for one invocation to start the subscription CLIs twice.
 
@@ -4817,21 +5467,25 @@ feat: agent-loop block, the attended block runner's front door (V2-08)
 
 Two modes, and the default is still read-only: without --attended the command
 freezes a plan and reports it, including whether the members are established as
-independent, and writes nothing.
+independent, and writes nothing and takes no lease.
 
-This is the one place the dependency relation is projected. The runner never
-computes it, so freezing is the caller's job, and doing it here takes the
-relation from the repository as it is at the moment the operator asked - once -
-and binds it into the fingerprint.
+This is the one place the dependency relation is projected and the one place a
+block run reads the roadmap. The runner computes neither, so both are the
+caller's job, and the same planNextTask result becomes the projection, the
+fingerprint, the eligibility filter and every task's start gate.
 
-The lease is taken after every input refusal and released on every path out,
-including a throw. Taken once for the whole run: a per-task lease would leave a
-window between tasks that a second writer fits into perfectly.
+The lease is taken before the plan is read, not after the input refusals - which
+is where run-command.ts:205 already takes it. A plan frozen ahead of the
+acquisition can be edited by a legitimate writer in between, and this invocation
+would then run a block frozen on a roadmap it was never the writer of. The cost
+is a few milliseconds of lease held over a refused --tasks argument; the finally
+gives it back on every path, including a throw.
 
-Two exit tables, both total. DURABLE_WRITE_FAILED exits 3 while the other two
-no-write outcomes exit 4 - code 4 says nothing durable is wrong and re-invoking
-can differ, which is true of a lease somebody else holds and false of a disk
-that refused a write.
+Two exit tables, both total. DURABLE_WRITE_FAILED and RECONCILIATION_UNRESOLVED
+exit 3 while the other two unrecorded outcomes exit 4 - code 4 says nothing
+durable is wrong and re-invoking can differ, which is true of a lease somebody
+else holds and false of a disk that refused a write or of task state moving
+under a held lease.
 ```
 
 ---
@@ -4840,7 +5494,7 @@ that refused a write.
 
 **Files:**
 - Modify: `README.md` (the "Not implemented yet" roadmap at ~4215; a new V2-08 section; the follow-up register)
-- Modify: `docs/superpowers/specs/2026-08-14-v2-08-attended-block-runner-design.md` (status line only)
+- Modify: `docs/superpowers/specs/2026-08-14-v2-08-attended-block-runner-design.md` (the status line, and the three places the plan narrowed or corrected the design — §5, §6, §7)
 
 - [ ] **Step 1: Write the V2-08 section**
 
@@ -4849,7 +5503,8 @@ Add a `## The attended block runner (V2-08)` section to `README.md`, after the V
 - **the two classes of bad news**, and that confusing them is the defect the design exists to prevent — with the worked example (`A = BLOCKED`, `B` and `C` `SETTLED`, ending `TASK_BLOCKED`, and *not* `COMPLETE`);
 - **why continuing is safe here and only here**: every continuation is still gated by the same proof, so a failed A cannot make a false claim about B possible;
 - **the policy V2-07 documented and this slice reversed**, named as a reversal;
-- **that a `stopReason` is itself a durable claim**, which is why lease uncertainty and a failed durable write are runner outcomes rather than reasons, and why the ledger is left byte-identical for both;
+- **that a `stopReason` is itself a durable claim**, which is why lease uncertainty, a failed durable write, a refused gate and an unconfirmed reconciliation are runner outcomes rather than reasons, and why the ledger is left byte-identical **across** each of them — stated in that form, not as "nothing was written", because all four are reachable after this run has already recorded task outcomes that are true and stay;
+- **one reading of the roadmap, taken under the lease**, consulted by the projection, the fingerprint, the eligibility filter and every task's start gate — and why `startPlannedTask` had to exist for that to be true rather than asserted: the runner imports no planner, but the primitive it started tasks with did;
 - **`ACTIVE_TASK_UNRESOLVED`**, and why it is not `STATE_UNUSABLE`;
 - **the frozen dependency relation**: that `BlockDefinition` could not previously express independence at all, that the relation is the *transitive projection* over the whole normalised DAG, and the `A ← X ← B` case that makes a direct intra-block check unsound;
 - **cause beats consequence** for the end reason, and what `NO_ELIGIBLE_TASK` is now reserved for;
@@ -4865,14 +5520,21 @@ Add a `## The attended block runner (V2-08)` section to `README.md`, after the V
 
 Add a `### Carried forward from V2-08, deliberately` block to the follow-up register (the "Carried forward, deliberately" convention at `README.md:2961` and `README.md:3645`):
 
-- **F-B1 — an attended invocation acts on one snapshot of the roadmap.** The
-  frozen relation and the eligibility list are both taken at the moment the
-  operator asked, and the runner imports no planner, so a roadmap edited while
-  the invocation is in flight changes neither what runs next nor what counts as
-  independent. Accepted deliberately: the alternative is a runner that re-reads
-  the plan, and the version of that which re-derives the relation is the
-  authority inversion the whole slice exists to prevent. The edit is seen by the
-  next invocation.
+- **F-B1 — an attended invocation acts on one snapshot of the roadmap.** One
+  `planNextTask` result, taken under the lease, is the projection, the
+  fingerprint, the eligibility filter and every task's start gate. So a roadmap
+  edited while the invocation is in flight changes nothing about it in either
+  direction: it cannot stop a member that was eligible when the operator asked,
+  and it cannot make one runnable that was not. Accepted deliberately — the
+  alternative is a run whose authority a mid-run edit can move, and the version
+  of that which re-derives the relation is the inversion the whole slice exists
+  to prevent. There is no drift check to notice the edit either, because with no
+  resume there is no persisted predecessor to compare against. The edit is seen
+  by the next invocation.
+
+  What this cost, and it is worth naming: `startTask` read the plan itself, so
+  the property was false one layer below a runner that looked correct. Closed by
+  splitting the start path (Task 6B) rather than by documenting the exception.
 - **F-B2 — `independenceIsEstablished` is all-or-nothing.** A block with any
   frozen edge degrades to V2-07's behaviour — stop at the first task-local
   failure — even where the remaining members happen to be mutually independent.
@@ -4940,6 +5602,33 @@ A design a plan quietly departed from is a design that stops describing the
 build. Written into the spec, not only into the plan, because the spec is what a
 later slice will read first.
 
+The same rule applies to the two places the plan review moved the design, so add
+these as well — §7's ordering and §6's "Three runner outcomes" heading:
+
+```
+**Corrected while planning.** The order is `resolve → lease → plan → project →
+define → run → release`. Freezing the plan before taking the lease left a window
+in which another writer could edit the roadmap between the reading the block was
+frozen from and the moment this invocation became the writer, so the frozen plan
+was never authoritative. And the freeze reaches further down than "the runner
+imports no planner": `startTask` read the plan itself, so a mid-run edit could
+still refuse a task the snapshot had authorised. `startPlannedTask` takes the
+frozen reading; the runner uses only that path.
+```
+
+```
+**Four, not three.** `RECONCILIATION_UNRESOLVED` joined them: a positive
+reconciliation that read as forced and was refused by the authoritative
+primitive at the commit is a proof race, not a failed write, and reporting it as
+`DURABLE_WRITE_FAILED` would send an operator to a working disk. It is not
+persisted, so it needed no schema change.
+
+The section's own sentence — *the ledger stays at its last provably durable
+state* — is the exact one, and it is weaker than "nothing was written". All four
+are reachable after tasks have been recorded in this run; those records are true
+and they stay. What none of them adds is a stop claim.
+```
+
 - [ ] **Step 5: Mark the design closed**
 
 In the design spec, change the status line from
@@ -4979,16 +5668,20 @@ The two classes of bad news and why confusing them is the defect; the V2-07
 policy this slice reversed, named as a reversal; and the insight that reshaped
 the design - a ledger stopReason is itself a durable claim, so a condition
 asserting that the run cannot make durable claims must not be represented as
-one.
+one. Four outcomes are therefore reported rather than recorded, and the ledger
+is left byte-identical across each of them, which is not the same as nothing
+having been written: all four can strike after task outcomes this run recorded,
+and those stay.
 
-Four items carried forward as decisions rather than defects, the first two of
-them costs of rules the slice chose deliberately: drift is answered when an
-invocation opens a run rather than between tasks, because the runner is
-forbidden to recompute the relation; and independence is all-or-nothing,
-because the finer answer is the dependency scheduler V2-09 owns.
+Five items carried forward as decisions rather than defects, the first two of
+them costs of rules the slice chose deliberately: an invocation acts on one
+reading of the roadmap, taken under its lease, so a mid-run edit changes nothing
+about it in either direction and no drift check exists to notice - with no
+resume there is no persisted predecessor to compare against; and independence is
+all-or-nothing, because the finer answer is the dependency scheduler V2-09 owns.
 ```
 
-The pull request body should carry the same four decisions and the control map below, so a reviewer can check the claims against the cases without reading the plan.
+The pull request body should carry the same five carried-forward items and the control map below, so a reviewer can check the claims against the cases without reading the plan.
 
 **Then follow the delivery policy in `CLAUDE.md`:** `PR_REQUIRED` + `CI_REQUIRED`. Wait for CI. A pull request showing **zero** checks is a defect in the delivery setup, not permission to merge — classify the checks into `NO_CHECKS` / `PENDING` / `FAILED` / `SUCCESS` with `gh pr checks --json name,bucket,state` and `gh pr view --json statusCheckRollup`, and merge only on `SUCCESS`.
 
@@ -5005,7 +5698,7 @@ row.
 | 1. a task-local failure does not stop the run | 5 (primitive), 8 → *"does not stop when one task fails locally"* in Task 7 |
 | 2. a class-2 condition stops immediately, with tasks still eligible | 8 (every case drives its condition between two tasks) |
 | 3. each class-2 condition, separately | 8, for every reason this runner can produce; `DEFINITION_DRIFTED` and `OPERATOR_STOPPED` have no producer and are named in a list rather than covered (F-B3) |
-| 3a. the two no-write outcomes leave the ledger byte-identical | 8 (lease), 9 (durable write) |
+| 3a. the unrecorded outcomes leave the ledger byte-identical **across** the condition | 8 (lease, and the post-open gate refusal over a ledger holding a settled task), 9 (durable write), 10 (`RECONCILIATION_UNRESOLVED`) |
 | 3b. `ACTIVE_TASK_UNRESOLVED` coexists with an unchanged `ACTIVE` | 4 (primitive), 8 (runner) |
 | 3c. the end reason names the cause, not the consequence | 6 (both halves of the pair), 7 |
 | 3d. reconciliation refuses where a choice would be required | 10 |
@@ -5020,16 +5713,28 @@ row.
 Three rows the lifetime decision added, which design §8 did not ask for because
 the contradiction had not surfaced when it was written: the driver's budget is
 absorbed rather than ending the invocation (Task 7), a run id is used once
-(Task 7), and an invocation acts on one snapshot of the roadmap (Task 7).
+(Task 7), and an invocation acts on one snapshot of the roadmap (Task 7, and —
+after the plan review — Tasks 6B and 11, which is what makes that third row
+true rather than asserted; see the table below).
+
+Four rows the plan review added, for the same reason — each is a claim the plan
+made that nothing in it would have caught:
+
+| Control | Task |
+| --- | --- |
+| the frozen snapshot survives a start, not only the runner's own loop | 6B (both directions at the start path), 7 (the mid-run-edit case, which fails `RUN_GATE_REFUSED` against a start path that re-plans) |
+| the plan is read once, **under** the lease | 11 (order, and the input refusal that now happens under it and gives the lease back) |
+| an unrecorded outcome met *after* the ledger exists adds no stop claim | 8 (`RUN_GATE_REFUSED` post-open, bytes anchored at the last landed write) |
+| a forced reconciliation the primitive refused is not a failed write | 10 (`RECONCILIATION_UNRESOLVED`) |
 
 Two constraints the design attached to the schema change, and where they live:
 the sorting of the new reason is a **correctness** test in Task 4, and the
 "writable over an unsupported ledger" obligation is the effect case in the same
 task. The four control points the design's decisions turned on — freeze-time
 projection only, one persisted truth, external-only blockers kept apart from
-independence, and an explicit load contract for old documents — are the first
-four bullets of Global Constraints, and are pinned by Tasks 2, 3, 7 and 3
-respectively.
+independence, and an explicit load contract for old documents — are Global
+Constraints rather than prose inside a task, and are pinned by Tasks 2, 3, 7 and
+3 respectively.
 
 ## Execution
 
