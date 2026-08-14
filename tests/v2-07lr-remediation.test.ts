@@ -27,9 +27,16 @@
  *
  *  R4  The restore half was pinned by nothing: `link` → `rename`, and
  *      discarding rather than keeping a record that could not be put back, both
- *      survived all 34 tests of the slice and all five rounds of its
- *      real-process harness. Those two mutants are the v1 and v3 defects that
- *      withdrew this command twice.
+ *      survived the whole slice suite *and* the real-process break harness that
+ *      then existed. Those two mutants are the v1 and v3 defects that withdrew
+ *      the attended break, which has since been withdrawn a third time and for
+ *      good; its harness went with it.
+ *
+ *      Stated without the counts it used to carry ("34 tests", "five rounds",
+ *      against a harness whose constant said eight). A measurement is worth
+ *      recording; a measurement's *size* recorded in prose beside the code it
+ *      counted goes stale on the next commit and then quietly misdescribes what
+ *      was established.
  *
  * The rule these share is the one the slice was supposed to be about: a decision
  * about bytes must be carried out on those bytes, and every refusal must leave
@@ -65,8 +72,6 @@ import {
   verifyExecutionLeaseHeld,
   verifyExecutionLeaseHeldFor,
 } from '../src/lease/execution-lease.js';
-import { exitCodeForLeaseBreakOutcome } from '../src/cli/run-exit-codes.js';
-import { breakInspectedLease } from '../src/lease/lease-recovery.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { removeRepoFixtures, createRepoFixture } from './helpers/repo-fixtures.js';
 import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
@@ -288,49 +293,6 @@ describe('a record this call may not remove survives, and is reported as it is',
     }
   });
 
-  onWindows('tells an operator the truth when the restore is refused', async () => {
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    acquireRepositoryExecutionLease(
-      fixture.repository,
-      { runId: 'run-holder', blockId: null },
-      { now: tickingClock() },
-    );
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    const held = readFileSync(path);
-
-    const extras = saturateLinkCount(path);
-    try {
-      // The refusal has to happen *after* the detach, or the gate answers first
-      // and nothing is ever put back. The probe therefore answers as the
-      // classifying read needs — gone — and then as the predicate re-check
-      // finds it: alive. That is a real sequence, not a contrivance: it is a
-      // pid observed as absent and then reused before the removal.
-      let probes = 0;
-      const broken = breakInspectedLease(
-        fixture.repository,
-        {
-          expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '',
-          expectedOwnerPid: inspected.ownerPid,
-        },
-        {
-          processAlive: () => {
-            probes += 1;
-            return probes === 1 ? 'NOT_FOUND' : 'ALIVE';
-          },
-        },
-      );
-
-      expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
-      expect(existsSync(path)).toBe(true);
-      expect(readFileSync(path)).toEqual(held);
-    } finally {
-      cleanUp(extras);
-    }
-  });
-
   it('keeps a record it could not put back, and says so rather than promising a file it deleted', async () => {
     // R3. `UNIDENTIFIABLE` and `CHANGED` were each returned from two end states
     // — record restored and quarantine discarded, or record left in quarantine
@@ -400,51 +362,6 @@ describe('a record this call may not remove survives, and is reported as it is',
     cleanUp(quarantineFilesBeside(path).map((name) => join(dirname(path), name)));
   });
 
-  it('reports an absence as an absence, never as a removal', async () => {
-    // R4, the second surviving mutant: reporting `ABSENT` as `LEASE_REMOVED`.
-    // The distinction is the one the outcome vocabulary exists for — whether
-    // *this* invocation destroyed something — and it was pinned only at the
-    // gate, where a free path never reaches the removal at all.
-    //
-    // Reached here at the effect: the lease is there when the gate reads it and
-    // gone when the removal aims at it, which is what happens when a second
-    // operator, or a successor's release, gets there first.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    const evidence = acquireRepositoryExecutionLease(
-      fixture.repository,
-      { runId: 'run-vanishing', blockId: null },
-      { now: tickingClock() },
-    );
-    expect(evidence.ok).toBe(true);
-    if (!evidence.ok) return;
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-
-    let removedUnderneath = false;
-    const broken = breakInspectedLease(
-      fixture.repository,
-      { expectedRevision: inspected.revision ?? '', expectedObjectId: inspected.objectId ?? '', expectedOwnerPid: inspected.ownerPid },
-      {
-        processAlive: () => {
-          if (!removedUnderneath) {
-            expect(releaseRepositoryExecutionLease(evidence.evidence).code).toBe('RELEASED');
-            removedUnderneath = true;
-          }
-          return 'NOT_FOUND';
-        },
-      },
-    );
-
-    expect(removedUnderneath).toBe(true);
-    expect(broken.outcome).toBe('LEASE_ALREADY_GONE');
-    expect(broken.outcome).not.toBe('LEASE_REMOVED');
-    expect(existsSync(path)).toBe(false);
-    expect(digestOf(Buffer.from(''))).toBe(
-      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    );
-  });
 });
 
 /* ───── R5. what the second independent review found, and how it is pinned ──── */
@@ -487,11 +404,12 @@ describe('a refusal says what it established, and only what it established', () 
 describe('every guard on the removal path costs a mutant its life', () => {
   /**
    * The second review's supporting finding: three destructive-path guards were
-   * written twice and pinned zero times. Each mutant survived all 139 tests of
-   * the four lease suites, the 2725-test foundation run and the real-process
-   * harness — because the fallback's failure branch is entered by nothing, and
-   * because the object identity answers first for every case the older
-   * counter-proofs construct.
+   * written twice and pinned zero times. Each mutant survived every lease suite,
+   * the whole foundation run and the real-process harness of the day — because
+   * the fallback's failure branch is entered by nothing, and because the object
+   * identity answered first for every case the older counter-proofs construct.
+   * (Suite and test counts deliberately not restated here; they were wrong within
+   * two commits last time.)
    */
   it('keeps a record when the restore is refused by an occupied name', async () => {
     // Kills `writeRecord(...) === null` -> `writeRecord(...); return true`. With
@@ -533,287 +451,24 @@ describe('every guard on the removal path costs a mutant its life', () => {
     }
   });
 
-  it('refuses a record rewritten in place, where the object is no evidence at all', async () => {
-    // Kills the effect-bound revision check. A record rewritten through an open
-    // handle keeps its inode, so the object identity matches and only the digest
-    // can refuse. With the check gone the mutant deletes it and reports
-    // LEASE_REMOVED — "still the same record, byte for byte".
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    acquireRepositoryExecutionLease(
-      fixture.repository,
-      { runId: 'run-crashed', blockId: null },
-      { now: tickingClock() },
-    );
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    const before = statSync(path, { bigint: true });
-
-    let rewritten = false;
-    const broken = breakInspectedLease(
-      fixture.repository,
-      {
-        expectedRevision: inspected.revision ?? '',
-        expectedObjectId: inspected.objectId ?? '',
-        expectedOwnerPid: inspected.ownerPid,
-      },
-      {
-        processAlive: () => {
-          if (!rewritten) {
-            const handle = openSync(path, 'r+');
-            const replacement = Buffer.from('{"schemaVersion":1}\n', 'utf8');
-            writeSync(handle, replacement, 0, replacement.length, 0);
-            ftruncateSync(handle, replacement.length);
-            closeSync(handle);
-            rewritten = true;
-          }
-          return 'NOT_FOUND';
-        },
-      },
-    );
-
-    expect(rewritten).toBe(true);
-    // The same object, different bytes: the identity holds and the digest refuses.
-    expect(statSync(path, { bigint: true }).ino).toBe(before.ino);
-    expect(broken.outcome).toBe('LEASE_CHANGED_SINCE_INSPECTION');
-    expect(broken.detail).toBe('RECORD_RESTORED');
-    expect(existsSync(path)).toBe(true);
-  });
-
-  /**
-   * One guard this file does not reach, and one that used to be excused here.
-   *
-   * The `leftUnowned` short-circuit's own branch — a predicate refusal *and* a
-   * failed restore *and* a free name — still has no reaching test: the two
-   * routes to an unowned name are a `bytes === null` detach, where the predicate
-   * never runs, or a write failure on a link-refusing filesystem. The third
-   * review attacked that reachability claim rather than accepting it and could
-   * not break it either; it stands as a stated gap, not as a proof.
-   *
-   * The note that used to sit here claimed the gate's owner-pid arm was
-   * observationally equivalent to the predicate's. That was false, and the third
-   * review proved it with three distinguishing inputs. It is pinned below.
-   */
-  it('touches nothing when the gate can already see the authorisation is wrong', async () => {
-    // Kills the gate's own pid and revision arms. Without them the refusal is
-    // still a refusal — and it becomes a real detach and restore of a live
-    // record, whose documented residual is a displaced writer. The reason line
-    // is what separates the two, so it is what this asserts.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    acquireRepositoryExecutionLease(
-      fixture.repository,
-      { runId: 'run-crashed', blockId: null },
-      { now: tickingClock() },
-    );
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-
-    const wrongRevision = breakInspectedLease(
-      fixture.repository,
-      {
-        expectedRevision: 'f'.repeat(64),
-        expectedObjectId: inspected.objectId ?? '',
-        expectedOwnerPid: inspected.ownerPid,
-      },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-    expect(wrongRevision.outcome).toBe('LEASE_CHANGED_SINCE_INSPECTION');
-    expect(wrongRevision.detail).toBeNull();
-
-    const wrongOwner = breakInspectedLease(
-      fixture.repository,
-      {
-        expectedRevision: inspected.revision ?? '',
-        expectedObjectId: inspected.objectId ?? '',
-        expectedOwnerPid: (inspected.ownerPid ?? 1) + 1,
-      },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-    expect(wrongOwner.outcome).toBe('LEASE_NOT_BREAKABLE');
-    expect(wrongOwner.detail).toBe('OWNER_PID_MISMATCH');
-    expect(quarantineFilesBeside(path)).toEqual([]);
-  });
-});
-
-/* ── R6. what the third independent review found, on the fix for the second ── */
-
-describe('an unreadable record beside a free lease name is reported as itself', () => {
-  /**
-   * The third review's blocking finding, and it is the previous remediation's
-   * own regression one line further down.
-   *
-   * `if (leftUnowned(removal))` was placed *in front of* the switch rather than
-   * inside the refusal it was meant to outrank. `leftUnowned` is true for
-   * exactly the two removal states the switch answers most precisely, so both
-   * arms became dead code, the reason token `UNREADABLE_LEASE_UNOWNED` could
-   * never be printed by any run — while this same commit shipped an operator
-   * sentence for it — and the state below was reported as `LEASE_NOT_BREAKABLE`:
-   * "the lease is there", of a name the same call had measured free, at exit 4,
-   * "re-invoking under other conditions can differ".
-   *
-   * Exit 3 is what `run-exit-codes.ts` reserves for it, verbatim: a record was
-   * detached, could not be identified, and is sitting beside the lease path; no
-   * retry helps and a human has to look. The retry exit 4 invites answers
-   * `LEASE_ALREADY_GONE` at exit 0, with `lease status` reporting nothing to
-   * recover, while the unreadable record is still in `.git`.
-   *
-   * No injection anywhere: a directory at the lease name renames, refuses the
-   * read, and refuses the link.
-   */
-  it('answers verification-failed at the operator exit code, not a refusal at the retry one', async () => {
-    // The state has to arise BETWEEN the gate and the rename, and the first
-    // version of this test missed that: a directory sitting at the lease path
-    // from the start makes the *gate* refuse with `LEASE_UNREADABLE`, the effect
-    // never runs, and the branch under test is never reached — the mutant that
-    // restores the shipped defect passed it unharmed. Which is the same mistake
-    // in miniature that this whole test exists for: an assertion about a state
-    // nothing had established.
-    //
-    // So the lease is a real one when the gate reads it, and becomes a directory
-    // inside the window the liveness probe opens. The rename then detaches it,
-    // the read fails, no restore is attempted, and the occupancy check finds the
-    // name free.
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    acquireRepositoryExecutionLease(
-      fixture.repository,
-      { runId: 'run-crashed', blockId: null },
-      { now: tickingClock() },
-    );
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-
-    let swapped = false;
-    const broken = breakInspectedLease(
-      fixture.repository,
-      {
-        expectedRevision: inspected.revision ?? '',
-        expectedObjectId: inspected.objectId ?? '',
-        expectedOwnerPid: inspected.ownerPid,
-      },
-      {
-        processAlive: () => {
-          if (!swapped) {
-            unlinkSync(path);
-            mkdirSync(path, { recursive: true });
-            swapped = true;
-          }
-          return 'NOT_FOUND';
-        },
-      },
-    );
-
-    expect(swapped).toBe(true);
-    expect(broken.outcome).toBe('LEASE_BREAK_VERIFICATION_FAILED');
-    expect(broken.detail).toBe('UNREADABLE_LEASE_UNOWNED');
-    // Exit 3 — a human has to look — and not the 4 that invites the retry which
-    // then reports the repository free while the record is still inside `.git`.
-    expect(exitCodeForLeaseBreakOutcome(broken.outcome)).toBe(3);
-    expect(existsSync(path)).toBe(false);
-    expect(quarantineFilesBeside(path).length).toBe(1);
-    cleanUpPaths(quarantineFilesBeside(path).map((name) => join(dirname(path), name)));
-  });
-
-});
-
-describe('the gate refuses a stale authorisation before the record is touched', () => {
-  /**
-   * The note this replaces was false, and the third review proved it by running
-   * three distinguishing inputs.
-   *
-   * It claimed the gate's owner-pid arm was observationally equivalent to the
-   * predicate's, differing only by an unobservable touch. It is not: the gate
-   * ranks object, then pid, then revision, while the predicate ranks object,
-   * then revision, then pid. A record rewritten **in place** — which keeps the
-   * inode, so the object identity still matches, and stales both the pid and the
-   * digest — is refused by the gate as `OWNER_PID_MISMATCH` and by the predicate
-   * as a plain revision mismatch. Different outcome, different reason, and no
-   * injection needed to produce it.
-   *
-   * Writing "this cannot be observed" beside a load-bearing guard is the
-   * strongest possible invitation for the next remediation to delete it, which
-   * is why the note is gone rather than softened.
-   */
-  it('names the owner mismatch that a later check would have called a changed lease', async () => {
-    const fixture = await leasableRepository();
-    const path = leasePathOf(fixture);
-    acquireRepositoryExecutionLease(
-      fixture.repository,
-      { runId: 'run-crashed', blockId: null },
-      { now: tickingClock() },
-    );
-    const inspected = inspectRepositoryExecutionLease(fixture.repository, {
-      processAlive: () => 'NOT_FOUND',
-    });
-    const before = statSync(path, { bigint: true });
-
-    // In place: same object, different bytes, and a pid that is no longer the
-    // one the record names.
-    const handle = openSync(path, 'r+');
-    const replacement = Buffer.from(
-      `${JSON.stringify({ schemaVersion: 1, notALease: true })}\n`,
-      'utf8',
-    );
-    writeSync(handle, replacement, 0, replacement.length, 0);
-    ftruncateSync(handle, replacement.length);
-    closeSync(handle);
-    expect(statSync(path, { bigint: true }).ino).toBe(before.ino);
-
-    const broken = breakInspectedLease(
-      fixture.repository,
-      {
-        expectedRevision: inspected.revision ?? '',
-        expectedObjectId: inspected.objectId ?? '',
-        expectedOwnerPid: inspected.ownerPid,
-      },
-      { processAlive: () => 'NOT_FOUND' },
-    );
-
-    // The gate saw an authorisation whose owner the record no longer names, and
-    // said so.
-    //
-    // What the mutant does, measured rather than assumed — and this is now the
-    // third note written about this one guard, the first two having been false,
-    // so it says only what was run. Delete the gate's pid arm and the gate's
-    // *revision* arm three lines below answers first: the outcome becomes
-    // `LEASE_CHANGED_SINCE_INSPECTION` and the reason becomes `null`. The
-    // predicate is never reached and nothing is detached.
-    //
-    // Which assertion catches it: the outcome one, on the line below, because it
-    // is evaluated first. The `detail` assertion is not what kills this mutant —
-    // the second note claimed it was — and it earns its place for a different
-    // reason: `OWNER_PID_MISMATCH` is produced at the gate and by the predicate
-    // alike, so without it a refusal that had detached and restored a record
-    // would read the same as one that touched nothing.
-    expect(broken.outcome).toBe('LEASE_NOT_BREAKABLE');
-    expect(broken.detail).toBe('OWNER_PID_MISMATCH');
-    expect(quarantineFilesBeside(path)).toEqual([]);
-  });
 });
 
 /**
- * One fix in this file's commit that no test here pins, stated rather than left.
+ * The claim that used to stand here was false, and is deleted rather than edited.
  *
- * `readObject` now distinguishes `ENOENT` — the lease was deleted between the
- * byte read and the stat — from the platform case that reports no usable
- * identity, and `inspectRepositoryExecutionLease` reports the first as `FREE`.
- * Reverting that discrimination leaves this suite green, and deliberately so:
- * the window is between two syscalls inside one function with no seam between
- * them, so there is no deterministic instrument for it in process.
+ * It said the `ENOENT` discrimination in `readObject` had "no deterministic
+ * instrument for it in process", that any test for it "would be a race with a
+ * timeout", and that it was therefore "pinned by the reviewer's measurement and
+ * by nothing here". The commit that wrote that sentence also *built* the
+ * instrument, in `tests/v2-07lr-enoent-window.test.ts` — a `vi.mock('node:fs')`
+ * wrapper that runs a hook between two real syscalls, with no sleep, no timeout
+ * and no injected errno — and left this paragraph standing one file away.
  *
- * What established it was contention, not construction: the fourth review
- * measured 551 byte reads under churn producing `ino === 0n` **zero** times and
- * `ENOENT` 181 times, and 18 of 36 barrier-released break attempts answering
- * `OBJECT_IDENTITY_UNVERIFIABLE` with the name already empty. A test that
- * reproduced that would be a race with a timeout, which is the kind of gate this
- * repository has already had to remove once for firing at random.
- *
- * So it is pinned by the reviewer's measurement and by nothing here. The next
- * round should attack that, not accept it.
+ * Two things are worth carrying forward from that. A claim about what *cannot*
+ * be tested is a claim this repository has now got wrong four times, and the
+ * instrument that falsified it each time already existed. And a correction
+ * written in a new file does not correct the sentence it replaces: that is how
+ * the same false statement came to be shipped in two places at once.
  */
 describe('a detach the filesystem refused is not an absence', () => {
   /**
@@ -822,8 +477,8 @@ describe('a detach the filesystem refused is not an absence', () => {
    * `removeVerifiedLease`'s rename catch discriminates `ENOENT` — nothing was
    * there — from every other errno, which means the name could not be detached
    * and the record is untouched. Substituting `return 'ABSENT'` for that
-   * discrimination survived **the entire suite**: 75 files, 2736 tests, and the
-   * real-process harness on top. The reverse mutant is caught, which is what
+   * discrimination survived **the entire suite** — every file, every test, and
+   * the real-process harness on top. The reverse mutant is caught, which is what
    * made the gap look covered.
    *
    * The two answers send an operator to opposite places. `ABSENT` means nothing

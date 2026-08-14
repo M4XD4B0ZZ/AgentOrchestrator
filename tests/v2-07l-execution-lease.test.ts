@@ -280,9 +280,15 @@ describe('the lease is exclusive per local Git domain', () => {
 
   it('is still exclusive on a filesystem that refuses to link', async () => {
     // The fallback exists for FAT and for network mounts that will not hard
-    // link, and no test can make NTFS refuse on demand — so the seam is how
-    // that branch gets to run at all. Without this it would ship having never
-    // executed, in the one mechanism the whole slice rests on.
+    // link, and the seam is how that branch gets to run at all.
+    //
+    // The claim here used to be that "no test can make NTFS refuse on demand".
+    // That is too strong and was falsified inside this repository: saturating
+    // NTFS's 1024-name limit makes a real `linkSync` refuse, with no mock, and
+    // the remediation suite does exactly that. What it cannot reach is *this*
+    // link, whose source is a staging file created moments earlier with one
+    // link — an attacker cannot saturate it, which is a property worth having
+    // and a different statement from "no test can".
     const fixture = await leasableRepository();
     const refuseToLink = () => {
       const error: NodeJS.ErrnoException = new Error('link is not supported here');
@@ -999,42 +1005,47 @@ describe('lease status reports a stale lease without offering to clear it', () =
     expect(status.liveness).toBe('ALIVE');
   });
 
-  it('offers recovery only for an owner that is not running', async () => {
+  it('offers no recovery command for any lease, stale or held', async () => {
     const fixture = await leasableRepository();
     heldLease(fixture, 'run-0009');
 
-    const live = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository), false);
+    const live = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository));
     const stale = renderLeaseStatus(
       inspectRepositoryExecutionLease(fixture.repository, { processAlive: () => 'NOT_FOUND' }),
-      true,
     );
 
-    // Nothing to recover from while somebody is running, and printing a break
-    // command beside a healthy run is how a healthy run gets cleared.
-    //
-    // V2-07LR replaced the manual procedure this used to print with an attended
-    // command; what did not change is *when* it is printed at all.
-    expect(live).not.toContain('lease break');
-    expect(stale).toContain('agent-loop lease break');
-    expect(stale).toContain('--attended');
-    // And still no bypass, in either report.
-    expect(live).not.toContain('--force');
-    expect(stale).toContain('no --force');
+    // The stale report is the one that used to carry a ready-made
+    // `lease break --expected-revision … --expected-object …` line, with the
+    // constant `sha256("")` filled in for a crash-window record. That is what
+    // made the withdrawn authorisation contract the *normal* operator path
+    // rather than a hand-built misuse, so the absence is pinned on the report an
+    // operator is most likely to be reading when they want one.
+    for (const report of [live, stale]) {
+      expect(report).not.toContain('lease break');
+      expect(report).not.toContain('--expected-revision');
+      expect(report).not.toContain('--expected-object');
+      expect(report).not.toContain('--force');
+    }
+    // Both still say what is there — withdrawing the command did not turn the
+    // report into a silence.
+    expect(live).toContain('Liveness');
+    expect(stale).toContain('Liveness');
   });
 });
 
-describe('the owner-only release stays owner-only, whatever recovery exists beside it', () => {
+describe('the owner-only release stays owner-only, and nothing beside it removes a lease', () => {
   /**
    * V2-07L withdrew the attended break; V2-07LR brought it back under a contract
-   * written from what defeated it, and this describe is what survives of the
-   * withdrawal.
+   * written from what defeated it; a sixth review broke that too, and it is
+   * withdrawn again — this time on the finding that the contract cannot be
+   * written at all for the record that most needs it. See
+   * `src/lease/lease-recovery.ts`.
    *
-   * The withdrawal's own assertions — no break subcommand, no break vocabulary,
-   * no mention in the source — were pins on an *absence*, and the absence was a
-   * decision this repository has since taken again, deliberately, with the
-   * counter-proofs in `tests/v2-07lr-lease-recovery.test.ts` behind it. What was
-   * never up for revision is below: `release` remains the owner's operation, and
-   * it remains the one that cannot name a victim.
+   * So these pins on an *absence* are back, and the note that removing them was
+   * "a decision this repository has since taken again, deliberately" is left
+   * here on purpose: pins on an absence are exactly the ones a later slice
+   * deletes when it wants the absence gone, and that is what happened. They are
+   * stated below as behaviour a caller can reach, not as a naming convention.
    */
   it('keeps the release owner-bound, with nothing for a caller to name', async () => {
     const lease = await import('../src/lease/execution-lease.js');
@@ -1050,13 +1061,33 @@ describe('the owner-only release stays owner-only, whatever recovery exists besi
     expect(Object.keys(lease).filter((name) => /force|takeover|steal/i.test(name))).toEqual([]);
   });
 
-  it('registers the read-only subcommand beside the attended one, and nothing else', async () => {
+  it('exports no break from the recovery module, which now only classifies', async () => {
+    const recovery = await import('../src/lease/lease-recovery.js');
+
+    // The module that held the destructive entry point still exists, because
+    // classifying what is at the lease path is worth doing. What it must not
+    // have is anything that acts on the classification.
+    expect(typeof recovery.assessLeaseRecovery).toBe('function');
+    expect(Object.keys(recovery).filter((name) => /break|remove|force/i.test(name))).toEqual([]);
+    // `breakable` is gone from the assessment as well: it was a permission, and
+    // the renderer read it to print a ready-made destructive command.
+    const assessment = recovery.assessLeaseRecovery({
+      gitCommonDir: '',
+      root: '',
+      id: 'absent',
+    } as never);
+    expect(Object.keys(assessment).sort()).toEqual(['classification', 'inspection']);
+  });
+
+  it('registers the read-only subcommand and nothing else', async () => {
     const { buildProgram } = await import('../src/cli/index.js');
     const lease = buildProgram()
       .commands.find((command) => command.name() === 'lease');
 
     expect(lease).toBeDefined();
-    expect(lease?.commands.map((command) => command.name()).sort()).toEqual(['break', 'status']);
+    // One subcommand. A `break` reappearing here is the single cheapest signal
+    // that the withdrawal has been undone.
+    expect(lease?.commands.map((command) => command.name()).sort()).toEqual(['status']);
   });
 
   it('names no command in the shipped source that does not exist', () => {
@@ -1091,44 +1122,40 @@ describe('the lease report', () => {
     expect([...all].filter((character) => character.codePointAt(0)! > 0x7f)).toEqual([]);
   });
 
-  it('tells an operator what recovering a stale lease requires of them', async () => {
+  it('tells an operator what is there, and claims nothing about removing it', async () => {
     const fixture = await leasableRepository();
     heldLease(fixture, 'run-0009');
     const inspection = inspectRepositoryExecutionLease(fixture.repository, {
       processAlive: () => 'NOT_FOUND',
     });
 
-    const report = renderLeaseStatus(inspection, true);
+    const report = renderLeaseStatus(inspection);
 
-    // The path, because they cannot act without it — and the judgement they
-    // have to make, because the tool cannot make it for them. What changed in
-    // V2-07LR is only the last step: the manual deletion this used to spell out
-    // is now a command, and the race it used to warn about is closed by the
-    // command rather than left to the operator's care.
+    // What survives: the path, because an operator cannot act without it, and
+    // the observation itself. This is the diagnostic half, and it was never the
+    // part that was wrong.
     expect(report).toContain(inspection.path);
-    expect(report).toContain('no orchestrator process and no agent process');
-    // The command, complete: an operator can run this line.
-    expect(report).toContain('agent-loop lease break --repository <path> --attended');
-    expect(report).toContain(`--expected-revision ${inspection.revision ?? ''}`);
-    expect(report).toContain(`--owner-pid ${String(inspection.ownerPid)}`);
-    expect(report).toContain('no --force');
-    // The ABA hazard, and what is now done about it.
-    //
-    // Pinned as whole sentences rather than by keyword, for the reason the
-    // previous version of this test recorded: the shipped text once lost a
-    // single word — "that race is exactly why this is a command", in a block
-    // whose purpose was to say no command existed — and every keyword assertion
-    // passed while it did. A negation is what a keyword search cannot check.
-    expect(report).toContain(
-      'released\n  and legitimately re-acquired in the meantime is left alone rather than destroyed',
-    );
-    expect(report).toContain('Nothing is removed on a revision you did not see');
+    expect(report).toContain('Liveness');
+    expect(report).toContain('Revision');
+    expect(report).toContain('Object');
+
+    // What must not: any guarantee about a removal. These two sentences are
+    // pinned as absences because both were false for the class of lease they
+    // were printed beside. A crash-window record's revision is `sha256("")`,
+    // which every empty file shares — so "Nothing is removed on a revision you
+    // did not see" promised nothing, and "the revision is the lease's identity"
+    // contradicted the module that computes the identity. The renderer supplied
+    // the constant that made the authorisation empty and then described it as
+    // the thing that made it safe.
+    expect(report).not.toContain('Nothing is removed on a revision you did not see');
+    expect(report).not.toContain("the revision is the lease's identity");
+    expect(report).not.toContain('This lease is recoverable');
   });
 
-  it('never suggests a break for a repository nobody owns', async () => {
+  it('suggests no removal for a repository nobody owns', async () => {
     const fixture = await leasableRepository();
 
-    const report = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository), false);
+    const report = renderLeaseStatus(inspectRepositoryExecutionLease(fixture.repository));
 
     expect(report).not.toContain('lease break');
   });
@@ -1924,7 +1951,7 @@ describe('an unreadable lease is held-and-unsafe, never free', () => {
     expect(inspection.state).not.toBe('FREE');
     // And the operator-facing consequence, which is the part that matters: the
     // report must not invite the next invocation to take it.
-    const report = renderLeaseStatus(inspection, true);
+    const report = renderLeaseStatus(inspection);
     expect(report).toContain('treated');
     expect(report).not.toContain('The next one may take the lease.');
   });
