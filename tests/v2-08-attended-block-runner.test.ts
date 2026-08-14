@@ -645,3 +645,98 @@ describe('the schema-version classifier never mislabels corruption as an old bui
     expect(saved.detail).toBe('PREDECESSOR_SCHEMA_UNSUPPORTED');
   });
 });
+
+import {
+  BLOCK_STOP_REASONS,
+  PROGRESS_CLAIMING_STOP_REASONS,
+  type BlockStopReason,
+} from '../src/block/block-ledger.js';
+
+describe('the stop-reason vocabulary is sorted correctly, not merely totally', () => {
+  /**
+   * Written by hand, reason by reason, and deliberately not derived from the
+   * production set.
+   *
+   * `satisfies Record<keyof T>` proves every member was *considered*; it proves
+   * nothing about whether each landed on the right side. A table generated from
+   * the module under test would agree with it by construction and could never
+   * disagree, which is the only thing a correctness test is for.
+   */
+  const CLAIMS_PROGRESS: Readonly<Record<BlockStopReason, boolean>> = {
+    // These three assert what the *tasks* did, and are proved against every
+    // task record before they are written.
+    COMPLETE: true,
+    TASK_BLOCKED: true,
+    TASK_ABANDONED: true,
+    // These assert only that the run cannot continue, and must stay writable
+    // over a ledger whose entries are not supported.
+    NO_ELIGIBLE_TASK: false,
+    OPERATOR_STOPPED: false,
+    LEDGER_DIVERGED: false,
+    STATE_UNUSABLE: false,
+    DEFINITION_DRIFTED: false,
+    ACTIVE_TASK_UNRESOLVED: false,
+  };
+
+  it('knows exactly these reasons', () => {
+    expect([...BLOCK_STOP_REASONS].sort()).toEqual(Object.keys(CLAIMS_PROGRESS).sort());
+  });
+
+  for (const [reason, claims] of Object.entries(CLAIMS_PROGRESS)) {
+    it(`${reason} ${claims ? 'claims' : 'does not claim'} progress`, () => {
+      expect(PROGRESS_CLAIMING_STOP_REASONS.has(reason as BlockStopReason)).toBe(claims);
+    });
+  }
+});
+
+import { activateBlockTask, stopBlockRun } from '../src/block/block-progress.js';
+import { startTask } from '../src/run/start-task.js';
+import { runGitCommand } from '../src/worktree/git-command.js';
+import { authPreflightPasses } from './helpers/auth-evidence.js';
+import { leaseFor } from './helpers/lease.js';
+import { tickingClock } from './helpers/e2e-fixtures.js';
+
+/** A real task, started through production code, so its state is a real one. */
+async function reallyStart(fixture: Fixture, taskId: string): Promise<void> {
+  const started = await startTask(
+    { repository: fixture.repository, taskId },
+    {
+      git: runGitCommand,
+      now: tickingClock(),
+      authPreflight: authPreflightPasses,
+      lease: leaseFor(fixture.repository),
+    },
+  );
+  expect(started.outcome).toBe('STARTED');
+}
+
+/** The ledger as JSON, read from disk. Assertions are on what persisted. */
+function onDisk(root: string, runId = RUN_ID): Record<string, unknown> {
+  return JSON.parse(readFileSync(ledgerPath(root, runId), 'utf8')) as Record<string, unknown>;
+}
+
+describe('a class-2 stop is writable over a ledger whose entries are not proved', () => {
+  it('records ACTIVE_TASK_UNRESOLVED while the task it cannot judge is still ACTIVE', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    expect(
+      activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('RECORDED');
+
+    const stopped = stopBlockRun(reload(fixture.root), 'ACTIVE_TASK_UNRESOLVED', {
+      repositoryRoot: fixture.root,
+    });
+
+    expect(stopped.outcome).toBe('RECORDED');
+    const after = onDisk(fixture.root);
+    expect(after['stopReason']).toBe('ACTIVE_TASK_UNRESOLVED');
+    // The entry is still ACTIVE, under the same activeTaskId, and nothing was
+    // invented for the task that could not be concluded.
+    expect(after['activeTaskId']).toBe('A-001');
+    const entries = after['tasks'] as readonly Record<string, unknown>[];
+    expect(entries[0]?.['disposition']).toBe('ACTIVE');
+    expect(entries[0]?.['evidenceRevision']).toBeNull();
+    expect(entries[0]?.['resultCommit']).toBeNull();
+  }, 180_000);
+});

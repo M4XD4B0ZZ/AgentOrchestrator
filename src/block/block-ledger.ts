@@ -158,6 +158,33 @@ export const BLOCK_STOP_REASONS = [
   'STATE_UNUSABLE',
   /** The frozen plan no longer matches the repository's definition. */
   'DEFINITION_DRIFTED',
+  /**
+   * An active task's outcome could not be safely established, so the run ends.
+   *
+   * ── Why this is not `STATE_UNUSABLE` ───────────────────────────────────────
+   *
+   * `STATE_UNUSABLE` says something about the task *state*: damaged, foreign,
+   * not trustworthy. A task can hold entirely legitimate prior evidence and
+   * still end in a condition whose outcome cannot be determined — a driver that
+   * made no progress, a settlement whose proof no longer holds, an interruption
+   * nothing can conclude. That is a **different fact**, and folding it into
+   * `STATE_UNUSABLE` is exactly the misdescription class V2-07P spent three
+   * review rounds deleting.
+   *
+   * ── What it may and may not carry ──────────────────────────────────────────
+   *
+   * It **may coexist** with `ACTIVE` and an unchanged `activeTaskId`: it does
+   * not require the run to first invent a disposition for the task it could not
+   * conclude. It drags **no** task disposition and **no** commit evidence with
+   * it — `assessLedgerSuccession`'s `UNRESOLVED_STOP_CARRIED_MORE` already holds
+   * that write to saying one thing.
+   *
+   * It is deliberately **not** required to have an active task. The design says
+   * where it may coexist with one, never that it may only be written with one,
+   * and a class-2 reason that quietly acquired a precondition is the shape that
+   * wedges a run in the case the reason was added for.
+   */
+  'ACTIVE_TASK_UNRESOLVED',
 ] as const;
 
 export type BlockStopReason = (typeof BLOCK_STOP_REASONS)[number];
@@ -175,6 +202,12 @@ export type BlockStopReason = (typeof BLOCK_STOP_REASONS)[number];
  * It lives here, with the contract, rather than beside the gate that consumes
  * it. The schema and the store both have to answer "does this reason claim
  * progress?", and two answers to that question would be two contracts.
+ *
+ * `ACTIVE_TASK_UNRESOLVED` is deliberately not a member, and the omission is
+ * load-bearing rather than incidental. Sorted in, it would be proved against
+ * every task record before it could be written — and it exists precisely for
+ * the case where one of those records cannot be judged. It would be unwritable
+ * exactly when it is true.
  */
 export const PROGRESS_CLAIMING_STOP_REASONS: ReadonlySet<BlockStopReason> =
   new Set<BlockStopReason>(['COMPLETE', 'TASK_BLOCKED', 'TASK_ABANDONED']);
