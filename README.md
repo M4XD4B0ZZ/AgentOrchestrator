@@ -57,7 +57,8 @@ What *is* implemented:
 
 ## Requirements
 
-- Node.js **22 or newer** (24 LTS recommended)
+- Windows, Node.js major **22 or 24** — not a floor; see
+  [Supported runtime](#supported-runtime)
 - npm
 - Git
 
@@ -66,6 +67,63 @@ What *is* implemented:
 ```powershell
 npm install
 ```
+
+## Supported runtime
+
+V2 is built for one configuration and refuses to run outside it. Three claims,
+kept apart on purpose, because they have different strengths:
+
+**Verified** — Windows, Node major 22 or 24, and a repository whose Git common
+directory is on a local NTFS volume. This is the configuration the project is
+measured on: `verify` runs on `windows-latest` against Node 22 *and* Node 24.
+
+**Enforced** — Windows, Node major in `{22, 24}`, and no explicit UNC or device
+path for the repository. This is what the build refuses to run outside of, and
+it is what can be decided from process-constant facts and the shape of a path.
+The refusal happens at the CLI entry, before any command action begins, with
+exit code 6; `--help` and `--version` keep working.
+
+**Proved at the effect** — the lease's own filesystem capability, checked at the
+hard link that needs it, answering `LEASE_FILESYSTEM_UNSUPPORTED` with the errno
+the link was refused with. Not a preflight, and deliberately not derived from
+one.
+
+The two axes behave differently, and the difference matters:
+
+- **on the Node axis, enforced and verified coincide exactly.** The supported
+  set is the whitelist `[22, 24]` (`src/platform/runtime-support.ts`), not a
+  floor: `>= 22` would admit 23 and 25 on a promise nobody has tested. CI
+  measures both members.
+- **on the filesystem axis, enforced is strictly narrower than verified.** The
+  build does **not** establish that an accepted volume is local, or that it is
+  NTFS.
+
+### Not part of the V2 support contract
+
+FAT, exFAT, SMB and other network filesystems, UNC-hosted repository storage,
+and POSIX/macOS/Linux runtimes.
+
+### ACCEPTED LIMIT: a network share mapped to a drive letter
+
+A share mounted as `Z:\` is path-shaped like a local volume and **is not
+detected by this build**. It is outside the supported configuration and the tool
+will not tell you so. This is recorded as an accepted limit rather than left as
+an unlikely case:
+
+- closing it needs a Windows drive-type query, which would introduce a preflight
+  *measurement of the filesystem* — precisely the construct the lease's whole
+  safety argument avoids — plus its own tail of questions (`SUBST`, junctions,
+  reparse points, Dev Drives, VHDX, UNC behind a local redirect, and
+  disagreement between what the query answers and where the lease directory
+  actually is);
+- the residual protection is real but partial: where such a share cannot hard
+  link, the lease refuses at the effect. A share that *can* hard link runs,
+  unverified.
+
+The runtime gate is not part of any safety argument downstream of it. It reads
+`process.platform` and `process.version`, both fixed by the running Node binary,
+and it measures nothing about any filesystem — which is why nothing in this
+build may read as "NTFS was established at startup, so this effect is safe".
 
 ## Build and verify
 
@@ -76,8 +134,9 @@ npm run verify
 `verify` is the canonical full Foundation verify command. It runs, in this
 order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
 `test:dist-trusted-profile`, `test:dist-lease-race`, `test:dist-lease-release`,
-`test:foundation-safe`, `test:windows-tree-kill-tool-release`. `build` runs
-immediately before the four dist artefact checks, so all of them always run
+`test:dist-runtime-gate`, `test:foundation-safe`,
+`test:windows-tree-kill-tool-release`. `build` runs
+immediately before the five dist artefact checks, so all of them always run
 against a fresh build, never a stale or missing one, and there is only ever one
 build per `verify` run. The two vitest gates run **sequentially**, in that order
 — the real-process harness never runs alongside the foundation set.
@@ -128,6 +187,15 @@ It exists because the only real-process measurement of the release effect used
 to be incidental to the attended-break harness, and was lost when that harness
 was withdrawn with the break: a coverage regression a green gate cannot show
 you.
+
+`test:dist-runtime-gate` drives the **runtime gate** against the shipped CLI as
+a real child process. The gate terminates the process and writes synchronously
+to fd 2 at the CLI entry, and none of that is observable from inside a vitest
+worker. A preload substitutes `process.platform` / `process.version` and
+verifies its own substitution took, dying with a distinct exit code if it did
+not — an ineffective preload would otherwise turn every negative case green. The
+negative cases assert that the lease report is **absent** from stdout, which is
+what proves the action never ran rather than merely that a message was printed.
 
 **`test:foundation-safe` is not "all tests", but it is the full regression
 set.** It runs every vitest file except one:
@@ -2841,9 +2909,10 @@ The consequence is a boundary on what V1 has actually demonstrated, and it is
 stated here rather than carried as a followup because an operator meets it on
 their first run:
 
-- V1's canonical verification evidence is **Windows + Node 22** — `verify` runs
-  on `windows-latest`, and `tests/v1-08-verification-boundary.test.ts` spawns its
-  real processes there;
+- V1's canonical verification evidence is **Windows + Node 22 or 24** — `verify`
+  runs on `windows-latest` against both majors (V2-07P widened this from Node 22
+  alone when the Node contract became a whitelist), and
+  `tests/v1-08-verification-boundary.test.ts` spawns its real processes there;
 - **portability to POSIX, or to any project toolchain that needs `HOME`,
   `npm_config_*`, `TMPDIR`, `LANG` or a proxy variable, is not proven by V1.** A
   POSIX `npm` without `HOME` is the concrete case;
@@ -2856,6 +2925,14 @@ their first run:
 Widening the policy is a product decision with a failing test behind it, not a
 quiet edit — `tests/v1-08-verification-boundary.test.ts` asserts the current
 narrow answer, so changing it has to be deliberate.
+
+**V2-07P narrowed this from the other end.** The limitation above was written
+when portability was an open question: the build did not run on POSIX and did
+not claim to. V2 now *refuses* to, at the CLI entry, so "portability to POSIX is
+not proven by V1" has become "POSIX is outside the support contract". The
+paragraph is kept rather than rewritten because it records what was true of V1,
+and because the failure mode it describes — a command that cannot start is
+`UNAVAILABLE`, never a false `PASSED` — is unchanged.
 
 ### Carried forward, deliberately
 
@@ -3922,6 +3999,15 @@ the evidence-mint rollback and `release` — and a test pins that no module outs
 it calls the function, scanning code with comments stripped so that explaining
 the mechanism is not mistaken for reaching it.
 
+**V2-07P made the surrounding contract match this refusal.** When this was
+written, the filesystem boundary was enforced while the runtime around it was
+not: the build refused a filesystem that could not link, and would happily start
+on Linux or on an untested Node. The runtime is now gated too, and the
+repository path is refused by shape when it is explicitly UNC or a device path.
+The division of labour is unchanged and deliberate — the *runtime* facts are
+decided once at the entry because they are process-constant, and the
+*filesystem* capability stays where it was, proved at the link that needs it.
+
 ### The release contract is pinned by value and by effect (V2-07LR-AA)
 
 This round changed **no release behaviour**. It is a remediation of the
@@ -4020,6 +4106,49 @@ No TTL and no renewal. A lease does not expire, because time alone is never
 evidence that a writer has stopped: a suspended or badly delayed writer can wake
 up and write beside its successor. No block runner, and no change to what the
 ledger means.
+
+### The platform contract, made executable (V2-07P)
+
+Six adversarial review rounds on the execution lease spent their budget on
+filesystems this project will never run on, and each repair widened the surface
+the next round had to break. The decision behind this slice is that V2 is built
+for its actual deployment and says so.
+
+**What was measured before anything changed.** Against the shipped build,
+`\\server\share\repo\.git`, `\\?\UNC\server\share\repo\.git` and
+`\\.\PhysicalDrive0` were all **accepted** as lease locations — the Windows
+check admitted the UNC shape explicitly. So this slice removes a real
+acceptance, not a theoretical one.
+
+**The runtime gate is not a filesystem preflight, and could not become one.**
+It reads `process.platform` and `process.version` and nothing else. Both are
+fixed by the running Node binary, so there is no later moment at which either
+could answer differently — which is why deciding them once at the entry is not
+a check relocated away from its effect. The lease's filesystem capability is not
+like that, and it stayed exactly where it was.
+
+**Three refusals where there was one.** A UNC path resolves perfectly well; the
+build refuses it because V2 does not support network storage. Reporting that as
+`LEASE_LOCATION_UNSUITABLE` — whose sentence says no location could be derived —
+would have been the same defect `REPOSITORY_RECORD_INCOHERENT` already records
+against itself. A device path got a third code rather than being folded into the
+network one, because a device path is not network storage.
+
+**What the contract deliberately does not claim.** A drive letter can be a
+mapped network share, in the plain and the extended-length form alike, and this
+build does not detect it. That is recorded as an ACCEPTED LIMIT in the
+supported-runtime section rather than described as unlikely, because closing it
+would require the filesystem preflight the whole design avoids.
+
+**Node became a whitelist.** `[22, 24]`, not `>= 22`. A floor enforces a
+contract wider than CI proves; the two disagree only on 23 and 25, and both are
+pinned by test. CI gained a second job so that every enforced member is a
+verified one.
+
+**POSIX code was not deleted.** The gate makes the `exec.ts` process-group
+branches, `path-identity.ts`'s casing fold and the POSIX profile resolver
+unreachable. They stay: removing them means rewriting the most dangerous module
+in the build inside a slice whose purpose was to stop opening review surfaces.
 
 ## Not implemented yet
 
