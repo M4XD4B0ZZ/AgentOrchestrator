@@ -1561,6 +1561,23 @@ describe('every persisted field’s authority is pinned by its own mutation', ()
     expect(assessLedgerSuccession(midFlight, next)).toEqual(['FROZEN_PLAN_CHANGED']);
   });
 
+  it('pins frozenDependencies to the frozen plan', () => {
+    // Demoting this field to RECORD would typecheck clean and leave the rest of
+    // this suite green — succession would then let a successor change the
+    // relation *and* its own fingerprint consistently, which is exactly the
+    // authority this classification exists to deny. Alone (fingerprint
+    // untouched) it also contradicts rule 1b, so the schema refuses it too.
+    const next = {
+      ...midFlight,
+      frozenDependencies: [
+        { taskId: 'A-001', dependsOn: [] },
+        { taskId: 'B-001', dependsOn: ['A-001'] },
+      ],
+    };
+    expect(safeParseBlockRunLedger(next).success).toBe(false);
+    expect(assessLedgerSuccession(midFlight, next)).toEqual(['FROZEN_PLAN_CHANGED']);
+  });
+
   it('pins planFingerprint to the frozen plan', () => {
     const next = { ...midFlight, planFingerprint: 'f'.repeat(64) };
     expect(safeParseBlockRunLedger(next).success).toBe(false);
@@ -1603,7 +1620,14 @@ describe('every persisted field’s authority is pinned by its own mutation', ()
 /* ───────────────── the fingerprint separator ────────────────────────────── */
 
 describe('the definition fingerprint separator', () => {
-  it('is written as an escape, and still digests exactly what it used to', () => {
+  it('is written as an escape, and the digest it produces can be reconstructed independently', () => {
+    // Not a claim that the digest is stable across this slice — it is not.
+    // Task 1 deliberately moved every existing fingerprint by binding the
+    // dependency relation into it, and that is the point of the relation
+    // being frozen evidence rather than a live judgement. What this proves is
+    // narrower and does not depend on history: the *current* encoding is
+    // exactly what `block-definition.ts` documents, reconstructed here from
+    // first principles rather than by calling back into the code under test.
     const source = readFileSync(new URL('../src/block/block-definition.ts', import.meta.url));
 
     // Raw control bytes in a source file are invisible in every editor, every
@@ -1615,19 +1639,30 @@ describe('the definition fingerprint separator', () => {
     expect(source.includes(2)).toBe(false);
 
     // Same value, proven rather than asserted: the digest is compared with one
-    // computed here from independently constructed separators, so the change
-    // cannot silently move any existing fingerprint. `block()` is independent by
-    // construction (see the helper above), so each relation row is just its own
-    // taskId with no `dependsOn` entries.
-    const definition = block(['A-001', 'B-001']);
+    // computed here from independently constructed separators. The fixture
+    // deliberately gives B-001 a non-empty `dependsOn`, so the reconstruction
+    // exercises the membership separator *inside* a row (between a taskId and
+    // its dependency) as well as between rows — with every row independent, as
+    // an earlier revision of this test left it, a mutant that swapped the two
+    // separators' roles within a row would go undetected, because there would
+    // be nothing inside any row to separate.
+    const definition = defineBlock('V2', ['A-001', 'B-001'], [
+      { taskId: 'A-001', dependsOn: [] },
+      { taskId: 'B-001', dependsOn: ['A-001'] },
+    ]);
+    if (!definition.ok) throw new Error('fixture block is not a block');
+
     const membershipSeparator = String.fromCharCode(0);
     const rowSeparator = String.fromCharCode(1);
     const sectionSeparator = String.fromCharCode(2);
     const membership = ['V2', 'A-001', 'B-001'].join(membershipSeparator);
-    const relation = ['A-001', 'B-001'].join(rowSeparator);
+    const relation = [
+      ['A-001'].join(membershipSeparator),
+      ['B-001', 'A-001'].join(membershipSeparator),
+    ].join(rowSeparator);
     const expected = createHash('sha256')
       .update(`${membership}${sectionSeparator}${relation}`, 'utf8')
       .digest('hex');
-    expect(fingerprintBlockDefinition(definition)).toBe(expected);
+    expect(fingerprintBlockDefinition(definition.definition)).toBe(expected);
   });
 });

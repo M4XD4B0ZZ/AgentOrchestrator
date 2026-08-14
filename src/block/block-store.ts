@@ -175,6 +175,37 @@ function revisionOfBytes(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+/**
+ * A document's `schemaVersion`, read without trusting its shape.
+ *
+ * `document` is `unknown` here in the truest sense — it is whatever
+ * `JSON.parse` produced, which can be `null`, an array, a string, a number, or
+ * an object with no `schemaVersion` field at all. Only a genuinely valid
+ * declaration (a positive safe integer) is reported as `VALID`; every other
+ * shape, `null` document included, is `ABSENT_OR_INVALID` — one rule, so both
+ * read sites classify a document the same way and cannot drift back apart.
+ *
+ * The distinction this exists to protect: a document with **no usable
+ * declaration** is not "written by an older build", it is unreadable, and
+ * belongs on the ordinary contract-violation path, which explains *why* it was
+ * refused. Only a version this build can name and does not match is "older
+ * build" — `LEDGER_SCHEMA_UNSUPPORTED` / `PREDECESSOR_SCHEMA_UNSUPPORTED` — and
+ * a corrupt or absent declaration must never borrow that gentler label.
+ */
+type DeclaredSchemaVersion =
+  | { readonly kind: 'VALID'; readonly version: number }
+  | { readonly kind: 'ABSENT_OR_INVALID' };
+
+function declaredSchemaVersion(document: unknown): DeclaredSchemaVersion {
+  if (typeof document !== 'object' || document === null) {
+    return { kind: 'ABSENT_OR_INVALID' as const };
+  }
+  const version = (document as { readonly schemaVersion?: unknown }).schemaVersion;
+  return typeof version === 'number' && Number.isSafeInteger(version) && version > 0
+    ? { kind: 'VALID' as const, version }
+    : { kind: 'ABSENT_OR_INVALID' as const };
+}
+
 /* ─────────────────────────────── saving ─────────────────────────────────── */
 
 export type LedgerSaveFailureCode =
@@ -442,13 +473,17 @@ export function updateBlockLedger(
   const previous = safeParseBlockRunLedger(document);
   if (!previous.success) {
     // The same distinction the load path draws, at the one other place a
-    // persisted ledger is read. A predecessor written by an older build is not
-    // an invalid predecessor, and a caller told `PREDECESSOR_INVALID` would go
-    // looking for corruption that is not there.
-    const declared = (document as { readonly schemaVersion?: unknown }).schemaVersion;
+    // persisted ledger is read, via the one shared classifier so the two
+    // cannot drift apart. A predecessor written by an older build is not an
+    // invalid predecessor, and a caller told `PREDECESSOR_INVALID` would go
+    // looking for corruption that is not there — but only a genuinely valid,
+    // merely different version earns that label. `document` may be `null` or
+    // any other non-object shape here; `declaredSchemaVersion` does not throw
+    // on any of them.
+    const declared = declaredSchemaVersion(document);
     return saveFailure(
       'LEDGER_CONFLICT',
-      declared !== BLOCK_LEDGER_SCHEMA_VERSION
+      declared.kind === 'VALID' && declared.version !== BLOCK_LEDGER_SCHEMA_VERSION
         ? 'PREDECESSOR_SCHEMA_UNSUPPORTED'
         : 'PREDECESSOR_INVALID',
     );
@@ -609,17 +644,15 @@ export function loadBlockLedger(repositoryRoot: string, runId: string): LedgerLo
     return loadFailure('LEDGER_MALFORMED');
   }
 
-  // The version, before the contract. A version-1 document fails the contract
-  // too — the `superRefine` refuses any other version and `.strict()` refuses
-  // the field it lacks — but it would fail as `LEDGER_CONTRACT_VIOLATION`,
-  // which describes a broken file rather than an older one.
-  const declaredVersion = (document as { readonly schemaVersion?: unknown }).schemaVersion;
-  if (
-    typeof declaredVersion === 'number' &&
-    Number.isSafeInteger(declaredVersion) &&
-    declaredVersion > 0 &&
-    declaredVersion !== BLOCK_LEDGER_SCHEMA_VERSION
-  ) {
+  // The version, before the contract, via the one classifier `updateBlockLedger`
+  // also calls. A version-1 document fails the contract too — the
+  // `superRefine` refuses any other version and `.strict()` refuses the field
+  // it lacks — but it would fail as `LEDGER_CONTRACT_VIOLATION`, which
+  // describes a broken file rather than an older one. `document` may be
+  // `null` or any other non-object shape here (it is whatever `JSON.parse`
+  // produced); `declaredSchemaVersion` does not throw on any of them.
+  const declaredVersion = declaredSchemaVersion(document);
+  if (declaredVersion.kind === 'VALID' && declaredVersion.version !== BLOCK_LEDGER_SCHEMA_VERSION) {
     return loadFailure('LEDGER_SCHEMA_UNSUPPORTED');
   }
 

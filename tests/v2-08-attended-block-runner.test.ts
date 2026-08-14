@@ -18,13 +18,34 @@
  * cannot see.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
 import {
   defineBlock,
   fingerprintBlockDefinition,
+  fingerprintFrozenMembership,
   type FrozenTaskDependency,
 } from '../src/block/block-definition.js';
+import {
+  BLOCK_LEDGER_SCHEMA_VERSION,
+  safeParseBlockRunLedger,
+} from '../src/block/block-ledger.js';
+import { startBlockRun } from '../src/block/block-progress.js';
+import {
+  loadBlockLedger,
+  updateBlockLedger,
+  type LedgerLoadResult,
+  type LedgerSaveResult,
+} from '../src/block/block-store.js';
+import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
+import { releaseTestLeases } from './helpers/lease.js';
+import { createRepoFixture, removeRepoFixtures } from './helpers/repo-fixtures.js';
+import {
+  removeTrackedWorkspaces,
+  resolveFixture,
+  trackWorkspacesOf,
+} from './helpers/worktree-fixtures.js';
+import { e2eProfile, taskFile } from './helpers/e2e-fixtures.js';
 
 /** Rows for a block whose members depend on nothing. */
 function independentRows(taskIds: readonly string[]): readonly FrozenTaskDependency[] {
@@ -254,7 +275,7 @@ describe('the projection is transitive, and restricted to members', () => {
   });
 });
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -309,5 +330,318 @@ describe('the projection is computed at freeze time and nowhere else', () => {
     // runner's module header makes and a reader should be able to find it here
     // under its own name.
     expect(projectionCallSites()).not.toContain(join('src', 'block', 'block-runner.ts'));
+  });
+});
+
+afterEach(() => {
+  releaseTestLeases();
+  removeRepoFixtures();
+});
+
+afterAll(() => {
+  removeTrackedWorkspaces();
+});
+
+const RUN_ID = 'run-0001';
+const BLOCK_ID = 'V2';
+const NOW = '2026-08-14T09:00:00.000Z';
+
+interface Fixture {
+  readonly repository: ResolvedRepository;
+  readonly root: string;
+}
+
+/**
+ * A real repository whose task files carry the dependencies asked for.
+ *
+ * Real throughout: the projection is taken from the repository's own graph, so
+ * a fixture that wrote the relation by hand would prove only that the fixture
+ * agreed with itself.
+ */
+async function repoWith(tasks: Readonly<Record<string, readonly string[]>>): Promise<Fixture> {
+  const files: Record<string, string> = { '.gitignore': '.agent-orchestrator/runtime/\n' };
+  for (const [taskId, dependsOn] of Object.entries(tasks)) {
+    files[`tasks/${taskId}.md`] = taskFile(taskId, { dependsOn });
+  }
+  const root = createRepoFixture({ defaultBranch: 'main', profile: e2eProfile(), files });
+  const repository = await resolveFixture(root);
+  trackWorkspacesOf(repository);
+  return { repository, root };
+}
+
+function ledgerPath(root: string, runId = RUN_ID): string {
+  return join(root, '.agent-orchestrator', 'runtime', 'blocks', `${runId}.json`);
+}
+
+/** A frozen, independent block over `taskIds`. */
+function independentBlock(taskIds: readonly string[]) {
+  const defined = defineBlock(BLOCK_ID, taskIds, independentRows(taskIds));
+  if (!defined.ok) throw new Error(`fixture block is not a block: ${defined.code}`);
+  return defined.definition;
+}
+
+function startRun(fixture: Fixture, definition = independentBlock(['A-001', 'B-001'])) {
+  return startBlockRun({
+    definition,
+    repositoryId: fixture.repository.id,
+    repositoryRoot: fixture.root,
+    runId: RUN_ID,
+    now: NOW,
+  });
+}
+
+function reload(root: string, runId = RUN_ID) {
+  const loaded = loadBlockLedger(root, runId);
+  if (!loaded.ok) throw new Error(`ledger did not load: ${loaded.code}`);
+  return loaded;
+}
+
+describe('the ledger freezes the relation, and version 1 is refused', () => {
+  it('writes the relation into the first ledger and fingerprints all three parts', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+
+    expect(startRun(fixture).ok).toBe(true);
+
+    const ledger = reload(fixture.root).ledger;
+    expect(ledger.schemaVersion).toBe(2);
+    expect(ledger.frozenDependencies).toEqual([
+      { taskId: 'A-001', dependsOn: [] },
+      { taskId: 'B-001', dependsOn: [] },
+    ]);
+    expect(ledger.planFingerprint).toBe(
+      fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001'], ledger.frozenDependencies),
+    );
+  });
+
+  it('refuses a document whose fingerprint describes a different relation', () => {
+    const honest = independentBlock(['A-001', 'B-001']);
+    const edged = defineBlock(BLOCK_ID, ['A-001', 'B-001'], [
+      { taskId: 'A-001', dependsOn: [] },
+      { taskId: 'B-001', dependsOn: ['A-001'] },
+    ]);
+    if (!edged.ok) throw new Error('fixture block is not a block');
+
+    const lying = {
+      schemaVersion: 2,
+      repositoryId: 'fixture',
+      repositoryRoot: 'D:\\repo',
+      blockId: BLOCK_ID,
+      runId: RUN_ID,
+      startedAt: NOW,
+      frozenTaskIds: ['A-001', 'B-001'],
+      frozenDependencies: honest.dependencies,
+      // The digest of a relation this document does not list. Stored and
+      // believed, this inverts drift detection rather than losing it.
+      planFingerprint: fingerprintFrozenMembership(
+        BLOCK_ID,
+        ['A-001', 'B-001'],
+        edged.definition.dependencies,
+      ),
+      activeTaskId: null,
+      tasks: [
+        { taskId: 'A-001', disposition: 'PLANNED' as const, evidenceRevision: null, baseCommit: null, resultCommit: null },
+        { taskId: 'B-001', disposition: 'PLANNED' as const, evidenceRevision: null, baseCommit: null, resultCommit: null },
+      ],
+      stopReason: null,
+    };
+
+    expect(safeParseBlockRunLedger(lying).success).toBe(false);
+  });
+
+  it('refuses a relation that is not one canonical row per member, in order', () => {
+    const base = {
+      schemaVersion: 2,
+      repositoryId: 'fixture',
+      repositoryRoot: 'D:\\repo',
+      blockId: BLOCK_ID,
+      runId: RUN_ID,
+      startedAt: NOW,
+      frozenTaskIds: ['A-001', 'B-001'],
+      activeTaskId: null,
+      tasks: [
+        { taskId: 'A-001', disposition: 'PLANNED' as const, evidenceRevision: null, baseCommit: null, resultCommit: null },
+        { taskId: 'B-001', disposition: 'PLANNED' as const, evidenceRevision: null, baseCommit: null, resultCommit: null },
+      ],
+      stopReason: null,
+    };
+    // The fingerprint is recomputed for each candidate, so every refusal below
+    // is the relation rule refusing — not the digest disagreeing by accident.
+    const withRelation = (dependencies: readonly FrozenTaskDependency[]) => ({
+      ...base,
+      frozenDependencies: dependencies,
+      planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001'], dependencies),
+    });
+
+    const refused: readonly (readonly FrozenTaskDependency[])[] = [
+      // Short by one row.
+      [{ taskId: 'A-001', dependsOn: [] }],
+      // Reordered against `frozenTaskIds`.
+      [
+        { taskId: 'B-001', dependsOn: [] },
+        { taskId: 'A-001', dependsOn: [] },
+      ],
+      // An edge to a stranger.
+      [
+        { taskId: 'A-001', dependsOn: [] },
+        { taskId: 'B-001', dependsOn: ['X-001'] },
+      ],
+      // A self-edge.
+      [
+        { taskId: 'A-001', dependsOn: ['A-001'] },
+        { taskId: 'B-001', dependsOn: [] },
+      ],
+      // Repeated, so one relation would have two encodings.
+      [
+        { taskId: 'A-001', dependsOn: [] },
+        { taskId: 'B-001', dependsOn: ['A-001', 'A-001'] },
+      ],
+    ];
+
+    for (const dependencies of refused) {
+      expect(safeParseBlockRunLedger(withRelation(dependencies)).success).toBe(false);
+    }
+
+    // The control: a canonical relation over the same members is accepted, so
+    // the rule above is not simply refusing everything.
+    expect(
+      safeParseBlockRunLedger(
+        withRelation([
+          { taskId: 'A-001', dependsOn: [] },
+          { taskId: 'B-001', dependsOn: ['A-001'] },
+        ]),
+      ).success,
+    ).toBe(true);
+  });
+
+  it('refuses a version-1 document under its own code, and migrates nothing', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+
+    // A document exactly as the shipped version-1 build wrote them: no
+    // `frozenDependencies`, and a fingerprint over two parts.
+    const path = ledgerPath(fixture.root);
+    const current = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    const { frozenDependencies: _dropped, ...version1 } = current;
+    writeFileSync(path, `${JSON.stringify({ ...version1, schemaVersion: 1 }, null, 2)}\n`, 'utf8');
+    const before = readFileSync(path);
+
+    const loaded = loadBlockLedger(fixture.root, RUN_ID);
+
+    expect(loaded.ok).toBe(false);
+    if (loaded.ok) return;
+    // Its own code. `LEDGER_CONTRACT_VIOLATION` would tell an operator their
+    // file is broken, when what happened is that an older build wrote it.
+    expect(loaded.code).toBe('LEDGER_SCHEMA_UNSUPPORTED');
+    // And nothing was rewritten on the way to saying so.
+    expect(readFileSync(path).equals(before)).toBe(true);
+  });
+
+  it('states the version this build writes', () => {
+    expect(BLOCK_LEDGER_SCHEMA_VERSION).toBe(2);
+  });
+});
+
+import { createHash } from 'node:crypto';
+
+/**
+ * Overwrites the on-disk ledger with `content`, and returns the CAS revision
+ * it now carries — the sha256 of the exact bytes just written, computed the
+ * same way `block-store.ts` computes it, so a caller can hand it straight
+ * back as `expectedRevision`.
+ */
+function corrupt(root: string, content: unknown, runId = RUN_ID): string {
+  const bytes = Buffer.from(`${JSON.stringify(content, null, 2)}\n`, 'utf8');
+  writeFileSync(ledgerPath(root, runId), bytes);
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+describe('the schema-version classifier never mislabels corruption as an old build', () => {
+  /**
+   * Every document that carries no *usable* declaration: no field at all, a
+   * `null` field, the whole document itself `null`, and a value of the right
+   * name but the wrong type. None of these says "an older build wrote this" —
+   * that gentler label is reserved for a version this build can actually name
+   * and simply does not match. Reported here as `LEDGER_CONTRACT_VIOLATION` /
+   * `PREDECESSOR_INVALID`, exactly as an unparseable document always was.
+   */
+  const CORRUPT: readonly { readonly label: string; readonly content: unknown }[] = [
+    { label: 'a missing schemaVersion', content: {} },
+    { label: 'schemaVersion: null', content: { schemaVersion: null } },
+    { label: 'the whole document being null', content: null },
+    { label: 'schemaVersion as a string', content: { schemaVersion: '2' } },
+  ];
+
+  it('loadBlockLedger reports every corrupt declaration as a contract violation, never as an unsupported version, and never throws', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+
+    for (const { label, content } of CORRUPT) {
+      corrupt(fixture.root, content);
+
+      let loaded: LedgerLoadResult | undefined;
+      expect(() => {
+        loaded = loadBlockLedger(fixture.root, RUN_ID);
+      }, label).not.toThrow();
+      expect(loaded?.ok, label).toBe(false);
+      if (loaded?.ok !== false) continue;
+      expect(loaded.code, label).toBe('LEDGER_CONTRACT_VIOLATION');
+    }
+  });
+
+  it('loadBlockLedger reports a genuinely valid old version as unsupported, not as a contract violation', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    corrupt(fixture.root, { schemaVersion: 1 });
+
+    let loaded: LedgerLoadResult | undefined;
+    expect(() => {
+      loaded = loadBlockLedger(fixture.root, RUN_ID);
+    }).not.toThrow();
+    expect(loaded?.ok).toBe(false);
+    if (loaded?.ok !== false) return;
+    expect(loaded.code).toBe('LEDGER_SCHEMA_UNSUPPORTED');
+  });
+
+  it('updateBlockLedger reports every corrupt predecessor as PREDECESSOR_INVALID, never PREDECESSOR_SCHEMA_UNSUPPORTED, and never throws', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    // The successor is otherwise unremarkable and irrelevant to what is being
+    // proved: the predecessor read fails before `next` is ever compared to it.
+    const next = reload(fixture.root).ledger;
+
+    for (const { label, content } of CORRUPT) {
+      const revision = corrupt(fixture.root, content);
+
+      let saved: LedgerSaveResult | undefined;
+      expect(() => {
+        saved = updateBlockLedger(next, {
+          repositoryRoot: fixture.root,
+          expectedRevision: revision,
+        });
+      }, label).not.toThrow();
+      expect(saved?.ok, label).toBe(false);
+      if (saved?.ok !== false) continue;
+      expect(saved.code, label).toBe('LEDGER_CONFLICT');
+      expect(saved.detail, label).toBe('PREDECESSOR_INVALID');
+    }
+  });
+
+  it('updateBlockLedger reports a genuinely valid old predecessor version as PREDECESSOR_SCHEMA_UNSUPPORTED', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    const next = reload(fixture.root).ledger;
+    const revision = corrupt(fixture.root, { schemaVersion: 1 });
+
+    let saved: LedgerSaveResult | undefined;
+    expect(() => {
+      saved = updateBlockLedger(next, {
+        repositoryRoot: fixture.root,
+        expectedRevision: revision,
+      });
+    }).not.toThrow();
+    expect(saved?.ok).toBe(false);
+    if (saved?.ok !== false) return;
+    expect(saved.code).toBe('LEDGER_CONFLICT');
+    expect(saved.detail).toBe('PREDECESSOR_SCHEMA_UNSUPPORTED');
   });
 });
