@@ -983,3 +983,80 @@ describe('independence is read from the frozen plan', () => {
     ).toBe(false);
   });
 });
+
+import { planNextTask, type TaskPlanningSuccess } from '../src/plan/plan-next-task.js';
+import { startPlannedTask } from '../src/run/start-task.js';
+import { git, writeRepoFile } from './helpers/repo-fixtures.js';
+
+/**
+ * One reading of the roadmap, exactly as `block-command.ts` takes it.
+ *
+ * The whole `TaskPlanningSuccess`, not a list of eligible ids: the runner filters
+ * by it *and* hands it to the start path, so a suite that produced two values
+ * would be testing a shape production does not have.
+ */
+function planningOf(fixture: Fixture): TaskPlanningSuccess {
+  const planned = planNextTask(fixture.repository);
+  if (!planned.ok) throw new Error(`fixture repository does not plan: ${planned.code}`);
+  return planned;
+}
+
+describe('a start may be authorised by a planning result it did not take', () => {
+  it('starts a task the roadmap has since made ineligible', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const frozen = planningOf(fixture);
+    // The premise: B-001 is eligible in the frozen reading.
+    expect(frozen.selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible).toBe(true);
+
+    // The roadmap moves underneath. A fresh planning now refuses B-001.
+    //
+    // Committed, and that is not decoration. `prepareTaskWorkspace` refuses a
+    // dirty source checkout with `SOURCE_WORKTREE_DIRTY`
+    // (`src/worktree/prepare-workspace.ts:406`, `git status --porcelain
+    // --untracked-files=all`), so an edit left uncommitted here never reaches
+    // the gate this case is about: measured, the start answered
+    // WORKSPACE_REFUSED / SOURCE_WORKTREE_DIRTY at step 5 rather than STARTED,
+    // against a correct split. An operator's mid-run roadmap edit is a commit
+    // anyway, so committing is also the truthful fixture.
+    writeRepoFile(fixture.root, 'tasks/GATE-001.md', taskFile('GATE-001'));
+    writeRepoFile(fixture.root, 'tasks/B-001.md', taskFile('B-001', { dependsOn: ['GATE-001'] }));
+    git(fixture.root, ['add', '--all']);
+    git(fixture.root, ['commit', '--quiet', '-m', 'the roadmap moves under the frozen plan']);
+    expect(planningOf(fixture).selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible)
+      .toBe(false);
+
+    const started = await startPlannedTask(
+      { repository: fixture.repository, taskId: 'B-001', planning: frozen },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
+    );
+
+    // The frozen reading is the authority. A path that planned again would
+    // answer TASK_INELIGIBLE here, which is exactly the hidden second read.
+    expect(started.outcome).toBe('STARTED');
+  }, 600_000);
+
+  it('still refuses a task the frozen reading itself calls ineligible', async () => {
+    // The other half, and without it the case above passes against a function
+    // that skipped the eligibility gate altogether rather than moving it.
+    const fixture = await repoWith({ 'A-001': [], 'B-001': ['A-001'] });
+    const frozen = planningOf(fixture);
+    expect(frozen.selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible).toBe(false);
+
+    const started = await startPlannedTask(
+      { repository: fixture.repository, taskId: 'B-001', planning: frozen },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
+    );
+
+    expect(started.outcome).toBe('TASK_INELIGIBLE');
+  }, 600_000);
+
+  it('prepares the workspace from the frozen definition, not the current file', async () => {
+    // The consequence worth stating: the task definition the workspace is built
+    // from comes out of the same graph the eligibility answer did. One instant,
+    // one plan — a start that gated on the frozen reading and then built from an
+    // edited file would be the same split authority in a quieter place.
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const frozen = planningOf(fixture);
+    expect(frozen.graph.node('B-001')?.definition).toBeDefined();
+  });
+});
