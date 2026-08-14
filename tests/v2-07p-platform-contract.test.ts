@@ -437,10 +437,11 @@ describe('lease status describes the refusal it actually met', () => {
   // line under a sentence that says the opposite: "This is a refusal, not a
   // failure to understand the path." A substring check on one field is not
   // enough to pin that: it would pass against an empty `Path` line, or any
-  // other wrong-but-different text. These three compare the COMPLETE
+  // other wrong-but-different text. These four compare the COMPLETE
   // operator-visible report - every field, byte for byte - so a contradiction
   // anywhere between the `Lease` sentence and the `Path` line is caught, not
-  // only the one this review found. Every literal below is copied from the
+  // only the one this review found. Four, not three, because one of the three
+  // states covers two distinct cases and each has to render truthfully. Every literal below is copied from the
   // sentence constants and from `pathField` independently, by hand, rather
   // than imported from either - importing them would let the test and the
   // implementation drift together and still agree with each other.
@@ -493,14 +494,35 @@ describe('lease status describes the refusal it actually met', () => {
     expect(actual).toBe(expected);
   });
 
-  it('prints the complete underivable-location report, and only this one still says "not derivable"', () => {
+  // LOCATION_UNSUITABLE covers TWO cases, so it gets two rendered reports, not
+  // one. The state's sentence names both - "either none could be derived from
+  // it, or its shape is one this build has not verified" - and a `Path` line
+  // asserting one of them over the other is the contradiction this block
+  // exists to pin, one code over from where the review first found it. Both
+  // cases therefore have to render the same, and that text has to be true of
+  // each: hence "no usable location" rather than "not derivable".
+  const UNSUITABLE_SENTENCE =
+    "This repository's Git common directory has no usable lease location: either none\n" +
+    '  could be derived from it, or its shape is one this build has not verified.';
+
+  it('prints the complete report for a key no location could be derived from', () => {
     const actual = renderLeaseStatus(inspect('\\repo\\.git'));
-    const expected = expectedReport(
-      'LOCATION_UNSUITABLE',
-      "This repository's Git common directory has no usable lease location: either none\n" +
-        '  could be derived from it, or its shape is one this build has not verified.',
-      'not derivable',
+    const expected = expectedReport('LOCATION_UNSUITABLE', UNSUITABLE_SENTENCE, 'no usable location');
+    expect(actual).toBe(expected);
+  });
+
+  // The second case, and the one that decides the text. `\\?\Volume{…}` is
+  // understood: `classifyWindowsKey` matches the extended-length namespace,
+  // finds it is neither the UNC form nor a drive letter, and declines it as a
+  // shape V2 has not verified. That is a refusal exactly like the two above,
+  // and it had no rendered coverage at all - the classification case for this
+  // key sits at the top of this file and never prints anything, so nothing
+  // read the `Path` line it produces.
+  it('prints the complete report for a recognised but unverified path shape', () => {
+    const actual = renderLeaseStatus(
+      inspect('\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\repo\\.git'),
     );
+    const expected = expectedReport('LOCATION_UNSUITABLE', UNSUITABLE_SENTENCE, 'no usable location');
     expect(actual).toBe(expected);
   });
 });

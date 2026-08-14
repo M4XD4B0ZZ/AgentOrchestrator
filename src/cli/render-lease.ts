@@ -145,18 +145,30 @@ export const LEASE_LIVENESS_SENTENCES: Readonly<Record<LeaseInspection['liveness
  * line under a sentence that says the opposite: "This is a refusal, not a
  * failure to understand the path."
  *
- * The three location-failure states each get their own true text here, not a
- * shared fallback: `LOCATION_UNSUITABLE` really could not derive a location,
- * so it keeps "not derivable". `LOCATION_NETWORK_UNSUPPORTED` and
- * `LOCATION_DEVICE_NAMESPACE` derived one and refused it because of its shape
- * — a different claim, and printing one string for both would be the same
- * collapse this function exists to remove, one layer out. Every other state
- * always carries a real, derived `inspection.path`.
+ * The location-failure states each get their own text, and each text has to be
+ * true of *every* case its state covers. A shared fallback across states is
+ * what this function exists to remove; a text that describes only one of two
+ * cases within a state is the same collapse one level down.
+ * `LOCATION_NETWORK_UNSUPPORTED` and `LOCATION_DEVICE_NAMESPACE` each cover a
+ * single shape, understood and refused for being that shape, so each says so.
+ *
+ * `LOCATION_UNSUITABLE` covers **two**, which is why it no longer says "not
+ * derivable": a key from which no location could be derived at all
+ * (`\repo\.git`, root-relative), and `\\?\Volume{…}`, a shape
+ * `classifyWindowsKey` recognises and declines because V2 verified the
+ * drive-letter forms and not that one. The second is a refusal, not a failure
+ * to understand the path — so asserting "not derivable" over it would reprint
+ * the very defect this function was written to remove, one code over, and
+ * directly under a sentence that offers both cases. Giving each case its own
+ * text would mean splitting the state, which changes the refusal taxonomy and
+ * is not a rendering decision to take here.
+ *
+ * Every other state always carries a real, derived `inspection.path`.
  */
 function pathField(inspection: LeaseInspection): string {
   switch (inspection.state) {
     case 'LOCATION_UNSUITABLE':
-      return 'not derivable';
+      return 'no usable location';
     case 'LOCATION_NETWORK_UNSUPPORTED':
       return 'refused (UNC or network path)';
     case 'LOCATION_DEVICE_NAMESPACE':
