@@ -1001,6 +1001,28 @@ function planningOf(fixture: Fixture): TaskPlanningSuccess {
   return planned;
 }
 
+/**
+ * The two directions of one control, and a third claim deliberately not made.
+ *
+ * The pair below discriminates "the eligibility gate moved" from "the
+ * eligibility gate was deleted": a start path that re-plans reddens the first
+ * case only, and a start path with no eligibility gate at all reddens the second
+ * case only. Neither subsumes the other, which is why both are here.
+ *
+ * **Not proved here:** that the workspace is prepared from the *frozen*
+ * definition rather than from the current file. It is a real consequence and
+ * worth stating — the task definition the workspace is built from comes out of
+ * the same graph the eligibility answer did, so one instant yields one plan, and
+ * a start that gated on the frozen reading and then built from an edited file
+ * would be the same split authority in a quieter place. There was a case here
+ * asserting it, and it was removed: it only checked that the fixture's own graph
+ * had a node, called no production code, and would have passed against an
+ * implementation that built from the current file. A name promising a control
+ * that the body does not provide is worse than no case at all, because it reads
+ * as coverage exactly where a reader would look for it. Proving it needs a
+ * fixture that changes something the workspace actually derives from the
+ * definition; that is recorded as a follow-up rather than faked here.
+ */
 describe('a start may be authorised by a planning result it did not take', () => {
   it('starts a task the roadmap has since made ineligible', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
@@ -1016,8 +1038,14 @@ describe('a start may be authorised by a planning result it did not take', () =>
     // --untracked-files=all`), so an edit left uncommitted here never reaches
     // the gate this case is about: measured, the start answered
     // WORKSPACE_REFUSED / SOURCE_WORKTREE_DIRTY at step 5 rather than STARTED,
-    // against a correct split. An operator's mid-run roadmap edit is a commit
-    // anyway, so committing is also the truthful fixture.
+    // against a correct split.
+    //
+    // And committing does not weaken what is being tested, because planning does
+    // not read Git: `discoverTasks` lists the working tree with `readdirSync`
+    // (`src/plan/discover-tasks.ts:278`). The commit changes checkout
+    // cleanliness and nothing either planning sees — the frozen reading and the
+    // fresh one are exactly what they would have been. An operator's mid-run
+    // roadmap edit is a commit anyway, so this is also the truthful fixture.
     writeRepoFile(fixture.root, 'tasks/GATE-001.md', taskFile('GATE-001'));
     writeRepoFile(fixture.root, 'tasks/B-001.md', taskFile('B-001', { dependsOn: ['GATE-001'] }));
     git(fixture.root, ['add', '--all']);
@@ -1049,14 +1077,4 @@ describe('a start may be authorised by a planning result it did not take', () =>
 
     expect(started.outcome).toBe('TASK_INELIGIBLE');
   }, 600_000);
-
-  it('prepares the workspace from the frozen definition, not the current file', async () => {
-    // The consequence worth stating: the task definition the workspace is built
-    // from comes out of the same graph the eligibility answer did. One instant,
-    // one plan — a start that gated on the frozen reading and then built from an
-    // edited file would be the same split authority in a quieter place.
-    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
-    const frozen = planningOf(fixture);
-    expect(frozen.graph.node('B-001')?.definition).toBeDefined();
-  });
 });

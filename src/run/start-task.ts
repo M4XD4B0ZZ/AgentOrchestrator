@@ -624,10 +624,14 @@ export async function startPlannedTask(
   request: PlannedStartRequest,
   deps: StartTaskDependencies,
 ): Promise<StartTaskResult> {
+  // One reading of each of the two request fields, for the reason {@link
+  // startTask} gives about the record: a supplied `taskId` is read once here and
+  // that value is what every gate judges and every effect uses.
+  const { taskId } = request;
   const repository = snapshotRepositoryRecord(request.repository);
-  const gated = gateStart(repository, request.taskId, deps);
+  const gated = gateStart(repository, taskId, deps);
   if (gated !== null) return gated;
-  return startAgainstPlan(repository, request.taskId, request.planning, deps);
+  return startAgainstPlan(repository, taskId, request.planning, deps);
 }
 
 /**
@@ -646,8 +650,8 @@ export async function startTask(
   request: StartTaskRequest,
   deps: StartTaskDependencies,
 ): Promise<StartTaskResult> {
-  // One reading of the repository record, taken before the first gate and used
-  // by every gate and every effect below it.
+  // One reading of the request, taken before the first gate and used by every
+  // gate and every effect below it.
   //
   // This path has three gates and three effects interleaved between them — a
   // plan read, a workspace, a first durable write — and a record whose `root` is
@@ -655,8 +659,16 @@ export async function startTask(
   // each effect. Every gate passes and nothing lands where the authority was.
   // See `snapshotRepositoryRecord`; the review that found this drove a branch, a
   // worktree and a state file into a repository nobody held.
+  //
+  // `taskId` is destructured here for exactly the same reason, and it is not a
+  // formality: `isValidTaskId` judges the value read at this line, while
+  // `loadTaskState`, `prepareTaskWorkspace` and `saveTaskState` act on it much
+  // later. Read again at each of those, an accessor-backed id would pass the
+  // syntactic gate as one task and be created as another. One read, one value —
+  // never a second validation, which would only move the same seam.
+  const { taskId } = request;
   const repository = snapshotRepositoryRecord(request.repository);
-  const gated = gateStart(repository, request.taskId, deps);
+  const gated = gateStart(repository, taskId, deps);
   if (gated !== null) return gated;
 
   // The plan read, and it stays *behind* the lease gate: an invocation that is
@@ -665,11 +677,11 @@ export async function startTask(
   const planning = planNextTask(repository);
   if (!planning.ok) {
     return result({
-      taskId: request.taskId,
+      taskId,
       outcome: 'PLANNING_FAILED',
       reasonCodes: Object.freeze([planning.code]),
     });
   }
 
-  return startAgainstPlan(repository, request.taskId, planning, deps);
+  return startAgainstPlan(repository, taskId, planning, deps);
 }
