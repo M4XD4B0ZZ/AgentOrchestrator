@@ -17,6 +17,18 @@ Every task's requirements implicitly include this section.
 - **The transitive projection is computed at freeze time and nowhere else.** `projectBlockDependencies` is called by the CLI when a block is frozen. `src/block/block-runner.ts` must never import `src/block/block-dependencies.ts`; Task 7 verifies that with `git grep`. A runner that recomputed the relation would answer "may B continue after A?" from a roadmap that can be edited mid-run, which is the opposite of frozen-plan authority.
 - **One canonical truth is persisted.** The ledger stores `frozenDependencies` and nothing else about the relation. No second `dependents` image, no derived `independent` flag. The fingerprint covers `blockId + frozenTaskIds + frozenDependencies`.
 - **External-only blockers are not independence.** A member with no frozen block-member dependency is *not* thereby eligible: it may still wait on a non-member. Eligibility comes from the repository's own selector (`planNextTask` → `selection.eligibility`), and a block with nothing eligible and no disposition to explain it ends `NO_ELIGIBLE_TASK`.
+- **A block run does not outlive its invocation.** One run id, one attended
+  invocation, one lease — literally, as `README.md:3789` states it: *"V2-08 must
+  hold one lease across a whole block run and perform its ledger writes
+  underneath it."* So there is **no cross-invocation resume**, a run id that
+  already has a ledger is refused rather than continued, and a step budget is
+  absorbed inside the invocation instead of ending it. See "The contradiction
+  this plan had to resolve" below.
+- **The runner reads the roadmap zero times.** The eligibility snapshot is taken
+  once by the caller, from the same `planNextTask` result the projection came
+  from, and handed in. A runner that re-read the plan between tasks would let a
+  mid-run edit change which task runs next, even though no fingerprint was
+  recomputed.
 - **One schema bump for the whole slice.** `BLOCK_LEDGER_SCHEMA_VERSION: 1 → 2`, once, covering both `frozenDependencies` and `ACTIVE_TASK_UNRESOLVED`. A version-1 document is **refused, never migrated**, under its own load code.
 - **Three runner outcomes write nothing.** `LEASE_AUTHORITY_UNCERTAIN`, `DURABLE_WRITE_FAILED` and `RUN_GATE_REFUSED` leave the ledger byte-identical and reach the operator through the report. No best-effort stop write on any of the three.
 - **`ACTIVE_TASK_UNRESOLVED` stays out of `PROGRESS_CLAIMING_STOP_REASONS`,** and the sorting is pinned by a hand-written correctness test plus an effect test (it must be writable over a ledger whose entries are not supported).
@@ -28,6 +40,55 @@ Every task's requirements implicitly include this section.
   Claude-Session: https://claude.ai/code/session_01BaE9b5RWjuCCPZqapWPSXK
   ```
 - Run `npm run typecheck` before every commit. The canonical gate is `npm run verify`; run it at Task 12 and before opening the PR.
+
+## The contradiction this plan had to resolve
+
+An earlier draft had a block run survive its invocation: the driver's step
+budget ran out, the invocation exited 5, and a later invocation picked the same
+run up. Three statements were then asserted at once, and they cannot all be
+true:
+
+```
+the same durable block run survives
++ the CLI invocation terminates
++ one lease spans the whole block run
+```
+
+A terminating invocation must give the lease back, so between two invocations
+the run would be open with no holder. Leaving the lease behind on purpose is not
+available either — that is exactly the stale-lease surface this slice is
+forbidden to reopen, and a lease whose owner is gone is never taken over
+automatically.
+
+**Decided: a block run's lifetime is its invocation's lifetime.**
+
+- `startBlockRun` already refuses a run id that has a ledger. The runner adds no
+  resume path, so that refusal *is* the answer: an operator continues by
+  starting a new run id, and the interrupted run stays as a durable record of
+  what it did.
+- The driver's `STEP_BUDGET_EXHAUSTED` is **absorbed**: the runner drives the
+  same task again under the same lease. `maxSteps` bounds one `runTask` call so a
+  driver cannot run away; it says nothing about a task's outcome, and turning it
+  into `ACTIVE_TASK_UNRESOLVED` would make a scheduling limit into a claim about
+  a task. The continuation terminates, because every `STEP_BUDGET_EXHAUSTED`
+  carries durable progress by its own definition, the task's state machine is
+  bounded by the repository's `maxReviewRounds`, and a continuation that lands
+  zero durable steps is refused rather than tried again.
+- `STEP_BUDGET_EXHAUSTED` is therefore not a block-run outcome, and `block` never
+  exits 5.
+
+Two things this costs, both recorded in the follow-up register rather than
+argued away:
+
+- **`DEFINITION_DRIFTED` has no producer in V2-08.** Drift is a comparison
+  between a frozen plan and a current one, and with no resume there is no
+  persisted predecessor to compare against — the plan is frozen and the ledger
+  is created from it inside one invocation. The reason stays in the vocabulary,
+  stays graded in the exit table, and is unproduced. `reconcileBlockRun` still
+  reports it to a caller that supplies a definition.
+- **An interrupted invocation leaves an open ledger nothing can continue.** Fail
+  closed, and honest: the record says which task was `ACTIVE` when the run
+  stopped being driven, and no later process claims authority over it.
 
 ## File Structure
 
@@ -726,14 +787,95 @@ export function projectBlockDependencies(
 }
 ```
 
-- [ ] **Step 4: Run the test**
+- [ ] **Step 4: Pin who may call it**
+
+"The runner does not recompute the relation" is a property of the module graph,
+which no runtime assertion can see — and an import check on `block-runner.ts`
+alone is not enough, because `helper.ts` importing the projection and
+`block-runner.ts` importing `helper.ts` walks straight past it. So the *call
+sites* are pinned, not one import edge.
+
+`tests/v2-07l-execution-lease.test.ts:1195` already owns the instrument:
+`productionImportersOf` scans every file under `src/` and catches a named
+import, a namespace import, a dynamic import and a re-export. Copy it into this
+suite with its module pattern retargeted from `block-(store|progress)` to
+`block-dependencies` — copied rather than shared, because a helper shared
+between two suites is a helper neither can retarget.
+
+Append:
+
+```ts
+import { readdirSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+function sourceFiles(directory = join(PACKAGE_ROOT, 'src')): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory()
+      ? sourceFiles(join(directory, entry.name))
+      : entry.name.endsWith('.ts')
+        ? [join(directory, entry.name)]
+        : [],
+  );
+}
+
+/** Every production module that can reach `projectBlockDependencies` statically. */
+function projectionCallSites(): string[] {
+  const declaring = join(PACKAGE_ROOT, 'src', 'block', 'block-dependencies.ts');
+  const reached: string[] = [];
+  for (const file of sourceFiles()) {
+    if (file === declaring) continue;
+    const text = readFileSync(file, 'utf8');
+    const namesTheModule = /['"][^'"]*block-dependencies\.js['"]/.test(text);
+    const named =
+      namesTheModule &&
+      /import[\s\S]{0,400}?\{[\s\S]{0,400}?\bprojectBlockDependencies\b[\s\S]{0,400}?\}/.test(text);
+    const indirect =
+      namesTheModule &&
+      (/import\s*\*\s*as\s+\w+/.test(text) ||
+        /import\s*\(/.test(text) ||
+        /export\s*(\*|\{[^}]*\})\s*from/.test(text));
+    if (named || indirect) reached.push(relative(PACKAGE_ROOT, file));
+  }
+  return reached.sort();
+}
+
+describe('the projection is computed at freeze time and nowhere else', () => {
+  it('is reachable from exactly one production module', () => {
+    // The freeze site, and nothing else. Not a style rule: a second caller is a
+    // second moment at which "may B continue after A?" could be answered, and
+    // the whole authority argument is that it is answered once, before the run,
+    // and then frozen.
+    //
+    // Until Task 11 lands this list is empty, which is also correct — nothing
+    // in src/ freezes a block yet. Change the expectation in the same commit
+    // that adds the caller, never afterwards.
+    expect(projectionCallSites()).toEqual([join('src', 'cli', 'block-command.ts')]);
+  });
+
+  it('is not reachable from the runner, by any route', () => {
+    // Stated separately from the list above, because this is the claim the
+    // runner's module header makes and a reader should be able to find it here
+    // under its own name.
+    expect(projectionCallSites()).not.toContain(join('src', 'block', 'block-runner.ts'));
+  });
+});
+```
+
+Until Task 11 exists the first expectation is `[]`. Write it as `[]` now and
+change it to the CLI path **in Task 11's commit**, so gaining a caller is a
+visible decision rather than a test edited to match.
+
+- [ ] **Step 5: Run the test**
 
 Run: `npx vitest run tests/v2-08-attended-block-runner.test.ts`
 Expected: PASS.
 
 `npm run typecheck` still fails at the three Task 3 call sites. That is expected and is not this task's to fix.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/block/block-dependencies.ts tests/v2-08-attended-block-runner.test.ts
@@ -755,9 +897,11 @@ members at the end.
 An unknown member is refused rather than projected as an empty row: "independent
 of everything" is the worst possible answer about a task nobody can find.
 
-Called at freeze time and nowhere else. The runner must never import this
-module; a run that recomputed the relation would take its continuation
-authority from a roadmap an operator can edit mid-run.
+Called at freeze time and nowhere else, and that is pinned by the call sites
+rather than by one import edge - a helper importing the projection and a runner
+importing the helper would walk past an import check. A run that recomputed the
+relation would take its continuation authority from a roadmap an operator can
+edit mid-run.
 ```
 
 ---
@@ -1820,10 +1964,12 @@ describe('a run outcome decides what the ledger may be told', () => {
     EXECUTION_LEASE_LOST: 'LEASE_UNCERTAIN',
     // A task record exists and cannot be used. That is its own class-2 reason.
     STATE_UNUSABLE: 'STATE_UNUSABLE',
-    // Durable progress happened and the budget ran out: the one outcome that
-    // means "call again", and the one that must NOT end the block run — a stop
-    // is final, and writing one here would make the work unresumable.
-    STEP_BUDGET_EXHAUSTED: 'BUDGET_EXHAUSTED',
+    // Durable progress happened and the driver's per-call bound was reached.
+    // The one grade that is not an ending at all: the runner drives the same
+    // task again under the same lease. Graded any other way, a scheduling limit
+    // becomes a claim about a task's outcome — and graded as an ending of the
+    // invocation it would need a block run that outlives its lease holder.
+    STEP_BUDGET_EXHAUSTED: 'CONTINUE',
     // Everything else leaves the task's outcome undetermined. Each is a real
     // situation and none of them proves settle, park or abandon.
     STATE_DIVERGED: 'UNRESOLVED',
@@ -2023,14 +2169,21 @@ export const TASK_CONCLUSIONS = [
    */
   'LEASE_UNCERTAIN',
   /**
-   * Durable progress was made and the invocation's step budget ran out.
+   * The driver's own per-call step budget ran out, with durable progress made.
    *
-   * Deliberately **not** an ending. A stop reason is written once and a stopped
-   * run has no successor but itself, so recording one here would make work that
-   * is merely unfinished permanently unresumable. The invocation ends; the run
-   * stays open; the operator calls again.
+   * **Drive the same task again, under the same lease.** Not an ending of any
+   * kind: `maxSteps` bounds one `runTask` call so a driver cannot run away, and
+   * reaching it says nothing about the task's outcome. Graded as an ending it
+   * would turn a scheduling limit into `ACTIVE_TASK_UNRESOLVED`, a claim about a
+   * task; graded as an ending of the *invocation* it would need a block run
+   * that outlives its holder, which the lease guarantee does not allow.
+   *
+   * The continuation terminates: every `STEP_BUDGET_EXHAUSTED` carries durable
+   * progress by its own definition, the task's state machine is bounded by the
+   * repository's `maxReviewRounds`, and a continuation that lands zero durable
+   * steps is refused as unresolved rather than tried again.
    */
-  'BUDGET_EXHAUSTED',
+  'CONTINUE',
 ] as const;
 
 export type TaskConclusion = (typeof TASK_CONCLUSIONS)[number];
@@ -2060,7 +2213,7 @@ const CONCLUSION_FOR_RUN_OUTCOME = Object.freeze({
   // ledger has a reason for exactly that.
   STATE_UNUSABLE: 'STATE_UNUSABLE',
 
-  STEP_BUDGET_EXHAUSTED: 'BUDGET_EXHAUSTED',
+  STEP_BUDGET_EXHAUSTED: 'CONTINUE',
 
   // Everything left. None of these proves settle, park or abandon, and none of
   // them is improved by trying again inside this invocation:
@@ -2224,12 +2377,15 @@ probe member and watching typecheck fail in this file. That is completeness and
 it is all a type can do; the grades are pinned by hand-written tables in the
 suite, deliberately not derived from these maps.
 
-Two grades are worth naming. STEP_BUDGET_EXHAUSTED is not an ending: a stop
-reason is written once and a stopped run has no successor but itself, so
-recording one would make merely-unfinished work permanently unresumable. And
-independence is answered for the whole block rather than per pair, because
-"these two are unrelated, run them and skip the rest" is the improvised
-scheduling this slice refuses.
+Two grades are worth naming. STEP_BUDGET_EXHAUSTED is not an ending of any kind
+but an instruction to drive the same task again under the same lease: maxSteps
+bounds one runTask call so a driver cannot run away, and it says nothing about
+a task's outcome. Graded as an ending it would make a scheduling limit into a
+claim about a task, and graded as an ending of the invocation it would need a
+block run that outlives the lease that authorised it. And independence is
+answered for the whole block rather than per pair, because "these two are
+unrelated, run them and skip the rest" is the improvised scheduling this slice
+refuses.
 ```
 
 ---
@@ -2329,6 +2485,19 @@ function drivingSeams() {
   return { agent: agent.runner, verify: verify.runner, agentCalls: agent };
 }
 
+/**
+ * The eligible task ids as the repository states them now.
+ *
+ * The caller's single reading, exactly as `block-command.ts` takes it: the
+ * runner imports no planner, so a suite that wants a snapshot has to produce
+ * one the same way production does.
+ */
+function eligibleNow(fixture: Fixture): readonly string[] {
+  const planned = planNextTask(fixture.repository);
+  if (!planned.ok) throw new Error(`fixture repository does not plan: ${planned.code}`);
+  return planned.selection.eligibility.filter((entry) => entry.eligible).map((entry) => entry.taskId);
+}
+
 async function runBlock(
   fixture: Fixture,
   definition = independentBlock(['A-001', 'B-001']),
@@ -2342,6 +2511,7 @@ async function runBlock(
       runId: RUN_ID,
       lease: leaseFor(fixture.repository),
       maxStepsPerTask: 8,
+      eligibleTaskIds: eligibleNow(fixture),
     },
     {
       now: tickingClock(),
@@ -2388,6 +2558,7 @@ describe('the attended block runner', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
+        eligibleTaskIds: eligibleNow(fixture),
       },
       {
         now: tickingClock(),
@@ -2434,6 +2605,7 @@ describe('the attended block runner', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
+        eligibleTaskIds: eligibleNow(fixture),
       },
       {
         now: tickingClock(),
@@ -2480,6 +2652,7 @@ describe('the attended block runner', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
+        eligibleTaskIds: eligibleNow(fixture),
       },
       {
         now: tickingClock(),
@@ -2620,9 +2793,8 @@ import type { AgentRunner } from '../agent/agent-command.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
-import { planNextTask } from '../plan/plan-next-task.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
-import { runTask, type RunOutcome } from '../run/run-driver.js';
+import { runTask, type RunOutcome, type RunResult } from '../run/run-driver.js';
 import { startTask } from '../run/start-task.js';
 import type { ReplaceFn, TempSuffixFn } from '../state/atomic-file.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
@@ -2634,7 +2806,7 @@ import {
   recordingResultFor,
   startConclusionFor,
 } from './block-conclusion.js';
-import { fingerprintBlockDefinition, type BlockDefinition } from './block-definition.js';
+import type { BlockDefinition } from './block-definition.js';
 import {
   entryFor,
   type BlockRunLedger,
@@ -2658,14 +2830,6 @@ import { reconcileBlockRun } from './reconcile-block.js';
 export const BLOCK_RUN_OUTCOMES = [
   /** The ledger carries the ending. {@link AttendedBlockResult.stopReason} says which. */
   'BLOCK_RUN_ENDED',
-  /**
-   * Durable progress was made and this invocation's budget ran out.
-   *
-   * The run stays **open**: no stop reason is written, the ledger says which
-   * task is still `ACTIVE`, and a further invocation under the same run id
-   * picks it up. The one outcome that means "call again".
-   */
-  'STEP_BUDGET_EXHAUSTED',
   /** This run may no longer be the repository's writer. Nothing was written. */
   'LEASE_AUTHORITY_UNCERTAIN',
   /** A durable write was not possible. Nothing was written. */
@@ -2723,8 +2887,31 @@ export interface AttendedBlockRequest {
    * tasks that an execution lease exists to close.
    */
   readonly lease: ExecutionLeaseEvidence;
-  /** The bound on durable steps per task, forwarded to `runTask`. */
+  /**
+   * The bound on durable steps per **one `runTask` call**, forwarded as-is.
+   *
+   * Not a bound on the task and not a bound on the run. Reaching it means the
+   * driver stopped after durable progress, and the runner drives the same task
+   * again under the same lease — see `TASK_CONCLUSIONS`' `CONTINUE`.
+   */
   readonly maxStepsPerTask: number;
+  /**
+   * The eligible task ids, as the caller's **one** reading of the roadmap saw
+   * them.
+   *
+   * Handed in rather than computed, and that is what makes "the runner does not
+   * re-read the plan" structural instead of disciplinary: this module imports
+   * no planner at all, so there is no moment at which a mid-run edit could
+   * change which task runs next. The caller takes this from the same
+   * `planNextTask` result it projected the frozen relation from, so the two are
+   * one snapshot at one instant.
+   *
+   * It can only ever narrow what runs. A caller that widened it — claiming a
+   * task eligible that the repository says is not — gains nothing: `startTask`
+   * asks the planner again and answers `TASK_INELIGIBLE`, which is a gate
+   * refusal that writes nothing.
+   */
+  readonly eligibleTaskIds: readonly string[];
 }
 
 export interface AttendedBlockDependencies {
@@ -2774,17 +2961,13 @@ export async function runAttendedBlock(
   if (evidence === null) return state.gateRefused('AUTH_PREFLIGHT_FAILED');
 
   const opened = openRun(request, deps.now, ledgerOptions);
-  if (opened.kind === 'ENDED' || opened.kind === 'STOPPED') return state.from(opened);
-  if (opened.kind === 'DRIFTED') {
-    // The plan this invocation froze is not the plan the run was started
-    // against. Recordable — the reason claims no progress — so it ends in the
-    // ledger, and nothing is driven first.
-    state.seen(opened.ledger.ledger);
-    return state.stop(opened.ledger, 'DEFINITION_DRIFTED', ledgerOptions);
-  }
+  if (opened.kind !== 'OPEN') return state.from(opened);
 
   let current = opened.ledger;
   state.seen(current.ledger);
+
+  // The eligibility snapshot, read once by the caller and not re-read here.
+  const eligible = new Set(request.eligibleTaskIds);
 
   for (;;) {
     // The lease, re-proved every iteration rather than trusted once. A step is
@@ -2805,8 +2988,7 @@ export async function runAttendedBlock(
     current = reconciled.ledger;
     state.seen(current.ledger);
 
-    const next = chooseTask(current.ledger, repository);
-    if (next.kind === 'GATE_REFUSED') return state.gateRefused(next.detail);
+    const next = chooseTask(current.ledger, eligible);
     if (next.kind === 'NONE') {
       return state.stop(current, endReasonFor(current.ledger.tasks), ledgerOptions);
     }
@@ -2847,7 +3029,6 @@ Then, in the same file, the vocabulary of a step and the helpers the loop names:
  */
 type RunStep =
   | { readonly kind: 'OPEN'; readonly ledger: LedgerLoadSuccess }
-  | { readonly kind: 'DRIFTED'; readonly ledger: LedgerLoadSuccess }
   | {
       readonly kind: 'STOPPED';
       readonly reason: BlockStopReason;
@@ -2863,20 +3044,8 @@ type RunStep =
 /** The two kinds that mean the run is over, however it got there. */
 type FinishedStep = Extract<RunStep, { kind: 'STOPPED' } | { kind: 'ENDED' }>;
 
-type OpenStep = Extract<RunStep, { kind: 'OPEN' }>;
-
-/**
- * What a helper below returns: the run continues, or it is over.
- *
- * Narrower than `RunStep` by exactly `DRIFTED`, and the difference is
- * load-bearing rather than tidy: drift is answered once, when a run is opened,
- * and a helper that could return it would be a helper able to re-answer it
- * mid-run — which is the authority inversion this module is built to avoid.
- */
-type StepResult = OpenStep | FinishedStep;
-
 interface DrivenStep {
-  readonly step: StepResult;
+  readonly step: RunStep;
   /** The driver's answer, when it got as far as driving. */
   readonly runOutcome: RunOutcome | null;
   readonly steps: number;
@@ -2884,8 +3053,7 @@ interface DrivenStep {
 
 type TaskChoice =
   | { readonly kind: 'TASK'; readonly taskId: string }
-  | { readonly kind: 'NONE' }
-  | { readonly kind: 'GATE_REFUSED'; readonly detail: string };
+  | { readonly kind: 'NONE' };
 
 const ended = (outcome: BlockRunOutcome, detail: string | null): FinishedStep =>
   Object.freeze({ kind: 'ENDED' as const, outcome, detail });
@@ -2962,10 +3130,6 @@ class RunState {
     return this.result('DURABLE_WRITE_FAILED', null, detail);
   }
 
-  budgetExhausted(): AttendedBlockResult {
-    return this.result('STEP_BUDGET_EXHAUSTED', null, null);
-  }
-
   /** A finished step, rendered. Never called with an open or drifted one. */
   from(step: FinishedStep): AttendedBlockResult {
     if (step.kind === 'STOPPED') {
@@ -2999,17 +3163,25 @@ class RunState {
 /* ─────────────────────────────── opening ─────────────────────────────────── */
 
 /**
- * Creates the first ledger of this run, or resumes the one already there.
+ * Creates the ledger of this run. There is **no resume**.
  *
- * Drift is answered here, and only here. The caller froze a definition from the
- * repository as it is *now*; if a persisted run carries a different fingerprint,
- * the roadmap this run was started against is not the one in front of us. That
- * is recordable — `DEFINITION_DRIFTED` claims no progress — so the caller ends
- * the run in the ledger rather than in the report.
+ * A block run's lifetime is its invocation's lifetime, because the lease
+ * guarantee is stated over a whole block run: an open run that outlived the
+ * process holding its lease would be a durable run with no holder, and the only
+ * ways to avoid that are to leave a lease behind — the stale-lease surface this
+ * slice may not reopen — or to let a later invocation adopt a run it never
+ * started.
  *
- * A ledger that exists and cannot be *read* ends the run in the report instead:
- * a document this build cannot load is a document it must not write either, so
- * there is nowhere honest to record the condition.
+ * So `startBlockRun`'s existing refusal *is* the answer: a run id that already
+ * has a ledger belongs to an invocation that is over, whether it stopped
+ * cleanly or was interrupted, and that record is not overwritten. An operator
+ * continues by starting a new run id.
+ *
+ * One consequence, stated because it removes a reason from this runner's reach:
+ * `DEFINITION_DRIFTED` has no producer here. Drift compares a frozen plan with a
+ * current one, and inside a single invocation the ledger is created from the
+ * plan the caller just froze. `reconcileBlockRun` still reports it to a caller
+ * that supplies a definition.
  */
 function openRun(
   request: AttendedBlockRequest,
@@ -3017,22 +3189,6 @@ function openRun(
   options: BlockProgressOptions,
 ): RunStep {
   const { repository, definition, runId } = request;
-
-  const loaded = loadBlockLedger(repository.root, runId);
-  if (loaded.ok) {
-    if (loaded.ledger.stopReason !== null) {
-      // A stopped run has no successor but itself. Reported rather than
-      // silently restarted: the operator asked to continue a run that is over,
-      // and starting a fresh one under their run id would destroy its record.
-      return ended('RUN_GATE_REFUSED', 'RUN_ALREADY_STOPPED');
-    }
-    if (loaded.ledger.planFingerprint !== fingerprintBlockDefinition(definition)) {
-      return Object.freeze({ kind: 'DRIFTED' as const, ledger: loaded });
-    }
-    return Object.freeze({ kind: 'OPEN' as const, ledger: loaded });
-  }
-
-  if (loaded.code !== 'LEDGER_MISSING') return ended('RUN_GATE_REFUSED', loaded.code);
 
   const created = startBlockRun(
     {
@@ -3045,9 +3201,19 @@ function openRun(
     options,
   );
   if (!created.ok) {
-    // The first durable write of the run. Failing it is exactly the condition
-    // `DURABLE_WRITE_FAILED` names, and there is no ledger to record it in.
-    return ended('DURABLE_WRITE_FAILED', created.detail === null ? created.code : `${created.code}:${created.detail}`);
+    const detail = created.detail === null ? created.code : `${created.code}:${created.detail}`;
+    // A write that could not be made is the condition `DURABLE_WRITE_FAILED`
+    // names, and there is no ledger to record it in.
+    if (created.code === 'WRITE_FAILED' || created.code === 'DIRECTORY_CREATE_FAILED') {
+      return ended('DURABLE_WRITE_FAILED', detail);
+    }
+    // Everything else is a gate: this run id already has a record, or the
+    // document does not name this checkout. Reported under the run id's own
+    // token, because "that id is taken" is what the operator has to act on.
+    return ended(
+      'RUN_GATE_REFUSED',
+      created.code === 'LEDGER_CONFLICT' ? 'RUN_ID_ALREADY_USED' : detail,
+    );
   }
 
   const reloaded = loadBlockLedger(repository.root, runId);
@@ -3100,7 +3266,7 @@ function applyForcedProgress(
   current: LedgerLoadSuccess,
   repositoryRoot: string,
   options: BlockProgressOptions,
-): StepResult {
+): RunStep {
   let ledger = current;
 
   for (;;) {
@@ -3135,36 +3301,29 @@ function applyForcedProgress(
 /* ───────────────────────────── choosing a task ───────────────────────────── */
 
 /**
- * The next task to drive, or why there is not one.
+ * The next task to drive, or that there is not one.
  *
- * An `ACTIVE` member comes first: that is a resume, and re-driving a task the
- * ledger already holds needs no ledger write at all — which is what lets an
- * interrupted invocation continue under the same run id.
+ * The candidates are the `PLANNED` members, in frozen order, filtered by the
+ * **snapshot** of the repository's own eligibility report that the caller took
+ * before the run. Two properties, and both are deliberate:
  *
- * Otherwise the candidates are the `PLANNED` members, in frozen order, filtered
- * by the repository's **own** eligibility report. That filter is the
- * external-blocker question and it is deliberately not answered from
- * `frozenDependencies`: a member with no frozen block-member dependency may
- * still be waiting on a non-member, and a runner reading "no frozen edge" as
- * "eligible" would start a task the repository says cannot run.
+ * The filter is not answered from `frozenDependencies`. A member with no frozen
+ * block-member dependency may still be waiting on a non-member, and a runner
+ * reading "no frozen edge" as "eligible" would start a task the repository says
+ * cannot run. The frozen relation answers independence; the planner answers
+ * eligibility; folding either into the other loses one of the two.
+ *
+ * And it is a snapshot rather than a fresh reading. This module imports no
+ * planner, so there is no moment at which an edited roadmap could change which
+ * task runs next — the invocation acts on the plan as it was when the operator
+ * asked for it, which is the same instant the relation was frozen at.
+ *
+ * There is no `ACTIVE` arm, and there cannot be one: a task becomes `ACTIVE`
+ * only when this loop activates it, and it is concluded before the next
+ * iteration. An `ACTIVE` entry at the top of an iteration would mean a resumed
+ * run, which this runner does not have.
  */
-function chooseTask(ledger: BlockRunLedger, repository: ResolvedRepository): TaskChoice {
-  if (ledger.activeTaskId !== null) {
-    return Object.freeze({ kind: 'TASK' as const, taskId: ledger.activeTaskId });
-  }
-
-  const planned = planNextTask(repository);
-  if (!planned.ok) {
-    // The repository's plan cannot be read. Not task progress and not something
-    // the ledger has a reason for: a run abort, reported with the planner's own
-    // code as its detail.
-    return Object.freeze({ kind: 'GATE_REFUSED' as const, detail: planned.code });
-  }
-
-  const eligible = new Set(
-    planned.selection.eligibility.filter((entry) => entry.eligible).map((entry) => entry.taskId),
-  );
-
+function chooseTask(ledger: BlockRunLedger, eligible: ReadonlySet<string>): TaskChoice {
   for (const entry of ledger.tasks) {
     if (entry.disposition !== 'PLANNED') continue;
     if (!eligible.has(entry.taskId)) continue;
@@ -3232,39 +3391,64 @@ async function driveOneTask(
     ledger = reloaded;
   }
 
-  const run = await runTask(
-    {
-      repository,
-      taskId,
-      // The task id, which is all this module legitimately has. The prose the
-      // agents receive is read inside the driver, from the worktree it
-      // authorised, so nothing here authors a prompt.
-      taskBrief: taskId,
-      attendedContinuation: true,
-      authEvidence: evidence,
-      lease,
-      maxSteps: maxStepsPerTask,
-    },
-    {
-      now: deps.now,
-      git: deps.git,
-      ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
-      ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
-      ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
-      ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
-    },
-  );
+  const drive = (): Promise<RunResult> =>
+    runTask(
+      {
+        repository,
+        taskId,
+        // The task id, which is all this module legitimately has. The prose the
+        // agents receive is read inside the driver, from the worktree it
+        // authorised, so nothing here authors a prompt.
+        taskBrief: taskId,
+        attendedContinuation: true,
+        authEvidence: evidence,
+        lease,
+        maxSteps: maxStepsPerTask,
+      },
+      {
+        now: deps.now,
+        git: deps.git,
+        ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
+        ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
+        ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
+        ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
+      },
+    );
 
-  const driven = (step: RunStep): DrivenStep => ({ step, runOutcome: run.outcome, steps: run.steps });
-  const conclusion = conclusionForRunOutcome(run.outcome);
+  // The drive, continued under the same lease for as long as the *driver's* own
+  // per-call bound is what stopped it. `maxSteps` exists so one `runTask` call
+  // cannot run away; it is not a statement about the task, and the block run
+  // may not end on it — a run that ended here would either misdescribe a
+  // scheduling limit as a task-outcome claim or need to outlive its lease.
+  let run = await drive();
+  let steps = run.steps;
+  let conclusion = conclusionForRunOutcome(run.outcome);
+
+  while (conclusion === 'CONTINUE') {
+    // A continuation that landed nothing would repeat itself for ever, and the
+    // task's outcome is then genuinely not established. This is the floor that
+    // makes the loop terminate without a counter nobody can justify: every
+    // other continuation carries durable progress, and the task's own state
+    // machine is bounded by the repository's `maxReviewRounds`.
+    if (run.steps === 0) {
+      return { step: stopStep(ledger, 'ACTIVE_TASK_UNRESOLVED', options), runOutcome: run.outcome, steps };
+    }
+    // The lease, between continuations too. The call that just returned was
+    // minutes of subprocess, and a lease taken before it is not a lease held
+    // after it.
+    const stillHeld = verifyExecutionLeaseHeldFor(repository, lease);
+    if (stillHeld.code !== 'HELD') {
+      return { step: ended('LEASE_AUTHORITY_UNCERTAIN', stillHeld.code), runOutcome: run.outcome, steps };
+    }
+    run = await drive();
+    steps += run.steps;
+    conclusion = conclusionForRunOutcome(run.outcome);
+  }
+
+  const driven = (step: RunStep): DrivenStep => ({ step, runOutcome: run.outcome, steps });
 
   if (conclusion === 'LEASE_UNCERTAIN') {
     return driven(ended('LEASE_AUTHORITY_UNCERTAIN', run.outcome));
-  }
-  if (conclusion === 'BUDGET_EXHAUSTED') {
-    // No stop reason. The run stays open on an ACTIVE task, which is what
-    // actually happened, and a further invocation continues it.
-    return driven(ended('STEP_BUDGET_EXHAUSTED', null));
   }
   if (conclusion === 'STATE_UNUSABLE') {
     return driven(stopStep(ledger, 'STATE_UNUSABLE', options));
@@ -3287,7 +3471,7 @@ async function driveOneTask(
 
   const reloaded = loadBlockLedger(repository.root, ledger.ledger.runId);
   if (!reloaded.ok) return driven(ended('RUN_GATE_REFUSED', reloaded.code));
-  return { step: Object.freeze({ kind: 'OPEN' as const, ledger: reloaded }), runOutcome: run.outcome, steps: run.steps };
+  return { step: Object.freeze({ kind: 'OPEN' as const, ledger: reloaded }), runOutcome: run.outcome, steps };
 }
 
 /**
@@ -3317,7 +3501,127 @@ the one duplicated branch is deliberate. The alternative — a helper that retur
 where an ending is decided and never recorded.
 
 
-- [ ] **Step 5: Run the tests**
+- [ ] **Step 5: Write the lifetime controls**
+
+Three cases the lifetime decision needs, and none of them is implied by the
+four above. Append:
+
+```ts
+describe('the invocation absorbs the driver’s budget rather than ending on it', () => {
+  it('drives the same task again when only the per-call bound was reached', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    // maxStepsPerTask of 1 makes the driver stop after its first durable write
+    // on every call, so a task that needs several reaches STEP_BUDGET_EXHAUSTED
+    // repeatedly — the exact condition that used to end the invocation.
+    const seams = drivingSeams();
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001']),
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 1,
+        eligibleTaskIds: eligibleNow(fixture),
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: seams.agent,
+        verify: seams.verify,
+      },
+    );
+
+    // The block still finishes, under one lease, in one invocation.
+    expect(result.outcome).toBe('BLOCK_RUN_ENDED');
+    expect(result.stopReason).toBe('COMPLETE');
+    // And a scheduling limit never became a claim about a task.
+    expect(result.stopReason).not.toBe('ACTIVE_TASK_UNRESOLVED');
+    expect(onDisk(fixture.root)['stopReason']).toBe('COMPLETE');
+    // The bound really was reached, or this case proves nothing: several
+    // durable steps landed for a budget of one per call.
+    expect(result.steps).toBeGreaterThan(2);
+  }, 900_000);
+
+  it('is not a block-run outcome at all', () => {
+    // The vocabulary itself, so a future edit that reintroduces the outcome
+    // fails here rather than in a behaviour case somebody may not run.
+    expect([...BLOCK_RUN_OUTCOMES]).not.toContain('STEP_BUDGET_EXHAUSTED');
+  });
+});
+
+describe('the invocation acts on the plan as it was when it opened', () => {
+  it('does not let a mid-run roadmap edit change what runs next', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const snapshot = eligibleNow(fixture);
+    const seams = drivingSeams();
+    let edited = false;
+    const agent = recordedAgent({
+      claude: () => {
+        if (!edited) {
+          edited = true;
+          // B-001 gains a dependency on a task that is not DONE, so a runner
+          // that re-read the roadmap would find it ineligible and end the run
+          // NO_ELIGIBLE_TASK instead of driving it.
+          writeRepoFile(fixture.root, 'tasks/GATE-001.md', taskFile('GATE-001'));
+          writeRepoFile(fixture.root, 'tasks/B-001.md', taskFile('B-001', { dependsOn: ['GATE-001'] }));
+        }
+        return writerSuccess();
+      },
+      codex: () => reviewResult(passingReview()),
+    });
+
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001']),
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 8,
+        eligibleTaskIds: snapshot,
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: seams.verify,
+      },
+    );
+
+    // The premise: the edit really did change what the planner would say.
+    expect(eligibleNow(fixture)).not.toEqual(snapshot);
+    // And the run acted on the snapshot regardless.
+    expect(result.stopReason).toBe('COMPLETE');
+    expect((onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[])
+      .map((task) => task['disposition'])).toEqual(['SETTLED', 'SETTLED']);
+  }, 900_000);
+});
+
+describe('a run id is used once', () => {
+  it('refuses a second invocation of the same run id rather than continuing it', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const first = await runBlock(fixture);
+    expect(first.stopReason).toBe('COMPLETE');
+    const after = readFileSync(ledgerPath(fixture.root));
+
+    const second = await runBlock(fixture);
+
+    // A block run's lifetime is its invocation's lifetime, so there is nothing
+    // to continue — and the record of what the first one did is not overwritten.
+    expect(second.outcome).toBe('RUN_GATE_REFUSED');
+    expect(second.detail).toBe('RUN_ID_ALREADY_USED');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(after)).toBe(true);
+  }, 900_000);
+});
+```
+
+The first case needs a task that takes more than one durable step to finish,
+which `drivingSeams` already produces — the writer/verify/review cycle is
+several transitions. If it turns out to complete in one, raise the review round
+count in the fixture profile rather than asserting a weaker `steps` bound.
+
+- [ ] **Step 6: Run the tests**
 
 Run: `npx vitest run tests/v2-08-attended-block-runner.test.ts`
 Expected: PASS. These cases start real worktrees and drive real state machines; the timeouts above are deliberate.
@@ -3325,17 +3629,51 @@ Expected: PASS. These cases start real worktrees and drive real state machines; 
 Run: `npm run typecheck`
 Expected: clean.
 
-- [ ] **Step 6: Prove the runner does not compute the relation**
+- [ ] **Step 7: Close the importer pin this task deliberately breaks**
+
+`tests/v2-07l-execution-lease.test.ts:1240` asserts that **no** production
+module imports `block-progress.ts`'s six mutating functions, and its own comment
+says why: *"this fails the moment a runner appears, and closing it means
+threading the lease through that runner rather than editing this list."* Task 7
+is that runner, so the pin fails here by design.
+
+Close it the way the comment demands — the lease is already threaded through
+`AttendedBlockRequest.lease` and re-proved every iteration — and then name the
+new importer:
+
+```ts
+    expect(
+      productionImportersOf([
+        'startBlockRun',
+        'activateBlockTask',
+        'settleBlockTask',
+        'parkBlockTask',
+        'abandonBlockTask',
+        'stopBlockRun',
+      ]),
+    ).toEqual([join('src', 'block', 'block-runner.ts')]);
+```
+
+and rewrite the comment above it so it describes what is now true: the block
+layer has exactly one productive caller, it holds a lease across the whole block
+run, and a second caller is still a decision that breaks the build.
+
+Run: `npx vitest run tests/v2-07l-execution-lease.test.ts`
+Expected: PASS. If the pin reports a *second* importer, something reached the
+progress layer from outside the runner — the CLI, a renderer, a helper — and the
+fix is to route it through the runner, never to lengthen the list.
+
+- [ ] **Step 8: Prove the runner does not compute the relation**
 
 Run: `git grep -n "block-dependencies" -- src/`
 Expected: exactly one match, in `src/cli/block-command.ts` once Task 11 lands — and **none** in `src/block/block-runner.ts`. Until then, no match in `src/` at all.
 
 This is the structural form of the rule. It is checked with a grep rather than a test because the property is "this module does not depend on that one", which a runtime assertion cannot see.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/block/block-runner.ts src/block/block-conclusion.ts tests/v2-08-attended-block-runner.test.ts
+git add src/block/block-runner.ts src/block/block-conclusion.ts tests/v2-08-attended-block-runner.test.ts tests/v2-07l-execution-lease.test.ts
 git commit
 ```
 
@@ -3361,8 +3699,19 @@ cost is stated rather than hidden - drift is answered when an invocation opens
 a run, not between tasks, so a mid-run roadmap edit waits for the next
 invocation.
 
-The lease is re-proved every iteration. A step is a subprocess that took
-minutes, and a lease taken before it is not a lease held after it.
+The lease is re-proved every iteration, and between continuations of one task
+too. A step is a subprocess that took minutes, and a lease taken before it is
+not a lease held after it.
+
+A block run's lifetime is its invocation's lifetime. There is no resume: the
+lease guarantee is stated over a whole block run, so an open run that outlived
+its holder would need a lease left behind or a later process adopting a run it
+never started. The driver's step budget is absorbed - the same task is driven
+again under the same lease - because ending on it would either misdescribe a
+scheduling limit as a claim about a task or need exactly that outliving run.
+This closes the block-progress importer pin in v2-07l, whose comment asked for
+the lease to be threaded through the runner rather than for the list to be
+edited.
 ```
 
 ---
@@ -3416,6 +3765,7 @@ async function runWithHookAfterFirstTask(
       runId: RUN_ID,
       lease: leaseFor(fixture.repository),
       maxStepsPerTask: 8,
+      eligibleTaskIds: eligibleNow(fixture),
     },
     {
       now: tickingClock(),
@@ -3457,25 +3807,22 @@ describe('each class-2 condition ends the run under its own name', () => {
     expect(dispositions.slice(1)).toEqual(['PLANNED', 'PLANNED']);
   }, 900_000);
 
-  it('DEFINITION_DRIFTED — the frozen plan is not the plan in front of us', async () => {
-    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
-    startRun(fixture);
-
-    // A second invocation under the same run id, freezing a plan with an edge
-    // the first did not have. Same blockId, same taskIds.
-    const drifted = defineBlock(BLOCK_ID, ['A-001', 'B-001'], [
-      { taskId: 'A-001', dependsOn: [] },
-      { taskId: 'B-001', dependsOn: ['A-001'] },
-    ]);
-    if (!drifted.ok) throw new Error('fixture block is not a block');
-
-    const result = await runBlock(fixture, drifted.definition);
-
-    expect(result.stopReason).toBe('DEFINITION_DRIFTED');
-    expect(onDisk(fixture.root)['stopReason']).toBe('DEFINITION_DRIFTED');
-    // Nothing was driven. Drift is answered before any task is started.
-    expect(result.steps).toBe(0);
-  }, 600_000);
+  it('names the two reasons this runner cannot produce, rather than pretending', () => {
+    // `DEFINITION_DRIFTED` compares a frozen plan with a current one, and a block
+    // run does not outlive its invocation — so there is never a persisted
+    // predecessor to compare against, and the reason has no producer here.
+    // `OPERATOR_STOPPED` has none either: this runner installs no signal
+    // handling.
+    //
+    // Asserted rather than left implicit, and asserted on the *runner* rather
+    // than on the vocabulary: both reasons are V2-07's, both stay graded in the
+    // exit table, and `reconcileBlockRun` still reports drift to a caller that
+    // supplies a definition. What must not happen is a later reader taking the
+    // "one case per reason" rule above to mean these two were covered.
+    expect(BLOCK_STOP_REASONS).toContain('DEFINITION_DRIFTED');
+    expect(BLOCK_STOP_REASONS).toContain('OPERATOR_STOPPED');
+    expect(UNPRODUCED_BY_THIS_RUNNER).toEqual(['DEFINITION_DRIFTED', 'OPERATOR_STOPPED']);
+  });
 
   it('ACTIVE_TASK_UNRESOLVED — the active task’s outcome cannot be established', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
@@ -3499,6 +3846,7 @@ describe('each class-2 condition ends the run under its own name', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
+        eligibleTaskIds: eligibleNow(fixture),
       },
       {
         now: tickingClock(),
@@ -3563,7 +3911,21 @@ describe('a no-write outcome leaves the ledger byte-identical', () => {
 });
 ```
 
-Add the three fixture helpers, each of which produces its condition through a real file rather than a stub:
+and the list the case above holds itself to, written beside the cases so it
+cannot drift from them:
+
+```ts
+/**
+ * The persisted reasons `runAttendedBlock` cannot reach, and why.
+ *
+ * A list rather than a comment, because "we decided not to cover these" and "we
+ * forgot to cover these" look identical in a suite otherwise organised as one
+ * case per reason. Every other member of `BLOCK_STOP_REASONS` has a case above.
+ */
+const UNPRODUCED_BY_THIS_RUNNER = ['DEFINITION_DRIFTED', 'OPERATOR_STOPPED'] as const;
+```
+
+Add the fixture helpers, each of which produces its condition through a real file rather than a stub:
 
 ```ts
 /** A `SETTLED` entry for a task that never finished. A hand-edit, as on disk. */
@@ -3820,9 +4182,9 @@ Append to `tests/v2-08-attended-block-runner.test.ts`:
 describe('positive reconciliation is applied only where it is forced', () => {
   it('recognises a PLANNED task that already finished, through the primitive', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
-    startRun(fixture);
-    // B-001 reaches READY_FOR_PR outside this run — a real state, driven the
-    // way the suite drives every other one.
+    // B-001 reaches READY_FOR_PR before the run exists — a real state, driven
+    // the way the suite drives every other one. The ledger is created by the
+    // run itself: a block run does not adopt a ledger somebody else started.
     await reallyStart(fixture, 'B-001');
     driveToReadyForPr(fixture, 'B-001');
 
@@ -3839,24 +4201,39 @@ describe('positive reconciliation is applied only where it is forced', () => {
     expect(entries[1]?.['resultCommit']).not.toBeNull();
   }, 600_000);
 
-  it('changes nothing when applied twice', async () => {
+  it('terminates when every member is already finished, having driven nothing', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
-    startRun(fixture);
     await reallyStart(fixture, 'A-001');
     driveToReadyForPr(fixture, 'A-001');
     await reallyStart(fixture, 'B-001');
     driveToReadyForPr(fixture, 'B-001');
 
-    // Everything is already finished, so the whole run is one reconciliation.
-    const first = await runBlock(fixture);
-    expect(first.stopReason).toBe('COMPLETE');
+    // The whole run is reconciliation: two entries recognised, nothing driven.
+    // That the loop *ends* is the idempotence property doing its work — a
+    // reconciliation that re-applied itself would never stop finding progress.
+    const result = await runBlock(fixture);
+
+    expect(result.stopReason).toBe('COMPLETE');
+    expect(result.steps).toBe(0);
+    expect(result.tasks.every((task) => task.runOutcome === null)).toBe(true);
+  }, 600_000);
+
+  it('changes nothing when the same settlement is recorded twice', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+    expect(
+      settleBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('RECORDED');
     const after = readFileSync(ledgerPath(fixture.root));
 
-    // A second invocation under the same run id meets a stopped run and
-    // refuses; the bytes do not move.
-    const second = await runBlock(fixture);
-    expect(second.outcome).toBe('RUN_GATE_REFUSED');
-    expect(second.detail).toBe('RUN_ALREADY_STOPPED');
+    // Condition six, at the primitive that enforces it. Asserted on the bytes
+    // and not only on the outcome: "it answered DISPOSITION_UNCHANGED" is
+    // compatible with a write that changed a timestamp.
+    const again = settleBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+
+    expect(again.outcome).toBe('DISPOSITION_UNCHANGED');
     expect(readFileSync(ledgerPath(fixture.root)).equals(after)).toBe(true);
   }, 600_000);
 
@@ -3868,25 +4245,43 @@ describe('positive reconciliation is applied only where it is forced', () => {
     driveToReadyForPr(fixture, 'A-001');
     const before = readFileSync(ledgerPath(fixture.root));
 
-    // The task is ACTIVE and its record says READY_FOR_PR. Declaring it settled
-    // from a reconciliation would be choosing between "drive it" and "call it
-    // done", which is the moment the six conditions stop holding. It is driven
-    // instead, and the driver's answer decides.
-    const result = await runBlock(fixture);
+    // Asked of the function that draws the line, because the runner reaches
+    // this state only through its own activation and would conclude the task in
+    // the same iteration — the run-level path cannot hold the two apart.
+    //
+    // The entry is ACTIVE and the record says READY_FOR_PR. Declaring it
+    // settled from a reconciliation would be choosing between "drive it" and
+    // "call it done", which is the moment the six conditions stop holding.
+    const step = applyForcedProgress(reload(fixture.root), fixture.root, {
+      repositoryRoot: fixture.root,
+    });
 
+    expect(step.kind).toBe('OPEN');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+  }, 600_000);
+
+  it('applies the forced case at the same function, so the refusal above is not blanket', async () => {
+    // The control. Without it, an implementation that reconciles nothing at all
+    // passes the case above.
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+
+    const step = applyForcedProgress(reload(fixture.root), fixture.root, {
+      repositoryRoot: fixture.root,
+    });
+
+    expect(step.kind).toBe('OPEN');
     const entries = onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[];
     expect(entries[0]?.['disposition']).toBe('SETTLED');
-    // The proof that it was driven rather than reconciled: the run reports a
-    // driver outcome for it.
-    expect(result.tasks[0]?.runOutcome).toBe('TASK_COMPLETED');
-    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(false);
+    // Through the primitive, so it carries the evidence a direct write could
+    // not have produced.
+    expect(entries[0]?.['evidenceRevision']).not.toBeNull();
   }, 600_000);
 
   it('stops rather than choosing when the evidence supports no single successor', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
-    startRun(fixture, independentBlock(['A-001', 'B-001', 'C-001']));
-    await reallyStart(fixture, 'A-001');
-    activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
     // A second writer moves the task on mid-drive, so this run's own write is
     // refused and the task ends neither finished, nor blocked, nor aborted.
     // Nothing may be recorded for it, and there is no repair that is not a
@@ -3905,6 +4300,7 @@ describe('positive reconciliation is applied only where it is forced', () => {
         runId: RUN_ID,
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
+        eligibleTaskIds: eligibleNow(fixture),
       },
       {
         now: tickingClock(),
@@ -3947,15 +4343,36 @@ function driveToReadyForPr(fixture: Fixture, taskId: string): void {
 
 `driveToReadyForPr` is the same helper `tests/v2-07-block-ledger.test.ts:112` already uses; it is repeated here rather than shared, because a fixture shared between two suites is a fixture neither suite can change.
 
-- [ ] **Step 2: Run the tests**
+- [ ] **Step 2: Export the function the line lives in**
+
+In `src/block/block-runner.ts`, export `applyForcedProgress` and say why:
+
+```ts
+/**
+ * …
+ *
+ * Exported for one reason: the repair-versus-choice line is the whole of this
+ * slice's answer to "which positive reconciliations may be applied alone", and
+ * the runner reaches an `ACTIVE` entry only through its own activation — which
+ * it then concludes in the same iteration. So the run-level path cannot hold
+ * "applied because forced" and "refused because it would be a choice" apart,
+ * and a decision that cannot be inspected cannot be reviewed.
+ *
+ * It is not part of any consumer's API. `block-command.ts` calls
+ * `runAttendedBlock` and nothing else.
+ */
+export function applyForcedProgress(
+```
+
+- [ ] **Step 3: Run the tests**
 
 Run: `npx vitest run tests/v2-08-attended-block-runner.test.ts`
-Expected: PASS. A failure in the third case — an `ACTIVE` entry settled without a driver outcome — means `applyForcedProgress` is not restricted to `PLANNED` entries, which is the repair-versus-choice line.
+Expected: PASS. A failure in the ACTIVE case — the entry settled — means `applyForcedProgress` is not restricted to `PLANNED` entries, which is the repair-versus-choice line.
 
 Run: `npm run test:foundation-safe`
 Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add tests/v2-08-attended-block-runner.test.ts src/block/block-runner.ts
@@ -3976,9 +4393,14 @@ idempotent.
 
 The line that makes it a rule rather than a preference: an ACTIVE entry is not
 reconciled even when its record says READY_FOR_PR. That task is the run's own
-business, and choosing between "drive it" and "call it done" is a choice. It is
-driven, and the driver's answer decides - pinned by asserting that the report
-carries a driver outcome for it.
+business, and choosing between "drive it" and "call it done" is a choice.
+
+Pinned at applyForcedProgress rather than through a run, and the function is
+exported for that: the runner reaches an ACTIVE entry only through its own
+activation and concludes it in the same iteration, so the run-level path cannot
+hold "applied because forced" and "refused because it would be a choice" apart.
+Both directions are asserted, because a refusal case alone passes against an
+implementation that reconciles nothing.
 
 Where the evidence supports no single successor the block stops with
 ACTIVE_TASK_UNRESOLVED and invents nothing.
@@ -4060,8 +4482,17 @@ describe('the exit code says what an operator should do next', () => {
     expect(code('DURABLE_WRITE_FAILED', null)).toBe(EXIT_RUN_NEEDS_OPERATOR);
   });
 
-  it('is the only outcome that means call again', () => {
-    expect(code('STEP_BUDGET_EXHAUSTED', null)).toBe(EXIT_RUN_CALL_AGAIN);
+  it('never tells an operator to call again, because nothing would continue', () => {
+    // A block run does not outlive its invocation. Exit 5 means "everything is
+    // on disk, call again to continue", and there is nothing here that a second
+    // call would continue — the run id is spent.
+    const everyCode = [
+      ...BLOCK_STOP_REASONS.map((reason) => code('BLOCK_RUN_ENDED', reason)),
+      code('LEASE_AUTHORITY_UNCERTAIN', null),
+      code('DURABLE_WRITE_FAILED', null),
+      code('RUN_GATE_REFUSED', null),
+    ];
+    expect(everyCode).not.toContain(EXIT_RUN_CALL_AGAIN);
   });
 });
 
@@ -4179,6 +4610,12 @@ Append to `src/cli/run-exit-codes.ts`:
  *
  * `ACTIVE_TASK_UNRESOLVED` is 3 rather than 5. The run is over — a stop reason
  * is written once — so "call again" would be advice that cannot be taken.
+ *
+ * Nothing here exits 5 at all, and that is the lifetime decision showing
+ * through: a block run does not outlive its invocation, so there is no state in
+ * which calling again continues anything. `EXIT_RUN_CALL_AGAIN` stays what it
+ * is — `run --attended`'s answer for one task — and `block` simply never
+ * produces it.
  */
 const BLOCK_STOP_EXIT_CODES = Object.freeze({
   COMPLETE: EXIT_RUN_OK,
@@ -4193,7 +4630,6 @@ const BLOCK_STOP_EXIT_CODES = Object.freeze({
 }) satisfies Record<BlockStopReason, CliExitCode>;
 
 const BLOCK_OUTCOME_EXIT_CODES = Object.freeze({
-  STEP_BUDGET_EXHAUSTED: EXIT_RUN_CALL_AGAIN,
   LEASE_AUTHORITY_UNCERTAIN: EXIT_RUN_REFUSED,
   DURABLE_WRITE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
   RUN_GATE_REFUSED: EXIT_RUN_REFUSED,
@@ -4298,7 +4734,18 @@ if (!acquired.ok) {
 }
 try {
   const result = await runAttendedBlock(
-    { repository, definition: defined.definition, runId: options.run, lease: acquired.evidence, maxStepsPerTask: maxSteps },
+    {
+      repository,
+      definition: defined.definition,
+      runId: options.run,
+      lease: acquired.evidence,
+      maxStepsPerTask: maxSteps,
+      // The same `planned` the projection came from, so the frozen relation and
+      // the eligibility snapshot are one reading of the roadmap at one instant.
+      eligibleTaskIds: planned.selection.eligibility
+        .filter((entry) => entry.eligible)
+        .map((entry) => entry.taskId),
+    },
     {
       now: () => new Date().toISOString(),
       git: runGitCommand,
@@ -4407,16 +4854,51 @@ Add a `## The attended block runner (V2-08)` section to `README.md`, after the V
 - **the frozen dependency relation**: that `BlockDefinition` could not previously express independence at all, that the relation is the *transitive projection* over the whole normalised DAG, and the `A ← X ← B` case that makes a direct intra-block check unsound;
 - **cause beats consequence** for the end reason, and what `NO_ELIGIBLE_TASK` is now reserved for;
 - **schema version 2 and the refusal of version 1**, with no migration;
+- **a block run's lifetime is its invocation's lifetime**, and why: the lease
+  guarantee is stated over a whole block run, so a run that outlived its holder
+  would need either a lease left behind or a later process adopting a run it
+  never started. One run id, one invocation, one lease — and the driver's step
+  budget is absorbed rather than allowed to end the invocation;
 - **the scope lines**: attended only, sequential only, no commit chain, no dependency scheduler, no new platform or ownership surface.
 
 - [ ] **Step 2: Record what this slice carried forward**
 
 Add a `### Carried forward from V2-08, deliberately` block to the follow-up register (the "Carried forward, deliberately" convention at `README.md:2961` and `README.md:3645`):
 
-- **F-B1 — drift is answered when an invocation opens a run, not between tasks.** The runner is forbidden to project the dependency relation, so it cannot re-derive a current fingerprint mid-run; the comparison happens when a run is opened or resumed. A roadmap edited while an attended invocation is in flight is therefore noticed by the *next* invocation. Accepted: the alternative is a runner that recomputes the relation, which is the authority inversion the slice exists to prevent.
-- **F-B2 — `independenceIsEstablished` is all-or-nothing.** A block with any frozen edge degrades to V2-07's behaviour — stop at the first task-local failure — even where the remaining members happen to be mutually independent. Accepted: the finer answer is a dependency scheduler, and V2-09 owns it.
-- **F-B3 — `OPERATOR_STOPPED` has no producer.** The runner has no signal handling, so the reason stays in the vocabulary unproduced. Either a later slice gives it one or the member is withdrawn; it is not graded as reachable in the meantime.
-- **F-B4 — a member blocked only by a non-member ends the run `NO_ELIGIBLE_TASK`.** The frozen relation deliberately records nothing about non-members, so the block can be frozen while that member can never become eligible. That is the honest dead end rather than a defect, and it is why the reason is reserved rather than generic.
+- **F-B1 — an attended invocation acts on one snapshot of the roadmap.** The
+  frozen relation and the eligibility list are both taken at the moment the
+  operator asked, and the runner imports no planner, so a roadmap edited while
+  the invocation is in flight changes neither what runs next nor what counts as
+  independent. Accepted deliberately: the alternative is a runner that re-reads
+  the plan, and the version of that which re-derives the relation is the
+  authority inversion the whole slice exists to prevent. The edit is seen by the
+  next invocation.
+- **F-B2 — `independenceIsEstablished` is all-or-nothing.** A block with any
+  frozen edge degrades to V2-07's behaviour — stop at the first task-local
+  failure — even where the remaining members happen to be mutually independent.
+  Accepted: the finer answer is a dependency scheduler, and V2-09 owns it.
+- **F-B3 — two persisted reasons have no producer in this runner.**
+  `OPERATOR_STOPPED` has none because the runner installs no signal handling.
+  `DEFINITION_DRIFTED` has none because a block run does not outlive its
+  invocation, so there is never a persisted predecessor whose fingerprint could
+  differ from the plan just frozen; `reconcileBlockRun` still reports drift to a
+  caller that supplies a definition. Both stay in the vocabulary and stay graded
+  in the exit table. Either a later slice gives them producers or the members are
+  withdrawn — neither is treated as reachable in the meantime, and the suite says
+  so in a list rather than by omission.
+- **F-B4 — a member blocked only by a non-member ends the run
+  `NO_ELIGIBLE_TASK`.** The frozen relation deliberately records nothing about
+  non-members, so a block can be frozen while that member can never become
+  eligible. The honest dead end rather than a defect, and the reason it is
+  reserved rather than generic.
+- **F-B5 — an interrupted invocation leaves a run nothing can continue.** A
+  crashed or killed attended invocation leaves an open ledger, possibly with an
+  `ACTIVE` entry, and no later invocation may adopt it: the run id is spent and
+  `startBlockRun` refuses it. Accepted as the fail-closed side of the lifetime
+  decision — the record still says what happened and which task was in flight,
+  and `release --attended` still handles the workspace that task left behind.
+  What is *not* offered is a continuation, because offering one would mean a
+  durable run outliving the lease that authorised it.
 
 - [ ] **Step 3: Update the roadmap**
 
@@ -4436,7 +4918,29 @@ and mark V2-08 shipped in the diagram at line ~4234, in the shape V2-07L already
 
 Leave the paragraph about unattended running and owned process containment exactly as it is. V2-08 needed none of it, which is the point of being attended, and editing it would suggest the boundary moved.
 
-- [ ] **Step 4: Mark the design closed**
+- [ ] **Step 4: Record where the plan narrowed the design**
+
+The design's shape sketch (§5) reads `start or resume the block run ledger`.
+This plan removed the resume, because the lease guarantee stated at
+`README.md:3789` — one lease across a whole block run — cannot hold for a run
+that outlives the invocation holding it. Add a short note to the design spec
+under §5 saying so, and pointing at "The contradiction this plan had to resolve"
+in the plan:
+
+```
+**Narrowed while planning.** "start or resume" became "start". A block run's
+lifetime is its invocation's lifetime: the lease guarantee is stated over a
+whole block run, so a resumable run would need a lease left behind — the
+stale-lease surface this slice may not reopen — or a later process adopting a
+run it never started. The driver's step budget is absorbed inside the
+invocation instead of ending it.
+```
+
+A design a plan quietly departed from is a design that stops describing the
+build. Written into the spec, not only into the plan, because the spec is what a
+later slice will read first.
+
+- [ ] **Step 5: Mark the design closed**
 
 In the design spec, change the status line from
 
@@ -4450,14 +4954,14 @@ to
 **Status:** planned and implemented. Plan: `docs/superpowers/plans/2026-08-14-v2-08-attended-block-runner.md`.
 ```
 
-- [ ] **Step 5: Run the canonical gate**
+- [ ] **Step 6: Run the canonical gate**
 
 Run: `npm run verify`
 Expected: PASS, end to end. This is the gate `CLAUDE.md` calls canonical — schema generation, typecheck, build, four dist-artefact harnesses, the in-process suite and the serial tree-kill probe. Nothing in this slice touches the dist harnesses, so a failure there is a regression rather than an expected consequence.
 
 If the block cases make the in-process suite meaningfully slower, say so with the measured before/after rather than trimming a case.
 
-- [ ] **Step 6: Commit and open the pull request**
+- [ ] **Step 7: Commit and open the pull request**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-08-14-v2-08-attended-block-runner-design.md
@@ -4500,7 +5004,7 @@ row.
 | --- | --- |
 | 1. a task-local failure does not stop the run | 5 (primitive), 8 → *"does not stop when one task fails locally"* in Task 7 |
 | 2. a class-2 condition stops immediately, with tasks still eligible | 8 (every case drives its condition between two tasks) |
-| 3. each class-2 condition, separately | 8 |
+| 3. each class-2 condition, separately | 8, for every reason this runner can produce; `DEFINITION_DRIFTED` and `OPERATOR_STOPPED` have no producer and are named in a list rather than covered (F-B3) |
 | 3a. the two no-write outcomes leave the ledger byte-identical | 8 (lease), 9 (durable write) |
 | 3b. `ACTIVE_TASK_UNRESOLVED` coexists with an unchanged `ACTIVE` | 4 (primitive), 8 (runner) |
 | 3c. the end reason names the cause, not the consequence | 6 (both halves of the pair), 7 |
@@ -4512,6 +5016,11 @@ row.
 | 6. one lease for the whole run, measured by effect | 7 |
 | 7. a class-2 stop is writable over an unsupported ledger | 4 |
 | 8. the reversed policy's documentation | 5 (`git grep`, against the tree) |
+
+Three rows the lifetime decision added, which design §8 did not ask for because
+the contradiction had not surfaced when it was written: the driver's budget is
+absorbed rather than ending the invocation (Task 7), a run id is used once
+(Task 7), and an invocation acts on one snapshot of the roadmap (Task 7).
 
 Two constraints the design attached to the schema change, and where they live:
 the sorting of the new reason is a **correctness** test in Task 4, and the
