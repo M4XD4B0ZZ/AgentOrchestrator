@@ -67,7 +67,14 @@ const BLOCK_ID = 'V2';
 const NOW = '2026-08-11T09:00:00.000Z';
 
 function block(taskIds: readonly string[] = ['A-001', 'B-001']) {
-  const defined = defineBlock(BLOCK_ID, taskIds);
+  // Independent by construction, which is what these fixtures always meant.
+  // Written out rather than defaulted inside `defineBlock`, because a default
+  // would let a caller freeze "everything is independent" without saying so.
+  const defined = defineBlock(
+    BLOCK_ID,
+    taskIds,
+    taskIds.map((taskId) => ({ taskId, dependsOn: [] })),
+  );
   if (!defined.ok) throw new Error(`fixture block is not a block: ${defined.code}`);
   return defined.definition;
 }
@@ -133,11 +140,11 @@ function driveToReadyForPr(fixture: Fixture, taskId: string): void {
 
 describe('the block definition', () => {
   it('refuses an empty block, a repeated task and an unusable id', () => {
-    expect(defineBlock(BLOCK_ID, []).ok).toBe(false);
-    const repeated = defineBlock(BLOCK_ID, ['A-001', 'A-001']);
+    expect(defineBlock(BLOCK_ID, [], []).ok).toBe(false);
+    const repeated = defineBlock(BLOCK_ID, ['A-001', 'A-001'], []);
     expect(repeated.ok).toBe(false);
     if (!repeated.ok) expect(repeated.code).toBe('TASK_REPEATED');
-    expect(defineBlock('not a block id', ['A-001']).ok).toBe(false);
+    expect(defineBlock('not a block id', ['A-001'], []).ok).toBe(false);
   });
 
   it('fingerprints identity and order, and nothing else', () => {
@@ -245,7 +252,14 @@ describe('the ledger contract', () => {
     runId: RUN_ID,
     startedAt: NOW,
     frozenTaskIds: ['A-001', 'B-001'],
-    planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001']),
+    frozenDependencies: [
+      { taskId: 'A-001', dependsOn: [] },
+      { taskId: 'B-001', dependsOn: [] },
+    ],
+    planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001'], [
+      { taskId: 'A-001', dependsOn: [] },
+      { taskId: 'B-001', dependsOn: [] },
+    ]),
     activeTaskId: null,
     tasks: [
       { taskId: 'A-001', disposition: 'PLANNED', evidenceRevision: null, baseCommit: null, resultCommit: null },
@@ -270,7 +284,10 @@ describe('the ledger contract', () => {
     const collided = {
       ...base,
       blockId: 'A-001',
-      planFingerprint: fingerprintFrozenMembership('A-001', ['A-001', 'B-001']),
+      planFingerprint: fingerprintFrozenMembership('A-001', ['A-001', 'B-001'], [
+        { taskId: 'A-001', dependsOn: [] },
+        { taskId: 'B-001', dependsOn: [] },
+      ]),
     };
 
     expect(safeParseBlockRunLedger(collided).success).toBe(false);

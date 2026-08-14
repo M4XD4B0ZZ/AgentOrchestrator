@@ -183,6 +183,10 @@ export function startBlockRun(
     runId: request.runId,
     startedAt: request.now,
     frozenTaskIds: [...request.definition.taskIds],
+    frozenDependencies: request.definition.dependencies.map((row) => ({
+      taskId: row.taskId,
+      dependsOn: [...row.dependsOn],
+    })),
     planFingerprint: fingerprintBlockDefinition(request.definition),
     activeTaskId: null,
     tasks: request.definition.taskIds.map((taskId) => ({

@@ -65,15 +65,31 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { z } from 'zod';
 
-import { isValidTaskId } from '../plan/task-id.js';
+import { compareTaskIds, isValidTaskId } from '../plan/task-id.js';
 import {
   fingerprintFrozenMembership,
   isValidBlockId,
   MAX_BLOCK_TASKS,
+  type FrozenTaskDependency,
 } from './block-definition.js';
 
-/** Contract version of the ledger document. Bump on any breaking shape change. */
-export const BLOCK_LEDGER_SCHEMA_VERSION = 1;
+/**
+ * Contract version of the ledger document. Bump on any breaking shape change.
+ *
+ * **2 (V2-08).** Two changes land under one bump, deliberately: the frozen plan
+ * gained `frozenDependencies`, and `BLOCK_STOP_REASONS` gained
+ * `ACTIVE_TASK_UNRESOLVED`. Not one bump per value — and, equally deliberately,
+ * no "the enum grew but the version stayed" exception. A reader of version 1
+ * genuinely cannot understand a version-2 document: it would meet a stop reason
+ * outside its closed vocabulary and a field its `.strict()` schema refuses.
+ * Pretending otherwise is the kind of convenient untruth this repository keeps
+ * removing.
+ *
+ * A version-1 document is refused on load and **never migrated**. See
+ * `LEDGER_SCHEMA_UNSUPPORTED` in `block-store.ts` for why inventing the missing
+ * relation would be worse than refusing.
+ */
+export const BLOCK_LEDGER_SCHEMA_VERSION = 2;
 
 /** What the run has durably established about one of its tasks. */
 export const TASK_DISPOSITIONS = [
@@ -170,6 +186,14 @@ const ISO_8601 =
 
 const TaskIdSchema = z.string().refine(isValidTaskId, 'Must be a canonical task id.');
 
+const FrozenTaskDependencySchema = z
+  .object({
+    taskId: TaskIdSchema,
+    /** Members this task transitively depends on. Deduplicated and sorted. */
+    dependsOn: z.array(TaskIdSchema).max(MAX_BLOCK_TASKS),
+  })
+  .strict();
+
 const BlockTaskEntrySchema = z
   .object({
     taskId: TaskIdSchema,
@@ -206,6 +230,15 @@ export const BlockRunLedgerObjectSchema = z
     startedAt: z.string().regex(ISO_8601, 'Must be an ISO-8601 instant.'),
     /** Membership as frozen at start. Never edited afterwards. */
     frozenTaskIds: z.array(TaskIdSchema).min(1).max(MAX_BLOCK_TASKS),
+    /**
+     * The dependency relation as frozen at start. Never edited afterwards.
+     *
+     * The **only** persisted image of the relation. No `dependents` copy sits
+     * beside it: two spellings of one fact are two facts that can disagree, and
+     * the one a run's continuation decision reads would then be a matter of
+     * which the caller happened to look at.
+     */
+    frozenDependencies: z.array(FrozenTaskDependencySchema).min(1).max(MAX_BLOCK_TASKS),
     planFingerprint: z.string().regex(SHA256_HEX, 'Must be a definition fingerprint.'),
     activeTaskId: TaskIdSchema.nullable(),
     tasks: z.array(BlockTaskEntrySchema).min(1).max(MAX_BLOCK_TASKS),
@@ -254,6 +287,50 @@ export const BlockRunLedgerSchema = BlockRunLedgerObjectSchema.superRefine((valu
     issue(['blockId'], 'blockId must not also be a task id of this block.');
   }
 
+  // --- 1a. The relation is one row per frozen task, in the same order -------
+  // The same shape as rule 1, for the same reason: the frozen plan is the run's
+  // identity, and a relation that drifted from the membership would make "what
+  // does this run consider independent" a question with two answers. Row order
+  // mirrors `frozenTaskIds`, so row order carries no information of its own and
+  // one relation cannot have two fingerprints.
+  const relationIds = value.frozenDependencies.map((row) => row.taskId);
+  if (
+    relationIds.length !== value.frozenTaskIds.length ||
+    relationIds.some((id, index) => id !== value.frozenTaskIds[index])
+  ) {
+    issue(
+      ['frozenDependencies'],
+      'frozenDependencies must carry exactly one row per frozen task, in the same order.',
+    );
+  }
+  const frozenMembers = new Set(value.frozenTaskIds);
+  value.frozenDependencies.forEach((row, index) => {
+    for (const dependency of row.dependsOn) {
+      if (dependency === row.taskId) {
+        issue(['frozenDependencies', index, 'dependsOn'], 'A task may not depend on itself.');
+      } else if (!frozenMembers.has(dependency)) {
+        // The relation is the *projection* onto this block's members. An edge
+        // to a non-member is not a stricter relation, it is a different one —
+        // and a runner reading it would answer independence from a task the
+        // ledger says nothing else about.
+        issue(
+          ['frozenDependencies', index, 'dependsOn'],
+          'A frozen dependency must name a task of this block.',
+        );
+      }
+    }
+    const canonical = [...new Set(row.dependsOn)].sort(compareTaskIds);
+    if (
+      row.dependsOn.length !== canonical.length ||
+      row.dependsOn.some((id, position) => id !== canonical[position])
+    ) {
+      issue(
+        ['frozenDependencies', index, 'dependsOn'],
+        'dependsOn must be deduplicated and canonically sorted.',
+      );
+    }
+  });
+
   // --- 1b. The fingerprint describes the plan the document actually lists ---
   // `planFingerprint` used to be stored and believed, which made it possible
   // for a ledger to carry the digest of a plan it does not contain. That is
@@ -261,10 +338,13 @@ export const BlockRunLedgerSchema = BlockRunLedgerObjectSchema.superRefine((valu
   // reports as drifted and the edited one reports as clean. Re-derived here,
   // from the document itself, so the two spellings of the frozen plan can never
   // disagree — on creation, on update and on every load.
-  if (value.planFingerprint !== fingerprintFrozenMembership(value.blockId, value.frozenTaskIds)) {
+  if (
+    value.planFingerprint !==
+    fingerprintFrozenMembership(value.blockId, value.frozenTaskIds, value.frozenDependencies)
+  ) {
     issue(
       ['planFingerprint'],
-      'planFingerprint must be the fingerprint of this document’s own blockId and frozenTaskIds.',
+      'planFingerprint must be the fingerprint of this document’s own blockId, frozenTaskIds and frozenDependencies.',
     );
   }
 
@@ -493,6 +573,7 @@ const FIELD_AUTHORITY = {
   runId: 'IDENTITY',
   startedAt: 'IDENTITY',
   frozenTaskIds: 'FROZEN_PLAN',
+  frozenDependencies: 'FROZEN_PLAN',
   planFingerprint: 'FROZEN_PLAN',
   activeTaskId: 'RECORD',
   tasks: 'RECORD',

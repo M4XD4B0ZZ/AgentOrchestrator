@@ -100,6 +100,7 @@ import {
   assessLedgerSuccession,
   safeParseBlockRunLedger,
   PROGRESS_CLAIMING_STOP_REASONS,
+  BLOCK_LEDGER_SCHEMA_VERSION,
   type BlockRunLedger,
 } from './block-ledger.js';
 
@@ -439,7 +440,19 @@ export function updateBlockLedger(
     return saveFailure('LEDGER_CONFLICT', 'PREDECESSOR_MALFORMED');
   }
   const previous = safeParseBlockRunLedger(document);
-  if (!previous.success) return saveFailure('LEDGER_CONFLICT', 'PREDECESSOR_INVALID');
+  if (!previous.success) {
+    // The same distinction the load path draws, at the one other place a
+    // persisted ledger is read. A predecessor written by an older build is not
+    // an invalid predecessor, and a caller told `PREDECESSOR_INVALID` would go
+    // looking for corruption that is not there.
+    const declared = (document as { readonly schemaVersion?: unknown }).schemaVersion;
+    return saveFailure(
+      'LEDGER_CONFLICT',
+      declared !== BLOCK_LEDGER_SCHEMA_VERSION
+        ? 'PREDECESSOR_SCHEMA_UNSUPPORTED'
+        : 'PREDECESSOR_INVALID',
+    );
+  }
 
   const violations = assessLedgerSuccession(previous.data, next);
   if (violations.length > 0) {
@@ -508,6 +521,21 @@ export const LEDGER_LOAD_FAILURE_CODES = [
   'LEDGER_TOO_LARGE',
   'LEDGER_MALFORMED',
   'LEDGER_CONTRACT_VIOLATION',
+  /**
+   * The document declares a schema version this build does not read.
+   *
+   * Kept apart from `LEDGER_CONTRACT_VIOLATION`, which says the document is not
+   * a ledger. This one says it *is* one, written by a different build, and the
+   * two send an operator to different places: a broken file, or a version
+   * boundary.
+   *
+   * There is no migration, and that is a decision rather than an omission. A
+   * version-1 ledger carries no `frozenDependencies`, and the only way to give
+   * it one is to invent it — which would hand the run authority to continue
+   * after a task-local failure on a relation nobody froze. Refusing costs an
+   * operator one new run id; migrating would cost them a guarantee.
+   */
+  'LEDGER_SCHEMA_UNSUPPORTED',
   'LOCATION_UNSUITABLE',
   'REPOSITORY_ROOT_MISMATCH',
   /** The recorded repository root is not an absolute path. */
@@ -579,6 +607,20 @@ export function loadBlockLedger(repositoryRoot: string, runId: string): LedgerLo
     document = JSON.parse(raw.toString('utf8'));
   } catch {
     return loadFailure('LEDGER_MALFORMED');
+  }
+
+  // The version, before the contract. A version-1 document fails the contract
+  // too — the `superRefine` refuses any other version and `.strict()` refuses
+  // the field it lacks — but it would fail as `LEDGER_CONTRACT_VIOLATION`,
+  // which describes a broken file rather than an older one.
+  const declaredVersion = (document as { readonly schemaVersion?: unknown }).schemaVersion;
+  if (
+    typeof declaredVersion === 'number' &&
+    Number.isSafeInteger(declaredVersion) &&
+    declaredVersion > 0 &&
+    declaredVersion !== BLOCK_LEDGER_SCHEMA_VERSION
+  ) {
+    return loadFailure('LEDGER_SCHEMA_UNSUPPORTED');
   }
 
   const parsed = safeParseBlockRunLedger(document);

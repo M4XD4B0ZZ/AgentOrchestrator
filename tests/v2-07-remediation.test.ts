@@ -117,7 +117,14 @@ async function repoWithTasks(taskIds: readonly string[] = ['A-001', 'B-001']): P
 }
 
 function block(taskIds: readonly string[]) {
-  const defined = defineBlock(BLOCK_ID, taskIds);
+  // Independent by construction, which is what these fixtures always meant.
+  // Written out rather than defaulted inside `defineBlock`, because a default
+  // would let a caller freeze "everything is independent" without saying so.
+  const defined = defineBlock(
+    BLOCK_ID,
+    taskIds,
+    taskIds.map((taskId) => ({ taskId, dependsOn: [] })),
+  );
   if (!defined.ok) throw new Error(`fixture block is not a block: ${defined.code}`);
   return defined.definition;
 }
@@ -210,7 +217,10 @@ describe('cluster 1 — a revision is not a licence to rewrite the run', () => {
       blockId: 'V9',
       startedAt: '2020-01-01T00:00:00.000Z',
       frozenTaskIds: ['A-001'],
-      planFingerprint: fingerprintFrozenMembership('V9', ['A-001']),
+      frozenDependencies: [{ taskId: 'A-001', dependsOn: [] }],
+      planFingerprint: fingerprintFrozenMembership('V9', ['A-001'], [
+        { taskId: 'A-001', dependsOn: [] },
+      ]),
       tasks: [
         {
           taskId: 'A-001',
@@ -1132,7 +1142,10 @@ describe('rules that were contract but not yet counter-proved', () => {
   }, 180_000);
 
   it('refuses a block whose id is also one of its own tasks', () => {
-    const defined = defineBlock('A-001', ['A-001', 'B-001']);
+    const defined = defineBlock('A-001', ['A-001', 'B-001'], [
+      { taskId: 'A-001', dependsOn: [] },
+      { taskId: 'B-001', dependsOn: [] },
+    ]);
 
     expect(defined.ok).toBe(false);
     expect(defined.ok ? null : defined.code).toBe('BLOCK_ID_COLLIDES_WITH_TASK');
@@ -1153,14 +1166,21 @@ describe('rules that were contract but not yet counter-proved', () => {
  * survive the store on their way in.
  */
 const midFlight = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   repositoryId: 'fixture',
   repositoryRoot: 'D:\\repo',
   blockId: BLOCK_ID,
   runId: RUN_ID,
   startedAt: NOW,
   frozenTaskIds: ['A-001', 'B-001'],
-  planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001']),
+  frozenDependencies: [
+    { taskId: 'A-001', dependsOn: [] },
+    { taskId: 'B-001', dependsOn: [] },
+  ],
+  planFingerprint: fingerprintFrozenMembership(BLOCK_ID, ['A-001', 'B-001'], [
+    { taskId: 'A-001', dependsOn: [] },
+    { taskId: 'B-001', dependsOn: [] },
+  ]),
   activeTaskId: 'A-001',
   tasks: [
     {
@@ -1442,6 +1462,7 @@ describe('a new persisted field cannot arrive without one of these tests moving'
       'runId',
       'startedAt',
       'frozenTaskIds',
+      'frozenDependencies',
       'planFingerprint',
       'activeTaskId',
       'tasks',
@@ -1493,7 +1514,8 @@ describe('every persisted field’s authority is pinned by its own mutation', ()
    */
 
   it('pins schemaVersion to run identity', () => {
-    const next = { ...midFlight, schemaVersion: 2 };
+    // Any version other than the one this build writes — `midFlight` is 2.
+    const next = { ...midFlight, schemaVersion: 3 };
     expect(safeParseBlockRunLedger(next).success).toBe(false);
     expect(assessLedgerSuccession(midFlight, next)).toEqual(['RUN_IDENTITY_CHANGED']);
   });
@@ -1584,19 +1606,27 @@ describe('the definition fingerprint separator', () => {
   it('is written as an escape, and still digests exactly what it used to', () => {
     const source = readFileSync(new URL('../src/block/block-definition.ts', import.meta.url));
 
-    // A raw NUL byte in a source file is invisible in every editor, every diff
-    // and every review — and this one is load-bearing: it is the separator that
-    // makes two different definitions unable to encode to one string. Written
-    // as an escape it is the same value and a readable one.
+    // Raw control bytes in a source file are invisible in every editor, every
+    // diff and every review — and these are load-bearing: they are the
+    // separators that make two different plans unable to encode to one string.
+    // Written as escapes they are the same values and readable ones.
     expect(source.includes(0)).toBe(false);
+    expect(source.includes(1)).toBe(false);
+    expect(source.includes(2)).toBe(false);
 
     // Same value, proven rather than asserted: the digest is compared with one
-    // computed here from an independently constructed NUL separator, so the
-    // change cannot silently move any existing fingerprint.
+    // computed here from independently constructed separators, so the change
+    // cannot silently move any existing fingerprint. `block()` is independent by
+    // construction (see the helper above), so each relation row is just its own
+    // taskId with no `dependsOn` entries.
     const definition = block(['A-001', 'B-001']);
-    const separator = String.fromCharCode(0);
+    const membershipSeparator = String.fromCharCode(0);
+    const rowSeparator = String.fromCharCode(1);
+    const sectionSeparator = String.fromCharCode(2);
+    const membership = ['V2', 'A-001', 'B-001'].join(membershipSeparator);
+    const relation = ['A-001', 'B-001'].join(rowSeparator);
     const expected = createHash('sha256')
-      .update(['V2', 'A-001', 'B-001'].join(separator), 'utf8')
+      .update(`${membership}${sectionSeparator}${relation}`, 'utf8')
       .digest('hex');
     expect(fingerprintBlockDefinition(definition)).toBe(expected);
   });
