@@ -109,12 +109,25 @@ and then the same six contend again, so "the file is gone" is distinguished from
 
 It is a separate gate for the same reason its sibling is: a release is an
 **effect on a directory several writers share**, and no return value can show it
-happened. `removeVerifiedLease` reduced to `return 'REMOVED'` satisfies every
-in-process assertion in this repository and fails this check — that mutant is
-the gate's acceptance criterion, not an illustration. It exists because the only
-real-process measurement of the release effect used to be incidental to the
-attended-break harness, and was lost when that harness was withdrawn with the
-break: a coverage regression a green gate cannot show you.
+happened. Two mutants state what it is for, and the difference between them was
+measured rather than assumed:
+
+- dropping the `discard` that deletes the detached record after a successful
+  removal **survived the entire pre-existing suite**. Against this gate it fails
+  in every round, and the leftovers accumulate: one `.breaking-…` record after
+  the first release, two after the second;
+- `removeVerifiedLease` reduced to `return 'REMOVED'` fails this gate four ways
+  per round — and is *also* caught in process, because a second release of the
+  same evidence then reports `RELEASED` where it must report `LEASE_ABSENT`.
+  (An earlier version of this paragraph, and of the commit that added the gate,
+  claimed that mutant "satisfies every in-process assertion in this repository".
+  That was written before it was measured, and it is wrong: the assertion that
+  kills it predates this gate.)
+
+It exists because the only real-process measurement of the release effect used
+to be incidental to the attended-break harness, and was lost when that harness
+was withdrawn with the break: a coverage regression a green gate cannot show
+you.
 
 **`test:foundation-safe` is not "all tests", but it is the full regression
 set.** It runs every vitest file except one:
@@ -3837,7 +3850,7 @@ A later recovery is a different design — quarantine-and-report, which never
 unlinks, taking its second confirmation against a quarantine name only that call
 knows — and it is a product decision of its own, not a fifth patch.
 
-### The acquire fallback is withdrawn, and the lease now needs hard links (V2-07LR-Y)
+### The acquire fallback is withdrawn, and the lease now needs hard links (V2-07LR-Z)
 
 Independent of the break, and the change that closes the class rather than one
 caller. `claimViaExclusiveCreate` was the second claim mechanism: where `link`
@@ -3955,12 +3968,23 @@ which of its assertions were replaced, but which production claims cite it as
 their only instrument.** Nothing load-bearing was deleted knowingly; the
 measurement went anyway.
 
-Nineteen mutants of the release path — every `detail` token, both directions of
-the `ENOENT` discriminations in the detach and in the read of the detached
+Twenty-five mutants of the release path — every `detail` token, both directions
+of the `ENOENT` discriminations in the detach and in the read of the detached
 object, the removal predicate, both `discard` calls, `occupancyOf`'s fail-closed
-answer, and `removeVerifiedLease` reduced to `return 'REMOVED'` — are killed by
-the two new vitest files. The last of those is separately the acceptance
-criterion of the real-process gate, and fails it four ways per round.
+answer, the staging cleanup, the quarantine marker, and `removeVerifiedLease`
+reduced to `return 'REMOVED'` — are killed by the two new vitest files.
+Nineteen were the list this round set out to kill; six more were invented
+afterwards, adversarially, and died too.
+
+Four of them were then run against the **pre-existing** suite, to establish that
+the gap was real rather than assumed. Three survived it: two exchanged `detail`
+tokens, and the effect mutant that leaks a quarantined record on every release.
+One did not — the whole-function `return 'REMOVED'`, which an existing test
+catches. A claim that *nothing* in process caught it stood in this file and in
+the commit message of `588cb1a` before that measurement; it is corrected above
+and in `package.json`, and left standing here rather than quietly deleted,
+because this repository's recurring defect is exactly a claim about coverage
+written before the coverage was measured.
 
 One documentation defect went with it: the `ENOENT` arm of the detached-object
 read cited the break harness as its empirical record, and that harness is no
