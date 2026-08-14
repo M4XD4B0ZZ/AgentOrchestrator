@@ -57,7 +57,7 @@ What *is* implemented:
 
 ## Requirements
 
-- Windows, Node.js major **22 or 24** — not a floor; see
+- Windows, Node.js major in `{22, 24}` — a whitelist, not a floor; see
   [Supported runtime](#supported-runtime)
 - npm
 - Git
@@ -73,9 +73,10 @@ npm install
 V2 is built for one configuration and refuses to run outside it. Three claims,
 kept apart on purpose, because they have different strengths:
 
-**Verified** — Windows, Node major 22 or 24, and a repository whose Git common
-directory is on a local NTFS volume. This is the configuration the project is
-measured on: `verify` runs on `windows-latest` against Node 22 *and* Node 24.
+**Verified** — Windows, Node major in `{22, 24}`, and a repository whose Git
+common directory is on a local NTFS volume. This is the configuration the
+project is measured on: `verify` runs on `windows-latest` against every member
+of `{22, 24}`, one job per member.
 
 **Enforced** splits into two commitments, because they are decided and
 refused by two different mechanisms — naming both separately is the point,
@@ -102,12 +103,24 @@ one.
 The two axes behave differently, and the difference matters:
 
 - **on the Node axis, enforced and verified coincide exactly.** The supported
-  set is the whitelist `[22, 24]` (`src/platform/runtime-support.ts`), not a
+  set is the whitelist `{22, 24}` (`src/platform/runtime-support.ts`), not a
   floor: `>= 22` would admit 23 and 25 on a promise nobody has tested. CI
   measures both members.
 - **on the filesystem axis, enforced is strictly narrower than verified.** The
   build does **not** establish that an accepted volume is local, or that it is
   NTFS.
+
+**How this document writes that set.** Wherever it states which Node majors are
+supported, it writes them in one form — a braced list in backticks, `{22, 24}`
+— and `tests/v2-07p-platform-contract.test.ts` checks *every* occurrence of that
+form, anywhere in this file, against `SUPPORTED_NODE_MAJORS` in
+`src/platform/runtime-support.ts`, alongside `engines.node` and the CI matrix.
+The form exists so that check can be an exact match on a fixed token instead of
+a parser for prose: this document used to spell the same set four different
+ways, and a test that reads prose fails for the wrong reasons. Two kinds of
+sentence stay outside the form deliberately and are not pinned by it — one that
+names a major this build does **not** support (`>= 22` would admit 23 and 25,
+above), and a dated record of what the set was at an earlier slice.
 
 ### Not part of the V2 support contract
 
@@ -2920,9 +2933,9 @@ The consequence is a boundary on what V1 has actually demonstrated, and it is
 stated here rather than carried as a followup because an operator meets it on
 their first run:
 
-- V1's canonical verification evidence is **Windows + Node 22 or 24** — `verify`
-  runs on `windows-latest` against both majors (V2-07P widened this from Node 22
-  alone when the Node contract became a whitelist), and
+- V1's canonical verification evidence is **Windows + Node major in
+  `{22, 24}`** — `verify` runs on `windows-latest` against both majors (V2-07P
+  widened this from Node 22 alone when the Node contract became a whitelist), and
   `tests/v1-08-verification-boundary.test.ts` spawns its real processes there;
 - **portability to POSIX, or to any project toolchain that needs `HOME`,
   `npm_config_*`, `TMPDIR`, `LANG` or a proxy variable, is not proven by V1.** A
@@ -4151,10 +4164,10 @@ build does not detect it. That is recorded as an ACCEPTED LIMIT in the
 supported-runtime section rather than described as unlikely, because closing it
 would require the filesystem preflight the whole design avoids.
 
-**Node became a whitelist.** `[22, 24]`, not `>= 22`. A floor enforces a
-contract wider than CI proves; the two disagree only on 23 and 25, and both are
-pinned by test. CI gained a second job so that every enforced member is a
-verified one.
+**Node became a whitelist.** At V2-07P, `[22, 24]`, not `>= 22`. A floor
+enforces a contract wider than CI proves; the two disagree only on 23 and 25,
+and both are pinned by test. CI gained a second job so that every enforced
+member is a verified one.
 
 **POSIX code was not deleted.** The gate makes the `exec.ts` process-group
 branches, `path-identity.ts`'s casing fold and the POSIX profile resolver

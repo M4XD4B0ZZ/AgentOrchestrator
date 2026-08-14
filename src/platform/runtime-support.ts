@@ -108,14 +108,14 @@ export function evaluateRuntimeSupport(platform: string, nodeVersion: string): R
     return refuse(
       'RUNTIME_NODE_VERSION_UNREADABLE',
       `Node reported the version ${JSON.stringify(nodeVersion)}, which could not be read. ` +
-        `V2 supports Node ${SUPPORTED_NODE_MAJORS.join(' and ')}.`,
+        `V2 supports Node ${SUPPORTED_NODE_MAJORS.join(' or ')}.`,
     );
   }
 
   if (!SUPPORTED_NODE_MAJORS.includes(major)) {
     return refuse(
       'RUNTIME_NODE_UNSUPPORTED',
-      `Detected Node major ${major}; V2 supports ${SUPPORTED_NODE_MAJORS.join(' and ')} ` +
+      `Detected Node major ${major}; V2 supports ${SUPPORTED_NODE_MAJORS.join(' or ')} ` +
         `and nothing else. This is a whitelist, not a minimum.`,
     );
   }

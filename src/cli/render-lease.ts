@@ -10,7 +10,10 @@
  * Every sentence is a literal written in this repository. No path, no host name
  * and no exception text is interpolated into a refusal (AO-002) — except the
  * lease path itself on the `lease status` report, which is the one place an
- * operator has explicitly asked *where* the lease is and cannot act without it.
+ * operator has explicitly asked *where* the lease is and cannot act without it,
+ * and except `SUPPORTED_NODE_MAJORS` in the network-location sentence below: it
+ * restates the same whitelist `runtime-gate.ts` renders, read from the same
+ * constant rather than copied, so the two cannot state different contracts.
  *
  * The printed vocabulary is **ASCII only**, and `tests/v2-07l-execution-lease.test.ts`
  * holds it there. This repository has twice had text damaged by a re-encoding
@@ -19,6 +22,7 @@
  */
 
 import type { LeaseAcquireFailureCode, LeaseInspection } from '../lease/execution-lease.js';
+import { SUPPORTED_NODE_MAJORS } from '../platform/runtime-support.js';
 import { line } from './render-attended-run.js';
 
 /**
@@ -46,12 +50,19 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
       '  record left by a crash there is no fact an operator can be shown that still names\n' +
       '  the same object once the removal runs. Clearing it is a decision outside this tool.',
     LEASE_LOCATION_UNSUITABLE:
-      'No lease location could be derived for this repository, so no exclusive claim could\n' +
-      '  be made. Nothing was started.',
+      // Covers two cases it actually serves, not one: a key from which no
+      // location could be derived at all, and a path shape this build
+      // recognises but has not verified (an extended-length volume GUID is
+      // the concrete case). Neither is "no location could be derived" alone -
+      // that was the same misdescription this slice makes its case against
+      // for UNC, one code over.
+      "This repository's Git common directory has no usable lease location: either none\n" +
+      '  could be derived from it, or its shape is one this build has not verified. No\n' +
+      '  exclusive claim could be made. Nothing was started.',
     LEASE_LOCATION_NETWORK_UNSUPPORTED:
       "This repository's Git common directory is on a UNC or network path, which is outside\n" +
       '  the V2 support contract. Nothing was started and nothing was created. V2 is built and\n' +
-      '  verified for one configuration: Windows, Node 22 or 24, and a repository whose Git\n' +
+      `  verified for one configuration: Windows, Node ${SUPPORTED_NODE_MAJORS.join(' or ')}, and a repository whose Git\n` +
       '  common directory is on a local NTFS volume. Move the repository, or its Git common\n' +
       '  directory, onto a local volume. Note what this refusal does not claim: a repository\n' +
       '  reached through a drive letter is accepted, and this build cannot tell whether such a\n' +
@@ -93,7 +104,12 @@ export const LEASE_STATE_SENTENCES: Readonly<Record<LeaseInspection['state'], st
       '  as held, never as free: this is what a run that died between claiming the lease and\n' +
       '  recording it leaves behind.',
     UNREADABLE: 'Something is at the lease path and could not be read at all.',
-    LOCATION_UNSUITABLE: 'No lease location could be derived for this repository.',
+    // Same two cases as LEASE_LOCATION_UNSUITABLE above, for the same reason:
+    // "no location could be derived" alone would misdescribe a recognised but
+    // unverified shape, such as an extended-length volume GUID.
+    LOCATION_UNSUITABLE:
+      "This repository's Git common directory has no usable lease location: either none\n" +
+      '  could be derived from it, or its shape is one this build has not verified.',
     LOCATION_NETWORK_UNSUPPORTED:
       'This repository is on a UNC or network path, which V2 does not support, so it has no\n' +
       '  lease location. This is a refusal, not a failure to understand the path.',
@@ -121,6 +137,34 @@ export const LEASE_LIVENESS_SENTENCES: Readonly<Record<LeaseInspection['liveness
     UNDETERMINED: 'whether the owner exists could not be established.',
     UNKNOWABLE: 'no owner is recorded, so nothing can be said about one.',
   });
+
+/**
+ * The `Path` field's text, decided from the STATE rather than from `path`
+ * being empty — the two used to agree by coincidence, and only by coincidence,
+ * which is how a UNC repository's report used to say "Path: not derivable" one
+ * line under a sentence that says the opposite: "This is a refusal, not a
+ * failure to understand the path."
+ *
+ * The three location-failure states each get their own true text here, not a
+ * shared fallback: `LOCATION_UNSUITABLE` really could not derive a location,
+ * so it keeps "not derivable". `LOCATION_NETWORK_UNSUPPORTED` and
+ * `LOCATION_DEVICE_NAMESPACE` derived one and refused it because of its shape
+ * — a different claim, and printing one string for both would be the same
+ * collapse this function exists to remove, one layer out. Every other state
+ * always carries a real, derived `inspection.path`.
+ */
+function pathField(inspection: LeaseInspection): string {
+  switch (inspection.state) {
+    case 'LOCATION_UNSUITABLE':
+      return 'not derivable';
+    case 'LOCATION_NETWORK_UNSUPPORTED':
+      return 'refused (UNC or network path)';
+    case 'LOCATION_DEVICE_NAMESPACE':
+      return 'refused (Windows device path)';
+    default:
+      return inspection.path;
+  }
+}
 
 /**
  * The `lease status` report. The only place a lease path is printed.
@@ -151,7 +195,7 @@ export function renderLeaseStatus(inspection: LeaseInspection): string {
     '',
     line('Lease', inspection.state),
     `  ${LEASE_STATE_SENTENCES[inspection.state]}`,
-    line('Path', inspection.path === '' ? 'not derivable' : inspection.path),
+    line('Path', pathField(inspection)),
     line('Revision', inspection.revision ?? 'none'),
     // The object, beside the digest, because for one class of lease the digest
     // is a constant: a crash-window record is empty, and every empty file hashes

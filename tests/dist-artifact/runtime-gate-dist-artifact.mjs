@@ -271,10 +271,15 @@ for (const args of [
     result.stdout.trim().length > 0,
     `\`${label}\` on an unsupported runtime: printed nothing to stdout`,
   );
-  check(
-    !result.stdout.includes('Lease  '),
-    `\`${label}\` on an unsupported runtime: ran an action instead of printing help`,
-  );
+  // A third check used to sit here - `!result.stdout.includes('Lease  ')` -
+  // meant to catch the action running instead of help being printed.
+  // Considered and dropped: every `args` in this loop is `--help`, `--version`
+  // or `help <command>`, none of which can reach an action handler at all, and
+  // `agent-loop --help`'s own command table renders the subcommand as
+  // lowercase `lease`, never padded as `Lease  `. The needle could not appear
+  // under any implementation, correct or broken, so the check could not fail
+  // and was measuring nothing. The two checks above it - a non-refusal exit
+  // and non-empty stdout - are what this loop actually proves.
 }
 
 if (failures.length > 0) {

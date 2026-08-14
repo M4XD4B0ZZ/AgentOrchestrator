@@ -49,7 +49,8 @@ export function renderRuntimeRefusal(
     `Windows, Node ${SUPPORTED_NODE_MAJORS.join(' or ')}, and a repository whose Git\n` +
     `common directory is on a local NTFS volume. FAT and exFAT, SMB and other\n` +
     `network filesystems, UNC-hosted repository storage and POSIX runtimes are\n` +
-    `outside that contract, and this build refuses rather than running unverified.\n` +
+    `outside that contract; where this build can tell, it refuses rather than\n` +
+    `running unverified.\n` +
     `\n` +
     `\`--help\` and \`--version\` still work here. No other command does.\n`
   );
