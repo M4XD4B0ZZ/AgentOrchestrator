@@ -61,7 +61,7 @@ function canonicalise(value: string): string {
  *
  * ── A known narrowness, deliberately not closed here (F-4) ─────────────────
  *
- * On Windows `isAbsolute` answers `true` for a **drive-relative** root — `\foo`,
+ * On Windows `isAbsolute` answers `true` for a **root-relative** path — `\foo`,
  * and `/foo`, which normalises to the same thing — because such a path is
  * absolute only *within* whichever volume the process is standing on. Two states
  * both recording `\foo` therefore compare `EQUAL` while potentially naming

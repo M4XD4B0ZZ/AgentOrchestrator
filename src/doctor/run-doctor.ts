@@ -66,9 +66,7 @@ import {
   type DoctorCheck,
   type DoctorReport,
 } from './report.js';
-
-/** Node version the orchestrator requires. */
-export const MINIMUM_NODE_MAJOR = 22;
+import { parseNodeMajor, SUPPORTED_NODE_MAJORS } from '../platform/runtime-support.js';
 
 // Both names come from the single run-protocol source of truth in
 // `run-completion.ts`, via its narrow accessor — never its internal array
@@ -86,12 +84,6 @@ export interface RunDoctorOptions {
    * path always uses {@link OS_PATH_PROVIDER}.
    */
   readonly pathProvider?: PathProvider;
-}
-
-function parseNodeMajor(versionText: string): number | null {
-  const match = /^v?(\d+)\./.exec(versionText.trim());
-  if (match?.[1] === undefined) return null;
-  return Number.parseInt(match[1], 10);
 }
 
 function versionFrom(records: readonly CapabilityRecord[], id: string): CliVersionInfo | null {
@@ -324,13 +316,16 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorReport
       : parseNodeMajor(nodeRecord.facts.version ?? process.version);
   checks.push({
     id: 'env:node-version',
-    title: 'Node.js >= 22',
-    status: nodeMajor !== null && nodeMajor >= MINIMUM_NODE_MAJOR ? 'PASS' : 'FAIL',
+    title: `Node.js ${SUPPORTED_NODE_MAJORS.join(' or ')}`,
+    // Membership, not `>=`. Left as a floor this would report PASS for Node 25
+    // on a build whose entry gate refuses it — the tool contradicting itself in
+    // the one command whose whole job is to describe the environment.
+    status: nodeMajor !== null && SUPPORTED_NODE_MAJORS.includes(nodeMajor) ? 'PASS' : 'FAIL',
     mandatory: true,
     detail:
       nodeMajor === null
         ? 'Node version could not be determined.'
-        : `Detected major version ${nodeMajor}; minimum is ${MINIMUM_NODE_MAJOR}.`,
+        : `Detected major version ${nodeMajor}; supported: ${SUPPORTED_NODE_MAJORS.join(', ')}.`,
   });
 
   // Write probes. Reversible: each creates one uniquely named file and deletes

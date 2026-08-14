@@ -7,6 +7,20 @@
 # process-tree termination path, and `test:dist-trusted-profile` checks a
 # Windows profile resolver. A green Ubuntu run would not mean the same thing,
 # so this workflow does not offer one.
+#
+# There are two jobs, one per supported Node major, and that is a change of
+# contract rather than of thoroughness. This project used to declare a floor
+# (`engines.node: ">=22"`) and gate on it, and the honest comment then was "no
+# matrix: a second version would test a promise nobody made". V2-07P replaced
+# the floor with a whitelist — `SUPPORTED_NODE_MAJORS = [22, 24]` in
+# src/platform/runtime-support.ts, enforced by the CLI's runtime gate — so the
+# promise IS now made, for exactly two majors, and each of them is measured
+# here. A member of that array without a job here would be an enforced claim
+# nobody verified.
+#
+# Still no Linux job, for the reason above: `verify` ends in a real-process
+# probe of the Windows process-tree termination path, and V2 refuses to run on
+# anything but Windows at all.
 name: verify
 
 on:
@@ -22,15 +36,25 @@ permissions:
 
 jobs:
   verify:
-    name: verify (windows, node 22)
+    name: verify (windows, node ${{ matrix.node }})
     runs-on: windows-latest
+    strategy:
+      # Never cancel the sibling on a failure: which majors passed and which
+      # failed is the whole information this matrix exists to produce.
+      fail-fast: false
+      matrix:
+        # Exactly the members of SUPPORTED_NODE_MAJORS in
+        # src/platform/runtime-support.ts. Not a sample of them: the runtime
+        # gate is a whitelist, and a whitelist whose members are not all
+        # measured is a floor wearing a disguise.
+        node: [22, 24]
     # `verify` starts real processes, including a detached helper that survives
     # on purpose, so a defect here can hang rather than fail. This bound is not a
     # performance budget, only a ceiling that stops a hung probe from holding a
     # runner open indefinitely.
     #
     # It was 20, with a comment claiming the gate took "about 30 seconds
-    # locally". Both had gone stale: the gate now runs ~2700 tests plus four
+    # locally". Both had gone stale: the gate now runs ~2700 tests plus five
     # dist-artefact checks, two of which are multi-process races, and the last
     # five green runs on this runner took 9, 14, 18:45, 18:48 and 19:19 minutes.
     # A ceiling a passing run reaches by chance is not a hang detector — it is a
@@ -47,12 +71,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          # The floor this project declares: package.json `engines.node` is
-          # ">=22" and MINIMUM_NODE_MAJOR in src/doctor/run-doctor.ts is 22.
-          # Gating on the floor is what makes that claim verified rather than
-          # assumed. No matrix: a second version would test a promise nobody
-          # made.
-          node-version: '22'
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install dependencies

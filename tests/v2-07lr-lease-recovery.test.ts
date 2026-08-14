@@ -415,16 +415,23 @@ describe('a lease location is a place, not a string that looks absolute', () => 
    */
   const onWindows = it.runIf(process.platform === 'win32');
 
-  onWindows('refuses a drive-relative Git common directory', () => {
+  onWindows('refuses a root-relative Git common directory', () => {
     // The premise, asserted rather than asserted-about: without the extra check
     // this key passes the absolute test and a lease path is derived from it.
+    //
+    // "Root-relative", not "drive-relative": `\foo` is absolute within whichever
+    // volume the process is standing on. The genuinely drive-relative form is
+    // `C:foo`, and `isAbsolute` already refuses that one a few lines earlier —
+    // so the two are caught by different guards and naming them alike sent a
+    // reader to the wrong one.
     expect(isAbsolute('\\repo\\.git')).toBe(true);
+    expect(isAbsolute('C:repo\\.git')).toBe(false);
 
     for (const key of ['\\repo\\.git', '/repo/.git', '\\', '/']) {
       const derived = deriveExecutionLeaseLocation({
         gitCommonDir: key,
         root: 'C:\\repo',
-        id: 'drive-relative',
+        id: 'root-relative',
       });
       expect(derived.ok).toBe(false);
       if (derived.ok) return;
@@ -432,23 +439,22 @@ describe('a lease location is a place, not a string that looks absolute', () => 
     }
   });
 
-  onWindows('still derives a location for the two shapes that name a volume', () => {
-    // The control. A refusal broad enough to catch the drive-relative case is a
+  onWindows('still derives a location for the two shapes V2 supports', () => {
+    // The control. A refusal broad enough to catch the root-relative case is a
     // refusal that can quietly catch every Windows path, and a suite without
     // this case would pass against one that refuses them all.
-    const local = deriveExecutionLeaseLocation({
-      gitCommonDir: 'C:\\repo\\.git',
-      root: 'C:\\repo',
-      id: 'local',
-    });
-    expect(local.ok).toBe(true);
-
-    const unc = deriveExecutionLeaseLocation({
-      gitCommonDir: '\\\\server\\share\\repo\\.git',
-      root: '\\\\server\\share\\repo',
-      id: 'unc',
-    });
-    expect(unc.ok).toBe(true);
+    //
+    // This used to include a UNC key and assert it derived. V2-07P withdrew
+    // that: UNC is network storage and is outside the support contract, so the
+    // control now stands on the two drive-letter forms.
+    for (const key of ['C:\\repo\\.git', '\\\\?\\C:\\repo\\.git']) {
+      const derived = deriveExecutionLeaseLocation({
+        gitCommonDir: key,
+        root: 'C:\\repo',
+        id: 'volume',
+      });
+      expect(derived.ok).toBe(true);
+    }
   });
 
   it('refuses a relative or empty key on every platform', () => {

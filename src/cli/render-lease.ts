@@ -10,7 +10,10 @@
  * Every sentence is a literal written in this repository. No path, no host name
  * and no exception text is interpolated into a refusal (AO-002) — except the
  * lease path itself on the `lease status` report, which is the one place an
- * operator has explicitly asked *where* the lease is and cannot act without it.
+ * operator has explicitly asked *where* the lease is and cannot act without it,
+ * and except `SUPPORTED_NODE_MAJORS` in the network-location sentence below: it
+ * restates the same whitelist `runtime-gate.ts` renders, read from the same
+ * constant rather than copied, so the two cannot state different contracts.
  *
  * The printed vocabulary is **ASCII only**, and `tests/v2-07l-execution-lease.test.ts`
  * holds it there. This repository has twice had text damaged by a re-encoding
@@ -19,6 +22,7 @@
  */
 
 import type { LeaseAcquireFailureCode, LeaseInspection } from '../lease/execution-lease.js';
+import { SUPPORTED_NODE_MAJORS } from '../platform/runtime-support.js';
 import { line } from './render-attended-run.js';
 
 /**
@@ -46,8 +50,28 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
       '  record left by a crash there is no fact an operator can be shown that still names\n' +
       '  the same object once the removal runs. Clearing it is a decision outside this tool.',
     LEASE_LOCATION_UNSUITABLE:
-      'No lease location could be derived for this repository, so no exclusive claim could\n' +
-      '  be made. Nothing was started.',
+      // Covers two cases it actually serves, not one: a key from which no
+      // location could be derived at all, and a path shape this build
+      // recognises but has not verified (an extended-length volume GUID is
+      // the concrete case). Neither is "no location could be derived" alone -
+      // that was the same misdescription this slice makes its case against
+      // for UNC, one code over.
+      "This repository's Git common directory has no usable lease location: either none\n" +
+      '  could be derived from it, or its shape is one this build has not verified. No\n' +
+      '  exclusive claim could be made. Nothing was started.',
+    LEASE_LOCATION_NETWORK_UNSUPPORTED:
+      "This repository's Git common directory is on a UNC or network path, which is outside\n" +
+      '  the V2 support contract. Nothing was started and nothing was created. V2 is built and\n' +
+      `  verified for one configuration: Windows, Node ${SUPPORTED_NODE_MAJORS.join(' or ')}, and a repository whose Git\n` +
+      '  common directory is on a local NTFS volume. Move the repository, or its Git common\n' +
+      '  directory, onto a local volume. Note what this refusal does not claim: a repository\n' +
+      '  reached through a drive letter is accepted, and this build cannot tell whether such a\n' +
+      '  letter is a mapped network share.',
+    LEASE_LOCATION_DEVICE_NAMESPACE:
+      "This repository's Git common directory is a Windows device path (\\\\.\\...), which is\n" +
+      '  not a filesystem location a lease can be kept in. Nothing was started and nothing was\n' +
+      '  created. This is reported apart from the network refusal because it is a different\n' +
+      '  thing: a device path is not network storage.',
     REPOSITORY_RECORD_INCOHERENT:
       'This repository record does not describe one repository: its root and its Git common\n' +
       '  directory belong to different places, so a lease taken for it would guard the wrong\n' +
@@ -80,7 +104,26 @@ export const LEASE_STATE_SENTENCES: Readonly<Record<LeaseInspection['state'], st
       '  as held, never as free: this is what a run that died between claiming the lease and\n' +
       '  recording it leaves behind.',
     UNREADABLE: 'Something is at the lease path and could not be read at all.',
-    LOCATION_UNSUITABLE: 'No lease location could be derived for this repository.',
+    // Same two cases as LEASE_LOCATION_UNSUITABLE above, for the same reason:
+    // "no location could be derived" alone would misdescribe a recognised but
+    // unverified shape, such as an extended-length volume GUID.
+    LOCATION_UNSUITABLE:
+      "This repository's Git common directory has no usable lease location: either none\n" +
+      '  could be derived from it, or its shape is one this build has not verified.',
+    // "This repository" and "this repository path" would both name the wrong
+    // object: the decision is made from `gitCommonDir` alone, and the two can
+    // be on different volumes. `git init --separate-git-dir \\server\share\r.git`
+    // under `C:\work\repo` is a coherent record this build accepts, and telling
+    // that operator "this repository is on a UNC path" is false of the working
+    // tree they are looking at. The acquire-side sentence for the identical
+    // condition already names the common directory; these two now agree with it.
+    LOCATION_NETWORK_UNSUPPORTED:
+      "This repository's Git common directory is on a UNC or network path, which V2 does not\n" +
+      '  support, so it has no lease location. This is a refusal, not a failure to understand\n' +
+      '  the path.',
+    LOCATION_DEVICE_NAMESPACE:
+      "This repository's Git common directory is in the Windows device namespace, which is not\n" +
+      '  a place a lease can be kept.',
   });
 
 /**
@@ -104,6 +147,46 @@ export const LEASE_LIVENESS_SENTENCES: Readonly<Record<LeaseInspection['liveness
   });
 
 /**
+ * The `Path` field's text, decided from the STATE rather than from `path`
+ * being empty — the two used to agree by coincidence, and only by coincidence,
+ * which is how a UNC repository's report used to say "Path: not derivable" one
+ * line under a sentence that says the opposite: "This is a refusal, not a
+ * failure to understand the path."
+ *
+ * The location-failure states each get their own text, and each text has to be
+ * true of *every* case its state covers. A shared fallback across states is
+ * what this function exists to remove; a text that describes only one of two
+ * cases within a state is the same collapse one level down.
+ * `LOCATION_NETWORK_UNSUPPORTED` and `LOCATION_DEVICE_NAMESPACE` each cover a
+ * single shape, understood and refused for being that shape, so each says so.
+ *
+ * `LOCATION_UNSUITABLE` covers **two**, which is why it no longer says "not
+ * derivable": a key from which no location could be derived at all
+ * (`\repo\.git`, root-relative), and `\\?\Volume{…}`, a shape
+ * `classifyWindowsKey` recognises and declines because V2 verified the
+ * drive-letter forms and not that one. The second is a refusal, not a failure
+ * to understand the path — so asserting "not derivable" over it would reprint
+ * the very defect this function was written to remove, one code over, and
+ * directly under a sentence that offers both cases. Giving each case its own
+ * text would mean splitting the state, which changes the refusal taxonomy and
+ * is not a rendering decision to take here.
+ *
+ * Every other state always carries a real, derived `inspection.path`.
+ */
+function pathField(inspection: LeaseInspection): string {
+  switch (inspection.state) {
+    case 'LOCATION_UNSUITABLE':
+      return 'no usable location';
+    case 'LOCATION_NETWORK_UNSUPPORTED':
+      return 'refused (UNC or network path)';
+    case 'LOCATION_DEVICE_NAMESPACE':
+      return 'refused (Windows device path)';
+    default:
+      return inspection.path;
+  }
+}
+
+/**
  * The `lease status` report. The only place a lease path is printed.
  *
  * Diagnostic, and it ends where the observations end. It used to take a
@@ -118,8 +201,9 @@ export const LEASE_LIVENESS_SENTENCES: Readonly<Record<LeaseInspection['liveness
  * the operator, and then told them "Nothing is removed on a revision you did not
  * see" — a guarantee that is vacuous for exactly the class of lease the command
  * was being offered for. It also asserted "the revision is the lease's identity",
- * which contradicts `leaseObjectIdentity`'s own reasoning that content cannot
- * identify an object whose content is nothing. So the tool supplied the fact that
+ * which contradicts the reasoning recorded on `readObject` in
+ * `lease/execution-lease.ts` — that content cannot identify an object whose
+ * content is nothing. So the tool supplied the fact that
  * made the authorisation empty, and described it as the fact that made it safe.
  *
  * That is why a report may state what was observed and may not offer a
@@ -131,7 +215,7 @@ export function renderLeaseStatus(inspection: LeaseInspection): string {
     '',
     line('Lease', inspection.state),
     `  ${LEASE_STATE_SENTENCES[inspection.state]}`,
-    line('Path', inspection.path === '' ? 'not derivable' : inspection.path),
+    line('Path', pathField(inspection)),
     line('Revision', inspection.revision ?? 'none'),
     // The object, beside the digest, because for one class of lease the digest
     // is a constant: a crash-window record is empty, and every empty file hashes

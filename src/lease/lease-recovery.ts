@@ -110,6 +110,26 @@ export const LEASE_RECOVERY_CLASSIFICATIONS = [
   'LEASE_UNREADABLE',
   /** No lease path can be derived for this repository. */
   'LOCATION_UNSUITABLE',
+  /**
+   * The Git common directory is on a UNC/network path, which V2 does not
+   * support.
+   *
+   * Its own member rather than folded into {@link LOCATION_UNSUITABLE}: a
+   * location *was* derived, and that classification's sentence says one
+   * could not be. Repeating that misdescription here — one module over from
+   * where V2-07P removed it — would report the crash-window artefact's
+   * classification, `NO_OWNER_RECORDED`, for a repository where nothing was
+   * ever created, which is worse still.
+   */
+  'LOCATION_NETWORK_UNSUPPORTED',
+  /**
+   * The Git common directory is a Windows device path (`\\.\...`).
+   *
+   * Kept apart from the network member for the same reason
+   * `execution-lease.ts` keeps the two codes apart: a device path is not
+   * network storage.
+   */
+  'LOCATION_DEVICE_NAMESPACE',
 ] as const;
 
 export type LeaseRecoveryClassification = (typeof LEASE_RECOVERY_CLASSIFICATIONS)[number];
@@ -120,7 +140,17 @@ export interface LeaseRecoveryAssessment {
 }
 
 /**
- * Classifies what is at the lease path. Reads; changes nothing; never throws.
+ * Classifies what is at the lease path. Reads; changes nothing; never throws
+ * for any `LeaseInspection` this build produces.
+ *
+ * That qualifier is new and is precision, not hedging: `classifyForRecovery`
+ * below closes its switch on `inspection.state` with a `never` exhaustiveness
+ * check, and the branch behind it throws rather than silently returning a
+ * classification for a state it does not name. Provably dead code today,
+ * because every member `inspectRepositoryExecutionLease` can produce has a
+ * case above it — and that is exactly what keeps it dead: it is a compile
+ * failure waiting on the next unhandled `LEASE_STATES` member, not a runtime
+ * path this build can reach.
  *
  * There is deliberately no `breakable` here any more. It existed so `lease
  * status` could tell an operator there was a decision to make, and it was read by
@@ -156,9 +186,28 @@ function classifyForRecovery(inspection: LeaseInspection): LeaseRecoveryClassifi
       return 'LEASE_UNREADABLE';
     case 'LOCATION_UNSUITABLE':
       return 'LOCATION_UNSUITABLE';
+    case 'LOCATION_NETWORK_UNSUPPORTED':
+      return 'LOCATION_NETWORK_UNSUPPORTED';
+    case 'LOCATION_DEVICE_NAMESPACE':
+      return 'LOCATION_DEVICE_NAMESPACE';
     case 'HELD':
     case 'UNPARSEABLE':
       break;
+    default: {
+      // The real repair, not the two cases above it. Without this, a state
+      // this switch does not name falls all the way through into the
+      // liveness switch below and comes out misclassified as whatever that
+      // switch's default answer happens to be — which is exactly how the two
+      // location states above went missing and were reported as
+      // `NO_OWNER_RECORDED`, the crash-window artefact, for a repository
+      // where nothing was ever created. `inspection.state` is `LeaseState`,
+      // a closed union; every member reaching here is handled above, so this
+      // assignment only compiles when that is still true. Add a member to
+      // `LEASE_STATES` without a case here and the build fails, rather than
+      // the classification silently lying again.
+      const unhandled: never = inspection.state;
+      throw new Error(`lease-recovery: unhandled lease state '${String(unhandled)}'`);
+    }
   }
 
   switch (inspection.liveness) {
