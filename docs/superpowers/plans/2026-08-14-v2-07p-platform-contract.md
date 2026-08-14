@@ -66,7 +66,7 @@ Every task's requirements implicitly include this section.
 Create `tests/v2-07p-platform-contract.test.ts`:
 
 ```ts
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   evaluateRuntimeSupport,
@@ -458,22 +458,36 @@ describe('the gate does not disturb the supported path', () => {
     expect(process.platform).toBe('win32');
     const { buildProgram } = await import('../src/cli/index.js');
     const program = buildProgram();
+    // Commander would otherwise call process.exit on a usage error.
     program.exitOverride();
 
+    // `process.stdout.write`, not `configureOutput`: `lease-command.ts` writes
+    // its report through the former directly, so a Commander output hook sees
+    // none of it and this control would pass against a gate that blocked the
+    // action entirely.
     const written: string[] = [];
-    program.configureOutput({
-      writeOut: (text) => written.push(text),
-      writeErr: (text) => written.push(text),
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
     });
+    // The action sets `process.exitCode`; left set, it becomes vitest's own
+    // exit code and a fully passing run reports failure.
+    const previousExitCode = process.exitCode;
+    try {
+      // `from: 'user'` means the array carries NO node/script prefix.
+      await program.parseAsync(['lease', 'status', '--repository', 'no-such-repository'], {
+        from: 'user',
+      });
+    } finally {
+      spy.mockRestore();
+      process.exitCode = previousExitCode;
+    }
 
-    await program.parseAsync(
-      ['node', 'agent-loop', 'lease', 'status', '--repository', 'definitely-not-a-repository'],
-      { from: 'user' },
-    );
-
-    // The action ran: this marker can only come from lease-command.ts's own
-    // resolution failure path, which sits after the hook.
-    expect(written.join('')).toContain('could not be resolved');
+    // The action ran. Either marker proves it: both are written by
+    // `lease-command.ts` itself, downstream of the hook.
+    const output = written.join('');
+    expect(output.length).toBeGreaterThan(0);
+    expect(/could not be resolved|Lease/.test(output)).toBe(true);
   });
 });
 ```
