@@ -11,11 +11,19 @@
  * harness was withdrawn together with the attended break it existed for.
  *
  * What went with it was not a duplicate assertion. It was the only measurement
- * in the repository of the release **effect** against the built artefact, and
- * its absence is invisible to a green gate: every in-process test can pass
- * while `removeVerifiedLease` returns `'REMOVED'` without touching the disk.
- * That mutant is this file's acceptance criterion — replacing the body of
- * `removeVerifiedLease` with `return 'REMOVED'` **must** make this check fail.
+ * in the repository of the release **effect** against the built artefact.
+ *
+ * Two mutants say what this file is for, and which is which was measured rather
+ * than assumed. Dropping the `discard` that deletes the detached record after a
+ * successful removal **survived the entire pre-existing suite** — the lease name
+ * is free either way, so nothing noticed, while every release leaked a full copy
+ * of a live record into the Git administrative directory. Here it fails in every
+ * round, and the leftovers accumulate across the two phases. Replacing the body
+ * of `removeVerifiedLease` with `return 'REMOVED'` must fail this check too, and
+ * does, four ways per round — that is this file's stated acceptance criterion,
+ * though not, as an earlier version of this header claimed, a mutant no
+ * in-process test catches: a second release of one lease reports `RELEASED`
+ * where it must report `LEASE_ABSENT`, and a test older than this file says so.
  *
  * ── What one round establishes ─────────────────────────────────────────────
  *
