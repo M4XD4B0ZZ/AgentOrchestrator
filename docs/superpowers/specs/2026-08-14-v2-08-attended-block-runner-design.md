@@ -190,10 +190,76 @@ subject, and it must earn a claim V2-07 explicitly refused to make: that a
 `READY_FOR_PR` task has a commit fit to be a successor's base. `block-ledger.ts`
 already records the distinction and warns against collapsing it.
 
-Consequence for the frozen plan: if a block's definition does not establish
-independence, **no task may continue after another's failure**, and the run stops
-at the first task-local failure exactly as V2-07 does today. That degradation is
-the correct one — it is V2-07's behaviour, which is proved.
+### The frozen plan must carry the dependency relation, because today it cannot
+
+`BlockDefinition` is `blockId` + ordered `taskIds` and nothing else, and
+`fingerprintBlockDefinition` covers exactly those. So V2-08 cannot prove
+independence from its own authoritative frozen input, and the clause above would
+make continue-on-task-local-failure unreachable in **every** block — the slice's
+headline behaviour as dead code.
+
+**Decided:** V2-08 extends the frozen block plan with the dependency relation and
+binds it into the fingerprint. Not derived live from `task-graph.ts` during the
+run — a roadmap edit mid-run could then change the answer to "may B continue
+after A?", which is the opposite of frozen-plan authority. Not deferred to V2-09
+either, because without it this slice cannot prove its own core decision. And
+not a bare `independent: true` flag, which would freeze the *judgement* while
+leaving the *evidence* it came from unfrozen.
+
+```ts
+type FrozenTaskDependency = {
+  readonly taskId: string;
+  readonly dependsOn: readonly string[];
+};
+// BlockDefinition gains: readonly dependencies: readonly FrozenTaskDependency[]
+```
+
+Canonicalisation is binding: exactly one row per member `taskId`, no unknown or
+duplicated ids, `dependsOn` deduplicated and deterministically sorted, rows
+deterministically ordered, and `fingerprintBlockDefinition` covering
+`blockId + taskIds + dependencies`.
+
+### `dependsOn` here is the transitive projection, and that is a measured result
+
+**A direct intra-block edge check is not sound.** Measured against
+`src/plan/task-graph.ts`: `normalizeTaskGraph` stores only each definition's own
+edge list and its direct reverse (step 5) — there is no transitive closure
+anywhere — and it normalises over the *whole* discovered task set, with every
+edge required to resolve inside it (`TASK_DEPENDENCY_UNKNOWN`). A block is
+therefore an arbitrary subset of a repository-wide DAG, and this is
+representable:
+
+```
+A: dependsOn []
+X: dependsOn [A]      <- not a block member
+B: dependsOn [X]
+
+block = {A, B}   ->   no direct intra-block edge exists,
+                      yet B transitively depends on A through X
+```
+
+So the frozen `dependsOn` of a member is **the set of block members it
+transitively depends on**, computed over the full normalised graph at freeze
+time and then restricted to members. Freeze time, never run time.
+
+A consequence worth stating: a member whose path to eligibility runs through a
+non-member is not recorded as dependent on anything, and the block can be
+frozen while that member can never become eligible. That run ends
+`NO_ELIGIBLE_TASK` — a genuine eligibility dead end that no task disposition
+explains, which is exactly what section 6 reserves it for.
+
+### What V2-08 may do with the relation, and what it may not
+
+V2-08 gets **no dependency scheduler**. It uses the relation for one question
+only: *may A's failure leave B untouched?* The answer must be an unambiguous yes
+from the frozen plan. As soon as any dependency relation holds between two tasks
+the block still has to process, that block is **not supported input** for the
+V2-08 runner — no improvised ordering, no partial scheduling. Dependent
+execution stays V2-09.
+
+If a block is not independent, the run stops at the first task-local failure
+exactly as V2-07 does today. That degradation is the correct one — it is V2-07's
+behaviour, which is proved.
 
 ## 5. The runner
 
@@ -336,6 +402,14 @@ The suite must distinguish the two classes by *effect*, not by reading a label:
 3d. **reconciliation refuses where a choice would be required** — one case that
    is forced and monotone and is applied, one that is ambiguous and stops the
    block. Also that applying the permitted one twice changes nothing;
+3e. **the fingerprint actually binds the dependency relation** — same `blockId`,
+   same `taskIds`, one edge added or removed, and the old fingerprint must no
+   longer match. Without this the new authority is modelled but not frozen,
+   which is the whole point of putting it in the plan;
+3f. **transitive dependency through a non-member defeats independence** — the
+   `A ← X ← B` case from section 4, with `X` outside the block. A suite that
+   only drives direct intra-block edges passes against the unsound projection
+   this design rejected;
 4. **the block is not `COMPLETE` when a task is `BLOCKED`** — asserted on the
    persisted ledger, not on an in-memory value;
 5. **no continuation without established independence** — a block whose
@@ -375,6 +449,12 @@ was written, rather than left for a planner to settle implicitly.
 | 2 | blocked task, nothing runnable: which reason? | `TASK_BLOCKED`. Cause beats consequence; `NO_ELIGIBLE_TASK` is reserved for a real dead end no disposition explains |
 | 3 | which positive reconciliations may be applied alone? | only monotone, forced, evidence-backed ones, through the existing primitive — the six conditions in section 6a. Anything else stops the block |
 | 4 | how many new reasons, and a schema bump? | **one** new persisted reason and **three** runner outcomes that write nothing. One bump of `BLOCK_LEDGER_SCHEMA_VERSION` for the slice |
+| 5 | where does established independence come from? | the **frozen plan**, extended with a canonical transitive dependency projection bound into the fingerprint (section 4). Not the live graph, not a bare flag, not deferred |
+
+Question 5 was not in the original list. It surfaced while planning: `BlockDefinition`
+carries no dependency information at all, so the slice could not have proved its
+own core decision. It folds into the same schema bump as question 1 — one version
+jump for the slice, not one per change.
 
 The insight that reshaped question 4, and with it the runner's exit paths: a
 ledger `stopReason` is itself a durable claim, so a condition asserting that the
