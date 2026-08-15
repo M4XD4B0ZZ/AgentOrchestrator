@@ -111,16 +111,32 @@ if (mode === 'FORBID') {
   // what makes "exactly one POST, to the configured endpoint" a measurement of
   // the *only* connection the process made rather than of the one we watched.
   const realConnect = net.Socket.prototype.connect;
+
+  /**
+   * The host this call is about, whatever calling convention was used.
+   *
+   * `net.connect(...)` normalises its arguments and hands
+   * `Socket.prototype.connect` a **single array** `[options, callback]`, which is
+   * what `fetch` ends up doing. A reader that took `args[0].host` therefore saw
+   * `undefined` on every real call — measured, by inverting the test below and
+   * watching the positive case stay green. An unrecognised shape yields `''`,
+   * which is refused rather than waved through: a bound that cannot see its
+   * subject is not a bound.
+   */
+  const hostOf = (args) => {
+    const raw = args[0];
+    const options = Array.isArray(raw) ? raw[0] : raw;
+    if (typeof options === 'object' && options !== null) {
+      return String(options.host ?? options.hostname ?? '');
+    }
+    if (typeof raw === 'string') return raw;
+    return typeof args[1] === 'string' ? args[1] : '';
+  };
+
   net.Socket.prototype.connect = function connect(...args) {
-    const options = args[0];
-    const host =
-      typeof options === 'object' && options !== null
-        ? String(options.host ?? '')
-        : typeof args[1] === 'string'
-          ? args[1]
-          : '';
-    if (host !== '' && host !== '127.0.0.1' && host !== '::1') {
-      die(EXIT_EGRESS_ATTEMPTED, `a socket was opened to ${host}`);
+    const host = hostOf(args);
+    if (host !== '127.0.0.1' && host !== '::1') {
+      die(EXIT_EGRESS_ATTEMPTED, `a socket was opened to ${host === '' ? '<unreadable>' : host}`);
     }
     return Reflect.apply(realConnect, this, args);
   };
