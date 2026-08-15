@@ -24,7 +24,7 @@ import { CLAUDE_WRITER_ARGS } from '../src/agent/claude-writer.js';
 import { readClaudeResultEnvelope } from '../src/agent/internal/claude-result-envelope.js';
 import { renderRunResult } from '../src/cli/render-attended-run.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
-import { runImplementStep } from '../src/loop/loop-step.js';
+import { runImplementStep, runReviewStep } from '../src/loop/loop-step.js';
 import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { runTask, type RunResult } from '../src/run/run-driver.js';
 import {
@@ -177,6 +177,9 @@ function runResultWithDenials(denials: { count: number; tools: readonly string[]
   });
 }
 
+/** Distinct task ids, so two payload fixtures never share a workspace. */
+let payloadCase = 0;
+
 /** Dependencies with **real** Git, as the e2e suite runs them. */
 function deps(overrides: Record<string, unknown> = {}) {
   return { now: tickingClock(), git: runGitCommand, ...overrides };
@@ -187,7 +190,6 @@ function request(started: StartedTask) {
   return {
     repository: started.repository,
     taskId: started.taskId,
-    taskBrief: 'Make the writer authority observable.',
     attendedContinuation: true,
     authEvidence: provenAuthEvidence(),
     lease: leaseFor(started.repository),
@@ -710,6 +712,135 @@ describe('the commit carries the orchestrator’s own identity', () => {
   });
 });
 
+/* ═══════════ 3b. The reviewer is told what the task requires ═══════════════ */
+
+describe('the reviewer is told what the task requires', () => {
+  /**
+   * The payload a real review step would build, captured at the seam.
+   *
+   * Built through `runReviewStep` rather than by calling the builder directly:
+   * the defect was not that the builder was wrong, it was that the step never
+   * handed it anything but an id. A control on the builder alone would have
+   * been green throughout.
+   */
+  async function reviewPayloadFor(options: {
+    readonly body?: string;
+    readonly round?: number;
+    readonly contextFileContaining?: string;
+  }): Promise<string> {
+    const taskId = `REM-001-RV${payloadCase++}`;
+    const body = options.body ?? 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.';
+    const started = await startTask({
+      taskId,
+      files: {
+        [`tasks/${taskId}.md`]: [
+          '---',
+          `id: ${taskId}`,
+          `title: task ${taskId}`,
+          'status: OPEN',
+          'kind: NORMAL',
+          'priority: NORMAL',
+          'currentFocus: true',
+          'dependsOn: []',
+          '---',
+          '',
+          body,
+          '',
+        ].join('\n'),
+        ...(options.contextFileContaining === undefined
+          ? {}
+          : { 'README.md': `# fixture\n\n${options.contextFileContaining}\n` }),
+      },
+    });
+    const round = options.round ?? 1;
+    const current = seedState(started, { state: 'REVIEWING', reviewRound: round - 1 });
+    const agent = recordedAgent({ codex: () => reviewResult(passingReview()) });
+
+    await runReviewStep(current, {
+      now: '2026-08-16T10:00:00.000Z',
+      authorisedWorktreePath: started.workspace.worktreePath,
+      verification: started.repository.verification,
+      brief: readExecutionBrief(started.repository, taskId, started.workspace.worktreePath),
+      git: runGitCommand,
+      agent: agent.runner,
+      lease: { repository: started.repository, evidence: leaseFor(started.repository) },
+    });
+
+    const payload = agent.calls.find((call) => call.agent === 'codex')?.payload;
+    if (payload === undefined) throw new Error('the reviewer was never started');
+    return payload;
+  }
+
+  // The control asserts on the constructed PAYLOAD, not on a verdict. The
+  // product's obligation is to hand over the discriminating semantics; a
+  // scripted agent's verdict is whatever the fixture says and asserts nothing.
+  it('gives two tasks with the same diff materially different payloads', async () => {
+    const a = await reviewPayloadFor({
+      body: 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.',
+    });
+    const b = await reviewPayloadFor({
+      body: 'Document the widget. ACCEPTANCE: README gains a Widget section.',
+    });
+
+    expect(a).not.toBe(b);
+    expect(a).toContain('src/widget.ts exports createWidget');
+    expect(a).not.toContain('README gains a Widget section');
+    expect(b).toContain('README gains a Widget section');
+    expect(b).not.toContain('src/widget.ts exports createWidget');
+  });
+
+  it('tells the reviewer which round it is', async () => {
+    expect(await reviewPayloadFor({ round: 3 })).toContain('round 3');
+  });
+
+  it('asks whether the tree satisfies the task, not only what it broke', async () => {
+    // Without this the round-3 PASS recurs: an empty diff introduces no defects.
+    expect(await reviewPayloadFor({})).toMatch(/satisf/i);
+  });
+
+  it('says so when the body was truncated', async () => {
+    // A body over the 8 KiB task-file cap, so the truncation is the reader's
+    // real one rather than a flag the fixture set.
+    const payload = await reviewPayloadFor({ body: `Add a widget. ${'x'.repeat(9_000)}` });
+    expect(payload).toMatch(/truncat/i);
+  });
+
+  it('carries context-source paths but never their contents', async () => {
+    // Non-vacuous by construction: the canary is real text in a real file the
+    // builder had a path to.
+    //
+    // Where the guarantee actually lives, measured: the builder cannot leak a
+    // file's contents even if it wanted to, because `ContextSourceReport` gives
+    // it a repository-relative path and a status and no root to resolve them
+    // against. A mutant pasting contents *in the builder* stays green — it
+    // reads the wrong file. The mutant that reddens this is in
+    // `task-brief.ts`, which is the component that does hold the bytes.
+    const payload = await reviewPayloadFor({ contextFileContaining: 'CANARY-README-BODY' });
+    expect(payload).toContain('README.md');
+    expect(payload).not.toContain('CANARY-README-BODY');
+  });
+
+  it('parks rather than degrading when the brief is unavailable', async () => {
+    const started = await startTask({ taskId: 'REM-001-RVX' });
+    const current = seedState(started, { state: 'REVIEWING', reviewRound: 0 });
+    const agent = recordedAgent({});
+
+    const step = await runReviewStep(current, {
+      now: '2026-08-16T10:00:00.000Z',
+      authorisedWorktreePath: started.workspace.worktreePath,
+      verification: started.repository.verification,
+      // No brief at all: the caller failed to read one.
+      git: runGitCommand,
+      agent: agent.runner,
+      lease: { repository: started.repository, evidence: leaseFor(started.repository) },
+    });
+
+    expect(step.outcome).toBe('BLOCKED');
+    expect(step.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(agent.countFor('codex')).toBe(0); // the reviewer was never started
+  });
+});
+
 /* ═══════ 4. READY_FOR_PR refuses a task that delivered nothing ═════════════ */
 
 describe('a task that delivered nothing does not reach READY_FOR_PR', () => {
@@ -871,7 +1002,6 @@ describe('a writer pass with no measured effect is not a success', () => {
       now: '2026-08-15T10:00:00.000Z',
       authorisedWorktreePath: started.workspace.worktreePath,
       verification: started.repository.verification,
-      taskBrief: 'Make the writer’s effect real.',
       brief: readExecutionBrief(started.repository, started.taskId, started.workspace.worktreePath),
       git: runGitCommand,
       agent: agent.runner,

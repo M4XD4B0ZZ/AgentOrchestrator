@@ -297,7 +297,6 @@ async function executeAttendedUnderLease(
       // agents actually receive is read inside the driver, from the worktree it
       // authorised (`readExecutionBrief`) — so this command authors no prompt
       // text, which is the property `run-driver.ts` insists on for itself.
-      taskBrief: taskId,
       // The grant, and only here. `true` because this function is only reached
       // when `--attended` was given.
       attendedContinuation: true,

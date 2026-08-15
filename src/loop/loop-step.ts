@@ -255,8 +255,6 @@ export interface LoopDependencies extends AdvanceOptions {
   readonly authorisedWorktreePath: string;
   /** The repository's resolved verification policy. Never the raw profile. */
   readonly verification: ResolvedVerificationPolicy;
-  /** What the task is, in the reviewer's and writer's own words. */
-  readonly taskBrief: string;
   /**
    * The repository's own account of the task, read by `task-brief.ts`.
    *
@@ -470,11 +468,11 @@ async function commitPassOrPark(
 /** The advance options, separated from the execution seams they travel with. */
 function leaseAdvanceOptions(deps: LoopDependencies): AdvanceOptions {
   const {
-    now, authorisedWorktreePath, agent, verify, observe, git, brief, taskBrief, verification,
+    now, authorisedWorktreePath, agent, verify, observe, git, brief, verification,
     remediationPayload, ...advance
   } = deps;
   void now; void authorisedWorktreePath; void agent; void verify; void observe; void git;
-  void brief; void taskBrief; void verification; void remediationPayload;
+  void brief; void verification; void remediationPayload;
   return advance;
 }
 
@@ -609,7 +607,6 @@ export async function runVerifyStep(
     now,
     authorisedWorktreePath,
     verification,
-    taskBrief,
     verify,
     agent,
     git,
@@ -617,7 +614,6 @@ export async function runVerifyStep(
     remediationPayload,
     ...advance
   } = deps;
-  void taskBrief;
   void agent;
   void git;
   void observe;
@@ -692,7 +688,7 @@ export async function runReviewStep(
   const state = current.state;
   if (state.state !== 'REVIEWING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, taskBrief, agent, observe, ...rest } = deps;
+  const { now, authorisedWorktreePath, brief, agent, observe, ...rest } = deps;
   const { verification, verify, git, remediationPayload, ...advance } = rest;
   void verification;
   void verify;
@@ -721,8 +717,36 @@ export async function runReviewStep(
     return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
   }
 
+  // The reviewer is told what the task requires, or no reviewer runs.
+  //
+  // Re-checked here rather than assumed from an earlier step, exactly as
+  // `runImplementStep` re-checks it: a restarted driver enters this step
+  // directly, and a task whose file was emptied in the meantime must not have a
+  // reviewer briefed from nothing. **Never a fallback to the task id** — that
+  // silent degrade is the defect being fixed here, and it would be untestable
+  // by absence, since a payload naming only an id looks exactly like a payload
+  // for a task with nothing to say.
+  if (brief === undefined || !brief.ok || !brief.brief.contextComplete) {
+    const save = advanceTaskState(
+      current,
+      {
+        ...state,
+        state: 'HUMAN_DECISION_REQUIRED',
+        stateEnteredAt: now,
+        resumeFrom: { phase: 'REVIEW', round },
+        reportedResetAt: null,
+      },
+      advance,
+    );
+    return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
+  }
+
   const review = await runCodexReviewer(
-    { worktreePath: authorisedWorktreePath, round, payload: buildReviewPayload(taskBrief) },
+    {
+      worktreePath: authorisedWorktreePath,
+      round,
+      payload: buildReviewPayload(brief.brief, round),
+    },
     { agent: leasedAgent(deps) },
   );
 
@@ -890,13 +914,11 @@ export async function runRemediateStep(
     agent,
     git,
     remediationPayload,
-    taskBrief,
     verification,
     verify,
     observe,
     ...advance
   } = deps;
-  void taskBrief;
   void verification;
   void verify;
   void observe;
@@ -1039,11 +1061,10 @@ export async function runWorktreeReadyStep(
   const state = current.state;
   if (state.state !== 'WORKTREE_READY') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, agent, git, remediationPayload, taskBrief, brief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, agent, git, remediationPayload, brief, verification, verify, observe, ...advance } = deps;
   void agent;
   void git;
   void remediationPayload;
-  void taskBrief;
   void brief;
   void verification;
   void verify;
@@ -1086,11 +1107,10 @@ export async function runContextLoadingStep(
   const state = current.state;
   if (state.state !== 'CONTEXT_LOADING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, brief, agent, git, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, brief, agent, git, remediationPayload, verification, verify, observe, ...advance } = deps;
   void agent;
   void git;
   void remediationPayload;
-  void taskBrief;
   void verification;
   void verify;
   void observe;
@@ -1180,9 +1200,8 @@ export async function runImplementStep(
   const state = current.state;
   if (state.state !== 'IMPLEMENTING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, agent, brief, git, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, agent, brief, git, remediationPayload, verification, verify, observe, ...advance } = deps;
   void remediationPayload;
-  void taskBrief;
   void verification;
   void verify;
   void observe;

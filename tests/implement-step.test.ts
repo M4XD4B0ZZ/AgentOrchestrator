@@ -109,7 +109,6 @@ function stepDeps(
     now: '2026-08-11T09:00:00.000Z',
     authorisedWorktreePath: current.state.worktreePath,
     verification: repository.verification,
-    taskBrief: 'unused by these steps',
     brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
     lease: leaseAuthorityFor(repository),
     ...overrides,
@@ -493,7 +492,6 @@ describe('a task created by production code now runs', () => {
       {
         repository,
         taskId: 'V2-04',
-        taskBrief: 'unused: the implement step reads the repository',
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(repository),

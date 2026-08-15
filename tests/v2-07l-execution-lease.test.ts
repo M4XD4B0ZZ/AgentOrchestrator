@@ -583,7 +583,6 @@ describe('no productive writer path runs without the lease', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: forged,
@@ -691,7 +690,6 @@ describe('no productive writer path runs without the lease', () => {
       {
         repository: target.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: foreign,
@@ -752,7 +750,6 @@ describe('a lease acquired minutes ago is not a lease held now', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
@@ -893,7 +890,6 @@ describe('no durable transition happens after the lease is lost', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
@@ -1345,7 +1341,6 @@ describe('a mutation never happens on a lease proved somewhere earlier', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
@@ -1580,7 +1575,6 @@ describe('the agent seam refuses to start a process without the lease', () => {
         now: tickingClock()(),
         authorisedWorktreePath: current.state.worktreePath,
         verification: fixture.repository.verification,
-        taskBrief: TASK_ID,
         brief: readExecutionBrief(fixture.repository, TASK_ID, current.state.worktreePath),
         lease: authority,
       });
@@ -1599,7 +1593,6 @@ describe('the agent seam refuses to start a process without the lease', () => {
       now: tickingClock()(),
       authorisedWorktreePath: current.state.worktreePath,
       verification: fixture.repository.verification,
-      taskBrief: TASK_ID,
       brief: readExecutionBrief(fixture.repository, TASK_ID, current.state.worktreePath),
       lease: authority,
       agent: async () => {
@@ -1778,7 +1771,6 @@ describe('every seam that starts a process is fenced, not just the writer', () =
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
-      taskBrief: TASK_ID,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -1837,7 +1829,6 @@ describe('every seam that starts a process is fenced, not just the writer', () =
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
@@ -1900,7 +1891,6 @@ describe('a step started directly is fenced exactly like one the loop drives', (
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
-      taskBrief: TASK_ID,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -1954,7 +1944,6 @@ describe('a step started directly is fenced exactly like one the loop drives', (
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
-      taskBrief: TASK_ID,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -2872,7 +2861,6 @@ describe('a gate is proved by what it stops, when the outcome no longer differs'
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,

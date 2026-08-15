@@ -83,7 +83,6 @@ function request(started: StartedTask, overrides: Record<string, unknown> = {}) 
   return {
     repository: started.repository,
     taskId: started.taskId,
-    taskBrief: 'Make the integrated pipeline behave.',
     attendedContinuation: true,
     authEvidence: provenAuthEvidence(),
     // Real, and re-proved by the driver on every iteration.
@@ -1028,7 +1027,6 @@ describe('selection reads the repository\'s own task files', () => {
     const first = await runNextTask(
       {
         repository: started.repository,
-        taskBrief: (task) => `brief for ${task.id}`,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(started.repository),
@@ -1047,7 +1045,6 @@ describe('selection reads the repository\'s own task files', () => {
     const second = await runNextTask(
       {
         repository: started.repository,
-        taskBrief: (task) => `brief for ${task.id}`,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(started.repository),

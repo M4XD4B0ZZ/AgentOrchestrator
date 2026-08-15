@@ -133,7 +133,6 @@ function deps(
     now: '2026-08-11T10:00:00.000Z',
     authorisedWorktreePath: current.state.worktreePath,
     verification: repository.verification,
-    taskBrief: 'unused here',
     brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
     lease: leaseAuthorityFor(repository),
     ...overrides,

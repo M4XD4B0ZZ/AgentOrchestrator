@@ -54,7 +54,6 @@ describe('the states the loop advertises are the states it dispatches', () => {
     now: '2026-08-10T10:00:00.000Z',
     authorisedWorktreePath: '/srv/projects/alpha.worktrees/task-0001',
     verification: { phases: [] },
-    taskBrief: 'brief',
     // Real evidence for a scratch directory. These deps exist to prove a
     // *non-driven* state reaches no seam at all, so nothing here should ever
     // get as far as a durable transition — but the requirement is a parameter,

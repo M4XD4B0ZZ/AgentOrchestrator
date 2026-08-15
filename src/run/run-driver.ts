@@ -322,8 +322,6 @@ export interface RunRequest {
   readonly repository: ResolvedRepository;
   /** The task to drive. */
   readonly taskId: string;
-  /** What the task is, in the reviewer's and writer's own words. */
-  readonly taskBrief: string;
   /**
    * Whether this run may continue a task that reconciles but is not cleared for
    * unattended execution.
@@ -452,7 +450,7 @@ export async function runTask(
   request: RunRequest,
   deps: RunDependencies,
 ): Promise<RunResult> {
-  const { repository, taskId, taskBrief, maxSteps } = request;
+  const { repository, taskId, maxSteps } = request;
 
   // Accumulated here rather than read off the step this run happens to stop on.
   // Every `stop` below is a way this run can end, and an operator is owed the
@@ -739,7 +737,6 @@ export async function runTask(
       now: deps.now(),
       authorisedWorktreePath,
       verification: repository.verification,
-      taskBrief,
       // Read fresh each iteration rather than once per run: a task file can be
       // corrected between steps, and a driver holding a stale answer would
       // park a task a human has already fixed. Reading it is not authoring it
@@ -1003,15 +1000,7 @@ export function selectRunTask(repository: ResolvedRepository): RunSelection {
   });
 }
 
-export interface RunNextRequest extends Omit<RunRequest, 'taskId' | 'taskBrief'> {
-  /**
-   * Builds the brief handed to the agents for the selected task.
-   *
-   * A function, because the task is not known until the selector has spoken —
-   * and supplied by the caller rather than composed here, because a brief is
-   * prompt text and this module authors none.
-   */
-  readonly taskBrief: (task: TaskDefinition) => string;
+export interface RunNextRequest extends Omit<RunRequest, 'taskId'> {
 }
 
 export interface RunNextResult {
@@ -1041,7 +1030,6 @@ export async function runNextTask(
     {
       repository: request.repository,
       taskId: task.id,
-      taskBrief: request.taskBrief(task),
       attendedContinuation: request.attendedContinuation,
       authEvidence: request.authEvidence,
       lease: request.lease,

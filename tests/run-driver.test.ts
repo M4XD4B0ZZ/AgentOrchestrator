@@ -29,7 +29,15 @@
  * cannot be asked to produce on demand.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -94,6 +102,40 @@ const tempDirs: string[] = [];
 function repoRoot(): string {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'ao-driver-')));
   tempDirs.push(dir);
+  // The task's own words, on disk in the worktree the state records.
+  //
+  // The rest of this suite's world is scripted, deliberately — see
+  // `scriptedGit`. This part cannot be: since DOGFOOD-REM-001 the review step
+  // reads the repository's account of the task and **parks** rather than
+  // briefing a reviewer with a bare id, and `readExecutionBrief` reads real
+  // files out of the authorised worktree. So the two files it needs really
+  // exist, and every case here keeps its own subject instead of stopping on a
+  // brief it never meant to withhold.
+  // The prose is read from the repository's own task source, the context from
+  // the authorised worktree — two different trees, and `readExecutionBrief`
+  // says why: a human correcting a task file edits it on the default branch.
+  const worktree = worktreeOf(dir);
+  mkdirSync(join(dir, 'tasks'), { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  writeFileSync(join(worktree, 'README.md'), '# fixture\n', 'utf8');
+  writeFileSync(
+    join(dir, 'tasks', `${TASK_ID}.md`),
+    [
+      '---',
+      `id: ${TASK_ID}`,
+      'title: add a widget',
+      'status: OPEN',
+      'kind: NORMAL',
+      'priority: NORMAL',
+      'currentFocus: true',
+      'dependsOn: []',
+      '---',
+      '',
+      'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
   return dir;
 }
 
@@ -368,7 +410,6 @@ function request(root: string, overrides: Partial<RunRequest> = {}): RunRequest 
   return {
     repository: repo,
     taskId: TASK_ID,
-    taskBrief: 'Add a widget.',
     attendedContinuation: true,
     authEvidence: provenAuthEvidence(),
     // Acquired for real: the driver re-proves it against the file every
@@ -1225,6 +1266,11 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
    */
   it('now resumes an IMPLEMENT pause, because the implement step exists', async () => {
     const root = repoRoot();
+    // This case's premise is a repository with **no task file**, which is what
+    // makes the implement step park without briefing anyone — see below. Every
+    // other case here now gets one, so this one takes it away again explicitly
+    // rather than depending on a fixture default that has since changed.
+    rmSync(join(root, 'tasks'), { recursive: true, force: true });
     const before = blockedOn(root, 'IMPLEMENT');
 
     const agent = cappedAgent(agentCommandResult(), 0);
@@ -1780,7 +1826,6 @@ describe('task selection', () => {
     const outcome = await runNextTask(
       {
         repository: resolved,
-        taskBrief: (task) => task.title,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(resolved),

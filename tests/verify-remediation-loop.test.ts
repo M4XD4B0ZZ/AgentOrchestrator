@@ -208,7 +208,6 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     now: NOW,
     authorisedWorktreePath: authorisedWorktree(root),
     verification: VERIFICATION,
-    taskBrief: 'Add a widget.',
     lease: leaseAuthorityAt(root),
     observe: settledObserver,
     // The Git a healthy repository would be, for the same reason `observe`
@@ -226,6 +225,22 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     // no-effect pass inadmissible: every remediation case here would now park
     // on the effect gate, one state short of the routing they are about.
     git: writingPassGit,
+    // The task's own words, supplied explicitly for the same reason `git` and
+    // `observe` are: this root is synthetic, so `readExecutionBrief` has nothing
+    // to read. Since DOGFOOD-REM-001 the review step parks rather than briefing
+    // a reviewer with a bare id, so a case that withheld this would stop one
+    // state early for a reason it is not about.
+    brief: {
+      ok: true as const,
+      code: 'BRIEF' as const,
+      brief: {
+        taskId: TASK_ID,
+        body: 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.',
+        bodyTruncated: false,
+        contextSources: [],
+        contextComplete: true,
+      },
+    },
     ...overrides,
   };
 }
