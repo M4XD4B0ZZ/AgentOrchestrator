@@ -29,7 +29,7 @@ import { loadBlockLedger } from '../src/block/block-store.js';
 import { defineBlock, fingerprintFrozenMembership } from '../src/block/block-definition.js';
 import { planNextTask, type TaskPlanningSuccess } from '../src/plan/plan-next-task.js';
 import type { TaskEligibility } from '../src/plan/select-task.js';
-import { registerBlockCommand } from '../src/cli/block-command.js';
+import { registerBlockCommand, type BlockCommandSeams } from '../src/cli/block-command.js';
 import {
   BLOCK_BASE_UNRESOLVED_SENTENCE,
   BLOCK_STOP_SENTENCES,
@@ -37,6 +37,7 @@ import {
   renderBlockRun,
 } from '../src/cli/render-block-run.js';
 import { REPO_PROFILE_RELATIVE_PATH } from '../src/repo/profile-location.js';
+import { loadTaskState } from '../src/state/state-store.js';
 import { runTask } from '../src/run/run-driver.js';
 import { startPlannedTask, startTask } from '../src/run/start-task.js';
 import { assessTaskScope } from '../src/scope/assess-scope.js';
@@ -1203,6 +1204,7 @@ describe('an operator-facing sentence is bound to the state that produced it', (
  */
 async function runBlockCli(
   args: readonly string[],
+  seams: BlockCommandSeams = {},
 ): Promise<{ readonly stdout: string; readonly exitCode: number | undefined }> {
   const chunks: string[] = [];
   const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown): boolean => {
@@ -1214,7 +1216,7 @@ async function runBlockCli(
   try {
     const program = new Command();
     program.exitOverride();
-    registerBlockCommand(program);
+    registerBlockCommand(program, seams);
     await program.parseAsync(['block', ...args], { from: 'user' });
     return { stdout: chunks.join(''), exitCode: process.exitCode as number | undefined };
   } finally {
@@ -1285,4 +1287,105 @@ describe('the freeze site refuses a block no member could be built on', () => {
     expect(printed.stdout).toContain('would be built on the result of A-001');
     expect(printed.stdout).not.toContain('NO_UNIQUE_MAXIMUM');
   });
+});
+
+/* ═══════════════════ the two end-to-end controls ═════════════════════════ */
+
+/**
+ * Exactly two, per the plan's test budget, and each carries the defect it proves
+ * that no cheaper control can.
+ *
+ * Everything below this line is proved one tier down in isolation: the lease is
+ * V2-07L's, the single plan snapshot is V2-08's, the frozen relation is V2-07's,
+ * the ledger's successor contract is V2-07's, workspace preparation is V1-03's
+ * and the scope authority is this slice's own G-2. None of those shows that the
+ * six of them *compose* for a chained member, which is what a whole-command run
+ * is for and the only thing these two are for.
+ */
+describe('the block command drives a dependent chain end to end', () => {
+  /**
+   * E2E-1. The defect only this can prove: that the lease, the one plan
+   * snapshot, the frozen relation, the ledger's successor contract, workspace
+   * preparation and the scope authority are all satisfied *at the same time*
+   * for a chained member — through the real command, including the freeze site
+   * that reads the block base and the exit code an operator acts on.
+   */
+  it('drives a dependent block end to end and exits on its reason', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+
+    const printed = await runBlockCli(
+      [
+        '--repository', repository.root, '--block', BLOCK_ID,
+        '--tasks', 'A-001', 'B-001', '--run', RUN_ID, '--attended',
+      ],
+      {
+        authPreflight: authPreflightPasses,
+        agent: recordedAgent({
+          claude: (call) => writerThatCommits('src/work.ts', `// ${call.index}\n`)(call),
+          codex: () => reviewResult(passingReview()),
+        }).runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    expect(printed.exitCode).toBe(0);
+    expect(printed.stdout).toContain('COMPLETE');
+    const ledger = ledgerOf(repository.root);
+    expect(ledger.stopReason).toBe('COMPLETE');
+    // The chain, in the durable document the command wrote.
+    expect(entryFor(ledger, 'B-001')?.baseCommit).toBe(entryFor(ledger, 'A-001')?.resultCommit);
+    // And the block base, derivable from that same document: the one distinct
+    // value among the empty-row members that carry a base.
+    expect(entryFor(ledger, 'A-001')?.baseCommit).toEqual(expect.any(String));
+    expect(reload(repository.root, 'B-001').state.scopeAuthorityCommit)
+      .toBe(entryFor(ledger, 'A-001')?.baseCommit);
+  }, 600_000);
+
+  /**
+   * E2E-2. The defect only this can prove: that Task 5's widening does not
+   * over-reach through the whole stack when the predecessor does **not**
+   * deliver. That is the one direction in which a mistake becomes durable and
+   * false — a successor started on a base its predecessor never produced, with a
+   * ledger entry claiming it.
+   */
+  it('never starts the successor when the predecessor blocks, and claims nothing about it', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+
+    const printed = await runBlockCli(
+      [
+        '--repository', repository.root, '--block', BLOCK_ID,
+        '--tasks', 'A-001', 'B-001', '--run', RUN_ID, '--attended',
+      ],
+      {
+        authPreflight: authPreflightPasses,
+        agent: recordedAgent({
+          // A real scope violation, through the real scope check: the fixture
+          // profile allows `src` and nothing else, so a file at the worktree
+          // root is a measured offence rather than a state edited into place.
+          claude: (call) => {
+            writeRepoFile(call.cwd, 'outside-scope.txt', 'written where the profile does not allow');
+            return writerSuccess();
+          },
+          codex: () => reviewResult(passingReview()),
+        }).runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    expect(printed.stdout).toContain('TASK_BLOCKED');
+    const ledger = ledgerOf(repository.root);
+    expect(entryFor(ledger, 'A-001')?.disposition).toBe('BLOCKED');
+    // Nothing is claimed about B: not a disposition, not a base, not a result.
+    expect(entryFor(ledger, 'B-001')).toMatchObject({
+      disposition: 'PLANNED',
+      baseCommit: null,
+      resultCommit: null,
+      evidenceRevision: null,
+    });
+    // And nothing was created for it either.
+    // `STATE_MISSING` exactly, not merely "not valid": an unreadable record
+    // would also fail a `tryReload`, and it would mean something quite different.
+    expect(loadTaskState(repository.root, 'B-001').classification).toBe('STATE_MISSING');
+    expect(branchExists(repository.root, 'ao/task/B-001')).toBe(false);
+  }, 600_000);
 });
