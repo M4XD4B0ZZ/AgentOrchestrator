@@ -79,6 +79,14 @@ import { readClaudeResultEnvelope } from './internal/claude-result-envelope.js';
  * not substitute a remembered flag for a measured one** — three of the four
  * decisions here contradict what the flag names suggest.
  *
+ * The standing gate has since reproduced the split on **2.1.220** as well: the
+ * writer edited inside its worktree, the escape to a sibling was blocked, no MCP
+ * tool was reachable, and HEAD did not move — while the same gate's control,
+ * driving the pre-fix vector, still produced an unchanged file and
+ * `permission_denials: [Write]` under a `success` envelope. Two versions, the
+ * same behaviour; the version numbers are recorded rather than merged, because
+ * "measured somewhere" and "measured here" are different claims.
+ *
  * `--print` is the non-interactive mode; `--output-format json` is what makes
  * the result a structured document rather than prose to be scraped. The prompt
  * is not here — it goes on stdin, because it could not be an argv token even
