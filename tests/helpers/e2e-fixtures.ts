@@ -225,6 +225,40 @@ export function seedState(
   return reload(started.root, workspace.taskId);
 }
 
+/**
+ * A first state for a task that has **already delivered work**.
+ *
+ * Since DOGFOOD-REM-001 `READY_FOR_PR` additionally requires the observed HEAD
+ * to differ from the base pin: a clean worktree sitting at the commit the task
+ * started from is an untouched task, not a finished one. A scenario seeded at
+ * `VERIFYING` with nothing committed therefore parks — correctly, and for a
+ * reason those scenarios are not about.
+ *
+ * So the work is real: a file is written and committed on the task's own branch
+ * before the state is seeded, and the state records that commit. The commit is
+ * made with the fixture's own Git rather than through the product, because this
+ * is *previous* work the scenario starts from — the writing agent's own
+ * inability to commit is a separate property, pinned in
+ * `tests/dogfood-rem-001.test.ts`.
+ */
+export function seedDeliveredState(
+  started: StartedTask,
+  overrides: Partial<TaskStateInput> = {},
+): StateLoadSuccess {
+  const worktreePath = started.workspace.worktreePath;
+  writeRepoFile(worktreePath, 'src/delivered.ts', 'export const delivered = true;\n');
+  git(worktreePath, ['add', '--all']);
+  git(worktreePath, [
+    '-c', 'user.name=AgentOrchestrator',
+    '-c', 'user.email=agent-orchestrator@local.invalid',
+    'commit', '--quiet', '-m', `AO:${started.taskId}:IMPLEMENT:r1`,
+  ]);
+  return seedState(started, {
+    currentCommit: git(worktreePath, ['rev-parse', 'HEAD']).trim(),
+    ...overrides,
+  });
+}
+
 /** The durable state as a caller would hold it. Fails loudly rather than silently. */
 export function reload(root: string, taskId: string): StateLoadSuccess {
   const loaded = loadTaskState(root, taskId);

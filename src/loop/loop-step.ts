@@ -790,11 +790,48 @@ export async function runReviewStep(
   // A clean review. `READY_FOR_PR` additionally demands settled commits and a
   // clean worktree, which no reviewer can attest to, so they are observed here
   // and the state is only claimed when both were positively established.
+  //
+  // ── And that the task delivered something (DOGFOOD-REM-001 R2) ───────────
+  //
+  // The first dogfood run settled a task whose worktree was clean at exactly
+  // the commit it started from: nothing had been written, the reviewer had
+  // nothing to object to, and "clean and known" was read as "finished". A clean
+  // tree at the base pin is not a delivered task; it is an untouched one.
+  //
+  // The comparison is **observed HEAD vs. the record's pin**, and the two
+  // provenances are the point. `checkpoint.currentCommit` comes from the fresh
+  // `observeCompletion` immediately above; `basePinnedCommit` is a pin, which is
+  // a fact the record is entitled to state. Comparing `state.currentCommit`
+  // against `state.basePinnedCommit` instead would compare two values an earlier
+  // write chose — a record agreeing with itself — and would relocate the TOCTOU
+  // rather than close it.
+  //
+  // **What this conjunct does not own, measured.** A record naming a commit the
+  // worktree no longer has never reaches this line: `src/state/reconcile.ts`
+  // refuses it first with `CURRENT_COMMIT_MOVED`, the run ends `STATE_DIVERGED`
+  // with zero steps, and no reviewer is started. That was measured while
+  // building this gate's fixture, and it is recorded here so the guarantee is
+  // attributed to the component that actually holds it. What reaches *this*
+  // predicate is the ordinary shape — `currentCommit` withdrawn to `null` by the
+  // writing phase — which is why the control for it is seeded that way.
+  //
+  // No task-type discrimination. `kind` is `NORMAL | REMEDIATION`, is not in the
+  // task state, and affects only ranking; there is no no-op kind to exempt. If
+  // one ever exists the answer here is already right: it parks, and an operator
+  // says so.
+  //
+  // **Residual, named rather than hidden (G2):** this is a SHA-inequality test
+  // and is strictly weaker than a non-empty-diff test — `observeTaskDelta` is
+  // the primitive that would close it. It is not needed today because AO commits
+  // without `--allow-empty` (`commitTaskWork`), so no result commit can exist
+  // without staged changes; an empty commit would move HEAD and satisfy this.
+  // Closing-audit material.
   const checkpoint = await (observe ?? observeCompletion)(state);
   const settled =
     checkpoint.worktreeClean === true &&
     checkpoint.currentCommit !== null &&
-    state.basePinnedCommit !== null;
+    state.basePinnedCommit !== null &&
+    checkpoint.currentCommit !== state.basePinnedCommit;
 
   if (!settled) {
     const save = advanceTaskState(

@@ -54,6 +54,7 @@ import {
   reload,
   removeTree,
   reviewResult,
+  seedDeliveredState,
   seedState,
   startTask,
   taskFile,
@@ -102,7 +103,9 @@ function deps(overrides: Record<string, unknown> = {}) {
 describe('a task the repository is happy with reaches READY_FOR_PR', () => {
   it('verifies, reviews clean, and settles — observing HEAD through real Git', async () => {
     const started = await startTask({ taskId: TASK_ID });
-    seedState(started);
+    // Work already delivered: settling additionally requires that the task did
+    // something (DOGFOOD-REM-001 R2), so the fixture commits before it verifies.
+    seedDeliveredState(started);
 
     const verify = recordedVerify();
     const agent = recordedAgent({ codex: () => reviewResult(passingReview()) });
@@ -170,7 +173,7 @@ describe('a task the repository is happy with reaches READY_FOR_PR', () => {
    */
   it('does not execute another task step for a terminal task', async () => {
     const started = await startTask({ taskId: TASK_ID });
-    seedState(started);
+    seedDeliveredState(started);
     const first = await runTask(
       request(started),
       deps({ verify: recordedVerify().runner, agent: recordedAgent({ codex: () => reviewResult(passingReview()) }).runner }),
@@ -369,7 +372,7 @@ describe('the repository verdict is the repository\'s', () => {
 describe('a process that dies mid-step loses nothing and fabricates nothing', () => {
   it('re-runs the step when the write never landed, without consuming a round', async () => {
     const started = await startTask({ taskId: TASK_ID });
-    const before = seedState(started);
+    const before = seedDeliveredState(started);
 
     const crashing: ReplaceFn = () => {
       throw new Error('crash between the subprocess and the state file');
@@ -406,7 +409,7 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
 
   it('does not replay a transition whose write did land', async () => {
     const started = await startTask({ taskId: TASK_ID });
-    seedState(started);
+    seedDeliveredState(started);
 
     // The write lands and *then* the process dies, which is the one crash point
     // where the caller's report and the disk disagree.
@@ -676,8 +679,8 @@ describe('one repository cannot reach into another', () => {
 
     expect(alpha.root).not.toBe(beta.root);
     expect(alpha.repository.id).toBe(beta.repository.id); // same profile id on purpose
-    seedState(alpha);
-    seedState(beta);
+    seedDeliveredState(alpha);
+    seedDeliveredState(beta);
 
     // Drive alpha to completion; beta must be untouched.
     const betaBefore = reload(beta.root, TASK_ID);
@@ -873,7 +876,7 @@ describe('a tampered state cannot make the main checkout a task workspace', () =
     // once compared as paths. If these ever disagree, the check above would
     // refuse every legitimate task.
     expect(started.workspace.workBranch).toBe(derived.identity.workBranch);
-    seedState(started);
+    seedDeliveredState(started);
     const run = await runTask(
       request(started),
       deps({ verify: recordedVerify().runner, agent: recordedAgent({ codex: () => reviewResult(passingReview()) }).runner }),
@@ -1020,7 +1023,7 @@ describe('selection reads the repository\'s own task files', () => {
       taskId: TASK_ID,
       files: { 'tasks/V1-08-B.md': taskFile('V1-08-B', { dependsOn: [TASK_ID] }) },
     });
-    seedState(started);
+    seedDeliveredState(started);
 
     const first = await runNextTask(
       {

@@ -32,6 +32,7 @@ import {
   executableDriverKeysIn,
   type CommitTaskWorkResult,
 } from '../src/worktree/commit-task-work.js';
+import { classifyAncestry } from '../src/worktree/commit-probes.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import {
   addsFile,
@@ -62,6 +63,7 @@ import {
   recordedAgent,
   recordedVerify,
   reviewResult,
+  reload,
   seedState,
   startTask,
   tickingClock,
@@ -705,6 +707,154 @@ describe('the commit carries the orchestrator’s own identity', () => {
     // And the repository's own configuration is left exactly as it was found:
     // AO supplies identity, it does not install one.
     expect(configOf(worktreePath, 'user.email')).toBe('somebody@example.com');
+  });
+});
+
+/* ═══════ 4. READY_FOR_PR refuses a task that delivered nothing ═════════════ */
+
+describe('a task that delivered nothing does not reach READY_FOR_PR', () => {
+  // ── Where the stale-record TOCTOU is actually closed, measured ───────────
+  //
+  // This case was designed to drive the settlement predicate with a record
+  // claiming a commit the worktree does not have. It never reaches it: the run
+  // stops at reconciliation with `CURRENT_COMMIT_MOVED`, 0 steps, before any
+  // loop step is dispatched.
+  //
+  // That is kept as the finding rather than smoothed away. The guarantee
+  // belongs to `src/state/reconcile.ts`, not to the conjunct in
+  // `runReviewStep`, and attributing it to the wrong line is how the empty-delta
+  // defect survived review the first time. The conjunct's own discriminating
+  // fixture is the case below, which reconciliation does admit.
+  it('never reaches the settlement gate at all when the record names a commit the worktree lost', async () => {
+    const started = await startTask({ taskId: 'REM-001-STALE' });
+    const worktreePath = started.workspace.worktreePath;
+    const base = started.workspace.basePinnedCommit;
+
+    // A real commit object, then the worktree is put back where it was: HEAD is
+    // BASE and clean, while the record still names the descendant. This is the
+    // stale-record shape a crash between commit and write produces.
+    writeIn(worktreePath, 'src/stale.ts', '// stale\n');
+    const stale = await commitTaskWork(runGitCommand, worktreePath, {
+      taskId: 'REM-001-STALE',
+      phase: 'IMPLEMENT',
+      round: 1,
+      approvedPaths: ['src/stale.ts'],
+      basePinnedCommit: base,
+    });
+    expect(stale.outcome).toBe('COMMITTED');
+    setupGit(worktreePath, ['reset', '--hard', base]);
+
+    const current = seedState(started, {
+      state: 'REVIEWING',
+      reviewRound: 0,
+      currentCommit: committedCommit(stale), // the record's claim …
+    });
+    expect(headOf(worktreePath)).toBe(base); // … and the truth
+    expect(committedCommit(stale)).not.toBe(base);
+    expect(current.state.currentCommit).not.toBe(base);
+
+    const agent = recordedAgent({ codex: () => reviewResult(passingReview()) });
+    const run = await runTask(
+      request(started),
+      deps({ verify: recordedVerify().runner, agent: agent.runner }),
+    );
+    const final = reload(started.root, 'REM-001-STALE').state;
+
+    // Measured, and this is the assertion that names the owner: nothing ran,
+    // nothing was written, and the reason is the reconciliation finding.
+    expect(run.outcome).toBe('STATE_DIVERGED');
+    expect(run.reasonCodes).toContain('CURRENT_COMMIT_MOVED');
+    expect(run.reconciliation?.outcome).toBe('STATE_DIVERGED');
+    expect(run.steps).toBe(0);
+    expect(final.state).toBe('REVIEWING');
+    // The reviewer was never started, so no settlement gate was ever consulted.
+    expect(agent.countFor('codex')).toBe(0);
+  });
+
+  // The conjunct's own discriminating fixture, and the shape a real run has.
+  //
+  // A writing phase withdraws the checkpoint, so `currentCommit` is **null** on
+  // the way into `VERIFYING` and stays null through `REVIEWING` — reconciliation
+  // admits that record precisely because withdrawal is what it is for. So this
+  // reaches the settlement predicate, and the two readings disagree here:
+  // `null !== basePinnedCommit` is true, while the observed HEAD really is the
+  // base pin. The record-vs-record mutant settles this task; the correct
+  // comparison parks it.
+  it('parks for an operator when the observed head is still the base pin', async () => {
+    const started = await startTask({ taskId: 'REM-001-NULL' });
+    seedState(started, {
+      state: 'REVIEWING',
+      reviewRound: 0,
+      currentCommit: null,
+      worktreeCleanAtCheckpoint: false,
+    });
+    expect(headOf(started.workspace.worktreePath)).toBe(started.workspace.basePinnedCommit);
+
+    const agent = recordedAgent({ codex: () => reviewResult(passingReview()) });
+    const run = await runTask(
+      request(started),
+      deps({ verify: recordedVerify().runner, agent: agent.runner }),
+    );
+    const final = reload(started.root, 'REM-001-NULL').state;
+
+    // The positive successor, not merely "not READY_FOR_PR".
+    expect(final.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(final.resumeFrom).toEqual({ phase: 'REVIEW', round: 1 });
+    expect(run.outcome).toBe('HUMAN_DECISION_REQUIRED');
+    // The reviewer really ran and really passed: the refusal is the gate's.
+    expect(agent.countFor('codex')).toBe(1);
+  });
+
+  // The plain shape, kept as well: the record agrees with the worktree and both
+  // say nothing was delivered. This is the dogfood's own record, and it is the
+  // case that would still pass under the mutant — which is exactly why it is
+  // not sufficient on its own and is not the mutation target.
+  it('parks when the record and the worktree agree that nothing was delivered', async () => {
+    const started = await startTask({ taskId: 'REM-001-AGREE' });
+    seedState(started, { state: 'REVIEWING', reviewRound: 0 });
+
+    const run = await runTask(
+      request(started),
+      deps({
+        verify: recordedVerify().runner,
+        agent: recordedAgent({ codex: () => reviewResult(passingReview()) }).runner,
+      }),
+    );
+    const final = reload(started.root, 'REM-001-AGREE').state;
+
+    expect(final.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(final.currentCommit).toBe(final.basePinnedCommit);
+    expect(run.outcome).toBe('HUMAN_DECISION_REQUIRED');
+  });
+
+  it('still settles a task whose commit is a real descendant', async () => {
+    const started = await startTask({ taskId: 'REM-001-REAL' });
+    seedState(started, { state: 'IMPLEMENTING' });
+    const agent = recordedAgent({
+      claude: writerThatEdits('src/work.ts', '// work\n'),
+      codex: () => reviewResult(passingReview()),
+    });
+
+    const run = await runTask(
+      request(started),
+      deps({ verify: recordedVerify().runner, agent: agent.runner }),
+    );
+    const final = reload(started.root, 'REM-001-REAL').state;
+
+    expect(run.outcome).toBe('TASK_COMPLETED');
+    expect(final.state).toBe('READY_FOR_PR');
+    expect(final.worktreeCleanAtCheckpoint).toBe(true);
+    expect(final.currentCommit).not.toBe(final.basePinnedCommit);
+    expect(final.currentCommit).toBe(headOf(started.workspace.worktreePath));
+    // A real descendant, and git says so — not merely a different string.
+    await expect(
+      classifyAncestry(
+        runGitCommand,
+        started.workspace.worktreePath,
+        final.basePinnedCommit ?? '',
+        'HEAD',
+      ),
+    ).resolves.toBe('ANCESTOR');
   });
 });
 
