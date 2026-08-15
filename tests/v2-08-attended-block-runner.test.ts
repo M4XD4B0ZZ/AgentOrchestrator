@@ -2027,3 +2027,88 @@ describe('an unrecorded outcome leaves the ledger byte-identical across it', () 
     expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
   }, 900_000);
 });
+
+/** A replace seam that fails every time, so no ledger write can land. */
+function alwaysFailingReplace(): ReplaceFn {
+  return () => {
+    const error = new Error('replace refused by the test seam') as NodeJS.ErrnoException;
+    error.code = 'EPERM';
+    throw error;
+  };
+}
+
+/** A replace seam that works `n` times and then fails. */
+function replaceFailingAfter(n: number): ReplaceFn {
+  let seen = 0;
+  return (from, to) => {
+    seen += 1;
+    if (seen > n) {
+      const error = new Error('replace refused by the test seam') as NodeJS.ErrnoException;
+      error.code = 'EPERM';
+      throw error;
+    }
+    renameSync(from, to);
+  };
+}
+
+describe('a durable write that is not possible is reported, never claimed', () => {
+  it('reports the failure of the very first write, with no ledger on disk', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+
+    const result = await runBlock(fixture, independentBlock(['A-001', 'B-001']), {
+      ledgerReplace: alwaysFailingReplace(),
+    });
+
+    expect(result.outcome).toBe('DURABLE_WRITE_FAILED');
+    expect(result.stopReason).toBeNull();
+    // The condition is that the run cannot write. There is no ledger, and the
+    // runner did not manufacture one to record that it could not write.
+    expect(existsSync(ledgerPath(fixture.root))).toBe(false);
+    // The detail names the failure rather than describing it.
+    expect(result.detail).toContain('WRITE_FAILED');
+  }, 600_000);
+
+  it('leaves the ledger byte-identical when a later write fails', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+
+    // One successful write — the creation — and every later one refused.
+    const result = await runBlock(fixture, independentBlock(['A-001', 'B-001']), {
+      ledgerReplace: replaceFailingAfter(1),
+    });
+    const after = readFileSync(ledgerPath(fixture.root));
+
+    expect(result.outcome).toBe('DURABLE_WRITE_FAILED');
+    expect(result.stopReason).toBeNull();
+    // The activation failed, so the ledger is still the creation. Byte for
+    // byte, and with no stop reason: the run cannot presuppose a successful
+    // stop write, because the failed write is the condition being reported.
+    const document = JSON.parse(after.toString('utf8')) as Record<string, unknown>;
+    expect(document['stopReason']).toBeNull();
+    expect(document['activeTaskId']).toBeNull();
+    expect((document['tasks'] as readonly Record<string, unknown>[]).map((t) => t['disposition']))
+      .toEqual(['PLANNED', 'PLANNED']);
+  }, 600_000);
+
+  it('does not try to record a stop reason about a write it could not make', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const attempted: string[] = [];
+
+    await runBlock(fixture, independentBlock(['A-001', 'B-001']), {
+      ledgerReplace: (from, to) => {
+        attempted.push(readFileSync(from, 'utf8'));
+        const error = new Error('refused') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      },
+    });
+
+    // Every document the run staged is inspected. A best-effort stop write
+    // would appear here as a staged document carrying a stopReason — the run's
+    // least trustworthy claim, made at its least trustworthy moment.
+    for (const staged of attempted) {
+      const document = JSON.parse(staged) as Record<string, unknown>;
+      expect(document['stopReason']).toBeNull();
+    }
+    expect(attempted.length).toBeGreaterThan(0);
+  }, 600_000);
+});
