@@ -65,6 +65,25 @@
  * `WORKTREE_READY` is therefore a literal in this module and reachable through
  * no argument at all — `tests/start-task.test.ts` pins that the only state any
  * production path can create is that one.
+ *
+ * ── Two entry points, and only one of them reads the roadmap ───────────────
+ *
+ * {@link startTask} plans, and {@link startPlannedTask} is *given* a plan. They
+ * share every gate below the plan — `startAgainstPlan` is the whole of the rest
+ * — and the split is structural rather than a matter of discipline: the planned
+ * entry point has no way to produce a `TaskPlanningSuccess`, so it cannot read
+ * the roadmap even by accident.
+ *
+ * It exists because a block run freezes one reading of the roadmap under its
+ * lease and starts every member through this module. A start that planned again
+ * would answer `TASK_INELIGIBLE` from a roadmap edited *after* the block was
+ * frozen — the frozen plan would be an assertion about what runs rather than the
+ * authority over it, and the second read would sit one layer below a runner in
+ * which every module looked innocent.
+ *
+ * `PLANNING_FAILED` is therefore unreachable through `startPlannedTask` by
+ * construction, and stays in {@link START_TASK_OUTCOMES} regardless: the outcome
+ * vocabulary is shared, and the block runner's grading is total over it.
  */
 
 import {
@@ -78,7 +97,7 @@ import {
 } from '../lease/execution-lease.js';
 import { TASK_STATE_SCHEMA_VERSION } from '../core/internal/task-state-object-schema.js';
 import type { TaskStateInput } from '../core/task-state.js';
-import { planNextTask } from '../plan/plan-next-task.js';
+import { planNextTask, type TaskPlanningSuccess } from '../plan/plan-next-task.js';
 import { isValidTaskId } from '../plan/task-id.js';
 import type { TaskDefinition } from '../plan/task-definition.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
@@ -208,6 +227,18 @@ export interface StartTaskRequest {
   readonly taskId: string;
 }
 
+/**
+ * A start request that carries the planning result the caller already took.
+ *
+ * The whole `TaskPlanningSuccess`, not a list of eligible ids: the eligibility
+ * answer and the task definition the workspace is built from must come out of
+ * the *same* reading, or the frozen plan would decide what may run and an edited
+ * file would decide what is built.
+ */
+export type PlannedStartRequest = StartTaskRequest & {
+  readonly planning: TaskPlanningSuccess;
+};
+
 export interface StartTaskDependencies {
   /** The Git seam. Required and never defaulted. */
   readonly git: GitRunner;
@@ -331,50 +362,63 @@ function firstState(
 }
 
 /**
- * Starts one task, or explains why it did not start.
+ * Steps 0 and 1: may this invocation act here, and is this an id at all.
  *
- * Never throws for an expected condition. Every refusal arrives as data, and
- * every refusal before the durable write leaves the repository exactly as it
- * was found.
+ * Returns the refusal, or `null` when both gates passed. Shared by both entry
+ * points, and on the {@link startTask} path it stays *ahead* of the plan read:
+ * an invocation that is not the writer must hear `EXECUTION_LEASE_NOT_HELD`
+ * rather than `PLANNING_FAILED`, which is the order this file has always had.
+ *
+ * `repository` is the caller's snapshot and never a fresh read of
+ * `request.repository` — see {@link startTask} for what a re-read record can do
+ * between a gate and an effect.
  */
-export async function startTask(
-  request: StartTaskRequest,
+function gateStart(
+  repository: ResolvedRepository,
+  taskId: string,
   deps: StartTaskDependencies,
-): Promise<StartTaskResult> {
-  const { taskId } = request;
-  // One reading of the repository record, taken before the first gate and used
-  // by every gate and every effect below it.
-  //
-  // This path has three gates and three effects interleaved between them — a
-  // plan read, a workspace, a first durable write — and a record whose `root` is
-  // an accessor can name the leased repository at each gate and another one at
-  // each effect. Every gate passes and nothing lands where the authority was.
-  // See `snapshotRepositoryRecord`; the review that found this drove a branch, a
-  // worktree and a state file into a repository nobody held.
-  const repository = snapshotRepositoryRecord(request.repository);
-  const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
-    result({ taskId, ...from });
-
+): StartTaskResult | null {
   // --- 0. May this invocation act on this repository at all? ---------------
   // Ahead of every other gate, including the cheap syntactic ones. Proven
   // against the file rather than against the artefact alone: evidence is a
   // record of a claim that was made, and a claim can have been cleared since.
   const lease = verifyExecutionLeaseHeldFor(repository, deps.lease);
   if (lease.code !== 'HELD') {
-    return stop({
+    return result({
+      taskId,
       outcome: 'EXECUTION_LEASE_NOT_HELD',
       reasonCodes: Object.freeze([lease.code]),
     });
   }
 
-  // --- 1. Is this a task at all, and may it run? ---------------------------
-  if (!isValidTaskId(taskId)) return stop({ outcome: 'TASK_ID_INVALID' });
+  // --- 1. Is this a task at all? -------------------------------------------
+  if (!isValidTaskId(taskId)) return result({ taskId, outcome: 'TASK_ID_INVALID' });
 
-  const planning = planNextTask(repository);
-  if (!planning.ok) {
-    return stop({ outcome: 'PLANNING_FAILED', reasonCodes: Object.freeze([planning.code]) });
-  }
+  return null;
+}
 
+/**
+ * Everything below the plan read: may this task run, and then the start itself.
+ *
+ * Takes the planning result **as a value** and neither imports nor calls
+ * `planNextTask`. That is the whole of this module's half of the frozen-plan
+ * argument: there is exactly one place a roadmap reading enters a start, and it
+ * is the caller's.
+ *
+ * Private, because the gates in {@link gateStart} are not optional. `repository`
+ * is the entry point's snapshot, unchanged.
+ */
+async function startAgainstPlan(
+  repository: ResolvedRepository,
+  taskId: string,
+  planning: TaskPlanningSuccess,
+  deps: StartTaskDependencies,
+): Promise<StartTaskResult> {
+  const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
+    result({ taskId, ...from });
+
+  // --- 1 (continued). May it run? ------------------------------------------
+  // Answered from the plan this function was handed, and from nothing else.
   const eligibility = planning.selection.eligibility.find((entry) => entry.taskId === taskId);
   if (eligibility === undefined) return stop({ outcome: 'TASK_UNKNOWN' });
   if (!eligibility.eligible) {
@@ -560,4 +604,84 @@ export async function startTask(
   // no adopted flag in the contract and no second recovery lifeline — so from
   // the next step onwards the two are indistinguishable, by design.
   return stop({ outcome: adopted ? 'ADOPTED' : 'STARTED', workspace });
+}
+
+/**
+ * Starts one task against a planning result **the caller already took**.
+ *
+ * Same gates, same order, same refusals as {@link startTask} — the single
+ * difference is where the plan came from. It exists because a block run freezes
+ * one reading of the roadmap under its lease and every gate below that must
+ * consult *that* reading: a start that planned again would answer
+ * `TASK_INELIGIBLE` from a roadmap edited after the block was frozen, and the
+ * frozen plan would be an assertion rather than an authority.
+ *
+ * `PLANNING_FAILED` is unreachable here by construction — the caller holds a
+ * `TaskPlanningSuccess`, so the planning already succeeded. The outcome stays in
+ * the shared vocabulary, which is what keeps `startConclusionFor` total.
+ */
+export async function startPlannedTask(
+  request: PlannedStartRequest,
+  deps: StartTaskDependencies,
+): Promise<StartTaskResult> {
+  // One reading of each of the two request fields, for the reason {@link
+  // startTask} gives about the record: a supplied `taskId` is read once here and
+  // that value is what every gate judges and every effect uses.
+  const { taskId } = request;
+  const repository = snapshotRepositoryRecord(request.repository);
+  const gated = gateStart(repository, taskId, deps);
+  if (gated !== null) return gated;
+  return startAgainstPlan(repository, taskId, request.planning, deps);
+}
+
+/**
+ * Starts one task, or explains why it did not start.
+ *
+ * Never throws for an expected condition. Every refusal arrives as data, and
+ * every refusal before the durable write leaves the repository exactly as it
+ * was found.
+ *
+ * Reads the roadmap itself, once, between the two gates in {@link gateStart} and
+ * everything below them. A caller that has already taken a planning result — a
+ * block run, which froze one — must use {@link startPlannedTask} instead, or the
+ * reading it froze is overruled here.
+ */
+export async function startTask(
+  request: StartTaskRequest,
+  deps: StartTaskDependencies,
+): Promise<StartTaskResult> {
+  // One reading of the request, taken before the first gate and used by every
+  // gate and every effect below it.
+  //
+  // This path has three gates and three effects interleaved between them — a
+  // plan read, a workspace, a first durable write — and a record whose `root` is
+  // an accessor can name the leased repository at each gate and another one at
+  // each effect. Every gate passes and nothing lands where the authority was.
+  // See `snapshotRepositoryRecord`; the review that found this drove a branch, a
+  // worktree and a state file into a repository nobody held.
+  //
+  // `taskId` is destructured here for exactly the same reason, and it is not a
+  // formality: `isValidTaskId` judges the value read at this line, while
+  // `loadTaskState`, `prepareTaskWorkspace` and `saveTaskState` act on it much
+  // later. Read again at each of those, an accessor-backed id would pass the
+  // syntactic gate as one task and be created as another. One read, one value —
+  // never a second validation, which would only move the same seam.
+  const { taskId } = request;
+  const repository = snapshotRepositoryRecord(request.repository);
+  const gated = gateStart(repository, taskId, deps);
+  if (gated !== null) return gated;
+
+  // The plan read, and it stays *behind* the lease gate: an invocation that is
+  // not the writer is told so, rather than being told the repository's roadmap
+  // could not be parsed.
+  const planning = planNextTask(repository);
+  if (!planning.ok) {
+    return result({
+      taskId,
+      outcome: 'PLANNING_FAILED',
+      reasonCodes: Object.freeze([planning.code]),
+    });
+  }
+
+  return startAgainstPlan(repository, taskId, planning, deps);
 }

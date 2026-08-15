@@ -65,15 +65,31 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { z } from 'zod';
 
-import { isValidTaskId } from '../plan/task-id.js';
+import { compareTaskIds, isValidTaskId } from '../plan/task-id.js';
 import {
   fingerprintFrozenMembership,
   isValidBlockId,
   MAX_BLOCK_TASKS,
+  type FrozenTaskDependency,
 } from './block-definition.js';
 
-/** Contract version of the ledger document. Bump on any breaking shape change. */
-export const BLOCK_LEDGER_SCHEMA_VERSION = 1;
+/**
+ * Contract version of the ledger document. Bump on any breaking shape change.
+ *
+ * **2 (V2-08).** Two changes land under one bump, deliberately: the frozen plan
+ * gained `frozenDependencies`, and `BLOCK_STOP_REASONS` gained
+ * `ACTIVE_TASK_UNRESOLVED`. Not one bump per value — and, equally deliberately,
+ * no "the enum grew but the version stayed" exception. A reader of version 1
+ * genuinely cannot understand a version-2 document: it would meet a stop reason
+ * outside its closed vocabulary and a field its `.strict()` schema refuses.
+ * Pretending otherwise is the kind of convenient untruth this repository keeps
+ * removing.
+ *
+ * A version-1 document is refused on load and **never migrated**. See
+ * `LEDGER_SCHEMA_UNSUPPORTED` in `block-store.ts` for why inventing the missing
+ * relation would be worse than refusing.
+ */
+export const BLOCK_LEDGER_SCHEMA_VERSION = 2;
 
 /** What the run has durably established about one of its tasks. */
 export const TASK_DISPOSITIONS = [
@@ -83,22 +99,40 @@ export const TASK_DISPOSITIONS = [
   'ACTIVE',
   /** Finished, on the strength of a task state that proved it. */
   'SETTLED',
-  /** Stopped on something a human must resolve. Also evidence-backed. */
+  /**
+   * Stopped on something a human must resolve. Also evidence-backed.
+   *
+   * Terminal for this task and **not** for the run. Until V2-08 this was
+   * documented the other way round — "a blocked task is waiting for a human and
+   * stops the run as a matter of policy" — and `parkBlockTask` implemented it by
+   * writing a stop reason. Both are gone. A block of independent tasks in which
+   * one fails locally is not a wasted run: the remaining tasks are still
+   * provable on their own records, and stopping would have thrown away work
+   * nothing was wrong with.
+   *
+   * What did not change: this disposition is still `EVIDENCE_BACKED`, still
+   * terminal for the task, and still unrecordable without the task state that
+   * proves it.
+   */
   'BLOCKED',
   /**
    * Given up on, on the strength of a task state that reached `ABORTED`.
    *
    * Terminal, and deliberately **not** `BLOCKED`. The two look similar and are
-   * opposite: a blocked task is waiting for a human and stops the run as a
-   * matter of policy, while an abandoned one is over — nothing continues from
-   * `ABORTED`, and there is nothing for a human to resolve.
+   * opposite: a blocked task is waiting for a human, while an abandoned one is
+   * over — nothing continues from `ABORTED`, and there is nothing for a human to
+   * resolve.
    *
    * Without it the run has no legal move at all when its active task aborts:
    * settling would claim work that did not finish, parking would claim a block
-   * that does not exist, and `stopBlockRun` refuses while a task is `ACTIVE`.
-   * A contract whose only remaining move is to falsify one of its own records
-   * has wedged the run, and inventing progress to escape is exactly what this
-   * ledger exists to prevent.
+   * that does not exist, and `stopBlockRun` refuses a progress-claiming reason
+   * while a task is `ACTIVE`. A contract whose only remaining move is to falsify
+   * one of its own records has wedged the run, and inventing progress to escape
+   * is exactly what this ledger exists to prevent.
+   *
+   * Like `BLOCKED`, it no longer ends the run by itself (V2-08). `COMPLETE`
+   * still requires every task `SETTLED`, so an abandoned task correctly makes
+   * the block uncompletable rather than silently forgivable.
    */
   'ABANDONED',
 ] as const;
@@ -128,7 +162,12 @@ export const EVIDENCE_BACKED: ReadonlySet<TaskDisposition> = new Set<TaskDisposi
 export const BLOCK_STOP_REASONS = [
   /** Every frozen task is settled. The intended end. */
   'COMPLETE',
-  /** A task is blocked and only a human continues it. */
+  /**
+   * A task stopped on something a human must resolve, so this run ended without
+   * completing the block. Narrowed in V2-08 from "abort now": parking a task no
+   * longer writes this reason — see `parkBlockTask` — and the runner writes it at
+   * the end, as the task outcome that explains the ending.
+   */
   'TASK_BLOCKED',
   /** A task was given up on, so the block cannot be completed. */
   'TASK_ABANDONED',
@@ -142,6 +181,33 @@ export const BLOCK_STOP_REASONS = [
   'STATE_UNUSABLE',
   /** The frozen plan no longer matches the repository's definition. */
   'DEFINITION_DRIFTED',
+  /**
+   * An active task's outcome could not be safely established, so the run ends.
+   *
+   * ── Why this is not `STATE_UNUSABLE` ───────────────────────────────────────
+   *
+   * `STATE_UNUSABLE` says something about the task *state*: damaged, foreign,
+   * not trustworthy. A task can hold entirely legitimate prior evidence and
+   * still end in a condition whose outcome cannot be determined — a driver that
+   * made no progress, a settlement whose proof no longer holds, an interruption
+   * nothing can conclude. That is a **different fact**, and folding it into
+   * `STATE_UNUSABLE` is exactly the misdescription class V2-07P spent three
+   * review rounds deleting.
+   *
+   * ── What it may and may not carry ──────────────────────────────────────────
+   *
+   * It **may coexist** with `ACTIVE` and an unchanged `activeTaskId`: it does
+   * not require the run to first invent a disposition for the task it could not
+   * conclude. It drags **no** task disposition and **no** commit evidence with
+   * it — `assessLedgerSuccession`'s `UNRESOLVED_STOP_CARRIED_MORE` already holds
+   * that write to saying one thing.
+   *
+   * It is deliberately **not** required to have an active task. The design says
+   * where it may coexist with one, never that it may only be written with one,
+   * and a class-2 reason that quietly acquired a precondition is the shape that
+   * wedges a run in the case the reason was added for.
+   */
+  'ACTIVE_TASK_UNRESOLVED',
 ] as const;
 
 export type BlockStopReason = (typeof BLOCK_STOP_REASONS)[number];
@@ -159,6 +225,12 @@ export type BlockStopReason = (typeof BLOCK_STOP_REASONS)[number];
  * It lives here, with the contract, rather than beside the gate that consumes
  * it. The schema and the store both have to answer "does this reason claim
  * progress?", and two answers to that question would be two contracts.
+ *
+ * `ACTIVE_TASK_UNRESOLVED` is deliberately not a member, and the omission is
+ * load-bearing rather than incidental. Sorted in, it would be proved against
+ * every task record before it could be written — and it exists precisely for
+ * the case where one of those records cannot be judged. It would be unwritable
+ * exactly when it is true.
  */
 export const PROGRESS_CLAIMING_STOP_REASONS: ReadonlySet<BlockStopReason> =
   new Set<BlockStopReason>(['COMPLETE', 'TASK_BLOCKED', 'TASK_ABANDONED']);
@@ -169,6 +241,14 @@ const ISO_8601 =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 const TaskIdSchema = z.string().refine(isValidTaskId, 'Must be a canonical task id.');
+
+const FrozenTaskDependencySchema = z
+  .object({
+    taskId: TaskIdSchema,
+    /** Members this task transitively depends on. Deduplicated and sorted. */
+    dependsOn: z.array(TaskIdSchema).max(MAX_BLOCK_TASKS),
+  })
+  .strict();
 
 const BlockTaskEntrySchema = z
   .object({
@@ -206,6 +286,15 @@ export const BlockRunLedgerObjectSchema = z
     startedAt: z.string().regex(ISO_8601, 'Must be an ISO-8601 instant.'),
     /** Membership as frozen at start. Never edited afterwards. */
     frozenTaskIds: z.array(TaskIdSchema).min(1).max(MAX_BLOCK_TASKS),
+    /**
+     * The dependency relation as frozen at start. Never edited afterwards.
+     *
+     * The **only** persisted image of the relation. No `dependents` copy sits
+     * beside it: two spellings of one fact are two facts that can disagree, and
+     * the one a run's continuation decision reads would then be a matter of
+     * which the caller happened to look at.
+     */
+    frozenDependencies: z.array(FrozenTaskDependencySchema).min(1).max(MAX_BLOCK_TASKS),
     planFingerprint: z.string().regex(SHA256_HEX, 'Must be a definition fingerprint.'),
     activeTaskId: TaskIdSchema.nullable(),
     tasks: z.array(BlockTaskEntrySchema).min(1).max(MAX_BLOCK_TASKS),
@@ -254,6 +343,50 @@ export const BlockRunLedgerSchema = BlockRunLedgerObjectSchema.superRefine((valu
     issue(['blockId'], 'blockId must not also be a task id of this block.');
   }
 
+  // --- 1a. The relation is one row per frozen task, in the same order -------
+  // The same shape as rule 1, for the same reason: the frozen plan is the run's
+  // identity, and a relation that drifted from the membership would make "what
+  // does this run consider independent" a question with two answers. Row order
+  // mirrors `frozenTaskIds`, so row order carries no information of its own and
+  // one relation cannot have two fingerprints.
+  const relationIds = value.frozenDependencies.map((row) => row.taskId);
+  if (
+    relationIds.length !== value.frozenTaskIds.length ||
+    relationIds.some((id, index) => id !== value.frozenTaskIds[index])
+  ) {
+    issue(
+      ['frozenDependencies'],
+      'frozenDependencies must carry exactly one row per frozen task, in the same order.',
+    );
+  }
+  const frozenMembers = new Set(value.frozenTaskIds);
+  value.frozenDependencies.forEach((row, index) => {
+    for (const dependency of row.dependsOn) {
+      if (dependency === row.taskId) {
+        issue(['frozenDependencies', index, 'dependsOn'], 'A task may not depend on itself.');
+      } else if (!frozenMembers.has(dependency)) {
+        // The relation is the *projection* onto this block's members. An edge
+        // to a non-member is not a stricter relation, it is a different one —
+        // and a runner reading it would answer independence from a task the
+        // ledger says nothing else about.
+        issue(
+          ['frozenDependencies', index, 'dependsOn'],
+          'A frozen dependency must name a task of this block.',
+        );
+      }
+    }
+    const canonical = [...new Set(row.dependsOn)].sort(compareTaskIds);
+    if (
+      row.dependsOn.length !== canonical.length ||
+      row.dependsOn.some((id, position) => id !== canonical[position])
+    ) {
+      issue(
+        ['frozenDependencies', index, 'dependsOn'],
+        'dependsOn must be deduplicated and canonically sorted.',
+      );
+    }
+  });
+
   // --- 1b. The fingerprint describes the plan the document actually lists ---
   // `planFingerprint` used to be stored and believed, which made it possible
   // for a ledger to carry the digest of a plan it does not contain. That is
@@ -261,10 +394,13 @@ export const BlockRunLedgerSchema = BlockRunLedgerObjectSchema.superRefine((valu
   // reports as drifted and the edited one reports as clean. Re-derived here,
   // from the document itself, so the two spellings of the frozen plan can never
   // disagree — on creation, on update and on every load.
-  if (value.planFingerprint !== fingerprintFrozenMembership(value.blockId, value.frozenTaskIds)) {
+  if (
+    value.planFingerprint !==
+    fingerprintFrozenMembership(value.blockId, value.frozenTaskIds, value.frozenDependencies)
+  ) {
     issue(
       ['planFingerprint'],
-      'planFingerprint must be the fingerprint of this document’s own blockId and frozenTaskIds.',
+      'planFingerprint must be the fingerprint of this document’s own blockId, frozenTaskIds and frozenDependencies.',
     );
   }
 
@@ -493,6 +629,7 @@ const FIELD_AUTHORITY = {
   runId: 'IDENTITY',
   startedAt: 'IDENTITY',
   frozenTaskIds: 'FROZEN_PLAN',
+  frozenDependencies: 'FROZEN_PLAN',
   planFingerprint: 'FROZEN_PLAN',
   activeTaskId: 'RECORD',
   tasks: 'RECORD',

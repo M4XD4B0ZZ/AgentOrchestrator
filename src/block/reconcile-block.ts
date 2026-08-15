@@ -220,7 +220,11 @@ export function reconcileBlockRun(
   // So the frozen membership is recomputed here from the two fields that *are*
   // the plan, and both the ledger's own claim about it and the repository's
   // current definition are held against that, rather than against each other.
-  const frozen = fingerprintFrozenMembership(ledger.blockId, ledger.frozenTaskIds);
+  const frozen = fingerprintFrozenMembership(
+    ledger.blockId,
+    ledger.frozenTaskIds,
+    ledger.frozenDependencies,
+  );
   if (ledger.planFingerprint !== frozen) {
     findings.push(record(ledger.blockId, 'PLAN_FINGERPRINT_UNSOUND'));
   }
