@@ -110,6 +110,10 @@ function scriptedGit(
     if (startsWith(args, ['worktree', 'list'])) return script.registry ?? OK(HEALTHY_REGISTRY);
     if (startsWith(args, ['status'])) return script.status ?? OK('');
     if (startsWith(args, ['merge-base', '--is-ancestor'])) return script.ancestry ?? OK();
+    // The base-pin probe. Both of its questions — `cat-file -t` and, only when
+    // that one fails, `cat-file -e` — are answered from the same script entry,
+    // because every case here is about one Git condition affecting both.
+    if (startsWith(args, ['cat-file'])) return script.baseObject ?? OK('commit');
     if (startsWith(args, ['rev-parse']) && args.includes('HEAD')) {
       return script.head ?? OK(STATE.currentCommit ?? SHA_B);
     }
@@ -259,7 +263,7 @@ describe('separating an absent Git object from an unobservable one', () => {
     });
   }
 
-  it('reads exit 1 as the documented "object does not resolve"', async () => {
+  it('reads the one exit code that answers "no" as absence, and nothing else', async () => {
     const observed = await basePinProbe(NONZERO(1));
 
     expect(observed.basePinnedCommitPresent).toBe(false);

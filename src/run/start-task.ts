@@ -109,6 +109,7 @@ import type { GitRunner } from '../worktree/git-command.js';
 import {
   prepareTaskWorkspace,
   type TaskWorkspace,
+  type WorkspaceBase,
   type WorkspacePreparationFailureCode,
 } from '../worktree/prepare-workspace.js';
 
@@ -237,6 +238,45 @@ export interface StartTaskRequest {
  */
 export type PlannedStartRequest = StartTaskRequest & {
   readonly planning: TaskPlanningSuccess;
+  /**
+   * The commit this task's workspace is to be built on.
+   *
+   * **Required**, because the caller that froze a plan is also the caller that
+   * knows whether this member is a root of its block or is chained onto a
+   * sibling's result. A default here would be this module deciding that on the
+   * caller's behalf, from the one source — the current default branch — that a
+   * frozen run is specifically not allowed to consult.
+   */
+  readonly base: WorkspaceBase;
+  /**
+   * Dependencies the caller has itself satisfied, and may therefore overrule the
+   * frozen ineligibility for.
+   *
+   * The **only** widening of the eligibility gate in this build, and it is
+   * narrow by construction: it overrules `BLOCKED_BY_DEPENDENCIES` and nothing
+   * else, only for dependencies named one by one, and only in the direction the
+   * caller can prove. Naming a dependency does not produce a base — that is
+   * `base` above, and it is proved against Git separately — so a caller cannot
+   * turn this into "start anything".
+   *
+   * `startTask` passes an empty list, which is exactly today's rule.
+   */
+  readonly satisfiedDependencies: readonly string[];
+  /**
+   * The commit whose profile governs this task, or `null` for *its own base pin*.
+   *
+   * **Required**, so every caller states its answer. An omitted field is exactly
+   * how a predecessor's widened profile would sneak back in: the block runner
+   * would forget to pass the block base, the successor's state would carry
+   * `null`, and `assess-scope.ts` would then read the declaration out of the
+   * commit the predecessor's agent wrote.
+   *
+   * Written once, at start, into the task's own durable record — not held in
+   * this invocation. The block run that made the promise can end, crash or be
+   * killed, and the successor is then an ordinary task any later caller may
+   * continue; an invocation-scoped answer would end with the invocation.
+   */
+  readonly scopeAuthorityCommit: string | null;
 };
 
 export interface StartTaskDependencies {
@@ -335,6 +375,7 @@ function firstState(
   workspace: TaskWorkspace,
   repository: ResolvedRepository,
   now: string,
+  scopeAuthorityCommit: string | null,
 ): TaskStateInput {
   return {
     schemaVersion: TASK_STATE_SCHEMA_VERSION,
@@ -346,6 +387,10 @@ function firstState(
     stateEnteredAt: now,
     baseBranch: workspace.baseBranch,
     basePinnedCommit: workspace.basePinnedCommit,
+    // The one field here that is not read off the workspace receipt, because it
+    // is not a property of the workspace: it says which commit's profile judges
+    // what is done *in* it. `null` for every task started outside a block.
+    scopeAuthorityCommit,
     workBranch: workspace.workBranch,
     // A fresh worktree is at its base commit and has nothing in it to be
     // dirty; `prepareTaskWorkspace` verified both from inside it.
@@ -412,6 +457,9 @@ async function startAgainstPlan(
   repository: ResolvedRepository,
   taskId: string,
   planning: TaskPlanningSuccess,
+  base: WorkspaceBase,
+  satisfiedDependencies: readonly string[],
+  scopeAuthorityCommit: string | null,
   deps: StartTaskDependencies,
 ): Promise<StartTaskResult> {
   const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
@@ -421,13 +469,32 @@ async function startAgainstPlan(
   // Answered from the plan this function was handed, and from nothing else.
   const eligibility = planning.selection.eligibility.find((entry) => entry.taskId === taskId);
   if (eligibility === undefined) return stop({ outcome: 'TASK_UNKNOWN' });
+
+  // The caller may overrule exactly one ineligibility, and only by naming the
+  // dependencies it has itself satisfied. Everything else — `ALREADY_DONE`, an
+  // unnamed dependency, a dependency outside the caller's list — refuses as
+  // before. A caller cannot widen this usefully: naming a dependency does not
+  // make a base, and the workspace it gets is still the one the caller pinned,
+  // under the lease, in this repository.
+  //
+  // No roadmap is read here to check the claim, and none may be: the whole point
+  // of this path is that the frozen reading is the authority. What makes the
+  // claim honest is where it comes from — a block runner that watched the
+  // dependency settle against that task's own durable record, in this run.
   if (!eligibility.eligible) {
-    return stop({
-      outcome: 'TASK_INELIGIBLE',
-      reasonCodes: Object.freeze(
-        eligibility.reason === null ? [] : [eligibility.reason],
-      ),
-    });
+    const overruled =
+      eligibility.reason === 'BLOCKED_BY_DEPENDENCIES' &&
+      eligibility.unsatisfiedDependencies.every((dependency) =>
+        satisfiedDependencies.includes(dependency),
+      );
+    if (!overruled) {
+      return stop({
+        outcome: 'TASK_INELIGIBLE',
+        reasonCodes: Object.freeze(
+          eligibility.reason === null ? [] : [eligibility.reason],
+        ),
+      });
+    }
   }
 
   const task: TaskDefinition | undefined = planning.graph.node(taskId)?.definition;
@@ -491,6 +558,7 @@ async function startAgainstPlan(
   const prepared = await prepareTaskWorkspace(repository, task, {
     git: deps.git,
     lease: deps.lease,
+    base,
   });
 
   // A collision may be this task's own crashed start. Only there is adoption
@@ -540,7 +608,10 @@ async function startAgainstPlan(
       });
     }
 
-    const adoption = await assessWorkspaceAdoption(repository, taskId, { git: deps.git });
+    // Assessed against the base this start was told, never against a re-derived
+    // branch tip: the question is whether the thing in the way is the workspace
+    // *this* start would have created.
+    const adoption = await assessWorkspaceAdoption(repository, taskId, { git: deps.git, base });
     if (adoption.verdict !== 'ADOPTABLE_PRISTINE_ORPHAN') {
       // The refusal now names *why* the thing in the way is not ours, which is
       // the difference between "delete a stale worktree" and "somebody is
@@ -581,7 +652,7 @@ async function startAgainstPlan(
     });
   }
 
-  const saved = saveTaskState(firstState(workspace, repository, deps.now()), {
+  const saved = saveTaskState(firstState(workspace, repository, deps.now(), scopeAuthorityCommit), {
     repositoryRoot: repository.root,
     ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
     ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
@@ -631,7 +702,15 @@ export async function startPlannedTask(
   const repository = snapshotRepositoryRecord(request.repository);
   const gated = gateStart(repository, taskId, deps);
   if (gated !== null) return gated;
-  return startAgainstPlan(repository, taskId, request.planning, deps);
+  return startAgainstPlan(
+    repository,
+    taskId,
+    request.planning,
+    request.base,
+    request.satisfiedDependencies,
+    request.scopeAuthorityCommit,
+    deps,
+  );
 }
 
 /**
@@ -683,5 +762,9 @@ export async function startTask(
     });
   }
 
-  return startAgainstPlan(repository, taskId, planning, deps);
+  // Today's behaviour, written down twice over. A task started outside a block
+  // is built on the tip of its repository's declared default branch — what this
+  // path has always resolved for itself one layer further in — and it satisfies
+  // no dependency of its own, so the eligibility gate is exactly the gate it was.
+  return startAgainstPlan(repository, taskId, planning, { kind: 'DEFAULT_BRANCH_TIP' }, [], null, deps);
 }

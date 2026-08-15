@@ -1285,6 +1285,7 @@ describe('a mutation never happens on a lease proved somewhere earlier', () => {
           return runGitCommand(cwd, args);
         },
         lease: evidence,
+        base: { kind: 'DEFAULT_BRANCH_TIP' },
       },
     );
 
@@ -1436,6 +1437,7 @@ describe('a failed preparation does not delete on a lease it no longer holds', (
         return result;
       },
       lease: evidence,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(prepared.ok).toBe(false);
@@ -1483,6 +1485,7 @@ describe('a failed preparation does not delete on a lease it no longer holds', (
         return result;
       },
       lease: evidence,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(prepared.ok).toBe(false);
@@ -1519,6 +1522,7 @@ describe('a failed preparation does not delete on a lease it no longer holds', (
         return result;
       },
       lease: evidence,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(prepared.ok).toBe(false);

@@ -235,7 +235,16 @@ export async function releaseTaskWorkspace(
 
   // The one ownership proof, shared with adoption. A workspace may be released
   // exactly when it could have been adopted — see the module header.
-  const assessment = await assessWorkspaceAdoption(repository, taskId, { git: deps.git });
+  // The default-branch tip, which is today's behaviour written down and is the
+  // only answer this path can give: a release names a task, not a run, so there
+  // is no frozen block base to consult and nothing durable to read one from —
+  // an orphan has no task state by definition. The consequence is honest rather
+  // than hidden: an orphan of a *chained* start sits at its predecessor's result
+  // and is therefore not releasable through this command (F-C5).
+  const assessment = await assessWorkspaceAdoption(repository, taskId, {
+    git: deps.git,
+    base: { kind: 'DEFAULT_BRANCH_TIP' },
+  });
   if (assessment.verdict !== 'ADOPTABLE_PRISTINE_ORPHAN') {
     return result({
       outcome: 'NOT_RELEASABLE',

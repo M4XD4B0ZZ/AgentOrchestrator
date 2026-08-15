@@ -282,6 +282,7 @@ describe('the two halves of the ownership proof must describe one repository', (
 
     const assessment = await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
       git: runGitCommand,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     // Whatever the source's registry says, the Git answering at that path is a
@@ -307,6 +308,7 @@ describe('the two halves of the ownership proof must describe one repository', (
 
     const assessment = await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
       git: lyingGit,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(assessment.verdict).toBe('WORKSPACE_PATH_MISMATCH');
@@ -322,6 +324,7 @@ describe('assessWorkspaceAdoption', () => {
 
     const assessment = await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
       git: runGitCommand,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(assessment.verdict).toBe('STATE_ALREADY_EXISTS');
@@ -339,6 +342,7 @@ describe('assessWorkspaceAdoption', () => {
 
     const assessment = await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
       git: runGitCommand,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(assessment.verdict).toBe('STATE_UNREADABLE');
@@ -353,6 +357,7 @@ describe('assessWorkspaceAdoption', () => {
     // identity is derived from its own root, so neither can see the other's.
     const assessment = await assessWorkspaceAdoption(mine.repository, TASK_ID, {
       git: runGitCommand,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(assessment.verdict).toBe('ADOPTABLE_PRISTINE_ORPHAN');
@@ -367,6 +372,7 @@ describe('assessWorkspaceAdoption', () => {
 
     const assessment = await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
       git: runGitCommand,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(assessment.verdict).toBe('ADOPTABLE_PRISTINE_ORPHAN');
@@ -393,6 +399,7 @@ describe('assessWorkspaceAdoption', () => {
 
     const assessment = await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
       git: runGitCommand,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
 
     expect(assessment.verdict).toBe('SOURCE_UNSUITABLE');
@@ -401,7 +408,10 @@ describe('assessWorkspaceAdoption', () => {
   it('writes nothing, whatever it concludes', async () => {
     const fixture = await afterCrashedStart();
 
-    await assessWorkspaceAdoption(fixture.repository, TASK_ID, { git: runGitCommand });
+    await assessWorkspaceAdoption(fixture.repository, TASK_ID, {
+      git: runGitCommand,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
+    });
 
     // Read-only: the durable write belongs to `startTask`, and an assessor that
     // persisted its own conclusion would be a second recovery lifeline.

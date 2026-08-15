@@ -21,6 +21,11 @@ describe('generated JSON Schema', () => {
 
   it('declares every mandatory field as required', () => {
     const schema = buildTaskStateJsonSchema();
+    // `scopeAuthorityCommit` is defaulted on the *input* side and therefore
+    // required here, because this document is generated with `io: 'output'` and
+    // describes a state after parsing. The two are not in tension: a state
+    // written before the field existed still parses, and parsing is what fills
+    // it in with the `null` that means "this task's own base pin governs".
     expect(schema['required']).toEqual([
       'schemaVersion',
       'taskId',
@@ -31,6 +36,7 @@ describe('generated JSON Schema', () => {
       'stateEnteredAt',
       'baseBranch',
       'basePinnedCommit',
+      'scopeAuthorityCommit',
       'workBranch',
       'currentCommit',
       'reviewRound',

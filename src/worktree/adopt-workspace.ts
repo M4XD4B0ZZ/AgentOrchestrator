@@ -99,6 +99,7 @@ import {
   proveSourcePreflight,
   verifyWorkspaceMatches,
   type TaskWorkspace,
+  type WorkspaceBase,
 } from './prepare-workspace.js';
 import { deriveTaskWorkspaceIdentity, isOwnedTaskBranch } from './workspace-identity.js';
 import { findByPath, listWorktrees } from './worktree-registry.js';
@@ -207,6 +208,17 @@ function unadoptable(
 export interface WorkspaceAdoptionOptions {
   /** The Git seam. Defaults to the real one. */
   readonly git?: GitRunner;
+  /**
+   * The base a fresh start would have used for this task. **Required.**
+   *
+   * Adoption asks whether an orphaned worktree is the one *this* start would
+   * have created, and the commit it must be sitting at is part of that question.
+   * Re-deriving it from the default branch here would answer about a different
+   * start than the caller is making: a chained task's orphan sits at its
+   * predecessor's result, so it would be refused as `WORKSPACE_HEAD_MOVED` —
+   * or, worse, accepted on a day the two commits happen to coincide.
+   */
+  readonly base: WorkspaceBase;
 }
 
 /**
@@ -219,7 +231,7 @@ export interface WorkspaceAdoptionOptions {
 export async function assessWorkspaceAdoption(
   repository: ResolvedRepository,
   taskId: string,
-  options: WorkspaceAdoptionOptions = {},
+  options: WorkspaceAdoptionOptions,
 ): Promise<WorkspaceAdoptionAssessment> {
   const git = options.git ?? runGitCommand;
 
@@ -239,7 +251,7 @@ export async function assessWorkspaceAdoption(
   // The same four proofs preparation runs, and the same pinned commit. A
   // repository that has since moved onto another branch, or been dirtied, is
   // not one a start may be completed in — whether by creation or by adoption.
-  const preflight = await proveSourcePreflight(git, identity);
+  const preflight = await proveSourcePreflight(git, identity, options.base);
   if (!preflight.ok) {
     return unadoptable(preflight.code === 'GIT_UNAVAILABLE' ? 'OWNERSHIP_UNPROVEN' : 'SOURCE_UNSUITABLE');
   }

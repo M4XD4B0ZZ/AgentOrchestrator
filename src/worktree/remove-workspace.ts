@@ -41,6 +41,7 @@ import {
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { localBranchRef, LOCAL_BRANCH_REF_PREFIX } from '../repo/branch-name.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
+import { classifyAncestry as classifyCommitAncestry } from './commit-probes.js';
 import { runGitCommand, type GitRunner } from './git-command.js';
 import {
   deriveTaskWorkspaceIdentity,
@@ -173,18 +174,16 @@ type AncestryVerdict = 'ANCESTOR' | 'NOT_ANCESTOR' | 'BASE_BRANCH_NOT_FOUND' | '
 /**
  * Classifies `git merge-base --is-ancestor`, whose exit status *is* its answer.
  *
- * The protocol this relies on, stated explicitly because it is the one place in
- * this slice that reads an exit code:
+ * The exit-status protocol itself is read in exactly one place —
+ * {@link classifyCommitAncestry} in `commit-probes.ts` — because "what does exit
+ * 128 mean" must have one answer in this build, and this module having its own
+ * copy of it was how a second one existed.
  *
- *   - **0** — `candidateRef` is an ancestor of `baseRef`;
- *   - **1** — it is not. A real answer, and the only non-zero one that is;
- *   - **anything else** (128 in practice) — Git could not evaluate the
- *     question: a ref that does not resolve, a broken repository, a bad
- *     invocation. Never an answer.
- *
- * On that third branch, and only there, one extra command distinguishes the
+ * What is local here is the *refinement*, not the protocol: on the
+ * indeterminate branch, and only there, one extra command distinguishes the
  * common, actionable cause — the base branch no longer exists — from everything
- * else. The happy path stays a single Git call.
+ * else. That is why this verdict has a fourth member the shared one does not,
+ * and why the happy path is still a single Git call.
  */
 async function classifyAncestry(
   git: GitRunner,
@@ -192,15 +191,8 @@ async function classifyAncestry(
   candidateRef: string,
   baseRef: string,
 ): Promise<AncestryVerdict> {
-  const probe = await git(root, [
-    'merge-base',
-    '--is-ancestor',
-    '--end-of-options',
-    candidateRef,
-    baseRef,
-  ]);
-  if (probe.outcome === 'OK') return 'ANCESTOR';
-  if (probe.outcome === 'NONZERO_EXIT' && probe.exitCode === 1) return 'NOT_ANCESTOR';
+  const verdict = await classifyCommitAncestry(git, root, candidateRef, baseRef);
+  if (verdict !== 'INDETERMINATE') return verdict;
 
   const base = await git(root, ['rev-parse', '--verify', '--quiet', '--end-of-options', baseRef]);
   if (base.outcome === 'NONZERO_EXIT') return 'BASE_BRANCH_NOT_FOUND';

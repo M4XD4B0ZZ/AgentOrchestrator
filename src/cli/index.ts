@@ -55,8 +55,15 @@ const DESCRIPTION = [
   'A block runs attended and sequentially: one lease for the whole run, one active',
   'task at a time, and a task that fails locally is recorded and does not end the',
   'run — provided the frozen plan establishes that the members are independent.',
-  'Dependent execution, unattended running and opening pull requests are not in',
-  'this build.',
+  '',
+  'A block may be dependent: a member whose predecessors have settled in this run',
+  'is built on the last of their result commits, proved against Git at the moment',
+  'it is used. The commit the block was frozen on still decides every member’s',
+  'allowed scope, so a predecessor can hand its successor code and never',
+  'permission. A member whose predecessors are not ordered relative to each other',
+  'has no single commit to build on, and the whole block is refused.',
+  '',
+  'Unattended running and opening pull requests are not in this build.',
 ].join('\n');
 
 export function buildProgram(): Command {

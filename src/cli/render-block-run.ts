@@ -74,6 +74,33 @@ export const BLOCK_OUTCOME_SENTENCES: Readonly<Record<BlockRunOutcome, string>> 
 });
 
 /**
+ * The block's members are not chainable, so no run may be opened for it.
+ *
+ * A shape refusal is about the *input*, not about the repository: some member's
+ * required predecessors are not totally ordered, so there is no single commit
+ * that holds all of them. The two ways to invent one are to merge and to drop
+ * somebody's work, and this build does neither.
+ */
+export const CHAIN_SHAPE_SENTENCE =
+  'A member of this block depends on two members that are not ordered relative to each\n' +
+  '  other, so there is no single commit its work could be built on. Nothing was started.\n' +
+  '  Split the block, or add the missing dependency that orders the two.';
+
+/**
+ * The block base could not be resolved, so no run was opened.
+ *
+ * Not a stop reason and not a run outcome: it happens above `runAttendedBlock`,
+ * under the lease, before any ledger exists. Every member's execution base and
+ * every member's scope authority are that one commit, so a run that cannot name
+ * it has nothing to freeze against and refuses rather than falling back to
+ * whatever the default branch says later.
+ */
+export const BLOCK_BASE_UNRESOLVED_SENTENCE =
+  'The declared default branch did not resolve to a commit, so the block has no base to\n' +
+  '  freeze on. Nothing was started and no ledger was written. Check that the branch this\n' +
+  '  repository declares exists locally and points at a commit.';
+
+/**
  * One static sentence per stop reason. Closed, distinct, and pinned by test.
  *
  * These are the endings the ledger *does* carry, so none of them has anything to

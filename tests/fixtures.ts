@@ -59,6 +59,7 @@ export function validCreatedState(overrides: Partial<TaskStateInput> = {}): Task
     stateEnteredAt: '2026-07-31T10:00:00.000Z',
     baseBranch: 'main',
     basePinnedCommit: null,
+    scopeAuthorityCommit: null,
     workBranch: FIXTURE_WORK_BRANCH,
     currentCommit: null,
     reviewRound: 0,

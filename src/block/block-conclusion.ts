@@ -26,6 +26,7 @@
 import type { FrozenTaskDependency } from './block-definition.js';
 import type { BlockStopReason, BlockTaskEntry } from './block-ledger.js';
 import type { BlockProgressOutcome } from './block-progress.js';
+import type { TaskEligibility } from '../plan/select-task.js';
 import type { RunOutcome } from '../run/run-driver.js';
 import type { StartTaskOutcome } from '../run/start-task.js';
 
@@ -280,4 +281,84 @@ const START_CONCLUSION_FOR = Object.freeze({
 
 export function startConclusionFor(outcome: StartTaskOutcome): StartConclusion {
   return START_CONCLUSION_FOR[outcome];
+}
+
+/* ─────────────────────── 6. run-local runnability ────────────────────────── */
+
+/** Why a member may not run now, or which settlements let it. A closed set. */
+export const MEMBER_UNRUNNABLE_REASONS = [
+  /**
+   * The frozen reading calls it ineligible for something this run cannot
+   * satisfy — `ALREADY_DONE`, a task not in the plan, anything but a dependency
+   * wait. The snapshot stands; no second reading is taken.
+   */
+  'FROZEN_INELIGIBLE',
+  /** A dependency is a member of this block and has not settled in this run. */
+  'DEPENDENCY_NOT_SETTLED',
+  /** A dependency is not a member, so this run holds no evidence about it. */
+  'DEPENDENCY_OUTSIDE_BLOCK',
+] as const;
+
+export type MemberUnrunnableReason = (typeof MEMBER_UNRUNNABLE_REASONS)[number];
+
+export type MemberRunnability =
+  | { readonly runnable: true; readonly satisfiedBy: readonly string[] }
+  | { readonly runnable: false; readonly reason: MemberUnrunnableReason };
+
+function notRunnable(reason: MemberUnrunnableReason): MemberRunnability {
+  return Object.freeze({ runnable: false as const, reason });
+}
+
+/**
+ * Whether a member may run *now*, given this run's own record.
+ *
+ * ── What this adds to the frozen snapshot, and what it must not ────────────
+ *
+ * The invocation reads the roadmap once (F-B1) and never again. Under that rule
+ * a dependent member is not merely unscheduled, it is unreachable: `B` is
+ * `BLOCKED_BY_DEPENDENCIES` at freeze because `A` is `OPEN`, and `A` must be
+ * `OPEN` or it could not run either. So V2-09 adds exactly one thing to the
+ * snapshot, and it is not a second reading of anything: the run's own
+ * settlements, which are monotone and were each proved against the task's record
+ * before they were written.
+ *
+ * A dependency on a **non-member** is never satisfied here. The ledger holds no
+ * entry for it, so there is nothing this run could have proved about it, and the
+ * honest end for such a block is still `NO_ELIGIBLE_TASK`.
+ *
+ * `SETTLED` alone is what this function answers. It is *not* the whole
+ * dependency-satisfaction rule: the base that settlement offers must also be
+ * proved fit against Git (`chain-fitness.ts`). The two are separate because they
+ * fail separately — this one over the planner's *direct* dependencies, that one
+ * over the frozen *transitive* required set — and neither implies the other.
+ *
+ * `TaskEligibility` arrives as a **type only**. This module must not acquire a
+ * value import from the planner: that is the pin V2-08 put in place so a block
+ * cannot take a second reading of the roadmap, and a type has no runtime
+ * existence to take one with.
+ */
+export function memberRunnability(
+  taskId: string,
+  eligibility: readonly TaskEligibility[],
+  entries: readonly BlockTaskEntry[],
+): MemberRunnability {
+  const report = eligibility.find((entry) => entry.taskId === taskId);
+  // No entry means the frozen reading says nothing about this task, which is not
+  // a licence to run it. Fail closed under the reason that claims least.
+  if (report === undefined) return notRunnable('FROZEN_INELIGIBLE');
+  if (report.eligible) return Object.freeze({ runnable: true as const, satisfiedBy: Object.freeze([]) });
+  if (report.reason !== 'BLOCKED_BY_DEPENDENCIES') return notRunnable('FROZEN_INELIGIBLE');
+
+  const members = new Set(entries.map((entry) => entry.taskId));
+  const settled = new Set(
+    entries.filter((entry) => entry.disposition === 'SETTLED').map((entry) => entry.taskId),
+  );
+  for (const dependency of report.unsatisfiedDependencies) {
+    if (!members.has(dependency)) return notRunnable('DEPENDENCY_OUTSIDE_BLOCK');
+    if (!settled.has(dependency)) return notRunnable('DEPENDENCY_NOT_SETTLED');
+  }
+  return Object.freeze({
+    runnable: true as const,
+    satisfiedBy: Object.freeze([...report.unsatisfiedDependencies]),
+  });
 }

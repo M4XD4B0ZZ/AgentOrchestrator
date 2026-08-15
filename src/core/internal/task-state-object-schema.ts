@@ -131,6 +131,30 @@ export const TaskStateObjectSchema = z
     baseBranch: NonBlankString('baseBranch'),
     /** Full SHA the work is pinned to, or `null` before it has been resolved. */
     basePinnedCommit: GitShaSchema.nullable(),
+    /**
+     * The commit whose profile decides what this task is allowed to change.
+     *
+     * `null` — and `null` is the default — means *this task's own
+     * `basePinnedCommit` governs*, which is the only answer that was ever needed
+     * while every task started from the default branch.
+     *
+     * A chained task breaks that identity: its base pin is a commit its
+     * predecessor's agent wrote, and reading a scope declaration out of that
+     * commit would let one agent widen the next one's permissions. So the two
+     * roles are separated here, in the durable record, rather than in whichever
+     * invocation happens to be driving: a block run can end, crash or be killed,
+     * and the successor's state is then an ordinary task state that any later
+     * caller may continue. If the authority lived in that caller's arguments, the
+     * guarantee would end with the invocation that made it.
+     *
+     * Additive and defaulted rather than versioned, deliberately. A state written
+     * before this field existed means exactly `null`: no task before the chain had
+     * a base authored by a sibling, so nothing is invented for an old document —
+     * which is the test the ledger's version-1 refusal applied and failed. The
+     * other direction fails closed on its own, because an older build meets an
+     * unknown key at a `.strict()` boundary and refuses the state.
+     */
+    scopeAuthorityCommit: GitShaSchema.nullable().default(null),
     workBranch: NonBlankString('workBranch'),
     /** Head of the work branch, or `null` before the first commit exists. */
     currentCommit: GitShaSchema.nullable(),
