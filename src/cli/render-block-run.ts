@@ -34,6 +34,7 @@
 
 import type { BlockStopReason } from '../block/block-ledger.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
+import type { NotificationResult, OperatorNotifier } from '../notify/notification.js';
 import { line } from './render-attended-run.js';
 
 /**
@@ -137,6 +138,47 @@ export const BLOCK_STOP_SENTENCES: Readonly<Record<BlockStopReason, string>> = O
     '  the run ended holding it. Deliberately not a claim that the record is unusable, and\n' +
     '  deliberately not a disposition invented to close the entry.',
 });
+
+/* ─────────────────────────── the notification ───────────────────────────── */
+
+/**
+ * Whether this machine will tell the operator, printed **before** the run.
+ *
+ * Printed at the start rather than only at the end, and that placement is the
+ * decision: an operator whose configuration is unusable learns it while they are
+ * still watching, instead of learning it from a message that never arrives after
+ * a run they walked away from. The topic and the token are never printed — the
+ * topic is the address half of the credential.
+ */
+export function renderNotifierState(notifier: OperatorNotifier): string {
+  const value =
+    notifier.state === 'ARMED'
+      ? 'ARMED - an ending that needs an operator will be reported'
+      : notifier.state === 'NOT_CONFIGURED'
+        ? 'OFF (not configured) - no notification will be sent and no network is used'
+        : `OFF (configuration unusable: ${notifier.configCode ?? 'UNKNOWN'}) - the run still proceeds`;
+  return `${line('Notification', value)}\n`;
+}
+
+/**
+ * What became of the notification, printed after the run's own report.
+ *
+ * `SILENT` is stated rather than omitted: "nothing was sent" and "nothing
+ * happened" have to be distinguishable, or a quiet phone means either.
+ */
+export function renderNotificationResult(result: NotificationResult): string {
+  const value =
+    result.outcome === 'DELIVERED'
+      ? 'DELIVERED'
+      : result.outcome === 'SILENT'
+        ? 'SILENT - this ending does not need an operator'
+        : result.outcome === 'NOT_CONFIGURED'
+          ? 'NOT SENT (not configured)'
+          : result.outcome === 'CONFIG_UNUSABLE'
+            ? `NOT SENT (configuration unusable: ${result.code ?? 'UNKNOWN'})`
+            : `NOT DELIVERED (${result.code ?? 'UNKNOWN'}) - the run's own outcome above is unaffected`;
+  return `${line('Notification', value)}\n\n`;
+}
 
 /** One line per task: what the ledger persisted, and what the driver said. */
 function taskLines(result: AttendedBlockResult): readonly string[] {
