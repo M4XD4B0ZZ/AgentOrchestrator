@@ -1,13 +1,28 @@
 /**
- * `agent-loop block` — run a block of independent tasks, attended.
+ * `agent-loop block` — run a block of tasks, attended, possibly chained.
  *
  * ── Two modes, and the default is still read-only ──────────────────────────
  *
  * Without `--attended` this command *freezes and reports*: it resolves the
  * repository, reads the plan, projects the dependency relation, and prints what a
- * run would be started against — including whether the members are established as
- * independent, which is the property the whole slice turns on. It starts no
- * agent, writes no ledger and prepares no workspace.
+ * run would be started against — whether the members are established as
+ * independent, and which member each dependent one would be built on. It starts
+ * no agent, writes no ledger and prepares no workspace.
+ *
+ * ── What is frozen here, and why all of it is here ─────────────────────────
+ *
+ * Three things, at one instant and under one lease: the **plan**, the
+ * **relation** projected from it, and the **block base** — the commit every root
+ * member is built on and every member's scope is judged against. The base is
+ * read here rather than inside the runner for the same reason the plan is: read
+ * per task, a default branch that moved mid-run would give two roots two
+ * different bases, and "the commit this block was frozen on" would stop having
+ * one answer.
+ *
+ * The **chain shape** is checked here too, in both modes, and it is a refusal
+ * about the *input*: a member whose required predecessors are not ordered
+ * relative to each other has no single commit to be built on, and the whole
+ * block is unsupported rather than that member being quietly skipped.
  *
  * ── Where the plan is frozen, and why it is here ───────────────────────────
  *
@@ -48,6 +63,7 @@ import { independenceIsEstablished } from '../block/block-conclusion.js';
 import { projectBlockDependencies } from '../block/block-dependencies.js';
 import { defineBlock } from '../block/block-definition.js';
 import { runAttendedBlock } from '../block/block-runner.js';
+import { chainShapeOf, uniqueMaximumOf } from '../block/chain-shape.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import { formatSafeError } from '../core/safe-error.js';
 import {
@@ -61,7 +77,11 @@ import { READ_ONLY_TRAILER } from '../run/render-run-plan.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import { runGitCommand } from '../worktree/git-command.js';
 import { GIT_OBJECT_NAME_PATTERN } from '../worktree/prepare-workspace.js';
-import { BLOCK_BASE_UNRESOLVED_SENTENCE, renderBlockRun } from './render-block-run.js';
+import {
+  BLOCK_BASE_UNRESOLVED_SENTENCE,
+  CHAIN_SHAPE_SENTENCE,
+  renderBlockRun,
+} from './render-block-run.js';
 import { line } from './render-attended-run.js';
 import { renderLeaseRefusal } from './render-lease.js';
 import { DEFAULT_MAX_STEPS, onceOnlyPreflight } from './run-command.js';
@@ -152,6 +172,18 @@ function reportFrozenPlan(repository: ResolvedRepository, options: BlockOptions)
     return EXIT_RUN_INPUT_UNUSABLE;
   }
 
+  const shape = chainShapeOf(defined.definition.dependencies);
+  if (!shape.ok) {
+    report([
+      line('Repository', `${repository.id}  (${repository.root})`),
+      line('Failure', `${shape.code} (${shape.taskId})`),
+      `  ${CHAIN_SHAPE_SENTENCE}`,
+      '',
+      READ_ONLY_TRAILER,
+    ]);
+    return EXIT_RUN_INPUT_UNUSABLE;
+  }
+
   const independent = independenceIsEstablished(defined.definition.dependencies);
   const eligible = new Set(
     planned.selection.eligibility.filter((entry) => entry.eligible).map((entry) => entry.taskId),
@@ -174,17 +206,28 @@ function reportFrozenPlan(repository: ResolvedRepository, options: BlockOptions)
       independent
         ? 'The frozen plan establishes that no member depends on another, so a task that fails\n' +
           '  locally would end that task and not the run.'
-        : 'A member depends on another member, so this is not supported input for an attended\n' +
-          '  block run: it would stop at the first task-local failure rather than improvise an\n' +
-          '  ordering. Dependent execution is V2-09.'
+        : 'A member depends on another member, so a task that fails locally ends the run rather\n' +
+          '  than continuing past work its successor was to be built on. The dependent members\n' +
+          '  are chained: see below.'
     }`,
     '',
-    // Stated where an operator can see it, because eligibility and independence
-    // are two different questions and a member with an empty row can still be
-    // waiting on a task outside the block.
-    'Eligibility is the repository selector\'s answer, asked live; independence is the frozen',
-    'relation\'s. A member independent of every other member may still be waiting on a task',
-    'this block does not hold, and a block with nothing eligible ends NO_ELIGIBLE_TASK.',
+    // Chain shape, printed beside independence rather than folded into it: they
+    // are different questions, and the answers are independent. An independent
+    // block trivially has a shape, and a dependent one may or may not.
+    line('Chain shape', 'every member has a base'),
+    ...defined.definition.dependencies.flatMap((row) => {
+      const maximum = uniqueMaximumOf(defined.definition.dependencies, row.taskId);
+      if (!maximum.ok || maximum.maximum === null) return [];
+      return [`  ${row.taskId.padEnd(12)} would be built on the result of ${maximum.maximum}`];
+    }),
+    '',
+    // Stated where an operator can see it, because eligibility, independence and
+    // chain shape are three different questions and a member with an empty row
+    // can still be waiting on a task outside the block.
+    'Eligibility is the repository selector\'s answer, asked live; independence and chain',
+    'shape are the frozen relation\'s. A member independent of every other member may still',
+    'be waiting on a task this block does not hold, and a block whose only path to',
+    'eligibility runs outside it ends NO_ELIGIBLE_TASK.',
     '',
     READ_ONLY_TRAILER,
   ]);
@@ -195,9 +238,11 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
   program
     .command('block')
     .description(
-      'Run a block of independent tasks, attended and sequentially, under one execution ' +
-        'lease. Freezes the dependency relation from one reading of the roadmap and records ' +
-        'each task outcome against the task\'s own durable state. ' +
+      'Run a block of tasks, attended and sequentially, under one execution lease. ' +
+        'Freezes the dependency relation and the base commit from one reading of the roadmap ' +
+        'and records each task outcome against the task\'s own durable state. A member whose ' +
+        'predecessors settle in this run is built on the last of their result commits; the ' +
+        'block base still decides every member\'s allowed scope. ' +
         'Read-only by default: starts no agent, writes no ledger, takes no lease. ' +
         'Pass --attended to execute instead.',
     )
@@ -298,6 +343,18 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
           const defined = defineBlock(options.block, options.tasks, projected.dependencies);
           if (!defined.ok) {
             report([line('Failure', defined.code)]);
+            process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+            return;
+          }
+
+          // Whether every member has a base to be built on, asked before the run
+          // opens. A member with two unordered predecessors cannot be given one,
+          // and refusing the *whole block* here rather than skipping that member
+          // later is the difference between unsupported input and a run that
+          // improvised an ordering.
+          const shape = chainShapeOf(defined.definition.dependencies);
+          if (!shape.ok) {
+            report([line('Failure', `${shape.code} (${shape.taskId})`), `  ${CHAIN_SHAPE_SENTENCE}`]);
             process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
             return;
           }

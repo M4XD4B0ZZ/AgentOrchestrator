@@ -74,6 +74,19 @@ export const BLOCK_OUTCOME_SENTENCES: Readonly<Record<BlockRunOutcome, string>> 
 });
 
 /**
+ * The block's members are not chainable, so no run may be opened for it.
+ *
+ * A shape refusal is about the *input*, not about the repository: some member's
+ * required predecessors are not totally ordered, so there is no single commit
+ * that holds all of them. The two ways to invent one are to merge and to drop
+ * somebody's work, and this build does neither.
+ */
+export const CHAIN_SHAPE_SENTENCE =
+  'A member of this block depends on two members that are not ordered relative to each\n' +
+  '  other, so there is no single commit its work could be built on. Nothing was started.\n' +
+  '  Split the block, or add the missing dependency that orders the two.';
+
+/**
  * The block base could not be resolved, so no run was opened.
  *
  * Not a stop reason and not a run outcome: it happens above `runAttendedBlock`,

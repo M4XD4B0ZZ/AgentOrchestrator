@@ -6,16 +6,19 @@
  * table and each carries the defect it proves that a cheaper test cannot.
  */
 
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
-import { afterAll, describe, expect, it } from 'vitest';
+import { Command } from 'commander';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import {
   BLOCK_LEDGER_SCHEMA_VERSION,
+  BLOCK_STOP_REASONS,
   parseBlockRunLedger,
   type BlockRunLedger,
   entryFor,
+  type BlockStopReason,
   type BlockTaskEntry,
   type TaskDisposition,
 } from '../src/block/block-ledger.js';
@@ -26,6 +29,13 @@ import { loadBlockLedger } from '../src/block/block-store.js';
 import { defineBlock, fingerprintFrozenMembership } from '../src/block/block-definition.js';
 import { planNextTask, type TaskPlanningSuccess } from '../src/plan/plan-next-task.js';
 import type { TaskEligibility } from '../src/plan/select-task.js';
+import { registerBlockCommand } from '../src/cli/block-command.js';
+import {
+  BLOCK_BASE_UNRESOLVED_SENTENCE,
+  BLOCK_STOP_SENTENCES,
+  CHAIN_SHAPE_SENTENCE,
+  renderBlockRun,
+} from '../src/cli/render-block-run.js';
 import { REPO_PROFILE_RELATIVE_PATH } from '../src/repo/profile-location.js';
 import { runTask } from '../src/run/run-driver.js';
 import { startPlannedTask, startTask } from '../src/run/start-task.js';
@@ -1109,4 +1119,170 @@ describe('a chained task keeps the scope it was started under, after its run is 
     expect(reload(repository.root, 'B-001').state.state).toBe('SCOPE_VIOLATION');
     releaseRepositoryExecutionLease(continuationLease.evidence);
   }, 600_000);
+});
+
+/* ═══════════════ operator-facing sentences, bound to state ═══════════════ */
+
+/**
+ * A sentence is judged by what it *claims*, not by whether it is non-empty.
+ *
+ * Measured before this slice: the V2-08 renderer controls accept a table in
+ * which `TASK_BLOCKED` and `NO_ELIGIBLE_TASK` have swapped sentences. The swap
+ * preserves distinctness, non-emptiness and ASCII, so none of those properties
+ * could see it — and an operator would read "no frozen member was eligible to
+ * run" for a run whose ledger holds a `BLOCKED` task, which is a false statement
+ * about their repository presented as a diagnosis.
+ *
+ * These assertions are two-sided on purpose. `must` fails when a sentence stops
+ * saying its own thing; `mustNot` fails when it starts saying another reason's.
+ * Either half alone survives the swap in one direction.
+ */
+describe('an operator-facing sentence is bound to the state that produced it', () => {
+  const claims: Record<BlockStopReason, { must: RegExp; mustNot: RegExp }> = {
+    COMPLETE: { must: /block is done/i, mustNot: /no frozen member|human must resolve/i },
+    TASK_BLOCKED: { must: /human must resolve/i, mustNot: /no frozen member|given up on/i },
+    TASK_ABANDONED: { must: /given up on/i, mustNot: /human must resolve|no frozen member/i },
+    NO_ELIGIBLE_TASK: {
+      must: /no frozen member was eligible/i,
+      mustNot: /human must resolve|given up on/i,
+    },
+    OPERATOR_STOPPED: { must: /operator stopped/i, mustNot: /task/i },
+    LEDGER_DIVERGED: { must: /records disagree/i, mustNot: /cannot be used|no longer matches/i },
+    STATE_UNUSABLE: { must: /cannot be used/i, mustNot: /records disagree|no longer matches/i },
+    DEFINITION_DRIFTED: {
+      must: /no longer matches/i,
+      mustNot: /records disagree|cannot be used/i,
+    },
+    ACTIVE_TASK_UNRESOLVED: {
+      must: /could not be safely established/i,
+      mustNot: /cannot be used|records disagree/i,
+    },
+  };
+
+  it.each(BLOCK_STOP_REASONS)('%s explains itself and claims nothing another reason owns', (reason) => {
+    expect(BLOCK_STOP_SENTENCES[reason]).toMatch(claims[reason].must);
+    expect(BLOCK_STOP_SENTENCES[reason]).not.toMatch(claims[reason].mustNot);
+  });
+
+  it('renders, for a persisted TASK_BLOCKED, a sentence that does not deny the blocked task', () => {
+    const printed = renderBlockRun(
+      { id: 'fixture', root: 'D:\\repo' },
+      {
+        outcome: 'BLOCK_RUN_ENDED',
+        stopReason: 'TASK_BLOCKED',
+        detail: null,
+        runId: RUN_ID,
+        blockId: BLOCK_ID,
+        steps: 3,
+        tasks: [{ taskId: 'A-001', disposition: 'BLOCKED', runOutcome: 'BLOCKED_VERIFY' }],
+      },
+    );
+
+    expect(printed).toMatch(/human must resolve/i);
+    expect(printed).not.toMatch(/no frozen member was eligible/i);
+  });
+
+  it('says what a shapeless block and an unresolvable base each are, in their own words', () => {
+    // Two refusals that happen above the runner, so neither is a stop reason and
+    // neither may borrow one's sentence.
+    expect(CHAIN_SHAPE_SENTENCE).toMatch(/no single commit/i);
+    expect(CHAIN_SHAPE_SENTENCE).not.toMatch(/default branch/i);
+    expect(BLOCK_BASE_UNRESOLVED_SENTENCE).toMatch(/default branch did not resolve/i);
+    expect(BLOCK_BASE_UNRESOLVED_SENTENCE).not.toMatch(/no single commit/i);
+  });
+});
+
+/* ══════════════ the freeze site refuses a shapeless block ════════════════ */
+
+/**
+ * The `block` command, driven through Commander, with stdout captured.
+ *
+ * Restores the spy and the previous exit code on every path, because this file
+ * has no global stdout capture and a leaked mock would silence every test that
+ * runs after it in the same worker.
+ */
+async function runBlockCli(
+  args: readonly string[],
+): Promise<{ readonly stdout: string; readonly exitCode: number | undefined }> {
+  const chunks: string[] = [];
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown): boolean => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write);
+  const previous = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    const program = new Command();
+    program.exitOverride();
+    registerBlockCommand(program);
+    await program.parseAsync(['block', ...args], { from: 'user' });
+    return { stdout: chunks.join(''), exitCode: process.exitCode as number | undefined };
+  } finally {
+    spy.mockRestore();
+    process.exitCode = previous;
+  }
+}
+
+const blocksDirectoryOf = (root: string) =>
+  join(root, '.agent-orchestrator', 'runtime', 'blocks');
+
+describe('the freeze site refuses a block no member could be built on', () => {
+  /**
+   * A diamond: `D-001` requires `B-001` and `C-001`, which are incomparable.
+   *
+   * Refused in **both** modes, and refused for the whole block rather than for
+   * the offending member. Skipping `D-001` and running the other three would be
+   * this build improvising which half of an operator's request to honour.
+   */
+  const diamond = {
+    'A-001': [],
+    'B-001': ['A-001'],
+    'C-001': ['A-001'],
+    'D-001': ['B-001', 'C-001'],
+  } as const;
+
+  const members = ['A-001', 'B-001', 'C-001', 'D-001'];
+
+  it('refuses it in the read-only report, before any lease is taken', async () => {
+    const repository = await chainRepository(diamond);
+
+    const printed = await runBlockCli([
+      '--repository', repository.root, '--block', BLOCK_ID, '--tasks', ...members, '--run', RUN_ID,
+    ]);
+
+    expect(printed.exitCode).toBe(2);
+    expect(printed.stdout).toContain('NO_UNIQUE_MAXIMUM (D-001)');
+    expect(printed.stdout).toContain('no single commit');
+    expect(existsSync(blocksDirectoryOf(repository.root))).toBe(false);
+  });
+
+  it('refuses it in the attended path too, and opens no run', async () => {
+    const repository = await chainRepository(diamond);
+
+    const printed = await runBlockCli([
+      '--repository', repository.root, '--block', BLOCK_ID, '--tasks', ...members,
+      '--run', RUN_ID, '--attended',
+    ]);
+
+    expect(printed.exitCode).toBe(2);
+    expect(printed.stdout).toContain('NO_UNIQUE_MAXIMUM (D-001)');
+    // Refused after the lease was taken and before anything durable: no ledger.
+    expect(existsSync(blocksDirectoryOf(repository.root))).toBe(false);
+  });
+
+  // Specificity (G6): a chain that *does* have a shape is reported, not refused,
+  // and the report says which member each dependent one would be built on.
+  it('reports the chain of a block every member of which has a base', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+
+    const printed = await runBlockCli([
+      '--repository', repository.root, '--block', BLOCK_ID,
+      '--tasks', 'A-001', 'B-001', '--run', RUN_ID,
+    ]);
+
+    expect(printed.exitCode).toBe(0);
+    expect(printed.stdout).toContain('Chain shape');
+    expect(printed.stdout).toContain('would be built on the result of A-001');
+    expect(printed.stdout).not.toContain('NO_UNIQUE_MAXIMUM');
+  });
 });
