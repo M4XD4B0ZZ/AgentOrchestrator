@@ -348,6 +348,47 @@ export function writerThatCommits(fileName: string, contents: string) {
   };
 }
 
+/**
+ * A Claude run that positively succeeded, **edited the worktree, and did not
+ * commit** — the shape the writer actually has once its authority is the
+ * measured one: `Read Edit Write Glob Grep`, no shell.
+ *
+ * `permissionDenials` is the whole reason this is not `writerThatCommits` with
+ * the commit removed. The envelope the CLI printed for the first dogfood run
+ * was a *success* that also reported denials, and a fixture that cannot produce
+ * that combination cannot drive the transport case at all: the observation has
+ * to survive a run which does **not** stop on the writer step.
+ */
+export function writerThatEdits(
+  fileName: string,
+  contents: string,
+  options: { readonly permissionDenials?: readonly string[] } = {},
+) {
+  return (call: { readonly cwd: string }): AgentCommandResult => {
+    writeRepoFile(call.cwd, fileName, contents);
+    return writerEnvelopeWithDenials(options.permissionDenials ?? []);
+  };
+}
+
+/**
+ * The successful envelope, carrying denials in the CLI's own measured shape.
+ *
+ * The entries are objects with `tool_name`, `tool_use_id` and `tool_input`,
+ * because that is what 2.1.233 prints — a fixture that carried bare strings
+ * would let a reader that only understands strings pass.
+ */
+export function writerEnvelopeWithDenials(tools: readonly string[]): AgentCommandResult {
+  return agentCommandResult({
+    stdout: claudeSuccessEnvelope({
+      permission_denials: tools.map((tool, index) => ({
+        tool_name: tool,
+        tool_use_id: `toolu_${index}`,
+        tool_input: { note: 'foreign text that must never be carried' },
+      })),
+    }),
+  });
+}
+
 /** A Claude run refused for quota, in exactly the envelope V1-05 recognises. */
 export function usageLimitResult(): AgentCommandResult {
   return agentCommandResult({

@@ -93,7 +93,11 @@
 
 import { runClaudeWriter } from '../agent/claude-writer.js';
 import { codexReviewResumePoint, runCodexReviewer } from '../agent/codex-reviewer.js';
-import { interruptedResumePoint, type AgentBlockEvidence } from '../agent/agent-outcome.js';
+import {
+  interruptedResumePoint,
+  type AgentBlockEvidence,
+  type PermissionDenialObservation,
+} from '../agent/agent-outcome.js';
 import type { AgentRunner } from '../agent/agent-command.js';
 import { recordAgentInterruption } from '../agent/record-interruption.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
@@ -182,6 +186,16 @@ export interface LoopStepResult {
    * whether or not the durable record of it landed.
    */
   readonly scope: ScopeAssessment | null;
+  /**
+   * What the writing agent was refused during this step, or `null` when no
+   * writer ran in it.
+   *
+   * `null` and `{ count: 0 }` are different answers and both are honest: a
+   * verify step never asked, while an implement step that asked and saw nothing
+   * refused did. In memory only — like `verification` and `scope`, this is
+   * reporting, and `TaskStateObjectSchema` is `.strict()` (G2).
+   */
+  readonly permissionDenials: PermissionDenialObservation | null;
 }
 
 /** What the loop must be told about the world. */
@@ -282,12 +296,29 @@ function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutc
     verification: null,
     remediationPayload: null,
     scope: null,
+    permissionDenials: null,
     ...from,
   });
 }
 
 const NOT_APPLICABLE = result({ outcome: 'NOT_APPLICABLE' });
 const EXECUTION_UNAUTHORISED = result({ outcome: 'EXECUTION_UNAUTHORISED' });
+
+/**
+ * Attaches what the writer was refused to a result the scope guard built.
+ *
+ * A step that blocks on scope still ran a writer, and what that writer was
+ * refused is as true as what it wrote. The guard cannot say so itself — it is
+ * given a tree, not an agent run — so the step that owns both facts joins them
+ * here rather than letting the observation fall off the one path where an
+ * operator is already being asked to look at the writer's behaviour.
+ */
+function withDenials(
+  step: LoopStepResult,
+  permissionDenials: PermissionDenialObservation,
+): LoopStepResult {
+  return Object.freeze({ ...step, permissionDenials });
+}
 
 /**
  * Whether `deps.authorisedWorktreePath` is authority for *this* state.
@@ -808,7 +839,7 @@ export async function runRemediateStep(
   // `VERIFYING` either. A guard on only the first pass would be a sandbox a
   // writer escapes on its second attempt.
   const after = await enforceScope(current, { ...scopeGuard, writerRan: true });
-  if (after.blocked !== null) return after.blocked;
+  if (after.blocked !== null) return withDenials(after.blocked, writer.permissionDenials);
 
   // The scope guard read *which* paths the writer touched and nothing more, so
   // the checkpoint facts stay withdrawn. Verification is what looks next.
@@ -824,7 +855,10 @@ export async function runRemediateStep(
     },
     advance,
   );
-  return saved(save, 'VERIFYING', 'ADVANCED', { scope: after.assessment });
+  return saved(save, 'VERIFYING', 'ADVANCED', {
+    scope: after.assessment,
+    permissionDenials: writer.permissionDenials,
+  });
 }
 
 /* ─────────────────────────── the setup hops ─────────────────────────────── */
@@ -1068,7 +1102,7 @@ export async function runImplementStep(
   // before the durable move, so a task that wrote out of scope cannot reach
   // `VERIFYING` — and therefore cannot reach a reviewer either.
   const after = await enforceScope(current, { ...scopeGuard, writerRan: true });
-  if (after.blocked !== null) return after.blocked;
+  if (after.blocked !== null) return withDenials(after.blocked, writer.permissionDenials);
 
   // The scope guard read *which* paths the writer touched and nothing more: it
   // has no opinion on whether the work is right, and it did not re-establish
@@ -1085,7 +1119,10 @@ export async function runImplementStep(
     },
     advance,
   );
-  return saved(save, 'VERIFYING', 'ADVANCED', { scope: after.assessment });
+  return saved(save, 'VERIFYING', 'ADVANCED', {
+    scope: after.assessment,
+    permissionDenials: writer.permissionDenials,
+  });
 }
 
 /**

@@ -63,6 +63,7 @@ import {
   type AgentDisposition,
   type AgentFailureCode,
   type AgentProcessEvidence,
+  type PermissionDenialObservation,
 } from './agent-outcome.js';
 import { readClaudeResultEnvelope } from './internal/claude-result-envelope.js';
 
@@ -215,6 +216,17 @@ interface ClaudeWriterOutcomeBase {
 export interface ClaudeWriterCompleted extends ClaudeWriterOutcomeBase {
   readonly ok: true;
   readonly disposition: 'AGENT_COMPLETED';
+  /**
+   * What this run was refused, as the envelope reported it.
+   *
+   * On the completed member alone, and that is the point: a completed writer
+   * that was denied `Write` is the shape the first dogfood run had, and it is
+   * indistinguishable from a healthy pass by every other field here. A failed
+   * run needs no such field — its diagnosis already says the run is unusable.
+   *
+   * Evidence, not a verdict (G6). Nothing in this module branches on it.
+   */
+  readonly permissionDenials: PermissionDenialObservation;
 }
 
 export interface ClaudeWriterFailed extends ClaudeWriterOutcomeBase {
@@ -322,7 +334,12 @@ export async function runClaudeWriter(
 
   if (envelope.verdict !== 'COMPLETED') return frozenFailure(evidence, 'AGENT_RESULT_MALFORMED');
 
-  return Object.freeze({ ...evidence, ok: true as const, disposition: 'AGENT_COMPLETED' as const });
+  return Object.freeze({
+    ...evidence,
+    ok: true as const,
+    disposition: 'AGENT_COMPLETED' as const,
+    permissionDenials: envelope.permissionDenials,
+  });
 }
 
 function frozenFailure(

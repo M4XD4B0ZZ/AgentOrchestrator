@@ -44,7 +44,31 @@
  * read. `reportedResetAt` stays `null`, `evaluateAutomaticResume` refuses with
  * `RESET_TIME_MISSING`, and the block waits for a human. That is the correct
  * outcome for evidence we do not have.
+ *
+ * ── The measured envelope of the first dogfood run (2.1.233) ───────────────
+ *
+ * The run that reported a delivered task and delivered nothing printed this,
+ * and every field in it is why the denial observation was added:
+ *
+ *     "type": "result"
+ *     "subtype": "success"
+ *     "is_error": false          ← co-occurred with two denials …
+ *     "api_error_status": null
+ *     "permission_denials": [ { "tool_name": "Write", … },
+ *                             { "tool_name": "Bash",  … } ]
+ *     "result": "I could not do it. …"   ← … and with no effect on disk
+ *
+ * So a successful envelope is not evidence that anything was permitted, and the
+ * verdict logic below is deliberately unchanged by the addition: `COMPLETED`
+ * still means "the CLI says the turn completed", because that is what it says.
+ * The denials are reported beside it, and whether the pass achieved anything is
+ * answered by a measured delta elsewhere — never here.
  */
+
+import {
+  NO_PERMISSION_DENIALS,
+  type PermissionDenialObservation,
+} from '../agent-outcome.js';
 
 /** The HTTP status that means "rate/quota refused". The one recognised value. */
 const RATE_LIMIT_STATUS = 429;
@@ -66,15 +90,49 @@ export interface ClaudeEnvelopeReading {
   readonly verdict: ClaudeEnvelopeVerdict;
   /** Always `null` at the observed version; see the module note. */
   readonly reportedResetAt: string | null;
+  /**
+   * What the agent was refused, when the document said so.
+   *
+   * Read on every path that produces a reading, including `UNRECOGNISED`, where
+   * it is empty because there is no document to read it from.
+   */
+  readonly permissionDenials: PermissionDenialObservation;
 }
 
 const UNRECOGNISED: ClaudeEnvelopeReading = Object.freeze({
   verdict: 'UNRECOGNISED' as const,
   reportedResetAt: null,
+  permissionDenials: NO_PERMISSION_DENIALS,
 });
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The denials the envelope reported, in the shape 2.1.233 prints them:
+ * `[{ tool_name, tool_use_id, tool_input }, …]`.
+ *
+ * Skipped, never refused. This module is documented as a *permissive* reader of
+ * foreign text, and an entry whose shape is unfamiliar must not turn a real
+ * result into `UNRECOGNISED` — that would convert an observation meant to
+ * inform an operator into a way of losing the whole run. So an unreadable entry
+ * contributes to `count` and contributes no name.
+ *
+ * `tool_input` is never carried: it holds file paths and command lines, and
+ * this observation is printed.
+ */
+function readPermissionDenials(value: unknown): PermissionDenialObservation {
+  if (!Array.isArray(value) || value.length === 0) return NO_PERMISSION_DENIALS;
+
+  const tools: string[] = [];
+  for (const entry of value) {
+    if (!isPlainObject(entry)) continue;
+    const name = entry['tool_name'];
+    if (typeof name !== 'string' || name.length === 0) continue;
+    if (!tools.includes(name)) tools.push(name);
+  }
+  return Object.freeze({ count: value.length, tools: Object.freeze(tools) });
 }
 
 /**
@@ -102,6 +160,12 @@ export function readClaudeResultEnvelope(stdout: string): ClaudeEnvelopeReading 
   if (!isPlainObject(parsed)) return UNRECOGNISED;
   if (parsed['type'] !== 'result') return UNRECOGNISED;
 
+  // Read once, before the verdict logic, and attached to whichever reading that
+  // logic produces. It is an observation about the document, not a step in
+  // classifying it: nothing below branches on it, which is what keeps a denial
+  // from becoming a verdict (G6).
+  const permissionDenials = readPermissionDenials(parsed['permission_denials']);
+
   const isError = parsed['is_error'];
   if (typeof isError !== 'boolean') return UNRECOGNISED;
 
@@ -114,7 +178,11 @@ export function readClaudeResultEnvelope(stdout: string): ClaudeEnvelopeReading 
     // being an error. A success that carries a 429 is a contradiction, and a
     // contradiction is not evidence.
     return isError
-      ? Object.freeze({ verdict: 'USAGE_LIMIT' as const, reportedResetAt: null })
+      ? Object.freeze({
+          verdict: 'USAGE_LIMIT' as const,
+          reportedResetAt: null,
+          permissionDenials,
+        })
       : UNRECOGNISED;
   }
 
@@ -125,5 +193,5 @@ export function readClaudeResultEnvelope(stdout: string): ClaudeEnvelopeReading 
   if (parsed['subtype'] !== 'success') return UNRECOGNISED;
   if (status !== null && status !== undefined) return UNRECOGNISED;
 
-  return Object.freeze({ verdict: 'COMPLETED' as const, reportedResetAt: null });
+  return Object.freeze({ verdict: 'COMPLETED' as const, reportedResetAt: null, permissionDenials });
 }

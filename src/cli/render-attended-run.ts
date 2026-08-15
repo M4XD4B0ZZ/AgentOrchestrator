@@ -140,6 +140,22 @@ export function renderRunResult(result: RunResult): string {
     lines.push(line('Continuation', `${result.resume.continuation}  (${result.resume.classification})`));
   }
   lines.push(line('Reasons', codes(result.reasonCodes)));
+  // Only when there were any. A clean run must not gain a noise line, and an
+  // operator who never sees this line has been told something by its absence.
+  //
+  // Count and distinct tool names, and nothing else: `tool_input` carries file
+  // paths and command lines the agent chose, which is exactly the foreign free
+  // text this renderer's opening rule excludes. What an operator needs is "the
+  // writer reached for authority it did not have, and here is which" — the rest
+  // is in the worktree.
+  if (result.permissionDenials.count > 0) {
+    lines.push(
+      line(
+        'Denials',
+        `${result.permissionDenials.count}  (${codes(result.permissionDenials.tools)})`,
+      ),
+    );
+  }
   return lines.join('\n');
 }
 

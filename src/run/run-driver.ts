@@ -104,6 +104,11 @@ import { classifyResume, type ResumeDecision } from '../state/resume-decision.js
 import type { ReplaceFn, TempSuffixFn } from '../state/atomic-file.js';
 import type { StateLoadSuccess } from '../state/state-store.js';
 import type { AgentRunner } from '../agent/agent-command.js';
+import {
+  mergePermissionDenials,
+  NO_PERMISSION_DENIALS,
+  type PermissionDenialObservation,
+} from '../agent/agent-outcome.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import type { GitRunner } from '../worktree/git-command.js';
 
@@ -293,6 +298,21 @@ export interface RunResult {
   readonly resume: ResumeDecision | null;
   /** The loop step the run stopped on, or `null` when none ran. */
   readonly lastStep: LoopStepResult | null;
+  /**
+   * What the writing agent was refused, **across every step of this run**.
+   *
+   * Run-level rather than per-step, and that placement is the whole point.
+   * `lastStep` cannot carry it: a writer pass that succeeds is followed by
+   * verification and review, so by the time a run ends `lastStep` is a later
+   * step whose own observation is `null` — the observation would vanish in
+   * exactly the case it exists for, a run that reported success while the
+   * writer had been refused.
+   *
+   * Aggregating, never last-writer-wins: see {@link mergePermissionDenials}.
+   * Never persisted (G2) — this is a report to the operator, and it is the
+   * `renderRunResult` line that makes it one.
+   */
+  readonly permissionDenials: PermissionDenialObservation;
 }
 
 /* ──────────────────────────── the inputs ────────────────────────────────── */
@@ -399,6 +419,7 @@ function runResult(
     reconciliation: null,
     resume: null,
     lastStep: null,
+    permissionDenials: NO_PERMISSION_DENIALS,
     ...from,
   });
 }
@@ -432,8 +453,15 @@ export async function runTask(
   deps: RunDependencies,
 ): Promise<RunResult> {
   const { repository, taskId, taskBrief, maxSteps } = request;
+
+  // Accumulated here rather than read off the step this run happens to stop on.
+  // Every `stop` below is a way this run can end, and an operator is owed the
+  // same answer on all of them, so the accumulation is attached in one place
+  // instead of at each return — a rule that holds by being unavoidable rather
+  // than by every future exit remembering it.
+  let permissionDenials = NO_PERMISSION_DENIALS;
   const stop = (from: Partial<RunResult> & { readonly outcome: RunOutcome }): RunResult =>
-    runResult({ taskId, ...from });
+    runResult({ taskId, permissionDenials, ...from });
 
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) {
     return stop({ outcome: 'NO_PROGRESS', reasonCodes: Object.freeze(['STEP_BUDGET_INVALID']) });
@@ -732,6 +760,13 @@ export async function runTask(
       ...(deps.observe !== undefined ? { observe: deps.observe } : {}),
       ...(remediationPayload !== undefined ? { remediationPayload } : {}),
     });
+
+    // Merged before the outcome is read, so a step that blocked contributes as
+    // much as one that advanced: being refused a tool is not less true because
+    // the step it happened in went on to fail.
+    if (step.permissionDenials !== null) {
+      permissionDenials = mergePermissionDenials(permissionDenials, step.permissionDenials);
+    }
 
     const stopped = {
       state: step.state ?? state.state,
