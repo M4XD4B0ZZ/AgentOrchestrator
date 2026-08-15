@@ -12,12 +12,18 @@
  *
  * ── Why `git status` is not enough, and is the specific hole ───────────────
  *
- * A writing agent is allowed to commit — `writerThatCommits` in the test
- * fixtures does exactly that, and the remediation cycle depends on it. A writer
- * that commits leaves a *clean* worktree, so a `git status --porcelain` check
- * would report nothing at all about the change it just made. That is not an
- * edge case: it is the normal shape of a well-behaved agent, and a guard built
- * on `status` would pass every task that committed its way out of scope.
+ * Work reaches this task's branch as *commits*, so a `git status --porcelain`
+ * check would report nothing at all about a change already recorded. That is
+ * not an edge case: it is the normal shape of every pass after the first, and a
+ * guard built on `status` would pass every task that committed its way out of
+ * scope.
+ *
+ * Where those commits come from changed in DOGFOOD-REM-001 and this observation
+ * did not have to. The writing agent used to be able to commit its own work;
+ * under G1 it holds no shell and cannot, and `commitTaskWork` records the pass
+ * on its behalf — after this measurement, which is what the scope gate is given
+ * to judge. Either way the tree is clean afterwards and the cumulative delta,
+ * not `status`, is what says what the task did.
  *
  * So the observation is cumulative:
  *

@@ -61,7 +61,7 @@ import {
   tryReload,
   usageLimitResult,
   writerSuccess,
-  writerThatCommits,
+  writerThatEdits,
   type StartedTask,
 } from './helpers/e2e-fixtures.js';
 import { fingerprint, passingReview } from './fixtures.js';
@@ -206,7 +206,7 @@ describe('a review that finds something drives a real remediation cycle', () => 
     const agent = recordedAgent({
       // Round 1 finds something; round 2 is clean.
       codex: ({ index }) => reviewResult(index === 0 ? findingsReview() : passingReview()),
-      claude: writerThatCommits('src/fix.ts', 'export const fixed = true;\n'),
+      claude: writerThatEdits('src/fix.ts', 'export const fixed = true;\n'),
     });
 
     const run = await runTask(
@@ -248,7 +248,7 @@ describe('a review that finds something drives a real remediation cycle', () => 
 
     const agent = recordedAgent({
       codex: ({ index }) => reviewResult(index === 0 ? findingsReview('src/broken.ts', 'e2e.named') : passingReview()),
-      claude: writerThatCommits('src/fix.ts', 'export const fixed = true;\n'),
+      claude: writerThatEdits('src/fix.ts', 'export const fixed = true;\n'),
     });
 
     await runTask(
@@ -460,7 +460,7 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
       codex: ({ index }) => reviewResult(index === 0 ? findingsReview() : passingReview()),
       claude: (call) => {
         crashArmed = true;
-        return writerThatCommits('src/fix.ts', 'export const fixed = true;\n')(call);
+        return writerThatEdits('src/fix.ts', 'export const fixed = true;\n')(call);
       },
     });
 
@@ -480,9 +480,15 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
     expect(headOf(started.workspace.worktreePath)).not.toBe(started.workspace.basePinnedCommit);
 
     // The restart reconciles rather than diverging, and finishes the task.
+    //
+    // Its writer edits rather than reporting a bare success: since
+    // DOGFOOD-REM-001 a pass that leaves nothing behind is inadmissible and
+    // parks, so a no-effect restart would stop this case one state short for a
+    // reason it is not about. The subject here is reconciliation surviving the
+    // writer's own authorised mutation.
     const restartAgent = recordedAgent({
       codex: () => reviewResult(passingReview()),
-      claude: () => writerSuccess(),
+      claude: writerThatEdits('src/fix-again.ts', 'export const again = true;\n'),
     });
     const restarted = await runTask(
       request(started),

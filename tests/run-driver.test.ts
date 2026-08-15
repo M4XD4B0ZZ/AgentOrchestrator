@@ -73,7 +73,7 @@ import {
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
 import { releaseRepositoryExecutionLease } from '../src/lease/execution-lease.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
-import { cleanScopeAnswer } from './helpers/scope-git.js';
+import { cleanScopeAnswer, writingPassAnswer } from './helpers/scope-git.js';
 import { resolveFixture } from './helpers/worktree-fixtures.js';
 
 const TASK_ID = 'task-0001';
@@ -213,6 +213,17 @@ interface GitScript {
   readonly registry?: GitCommandResult;
   readonly head?: GitCommandResult;
   readonly status?: GitCommandResult;
+  /**
+   * Answer as a repository in which the writing pass really changed a file and
+   * AO committed it.
+   *
+   * Off by default, because most cases here are about routing and refusals and
+   * are better served by a task that changed nothing. It is on for the cases
+   * whose subject *requires* a pass to complete: since DOGFOOD-REM-001 a pass
+   * with no effect parks, so a scripted world that changes nothing stops those
+   * runs one state early for a reason they are not about.
+   */
+  readonly writingPass?: boolean;
 }
 
 /** The porcelain listing a healthy repository produces for {@link taskState}. */
@@ -230,6 +241,14 @@ function scriptedGit(root: string, script: GitScript = {}) {
   const runner: GitRunner = async (cwd, args) => {
     calls.push({ cwd, args: [...args] });
     if (startsWith(args, ['worktree', 'list'])) return script.registry ?? OK(healthyRegistry(root));
+    // A pass that really changed something, for the cases whose subject needs
+    // one. Consulted before the answers below so that the commit path's
+    // `status --porcelain -z` is not swallowed by the reconciliation answer to
+    // `status --porcelain`, which is a different question of the same command.
+    if (script.writingPass === true) {
+      const writing = writingPassAnswer(args);
+      if (writing !== null) return writing;
+    }
     if (startsWith(args, ['status'])) return script.status ?? OK('');
     if (startsWith(args, ['merge-base', '--is-ancestor'])) return OK();
     if (startsWith(args, ['rev-parse']) && args.includes('HEAD')) return script.head ?? OK(SHA_B);
@@ -519,7 +538,7 @@ describe('execution authority comes from Git, never from the record', () => {
     const run = await runTask(
       request(root, { maxSteps: 3 }),
       deps(root, {
-        git: scriptedGit(root, { registry: OK(healthyRegistry(root, printed)) }),
+        git: scriptedGit(root, { registry: OK(healthyRegistry(root, printed)), writingPass: true }),
         verify: verify.runner,
         agent: agent.runner,
       }),
@@ -831,7 +850,12 @@ describe('an authorised quota resume', () => {
 
     const run = await runTask(
       request(root, { maxSteps: 2 }),
-      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      deps(root, {
+        agent: agent.runner,
+        verify: cappedVerify(0).runner,
+        // The remediation pass has to leave something behind to be admissible.
+        git: scriptedGit(root, { writingPass: true }),
+      }),
     );
 
     // The resume itself is one durable step; the remediation pass is the next.
@@ -923,7 +947,11 @@ describe('an authorised quota resume', () => {
     for (let step = 0; step < 4; step += 1) {
       const run = await runTask(
         request(root, { maxSteps: 1 }),
-        deps(root, { agent: agent.runner, verify: scriptedVerify({ exitCode: 0 }).runner }),
+        deps(root, {
+          agent: agent.runner,
+          verify: scriptedVerify({ exitCode: 0 }).runner,
+          git: scriptedGit(root, { writingPass: true }),
+        }),
       );
       if (run.steps === 0) break;
       const after = reload(root).state;
@@ -1328,7 +1356,7 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
     const next = await runTask(
       request(root, { maxSteps: 1 }),
       deps(root, {
-        git: scriptedGit(root, mutated),
+        git: scriptedGit(root, { ...mutated, writingPass: true }),
         agent: scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() })).runner,
         verify: cappedVerify(0).runner,
       }),
@@ -1386,7 +1414,11 @@ describe('remediation is never started on invented evidence', () => {
 
     const run = await runTask(
       request(root, { maxSteps: 1 }),
-      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      deps(root, {
+        agent: agent.runner,
+        verify: cappedVerify(0).runner,
+        git: scriptedGit(root, { writingPass: true }),
+      }),
     );
 
     expect(run.steps).toBe(1);

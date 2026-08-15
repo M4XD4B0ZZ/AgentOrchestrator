@@ -331,22 +331,22 @@ export function writerSuccess(): AgentCommandResult {
   return agentCommandResult({ stdout: claudeSuccessEnvelope() });
 }
 
-/**
- * A Claude run that positively succeeded **and really changed the worktree**.
+/*
+ * There is deliberately no `writerThatCommits` here any more.
  *
- * The whole point of the remediation cycle test: the writer commits, so the
- * next reconciliation sees a HEAD the record did not name and a tree the record
- * did not describe — the exact conditions V1-07-RR-B2's checkpoint withdrawal
- * exists to survive, produced by a real `git commit` rather than by a script.
+ * It wrote a file and then ran `git add` + `git commit` as the agent, and every
+ * suite that needed a task to progress used it. Under DOGFOOD-REM-001 G1 that
+ * models a capability production does not grant: the writer's argument vector
+ * is `--tools Read Edit Write Glob Grep`, there is no shell, and AO commits the
+ * pass itself through `commitTaskWork`.
+ *
+ * Retiring it rather than leaving it unused is the point. It was the one
+ * fixture that manufactured `worktreeClean === true` *and* a moved HEAD in a
+ * single step, which is exactly the combination the first dogfood's false
+ * completion needed — a suite built on it could not tell a writer that had
+ * really done something from one that had not. {@link writerThatEdits} is its
+ * replacement: it writes, and it runs no git at all.
  */
-export function writerThatCommits(fileName: string, contents: string) {
-  return (call: { readonly cwd: string }): AgentCommandResult => {
-    writeRepoFile(call.cwd, fileName, contents);
-    git(call.cwd, ['add', '--all']);
-    git(call.cwd, ['commit', '--quiet', '-m', `remediation ${fileName}`]);
-    return writerSuccess();
-  };
-}
 
 /**
  * A Claude run that positively succeeded, **edited the worktree, and did not

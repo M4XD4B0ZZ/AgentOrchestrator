@@ -15,14 +15,43 @@
  * authority.
  */
 
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { CLAUDE_WRITER_ARGS } from '../src/agent/claude-writer.js';
 import { readClaudeResultEnvelope } from '../src/agent/internal/claude-result-envelope.js';
 import { renderRunResult } from '../src/cli/render-attended-run.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
+import { runImplementStep } from '../src/loop/loop-step.js';
+import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { runTask, type RunResult } from '../src/run/run-driver.js';
+import {
+  commitTaskWork,
+  executableDriverKeysIn,
+  type CommitTaskWorkResult,
+} from '../src/worktree/commit-task-work.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
+import {
+  addsFile,
+  authorOf,
+  committerOf,
+  configOf,
+  configureCleanFilter,
+  headOf,
+  isSigned,
+  pathsInCommit,
+  porcelainOf,
+  recordingGit,
+  removeCommitFixtures,
+  scratchWorktree,
+  setupGit,
+  subjectOf,
+  touches,
+  writeHook,
+  writeIn,
+} from './helpers/commit-fixtures.js';
 import { passingReview } from './fixtures.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
@@ -36,6 +65,7 @@ import {
   seedState,
   startTask,
   tickingClock,
+  writerSuccess,
   writerThatEdits,
   type StartedTask,
 } from './helpers/e2e-fixtures.js';
@@ -44,6 +74,7 @@ afterAll(() => {
   releaseTestLeases();
   removeTrackedWorkspaces();
   removeRepoFixtures();
+  removeCommitFixtures();
 });
 
 describe('the writer is configured hermetically and can actually edit', () => {
@@ -303,5 +334,440 @@ describe('a refused write is observable without reading prose', () => {
     const reading = readClaudeResultEnvelope(quoting);
     expect(reading.verdict).toBe('COMPLETED');
     expect(reading.permissionDenials.count).toBe(0);
+  });
+});
+
+/* ════════════════ 3. The orchestrator owns the commit ══════════════════════ */
+
+/**
+ * One request shape, so no case can pass by quietly omitting `approvedPaths`.
+ *
+ * It is a required parameter in production for a reason a default would defeat:
+ * a path set derived *inside* the commit module would be measured after any
+ * injection and would therefore agree with it. A helper that let a case forget
+ * it would re-open exactly that hole in the test suite.
+ */
+function commitRequest(
+  base: string,
+  approvedPaths: readonly string[],
+  overrides: { readonly taskId?: string; readonly round?: number } = {},
+) {
+  return {
+    taskId: overrides.taskId ?? 'T-1',
+    phase: 'IMPLEMENT' as const,
+    round: overrides.round ?? 1,
+    approvedPaths,
+    basePinnedCommit: base,
+  };
+}
+
+/** Narrows to the member carrying a commit, failing loudly rather than casting. */
+function committedCommit(result: CommitTaskWorkResult): string {
+  if (result.outcome !== 'COMMITTED' && result.outcome !== 'COMMITTED_BEYOND_APPROVED_SCOPE') {
+    throw new Error(`expected a commit, got ${result.outcome}`);
+  }
+  return result.commit;
+}
+
+describe('the orchestrator commits the writer’s work', () => {
+  it('refuses to commit when the writer changed nothing, and invents no empty commit', async () => {
+    const { worktreePath, head } = scratchWorktree();
+
+    const result = await commitTaskWork(runGitCommand, worktreePath, commitRequest(head, []));
+
+    expect(result.outcome).toBe('NOTHING_TO_COMMIT');
+    expect(headOf(worktreePath)).toBe(head); // no --allow-empty, ever
+  });
+
+  it('commits a real edit and leaves the tree clean', async () => {
+    const { worktreePath, head } = scratchWorktree();
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('COMMITTED');
+    expect(committedCommit(result)).not.toBe(head);
+    expect(headOf(worktreePath)).toBe(committedCommit(result));
+    expect(porcelainOf(worktreePath)).toBe('');
+  });
+
+  it('writes a message it authored itself, carrying no agent text', async () => {
+    const { worktreePath, head } = scratchWorktree();
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['src/work.ts'], { round: 2 }),
+    );
+    const subject = subjectOf(worktreePath, committedCommit(result));
+
+    expect(subject).toContain('T-1');
+    expect(subject).toContain('r2');
+    // Deterministic, ASCII, no transcript — and shell-inert, because -m takes
+    // one argument and SAFE_ARG_PATTERN excludes the space (G11). A message
+    // built as a sentence would return REFUSED_UNSAFE_ARGUMENT, not a commit.
+    expect(isShellInertArgument(subject)).toBe(true);
+  });
+
+  it('refuses a task id it could not express as one argument, and commits nothing', async () => {
+    const { worktreePath, head } = scratchWorktree();
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['src/work.ts'], { taskId: 'T 1; rm -rf /' }),
+    );
+
+    expect(result.outcome).toBe('REFUSED_UNSAFE_ARGUMENT');
+    expect(headOf(worktreePath)).toBe(head);
+  });
+});
+
+// G12 control one. It covers path-ADDING injection by any mechanism, known or
+// not — and nothing else. A driver that rewrites an approved file's bytes leaves
+// this set identical; that is control two's case, below, and the two are not
+// interchangeable.
+describe('the commit contains exactly the paths the scope gate approved', () => {
+  it('commits only the approved paths when the repository tries to add one', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    // The hook is the *sample* mechanism, not the property under test.
+    writeHook(worktreePath, 'pre-commit', addsFile('forbidden/config.ts'));
+    writeHook(worktreePath, 'post-commit', touches('.ao-sentinel'));
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('COMMITTED');
+    expect(pathsInCommit(worktreePath, head, committedCommit(result))).toEqual(['src/work.ts']);
+    expect(existsSync(join(worktreePath, 'forbidden', 'config.ts'))).toBe(false);
+    expect(existsSync(join(worktreePath, '.ao-sentinel'))).toBe(false); // post-commit too
+  });
+
+  // The mechanism-independent half: the guard must fire even when nothing was
+  // neutralised, because the enumeration will one day be incomplete.
+  it('refuses, parks and does not undo when the committed set is not the approved set', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+    writeIn(worktreePath, 'forbidden/config.ts', '// injected\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('COMMITTED_BEYOND_APPROVED_SCOPE');
+    if (result.outcome !== 'COMMITTED_BEYOND_APPROVED_SCOPE') return;
+    expect(result.unapprovedPaths).toEqual(['forbidden/config.ts']);
+    // The commit object stays. A rollback is an effect too, and the operator
+    // needs the artefact to see what happened.
+    expect(headOf(worktreePath)).toBe(result.commit);
+  });
+
+  // Control two (G12). The path-set check cannot see this case: the filter runs,
+  // the blob is not the approved bytes, a sentinel lands outside the object, and
+  // the committed path set is still exactly { src/work.ts }.
+  it('refuses to commit into a repository that has configured an executable driver', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    writeIn(worktreePath, '.gitattributes', '* -text\nsrc/work.ts filter=probe\n');
+    configureCleanFilter(worktreePath);
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['.gitattributes', 'src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('TARGET_CONFIG_EXECUTES_CODE');
+    if (result.outcome !== 'TARGET_CONFIG_EXECUTES_CODE') return;
+    expect(result.findings).toEqual([{ key: 'filter.probe.clean', scope: 'local' }]);
+    expect(headOf(worktreePath)).toBe(head); // nothing committed
+    expect(existsSync(join(worktreePath, '.filter-ran'))).toBe(false); // and it never ran
+  });
+
+  // The predicate is path-scoped, and this is the case that proves it. Every
+  // machine with Git LFS has filter.lfs.* configured in system scope; a blanket
+  // refusal would park every commit in every repository, measured on
+  // git 2.55.0.windows.3. A configured driver that claims none of the approved
+  // paths is not this task's business.
+  it('commits when a configured driver applies to no approved path', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    configureCleanFilter(worktreePath);
+    writeIn(worktreePath, '.gitattributes', '* -text\nassets/*.bin filter=probe\n');
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['.gitattributes', 'src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('COMMITTED');
+    expect(existsSync(join(worktreePath, '.filter-ran'))).toBe(false);
+  });
+
+  // A driver Git honours that a --local scan cannot see. Two scratch-creatable
+  // shapes; neither mutates this machine's configuration.
+  it('refuses a driver configured in the worktree scope, not only in .git/config', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    setupGit(worktreePath, ['config', 'extensions.worktreeConfig', 'true']);
+    configureCleanFilter(worktreePath, 'probe', 'worktree');
+    writeIn(worktreePath, '.gitattributes', '* -text\nsrc/work.ts filter=probe\n');
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['.gitattributes', 'src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('TARGET_CONFIG_EXECUTES_CODE');
+    if (result.outcome !== 'TARGET_CONFIG_EXECUTES_CODE') return;
+    // The scope must survive as far as the result, not only as far as the
+    // parser. This is the assertion that kills a production path which reads
+    // the scope and then reports keys alone.
+    expect(result.findings).toEqual([{ key: 'filter.probe.clean', scope: 'worktree' }]);
+    expect(headOf(worktreePath)).toBe(head);
+    expect(existsSync(join(worktreePath, '.filter-ran'))).toBe(false);
+  });
+
+  it('refuses a driver reached through include, which Git resolves and we do not', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    // Relative include paths resolve against the directory of the config file
+    // that names them — `.git/`, not the worktree root. Measured.
+    writeIn(
+      worktreePath,
+      '.git/extra.cfg',
+      '[filter "probe"]\n\tclean = sh -c "echo ran > .filter-ran; sed s/BASE/MANGLED/"\n',
+    );
+    setupGit(worktreePath, ['config', 'include.path', 'extra.cfg']);
+    writeIn(worktreePath, '.gitattributes', '* -text\nsrc/work.ts filter=probe\n');
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['.gitattributes', 'src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('TARGET_CONFIG_EXECUTES_CODE');
+    if (result.outcome !== 'TARGET_CONFIG_EXECUTES_CODE') return;
+    expect(result.findings).toEqual([{ key: 'filter.probe.clean', scope: 'local' }]);
+  });
+
+  // System scope cannot be exercised without mutating this machine, which is
+  // forbidden. It is covered where it can be: the parser, fed Git's OWN measured
+  // byte format. Pure and cheap, and it pins that the reader keys on the key
+  // rather than on the scope label.
+  it('refuses a system-scope driver, reading Git’s measured --name-only -z format', () => {
+    // Measured, git 2.55.0.windows.3:  scope\0key\0scope\0key\0…
+    // No value appears in this stream at all — see the argv assertion below.
+    const listing = ['system', 'filter.probe.clean', 'local', 'core.bare'].join('\0') + '\0';
+    expect(executableDriverKeysIn(listing)).toEqual([
+      { key: 'filter.probe.clean', scope: 'system' },
+    ]);
+  });
+
+  it('never asks Git for the configured values in the first place', async () => {
+    // Stronger than filtering a value out after receiving it: with --name-only
+    // the attacker-chosen command never enters this process. Asserted on the
+    // argv the module builds, because that is where the property lives.
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+    const git = recordingGit(runGitCommand);
+
+    await commitTaskWork(git.runner, worktreePath, commitRequest(head, ['src/work.ts']));
+
+    const configRead = git.calls.find((call) => call.args[0] === 'config');
+    expect(configRead?.args).toEqual(['config', '--list', '--show-scope', '--name-only', '-z']);
+  });
+
+  // The commit invocation itself, asserted as argv.
+  //
+  // Three of these properties are only observable here. `--allow-empty` is
+  // unreachable behind the effect gate, so its absence cannot be shown by any
+  // outcome — a run with the flag added behaves identically. `--no-verify` was
+  // measured insufficient (prepare-commit-msg and post-commit still ran), so its
+  // presence would be a false comfort rather than a visible failure. And an
+  // empty `core.hooksPath` produces the same result as a *relative* one right
+  // up until the writer creates that directory, which no green test would show.
+  it('asks Git for exactly the commit it decided to make', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+    const git = recordingGit(runGitCommand);
+
+    await commitTaskWork(git.runner, worktreePath, commitRequest(head, ['src/work.ts']));
+
+    const commit = git.calls.find((call) => call.args.includes('commit'));
+    expect(commit?.args).toEqual([
+      '-c', 'user.name=AgentOrchestrator',
+      '-c', 'user.email=agent-orchestrator@local.invalid',
+      '-c', 'core.hooksPath=',
+      '-c', 'commit.gpgSign=false',
+      'commit', '-m', 'AO:T-1:IMPLEMENT:r1',
+    ]);
+    // Never, on any path: an empty commit would move HEAD and satisfy every
+    // "did anything happen?" rule without anything having happened.
+    expect(commit?.args).not.toContain('--allow-empty');
+    // Measured insufficient, so it is not carried as if it helped.
+    expect(commit?.args).not.toContain('--no-verify');
+  });
+
+  // The closest legitimate variant, or the refusal is just a repo-shape allergy:
+  // .gitattributes on its own configures no driver and must not block anything.
+  it('commits normally when .gitattributes names a driver the config never defines', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    writeIn(worktreePath, '.gitattributes', '* -text\nsrc/work.ts filter=undefined-driver\n');
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['.gitattributes', 'src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('COMMITTED');
+  });
+
+  it('commits deterministically in a repository that demands signing', async () => {
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    setupGit(worktreePath, ['config', 'commit.gpgSign', 'true']);
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('COMMITTED');
+    expect(isSigned(worktreePath, committedCommit(result))).toBe(false);
+  });
+});
+
+// G11, and it is a pair: the identity must be supplied, and nothing else's
+// identity may reach the commit.
+describe('the commit carries the orchestrator’s own identity', () => {
+  it('commits in a repository that has no git identity configured at all', async () => {
+    // The counter-control. scratchWorktree() must NOT set user.name/user.email
+    // for this case — a helper that quietly configures an identity would make
+    // every assertion below vacuous, so assert the absence first.
+    const { worktreePath, head } = scratchWorktree({ identity: 'none' });
+    expect(configOf(worktreePath, 'user.email')).toBeNull();
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['src/work.ts']),
+    );
+
+    expect(result.outcome).toBe('COMMITTED');
+    const commit = committedCommit(result);
+    expect(authorOf(worktreePath, commit)).toEqual({
+      name: 'AgentOrchestrator',
+      email: 'agent-orchestrator@local.invalid',
+    });
+    expect(committerOf(worktreePath, commit)).toEqual({
+      name: 'AgentOrchestrator',
+      email: 'agent-orchestrator@local.invalid',
+    });
+  });
+
+  it('does not let a foreign identity in the target repository leak into the commit', async () => {
+    // Measured, and this is why the case is load-bearing rather than decorative:
+    // the seam forwards PATH/PATHEXT only, and Git STILL reads the operator's
+    // global ~/.gitconfig through it. Without -c, this commit is authored by
+    // whoever is logged in.
+    const { worktreePath, head } = scratchWorktree({ identity: 'foreign' });
+    writeIn(worktreePath, 'src/work.ts', '// work\n');
+
+    const result = await commitTaskWork(
+      runGitCommand,
+      worktreePath,
+      commitRequest(head, ['src/work.ts']),
+    );
+
+    const author = authorOf(worktreePath, committedCommit(result));
+    expect(author.name).toBe('AgentOrchestrator');
+    expect(author.email).toBe('agent-orchestrator@local.invalid');
+    // And the repository's own configuration is left exactly as it was found:
+    // AO supplies identity, it does not install one.
+    expect(configOf(worktreePath, 'user.email')).toBe('somebody@example.com');
+  });
+});
+
+describe('a writer pass with no measured effect is not a success', () => {
+  /** A task seeded at `IMPLEMENTING`, over a real repository and a real worktree. */
+  async function atImplementing(taskId: string) {
+    const started = await startTask({ taskId });
+    const current = seedState(started, { state: 'IMPLEMENTING' });
+    return { started, current, worktreePath: started.workspace.worktreePath };
+  }
+
+  function stepDeps(started: StartedTask, agent: ReturnType<typeof recordedAgent>) {
+    return {
+      now: '2026-08-15T10:00:00.000Z',
+      authorisedWorktreePath: started.workspace.worktreePath,
+      verification: started.repository.verification,
+      taskBrief: 'Make the writer’s effect real.',
+      brief: readExecutionBrief(started.repository, started.taskId, started.workspace.worktreePath),
+      git: runGitCommand,
+      agent: agent.runner,
+      lease: { repository: started.repository, evidence: leaseFor(started.repository) },
+    };
+  }
+
+  it('does not reach VERIFYING when the writer changed nothing', async () => {
+    const { started, current, worktreePath } = await atImplementing('REM-001-N');
+    const base = headOf(worktreePath);
+    const agent = recordedAgent({ claude: () => writerSuccess() }); // edits nothing
+
+    const step = await runImplementStep(current, stepDeps(started, agent));
+
+    expect(step.outcome).toBe('BLOCKED');
+    expect(step.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(step.commit?.outcome).toBe('NOTHING_TO_COMMIT');
+    expect(headOf(worktreePath)).toBe(base);
+  });
+
+  it('reaches VERIFYING when the writer really edited, and AO committed it', async () => {
+    const { started, current, worktreePath } = await atImplementing('REM-001-E');
+    const base = headOf(worktreePath);
+    const agent = recordedAgent({ claude: writerThatEdits('src/work.ts', '// work\n') });
+
+    const step = await runImplementStep(current, stepDeps(started, agent));
+
+    expect(step.outcome).toBe('ADVANCED');
+    expect(step.state).toBe('VERIFYING');
+    expect(step.commit?.outcome).toBe('COMMITTED');
+    expect(headOf(worktreePath)).not.toBe(base);
+    // The writer edits; AO commits; the tree it leaves behind is clean.
+    expect(porcelainOf(worktreePath)).toBe('');
+    expect(authorOf(worktreePath, headOf(worktreePath)).name).toBe('AgentOrchestrator');
+  });
+
+  // The order is the safety property, not an implementation detail.
+  it('does not commit a change the scope guard refuses', async () => {
+    const { started, current, worktreePath } = await atImplementing('REM-001-S');
+    const base = headOf(worktreePath);
+    const agent = recordedAgent({ claude: writerThatEdits('forbidden/x.ts', '// nope\n') });
+
+    const step = await runImplementStep(current, stepDeps(started, agent));
+
+    expect(step.state).toBe('SCOPE_VIOLATION');
+    expect(step.commit).toBeNull(); // the commit was never attempted
+    expect(headOf(worktreePath)).toBe(base); // nothing was committed
   });
 });

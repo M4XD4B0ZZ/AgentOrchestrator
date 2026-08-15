@@ -108,7 +108,8 @@ import type { TaskState } from '../core/task-state.js';
 import type { ResumePhase, TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
-import { leasedAgent, leasedVerify } from './leased-spawns.js';
+import { leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
+import { commitTaskWork, type CommitTaskWorkResult } from '../worktree/commit-task-work.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import { observeRuntime } from '../state/observe-runtime.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
@@ -196,6 +197,17 @@ export interface LoopStepResult {
    * reporting, and `TaskStateObjectSchema` is `.strict()` (G2).
    */
   readonly permissionDenials: PermissionDenialObservation | null;
+  /**
+   * What AO's own commit of this pass did, or `null` when no commit was
+   * attempted (every non-writing step, and a writing step that never got past
+   * its scope gate).
+   *
+   * Carried rather than persisted, like `scope` — it names repository paths and
+   * a commit id, and it is what an operator needs in front of them when a pass
+   * parks: which object exists, which paths it should not have contained, which
+   * configured driver stopped it.
+   */
+  readonly commit: CommitTaskWorkResult | null;
 }
 
 /** What the loop must be told about the world. */
@@ -297,6 +309,7 @@ function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutc
     remediationPayload: null,
     scope: null,
     permissionDenials: null,
+    commit: null,
     ...from,
   });
 }
@@ -370,6 +383,99 @@ function saved(save: StateSaveResult, state: TaskStateName, outcome: LoopStepOut
     return result({ ...extra, remediationPayload: null, outcome: 'STATE_NOT_RECORDED', save });
   }
   return result({ outcome, state, save, ...extra });
+}
+
+/* ────────────────────────── the orchestrator's commit ───────────────────── */
+
+/**
+ * Records the pass, or refuses it — and either way the writer never decides.
+ *
+ * ── Why this is a step of its own, between the gate and the move ───────────
+ *
+ * `runClaudeWriter` returning `ok` means a process ended cleanly and printed a
+ * recognised envelope. The first dogfood run proved what that is worth on its
+ * own: the writer had no authority to write, the envelope said success, and the
+ * task was reported as delivered. So a pass now has to leave an *object* behind,
+ * and the object has to be one AO made:
+ *
+ *   scope gate (already run)  → what did the writer actually touch?
+ *   commit                    → AO stages, AO authors, AO's identity
+ *   controls one and two      → and it contains exactly what was approved
+ *
+ * **Nothing changed → nothing recorded → the pass is inadmissible.** That is the
+ * whole of R2 in one line, and it parks rather than advancing, because a writing
+ * phase that produced no effect is not a phase that can be verified.
+ *
+ * ── The refusals are deliberately all one state ────────────────────────────
+ *
+ * Every way this can fail parks at `HUMAN_DECISION_REQUIRED` with a resume
+ * point: the transition table offers no state for "AO could not record the
+ * work", and inventing one is a product-contract change a runner slice may not
+ * make. The *reason* is not lost — it travels on `LoopStepResult.commit`, which
+ * carries the commit id, the unapproved paths or the configured driver keys,
+ * whichever applies.
+ *
+ * Refusals never undo. A commit that contained an unapproved path stays, and so
+ * do the writer's files: they are the evidence somebody is being asked to look
+ * at, and the undo is an effect too.
+ */
+async function commitPassOrPark(
+  current: StateLoadSuccess,
+  approvedPaths: readonly string[],
+  deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+): Promise<{ readonly blocked: LoopStepResult | null; readonly commit: CommitTaskWorkResult }> {
+  const state = current.state;
+  const { now, authorisedWorktreePath, phase, round } = deps;
+
+  const park = (commit: CommitTaskWorkResult): LoopStepResult => {
+    const save = advanceTaskState(
+      current,
+      {
+        ...state,
+        state: 'HUMAN_DECISION_REQUIRED',
+        stateEnteredAt: now,
+        resumeFrom: { phase, round },
+        reportedResetAt: null,
+      },
+      leaseAdvanceOptions(deps),
+    );
+    return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED', { commit });
+  };
+
+  // A task with no base pin cannot be committed against one, and the scope gate
+  // that ran before this refuses such a task already (`NO_BASE_PIN`). Asked
+  // again rather than assumed, because this module is entered directly.
+  if (state.basePinnedCommit === null) {
+    const commit = Object.freeze({
+      outcome: 'GIT_UNAVAILABLE' as const,
+      step: 'READ_COMMITTED_PATHS' as const,
+    });
+    return { blocked: park(commit), commit };
+  }
+
+  const commit = await commitTaskWork(leasedGit(deps), authorisedWorktreePath, {
+    taskId: state.taskId,
+    phase,
+    round,
+    // Handed down from the gate that approved them. Never re-derived here: a
+    // set measured at this point would be measured after any injection and
+    // would therefore contain it (G12).
+    approvedPaths,
+    basePinnedCommit: state.basePinnedCommit,
+  });
+
+  return { blocked: commit.outcome === 'COMMITTED' ? null : park(commit), commit };
+}
+
+/** The advance options, separated from the execution seams they travel with. */
+function leaseAdvanceOptions(deps: LoopDependencies): AdvanceOptions {
+  const {
+    now, authorisedWorktreePath, agent, verify, observe, git, brief, taskBrief, verification,
+    remediationPayload, ...advance
+  } = deps;
+  void now; void authorisedWorktreePath; void agent; void verify; void observe; void git;
+  void brief; void taskBrief; void verification; void remediationPayload;
+  return advance;
 }
 
 /* ─────────────────────────── the scope guard ────────────────────────────── */
@@ -841,6 +947,16 @@ export async function runRemediateStep(
   const after = await enforceScope(current, { ...scopeGuard, writerRan: true });
   if (after.blocked !== null) return withDenials(after.blocked, writer.permissionDenials);
 
+  // AO records the pass. Nothing changed → nothing recorded → inadmissible.
+  const recorded = await commitPassOrPark(current, after.assessment.approvedPaths, {
+    ...deps,
+    phase: 'REMEDIATE',
+    round,
+  });
+  if (recorded.blocked !== null) {
+    return withDenials(recorded.blocked, writer.permissionDenials);
+  }
+
   // The scope guard read *which* paths the writer touched and nothing more, so
   // the checkpoint facts stay withdrawn. Verification is what looks next.
   const save = advanceTaskState(
@@ -858,6 +974,7 @@ export async function runRemediateStep(
   return saved(save, 'VERIFYING', 'ADVANCED', {
     scope: after.assessment,
     permissionDenials: writer.permissionDenials,
+    commit: recorded.commit,
   });
 }
 
@@ -1104,6 +1221,18 @@ export async function runImplementStep(
   const after = await enforceScope(current, { ...scopeGuard, writerRan: true });
   if (after.blocked !== null) return withDenials(after.blocked, writer.permissionDenials);
 
+  // AO records the pass. A writer that completed and changed nothing does not
+  // reach `VERIFYING` — it parks, because there is nothing for verification to
+  // look at and "the agent finished" is not the same claim as "the work exists".
+  const recorded = await commitPassOrPark(current, after.assessment.approvedPaths, {
+    ...deps,
+    phase: 'IMPLEMENT',
+    round,
+  });
+  if (recorded.blocked !== null) {
+    return withDenials(recorded.blocked, writer.permissionDenials);
+  }
+
   // The scope guard read *which* paths the writer touched and nothing more: it
   // has no opinion on whether the work is right, and it did not re-establish
   // HEAD or a clean tree. So the checkpoint facts stay withdrawn, and
@@ -1122,6 +1251,7 @@ export async function runImplementStep(
   return saved(save, 'VERIFYING', 'ADVANCED', {
     scope: after.assessment,
     permissionDenials: writer.permissionDenials,
+    commit: recorded.commit,
   });
 }
 

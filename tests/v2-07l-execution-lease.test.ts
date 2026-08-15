@@ -99,7 +99,13 @@ import { runGitCommand } from '../src/worktree/git-command.js';
 import { removeTaskWorkspace } from '../src/worktree/remove-workspace.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { createRepoFixture, git, removeRepoFixtures } from './helpers/repo-fixtures.js';
-import { e2eProfile, taskFile, tickingClock, writerSuccess } from './helpers/e2e-fixtures.js';
+import {
+  e2eProfile,
+  taskFile,
+  tickingClock,
+  writerSuccess,
+  writerThatEdits,
+} from './helpers/e2e-fixtures.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 import {
   removeTrackedWorkspaces,
@@ -112,6 +118,22 @@ afterEach(() => {
   releaseTestLeases();
   removeRepoFixtures();
 });
+
+/**
+ * A writer seam that really edits, so the pass it drives is admissible.
+ *
+ * Since DOGFOOD-REM-001 a writing pass that leaves nothing behind parks instead
+ * of advancing, so these cases — whose subject is the *lease*, not the writer —
+ * have to produce a real effect to reach the phase they are about.
+ */
+function editingWriter() {
+  let index = 0;
+  return async (_id: string, _args: readonly string[], cwd: string) => {
+    index += 1;
+    return writerThatEdits(`src/lease-${index}.ts`, `export const step = ${index};
+`)({ cwd });
+  };
+}
 
 afterAll(() => {
   removeTrackedWorkspaces();
@@ -1768,7 +1790,7 @@ describe('every seam that starts a process is fenced, not just the writer', () =
 
     // Drive to VERIFYING, which is the phase that runs the verification command.
     for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING', 'VERIFYING'] as const) {
-      const advanced = await runLoopStep(current, stepDeps({ agent: async () => writerSuccess() }));
+      const advanced = await runLoopStep(current, stepDeps({ agent: editingWriter() }));
       expect(advanced.state).toBe(expected);
       current = loadTaskState(fixture.root, TASK_ID);
       if (!current.ok) throw new Error('state vanished');
@@ -1889,7 +1911,7 @@ describe('a step started directly is fenced exactly like one the loop drives', (
     });
 
     for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING'] as const) {
-      const advanced = await runLoopStep(current, deps({ agent: async () => writerSuccess() }));
+      const advanced = await runLoopStep(current, deps({ agent: editingWriter() }));
       expect(advanced.state).toBe(expected);
       current = loadTaskState(fixture.root, TASK_ID);
       if (!current.ok) throw new Error('state vanished');
@@ -1943,7 +1965,7 @@ describe('a step started directly is fenced exactly like one the loop drives', (
     });
 
     for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING', 'VERIFYING'] as const) {
-      const advanced = await runLoopStep(current, deps({ agent: async () => writerSuccess() }));
+      const advanced = await runLoopStep(current, deps({ agent: editingWriter() }));
       expect(advanced.state).toBe(expected);
       current = loadTaskState(fixture.root, TASK_ID);
       if (!current.ok) throw new Error('state vanished');

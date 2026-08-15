@@ -82,7 +82,7 @@ import {
   taskFile,
   tickingClock,
   writerSuccess,
-  writerThatCommits,
+  writerThatEdits,
 } from './helpers/e2e-fixtures.js';
 
 afterAll(() => {
@@ -836,7 +836,7 @@ async function runChainedBlock(
 ) {
   const taskIds = options.taskIds ?? ['A-001', 'B-001'];
   const claude: ClaudeHandler =
-    options.claude ?? ((call) => writerThatCommits('src/work.ts', `// ${call.index}\n`)(call));
+    options.claude ?? ((call) => writerThatEdits('src/work.ts', `// ${call.index}\n`)(call));
   const agent = recordedAgent({ claude, codex: () => reviewResult(passingReview()) });
   return runAttendedBlock(
     {
@@ -1052,7 +1052,7 @@ describe('a chained task keeps the scope it was started under, after its run is 
     const agent = recordedAgent({
       claude: (call) => {
         if (call.index === 0) {
-          return writerThatCommits(
+          return writerThatEdits(
             REPO_PROFILE_RELATIVE_PATH,
             scopedProfile(['.agent-orchestrator', 'src']),
           )(call);
@@ -1120,7 +1120,7 @@ describe('a chained task keeps the scope it was started under, after its run is 
         now: tickingClock(),
         git: runGitCommand,
         agent: recordedAgent({
-          claude: (call) => writerThatCommits('src/b/x.ts', 'work\n')(call),
+          claude: (call) => writerThatEdits('src/b/x.ts', 'work\n')(call),
           codex: () => reviewResult(passingReview()),
         }).runner,
         verify: recordedVerify().runner,
@@ -1346,7 +1346,7 @@ describe('the block command drives a dependent chain end to end', () => {
       {
         authPreflight: authPreflightPasses,
         agent: recordedAgent({
-          claude: (call) => writerThatCommits('src/work.ts', `// ${call.index}\n`)(call),
+          claude: (call) => writerThatEdits('src/work.ts', `// ${call.index}\n`)(call),
           codex: () => reviewResult(passingReview()),
         }).runner,
         verify: recordedVerify().runner,

@@ -63,7 +63,7 @@ import {
   SHA_B,
   validCreatedState,
 } from './fixtures.js';
-import { cleanScopeGit } from './helpers/scope-git.js';
+import { cleanScopeGit, writingPassGit } from './helpers/scope-git.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 
 const NOW = '2026-08-10T09:00:00.000Z';
@@ -219,7 +219,13 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     // without this every mutating step here would fail closed on "this is not
     // a repository", which is true and is not what any of them are asking.
     // A test that means to exercise the guard overrides it explicitly.
-    git: cleanScopeGit,
+    //
+    // It answers as a repository in which the writer really edited one allowed
+    // path and AO then committed it. It used to answer as one where nothing
+    // changed, which was a harmless backdrop until DOGFOOD-REM-001 made a
+    // no-effect pass inadmissible: every remediation case here would now park
+    // on the effect gate, one state short of the routing they are about.
+    git: writingPassGit,
     ...overrides,
   };
 }

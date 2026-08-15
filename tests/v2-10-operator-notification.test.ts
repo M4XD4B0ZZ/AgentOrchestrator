@@ -66,7 +66,14 @@ import {
 import { createNtfyTransport } from '../src/notify/ntfy-transport.js';
 import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
-import { e2eProfile, recordedAgent, recordedVerify, reviewResult, taskFile, writerSuccess } from './helpers/e2e-fixtures.js';
+import {
+  e2eProfile,
+  recordedAgent,
+  recordedVerify,
+  reviewResult,
+  taskFile,
+  writerThatEdits,
+} from './helpers/e2e-fixtures.js';
 import { passingReview } from './fixtures.js';
 import { releaseTestLeases } from './helpers/lease.js';
 import { createRepoFixture, removeRepoFixtures } from './helpers/repo-fixtures.js';
@@ -712,8 +719,23 @@ async function repoWith(tasks: Readonly<Record<string, readonly string[]>>) {
   return { repository, root };
 }
 
+/**
+ * Seams that drive a block to its end.
+ *
+ * The writer edits and AO commits it (DOGFOOD-REM-001 G1): a pass that leaves
+ * nothing behind now parks, and the completion cases here need the block to
+ * really complete before they can assert that nothing was sent.
+ */
 function drivingSeams() {
-  const agent = recordedAgent({ claude: () => writerSuccess(), codex: () => reviewResult(passingReview()) });
+  let pass = 0;
+  const agent = recordedAgent({
+    claude: (call) => {
+      pass += 1;
+      return writerThatEdits(`src/work-${pass}.ts`, `export const pass = ${pass};
+`)(call);
+    },
+    codex: () => reviewResult(passingReview()),
+  });
   return { agent: agent.runner, verify: recordedVerify().runner };
 }
 

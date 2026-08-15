@@ -136,6 +136,82 @@ export function scriptedGit(script: GitScript = {}): GitRunner {
 export const cleanScopeGit: GitRunner = scriptedGit();
 
 /**
+ * The world a writing pass that really did something lives in.
+ *
+ * ── Why this exists beside {@link cleanScopeAnswer} ────────────────────────
+ *
+ * `cleanScopeAnswer` models a task that changed nothing, and that used to be a
+ * harmless backdrop for suites about routing: a writer completed, the delta was
+ * empty, and the step advanced anyway. Since DOGFOOD-REM-001 it is no longer
+ * harmless — a pass with no effect is inadmissible and parks, which is the
+ * defect the slice exists to remove. A routing suite driven by the clean answer
+ * therefore stops at `HUMAN_DECISION_REQUIRED` for a reason it is not about.
+ *
+ * This answers the same questions as a repository in which the writer edited
+ * one allowed path and AO then committed it: a non-empty in-scope delta, a
+ * dirty worktree before the commit, a configuration with no executable driver,
+ * and a commit whose path set is exactly the approved one.
+ *
+ * It is deliberately **not** a general-purpose Git. Anything outside the two
+ * questions above returns `null`, so a caller keeps its own "unscripted call
+ * throws" discipline and an unexpected invocation stays visible.
+ */
+export function writingPassAnswer(
+  args: readonly string[],
+  options: { readonly path?: string; readonly head?: string } = {},
+): GitCommandResult | null {
+  const path = options.path ?? 'src/work.ts';
+
+  // Control one's read, distinguished from the scope guard's `--name-status`
+  // by the flag rather than by the subcommand: both are `git diff … -z`.
+  if (args.includes('diff') && args.includes('--name-only')) return ok(nulJoin([path]));
+  // The commit path's effect gate. `-z` is what separates it from
+  // `observe-runtime.ts`'s `status --porcelain`, which asks a different
+  // question of the same command and must keep its own answer.
+  if (args.includes('status') && args.includes('-z')) return ok(`1 .M ${path}\0`);
+  if (args.includes('config') && args.includes('--name-only')) {
+    return ok(nulJoin(['local', 'core.bare', 'local', 'core.repositoryformatversion']));
+  }
+  if (args.includes('check-attr')) return ok(nulJoin([path, 'filter', 'unspecified']));
+  if (args.includes('add')) return ok('');
+  if (args.includes('commit')) return ok('');
+  // The commit AO just made, read back — **only** when the caller said what
+  // HEAD is. Suites that already answer `rev-parse` own that answer: it is also
+  // what reconciliation compares against the record, so a second opinion here
+  // would report the task as diverged for a commit this fixture invented.
+  if (options.head !== undefined && args.includes('rev-parse') && args.includes('HEAD')) {
+    return ok(options.head);
+  }
+
+  switch (question(args)) {
+    case 'show':
+      return ok(e2eProfile());
+    case 'diff':
+      return ok(nulJoin(['M', path]));
+    case 'index':
+    case 'ignored':
+    case 'untracked':
+      return ok('');
+    default:
+      return null;
+  }
+}
+
+/**
+ * {@link writingPassAnswer} as a whole {@link GitRunner}, for suites that supply
+ * one seam rather than composing several.
+ *
+ * Anything it does not recognise is `UNAVAILABLE`, for the reason
+ * {@link scriptedGit} gives: a stub that invented replies would hide the subject
+ * running commands nobody expected.
+ */
+export const writingPassGit: GitRunner = async (_cwd, args) =>
+  // `SHA_B` rather than an invented commit: it is what the loop suites' own
+  // states record as `currentCommit`, so reconciliation and the commit's
+  // read-back agree instead of manufacturing divergence.
+  writingPassAnswer(args, { head: `${'a'.repeat(39)}1` }) ?? UNAVAILABLE;
+
+/**
  * The three answers a task that changed nothing produces, for suites that
  * already own a scripted Git and only need the scope questions covered.
  *
