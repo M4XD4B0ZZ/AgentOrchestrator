@@ -248,6 +248,20 @@ export type PlannedStartRequest = StartTaskRequest & {
    * frozen run is specifically not allowed to consult.
    */
   readonly base: WorkspaceBase;
+  /**
+   * Dependencies the caller has itself satisfied, and may therefore overrule the
+   * frozen ineligibility for.
+   *
+   * The **only** widening of the eligibility gate in this build, and it is
+   * narrow by construction: it overrules `BLOCKED_BY_DEPENDENCIES` and nothing
+   * else, only for dependencies named one by one, and only in the direction the
+   * caller can prove. Naming a dependency does not produce a base — that is
+   * `base` above, and it is proved against Git separately — so a caller cannot
+   * turn this into "start anything".
+   *
+   * `startTask` passes an empty list, which is exactly today's rule.
+   */
+  readonly satisfiedDependencies: readonly string[];
 };
 
 export interface StartTaskDependencies {
@@ -424,6 +438,7 @@ async function startAgainstPlan(
   taskId: string,
   planning: TaskPlanningSuccess,
   base: WorkspaceBase,
+  satisfiedDependencies: readonly string[],
   deps: StartTaskDependencies,
 ): Promise<StartTaskResult> {
   const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
@@ -433,13 +448,32 @@ async function startAgainstPlan(
   // Answered from the plan this function was handed, and from nothing else.
   const eligibility = planning.selection.eligibility.find((entry) => entry.taskId === taskId);
   if (eligibility === undefined) return stop({ outcome: 'TASK_UNKNOWN' });
+
+  // The caller may overrule exactly one ineligibility, and only by naming the
+  // dependencies it has itself satisfied. Everything else — `ALREADY_DONE`, an
+  // unnamed dependency, a dependency outside the caller's list — refuses as
+  // before. A caller cannot widen this usefully: naming a dependency does not
+  // make a base, and the workspace it gets is still the one the caller pinned,
+  // under the lease, in this repository.
+  //
+  // No roadmap is read here to check the claim, and none may be: the whole point
+  // of this path is that the frozen reading is the authority. What makes the
+  // claim honest is where it comes from — a block runner that watched the
+  // dependency settle against that task's own durable record, in this run.
   if (!eligibility.eligible) {
-    return stop({
-      outcome: 'TASK_INELIGIBLE',
-      reasonCodes: Object.freeze(
-        eligibility.reason === null ? [] : [eligibility.reason],
-      ),
-    });
+    const overruled =
+      eligibility.reason === 'BLOCKED_BY_DEPENDENCIES' &&
+      eligibility.unsatisfiedDependencies.every((dependency) =>
+        satisfiedDependencies.includes(dependency),
+      );
+    if (!overruled) {
+      return stop({
+        outcome: 'TASK_INELIGIBLE',
+        reasonCodes: Object.freeze(
+          eligibility.reason === null ? [] : [eligibility.reason],
+        ),
+      });
+    }
   }
 
   const task: TaskDefinition | undefined = planning.graph.node(taskId)?.definition;
@@ -647,7 +681,14 @@ export async function startPlannedTask(
   const repository = snapshotRepositoryRecord(request.repository);
   const gated = gateStart(repository, taskId, deps);
   if (gated !== null) return gated;
-  return startAgainstPlan(repository, taskId, request.planning, request.base, deps);
+  return startAgainstPlan(
+    repository,
+    taskId,
+    request.planning,
+    request.base,
+    request.satisfiedDependencies,
+    deps,
+  );
 }
 
 /**
@@ -699,8 +740,9 @@ export async function startTask(
     });
   }
 
-  // Today's behaviour, written down. A task started outside a block is built on
-  // the tip of its repository's declared default branch, which is what this path
-  // has always resolved for itself one layer further in.
-  return startAgainstPlan(repository, taskId, planning, { kind: 'DEFAULT_BRANCH_TIP' }, deps);
+  // Today's behaviour, written down twice over. A task started outside a block
+  // is built on the tip of its repository's declared default branch — what this
+  // path has always resolved for itself one layer further in — and it satisfies
+  // no dependency of its own, so the eligibility gate is exactly the gate it was.
+  return startAgainstPlan(repository, taskId, planning, { kind: 'DEFAULT_BRANCH_TIP' }, [], deps);
 }

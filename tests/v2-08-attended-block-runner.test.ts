@@ -1390,6 +1390,7 @@ describe('a start may be authorised by a planning result it did not take', () =>
         taskId: 'B-001',
         planning: frozen,
         base: { kind: 'DEFAULT_BRANCH_TIP' },
+        satisfiedDependencies: [],
       },
       { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
     );
@@ -1412,6 +1413,7 @@ describe('a start may be authorised by a planning result it did not take', () =>
         taskId: 'B-001',
         planning: frozen,
         base: { kind: 'DEFAULT_BRANCH_TIP' },
+        satisfiedDependencies: [],
       },
       { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
     );

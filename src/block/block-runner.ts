@@ -772,11 +772,17 @@ async function driveOneTask(
   // legitimately chose, and a roadmap edited mid-run would be back in charge of
   // what runs.
   const start = await startPlannedTask(
-    // The base this runner has always used, now said out loud. Task 7 of V2-09
-    // replaces it with the block base for a root member and with a proved
-    // predecessor result for a chained one; until then this is V2-08's
-    // behaviour, unchanged and merely explicit.
-    { repository, taskId, planning: request.planning, base: { kind: 'DEFAULT_BRANCH_TIP' } },
+    // The base and the widening this runner has always used, now said out loud.
+    // Task 7 of V2-09 replaces both — the block base for a root member, a proved
+    // predecessor result and the settlements that unlocked it for a chained one;
+    // until then this is V2-08's behaviour, unchanged and merely explicit.
+    {
+      repository,
+      taskId,
+      planning: request.planning,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
+      satisfiedDependencies: [],
+    },
     { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease },
   );
   const startConclusion = startConclusionFor(start.outcome);

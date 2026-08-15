@@ -12,9 +12,14 @@ import {
   BLOCK_LEDGER_SCHEMA_VERSION,
   parseBlockRunLedger,
   type BlockRunLedger,
+  type BlockTaskEntry,
   type TaskDisposition,
 } from '../src/block/block-ledger.js';
+import { memberRunnability } from '../src/block/block-conclusion.js';
 import { fingerprintFrozenMembership } from '../src/block/block-definition.js';
+import { planNextTask, type TaskPlanningSuccess } from '../src/plan/plan-next-task.js';
+import type { TaskEligibility } from '../src/plan/select-task.js';
+import { startPlannedTask } from '../src/run/start-task.js';
 import { proveChainBase } from '../src/block/chain-fitness.js';
 import { chainShapeOf, uniqueMaximumOf } from '../src/block/chain-shape.js';
 import {
@@ -39,6 +44,8 @@ import {
   trackWorkspacesOf,
 } from './helpers/worktree-fixtures.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
+import { authPreflightPasses } from './helpers/auth-evidence.js';
+import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
 
 afterAll(() => {
   releaseTestLeases();
@@ -470,5 +477,147 @@ describe('a workspace is created at the base it was told, not at one it derived'
 
     expect(prepared).toMatchObject({ ok: false, code: 'BASE_COMMIT_ABSENT', residue: false });
     expect(branchExists(repository.root, 'agent/task-a')).toBe(false);
+  });
+});
+
+/* ═══════════════════════ run-local runnability ═══════════════════════════ */
+
+describe('a settled member satisfies a dependency inside the run, and nothing else does', () => {
+  const eligibility = (over: readonly Partial<TaskEligibility>[]) =>
+    over.map((entry) => ({
+      taskId: 'task-b',
+      eligible: false,
+      reason: 'BLOCKED_BY_DEPENDENCIES',
+      unsatisfiedDependencies: [],
+      unlockCount: 0,
+      ...entry,
+    })) as readonly TaskEligibility[];
+
+  /** Entries in ledger shape; only the two fields this rule reads are set. */
+  const entries = (spec: Record<string, TaskDisposition>) =>
+    Object.entries(spec).map(([taskId, disposition]) => ({
+      taskId,
+      disposition,
+      evidenceRevision: null,
+      baseCommit: null,
+      resultCommit: null,
+    })) as readonly BlockTaskEntry[];
+
+  it('lets a member run when every unsatisfied dependency is a settled member', () => {
+    expect(memberRunnability('task-b',
+      eligibility([{ taskId: 'task-b', unsatisfiedDependencies: ['task-a'] }]),
+      entries({ 'task-a': 'SETTLED', 'task-b': 'PLANNED' }),
+    )).toEqual({ runnable: true, satisfiedBy: ['task-a'] });
+  });
+
+  it.each(['PLANNED', 'ACTIVE', 'BLOCKED', 'ABANDONED'] as const)(
+    'does not let it run when the dependency is %s', (disposition) => {
+      expect(memberRunnability('task-b',
+        eligibility([{ taskId: 'task-b', unsatisfiedDependencies: ['task-a'] }]),
+        entries({ 'task-a': disposition, 'task-b': 'PLANNED' }),
+      )).toEqual({ runnable: false, reason: 'DEPENDENCY_NOT_SETTLED' });
+    });
+
+  it('never satisfies a dependency the block does not hold', () => {
+    expect(memberRunnability('task-b',
+      eligibility([{ taskId: 'task-b', unsatisfiedDependencies: ['task-x'] }]),
+      entries({ 'task-a': 'SETTLED', 'task-b': 'PLANNED' }),
+    )).toEqual({ runnable: false, reason: 'DEPENDENCY_OUTSIDE_BLOCK' });
+  });
+
+  it('does not resurrect a task the roadmap calls finished', () => {
+    expect(memberRunnability('task-b',
+      eligibility([{ taskId: 'task-b', reason: 'ALREADY_DONE' }]),
+      entries({ 'task-b': 'PLANNED' }),
+    )).toEqual({ runnable: false, reason: 'FROZEN_INELIGIBLE' });
+  });
+
+  it('answers nothing about a member the frozen reading has no entry for', () => {
+    expect(memberRunnability('task-z',
+      eligibility([{ taskId: 'task-b', unsatisfiedDependencies: ['task-a'] }]),
+      entries({ 'task-a': 'SETTLED', 'task-b': 'PLANNED' }),
+    )).toEqual({ runnable: false, reason: 'FROZEN_INELIGIBLE' });
+  });
+
+  // Specificity (G6): the rule must not disturb the members V2-08 already runs.
+  it('passes a frozen-eligible member through untouched, with nothing claimed as satisfied', () => {
+    expect(memberRunnability('task-b',
+      eligibility([{ taskId: 'task-b', eligible: true, reason: null }]),
+      entries({ 'task-b': 'PLANNED' }),
+    )).toEqual({ runnable: true, satisfiedBy: [] });
+  });
+});
+
+/**
+ * A repository whose roadmap really holds the relation under test.
+ *
+ * The two cases below are about the eligibility gate of `startPlannedTask`, and
+ * that gate reads a planning result taken from a real roadmap — so the roadmap
+ * has to be real, or the "frozen ineligibility" they overrule would be a value
+ * a test wrote rather than one the planner produced.
+ */
+async function chainRepository(
+  tasks: Readonly<Record<string, readonly string[]>>,
+): Promise<ResolvedRepository> {
+  const files: Record<string, string> = { '.gitignore': '.agent-orchestrator/runtime/\n' };
+  for (const [taskId, dependsOn] of Object.entries(tasks)) {
+    files[`tasks/${taskId}.md`] = taskFile(taskId, { dependsOn });
+  }
+  const root = createRepoFixture({ defaultBranch: 'main', profile: e2eProfile(), files });
+  const repository = await resolveFixture(root);
+  trackWorkspacesOf(repository);
+  return repository;
+}
+
+function planningOf(repository: ResolvedRepository): TaskPlanningSuccess {
+  const planned = planNextTask(repository);
+  if (!planned.ok) throw new Error(`fixture repository does not plan: ${planned.code}`);
+  return planned;
+}
+
+describe('a start may be authorised for a dependency this run satisfied', () => {
+  const startDeps = (repository: ResolvedRepository) => ({
+    git: runGitCommand,
+    now: tickingClock(),
+    authPreflight: authPreflightPasses,
+    lease: leaseFor(repository),
+  });
+
+  it('starts a frozen-ineligible member when the caller names the settled dependency', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+    const planning = planningOf(repository);
+    // The precondition, and it is the whole deadlock: B is ineligible at freeze
+    // because A is OPEN, and A must be OPEN or it could not run either.
+    expect(planning.selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible).toBe(false);
+
+    const start = await startPlannedTask(
+      {
+        repository,
+        taskId: 'B-001',
+        planning,
+        base: { kind: 'PINNED_COMMIT', commit: headOf(repository.root) },
+        satisfiedDependencies: ['A-001'],
+      },
+      startDeps(repository),
+    );
+
+    expect(start.outcome).toBe('STARTED');
+  });
+
+  it('still refuses when the caller names a different dependency than the one blocking it', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+
+    const start = await startPlannedTask(
+      {
+        repository,
+        taskId: 'B-001',
+        planning: planningOf(repository),
+        base: { kind: 'DEFAULT_BRANCH_TIP' },
+        satisfiedDependencies: ['C-001'],
+      },
+      startDeps(repository),
+    );
+
+    expect(start).toMatchObject({ outcome: 'TASK_INELIGIBLE', reasonCodes: ['BLOCKED_BY_DEPENDENCIES'] });
   });
 });
