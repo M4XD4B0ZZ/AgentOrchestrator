@@ -394,6 +394,51 @@ describe('the projection is computed at freeze time and nowhere else', () => {
 /** The one module that must keep importing the planner's *type*. */
 const RUNNER_SOURCE = join(PACKAGE_ROOT, 'src', 'block', 'block-runner.ts');
 
+const PLANNER_SOURCE = join(PACKAGE_ROOT, 'src', 'plan', 'plan-next-task.ts');
+
+/**
+ * Source with comments removed.
+ *
+ * Shared by every scan below, because a comment may quote a module path, name a
+ * function in prose — which `block-runner.ts:75` now legitimately does — or
+ * contain anything at all, and none of that is a dependency. One copy, so the
+ * scans cannot disagree about what counts as code.
+ */
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+}
+
+/**
+ * The names a module exports as **values**, derived from the module itself.
+ *
+ * Derived rather than listed, and that is the point: a scan scoped to the single
+ * identifier `planNextTask` would pass a second exported function on the day it
+ * is written, which is the same "complete for today's names" failure this
+ * repository keeps removing from hand-maintained allowlists. Types are excluded
+ * — `export type` and `export interface` carry nothing at runtime, and the whole
+ * distinction the assertions below turn on is value versus type.
+ */
+function valueExportsOf(modulePath: string): string[] {
+  const text = withoutComments(readFileSync(modulePath, 'utf8'));
+  const declared = [
+    ...text.matchAll(
+      /(?:^|\n)export\s+(?:async\s+)?(?:function|const|let|var|class)\s+([A-Za-z_$][\w$]*)/g,
+    ),
+  ].map((match) => match[1] ?? '');
+  // `export { a, b as c }`, with or without a `from`. `export type { … }` is not
+  // matched at all, because `type` sits between the keyword and the brace.
+  const listed = [...text.matchAll(/(?:^|\n)export\s*\{([^}]*)\}/g)].flatMap((match) =>
+    (match[1] ?? '')
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0 && !/^type\b/.test(entry))
+      .map((entry) => (entry.split(/\s+as\s+/).pop() ?? '').trim()),
+  );
+  return [...new Set([...declared, ...listed])].filter((name) => name.length > 0).sort();
+}
+
+const PLANNER_VALUE_EXPORTS = valueExportsOf(PLANNER_SOURCE);
+
 /**
  * Every module under `src/block/` that imports `planNextTask` as a **value**.
  *
@@ -443,9 +488,7 @@ function blockLayerPlannerValueImports(): string[] {
   const reaching: string[] = [];
 
   for (const file of sourceFiles(join(PACKAGE_ROOT, 'src', 'block'))) {
-    const text = readFileSync(file, 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/\/\/[^\n]*/g, ' ');
+    const text = withoutComments(readFileSync(file, 'utf8'));
     let reaches = false;
 
     for (const hit of text.matchAll(/['"][^'"]*plan-next-task\.js['"]/g)) {
@@ -488,6 +531,82 @@ function blockLayerPlannerValueImports(): string[] {
   return reaching.sort();
 }
 
+/**
+ * Every module under `src/block/` that imports one of `names` as a **value**,
+ * whatever module hands it over.
+ *
+ * The name-scoped half of the pair. It asks nothing about where a name came
+ * from, so a chain of honest-looking re-exports does not launder it: what is
+ * counted is a binding under `src/block/` that can be called.
+ *
+ * The same value-versus-type classification as the path-scoped scan, and the
+ * same false-positive direction is the one that must not regress: a type-only
+ * import, in either spelling, carries nothing at runtime and is not a reach. The
+ * inline `type` specifiers are struck before the names are looked for, so
+ * `{ type TaskPlanningSuccess, planNextTask }` is a reach and
+ * `{ type planNextTask }` is not.
+ *
+ * Two routes that name nothing in a clause are counted anyway, and both fail
+ * closed rather than adjudicate:
+ *
+ *   a namespace binding — `import * as p from '…'` — because this scan cannot
+ *   see what the module hands on, and `p.planNextTask(…)` is a call;
+ *   a dynamic `import(…)`, because the module object it resolves to is not
+ *   readable here at all.
+ *
+ * Measured before it was written: `src/block/` today contains no namespace
+ * import, no re-export and no dynamic import, so neither rule costs the tree
+ * anything. A future author who needs one gets a red a human reads, which is the
+ * direction chosen throughout these scans.
+ *
+ * A member access is counted directly for the same reason — a namespace could be
+ * bound from a launderer rather than from the planner, and the call is the reach.
+ *
+ * What it cannot do, stated rather than left to be found: it is scoped to names,
+ * so a `src/block/` module importing an unrelated binding that happens to share
+ * a name with a planner export reddens. That is a false positive, it fails
+ * closed, and the path-scoped scan beside it does not share the weakness.
+ */
+function blockLayerValueImportsOf(names: readonly string[]): string[] {
+  const alternation = names.join('|');
+  const named = new RegExp(`\\b(?:${alternation})\\b`);
+  const member = new RegExp(`\\.\\s*(?:${alternation})\\b`);
+  const reaching: string[] = [];
+
+  for (const file of sourceFiles(join(PACKAGE_ROOT, 'src', 'block'))) {
+    const text = withoutComments(readFileSync(file, 'utf8'));
+    // A call through a namespace binding appears in no import clause.
+    let reaches = member.test(text) || /\bimport\s*\(/.test(text);
+
+    // Every import or export declaration, found by its module specifier and
+    // walked back to the keyword that opens it. Anchoring on the specifier is
+    // what stops an earlier statement swallowing the declaration — the defect
+    // the forward-window version of the scan above was rewritten to remove.
+    for (const hit of text.matchAll(/\bfrom[ \t]*['"][^'"]*['"]/g)) {
+      const before = text.slice(0, hit.index);
+      let head = '';
+      for (const open of before.matchAll(/(?:^|\n)[ \t]*(?:import|export)\b/g)) {
+        head = before.slice(open.index ?? 0).trimStart();
+      }
+      // Not a declaration this scan can read. The path-scoped pin above is the
+      // one that fails closed on the planner's own module; this one would only
+      // be guessing about a module it knows nothing about.
+      if (head === '' || head.includes(';')) continue;
+
+      const clause = head.replace(/^(?:import|export)\b/, '').replace(/\bfrom\s*$/, '').trim();
+      if (/^type\b/.test(clause)) continue;
+      if (clause.startsWith('*')) {
+        reaches = true;
+        continue;
+      }
+      if (named.test(clause.replace(/\btype\s+\w+/g, ''))) reaches = true;
+    }
+
+    if (reaches) reaching.push(relative(PACKAGE_ROOT, file));
+  }
+  return reaching.sort();
+}
+
 describe('the block layer takes no reading of the roadmap of its own', () => {
   it('imports the planning result as a type and the planner as nothing', () => {
     // The symmetric half of the pin above, and it replaces a `git grep -n
@@ -504,6 +623,33 @@ describe('the block layer takes no reading of the roadmap of its own', () => {
       /import\s+type\s*\{[^}]*\bTaskPlanningSuccess\b[^}]*\}\s*from\s*['"][^'"]*plan-next-task\.js['"]/,
     );
     expect(blockLayerPlannerValueImports()).toEqual([]);
+  });
+
+  it('does not reach the planner through a module that re-exports it', () => {
+    // The companion, and the pair is deliberate. The scan above gates on the
+    // planner's own **module specifier**, so a launderer walks past it:
+    //
+    //   export { planNextTask } from '../plan/plan-next-task.js';  // in src/run/
+    //   import { planNextTask } from '../run/start-task.js';       // in src/block/
+    //
+    // names no planner path anywhere under `src/block/` and passes. Measured by
+    // review, not imagined, and it is the same failure mode this file already
+    // knows about one property over: `productionImportersOf` exists precisely
+    // because `projectionCallSites` gates on the path first, and the re-export
+    // route defeating a path-scoped scan was measured for the projection too.
+    // The lesson simply had not been carried across to the planner.
+    //
+    // So: path-scoped catches the honest route and fails closed on anything it
+    // cannot classify at the planner's own module; name-scoped catches the
+    // laundered one. Neither subsumes the other, which is why both are here.
+    //
+    // The names are the planner's value exports, derived from the module rather
+    // than listed, so a second exported function is covered on the day it is
+    // written. Both premises are asserted, because an empty name list would make
+    // the scan below vacuously green.
+    expect(PLANNER_VALUE_EXPORTS.length).toBeGreaterThan(0);
+    expect(PLANNER_VALUE_EXPORTS).toContain('planNextTask');
+    expect(blockLayerValueImportsOf(PLANNER_VALUE_EXPORTS)).toEqual([]);
   });
 });
 
