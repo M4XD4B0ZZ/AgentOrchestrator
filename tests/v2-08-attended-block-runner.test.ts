@@ -1642,3 +1642,388 @@ describe('a run id is used once', () => {
     expect(readFileSync(ledgerPath(fixture.root)).equals(after)).toBe(true);
   }, 900_000);
 });
+
+import { existsSync, renameSync, rmSync } from 'node:fs';
+
+import type { AttendedBlockDependencies, AttendedBlockResult } from '../src/block/block-runner.js';
+import type { ReplaceFn } from '../src/state/atomic-file.js';
+import { authPreflightFails } from './helpers/auth-evidence.js';
+
+/**
+ * A three-task block whose first task is driven, and a hook that fires while
+ * the second is still eligible.
+ *
+ * The hook is what makes these cases mean anything: a class-2 condition
+ * introduced after the block would have ended anyway proves nothing, so each
+ * case below breaks something *between* two tasks and then asserts that the
+ * untouched ones are untouched.
+ */
+async function runWithHookAfterFirstTask(
+  fixture: Fixture,
+  hook: () => void,
+  overrides: Partial<AttendedBlockDependencies> = {},
+): Promise<AttendedBlockResult> {
+  let driven = 0;
+  const agent = recordedAgent({
+    claude: () => writerSuccess(),
+    codex: () => {
+      driven += 1;
+      if (driven === 1) hook();
+      return reviewResult(passingReview());
+    },
+  });
+  const planning = planningOf(fixture);
+  // The premise every case built on this helper depends on, asserted rather than
+  // argued: all three members are eligible in the reading the run is given, so a
+  // run that stopped is distinguishable from a block that had nothing left to
+  // do. Three §8.5-style controls in this slice turned out to be vacuous because
+  // the task they left behind was never runnable in the first place.
+  expect(
+    planning.selection.eligibility.filter((entry) => entry.eligible).map((entry) => entry.taskId).sort(),
+  ).toEqual(['A-001', 'B-001', 'C-001']);
+  return runAttendedBlock(
+    {
+      repository: fixture.repository,
+      definition: independentBlock(['A-001', 'B-001', 'C-001']),
+      runId: RUN_ID,
+      lease: leaseFor(fixture.repository),
+      maxStepsPerTask: 8,
+      planning,
+    },
+    {
+      now: tickingClock(),
+      git: runGitCommand,
+      authPreflight: authPreflightPasses,
+      agent: agent.runner,
+      verify: recordedVerify().runner,
+      ...overrides,
+    },
+  );
+}
+
+/**
+ * A ledger replace seam that does the real rename and remembers what went past.
+ *
+ * Two questions need two records. `staged()` is every document the run *tried*
+ * to write, which is how a best-effort stop write is caught even when it never
+ * landed; `last()` is the bytes on disk after the last write that succeeded,
+ * which is the only honest anchor for "the ledger did not move across this
+ * condition" when the condition is reached some time after the last write.
+ */
+function recordingLedgerReplace(root: string) {
+  const stagedDocuments: string[] = [];
+  let landed: Buffer | null = null;
+  return {
+    replace: ((from, to) => {
+      stagedDocuments.push(readFileSync(from, 'utf8'));
+      renameSync(from, to);
+      landed = readFileSync(ledgerPath(root));
+    }) as ReplaceFn,
+    staged: (): readonly string[] => stagedDocuments,
+    last: (): Buffer | null => landed,
+  };
+}
+
+/**
+ * A ledger replace seam that lands `hook` the instant the first settlement does.
+ *
+ * The moment matters and no agent seam can reach it. A ledger write is a
+ * compare-and-swap against the bytes on disk, so anything that disturbs the
+ * ledger *during* a drive is met by the run's own next write — measured: forging
+ * an entry inside the first task's review ended the run
+ * `DURABLE_WRITE_FAILED / LEDGER_CONFLICT:REVISION_MISMATCH`, with the runner
+ * never loading the document at all. And anything that disturbs a *task record*
+ * before the run's next disposition change is caught by the store's proof gate,
+ * which re-proves every entry whenever one moves.
+ *
+ * The one window in which a divergence survives to be *observed* is therefore
+ * between the run's last durable write and the reconciliation at the top of the
+ * next iteration. This seam performs the real rename and then hands that window
+ * to a second writer, which is exactly the shape of the thing being modelled: a
+ * record that moved after this run pinned its evidence.
+ */
+function afterFirstSettlement(hook: () => void): ReplaceFn {
+  let fired = false;
+  return (from, to) => {
+    const staged = JSON.parse(readFileSync(from, 'utf8')) as {
+      readonly tasks: readonly { readonly disposition: string }[];
+    };
+    renameSync(from, to);
+    if (fired || !staged.tasks.some((entry) => entry.disposition === 'SETTLED')) return;
+    fired = true;
+    hook();
+  };
+}
+
+/** A task record that exists and cannot be parsed. */
+function corruptTaskState(root: string, taskId: string): void {
+  writeFileSync(join(root, '.agent-orchestrator', 'runtime', `${taskId}.json`), '{ not json', 'utf8');
+}
+
+/**
+ * A legitimate write by somebody who is not this run, landed mid-drive.
+ *
+ * Through the production store, at the current revision, so it succeeds exactly
+ * as a second writer's would — and the driver's own next write then meets a
+ * revision that is no longer the one it read. That is a real `STATE_CONFLICT`
+ * rather than a state file edited into a shape.
+ */
+function movedByAnotherWriter(fixture: Fixture, taskId: string): void {
+  const loaded = loadTaskState(fixture.root, taskId);
+  if (!loaded.ok) throw new Error('fixture: the task never started');
+  const saved = saveTaskState(
+    { ...loaded.state, stateEnteredAt: '2026-08-14T11:30:00.000Z' },
+    { repositoryRoot: fixture.root, expectedRevision: loaded.revision },
+  );
+  if (!saved.ok) throw new Error(`fixture could not move the task on: ${saved.code}`);
+}
+
+/**
+ * The persisted reasons `runAttendedBlock` cannot reach, and why.
+ *
+ * A list rather than a comment, because "we decided not to cover these" and "we
+ * forgot to cover these" look identical in a suite otherwise organised as one
+ * case per reason. Every other member of `BLOCK_STOP_REASONS` has a case above.
+ */
+const UNPRODUCED_BY_THIS_RUNNER = ['DEFINITION_DRIFTED', 'OPERATOR_STOPPED'] as const;
+
+describe('each class-2 condition ends the run under its own name', () => {
+  it('LEDGER_DIVERGED — the ledger and the records disagree', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
+    // A second writer moves A-001's record on the instant this run has pinned
+    // its evidence, so the ledger's settlement claim is no longer *proven* by
+    // the record it names. Nothing is hand-edited: the mutation goes through the
+    // production store at the current revision, exactly as another writer's
+    // would, and every entry, disposition and reason below is the product's.
+    const result = await runWithHookAfterFirstTask(
+      fixture,
+      // Nothing during the drive. This condition cannot be reached from an
+      // agent's moment at all — see `afterFirstSettlement`.
+      () => {},
+      { ledgerReplace: afterFirstSettlement(() => movedByAnotherWriter(fixture, 'A-001')) },
+    );
+
+    // The premise: A-001 really was driven to completion and really was settled,
+    // so the run stopped *after* a task rather than instead of one.
+    expect(result.tasks[0]?.runOutcome).toBe('TASK_COMPLETED');
+    expect(result.outcome).toBe('BLOCK_RUN_ENDED');
+    expect(result.stopReason).toBe('LEDGER_DIVERGED');
+    expect(onDisk(fixture.root)['stopReason']).toBe('LEDGER_DIVERGED');
+    // B-001 and C-001 were eligible and are untouched. Without the record check
+    // the run would have gone on to B-001, whose activation the store's own
+    // proof gate then refuses — ending `ACTIVE_TASK_UNRESOLVED`, which is a
+    // different reason and a different ledger. Measured by mutant; see the task
+    // report.
+    expect(
+      (onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[]).map(
+        (task) => task['disposition'],
+      ),
+    ).toEqual(['SETTLED', 'PLANNED', 'PLANNED']);
+  }, 900_000);
+
+  it('STATE_UNUSABLE — a task record exists and cannot be used', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
+    // B-001's record, not A-001's, and that is the whole mechanism rather than a
+    // detail. Corrupting the record of the task being *driven* does not produce
+    // this condition: the driver has already read that state, so its own next
+    // write meets changed bytes and the run ends `ACTIVE_TASK_UNRESOLVED` under
+    // run outcome `STATE_CONFLICT` — measured, and the reason the case below
+    // exists separately. A record that exists and cannot be used is refused when
+    // it is *read*, which for a member still `PLANNED` is at its start.
+    const result = await runWithHookAfterFirstTask(fixture, () => {
+      corruptTaskState(fixture.root, 'B-001');
+    });
+
+    // Its own reason, not LEDGER_DIVERGED: "a record cannot be read" and "the
+    // ledger and the records disagree" send an operator to different places.
+    // And not `RUN_GATE_REFUSED` either, which is what every *other* refusal
+    // from the same start path grades to.
+    expect(result.outcome).toBe('BLOCK_RUN_ENDED');
+    expect(result.stopReason).toBe('STATE_UNUSABLE');
+    expect(onDisk(fixture.root)['stopReason']).toBe('STATE_UNUSABLE');
+    // A-001 finished; B-001 and C-001 were eligible and are untouched.
+    const dispositions = (onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[]).map(
+      (task) => task['disposition'],
+    );
+    expect(dispositions).toEqual(['SETTLED', 'PLANNED', 'PLANNED']);
+    expect(dispositions.slice(1)).toEqual(['PLANNED', 'PLANNED']);
+  }, 900_000);
+
+  it('names the two reasons this runner cannot produce, rather than pretending', () => {
+    // `DEFINITION_DRIFTED` compares a frozen plan with a current one, and a block
+    // run does not outlive its invocation — so there is never a persisted
+    // predecessor to compare against, and the reason has no producer here.
+    // `OPERATOR_STOPPED` has none either: this runner installs no signal
+    // handling.
+    //
+    // Asserted rather than left implicit, and asserted on the *runner* rather
+    // than on the vocabulary: both reasons are V2-07's, both stay graded in the
+    // exit table, and `reconcileBlockRun` still reports drift to a caller that
+    // supplies a definition. What must not happen is a later reader taking the
+    // "one case per reason" rule above to mean these two were covered.
+    expect(BLOCK_STOP_REASONS).toContain('DEFINITION_DRIFTED');
+    expect(BLOCK_STOP_REASONS).toContain('OPERATOR_STOPPED');
+    expect(UNPRODUCED_BY_THIS_RUNNER).toEqual(['DEFINITION_DRIFTED', 'OPERATOR_STOPPED']);
+  });
+
+  it('ACTIVE_TASK_UNRESOLVED — the active task’s outcome cannot be established', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
+    // A second writer moves the task on while it is being driven, so the
+    // driver's own next write meets a revision that is no longer the one it
+    // read. `STATE_CONFLICT` is graded UNRESOLVED: the driver's write did not
+    // land, the task's outcome is not established, and re-reading and deciding
+    // again is exactly how a stale-writer refusal gets laundered.
+    const agent = recordedAgent({
+      claude: () => {
+        movedByAnotherWriter(fixture, 'A-001');
+        return writerSuccess();
+      },
+      codex: () => reviewResult(passingReview()),
+    });
+
+    const planning = planningOf(fixture);
+    // The same premise the shared helper asserts, restated here because this
+    // case does not use it: B-001 and C-001 are eligible, so "the run stopped"
+    // is distinguishable from "the block had nothing left to run".
+    expect(
+      planning.selection.eligibility.filter((entry) => entry.eligible).map((entry) => entry.taskId).sort(),
+    ).toEqual(['A-001', 'B-001', 'C-001']);
+
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001', 'C-001']),
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 8,
+        planning,
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    // The driver's own answer, so the case is pinned to the run outcome it
+    // names rather than to whatever else might grade `UNRESOLVED`.
+    expect(result.tasks[0]?.runOutcome).toBe('STATE_CONFLICT');
+    expect(result.outcome).toBe('BLOCK_RUN_ENDED');
+    expect(result.stopReason).toBe('ACTIVE_TASK_UNRESOLVED');
+    const after = onDisk(fixture.root);
+    expect(after['stopReason']).toBe('ACTIVE_TASK_UNRESOLVED');
+    // The coexistence contract, at the runner level this time.
+    expect(after['activeTaskId']).toBe('A-001');
+    const entries = after['tasks'] as readonly Record<string, unknown>[];
+    expect(entries[0]?.['disposition']).toBe('ACTIVE');
+    expect(entries[0]?.['evidenceRevision']).toBeNull();
+    // B-001 and C-001 were eligible and are untouched.
+    expect(entries.slice(1).map((task) => task['disposition'])).toEqual(['PLANNED', 'PLANNED']);
+  }, 900_000);
+
+  it('RUN_GATE_REFUSED — auth is not there, and no ledger is created', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+
+    const result = await runBlock(fixture, independentBlock(['A-001', 'B-001']), {
+      authPreflight: authPreflightFails,
+    });
+
+    expect(result.outcome).toBe('RUN_GATE_REFUSED');
+    expect(result.stopReason).toBeNull();
+    expect(result.detail).toBe('AUTH_PREFLIGHT_FAILED');
+    // This gate is answered before the first ledger is created, so there is not
+    // even a file to be byte-identical with. That is a property of *this* gate
+    // and not of the outcome — see the case below, which is the same outcome
+    // over a ledger that exists and carries a settled task.
+    expect(existsSync(ledgerPath(fixture.root))).toBe(false);
+  }, 600_000);
+
+  // The case the outcome's own wording used to hide. `RUN_GATE_REFUSED` said
+  // "nothing was written", and the only case pinning it met the gate ahead of
+  // `openRun` — so the claim was true of the convenient half and untested on the
+  // other. A start gate met *between two tasks* ends the run under the same
+  // outcome with a ledger that exists, carries A-001's settlement, and must not
+  // gain a stop claim about the refusal.
+  it('RUN_GATE_REFUSED — a start gate refuses after the ledger exists', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
+    // The anchor has to be the last write the run made, not a value read at hook
+    // time: the hook fires while A-001 is still being driven, and A-001's
+    // settlement lands after it. `landed` therefore holds the ledger exactly as
+    // it stood when the gate was reached, because a gate refusal writes nothing.
+    const landed = recordingLedgerReplace(fixture.root);
+
+    const result = await runWithHookAfterFirstTask(
+      fixture,
+      () => {
+        // The repository stops ignoring its own runtime directory, so the next
+        // start refuses RUNTIME_NOT_IGNORED. A real misconfiguration an operator
+        // fixes outside the run — not a stubbed refusal, and not a condition
+        // that would have ended the block anyway: B-001 and C-001 are eligible.
+        writeFileSync(join(fixture.root, '.gitignore'), '# nothing ignored\n', 'utf8');
+      },
+      { ledgerReplace: landed.replace },
+    );
+
+    expect(result.outcome).toBe('RUN_GATE_REFUSED');
+    expect(result.detail).toBe('RUNTIME_NOT_IGNORED');
+    expect(result.stopReason).toBeNull();
+
+    // Byte for byte across the gate. Not "the file is empty" and not "no stop
+    // reason was written": the ledger holds A-001's settlement, that record is
+    // true, and it stays. What must not appear is an ending.
+    const before = landed.last();
+    if (before === null) throw new Error('the run never wrote a ledger, so nothing was measured');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+
+    // And the anchor's own content, which is what carries the claim rather than
+    // the comparison above. Measured: a runner that writes a best-effort stop
+    // and *then* reports `RUN_GATE_REFUSED` passes the byte comparison, because
+    // the anchor is the last write that landed and therefore moves with the
+    // extra one. Byte identity says "nothing was written after the ledger
+    // stopped moving"; these two say "the ledger never gained an ending".
+    const document = JSON.parse(before.toString('utf8')) as Record<string, unknown>;
+    expect(document['stopReason']).toBeNull();
+    const entries = document['tasks'] as readonly Record<string, unknown>[];
+    expect(entries.map((task) => task['disposition'])).toEqual(['SETTLED', 'PLANNED', 'PLANNED']);
+    // Every document the run staged, not only the last: a best-effort stop write
+    // that was attempted and lost would be invisible in the file.
+    for (const staged of landed.staged()) {
+      expect((JSON.parse(staged) as Record<string, unknown>)['stopReason']).toBeNull();
+    }
+    // And the report carries the ending the ledger deliberately does not.
+    expect(result.tasks[0]?.disposition).toBe('SETTLED');
+  }, 900_000);
+});
+
+// Design §8.3a. Asserting "no stop reason was written" is weaker: it passes
+// against a run that mutated the ledger some other way.
+//
+// "Byte-identical" is always *across the condition* — the ledger before it and
+// the ledger after it. Never "byte-identical with an empty file": a run that
+// settled a task before meeting one of these outcomes wrote that settlement, and
+// it is true.
+describe('an unrecorded outcome leaves the ledger byte-identical across it', () => {
+  it('LEASE_AUTHORITY_UNCERTAIN', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
+    const atGate: Buffer[] = [];
+
+    const result = await runWithHookAfterFirstTask(fixture, () => {
+      atGate.push(readFileSync(ledgerPath(fixture.root)));
+      // The lease removed underneath the run, which is what an operator
+      // breaking a lease they believed stale actually does.
+      const location = deriveExecutionLeaseLocation(fixture.repository);
+      if (!location.ok) throw new Error('fixture: no lease location');
+      rmSync(location.path, { force: true });
+    });
+
+    expect(result.outcome).toBe('LEASE_AUTHORITY_UNCERTAIN');
+    expect(result.stopReason).toBeNull();
+    const before = atGate[0];
+    if (before === undefined) throw new Error('the hook never ran, so nothing was measured');
+    // Byte for byte. The run may no longer be the writer, so any mutation at
+    // all is precisely the act it has lost the authority for.
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+  }, 900_000);
+});
