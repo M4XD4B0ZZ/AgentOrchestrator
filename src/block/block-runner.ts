@@ -4,11 +4,12 @@
  * ── What this module is, and what it deliberately is not ───────────────────
  *
  * It composes primitives that already exist and invents no orchestration truth
- * of its own. The lease makes this invocation the repository's writer; `startTask`
- * prepares a workspace; `runTask` drives one task; `block-progress.ts` records
- * each outcome against the task's own durable record and refuses anything the
- * record does not prove. This module decides *sequence*, and `block-conclusion.ts`
- * decides *meaning*. Nothing here writes the ledger directly.
+ * of its own. The lease makes this invocation the repository's writer;
+ * `startPlannedTask` prepares a workspace; `runTask` drives one task;
+ * `block-progress.ts` records each outcome against the task's own durable record
+ * and refuses anything the record does not prove. This module decides *sequence*,
+ * and `block-conclusion.ts` decides *meaning*. Nothing here writes the ledger
+ * directly.
  *
  * ── Two exits, and why one of them writes nothing ──────────────────────────
  *
@@ -88,14 +89,19 @@
  * that it *depends on a module*.
  *
  * What backs each claim now, stated exactly rather than jointly, because the two
- * are not equally well pinned. The relation is pinned over **imports**, in
- * `tests/v2-08-attended-block-runner.test.ts`: the projection's exports have one
- * production importer, the CLI freeze site, so this module reaching them fails
- * there. The plan is not pinned that way. It rests on what this module imports
- * from the planner — the `TaskPlanningSuccess` *type* and nothing callable — and
- * on `startPlannedTask` having no way to take a reading of its own, which is
- * pinned by effect one layer down. An import-scoped assertion for the block
- * layer's planner use is worth having and is not in this commit.
+ * take different instruments. Both are pinned over **imports**, in
+ * `tests/v2-08-attended-block-runner.test.ts`. The relation: the projection's
+ * exports have one production importer, the CLI freeze site, so this module
+ * reaching them fails there. The plan: no module under `src/block/` may import a
+ * planner value export — neither at the planner's own module path nor laundered
+ * through a re-export, which is why that pin is a path-scoped scan and a
+ * name-scoped one rather than either alone — while the type-only import of
+ * `TaskPlanningSuccess` this module legitimately needs stays green. Both
+ * directions were established by mutation, the false-positive one included.
+ *
+ * Underneath the import pins sits the effect one layer down: `startPlannedTask`
+ * has no way to take a reading of its own, so there is no gate below here that
+ * could consult a second one.
  *
  * One consequence, stated rather than left to be discovered: **a mid-run edit is
  * invisible to this invocation, in both directions.** It cannot stop a member
@@ -737,10 +743,10 @@ function chooseTask(ledger: BlockRunLedger, eligible: ReadonlySet<string>): Task
  * Starts the task if it needs starting, drives it, and records what its own
  * record proves.
  *
- * The order `startTask` → `activateBlockTask` → `runTask` → settle/park/abandon
- * is forced rather than chosen: activation copies the task state's own base pin
- * into the entry, so a durable state has to exist before the ledger can say the
- * run is working on it.
+ * The order `startPlannedTask` → `activateBlockTask` → `runTask` →
+ * settle/park/abandon is forced rather than chosen: activation copies the task
+ * state's own base pin into the entry, so a durable state has to exist before
+ * the ledger can say the run is working on it.
  *
  * Every recording attempt is graded through `recordingResultFor`, and the three
  * non-`RECORDED` grades are three different endings — a failed write is

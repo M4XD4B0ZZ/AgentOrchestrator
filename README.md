@@ -4259,8 +4259,10 @@ run as a matter of policy"*, and `parkBlockTask` implemented that sentence by
 writing a stop reason. Both are gone. It was a documented contract statement in a
 shipped, proved artefact, so amending it was a task of this slice with its own
 control rather than a comment edited in passing — and the control that proves the
-reversal happened is the one that fails against V2-07's behaviour: a block of
-three independent tasks whose first parks still activates the second.
+reversal happened is the one that fails against V2-07's behaviour: a two-task
+block whose first member parks, and whose second is then still activated. The
+runner-level control beside it drives a block of three independent tasks where
+the first fails locally and the other two still settle.
 
 What did **not** change: `BLOCKED` and `ABANDONED` are still `EVIDENCE_BACKED`,
 still terminal for their task, and still unrecordable without the task state that

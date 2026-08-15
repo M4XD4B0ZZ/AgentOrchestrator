@@ -162,7 +162,12 @@ export const EVIDENCE_BACKED: ReadonlySet<TaskDisposition> = new Set<TaskDisposi
 export const BLOCK_STOP_REASONS = [
   /** Every frozen task is settled. The intended end. */
   'COMPLETE',
-  /** A task is blocked and only a human continues it. */
+  /**
+   * A task stopped on something a human must resolve, so this run ended without
+   * completing the block. Narrowed in V2-08 from "abort now": parking a task no
+   * longer writes this reason — see `parkBlockTask` — and the runner writes it at
+   * the end, as the task outcome that explains the ending.
+   */
   'TASK_BLOCKED',
   /** A task was given up on, so the block cannot be completed. */
   'TASK_ABANDONED',

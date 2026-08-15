@@ -400,7 +400,7 @@ const PLANNER_SOURCE = join(PACKAGE_ROOT, 'src', 'plan', 'plan-next-task.ts');
  * Source with comments removed.
  *
  * Shared by every scan below, because a comment may quote a module path, name a
- * function in prose — which `block-runner.ts:75` now legitimately does — or
+ * function in prose — which `block-runner.ts`'s header now legitimately does — or
  * contain anything at all, and none of that is a dependency. One copy, so the
  * scans cannot disagree about what counts as code.
  */
@@ -473,11 +473,14 @@ const PLANNER_VALUE_EXPORTS = valueExportsOf(PLANNER_SOURCE);
  * keyword. The forward version was written first and was wrong in the direction
  * that matters: any `export` within a few hundred characters above a type-only
  * import was read as the declaration, so `block-conclusion.ts`'s last exported
- * function made a legitimate `import type` register as a value reach. Measured,
- * not imagined — it is the mutant in §5.6 of the task report.
+ * function made a legitimate `import type` register as a value reach. Measured
+ * rather than imagined: a type-only planner import added to `block-conclusion.ts`
+ * below its exported functions — a change this property must not object to — came
+ * back from the forward version as a reach. It does not from this one, which
+ * still reddens when the same import is made a value import.
  *
  * Comments are stripped once, up front. They may quote a module path, name the
- * function in prose — which `block-runner.ts:75` now legitimately does — or
+ * function in prose — which `block-runner.ts`'s header now legitimately does — or
  * contain anything at all, and none of that is a dependency.
  *
  * Anything this scan cannot classify counts as a reach. A specifier that no
@@ -562,10 +565,18 @@ function blockLayerPlannerValueImports(): string[] {
  * A member access is counted directly for the same reason — a namespace could be
  * bound from a launderer rather than from the planner, and the call is the reach.
  *
- * What it cannot do, stated rather than left to be found: it is scoped to names,
- * so a `src/block/` module importing an unrelated binding that happens to share
- * a name with a planner export reddens. That is a false positive, it fails
- * closed, and the path-scoped scan beside it does not share the weakness.
+ * What it cannot do, stated rather than left to be found. Scoped to names, it
+ * reddens on a `src/block/` module importing an unrelated binding that happens to
+ * share a name with a planner export: a false positive, failing closed, and the
+ * path-scoped scan beside it does not share the weakness.
+ *
+ * The false-negative direction is the one that costs something, and the pair does
+ * not close it. A launderer that *renames* on the way through —
+ * `export { planNextTask as plan } from '…/plan-next-task.js'` in `src/run/`,
+ * imported as `plan` under `src/block/` — names neither the planner's module path
+ * nor any of its export names, so it walks past both scans. What the pair closes
+ * is the set of routes measured here; it is not a type-aware reachability proof,
+ * and a real one wants the compiler rather than two regex scans.
  */
 function blockLayerValueImportsOf(names: readonly string[]): string[] {
   const alternation = names.join('|');
@@ -1586,7 +1597,9 @@ describe('the attended block runner', () => {
     // and drive it. With X-001 left `OPEN`, B-001 is ineligible and `chooseTask`
     // skips it for a reason that has nothing to do with independence, and the
     // case stays green against a runner with no independence check at all.
-    // Measured by mutant rather than argued; see the task report.
+    // Measured by mutant rather than argued: with the runner's independence
+    // guard forced open, the run goes on to drive B-001, and both the
+    // dispositions and the `claude` count asserted at the end of this case move.
     const fixture = await repoWith({ 'A-001': [], 'B-001': ['X-001'] });
     writeRepoFile(
       fixture.root,
@@ -2424,7 +2437,7 @@ describe('a durable write that is not possible is reported, never claimed', () =
     expect(result.detail).toContain('WRITE_FAILED');
   }, 600_000);
 
-  it('leaves the ledger byte-identical when a later write fails', async () => {
+  it('leaves the ledger unstopped, with no active task and both members PLANNED, when a later write fails', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
 
     // One successful write — the creation — and every later one refused.
@@ -2435,9 +2448,10 @@ describe('a durable write that is not possible is reported, never claimed', () =
 
     expect(result.outcome).toBe('DURABLE_WRITE_FAILED');
     expect(result.stopReason).toBeNull();
-    // The activation failed, so the ledger is still the creation. Byte for
-    // byte, and with no stop reason: the run cannot presuppose a successful
-    // stop write, because the failed write is the condition being reported.
+    // The activation failed, so the ledger still reads as the creation did: no
+    // task activated, none progressed, and no stop reason. The run cannot
+    // presuppose a successful stop write, because the failed write is the
+    // condition being reported.
     const document = JSON.parse(after.toString('utf8')) as Record<string, unknown>;
     expect(document['stopReason']).toBeNull();
     expect(document['activeTaskId']).toBeNull();
@@ -2741,8 +2755,8 @@ describe('positive reconciliation is applied only where it is forced', () => {
   // The fourth grade, and the one the brief's set left without a case. Two of
   // `recordingResultFor`'s four classes are pinned above — RECORDED by the
   // control, UNRESOLVED by the case before this one — and `WRITE_FAILED` was
-  // not, so collapsing its arm into the UNRESOLVED one reddened nothing.
-  // Measured by mutant; see the task report.
+  // not. Measured rather than assumed: with this case removed, collapsing the
+  // `WRITE_FAILED` arm into the UNRESOLVED one left the suite green.
   it('reports a reconciliation whose write could not land as a failed write', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
     startRun(fixture);

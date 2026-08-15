@@ -83,8 +83,10 @@ export const BLOCK_OUTCOME_SENTENCES: Readonly<Record<BlockRunOutcome, string>> 
 export const BLOCK_STOP_SENTENCES: Readonly<Record<BlockStopReason, string>> = Object.freeze({
   COMPLETE: 'Every frozen task is settled on the strength of its own record. The block is done.',
   TASK_BLOCKED:
-    'A task is blocked and only a human continues it. The others ran to their own ends\n' +
-    '  first, because the frozen plan established that the members are independent.',
+    'A task stopped on something a human must resolve, and until they do the block\n' +
+    '  cannot complete. Whether any other member ran depends on the frozen plan and on\n' +
+    '  what was eligible - the task table below is that record, and a member this run\n' +
+    '  never reached is still PLANNED.',
   TASK_ABANDONED:
     'A task was given up on, so the block cannot complete. That is terminal for the task\n' +
     '  and different from blocked: nothing continues from it, and there is nothing to\n' +

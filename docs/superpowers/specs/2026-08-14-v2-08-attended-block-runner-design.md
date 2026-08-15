@@ -328,9 +328,10 @@ tasks" is about surviving a sibling's failure, not concurrency. Parallel
 execution is not in this slice and would need the process containment V2-08 does
 not have.
 
-**Attended only.** `README.md:4238` records that unattended running needs owned
-process containment rather than merely the lease, and that automatic recovery of
-a stale lease stays refused until the orchestrator creates that containment.
+**Attended only.** `README.md`'s "Not implemented yet" section records that
+unattended running needs owned process containment rather than merely the lease,
+and that automatic recovery of a stale lease stays refused until the
+orchestrator creates that containment.
 V2-08 is the *attended* block runner precisely so it needs none of that. This is
 the single most important scope line in the slice: staying attended is what
 keeps the recovery surface closed.
