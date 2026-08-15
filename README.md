@@ -3594,7 +3594,8 @@ Each entry carries `baseCommit` and `resultCommit`. `resultCommit` records the
 commit a settled task's own record proves it ended at — and that is **not** a
 claim that the commit is a fit base for a dependent successor. Whether a settled
 task yields a usable chain commit is V2-09's separate question; the fields exist
-so answering it needs no new ledger shape.
+so answering it needs no new ledger shape. That held: V2-09 answers it against
+real Git at the moment the base is used, and added no ledger field.
 
 ### One active task *per ledger* — and what that deliberately does not say
 
@@ -4401,7 +4402,8 @@ blocked task and nobody can act on an abandoned one, so the reason names the one
 with a next step. `NO_ELIGIBLE_TASK` is now **reserved** for a genuine
 eligibility dead end that no persisted disposition accounts for — a member whose
 path to eligibility runs through a non-member, which the frozen relation
-deliberately records nothing about (F-B4).
+deliberately records nothing about (F-B4). As V2-08 shipped, a member blocked by
+another *member* ended the same way; V2-09 removes that half.
 
 ### Schema version 2, and version 1 refused rather than migrated
 
@@ -4539,6 +4541,13 @@ not a claim about credentials, and a fresh auth preflight must still pass.
   frozen edge degrades to V2-07's behaviour — stop at the first task-local
   failure — even where the remaining members happen to be mutually independent.
   Accepted: the finer answer is a dependency scheduler, and V2-09 owns it.
+
+  V2-09 kept the behaviour and gave it a better reason. In a dependent block a
+  task-local failure is not merely a sibling's bad luck: it is the absence of the
+  commit some successor was to be built on, so continuing past it would leave the
+  run choosing which of the operator's members to abandon quietly. What changed is
+  that this is now the *correct* ending rather than a degradation, and it has its
+  own end-to-end control.
 - **F-B3 — two persisted reasons have no producer in this runner.**
   `OPERATOR_STOPPED` has none because the runner installs no signal handling.
   `DEFINITION_DRIFTED` has none because a block run does not outlive its
@@ -4548,11 +4557,17 @@ not a claim about credentials, and a fresh auth preflight must still pass.
   in the exit table. Either a later slice gives them producers or the members are
   withdrawn — neither is treated as reachable in the meantime, and the suite says
   so in a list rather than by omission.
-- **F-B4 — a member blocked only by a non-member ends the run
-  `NO_ELIGIBLE_TASK`.** The frozen relation deliberately records nothing about
-  non-members, so a block can be frozen while that member can never become
-  eligible. The honest dead end rather than a defect, and the reason it is
-  reserved rather than generic.
+- **F-B4 — a member blocked by anything the run cannot finish ends the run
+  `NO_ELIGIBLE_TASK`.** As shipped in V2-08 this covered *any* unfinished
+  dependency, member or not: the eligibility snapshot is taken once and never
+  revisited, so a member whose dependency was another member of the same block
+  was equally unreachable. The sentence here previously named only non-members,
+  which understated it — and understated it in the direction that mattered,
+  because it read as though a dependent block merely lacked a scheduler when in
+  fact it could not run at all. V2-09 removes the member half — see below — and
+  leaves the non-member half exactly as it was, deliberately: the frozen relation
+  records nothing about non-members, so a block can be frozen while that member
+  can never become eligible, and that is the honest dead end rather than a defect.
 - **F-B5 — an interrupted invocation leaves a run nothing can continue.** A
   crashed or killed attended invocation leaves an open ledger, possibly with an
   `ACTIVE` entry, and no later invocation may adopt it: the run id is spent and
@@ -4583,11 +4598,278 @@ behaviour: V2-07P closed that block and it is not reopened here. And
 `READY_FOR_PR` is still terminal, so the orchestrator still hands a finished task
 to a human and stops.
 
+## The dependent commit chain (V2-09)
+
+V2-08 could run a block whose members were independent. A member that depended on
+another was not merely unscheduled — it was **unreachable**, and by more than one
+mechanism at once. `chooseTask` filtered candidates against a frozen eligibility
+snapshot; `startPlannedTask` gated each start against the same reading; and the
+planner calls a task eligible only when every direct dependency has roadmap
+status `DONE`. For a block containing `A → B`, `A` has to be `OPEN` at freeze or
+it could not run either, so `B` was `BLOCKED_BY_DEPENDENCIES` at freeze and there
+was no second reading. `B` never ran, in any block, and the run ended
+`NO_ELIGIBLE_TASK`.
+
+V2-09 removes exactly that, and adds nothing else to the frozen snapshot.
+
+### `SETTLED` is a disposition; `SETTLED` + chain-fit is a satisfied dependency
+
+The one thing added to the snapshot is **this run's own settlements**, which are
+monotone (`PLANNED → SETTLED`) and were each proved against the task's own
+durable record before they were written. No second reading of the roadmap is
+taken, and no roadmap file is ever written.
+
+```
+runnable(T) :=
+    frozenEligible(T)
+  OR (
+    frozen ineligibility of T is BLOCKED_BY_DEPENDENCIES
+    AND every unsatisfied dependency of T is a block member
+    AND every such member is SETTLED in this ledger
+    AND the selected successor base is chain-fit
+  )
+```
+
+The last two conditions do not subsume one another and both are required.
+Runnability is answered from the planner's *direct* `unsatisfiedDependencies`;
+chain fitness is answered from the frozen *transitive* required set, against real
+Git. Each can hold while the other fails, and the suite pins both directions
+against each other rather than trusting that one implies the other.
+
+A dependency on a **non-member** is still a hard dead end. The ledger holds no
+entry for it, so there is nothing this run could have proved about it.
+
+What this cost is one widening of the start gate, and it is narrow by
+construction: `startPlannedTask` accepts `satisfiedDependencies`, overrules
+`BLOCKED_BY_DEPENDENCIES` and nothing else, and only for dependencies named one
+by one. A caller cannot turn it into "start anything" — naming a dependency does
+not produce a base, and the workspace is still the one the caller pinned, under
+the lease, in this repository. `startTask` passes an empty list, so the
+single-task path is exactly the path it was.
+
+### Two commit roles, and only one travels — and the authority is durable
+
+```
+executionBaseCommit    what the task's code is built on
+                       = blockBaseCommit for a root member
+                       = resultCommit(M) for a chained member
+
+scopeAuthorityCommit   which commit's profile decides the allowed scope
+                       = blockBaseCommit for EVERY member of the block
+```
+
+A predecessor may pass its successor code. It may never pass it authority: if `A`
+commits a profile widening `allowedPaths` to everything, `B` is still judged
+against the profile at `blockBaseCommit`. A legitimate profile change becomes
+authority only in a later, newly frozen invocation.
+
+**And the invariant outlives the invocation, or it is not one.** This is where an
+earlier draft of the design was wrong, and the correction is the substance of the
+slice rather than a detail of it. A chained task's durable `TaskState` is an
+ordinary task state: it pins `basePinnedCommit = A.resultCommit`, and nothing in
+it says that some *other* commit governs its scope. So an invocation-scoped
+answer — the block runner handing the authority to the driver it starts —
+protects the run and nothing after it:
+
+```
+block run:   blockBase = M0,  A settles at A1 (A1 widens the profile),
+             B is started chained at A1 and the invocation then ends
+
+later:       the roadmap says A is DONE, but the authoritative default branch
+             does not contain A1 - A was squash-merged, reworked, or the
+             status was simply written by hand
+
+standalone:  agent-loop run --attended --task B
+             eligibility now passes, B's existing state is used,
+             the scope is read from B.basePinnedCommit = A1
+             -> agent A decides B's scope after all
+```
+
+So the two roles are separated **in the durable record**. `TaskState` gains
+`scopeAuthorityCommit`, written once at start, `null` meaning *this task's own
+base pin governs*. It is additive, nullable and defaulted, and it is deliberately
+**not** a schema version bump: a state written before this slice parses unchanged
+and means exactly what it meant, because no pre-V2-09 task had a base authored by
+a sibling. Nothing is invented for an old document, which is the test the ledger's
+version-1 refusal applied and failed. The other direction fails closed on its own
+— an older build meets an unknown key at a `.strict()` boundary and refuses the
+state.
+
+`assessTaskScope` therefore takes two commits on purpose: the **delta** is
+measured from the base pin, because that is the tree the work sits on, and the
+**declaration** is read from the scope authority. The `??` fallback exists in
+exactly one place, so "which commit governed" has one answer. No profile object
+is copied anywhere.
+
+The control that proves this is the only kind that can: a block run that ends with
+`B` chained and unfinished, the roadmap then marked `DONE` for `A`, and an
+ordinary `runTask` under a fresh lease continuing `B` afterwards. It was seen to
+fail with the runner passing `null` — and seen to fail *at the effect*, with the
+continuation completing the task under the widened profile, not merely at the
+assertion about the field.
+
+### Roadmap `DONE` is not evidence about Git
+
+An earlier draft of this design argued that once `A` is roadmap-`DONE`, a human
+has accepted `A`'s commits, so `A`'s widened profile is no longer
+self-authorisation. **That inference is unsupported, and it is retracted here
+rather than quietly replaced.**
+
+`status: DONE` is a markdown field written by whoever edits the file. It says
+nothing about which commits reached the default branch, or in what shape. `A` can
+be squash-merged without the profile hunk, reworked before merge, or simply marked
+done by hand, and `B`'s durable state still pins `A1`. Nothing in this build
+treats that field as evidence about Git, and the gate ordering in `start-task.ts`
+that closes the window *while* `A` is not `DONE` buys invocation safety — not the
+durable invariant.
+
+### The unique maximum, and why a diamond is refused
+
+The chain shape is read from `frozenDependencies` and from nothing else:
+
+```
+frozen member dependencies empty
+→ base(T) = blockBaseCommit
+
+frozen member dependencies non-empty
+→ there must be exactly one unique maximum M in the frozen transitive
+  member relation
+→ base(T) = resultCommit(M)
+
+no unique maximum
+→ unsupported block input, refused at freeze
+```
+
+`A1 → A2 → B` gives `base(B) = resultCommit(A2)`, and `A2`'s history already
+contains `A1`'s. `A1 → B ← A2` with `A1` and `A2` incomparable has no such commit:
+the only ways to invent one are to merge — a Git effect this slice does not make —
+or to pick one and silently drop the other's work. So the **whole block** is
+refused, in both modes, before anything durable happens. Refusing only the
+offending member and running the rest would be this build improvising which half
+of an operator's request to honour.
+
+**No implicit linearisation.** Independent members are never stacked on one
+another to manufacture an order; a root member takes the block base, never a
+sibling's result.
+
+### Chain fitness is proved at the effect
+
+Nothing about a base is ever stored. A recorded "this base was fine" is a claim
+about a repository at an earlier instant, and the repository is the one thing an
+operator can change between two instants. For a chained member `T` with unique
+maximum `M` and required predecessor set `R`, immediately before the base is used:
+
+| # | question | refusal |
+| --- | --- | --- |
+| 1 | every `P` in `R` is `SETTLED` in this ledger | `PREDECESSOR_NOT_SETTLED` |
+| 2 | `M`'s entry carries a `resultCommit` | `PREDECESSOR_RESULT_ABSENT` |
+| 3 | that commit exists, as a commit | `BASE_OBJECT_ABSENT` / `BASE_OBJECT_UNREADABLE` |
+| 4 | some ref contains it | `BASE_NOT_REFERENCED` |
+| 5 | `blockBaseCommit` is ancestor-or-equal of it | `BASE_NOT_DESCENDED_FROM_BLOCK_BASE` |
+| 6 | every `P` in `R` is contained in it | `BASE_MISSING_REQUIRED_PREDECESSOR` |
+| 7 | the ledger names exactly one block base, and it is ours | `CHAIN_ANCHOR_MISSING` / `CHAIN_ANCHOR_AMBIGUOUS` |
+
+Existence and reachability are different facts and the chain needs both: an object
+no ref contains is either about to be pruned or is the discarded tip of a deleted
+branch, and chaining onto the second would resurrect abandoned work into a
+successor's pull request, silently. Rule 6 is what excludes a `READY_FOR_PR`
+record from an older run, which `applyForcedProgress` may legitimately settle and
+which does not thereby authorise this chain.
+
+### The chain anchor is a cardinality rule
+
+Rule 7 is the one that looks like an existence check and is not. `blockBaseCommit`
+is an invocation input; what makes it *derivable* from the ledger afterwards is
+that the empty-row members which have started agree on **one** value:
+
+```
+R1  frozen row []   baseCommit = M0     started by this run
+R2  frozen row []   baseCommit = M1     forced-settled from an older run
+
+reader of the durable document alone:
+  "blockBase := the baseCommit of an empty-row member"  ->  M0 or M1
+```
+
+Two answers is no answer. So the set of recorded empty-row base commits must have
+cardinality exactly one, and its element must be this invocation's base. More than
+one distinct value is `CHAIN_ANCHOR_AMBIGUOUS`; no value, or one that is not ours,
+is `CHAIN_ANCHOR_MISSING`. Both are refusals and never repairs, and the rule is
+evaluated only on a chained start, so a wholly independent block is unaffected.
+Several roots that legitimately agree on one base stay permitted, and a root that
+has not started yet carries no base and is not evidence either way.
+
+### A chain refusal is a gate refusal
+
+An unfit base ends the run through the **report**, exactly like a refused
+workspace: `RUN_GATE_REFUSED` with the fitness code as its detail, the member
+stays `PLANNED` — which is true, nothing was started for it — and the ledger is
+byte-identical across the condition. It is not a claim about the member's outcome,
+and it is not a durable-write problem.
+
+No new ledger field, no new stop reason, no ledger schema bump. The chain is read
+out of `frozenDependencies` plus `entry.baseCommit` plus `entry.resultCommit` plus
+the anchor. Exactly one new task-state field, and no task-state version bump
+either.
+
+### What V2-09 is not
+
+**Attended only. Sequential only.** No unattended mode, no stale-lease recovery,
+no process containment, no parallel execution, no resume across invocations, no
+outgoing transition from `READY_FOR_PR`, and no product-side PR/CI/merge concept.
+V2-07P's platform contract is unchanged and not reopened.
+
+The block produces a **stack**: `B`'s branch contains `A`'s commits, so a pull
+request for `B` carries `A`'s work. That is what "dependent execution" means here,
+and merging out of order is an operator decision this build does not model.
+
+### Carried forward from V2-09, deliberately
+
+- **F-C1 — a ledger whose roots do not agree on one base cannot be chained onto
+  (`CHAIN_ANCHOR_MISSING` / `CHAIN_ANCHOR_AMBIGUOUS`).** `blockBaseCommit` is an
+  invocation input, and the anchor is what makes it *derivable* from the ledger
+  afterwards — which needs one value, not merely one occurrence. A run whose roots
+  were all forced-settled from an older run, or which holds roots pinned at two
+  different bases, refuses rather than chaining onto a base the document cannot
+  name. Accepted: an operator clears it by starting the block from its root, and
+  the alternative is a durable answer nobody can reconstruct.
+- **F-C2 — an unfit base ends the run rather than skipping the member.** A
+  chain-fitness refusal is `RUN_GATE_REFUSED`, so independent members the run had
+  not yet reached stay `PLANNED`. Accepted: it matches how every other start-gate
+  refusal is graded, and continuing past a Git state nobody understands is the
+  direction this repository does not take.
+- **F-C3 — a chained member *can* be continued outside its block, and keeps the
+  scope it was started under.** Its state is an ordinary `TaskState`, so any later
+  caller may drive it; what travels with it is `scopeAuthorityCommit`, so the
+  profile at the block base still governs however long afterwards that happens and
+  whatever the roadmap has since been edited to say. Not a residue but the property
+  the durable control exists to prove — recorded here because the *execution* base
+  is still the predecessor's commit, so such a continuation extends a stack whose
+  first half was never separately reviewed.
+- **F-C4 — the block produces a stack.** `B`'s branch contains `A`'s commits, so a
+  pull request for `B` carries `A`'s work. The report says so; merging out of order
+  is an operator decision this build does not model.
+- **F-C5 — an orphaned workspace of a *chained* start is not releasable.**
+  `agent-loop release` names a task rather than a run, so it has no frozen block
+  base to consult and no durable state to read one from — an orphan has no task
+  state by definition. It therefore assesses against the default-branch tip, which
+  is what it always did, and a chained orphan sitting at its predecessor's result
+  is refused as `WORKSPACE_HEAD_MOVED`. Accepted rather than repaired: the fix is
+  either a second authority for the release path to consult or a release command
+  that takes a base on trust, and neither is worth a durable claim nobody can check.
+- **F-C6 — the published JSON schema now requires `scopeAuthorityCommit`.** It is
+  generated with `io: 'output'` and so describes a state *after* parsing, where the
+  default has been applied. A pre-V2-09 state file still parses through
+  `parseTaskState` — that is what the additive default is for and it is controlled
+  — but an external validator holding the new schema would reject the old file.
+  Accepted: each build's published schema describes its own output, and the
+  alternative is a second spelling of "no authority recorded" in the type.
+
 ## Not implemented yet
 
-Still missing, deliberately: the dependent commit chain
-(V2-09); unattended operation; owned process containment; and any product-side
-PR/CI/merge automation.
+Still missing, deliberately: the operator notification a long run needs
+(V2-10); unattended operation; owned process containment; and any product-side
+PR/CI/merge automation. `READY_FOR_PR` remains terminal — the orchestrator hands
+a finished task to a human and stops there.
 
 **The lease came before the block runner, not after it**, and V2-07 is what forced
 that change of order. The ledger's compare-and-swap is advisory, so two concurrent
@@ -4604,7 +4886,11 @@ V2-07L execution lease / ownership          <- shipped
          |
 V2-08  attended block runner                <- shipped
          |
-V2-09  dependent tasks / commit chain
+V2-09  dependent tasks / commit chain        <- shipped
+         |
+V2-10  operator notification
+         |
+       the dogfood block, then the closing audit
 ```
 
 One prerequisite is now explicit that was not before. **Unattended running needs
