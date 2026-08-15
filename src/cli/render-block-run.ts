@@ -86,7 +86,7 @@ export const BLOCK_STOP_SENTENCES: Readonly<Record<BlockStopReason, string>> = O
     'A task stopped on something a human must resolve, and until they do the block\n' +
     '  cannot complete. Whether any other member ran depends on the frozen plan and on\n' +
     '  what was eligible - the task table below is that record, and a member this run\n' +
-    '  never reached is still PLANNED.',
+    '  never drove is still PLANNED unless its own record had already settled it.',
   TASK_ABANDONED:
     'A task was given up on, so the block cannot complete. That is terminal for the task\n' +
     '  and different from blocked: nothing continues from it, and there is nothing to\n' +

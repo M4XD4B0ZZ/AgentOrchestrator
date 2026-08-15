@@ -94,10 +94,13 @@
  * exports have one production importer, the CLI freeze site, so this module
  * reaching them fails there. The plan: no module under `src/block/` may import a
  * planner value export — neither at the planner's own module path nor laundered
- * through a re-export, which is why that pin is a path-scoped scan and a
- * name-scoped one rather than either alone — while the type-only import of
- * `TaskPlanningSuccess` this module legitimately needs stays green. Both
- * directions were established by mutation, the false-positive one included.
+ * through a re-export that keeps the name, which is why that pin is a
+ * path-scoped scan and a name-scoped one rather than either alone — while the
+ * type-only import of `TaskPlanningSuccess` this module legitimately needs stays
+ * green. Both directions were established by mutation, the false-positive one
+ * included. A re-export that *renames* on the way through walks past both: the
+ * pair closes the routes measured there and is not a reachability proof, for
+ * which a real one wants the compiler.
  *
  * Underneath the import pins sits the effect one layer down: `startPlannedTask`
  * has no way to take a reading of its own, so there is no gate below here that

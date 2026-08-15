@@ -221,7 +221,7 @@ export function independenceIsEstablished(
 
 /* ─────────────────── 5. what a start attempt entitles ────────────────────── */
 
-/** What `startTask`'s answer means for a block run. A closed set. */
+/** What `startPlannedTask`'s answer means for a block run. A closed set. */
 export const START_CONCLUSIONS = [
   /** A durable state exists and the task may be driven. */
   'DRIVE',
