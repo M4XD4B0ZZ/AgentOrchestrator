@@ -43,6 +43,7 @@ import {
 } from '../src/core/auth-preflight-evidence.js';
 import { mintAuthPreflightEvidence } from '../src/core/internal/auth-preflight-evidence.js';
 import { evaluateAutomaticResume } from '../src/core/automatic-resume.js';
+import { parseTaskState } from '../src/core/task-state.js';
 import { PACKAGE_ROOT } from '../src/config/paths.js';
 import { positiveResumeEvidence, validUsageLimitState } from './fixtures.js';
 import { passingAuthChecks, provenAuthEvidence } from './helpers/auth-evidence.js';
@@ -64,7 +65,9 @@ function sourceFiles(): string[] {
 /** The resume decision for a quota-blocked task, given some auth evidence. */
 function resumeWith(authEvidence: unknown): ReturnType<typeof evaluateAutomaticResume> {
   return evaluateAutomaticResume(
-    validUsageLimitState(),
+    // Parsed rather than passed as a literal: the gate takes a `TaskState`, and
+    // the fixture builds the *input* shape, whose defaulted fields are optional.
+    parseTaskState(validUsageLimitState()),
     // The cast is on the *call*, not on a fabricated artefact: this helper's
     // whole job is to feed the gate values a caller should not be able to use.
     positiveResumeEvidence({ authEvidence } as { authEvidence: AuthPreflightEvidence | null }),

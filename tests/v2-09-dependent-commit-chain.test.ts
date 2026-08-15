@@ -6,6 +6,9 @@
  * table and each carries the defect it proves that a cheaper test cannot.
  */
 
+import { rmSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+
 import { afterAll, describe, expect, it } from 'vitest';
 
 import {
@@ -19,7 +22,9 @@ import { memberRunnability } from '../src/block/block-conclusion.js';
 import { fingerprintFrozenMembership } from '../src/block/block-definition.js';
 import { planNextTask, type TaskPlanningSuccess } from '../src/plan/plan-next-task.js';
 import type { TaskEligibility } from '../src/plan/select-task.js';
-import { startPlannedTask } from '../src/run/start-task.js';
+import { REPO_PROFILE_RELATIVE_PATH } from '../src/repo/profile-location.js';
+import { startPlannedTask, startTask } from '../src/run/start-task.js';
+import { assessTaskScope } from '../src/scope/assess-scope.js';
 import { proveChainBase } from '../src/block/chain-fitness.js';
 import { chainShapeOf, uniqueMaximumOf } from '../src/block/chain-shape.js';
 import {
@@ -45,7 +50,7 @@ import {
 } from './helpers/worktree-fixtures.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
-import { e2eProfile, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
+import { e2eProfile, reload, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
 
 afterAll(() => {
   releaseTestLeases();
@@ -597,6 +602,10 @@ describe('a start may be authorised for a dependency this run satisfied', () => 
         planning,
         base: { kind: 'PINNED_COMMIT', commit: headOf(repository.root) },
         satisfiedDependencies: ['A-001'],
+        // Stated rather than defaulted: these two cases are about the
+        // eligibility gate and nothing else, and `null` is the answer an
+        // ordinary start gives.
+        scopeAuthorityCommit: null,
       },
       startDeps(repository),
     );
@@ -614,10 +623,136 @@ describe('a start may be authorised for a dependency this run satisfied', () => 
         planning: planningOf(repository),
         base: { kind: 'DEFAULT_BRANCH_TIP' },
         satisfiedDependencies: ['C-001'],
+        scopeAuthorityCommit: null,
       },
       startDeps(repository),
     );
 
     expect(start).toMatchObject({ outcome: 'TASK_INELIGIBLE', reasonCodes: ['BLOCKED_BY_DEPENDENCIES'] });
+  });
+});
+
+/* ══════════════ the scope authority, split from the execution base ═══════ */
+
+/** The e2e profile with a different scope, so two commits can disagree. */
+function scopedProfile(allowedPaths: readonly string[]): string {
+  return e2eProfile().replace(
+    'scope:\n  allowedPaths:\n    - src\n',
+    `scope:\n  allowedPaths:\n${allowedPaths.map((path) => `    - ${path}`).join('\n')}\n`,
+  );
+}
+
+/**
+ * A repository holding two profiles in two commits, and a worktree on the second.
+ *
+ * Git-tier controls **G-2a** and **G-2b**. The effect under test is *which
+ * committed tree the scope declaration was read out of*, and only a repository
+ * that really holds two different declarations in two different commits can show
+ * it: with one profile every answer is the same whichever commit is consulted,
+ * which is precisely the case that cannot tell a correct implementation from one
+ * that ignores the authority entirely.
+ */
+async function repositoryWithWidenedProfile(change: string): Promise<{
+  readonly blockBase: string;
+  readonly widened: string;
+  readonly worktreePath: string;
+}> {
+  const root = createRepoFixture({
+    defaultBranch: 'main',
+    profile: scopedProfile(['src/a']),
+    files: { '.gitignore': '.agent-orchestrator/runtime/\n' },
+  });
+  const blockBase = headOf(root);
+
+  // The predecessor's agent commits a widened profile. Nothing about this commit
+  // is illegitimate — a task may well be *about* changing the profile — and the
+  // whole question is whether it thereby decides its successor's permissions.
+  writeRepoFile(root, REPO_PROFILE_RELATIVE_PATH, scopedProfile(['src']));
+  fixtureGit(root, ['add', '--all']);
+  fixtureGit(root, ['commit', '--quiet', '-m', 'widen the allowed scope']);
+  const widened = headOf(root);
+
+  const worktreePath = join(dirname(root), `${basename(root)}-chained`);
+  chainedWorktrees.push(worktreePath);
+  fixtureGit(root, ['worktree', 'add', '--quiet', '--detach', worktreePath, widened]);
+  writeRepoFile(worktreePath, change, 'work\n');
+
+  return { blockBase, widened, worktreePath };
+}
+
+const chainedWorktrees: string[] = [];
+
+afterAll(() => {
+  for (const path of chainedWorktrees) {
+    try {
+      rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch {
+      // A locked Git file on Windows must not fail an otherwise passing suite.
+    }
+  }
+});
+
+describe('the scope declaration comes from the authority, the delta from the base pin', () => {
+  it('reads the declaration from the scope authority and the delta from the base pin', async () => {
+    const { blockBase, widened, worktreePath } = await repositoryWithWidenedProfile('src/b/x.ts');
+
+    const assessment = await assessTaskScope({
+      git: runGitCommand,
+      authorisedWorktreePath: worktreePath,
+      basePinnedCommit: widened,
+      scopeAuthorityCommit: blockBase,
+    });
+
+    expect(assessment.verdict).toBe('VIOLATION');
+    expect(assessment.offences.map((offence) => offence.path)).toEqual(['src/b/x.ts']);
+  });
+
+  // The mutant this kills: an implementation that ignores the authority reads
+  // the widened profile out of the base pin and calls the same change allowed.
+  it('would allow the same change if the predecessor decided the scope', async () => {
+    const { widened, worktreePath } = await repositoryWithWidenedProfile('src/b/x.ts');
+
+    const assessment = await assessTaskScope({
+      git: runGitCommand,
+      authorisedWorktreePath: worktreePath,
+      basePinnedCommit: widened,
+      scopeAuthorityCommit: null,
+    });
+
+    expect(assessment).toMatchObject({ verdict: 'WITHIN_SCOPE', offences: [] });
+  });
+
+  // Specificity (G6): the frozen profile must still permit what it really
+  // permits, and the delta must still be measured from the chained base.
+  it('lets a chained task change what the block-base profile allows', async () => {
+    const { blockBase, widened, worktreePath } = await repositoryWithWidenedProfile('src/a/y.ts');
+
+    const assessment = await assessTaskScope({
+      git: runGitCommand,
+      authorisedWorktreePath: worktreePath,
+      basePinnedCommit: widened,
+      scopeAuthorityCommit: blockBase,
+    });
+
+    expect(assessment).toMatchObject({ verdict: 'WITHIN_SCOPE', offences: [] });
+  });
+});
+
+describe('an ordinary task carries no scope authority of its own', () => {
+  it('writes no scope authority for a task started outside a block', async () => {
+    const repository = await chainRepository({ 'A-001': [] });
+
+    const started = await startTask(
+      { repository, taskId: 'A-001' },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: leaseFor(repository),
+      },
+    );
+
+    expect(started.outcome).toBe('STARTED');
+    expect(reload(repository.root, 'A-001').state.scopeAuthorityCommit).toBeNull();
   });
 });

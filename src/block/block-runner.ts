@@ -782,6 +782,7 @@ async function driveOneTask(
       planning: request.planning,
       base: { kind: 'DEFAULT_BRANCH_TIP' },
       satisfiedDependencies: [],
+      scopeAuthorityCommit: null,
     },
     { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease },
   );

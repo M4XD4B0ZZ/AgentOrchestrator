@@ -100,6 +100,14 @@ export interface ScopeAssessmentInput {
   readonly authorisedWorktreePath: string;
   /** The task's durable pin, read off the persisted state by the caller. */
   readonly basePinnedCommit: string | null;
+  /**
+   * The commit whose profile governs, or `null` when the base pin governs.
+   *
+   * Read off the same persisted state as {@link basePinnedCommit} and never
+   * invented by a caller — it is a durable property of the task, not of the
+   * invocation driving it.
+   */
+  readonly scopeAuthorityCommit: string | null;
 }
 
 function indeterminate(reason: ScopeIndeterminateReason): ScopeAssessment {
@@ -126,12 +134,24 @@ function indeterminate(reason: ScopeIndeterminateReason): ScopeAssessment {
  * before the writer starts and once after it finishes.
  */
 export async function assessTaskScope(input: ScopeAssessmentInput): Promise<ScopeAssessment> {
-  const { git, authorisedWorktreePath, basePinnedCommit } = input;
+  const { git, authorisedWorktreePath, basePinnedCommit, scopeAuthorityCommit } = input;
 
   // The declaration first. A delta cannot be classified without one, and asking
   // Git for a diff we could not judge would be work done to reach the same
   // refusal one call later.
-  const scope = await readPinnedScope(git, authorisedWorktreePath, basePinnedCommit);
+  //
+  // Two commits, and the difference is the whole of E2. The *delta* is measured
+  // from the base pin, because that is the tree this task's work sits on top of.
+  // The *declaration* is read from the scope authority, because a predecessor
+  // that hands its successor code must not thereby hand it permission. For an
+  // ordinary task the two are the same commit and nothing changes; for a chained
+  // one the authority is the commit the block was frozen at. This `??` is the one
+  // place the fallback exists, so there is one answer to "which commit governed".
+  const scope = await readPinnedScope(
+    git,
+    authorisedWorktreePath,
+    scopeAuthorityCommit ?? basePinnedCommit,
+  );
   if (scope.outcome !== 'RESOLVED') return indeterminate(scope.refusal);
 
   const delta = await observeTaskDelta(git, authorisedWorktreePath, basePinnedCommit);

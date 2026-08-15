@@ -262,6 +262,21 @@ export type PlannedStartRequest = StartTaskRequest & {
    * `startTask` passes an empty list, which is exactly today's rule.
    */
   readonly satisfiedDependencies: readonly string[];
+  /**
+   * The commit whose profile governs this task, or `null` for *its own base pin*.
+   *
+   * **Required**, so every caller states its answer. An omitted field is exactly
+   * how a predecessor's widened profile would sneak back in: the block runner
+   * would forget to pass the block base, the successor's state would carry
+   * `null`, and `assess-scope.ts` would then read the declaration out of the
+   * commit the predecessor's agent wrote.
+   *
+   * Written once, at start, into the task's own durable record — not held in
+   * this invocation. The block run that made the promise can end, crash or be
+   * killed, and the successor is then an ordinary task any later caller may
+   * continue; an invocation-scoped answer would end with the invocation.
+   */
+  readonly scopeAuthorityCommit: string | null;
 };
 
 export interface StartTaskDependencies {
@@ -360,6 +375,7 @@ function firstState(
   workspace: TaskWorkspace,
   repository: ResolvedRepository,
   now: string,
+  scopeAuthorityCommit: string | null,
 ): TaskStateInput {
   return {
     schemaVersion: TASK_STATE_SCHEMA_VERSION,
@@ -371,6 +387,10 @@ function firstState(
     stateEnteredAt: now,
     baseBranch: workspace.baseBranch,
     basePinnedCommit: workspace.basePinnedCommit,
+    // The one field here that is not read off the workspace receipt, because it
+    // is not a property of the workspace: it says which commit's profile judges
+    // what is done *in* it. `null` for every task started outside a block.
+    scopeAuthorityCommit,
     workBranch: workspace.workBranch,
     // A fresh worktree is at its base commit and has nothing in it to be
     // dirty; `prepareTaskWorkspace` verified both from inside it.
@@ -439,6 +459,7 @@ async function startAgainstPlan(
   planning: TaskPlanningSuccess,
   base: WorkspaceBase,
   satisfiedDependencies: readonly string[],
+  scopeAuthorityCommit: string | null,
   deps: StartTaskDependencies,
 ): Promise<StartTaskResult> {
   const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
@@ -631,7 +652,7 @@ async function startAgainstPlan(
     });
   }
 
-  const saved = saveTaskState(firstState(workspace, repository, deps.now()), {
+  const saved = saveTaskState(firstState(workspace, repository, deps.now(), scopeAuthorityCommit), {
     repositoryRoot: repository.root,
     ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
     ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
@@ -687,6 +708,7 @@ export async function startPlannedTask(
     request.planning,
     request.base,
     request.satisfiedDependencies,
+    request.scopeAuthorityCommit,
     deps,
   );
 }
@@ -744,5 +766,5 @@ export async function startTask(
   // is built on the tip of its repository's declared default branch — what this
   // path has always resolved for itself one layer further in — and it satisfies
   // no dependency of its own, so the eligibility gate is exactly the gate it was.
-  return startAgainstPlan(repository, taskId, planning, { kind: 'DEFAULT_BRANCH_TIP' }, [], deps);
+  return startAgainstPlan(repository, taskId, planning, { kind: 'DEFAULT_BRANCH_TIP' }, [], null, deps);
 }

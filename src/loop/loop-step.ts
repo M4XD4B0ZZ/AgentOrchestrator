@@ -407,6 +407,10 @@ async function enforceScope(
     git: options.git,
     authorisedWorktreePath: options.authorisedWorktreePath,
     basePinnedCommit: state.basePinnedCommit,
+    // From the record, not from this invocation. A chained task's authority has
+    // to outlive the block run that started it, and a value threaded through
+    // `RunRequest` would protect the run and nothing after it.
+    scopeAuthorityCommit: state.scopeAuthorityCommit,
   });
 
   if (assessment.verdict === 'WITHIN_SCOPE') return { blocked: null, assessment };

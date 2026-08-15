@@ -747,6 +747,7 @@ describe('an indeterminate assessment is not a violation', () => {
       git: scriptedGit(),
       authorisedWorktreePath: 'anywhere',
       basePinnedCommit: null,
+      scopeAuthorityCommit: null,
     });
 
     expect(assessment.verdict).toBe('INDETERMINATE');
@@ -867,6 +868,7 @@ describe('a leading space in an untracked path cannot be trimmed away', () => {
       git: scriptedGit({ untracked: untrackedRecords([' src']) }),
       authorisedWorktreePath: 'anywhere',
       basePinnedCommit: 'a'.repeat(40),
+      scopeAuthorityCommit: null,
     });
 
     expect(assessment.verdict).toBe('VIOLATION');

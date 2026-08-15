@@ -166,6 +166,38 @@ describe('git commit fields', () => {
   });
 });
 
+/* ───────────────────────── the scope authority ───────────────────────────── */
+
+describe('scopeAuthorityCommit', () => {
+  /**
+   * The compatibility claim V2-09 makes, driven rather than asserted.
+   *
+   * The field was added without a `TASK_STATE_SCHEMA_VERSION` bump, on the
+   * argument that a state written before it existed parses unchanged and means
+   * exactly what it meant — `null`, "this task's own base pin governs", which is
+   * true of every pre-V2-09 task by construction because none of them had a base
+   * authored by a sibling. That argument is only worth anything if the document
+   * without the key really is accepted, so here is one.
+   */
+  it('parses a state written before the field existed, and reads null into it', () => {
+    const old = validCreatedState() as Record<string, unknown>;
+    delete old['scopeAuthorityCommit'];
+
+    const parsed = safeParseTaskState(old);
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.scopeAuthorityCommit).toBeNull();
+  });
+
+  it('accepts a full object name and rejects an abbreviated one', () => {
+    expect(safeParseTaskState(validCreatedState({ scopeAuthorityCommit: 'a'.repeat(40) })).success)
+      .toBe(true);
+    const bad = safeParseTaskState(validCreatedState({ scopeAuthorityCommit: 'deadbee' }));
+    expect(bad.success).toBe(false);
+    expect(issuePaths(bad)).toContain('scopeAuthorityCommit');
+  });
+});
+
 describe('blockedAgent consistency', () => {
   it.each(['CREATED', 'IMPLEMENTING', 'REVIEWING', 'READY_FOR_PR', 'ABORTED'] as const)(
     'rejects a blockedAgent in the non-blocking state %s',
