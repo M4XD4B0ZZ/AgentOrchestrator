@@ -5736,6 +5736,53 @@ independence, and an explicit load contract for old documents — are Global
 Constraints rather than prose inside a task, and are pinned by Tasks 2, 3, 7 and
 3 respectively.
 
+### Corrected during execution
+
+Executing this plan found **eleven instruments that would have passed without
+exercising what they named**. Every one was found by mutation or by
+implementation; none was found by reading the case.
+
+- a `git grep` control defeated by the sentence it searched for being
+  word-wrapped across two comment lines (5);
+- a start-path fixture refused by `SOURCE_WORKTREE_DIRTY` at step 5, well past
+  the eligibility gate it was written for, so it failed identically against a
+  correct and an incorrect implementation (6B);
+- design §8.5's case, whose member was ineligible in the frozen reading, so
+  `chooseTask` skipped it for a reason unrelated to independence and the gate was
+  never consulted (7);
+- a byte anchor captured after every write, so a write it should have detected
+  moved the anchor with it; what killed the mutant was the anchor's `stopReason`,
+  not its bytes (8);
+- a guard the brief claimed case 3 provided, whose fixture reaches only the
+  pre-ledger write — no fallback stop write is constructible there, so the
+  property was pinned by nothing (9);
+- two reconciliation cases whose end state was identical whether the task was
+  recognised or simply driven; only the per-task driver answer and the agent
+  seam's call count discriminate (10);
+- the `WRITE_FAILED` arm of `applyForcedProgress`, which collapsing into the
+  `UNRESOLVED` arm reddened nothing (10);
+- a `STATE_UNUSABLE` grade argued unreachable and withdrawn: a settled sibling
+  whose record cannot be read refuses the write on a task the reconciliation
+  never touched (10, after review);
+- the runner's own header naming `planNextTask` in prose, which turned the
+  zero-match grep meant to check it into a list a reader has to adjudicate (11);
+- a path-scoped import scan defeated by a re-export laundering the planner
+  through `src/run/`, naming no planner path under `src/block/` at all (11,
+  after review).
+
+For whoever plans V2-09: **a control's reachability must be proved separately
+from its assertion, and only mutation does both at once.** A green case says
+nothing about whether its fixture can reach the branch it names, and the two
+questions are answered by different evidence.
+
+And the sharpest case says why killing the mutant is not the whole bar. The first
+path-scoped planner classifier was green on the tree *and* red on its
+value-import mutant — the conventional standard, met — and was still wrong: a
+forward window from the keyword read any nearby export as the declaration, so a
+legitimate `import type` registered as a value reach. No amount of asking "does
+the mutant die" reaches that. It was caught by driving the false-positive
+direction, which is why both directions are required rather than one.
+
 ## Execution
 
 Plan complete. Two execution options:

@@ -1,6 +1,6 @@
 # V2-08 — Attended block runner: execute a block of independent tasks
 
-**Status:** design, not yet planned into tasks.
+**Status:** planned and implemented. Plan: `docs/superpowers/plans/2026-08-14-v2-08-attended-block-runner.md`.
 **Predecessors:** V2-07 (block ledger), V2-07L (execution lease), V2-07P (platform contract).
 **Successor:** V2-09 (dependent tasks / controlled commit chain).
 
@@ -156,6 +156,17 @@ The gate failure follows the same model boundary: it is a run abort, not task
 progress, and the specific underlying gate code belongs in the runner outcome's
 detail rather than growing an ever-larger persisted stop vocabulary.
 
+**Four, not three.** `RECONCILIATION_UNRESOLVED` joined them: a positive
+reconciliation that read as forced and was refused by the authoritative
+primitive at the commit is a proof race, not a failed write, and reporting it as
+`DURABLE_WRITE_FAILED` would send an operator to a working disk. It is not
+persisted, so it needed no schema change.
+
+The section's own sentence — *the ledger stays at its last provably durable
+state* — is the exact one, and it is weaker than "nothing was written". All four
+are reachable after tasks have been recorded in this run; those records are true
+and they stay. What none of them adds is a stop claim.
+
 ### Schema version
 
 `ACTIVE_TASK_UNRESOLVED` is a new member of a persisted, closed-validated
@@ -279,6 +290,23 @@ attended block run
   stopBlockRun with the end reason chosen by the table in section 6
   release the lease
 ```
+
+**Narrowed while planning.** "start or resume" became "start". A block run's
+lifetime is its invocation's lifetime: the lease guarantee is stated over a
+whole block run, so a resumable run would need a lease left behind — the
+stale-lease surface this slice may not reopen — or a later process adopting a
+run it never started. The driver's step budget is absorbed inside the
+invocation instead of ending it. See "The contradiction this plan had to
+resolve" in the plan.
+
+**Corrected while planning.** The order is `resolve → lease → plan → project →
+define → run → release`. Freezing the plan before taking the lease left a window
+in which another writer could edit the roadmap between the reading the block was
+frozen from and the moment this invocation became the writer, so the frozen plan
+was never authoritative. And the freeze reaches further down than "the runner
+imports no planner": `startTask` read the plan itself, so a mid-run edit could
+still refuse a task the snapshot had authorised. `startPlannedTask` takes the
+frozen reading; the runner uses only that path.
 
 Note the two distinct exits. A recordable class-2 condition ends the run *in the
 ledger*; an unrecordable one ends it *in the report*, leaving the ledger on its

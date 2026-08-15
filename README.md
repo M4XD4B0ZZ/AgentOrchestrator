@@ -4212,9 +4212,378 @@ branches, `path-identity.ts`'s casing fold and the POSIX profile resolver
 unreachable. They stay: removing them means rewriting the most dangerous module
 in the build inside a slice whose purpose was to stop opening review surfaces.
 
+## The attended block runner (V2-08)
+
+Everything needed to *record* a block run existed and was proved. What did not
+exist is the thing the product is for: **something that actually runs a block.**
+V2-08 adds that driver and nothing else. `block-runner.ts` decides *sequence*,
+`block-conclusion.ts` decides *meaning*, and neither invents orchestration truth:
+the lease decides who may write, `startPlannedTask` prepares a workspace,
+`runTask` drives one task, and `block-progress.ts` records every outcome against
+the task's own durable record and refuses whatever that record does not prove.
+Nothing in the runner writes the ledger except through those primitives.
+
+### Two classes of bad news, and confusing them is the defect
+
+| | class 1 — *a task failed* | class 2 — *the run cannot safely continue* |
+| --- | --- | --- |
+| what it is about | one task's own outcome | the run's ability to make any further durable claim |
+| effect on the block | the run continues with tasks already known to be independent | the whole block stops immediately |
+| example | the agent could not finish A; a human must resolve it | the lease is no longer certainly held |
+
+A block of `A, B, C` where `A` fails locally and `B` and `C` are independent ends
+as
+
+```
+A = BLOCKED          B = READY_FOR_PR          C = READY_FOR_PR
+```
+
+and the run's reason is `TASK_BLOCKED`. That block is **not `COMPLETE`** —
+`COMPLETE` still means every member `SETTLED` — and it is not a wasted run
+either. "Not complete" and "wasted" are different statements; the ledger already
+had the vocabulary for the first, and what it lacked was a runner that would not
+throw the other two tasks away in order to say it.
+
+Continuing after a task-local failure is safe **because every continuation is
+still gated by the same proof.** `settleBlockTask` reads B's own durable state
+and refuses a settlement that state does not support, whatever happened to A. A
+failed A cannot make a false claim about B possible. What a failed A *can* do is
+consume the operator's attention — which is why the run stops for class 2, where
+the machinery that would catch a false claim is itself in doubt. Continuing is
+the safe direction here, and only here.
+
+### The policy this reverses, named as a reversal
+
+`TASK_DISPOSITIONS` documented `BLOCKED` as *"waiting for a human and stops the
+run as a matter of policy"*, and `parkBlockTask` implemented that sentence by
+writing a stop reason. Both are gone. It was a documented contract statement in a
+shipped, proved artefact, so amending it was a task of this slice with its own
+control rather than a comment edited in passing — and the control that proves the
+reversal happened is the one that fails against V2-07's behaviour: a block of
+three independent tasks whose first parks still activates the second.
+
+What did **not** change: `BLOCKED` and `ABANDONED` are still `EVIDENCE_BACKED`,
+still terminal for their task, and still unrecordable without the task state that
+proves them. Only the *run's reaction* to them moved. `TASK_BLOCKED` and
+`TASK_ABANDONED` survive as stop reasons with their meaning narrowed from "abort
+now" to "this run ended without completing, and a task outcome is why", and they
+stay in `PROGRESS_CLAIMING_STOP_REASONS`, because they still assert something
+about the tasks and must still be proved against every task record.
+
+### A `stopReason` is itself a durable claim
+
+This is the insight that reshaped the design. When the condition *is* that the
+run has no write authority, or no durable write capability at all, a runner that
+records it is asserting durably that it cannot assert durably. So class 2 splits
+by **representability** rather than by severity, and a condition becomes a
+persisted `stopReason` only where writing it is something the run can still
+honestly do:
+
+```
+recorded    OPERATOR_STOPPED · LEDGER_DIVERGED · STATE_UNUSABLE
+            DEFINITION_DRIFTED · ACTIVE_TASK_UNRESOLVED
+
+reported    LEASE_AUTHORITY_UNCERTAIN · DURABLE_WRITE_FAILED
+            RUN_GATE_REFUSED · RECONCILIATION_UNRESOLVED
+```
+
+`BLOCK_RUN_OUTCOMES` therefore has five members: `BLOCK_RUN_ENDED`, where the
+ledger carries the ending, and the four above, which reach the operator through
+the runner's report. They stay four rather than one generic `RUN_UNSAFE` because
+they demand four different reactions — find out who else holds the lease, fix the
+disk or the permission, satisfy the gate, look at task state that moved under a
+held lease — and the exit table grades them by that: a lease somebody else holds
+and an unsatisfied gate exit 4, whose sentence is "nothing durable is wrong and
+re-invoking under other conditions can differ", while a refused write and a
+refused reconciliation exit 3, because a scheduler told 4 would retry into the
+same refusal forever.
+
+For two of them the no-write rule is a consequence and not a preference. With
+`LEASE_AUTHORITY_UNCERTAIN` any further mutation is precisely the act the run may
+have lost the authority for; with `DURABLE_WRITE_FAILED` the failed write is the
+condition being reported. A best-effort stop write there would be the run's least
+trustworthy claim, made at its least trustworthy moment.
+
+**Across each of the four the ledger is left byte-identical**, and that sentence
+is the exact one. It is deliberately weaker than "nothing was written": all four
+are reachable after this run has already recorded settlements, parks and
+abandonments, and those records are true and they stay. What none of the four
+adds is a stop claim. Two of them can additionally strike before any ledger
+exists, which is a fact about where the condition arose and not about what the
+outcome means. The suite anchors the bytes at the last write that landed and
+compares them *across* the condition — and asserts the anchor's own `stopReason`
+as well, because an anchor defined as "the last write that landed" moves with an
+extra write and would not, on its own, notice one.
+
+### `ACTIVE_TASK_UNRESOLVED`, and why it is not `STATE_UNUSABLE`
+
+`STATE_UNUSABLE` says something about the task *state*: damaged, foreign, not
+trustworthy. A task can hold entirely legitimate prior evidence and still end in
+a condition whose outcome cannot be determined — a driver that made no progress,
+a settlement whose proof no longer holds, an interruption nothing can conclude.
+That is a **different fact**, and folding it into `STATE_UNUSABLE` is exactly the
+misdescription class V2-07P spent three review rounds deleting.
+
+It **may coexist** with `ACTIVE` and an unchanged `activeTaskId`: it does not
+require the run to first invent a disposition for the task it could not conclude.
+It drags no disposition and no commit evidence with it, which
+`UNRESOLVED_STOP_CARRIED_MORE` already enforces. And it is deliberately **not**
+in `PROGRESS_CLAIMING_STOP_REASONS` — sorted in, it would be proved against every
+task record before it could be written, and it exists precisely for the case
+where one of those records cannot be judged. It would be unwritable exactly when
+it is true. That sorting is pinned by a hand-written correctness table, one case
+per reason: `satisfies Record<…>` proves every member was considered and proves
+nothing about which side each landed on.
+
+### The frozen plan carries the dependency relation
+
+**V2-08 does not interpret dependencies.** Only tasks already established as
+independent may continue after a sibling's local failure, and the runner reads
+that property rather than deriving it. Except that it could not read it:
+`BlockDefinition` was `blockId` plus ordered `taskIds` and nothing else, so the
+slice's headline behaviour would have been unreachable in *every* block —
+continue-on-task-local-failure shipped as dead code.
+
+So the frozen plan gained the relation, and `fingerprintBlockDefinition` binds
+it. Not derived live from `task-graph.ts` during the run, because a roadmap edit
+would then change the answer to "may B continue after A?", which is the opposite
+of frozen-plan authority. Not a bare `independent: true` flag either, which would
+freeze the *judgement* while leaving the evidence it came from unfrozen.
+
+**A direct intra-block edge check would have been unsound**, and that is a
+measured result rather than a caution. `normalizeTaskGraph` stores each
+definition's own edge list and its direct reverse, computes no transitive closure
+anywhere, and normalises over the whole discovered task set. A block is an
+arbitrary subset of a repository-wide DAG, so this is representable:
+
+```
+A: dependsOn []
+X: dependsOn [A]      <- not a block member
+B: dependsOn [X]
+
+block = {A, B}   ->   no direct intra-block edge exists,
+                      yet B transitively depends on A through X
+```
+
+A member's frozen `dependsOn` is therefore **the set of block members it
+transitively depends on**, walked over the full normalised graph and restricted
+to members once, at the end, never at each hop. Freeze time, never run time:
+`projectBlockDependencies` has exactly one production importer — the CLI freeze
+site — and the runner reaching it by any route fails that assertion.
+
+`independenceIsEstablished` then asks the relation one question, *does any member
+depend on any member*, and answers it for the block rather than for a pair.
+Per-pair continuation is a dependency scheduler and V2-08 does not get one: as
+soon as any relation holds between members the block still has to process, that
+block is not supported input, and the run degrades to stopping at the first
+task-local failure exactly as V2-07 does. That degradation is the correct one,
+because it is the behaviour that is already proved.
+
+### Cause beats consequence
+
+`NO_ELIGIBLE_TASK` became reachable in a new way under the reversed policy: after
+A fails and B and C settle, a block with nothing left to run is *finished*, not
+obstructed. It must not become the generic "the loop ended" code, because an
+operator told "no eligible task" has learned the consequence and not the cause.
+The end reason is the most specific task disposition that explains the ending:
+
+| condition | reason |
+| --- | --- |
+| every member settled | `COMPLETE` |
+| at least one `BLOCKED`, nothing runnable left | `TASK_BLOCKED` |
+| no `BLOCKED`, at least one `ABANDONED`, nothing runnable left | `TASK_ABANDONED` |
+| no disposition explains why nothing is eligible | `NO_ELIGIBLE_TASK` |
+
+`BLOCKED` beats `ABANDONED` where both are present, because a human can act on a
+blocked task and nobody can act on an abandoned one, so the reason names the one
+with a next step. `NO_ELIGIBLE_TASK` is now **reserved** for a genuine
+eligibility dead end that no persisted disposition accounts for — a member whose
+path to eligibility runs through a non-member, which the frozen relation
+deliberately records nothing about (F-B4).
+
+### Schema version 2, and version 1 refused rather than migrated
+
+`frozenDependencies` and `ACTIVE_TASK_UNRESOLVED` land under **one** bump of
+`BLOCK_LEDGER_SCHEMA_VERSION` — not one per value, and with no "the enum grew but
+the version stayed" exception. A version-1 reader genuinely cannot understand a
+version-2 document: it meets a stop reason outside its closed vocabulary and a
+field its `.strict()` schema refuses.
+
+A version-1 ledger is refused on load as `LEDGER_SCHEMA_UNSUPPORTED` and is
+**never migrated**, which is a decision rather than an omission. It carries no
+`frozenDependencies`, and the only way to give it one is to invent it — which
+would hand the run authority to continue after a task-local failure on a relation
+nobody froze. Refusing costs an operator one new run id; migrating would cost
+them a guarantee.
+
+The version boundary is also kept apart from corruption in both directions. A
+document with **no usable declaration** is not "written by an older build", it is
+unreadable, and belongs on the ordinary contract-violation path that explains why
+it was refused; only a version this build can name and does not match earns the
+gentler label. One classifier answers that for the load path and the update path
+alike, so the two cannot drift back apart.
+
+### One reading of the roadmap, taken under the lease
+
+```
+attended:  resolve -> lease -> plan -> project -> define -> run -> release
+default:   resolve -> plan -> project -> define -> report    (no lease, no writes)
+```
+
+The lease comes first because a plan frozen above that line is a plan this
+invocation was not yet the writer of: a legitimate other writer could edit the
+roadmap between the reading the block was frozen from and the moment the lease
+landed. `run-command.ts` already took the lease before selecting a task, so the
+block command was the anomaly and not the correction. The cost is that an
+unusable `--tasks` argument is now refused while the lease is held, for the few
+milliseconds it takes to plan and project; `finally` gives it back on every path
+out, including a throw.
+
+That single `planNextTask` result is then the projection, the fingerprint, the
+eligibility filter and every task's start gate. The runner takes the whole
+`TaskPlanningSuccess` rather than a list of eligible ids, because a list handed in
+beside a plan read somewhere else is two readings that can disagree — and the
+disagreement would surface as `TASK_INELIGIBLE` for a task the run had already
+chosen.
+
+**`startPlannedTask` had to exist for that to be true rather than asserted.** The
+runner imports no planner, and that was not enough: `startTask` called
+`planNextTask` itself and refused `TASK_INELIGIBLE` from *that* reading, so a
+mid-run roadmap edit was back in charge of what runs — behind a primitive instead
+of in the loop, with every module in `src/block/` looking innocent. `startTask`
+now reads the plan once and delegates; `startPlannedTask` is *given* a planning
+result and has no way to produce one; the runner uses only the latter. The second
+read is not hidden, it is absent.
+
+The block layer's planner use is pinned twice, because one scan was not enough. A
+path-scoped assertion walks every occurrence of the planner's module specifier
+back to the declaration that owns it and classifies it as a value import or a
+type-only one — the runner must keep naming `TaskPlanningSuccess`, so an
+assertion that reddened on the type would force the module to stop naming what it
+legitimately consumes. A name-scoped companion catches the laundered route, where
+a module under `src/run/` re-exports `planNextTask` and `src/block/` imports it
+from there, naming no planner path anywhere. Neither subsumes the other, and both
+directions of both were established by mutation.
+
+### A block run's lifetime is its invocation's lifetime
+
+An earlier draft let a run survive its invocation: the driver's step budget ran
+out, the process exited, and a later invocation picked the same run up. Three
+statements were asserted at once and they cannot all hold — the same durable run
+survives, the invocation terminates, and one lease spans the whole block run. A
+terminating invocation gives the lease back, so between two invocations the run
+would be open with no holder; leaving the lease behind on purpose is the
+stale-lease surface this slice may not reopen, and a later process adopting a run
+it never started is worse.
+
+So there is **no resume**, and `startBlockRun`'s existing refusal *is* the
+answer: a run id that already has a ledger belongs to an invocation that is over,
+whether it stopped cleanly or was interrupted, and that record is not overwritten
+(`RUN_ID_ALREADY_USED`). An operator continues by starting a new run id. One run
+id, one invocation, one lease.
+
+The driver's `STEP_BUDGET_EXHAUSTED` is **absorbed** rather than allowed to end
+the invocation: the runner drives the same task again under the same lease, and
+re-proves the lease between continuations. `maxSteps` bounds one `runTask` call
+so a driver cannot run away, and says nothing about a task's outcome — graded as
+an ending it would turn a scheduling limit into a claim about a task, and graded
+as an ending of the *invocation* it would need a block run that outlives its
+holder. The continuation terminates: every `STEP_BUDGET_EXHAUSTED` carries
+durable progress by its own definition, the task's state machine is bounded by
+the repository's `maxReviewRounds`, and a continuation that lands zero durable
+steps is refused as unresolved rather than tried again. `agent-loop block`
+therefore never exits 5, because there is no state in which calling again would
+continue anything.
+
+### `agent-loop block`
+
+```powershell
+agent-loop block --repository <abs path> --block <id> --tasks <id...> --run <id>
+agent-loop block --repository <abs path> --block <id> --tasks <id...> --run <id> --attended
+```
+
+Read-only by default. It resolves, plans, projects, defines and prints what a run
+*would* be started against — including whether the members are established as
+independent, which is the property the whole slice turns on — while starting no
+agent, writing no ledger and taking no lease. A command that wrote nothing and
+drove nothing has no claim on the repository's turn as writer, and the snapshot
+it prints authorises nothing.
+
+The report states plainly that eligibility and independence are two different
+questions, because a member independent of every other member can still be
+waiting on a task the block does not hold. `--run` is required and never
+generated: a run id the tool invented would be a run an operator cannot name
+back. `--attended` states that an operator is present for this invocation; it is
+not a claim about credentials, and a fresh auth preflight must still pass.
+
+### Carried forward from V2-08, deliberately
+
+- **F-B1 — an attended invocation acts on one snapshot of the roadmap.** One
+  `planNextTask` result, taken under the lease, is the projection, the
+  fingerprint, the eligibility filter and every task's start gate. So a roadmap
+  edited while the invocation is in flight changes nothing about it in either
+  direction: it cannot stop a member that was eligible when the operator asked,
+  and it cannot make one runnable that was not. Accepted deliberately — the
+  alternative is a run whose authority a mid-run edit can move, and the version
+  of that which re-derives the relation is the inversion the whole slice exists
+  to prevent. There is no drift check to notice the edit either, because with no
+  resume there is no persisted predecessor to compare against. The edit is seen
+  by the next invocation.
+
+  What this cost, and it is worth naming: `startTask` read the plan itself, so
+  the property was false one layer below a runner that looked correct. Closed by
+  splitting the start path rather than by documenting the exception.
+- **F-B2 — `independenceIsEstablished` is all-or-nothing.** A block with any
+  frozen edge degrades to V2-07's behaviour — stop at the first task-local
+  failure — even where the remaining members happen to be mutually independent.
+  Accepted: the finer answer is a dependency scheduler, and V2-09 owns it.
+- **F-B3 — two persisted reasons have no producer in this runner.**
+  `OPERATOR_STOPPED` has none because the runner installs no signal handling.
+  `DEFINITION_DRIFTED` has none because a block run does not outlive its
+  invocation, so there is never a persisted predecessor whose fingerprint could
+  differ from the plan just frozen; `reconcileBlockRun` still reports drift to a
+  caller that supplies a definition. Both stay in the vocabulary and stay graded
+  in the exit table. Either a later slice gives them producers or the members are
+  withdrawn — neither is treated as reachable in the meantime, and the suite says
+  so in a list rather than by omission.
+- **F-B4 — a member blocked only by a non-member ends the run
+  `NO_ELIGIBLE_TASK`.** The frozen relation deliberately records nothing about
+  non-members, so a block can be frozen while that member can never become
+  eligible. The honest dead end rather than a defect, and the reason it is
+  reserved rather than generic.
+- **F-B5 — an interrupted invocation leaves a run nothing can continue.** A
+  crashed or killed attended invocation leaves an open ledger, possibly with an
+  `ACTIVE` entry, and no later invocation may adopt it: the run id is spent and
+  `startBlockRun` refuses it. Accepted as the fail-closed side of the lifetime
+  decision — the record still says what happened and which task was in flight,
+  and `release --attended` still handles the workspace that task left behind.
+  What is *not* offered is a continuation, because offering one would mean a
+  durable run outliving the lease that authorised it.
+
+### What V2-08 is not
+
+**Attended only**, and that is the single most important scope line in the slice.
+Unattended running needs *owned process containment* rather than merely the
+lease, and automatic recovery of a stale lease stays refused until the
+orchestrator creates that containment itself — so staying attended is exactly
+what keeps that surface closed. Nothing here creates a Job Object, supervises a
+process group, or changes the lease's recovery answer.
+
+**Sequential only.** The ledger enforces one `ACTIVE` task and this runner drives
+one at a time; "several independent tasks" is about surviving a sibling's
+failure, never about concurrency. Parallel execution would need the same
+containment.
+
+No commit chain and no dependency scheduler — V2-09 owns both, and the chain must
+earn a claim V2-07 explicitly refused to make: that a `READY_FOR_PR` task has a
+commit fit to be a successor's base. No new platform, filesystem or ownership
+behaviour: V2-07P closed that block and it is not reopened here. And
+`READY_FOR_PR` is still terminal, so the orchestrator still hands a finished task
+to a human and stops.
+
 ## Not implemented yet
 
-Still missing, deliberately: block execution (V2-08); the dependent commit chain
+Still missing, deliberately: the dependent commit chain
 (V2-09); unattended operation; owned process containment; and any product-side
 PR/CI/merge automation.
 
@@ -4231,7 +4600,7 @@ V2-07  ledger authority
          |
 V2-07L execution lease / ownership          <- shipped
          |
-V2-08  attended block runner
+V2-08  attended block runner                <- shipped
          |
 V2-09  dependent tasks / commit chain
 ```
