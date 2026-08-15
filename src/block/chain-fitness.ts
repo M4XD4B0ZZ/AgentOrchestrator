@@ -51,6 +51,28 @@ export const CHAIN_BASE_REFUSALS = [
    */
   'PREDECESSOR_RESULT_ABSENT',
   /**
+   * A required predecessor's result commit **is the commit it started on**.
+   *
+   * A settlement is not a delivery. An entry whose `resultCommit` equals its own
+   * `baseCommit` says, in the ledger's own words, that the member finished
+   * exactly where it began — so building the successor on it would chain onto a
+   * tree nobody changed and call the emptiness progress.
+   *
+   * This is not redundant with the settlement gate in `runReviewStep`, and the
+   * reason is durability. Task-state files are keyed by task id and survive
+   * every later run; the reconciler re-reads them each iteration; a `PLANNED`
+   * ledger entry against a `READY_FOR_PR` record yields `TASK_AHEAD_OF_LEDGER`,
+   * and `applyForcedProgress` then writes that stale record into the *new*
+   * ledger, taking `baseCommit` and `resultCommit` straight from it. Records
+   * written before that gate existed — the first dogfood's among them — can
+   * therefore re-enter a chain on a future run, and nothing stops them at load
+   * time. This is what stops them, and it says truthfully what is wrong.
+   *
+   * The operator's move: look at the predecessor. It settled without producing
+   * anything, which is now a refusal in its own right rather than a base.
+   */
+  'PREDECESSOR_DELIVERED_NOTHING',
+  /**
    * The recorded result commit is not an object in this repository.
    *
    * Git answered the question and said no. The commit was pruned, or the ledger
@@ -131,6 +153,25 @@ export async function proveChainBase(
   }
   const candidate = entryFor(ledger, maximum)?.resultCommit ?? null;
   if (candidate === null) return refuse('PREDECESSOR_RESULT_ABSENT');
+
+  // 2b. A predecessor whose result is the tree it started on delivered nothing,
+  // and a settlement is not a delivery.
+  //
+  // Compared per entry against its **own** `baseCommit` rather than against
+  // `blockBaseCommit`: that also catches a chained `a2` whose base was `a1`'s
+  // result and whose own result equals it, which a comparison against the block
+  // base would miss entirely. Applied to every required predecessor, not only
+  // the maximum, because a chain is only as delivered as its emptiest member.
+  //
+  // Placed after the candidate read so a settled entry carrying no result at all
+  // still gets the more specific `PREDECESSOR_RESULT_ABSENT`, and before Git so
+  // it costs no subprocess — this module asks the ledger first, by design.
+  for (const predecessor of required) {
+    const entry = entryFor(ledger, predecessor); // non-null: proved immediately above
+    if (entry !== null && entry.resultCommit !== null && entry.resultCommit === entry.baseCommit) {
+      return refuse('PREDECESSOR_DELIVERED_NOTHING');
+    }
+  }
 
   // 3–4. The object, then its reachability. Existence is not enough: an
   // unreferenced tip is discarded work, and chaining onto it would resurrect it.
