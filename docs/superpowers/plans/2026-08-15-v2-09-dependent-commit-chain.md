@@ -56,6 +56,36 @@ Every task's requirements implicitly include this section. The first three are t
   `blockBaseCommit`, and scope resolution must be handed that commit explicitly:
   `readPinnedScope` may never fall back to `basePinnedCommit` on the block path.
 
+  **And the invariant outlives the invocation, or it is not one.** A chained
+  task's durable `TaskState` is an ordinary task state: it pins
+  `basePinnedCommit = A.resultCommit`, and nothing in it says that some *other*
+  commit governs its scope. So an invocation-scoped answer — the block runner
+  handing the authority to the driver it starts — protects the run and nothing
+  after it. The counter-example is representable and is not exotic:
+
+  ```text
+  block run:   blockBase = M0,  A settles at A1 (A1 widens the profile),
+               B is started chained at A1 and the invocation then dies
+
+  later:       the roadmap says A is DONE, but the authoritative default branch
+               does not contain A1 - A was squash-merged, reworked, or the
+               status was simply written by hand
+
+  standalone:  agent-loop run --attended --task B
+               eligibility now passes, B's existing state is used,
+               the scope is read from B.basePinnedCommit = A1
+               -> agent A decides B's scope after all
+  ```
+
+  So the two roles are separated **in the durable record**: `TaskState` gains
+  `scopeAuthorityCommit`, written once at start, `null` meaning *this task's own
+  base pin governs*. Task 6 establishes it and states why it needs no schema
+  version bump. Roadmap `DONE` is **not** evidence about Git and is nowhere
+  treated as such: an earlier draft of this plan argued that a human marking `A`
+  done had thereby accepted `A`'s profile change, and that inference is
+  unsupported — `status: DONE` is a markdown field, and it says nothing about
+  which commits reached the default branch or in what shape.
+
 - **G3 — E3: `SETTLED` is a disposition; `SETTLED + chain-fit` is a satisfied dependency.**
 
   ```text
@@ -90,27 +120,69 @@ Every task's requirements implicitly include this section. The first three are t
   5. blockBaseCommit is ancestor-or-equal of it    else BASE_NOT_DESCENDED_FROM_BLOCK_BASE
   6. every P in R has its resultCommit
      ancestor-or-equal of it                       else BASE_MISSING_REQUIRED_PREDECESSOR
-  7. some member with an empty frozen row is
-     recorded in this ledger at blockBaseCommit    else CHAIN_ANCHOR_MISSING
+  7. the empty-row members of this ledger that
+     carry a baseCommit at all carry exactly ONE
+     distinct value, and it is blockBaseCommit     else CHAIN_ANCHOR_MISSING
+                                                    / CHAIN_ANCHOR_AMBIGUOUS
   ```
 
   Rule 6 is the general form of the sharpening: *the result commit of the unique
   maximum must actually contain every settled member predecessor required for
   `T`.* It is what excludes a `READY_FOR_PR` record from an older run, which
   `applyForcedProgress` may legitimately settle and which does not thereby
-  authorise this chain. Rule 7 is the **chain anchor**: it is what makes
-  `blockBaseCommit` — an invocation input, not a persisted field —
-  reconstructible from the ledger afterwards, so no chain decision rests on
-  runtime memory alone. See "The B-6 counter-proof, run" below.
+  authorise this chain.
 
-- **G5 — no new ledger field, no new stop reason, no schema bump.** A chain
+  Rule 7 is the **chain anchor**, and it is a cardinality rule rather than an
+  existence one. Existence alone does not make `blockBaseCommit` *derivable* from
+  the ledger, which was the point of having it:
+
+  ```text
+  R1  frozen row []   baseCommit = M0     started by this run
+  R2  frozen row []   baseCommit = M1     forced-settled from an older run
+
+  reader of the durable document alone:
+    "blockBase := the baseCommit of an empty-row member"  ->  M0 or M1
+  ```
+
+  Two answers is no answer. So the set
+
+  ```text
+  { entry.baseCommit | empty frozen row, baseCommit != null }
+  ```
+
+  must have cardinality exactly 1 before any chained start proceeds, and its one
+  element must be the `blockBaseCommit` this invocation is running under. More
+  than one distinct value is `CHAIN_ANCHOR_AMBIGUOUS` — a document with two
+  answers. No value, or one value that is not this invocation's base, is
+  `CHAIN_ANCHOR_MISSING` — a document with no answer of ours, and the same
+  instruction to the operator: start this block from its root. Both are refusals,
+  never repairs. The rule is evaluated only on a chained start, so a wholly
+  independent block is unaffected by it.
+
+- **G5 — no new ledger field, no new stop reason, no ledger schema bump; exactly
+  one new task-state field, and no task-state version bump either.** A chain
   refusal is a start-gate refusal: `RUN_GATE_REFUSED`, detail = the fitness
   code, entry stays `PLANNED`, ledger byte-identical across it. The chain is
   read out of `frozenDependencies` plus `entry.baseCommit` plus
-  `entry.resultCommit`. If any task finds a decision that cannot be
-  reconstructed from those plus effect-time Git proofs plus the anchor, the
-  hypothesis has fallen and the plan stops for a decision — it does not
-  pre-emptively grow a field.
+  `entry.resultCommit` plus the anchor, and that side of the hypothesis holds in
+  full.
+
+  The one addition is `TaskState.scopeAuthorityCommit`, and it is the minimal
+  state change G2 forces: there is no existing durable authority that preserves
+  the governing scope commit past the block invocation, and the alternatives were
+  checked one by one rather than assumed away (see the counter-proof below). It
+  is **additive, nullable and defaulted**, so a state written before this slice
+  parses unchanged and means exactly what it meant — `null` is *"this task's own
+  base pin governs"*, which is true of every pre-V2-09 task by construction,
+  since no pre-V2-09 task has a base authored by a sibling. Nothing is invented
+  for an old document, which is the whole reason the ledger's version-1 refusal
+  was right and a version bump here would be theatre. The other direction fails
+  closed on its own: an older build meeting a state that carries the field
+  refuses it at its `.strict()` boundary.
+
+  If any task finds a further decision that cannot be reconstructed from durable
+  evidence, the plan stops for a decision — it does not pre-emptively grow a
+  second field.
 
 - **G6 — every control addresses both directions.** For each new guard, a
   sensitivity case (the unsafe mutant must turn it red) *and* a specificity case
@@ -198,32 +270,41 @@ Answered per decision, before any code:
 | --- | --- | --- |
 | which predecessor `T` chains onto | `frozenDependencies` (pure) | yes |
 | `T`'s execution base | `entry(M).resultCommit`, itself re-proved against `M`'s task record on every write | yes |
-| the base is real, referenced, descended, containing | Git, re-runnable at any later time from the same inputs | yes — a gate, never a stored answer |
-| `blockBaseCommit` | **not persisted** — an invocation input | only via rule 7 |
-| the scope authority used for a chained member | equals `blockBaseCommit` | only via rule 7 |
+| the base is real, referenced, descended, containing | Git, re-runnable later from the same inputs | yes — a gate, never a stored answer |
+| `blockBaseCommit`, from the ledger | the empty-row entries' `baseCommit` | only under rule 7's **cardinality** form |
+| the scope authority of a chained task, after the run | nothing | **no — the hypothesis falls here** |
 
-The two gaps are the same gap, and rule 7 closes it: a chain may only proceed
-while some member with an empty frozen row is recorded in *this* ledger with
-`baseCommit === blockBaseCommit`. In the ordinary case the chain root is exactly
-that member, so the rule costs nothing; in the exotic case — every root of the
-chain settled by `applyForcedProgress` from an older run, so no entry names this
-run's base — the run refuses `CHAIN_ANCHOR_MISSING` rather than chaining onto a
-base nothing durable names. **Hypothesis holds: no new field.** The residue is
-recorded as a follow-up, not smuggled past.
+The first gap is closed by rule 7 as G4 now states it. Existence was not enough:
+one empty-row member started by this run and one forced-settled from an older run
+give a later reader two candidate values and therefore no answer. Cardinality one
+makes the value *derivable*; the price is a refusal in the mixed case, carried as
+F-C1.
 
-One further hole was checked and found already closed, and the argument is
-load-bearing enough to be pinned rather than trusted (Task 6, control G-5). A
-chained task's durable state is an ordinary `TaskState`; nothing marks it as
-chained; so `agent-loop run --attended --task B` would compute `B`'s scope from
-`basePinnedCommit`, which for a chained member is `A`'s result — the widened
-profile, outside the block that knew better. It is unreachable because the same
-gate that makes `B` chainable inside the run makes it unstartable outside it:
-`startTask` checks eligibility *before* `ALREADY_STARTED`
-(`src/run/start-task.ts:422` ahead of `:443`), so while `A` is not roadmap-`DONE`
-the invocation stops at `TASK_INELIGIBLE` having read no profile at all. Once
-`A` *is* `DONE`, a human has accepted `A`'s commits — including any profile
-change in them — and the widening is no longer self-authorisation. Both halves
-get a control.
+**The second gap is real and no existing durable authority closes it.** Checked
+one by one before proposing anything:
+
+| Candidate authority | Why it does not answer |
+| --- | --- |
+| `TaskState` fields | the only commits it holds are `basePinnedCommit` and `currentCommit`; neither is the scope authority for a chained task, and `baseBranch` is a branch name |
+| the block ledger | orchestration truth a task path may not consult; not findable from a task id; and two runs may legitimately hold the same task, so it can give two answers |
+| Git refs | nothing names the block base; `merge-base(pin, defaultBranch)` is an inference that moves whenever the default branch moves or is rewritten, and it would silently *change* the governing profile over time |
+| the roadmap | `status: DONE` is a markdown field. It is not evidence about Git, about what reached the default branch, or about the shape it arrived in |
+
+The last row is where the previous draft of this plan was wrong, and it is worth
+naming as an error rather than quietly replacing: it argued that once `A` is
+roadmap-`DONE` a human has accepted `A`'s commits, so `A`'s widened profile is no
+longer self-authorisation. That inference is unsupported. `A` can be squash-merged
+without the profile hunk, reworked before merge, or simply marked done by hand,
+and `B`'s durable state still pins `A1`. The gate ordering in `start-task.ts`
+(eligibility at `:422` ahead of `ALREADY_STARTED` at `:443`) does close the window
+*while* `A` is not `DONE` — that part stands and is still worth a control — but it
+buys invocation safety, not the durable invariant G2 requires.
+
+So the minimal state change is taken exactly there, and nowhere else:
+`TaskState.scopeAuthorityCommit`, additive, nullable, defaulted, no version bump
+(G5). With it, the scope authority of every task is answerable from the task's own
+durable record, by the module that already reads that record, forever — and no
+ledger field, stop reason or ledger version was needed for any of it.
 
 ## File Structure
 
@@ -231,20 +312,22 @@ get a control.
 | --- | --- |
 | `src/block/chain-shape.ts` *(create)* | Pure. The unique maximum of a member's frozen required set; the whole-block shape verdict. Freeze-time and run-time readers share it; it computes no relation of its own. |
 | `src/worktree/commit-probes.ts` *(create)* | The two Git exit-status protocols in one place — object presence and ancestry — plus "is this commit contained in any ref". Extracted from `observe-runtime.ts` so there is one implementation, not two. |
-| `src/block/chain-fitness.ts` *(create)* | Effect-time proof that a predecessor's result is fit to be this member's base. The seven refusals of G4, in that precedence order. |
+| `src/block/chain-fitness.ts` *(create)* | Effect-time proof that a predecessor's result is fit to be this member's base. The eight refusals of G4, in that precedence order. |
 | `src/worktree/prepare-workspace.ts` *(modify)* | `WorkspaceBase` as a required option; `proveSourcePreflight` splits checkout proof from base resolution; two new refusals for a pinned base that does not resolve. |
 | `src/worktree/adopt-workspace.ts` *(modify)* | Adoption is assessed against the base it was *told*, never against a re-derived default-branch tip. |
-| `src/run/start-task.ts` *(modify)* | `PlannedStartRequest` carries `base` and `satisfiedDependencies`; the eligibility gate accepts a frozen-ineligible member exactly on G3's terms. `startTask` keeps today's behaviour. |
+| `src/run/start-task.ts` *(modify)* | `PlannedStartRequest` carries `base`, `scopeAuthorityCommit` and `satisfiedDependencies`; `firstState` writes the authority into the first durable record; the eligibility gate accepts a frozen-ineligible member exactly on G3's terms. `startTask` keeps today's behaviour and passes `null`. |
+| `src/core/internal/task-state-object-schema.ts` *(modify)* | `scopeAuthorityCommit`: a full Git object name, nullable, defaulted to `null`. No version bump — see G5. |
+| `schemas/task-state.schema.json` *(regenerate)* | `npm run schema:generate`. Never hand-edited; a test fails if it drifts. |
 | `src/block/block-conclusion.ts` *(modify)* | `memberRunnability` — the pure G3 rule over the planner's eligibility report and the ledger's entries. |
-| `src/block/block-runner.ts` *(modify)* | `blockBaseCommit` in the request; the runnable set recomputed per iteration; the chained base chosen, proved, and handed to the start path. |
-| `src/run/run-driver.ts` *(modify)* | `RunRequest.scopeAuthorityCommit: string \| null`, forwarded to the loop. Required, so both callers state their answer. |
-| `src/loop/loop-step.ts` *(modify)* | The scope gate resolves its declaration from the scope authority commit, not from the base pin. |
+| `src/block/block-runner.ts` *(modify)* | `blockBaseCommit` in the request; the runnable set recomputed per iteration; the chained base chosen, proved, and handed to the start path together with the scope authority. |
+| `src/scope/assess-scope.ts` *(modify)* | Two commits, not one: the delta is measured from the base pin, the declaration is read from the scope authority. |
+| `src/loop/loop-step.ts` *(modify)* | The scope gate passes `state.scopeAuthorityCommit`, falling back to the base pin in exactly one place. |
 | `src/cli/block-command.ts` *(modify)* | Captures `blockBaseCommit` under the lease at the same instant as the plan; refuses a block with no chain shape; reports both. |
-| `src/cli/run-command.ts` *(modify)* | Passes `scopeAuthorityCommit: null` — "the task's own pin governs" — explicitly. |
 | `src/cli/render-block-run.ts` *(modify)* | Sentences for the new refusal detail; the semantic renderer controls' subject. |
 | `tests/v2-09-dependent-commit-chain.test.ts` *(create)* | Every control of this slice. |
 | `tests/v2-08-attended-block-runner.test.ts` *(modify)* | Re-based onto the new request and start signatures; the import pins stay. |
-| `tests/start-task.test.ts`, `tests/run-driver.test.ts`, `tests/worktree-lifecycle.test.ts`, `tests/v2-06-scope-enforcement.test.ts`, `tests/v2-06a-workspace-adoption.test.ts`, `tests/helpers/e2e-fixtures.ts` *(modify)* | Mechanical: the new required arguments. |
+| `tests/start-task.test.ts`, `tests/worktree-lifecycle.test.ts`, `tests/worktree-races.test.ts`, `tests/v2-06-scope-enforcement.test.ts`, `tests/v2-06a-workspace-adoption.test.ts`, `tests/helpers/e2e-fixtures.ts` *(modify)* | Mechanical: the new required arguments. |
+| `tests/task-state.test.ts`, `tests/public-state-api.test.ts`, `tests/schema-generation.test.ts` *(modify)* | The new state field: its contract, that it is not a new public export, and that the generated JSON schema matches. |
 | `README.md` *(modify)* | The V2-09 narrative, the F-B4 correction, the follow-up register, the roadmap. |
 
 ---
@@ -610,6 +693,48 @@ describe('a predecessor result is proved fit before it becomes a base', () => {
     });
     expect(result).toEqual({ ok: false, code: 'CHAIN_ANCHOR_MISSING' });
   });
+
+  it('refuses when the empty-row members name two different bases', async () => {
+    // R1 was started by this run at BASE; R2 was forced-settled from an older
+    // run at FOREIGN. The anchor exists, and a later reader of this document
+    // alone still cannot say which commit the block was frozen on.
+    const result = await proveChainBase(gitAnswering({}), 'C:/r', {
+      ledger: chainLedgerWithRoots({ 'task-r1': BASE, 'task-r2': FOREIGN }, {
+        a2: { disposition: 'SETTLED', resultCommit: RESULT },
+      }),
+      taskId: 'task-b',
+      maximum: 'task-a2',
+      blockBaseCommit: BASE,
+    });
+    expect(result).toEqual({ ok: false, code: 'CHAIN_ANCHOR_AMBIGUOUS' });
+  });
+
+  // Specificity (G6): the anchor must not refuse the ordinary chain.
+  it('accepts several roots that all name the same base', async () => {
+    const result = await proveChainBase(gitAnswering({}), 'C:/r', {
+      ledger: chainLedgerWithRoots({ 'task-r1': BASE, 'task-r2': BASE }, {
+        a2: { disposition: 'SETTLED', resultCommit: RESULT },
+      }),
+      taskId: 'task-b',
+      maximum: 'task-a2',
+      blockBaseCommit: BASE,
+    });
+    expect(result).toEqual({ ok: true, commit: RESULT });
+  });
+
+  // An empty-row member that has not started yet carries no baseCommit, and a
+  // PLANNED entry must not count against the cardinality.
+  it('ignores an empty-row member that has not started', async () => {
+    const result = await proveChainBase(gitAnswering({}), 'C:/r', {
+      ledger: chainLedgerWithRoots({ 'task-r1': BASE, 'task-r2': null }, {
+        a2: { disposition: 'SETTLED', resultCommit: RESULT },
+      }),
+      taskId: 'task-b',
+      maximum: 'task-a2',
+      blockBaseCommit: BASE,
+    });
+    expect(result).toEqual({ ok: true, commit: RESULT });
+  });
 });
 ```
 
@@ -633,6 +758,7 @@ export const CHAIN_BASE_REFUSALS = [
   'BASE_NOT_DESCENDED_FROM_BLOCK_BASE',
   'BASE_MISSING_REQUIRED_PREDECESSOR',
   'CHAIN_ANCHOR_MISSING',
+  'CHAIN_ANCHOR_AMBIGUOUS',
 ] as const;
 
 export async function proveChainBase(
@@ -681,13 +807,28 @@ export async function proveChainBase(
     if (contained === 'NOT_ANCESTOR') return refuse('BASE_MISSING_REQUIRED_PREDECESSOR');
   }
 
-  // 7. The anchor: `blockBaseCommit` is an invocation input, and this is what
-  // makes it reconstructible from the ledger afterwards.
-  const anchored = ledger.frozenDependencies.some((row) => {
-    if (row.dependsOn.length !== 0) return false;
-    return entryFor(ledger, row.taskId)?.baseCommit === blockBaseCommit;
-  });
-  if (!anchored) return refuse('CHAIN_ANCHOR_MISSING');
+  // 7. The anchor, and it is a cardinality question rather than an existence
+  // one. `blockBaseCommit` is an invocation input; what makes it *derivable*
+  // from this document afterwards is that the empty-row members which have
+  // started agree on one value. Two values — one root started here, one
+  // forced-settled from an older run — leave a later reader with two candidate
+  // block bases and therefore with none.
+  const anchors = new Set(
+    ledger.frozenDependencies
+      .filter((row) => row.dependsOn.length === 0)
+      .map((row) => entryFor(ledger, row.taskId)?.baseCommit ?? null)
+      // A root that has not started carries no base and is not evidence either
+      // way; only a recorded value can anchor or contradict.
+      .filter((commit): commit is string => commit !== null),
+  );
+  //
+  // Two codes, and each says exactly one thing. More than one distinct value is
+  // a document with two answers. A single value that is not this invocation's
+  // base — every root forced-settled from one older run — is a document with one
+  // answer that is not ours, and it is the same operator instruction as no
+  // anchor at all: start this block from its root.
+  if (anchors.size > 1) return refuse('CHAIN_ANCHOR_AMBIGUOUS');
+  if (!anchors.has(blockBaseCommit)) return refuse('CHAIN_ANCHOR_MISSING');
 
   return Object.freeze({ ok: true as const, commit: candidate });
 }
@@ -1038,85 +1179,181 @@ git commit -m "feat: a settled member satisfies a dependency inside its own run 
 
 ---
 
-### Task 6: The scope authority, split from the execution base
+### Task 6: The scope authority, durable and split from the execution base
 
 **Files:**
-- Modify: `src/run/run-driver.ts` (`RunRequest`, forwarded into the loop options)
-- Modify: `src/loop/loop-step.ts` (the scope gate, line ~406)
+- Modify: `src/core/internal/task-state-object-schema.ts` (the new field)
+- Regenerate: `schemas/task-state.schema.json` (`npm run schema:generate`)
+- Modify: `src/run/start-task.ts` (`PlannedStartRequest.scopeAuthorityCommit`, `firstState`)
 - Modify: `src/scope/assess-scope.ts` (`ScopeAssessmentInput.scopeAuthorityCommit`)
-- Modify: `src/cli/run-command.ts` (passes `null`)
+- Modify: `src/loop/loop-step.ts` (the scope gate, line ~406)
+- Modify: `tests/task-state.test.ts`, `tests/public-state-api.test.ts`
 - Test: `tests/v2-09-dependent-commit-chain.test.ts`
 
 **Interfaces:**
-- Produces: `RunRequest.scopeAuthorityCommit: string | null` — **required**, where
-  `null` means *the task's own base pin governs*. Required rather than optional
-  so both callers state their answer; an omitted field is how the widened profile
-  would sneak back in.
-- `ScopeAssessmentInput` gains `scopeAuthorityCommit: string | null`;
-  `readPinnedScope` is called with `scopeAuthorityCommit ?? basePinnedCommit`,
-  and the delta continues to be measured from `basePinnedCommit`. Those are two
-  different commits on purpose: the delta is *what this task changed*, the scope
-  is *what it was allowed to change*.
+- Produces: `TaskState.scopeAuthorityCommit: string | null` — a full Git object
+  name; `null` means *this task's own base pin governs*. Additive, nullable,
+  `.default(null)`, **no `TASK_STATE_SCHEMA_VERSION` bump** (G5).
+- `PlannedStartRequest.scopeAuthorityCommit: string | null` — **required**, so
+  every caller states its answer. `startTask` passes `null`; the block runner
+  passes `blockBaseCommit`. An omitted field is how the widened profile would
+  sneak back in, which is why it is not optional.
+- `ScopeAssessmentInput.scopeAuthorityCommit: string | null`. `readPinnedScope`
+  is called with `scopeAuthorityCommit ?? basePinnedCommit`; the delta continues
+  to be measured from `basePinnedCommit`. Two different commits on purpose: the
+  delta is *what this task changed*, the scope is *what it was allowed to
+  change*.
+- **`RunRequest` gains nothing.** An earlier draft of this task threaded the
+  authority through `runTask` as an invocation argument. That is the shape the
+  review rejected: it protects the run and nothing after it. The value is written
+  once, at start, into the record its consumer already reads.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing durable counter-proof**
 
-Git-tier controls **G-2a** and **G-2b**. Justification: the effect is which
-committed tree the profile is read out of, and only a real repository with two
-different profiles in two commits can show it.
+Git-tier control **G-5**, and it is the one the review demanded. Justification:
+the claim is that the authority *survives the block invocation*, so nothing that
+stays inside one invocation can prove it — the state has to be written by a real
+chained start, the block run has to end, and a caller that knows nothing about
+blocks has to drive the task afterwards.
 
 ```ts
-it('judges a chained task against the profile at the block base, not the one its predecessor committed', async () => {
+it('judges a chained task against the block base even after the block run is over', async () => {
+  // blockBase allows src/a/** only. A commits a profile allowing /**, and B is
+  // started chained on A's result. The block run then ends with B unfinished.
+  const repo = await realRepositoryWithChain({ allowedPaths: ['src/a/**'] });
+  const blockBase = headOf(repo.root);
+  await runAttendedBlock(request(repo, { blockBaseCommit: blockBase }), {
+    ...seams,
+    agent: recordedAgent({
+      'task-a': writerThatCommits(REPO_PROFILE_RELATIVE_PATH, profileAllowing(['/**'])),
+      'task-b': usageLimitResult(),          // B is started, then stops resumably
+    }),
+  });
+
+  const b = reload(repo.root, 'task-b').state;
+  expect(b.basePinnedCommit).toBe(entryFor(loadBlockLedger(repo.root, 'run-1').ledger, 'task-a')?.resultCommit);
+  expect(b.scopeAuthorityCommit).toBe(blockBase);          // durable, not remembered
+
+  // Now a caller that knows nothing about blocks. It supplies no authority of
+  // any kind, and the roadmap has since been marked DONE for task-a — which is a
+  // markdown field and proves nothing about Git.
+  markTaskDone(repo, 'task-a');
+  const run = await runTask(
+    { repository: repo.repository, taskId: 'task-b', taskBrief: 'task-b',
+      attendedContinuation: true, authEvidence, lease: repo.lease, maxSteps: 4 },
+    { now, git: runGitCommand, agent: recordedAgent({ 'task-b': writerThatCommits('src/b/x.ts', 'work') }) },
+  );
+
+  // The widening A committed is not in force: src/b/** was never allowed by the
+  // profile at the block base, and that is still the profile that governs.
+  expect(run.outcome).toBe('SCOPE_VIOLATION');
+  expect(reload(repo.root, 'task-b').state.state).toBe('SCOPE_VIOLATION');
+});
+```
+
+Specificity (G6) for this guard is not a second expensive control: an ordinary
+task is unaffected because its `scopeAuthorityCommit` is `null`, which is proved
+by `tests/v2-06-scope-enforcement.test.ts` staying green **unedited**, plus one
+pure assertion that the standalone start path writes `null`:
+
+```ts
+it('writes no scope authority for a task started outside a block', async () => {
+  const start = await startTask({ repository, taskId: 'task-a' }, deps);
+  expect(reload(repository.root, 'task-a').state.scopeAuthorityCommit).toBeNull();
+});
+```
+
+- [ ] **Step 2: Write the failing scope-resolution controls**
+
+Git-tier **G-2a** and **G-2b**, at the assessment boundary. Justification: the
+effect is which committed tree the profile is read out of, and only a real
+repository holding two different profiles in two commits can show it.
+
+```ts
+it('reads the declaration from the scope authority and the delta from the base pin', async () => {
   const repo = await realRepositoryWithProfile({ allowedPaths: ['src/a/**'] });
   const blockBase = headOf(repo.root);
   const widened = await commitOnBranch(repo, 'agent/task-a', profileAllowing(['/**']));
+  const worktree = chainedWorktreeAt(repo, widened, { change: 'src/b/x.ts' });
 
   const assessment = await assessTaskScope({
-    git: runGitCommand,
-    authorisedWorktreePath: chainedWorktreeAt(repo, widened),
-    basePinnedCommit: widened,
-    scopeAuthorityCommit: blockBase,
-    // the worktree holds one change, to src/b/x.ts
+    git: runGitCommand, authorisedWorktreePath: worktree,
+    basePinnedCommit: widened, scopeAuthorityCommit: blockBase,
   });
-
   expect(assessment.verdict).toBe('VIOLATION');
   expect(assessment.offences.map((offence) => offence.path)).toEqual(['src/b/x.ts']);
 });
 
-// Specificity (G6): the frozen profile must still permit what it really permits.
+// Specificity (G6): the frozen profile must still permit what it really permits,
+// and the delta must still be measured from the chained base — a change to
+// src/a/y.ts is inside the block-base scope and is not reported.
 it('lets a chained task change what the block-base profile allows', async () => {
-  // same fixture; the worktree holds one change, to src/a/y.ts
-  expect((await assessTaskScope({ …, scopeAuthorityCommit: blockBase })).verdict).toBe('WITHIN_SCOPE');
+  const worktree = chainedWorktreeAt(repo, widened, { change: 'src/a/y.ts' });
+  const assessment = await assessTaskScope({
+    git: runGitCommand, authorisedWorktreePath: worktree,
+    basePinnedCommit: widened, scopeAuthorityCommit: blockBase,
+  });
+  expect(assessment).toMatchObject({ verdict: 'WITHIN_SCOPE', offences: [] });
 });
 ```
 
-And the out-of-block argument, git-tier control **G-5**. Justification: it is a
-claim about the composition of two CLI-level gates against a real roadmap and a
-real durable state; no unit test can show that `agent-loop run` reads no profile.
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Run: `npx vitest run tests/v2-09-dependent-commit-chain.test.ts -t 'scope authority'`
+Expected: FAIL — `scopeAuthorityCommit` is neither a state field nor an
+assessment input, and the assessment reads the widened profile.
+
+- [ ] **Step 4: Add the field to the state contract**
+
+In `src/core/internal/task-state-object-schema.ts`, beside `basePinnedCommit`:
 
 ```ts
-it('refuses to continue a chained task outside its block while its predecessor is not DONE', async () => {
-  const repo = await realRepositoryWithChain();   // task-a OPEN, task-b dependsOn task-a, b has state
-  const result = await runAgentLoop(['run', '--repository', repo.root, '--task', 'task-b', '--attended']);
-  expect(result.stdout).toContain('TASK_INELIGIBLE');
-  expect(result.stdout).not.toContain('SCOPE');
-  expect(reload(repo.root, 'task-b').state.state).toBe('WORKTREE_READY');  // nothing moved
-});
-
-// Specificity (G6): once a human has accepted the predecessor, the refusal lifts.
-it('continues it once the roadmap says the predecessor is DONE', async () => {
-  markTaskDone(repo, 'task-a');
-  const result = await runAgentLoop(['run', '--repository', repo.root, '--task', 'task-b', '--attended']);
-  expect(result.stdout).not.toContain('TASK_INELIGIBLE');
-});
+  /**
+   * The commit whose profile decides what this task is allowed to change.
+   *
+   * `null` — and `null` is the default — means *this task's own
+   * `basePinnedCommit` governs*, which is the only answer that was ever needed
+   * while every task started from the default branch.
+   *
+   * A chained task breaks that identity: its base pin is a commit its
+   * predecessor's agent wrote, and reading a scope declaration out of that
+   * commit would let one agent widen the next one's permissions. So the two
+   * roles are separated here, in the durable record, rather than in whichever
+   * invocation happens to be driving: a block run can end, crash or be killed,
+   * and the successor's state is then an ordinary task state that any later
+   * caller may continue. If the authority lived in that caller's arguments, the
+   * guarantee would end with the invocation that made it.
+   *
+   * Additive and defaulted rather than versioned, deliberately. A state written
+   * before this field existed means exactly `null`: no task before the chain had
+   * a base authored by a sibling, so nothing is invented for an old document —
+   * which is the test the ledger's version-1 refusal applied and failed. The
+   * other direction fails closed on its own, because an older build meets an
+   * unknown key at a `.strict()` boundary and refuses the state.
+   */
+  scopeAuthorityCommit: GitShaSchema.nullable().default(null),
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 5: Regenerate the public schema and re-pin the surface**
 
-Run: `npx vitest run tests/v2-09-dependent-commit-chain.test.ts -t 'block base'`
-Expected: FAIL — `scopeAuthorityCommit` is not an accepted input, and the
-assessment reads the widened profile.
+Run: `npm run schema:generate`
+Then confirm `tests/schema-generation.test.ts` and `tests/public-state-api.test.ts`
+pass: the generated JSON schema must match, and the field must **not** add a new
+runtime export to `src/core/task-state.ts` (AO-009 — the public surface stays the
+three values and two types it already is).
 
-- [ ] **Step 3: Thread the authority**
+- [ ] **Step 6: Write it at start, read it at the gate**
+
+`start-task.ts`: `PlannedStartRequest` gains the required field, `startAgainstPlan`
+takes it as a parameter, `firstState` writes it, and `startTask` passes `null`.
+Task 5's two `startPlannedTask` cases gain `scopeAuthorityCommit: null` — they are
+about the eligibility gate and nothing else, and stating `null` there is the same
+"say what you mean" the required field exists to force.
+
+```ts
+    basePinnedCommit: workspace.basePinnedCommit,
+    scopeAuthorityCommit,
+```
 
 `assess-scope.ts`:
 
@@ -1126,24 +1363,34 @@ assessment reads the widened profile.
   // The *declaration* is read from the scope authority, because a predecessor
   // that hands its successor code must not thereby hand it permission. For an
   // ordinary task the two are the same commit and nothing changes; for a chained
-  // one the authority is the commit the block was frozen at.
+  // one the authority is the commit the block was frozen at. This `??` is the one
+  // place the fallback exists, so there is one answer to "which commit governed".
   const scope = await readPinnedScope(git, authorisedWorktreePath, scopeAuthorityCommit ?? basePinnedCommit);
   const delta = await observeTaskDelta(git, authorisedWorktreePath, basePinnedCommit);
 ```
 
-`loop-step.ts` passes `options.scopeAuthorityCommit`; `run-driver.ts` carries it
-from `RunRequest` into the loop options; `run-command.ts` passes `null`.
+`loop-step.ts` passes `state.scopeAuthorityCommit` into both assessment calls.
 
-- [ ] **Step 4: Run the scope suites**
+- [ ] **Step 7: Run the scope and state suites**
 
-Run: `npx vitest run tests/v2-06-scope-enforcement.test.ts tests/v2-09-dependent-commit-chain.test.ts`
-Expected: PASS, with `v2-06` unedited apart from the new required field.
+Run: `npx vitest run tests/v2-06-scope-enforcement.test.ts tests/task-state.test.ts tests/public-state-api.test.ts tests/schema-generation.test.ts tests/v2-09-dependent-commit-chain.test.ts`
+Expected: PASS, with `v2-06` **unedited** — that is the specificity half of this
+task, and an edit to it means the ordinary path changed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Prove the durable control is load-bearing**
+
+Change the block runner (Task 7) to pass `scopeAuthorityCommit: null` on the
+chained start, run the G-5 control, and confirm it goes **red** with
+`WITHIN_SCOPE` — the widened profile in force. Revert. A durable-authority claim
+whose control has never been seen to fail is a sentence, not a proof; record the
+observed failure in the commit message.
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/scope/assess-scope.ts src/loop/loop-step.ts src/run/run-driver.ts src/cli/run-command.ts tests/
-git commit -m "feat: scope authority is the block base, never the predecessor's commit (V2-09)"
+git add src/core/internal/task-state-object-schema.ts schemas/task-state.schema.json \
+        src/run/start-task.ts src/scope/assess-scope.ts src/loop/loop-step.ts tests/
+git commit -m "feat: the scope authority is durable, and it is the block base (V2-09)"
 ```
 
 ---
@@ -1223,12 +1470,17 @@ In `driveOneTask`, ahead of `startPlannedTask`:
 
   const start = await startPlannedTask(
     { repository, taskId: choice.taskId, planning: request.planning, base,
-      satisfiedDependencies: choice.satisfiedBy },
+      satisfiedDependencies: choice.satisfiedBy,
+      // Every member of the block, chained or root, is judged against the commit
+      // the block was frozen at — and it is written into the task's own record
+      // here, once, so the answer outlives this invocation.
+      scopeAuthorityCommit: request.blockBaseCommit },
     { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease },
   );
 ```
 
-and `runTask` is called with `scopeAuthorityCommit: request.blockBaseCommit`.
+`runTask` is called unchanged: the authority is a property of the task's record,
+not of the call that drives it.
 
 - [ ] **Step 3: Write the controls**
 
@@ -1486,30 +1738,43 @@ V2-08 shipped, not as a description of new behaviour:
 
 Sections, in this order, each stating the decision and what it cost:
 `SETTLED is a disposition; SETTLED + chain-fit is a satisfied dependency` ·
-`Two commit roles, and only one travels` · `The unique maximum, and why a diamond
-is refused` · `The chain anchor, and what it makes reconstructible` ·
+`Two commit roles, and only one travels — and the authority is durable` ·
+`Roadmap DONE is not evidence about Git` · `The unique maximum, and why a diamond
+is refused` · `The chain anchor is a cardinality rule` ·
 `A chain refusal is a gate refusal` · `What V2-09 is not`.
+
+The third of those is the one to write carefully, because it corrects a claim
+this plan itself made in an earlier draft: that a task marked `DONE` in the
+roadmap has thereby had its commits accepted by a human. `status` is a markdown
+field written by whoever edits the file, and a merge can squash, rework or drop
+any hunk in it. Nothing in this build may treat it as evidence about what reached
+the default branch.
 
 - [ ] **Step 3: Carry the register forward**
 
 New entries, each stating the accepted cost rather than a plan to fix it:
 
-- **F-C1 — a chain whose every root was settled by an older run refuses
-  (`CHAIN_ANCHOR_MISSING`).** The block base is an invocation input, and the
-  anchor is what makes it reconstructible from the ledger afterwards. Accepted:
-  the alternative is a persisted field, and a chain resting on a base nothing
-  durable names is worse than a refusal an operator can clear by starting the
-  block from its root.
+- **F-C1 — a ledger whose roots do not agree on one base cannot be chained onto
+  (`CHAIN_ANCHOR_MISSING` / `CHAIN_ANCHOR_AMBIGUOUS`).** `blockBaseCommit` is an
+  invocation input, and the anchor is what makes it *derivable* from the ledger
+  afterwards — which needs one value, not merely one occurrence. A run whose
+  roots were all forced-settled from an older run, or which holds roots pinned at
+  two different bases, refuses rather than chaining onto a base the document
+  cannot name. Accepted: an operator clears it by starting the block from its
+  root, and the alternative is a durable answer nobody can reconstruct.
 - **F-C2 — an unfit base ends the run rather than skipping the member.** A
   chain-fitness refusal is `RUN_GATE_REFUSED`, so independent members the run had
   not yet reached stay `PLANNED`. Accepted: it matches how every other start-gate
   refusal is graded, and continuing past a Git state nobody understands is the
   direction this repository does not take.
-- **F-C3 — a chained member cannot be continued outside its block.** Its state is
-  an ordinary `TaskState` and nothing marks it as chained; the eligibility gate
-  refuses it while its predecessor is not `DONE`, and once it is `DONE` a human
-  has accepted the predecessor's commits. Accepted, and pinned by control G-5 in
-  both directions.
+- **F-C3 — a chained member *can* be continued outside its block, and keeps the
+  scope it was started under.** Its state is an ordinary `TaskState`, so any later
+  caller may drive it; what travels with it is `scopeAuthorityCommit`, so the
+  profile at the block base still governs however long afterwards that happens
+  and whatever the roadmap has since been edited to say. Not a residue but the
+  property G-5 exists to prove — recorded here because the *execution* base is
+  still the predecessor's commit, so such a continuation extends a stack whose
+  first half was never separately reviewed.
 - **F-C4 — the block produces a stack.** `B`'s branch contains `A`'s commits, so
   a pull request for `B` carries `A`'s work. That is what "dependent execution"
   means here and the report says so; merging out of order is an operator
@@ -1553,19 +1818,21 @@ added, with the defect it proves and why a cheaper control cannot:
 | Control | s | Defect only this can prove |
 | --- | --- | --- |
 | G-1 chain lands | | the worktree is really at the predecessor's commit |
-| G-2a scope authority frozen | | which committed tree the profile came from |
+| G-2a authority read from the right commit | | which committed tree the profile came from |
 | G-2b scope specificity | | the frozen profile still permits what it permits |
 | G-3 unreferenced base refuses | | reachability is a Git fact, not a record fact |
 | G-4 older-run result refused | | ancestry of two real commit histories |
-| G-5a out-of-block refusal | | two CLI gates composing over a real roadmap |
-| G-5b out-of-block, predecessor DONE | | the refusal is conditional, not blanket |
+| G-5 authority survives the block run | | the guarantee holds after the invocation that made it |
 | G-6 frozen base beats a moving branch | | which commit `worktree add` used |
 | E2E-1 | | lease + snapshot + ledger + workspace + scope, together |
 | E2E-2 | | the widening rule does not over-reach end to end |
 
-Budget: 8 git-tier, 2 E2E. **If the count is exceeded, a control moves down a
-tier — none is deleted.** Any material runtime increase not attributable to a row
-above is a finding, not a rounding error.
+Budget: at most 8 git-tier, exactly 2 E2E. Seven git-tier rows are planned, one
+slot unspent; the specificity half of G-5 costs nothing extra because it is
+`tests/v2-06-scope-enforcement.test.ts` staying green unedited plus one pure
+assertion. **If the count is exceeded, a control moves down a tier — none is
+deleted.** Any material runtime increase not attributable to a row above is a
+finding, not a rounding error.
 
 - [ ] **Step 4: Open the pull request**
 
@@ -1585,19 +1852,35 @@ checks is `MERGE_BLOCKED_NO_CHECKS`, not permission to merge.
   freeze, both modes), Task 7 Step 1 (read from `frozenDependencies`, never
   recomputed; the import pin is re-run in Step 5). No implicit linearisation:
   root members take the block base, never a sibling's result.
-- **E2** — Task 6 (two commit roles, threaded, required field), controls G-2a/b;
-  no profile object is copied anywhere; `readPinnedScope` is never called with
-  `basePinnedCommit` on the block path.
+- **E2, and the durability blocker** — Task 6, and it is now a **durable** answer:
+  `TaskState.scopeAuthorityCommit`, written at start, read by the module that
+  already reads the record. Control G-5 drives the review's own counter-example —
+  block run ends with `B` chained and unfinished, `A` marked `DONE`, `A`'s widened
+  profile *not* on the authoritative line — and requires the widening to be
+  refused; Step 8 makes the runner pass `null` and requires the control to go red.
+  No profile object is copied anywhere, `readPinnedScope` is never handed
+  `basePinnedCommit` for a chained task, and the roadmap-`DONE` inference the
+  earlier draft relied on is retracted in three places (G2, the counter-proof
+  section, Task 10 Step 2).
 - **E3 + the B-4 sharpening** — Task 5 (`SETTLED`, run-local, non-member is a
   dead end, no roadmap write) *and* Task 3 (chain-fit), with Task 7 Step 3's two
   pure controls pinning that neither alone is sufficient. Rule 6 of G4 is the
   general containment statement; the older-run case is control G-4.
+- **The anchor blocker** — G4 rule 7 is a cardinality rule, not an existence one:
+  the empty-row entries that carry a base must carry exactly one distinct value
+  and it must be this invocation's, so `blockBaseCommit` is *derivable* from the
+  document rather than merely findable in it. `CHAIN_ANCHOR_AMBIGUOUS` is its own
+  code, and Task 3 has three cases for it — two answers, no answer of ours, and
+  the specificity case where several roots legitimately agree.
 - **`startPlannedTask`** — no planner read is added; the widening arrives as an
   argument the runner computed from the ledger, and Task 7 Step 5 re-runs the
   pins that forbid a second reading.
-- **B-6** — the counter-proof is run above and recorded; it holds, with rule 7 as
-  its price and F-C1 as the residue.
-- **Test budget** — 8 git-tier rows, 2 E2E rows, pure everywhere else; final
-  measurement with the same script.
+- **B-6** — the counter-proof is run above and recorded honestly: it **holds on
+  the ledger** (no field, no stop reason, no version bump) and **fails on the task
+  state**, where the minimal change is taken — one additive, nullable, defaulted
+  field, with the four candidate existing authorities named and rejected one by
+  one before proposing it.
+- **Test budget** — 7 git-tier rows planned of 8 allowed, 2 E2E rows, pure
+  everywhere else; final measurement with the same script.
 - **Renderer truth** — Task 8 Steps 3–4, including killing the measured mutant.
 - **F-B4** — Task 10 Step 1, written as a correction to V2-08's behaviour.
