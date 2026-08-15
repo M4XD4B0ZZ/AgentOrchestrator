@@ -1919,6 +1919,10 @@ describe('each class-2 condition ends the run under its own name', () => {
     const entries = after['tasks'] as readonly Record<string, unknown>[];
     expect(entries[0]?.['disposition']).toBe('ACTIVE');
     expect(entries[0]?.['evidenceRevision']).toBeNull();
+    // Nor a result commit, which is the other half of "nothing was invented":
+    // `evidenceRevision` alone leaves the field V2-09 intends to chain from
+    // unasserted, and that is the one a forgery would be worth making.
+    expect(entries[0]?.['resultCommit']).toBeNull();
     // B-001 and C-001 were eligible and are untouched.
     expect(entries.slice(1).map((task) => task['disposition'])).toEqual(['PLANNED', 'PLANNED']);
   }, 900_000);
@@ -2442,6 +2446,66 @@ describe('positive reconciliation is applied only where it is forced', () => {
     expect(step.detail).toContain('WRITE_FAILED');
     expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
   }, 600_000);
+
+  // The fourth grade, and the one this suite briefly recorded as unreachable.
+  // That claim rested on a premise that holds only for the *forced task's own*
+  // record: the reconciler has just read it as READY_FOR_PR, so it cannot also
+  // be unreadable. The run is not one record. `firstUnprovenClaim` re-proves
+  // **every** entry of the successor whenever any disposition moves, and
+  // `proveBlockTaskEntry` answers TASK_STATE_UNUSABLE for any non-PLANNED entry
+  // whose record cannot be read — so a settled *sibling* refuses the write, and
+  // the grade arrives on a task the reconciliation never touched. No seam
+  // inside `applyForcedProgress`, and nothing here the file did not already
+  // have.
+  //
+  // What it protects is the F3 failure twice over: a record that cannot be read
+  // reported as a proof race sends an operator to look for a moving task, and —
+  // worse — `RECONCILIATION_UNRESOLVED` is *unrecorded*, so the run would end
+  // without the ledger ever carrying the ending it is entitled to carry.
+  it('stops on a sibling whose record cannot be read, rather than calling it a proof race', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+    expect(
+      settleBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('RECORDED');
+    await reallyStart(fixture, 'B-001');
+    driveToReadyForPr(fixture, 'B-001');
+    // A-001's record becomes unreadable *after* it was settled on the strength of
+    // it. That ordering is the whole mechanism: the settlement was true when it
+    // was made, and what has failed since is the record, not the claim.
+    corruptTaskState(fixture.root, 'A-001');
+
+    // The premises. B-001's reconciliation is still the forced one — its own
+    // record is readable and says READY_FOR_PR — the sibling is SETTLED, and no
+    // ending has been written yet, so the stop below is this call's.
+    expect(progressIsOffered(fixture)).toBe(true);
+    expect(recordedStateOf(fixture.root, 'B-001')).toBe('READY_FOR_PR');
+    const before = onDisk(fixture.root);
+    expect((before['tasks'] as readonly Record<string, unknown>[]).map((t) => t['disposition']))
+      .toEqual(['SETTLED', 'PLANNED']);
+    expect(before['stopReason']).toBeNull();
+
+    const step = applyForcedProgress(reload(fixture.root), fixture.root, {
+      repositoryRoot: fixture.root,
+    });
+
+    // Recorded, not merely reported. `STATE_UNUSABLE` is a class-2 ending the
+    // ledger has a persisted reason for, and the store exempts exactly this
+    // stop from the proof it just failed — so a run that has detected an
+    // unreadable record can always say so.
+    expect(step.kind).toBe('STOPPED');
+    if (step.kind !== 'STOPPED') return;
+    expect(step.reason).toBe('STATE_UNUSABLE');
+    const after = onDisk(fixture.root);
+    expect(after['stopReason']).toBe('STATE_UNUSABLE');
+    // And nothing was recorded for the task the reconciliation was about: the
+    // write was refused, so the entry it would have moved is untouched.
+    const entries = after['tasks'] as readonly Record<string, unknown>[];
+    expect(entries[1]?.['disposition']).toBe('PLANNED');
+    expect(entries[1]?.['evidenceRevision']).toBeNull();
+  }, 600_000);
 });
 
 // What the RECONCILIATION_UNRESOLVED case above does and does not establish,
@@ -2456,64 +2520,10 @@ describe('positive reconciliation is applied only where it is forced', () => {
 // is testing. The stopped-ledger route reaches the same branch through a
 // condition the runner grades as a fail-closed floor.
 //
-// The fourth grade, `STATE_UNUSABLE`, has no case at all and cannot have a
-// deterministic one for the same reason and one more: the reconciler only offers
-// a task whose record it just read *and found to be* READY_FOR_PR, so reaching
-// `settleBlockTask`'s TASK_STATE_UNUSABLE needs the record to become unreadable
-// between those two reads. Its arm in `applyForcedProgress` is a fail-closed
-// floor like the activation guard in `driveOneTask`, and removing it reddens
-// nothing — measured, and recorded in the task report rather than left to be
-// discovered.
-
-describe('positive reconciliation stops rather than guessing', () => {
-  // The mechanism here is the one the `ACTIVE_TASK_UNRESOLVED` case above
-  // already drives, and this case asserts a subset of that case's facts plus
-  // the driver answer that is its premise. It is kept because it states the
-  // rule from the reconciliation side — what happens when the six conditions
-  // cannot be met at all — and not because it reaches code the other case does
-  // not. Read honestly: nothing below enters `applyForcedProgress`. The task is
-  // ACTIVE, which forced reconciliation refuses by construction, so what is
-  // measured is the run declining to invent an outcome rather than a repair
-  // being weighed and rejected.
-  it('stops rather than choosing when the evidence supports no single successor', async () => {
-    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
-    // A second writer moves the task on mid-drive, so this run's own write is
-    // refused and the task ends neither finished, nor blocked, nor aborted.
-    // Nothing may be recorded for it, and there is no repair that is not a
-    // guess — so the block stops and invents nothing.
-    const agent = recordedAgent({
-      claude: () => {
-        movedByAnotherWriter(fixture, 'A-001');
-        return writerSuccess();
-      },
-      codex: () => reviewResult(passingReview()),
-    });
-    const result = await runAttendedBlock(
-      {
-        repository: fixture.repository,
-        definition: independentBlock(['A-001', 'B-001', 'C-001']),
-        runId: RUN_ID,
-        lease: leaseFor(fixture.repository),
-        maxStepsPerTask: 8,
-        planning: planningOf(fixture),
-      },
-      {
-        now: tickingClock(),
-        git: runGitCommand,
-        authPreflight: authPreflightPasses,
-        agent: agent.runner,
-        verify: recordedVerify().runner,
-      },
-    );
-
-    // The premise: the run really did try to record something and was refused,
-    // rather than never getting that far.
-    expect(result.tasks[0]?.runOutcome).toBe('STATE_CONFLICT');
-    expect(result.stopReason).toBe('ACTIVE_TASK_UNRESOLVED');
-    const entries = onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[];
-    // Nothing was invented for it, and the block stopped rather than guessing.
-    expect(entries[0]?.['disposition']).toBe('ACTIVE');
-    expect(entries[0]?.['evidenceRevision']).toBeNull();
-    expect(entries[0]?.['resultCommit']).toBeNull();
-  }, 900_000);
-});
+// The fourth grade, `STATE_UNUSABLE`, has its own case above — through a settled
+// sibling whose record became unreadable, which needs no seam at all. This
+// paragraph once said it had none and could have none, on an argument about the
+// forced task's own record that simply does not cover the run; the case that
+// disproves it is `stops on a sibling whose record cannot be read`. Recorded
+// here because a wrong "we decided not to" reads exactly like a right one, and
+// it is what stops the next reader writing the case.
