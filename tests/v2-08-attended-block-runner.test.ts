@@ -312,6 +312,47 @@ function projectionCallSites(): string[] {
   return reached.sort();
 }
 
+/**
+ * Every production module that imports one of `names`, by any static route.
+ *
+ * The shape `tests/v2-07l-execution-lease.test.ts:1195` demonstrates, replicated
+ * here rather than reused, and the reason is worth stating: three of that copy's
+ * four routes hardcode `block-(store|progress).js`, so reusing it would mean
+ * widening a shared instrument that pins a *different* property — the lease scope
+ * of the ledger store. This suite already owns the freeze-time rule and already
+ * owns `sourceFiles`, so the claim about `block-dependencies.ts` lives beside the
+ * other claims about it.
+ *
+ * Scoped to the module's **exported names**, which is what `projectionCallSites`
+ * above cannot do: that one gates on the module path first, so a caller reaching
+ * the projection through a re-export would name no path and pass. Between them
+ * the two see a direct import, an aliased namespace, a dynamic import, a
+ * re-export, and an import of the re-export.
+ */
+function productionImportersOf(names: readonly string[], moduleBasename: string): string[] {
+  const alternation = names.join('|');
+  const modulePath = `['"][^'"]*${moduleBasename}\\.js['"]`;
+  const declaring = join(PACKAGE_ROOT, 'src', 'block', `${moduleBasename}.ts`);
+  const importers: string[] = [];
+  for (const file of sourceFiles()) {
+    if (file === declaring) continue;
+    const text = readFileSync(file, 'utf8');
+    const reaches =
+      // a named import, alone or among others, on one line or several
+      new RegExp(
+        `import[\\s\\S]{0,400}?\\{[\\s\\S]{0,400}?\\b(${alternation})\\b[\\s\\S]{0,400}?\\}`,
+      ).test(text) ||
+      // a namespace import of the module, which a named-import scan misses
+      new RegExp(`import\\s+\\*\\s+as\\s+\\w+\\s+from\\s+${modulePath}`).test(text) ||
+      // a dynamic import of it, likewise
+      new RegExp(`await\\s+import\\(\\s*${modulePath}`).test(text) ||
+      // and a re-export, which would hand the names on without importing them
+      new RegExp(`export\\s+\\*\\s+from\\s+${modulePath}`).test(text);
+    if (reaches) importers.push(relative(PACKAGE_ROOT, file));
+  }
+  return importers.sort();
+}
+
 describe('the projection is computed at freeze time and nowhere else', () => {
   it('is reachable from exactly one production module', () => {
     // The freeze site, and nothing else. Not a style rule: a second caller is a
@@ -319,10 +360,27 @@ describe('the projection is computed at freeze time and nowhere else', () => {
     // the whole authority argument is that it is answered once, before the run,
     // and then frozen.
     //
-    // Until Task 11 lands this list is empty, which is also correct — nothing
-    // in src/ freezes a block yet. Change the expectation in the same commit
-    // that adds the caller, never afterwards.
-    expect(projectionCallSites()).toEqual([]);
+    // One entry rather than none since Task 11: `block-command.ts` is the freeze
+    // site. Changed in the commit that added the caller, which is what the
+    // previous wording of this comment asked for.
+    expect(projectionCallSites()).toEqual([join('src', 'cli', 'block-command.ts')]);
+  });
+
+  it('has its exports imported by exactly one production module', () => {
+    // The same claim, asked about the module's *exports* rather than about its
+    // path, and it replaces a `git grep -n "block-dependencies" -- src/` that
+    // measured something else entirely: whether a file says a word. That grep
+    // was already wrong before this command existed — `block-definition.ts:90`
+    // names the module in prose — and satisfying it cost `block-runner.ts` two
+    // identifiers out of its own header, which is a module being made less clear
+    // to keep a substring count at zero. An import is what "depends on" means,
+    // so an import is what is counted.
+    expect(
+      productionImportersOf(
+        ['projectBlockDependencies', 'BLOCK_PROJECTION_FAILURE_CODES'],
+        'block-dependencies',
+      ),
+    ).toEqual([join('src', 'cli', 'block-command.ts')]);
   });
 
   it('is not reachable from the runner, by any route', () => {
@@ -2527,3 +2585,247 @@ describe('positive reconciliation is applied only where it is forced', () => {
 // disproves it is `stops on a sibling whose record cannot be read`. Recorded
 // here because a wrong "we decided not to" reads exactly like a right one, and
 // it is what stops the next reader writing the case.
+
+/* ─────────── 11. the command, and the exit codes an operator sees ────────── */
+
+import { beforeEach, vi } from 'vitest';
+import { Command } from 'commander';
+
+import { registerBlockCommand, type BlockCommandSeams } from '../src/cli/block-command.js';
+import { BLOCK_OUTCOME_SENTENCES, BLOCK_STOP_SENTENCES } from '../src/cli/render-block-run.js';
+import {
+  EXIT_RUN_CALL_AGAIN,
+  EXIT_RUN_INPUT_UNUSABLE,
+  EXIT_RUN_NEEDS_OPERATOR,
+  EXIT_RUN_OK,
+  EXIT_RUN_REFUSED,
+  exitCodeForBlockRun,
+} from '../src/cli/run-exit-codes.js';
+import type { BlockRunOutcome } from '../src/block/block-runner.js';
+
+let stdout: string[] = [];
+let stderr: string[] = [];
+
+beforeEach(() => {
+  stdout = [];
+  stderr = [];
+  // Reset, or a fully passing run inherits whatever exit code the command last
+  // set and vitest exits non-zero over a green suite.
+  process.exitCode = undefined;
+  vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown): boolean => {
+    stdout.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write);
+  vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown): boolean => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  process.exitCode = undefined;
+  // Read by nothing above, and that is the point: an unexpected failure goes to
+  // stderr through the safe formatter, and a case that never inspects it would
+  // not notice. Referenced here so the capture cannot be deleted as unused.
+  stderr = [];
+});
+
+async function invokeBlock(args: readonly string[], seams: BlockCommandSeams = {}): Promise<void> {
+  const program = new Command();
+  program.exitOverride();
+  registerBlockCommand(program, seams);
+  await program.parseAsync(['block', ...args], { from: 'user' });
+}
+
+describe('the exit code says what an operator should do next', () => {
+  const code = (outcome: BlockRunOutcome, stopReason: BlockStopReason | null) =>
+    exitCodeForBlockRun({
+      outcome,
+      stopReason,
+      detail: null,
+      runId: RUN_ID,
+      blockId: BLOCK_ID,
+      tasks: [],
+      steps: 0,
+    });
+
+  it('grades a completed block nominal', () => {
+    expect(code('BLOCK_RUN_ENDED', 'COMPLETE')).toBe(EXIT_RUN_OK);
+  });
+
+  it('sends every ending that needs a human to code 3', () => {
+    for (const reason of [
+      'TASK_BLOCKED',
+      'TASK_ABANDONED',
+      'LEDGER_DIVERGED',
+      'STATE_UNUSABLE',
+      'DEFINITION_DRIFTED',
+      'ACTIVE_TASK_UNRESOLVED',
+    ] as const) {
+      expect(code('BLOCK_RUN_ENDED', reason), reason).toBe(EXIT_RUN_NEEDS_OPERATOR);
+    }
+  });
+
+  it('keeps NO_ELIGIBLE_TASK an unusable input, as the plan table already does', () => {
+    expect(code('BLOCK_RUN_ENDED', 'NO_ELIGIBLE_TASK')).toBe(EXIT_RUN_INPUT_UNUSABLE);
+  });
+
+  it('grades a deliberate operator stop a refusal, not an operator condition', () => {
+    // The ninth reason, and the one neither of the two cases above covers. It is
+    // the only ending a human chose, so nothing durable is wrong and re-invoking
+    // can differ: code 4.
+    expect(code('BLOCK_RUN_ENDED', 'OPERATOR_STOPPED')).toBe(EXIT_RUN_REFUSED);
+  });
+
+  it('grades the four unrecorded outcomes by what the operator must do', () => {
+    // Lease and gate: nothing durable is wrong and re-invoking under other
+    // conditions can differ. The other two are not like that - a disk or a
+    // permission has to be fixed before anything will ever run, and a
+    // reconciliation the primitive refused means somebody or something moved
+    // task state under a held lease.
+    expect(code('LEASE_AUTHORITY_UNCERTAIN', null)).toBe(EXIT_RUN_REFUSED);
+    expect(code('RUN_GATE_REFUSED', null)).toBe(EXIT_RUN_REFUSED);
+    expect(code('DURABLE_WRITE_FAILED', null)).toBe(EXIT_RUN_NEEDS_OPERATOR);
+    expect(code('RECONCILIATION_UNRESOLVED', null)).toBe(EXIT_RUN_NEEDS_OPERATOR);
+  });
+
+  it('never tells an operator to call again, because nothing would continue', () => {
+    // A block run does not outlive its invocation. Exit 5 means "everything is
+    // on disk, call again to continue", and there is nothing here that a second
+    // call would continue - the run id is spent. Written over the vocabularies
+    // rather than over a hand-listed set, so a new outcome is graded here too.
+    const everyCode = [
+      ...BLOCK_STOP_REASONS.map((reason) => code('BLOCK_RUN_ENDED', reason)),
+      ...BLOCK_RUN_OUTCOMES.filter((outcome) => outcome !== 'BLOCK_RUN_ENDED').map((outcome) =>
+        code(outcome, null),
+      ),
+    ];
+    expect(everyCode).not.toContain(EXIT_RUN_CALL_AGAIN);
+  });
+});
+
+describe('every outcome and every reason has its own sentence', () => {
+  it('covers the outcome vocabulary, distinctly', () => {
+    const sentences = BLOCK_RUN_OUTCOMES.map((outcome) => BLOCK_OUTCOME_SENTENCES[outcome]);
+    // Two failures, not one. A blank or absent sentence is caught by the first
+    // assertion; two outcomes sharing one sentence by the second. Neither
+    // subsumes the other, and a `satisfies Record<…>` table catches neither -
+    // it proves every member was *considered*.
+    expect(sentences.every((sentence) => sentence.length > 0)).toBe(true);
+    // Distinct, because four unrecorded outcomes that read alike are four
+    // outcomes an operator cannot act on differently - which is the whole
+    // reason they are four and not one generic RUN_UNSAFE.
+    expect(new Set(sentences).size).toBe(BLOCK_RUN_OUTCOMES.length);
+  });
+
+  it('does not claim that nothing was written', () => {
+    // The sentence that was wrong: every one of the four unrecorded outcomes is
+    // reachable after this run has settled tasks, and telling an operator
+    // "nothing was written" sends them looking for a ledger that is there, or
+    // stops them looking at one that is. What the sentences may say is that the
+    // *ending* was not recorded.
+    for (const outcome of BLOCK_RUN_OUTCOMES) {
+      expect(BLOCK_OUTCOME_SENTENCES[outcome], outcome).not.toMatch(/nothing was written/i);
+    }
+  });
+
+  it('covers the stop-reason vocabulary, distinctly', () => {
+    const sentences = BLOCK_STOP_REASONS.map((reason) => BLOCK_STOP_SENTENCES[reason]);
+    expect(sentences.every((sentence) => sentence.length > 0)).toBe(true);
+    expect(new Set(sentences).size).toBe(BLOCK_STOP_REASONS.length);
+  });
+
+  it('tells an operator which of the four unrecorded outcomes they met', () => {
+    expect(BLOCK_OUTCOME_SENTENCES.LEASE_AUTHORITY_UNCERTAIN).toMatch(/lease|writer/i);
+    expect(BLOCK_OUTCOME_SENTENCES.DURABLE_WRITE_FAILED).toMatch(/write|disk|permission/i);
+    expect(BLOCK_OUTCOME_SENTENCES.RUN_GATE_REFUSED).toMatch(/gate|refused/i);
+    expect(BLOCK_OUTCOME_SENTENCES.RECONCILIATION_UNRESOLVED).toMatch(/evidence|record|moved/i);
+  });
+
+  it('prints ASCII only, which is the discipline every operator-facing table here keeps', () => {
+    const all = [
+      ...Object.values(BLOCK_OUTCOME_SENTENCES),
+      ...Object.values(BLOCK_STOP_SENTENCES),
+    ].join('');
+    expect([...all].filter((character) => character.codePointAt(0)! > 0x7f)).toEqual([]);
+  });
+});
+
+describe('the command', () => {
+  it('reports without executing unless --attended is given', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+
+    await invokeBlock([
+      '--repository', fixture.root,
+      '--block', BLOCK_ID,
+      '--tasks', 'A-001', 'B-001',
+      '--run', RUN_ID,
+    ]);
+
+    // The same contract `run` keeps: no ledger, no state, no workspace.
+    expect(existsSync(ledgerPath(fixture.root))).toBe(false);
+    expect(process.exitCode).toBe(EXIT_RUN_OK);
+    // And it says what it *would* freeze, including whether the members are
+    // independent - the property the whole slice turns on.
+    expect(stdout.join('')).toMatch(/independent/i);
+    // No lease either. A report is not a claim on the repository's turn as
+    // writer, and the plan it printed authorises nothing. Observable rather than
+    // argued: a lease this invocation took and did not give back is still on
+    // disk with a live owner, so the acquisition below answers LEASE_HELD.
+    const free = acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-0002', blockId: BLOCK_ID },
+      { now: () => new Date().toISOString() },
+    );
+    expect(free.ok).toBe(true);
+    if (free.ok) releaseRepositoryExecutionLease(free.evidence);
+  }, 600_000);
+
+  it('refuses a member the repository does not declare, and gives the lease back', async () => {
+    const fixture = await repoWith({ 'A-001': [] });
+
+    await invokeBlock([
+      '--repository', fixture.root,
+      '--block', BLOCK_ID,
+      '--tasks', 'A-001', 'GHOST-001',
+      '--run', RUN_ID,
+      '--attended',
+    ]);
+
+    expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    expect(stdout.join('')).toContain('TASK_NOT_IN_GRAPH');
+    expect(existsSync(ledgerPath(fixture.root))).toBe(false);
+    // The refusal happens *under* the lease, because the plan it refuses is read
+    // under the lease. So the property that matters is not "no lease was taken"
+    // but "the lease did not survive the refusal": the next invocation must not
+    // find this one still holding it.
+    const after = acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-0002', blockId: BLOCK_ID },
+      { now: () => new Date().toISOString() },
+    );
+    expect(after.ok).toBe(true);
+    if (after.ok) releaseRepositoryExecutionLease(after.evidence);
+  }, 600_000);
+
+  it('drives a block end to end and exits on its reason', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const seams = drivingSeams();
+
+    await invokeBlock(
+      [
+        '--repository', fixture.root,
+        '--block', BLOCK_ID,
+        '--tasks', 'A-001', 'B-001',
+        '--run', RUN_ID,
+        '--attended',
+      ],
+      { authPreflight: authPreflightPasses, agent: seams.agent, verify: seams.verify },
+    );
+
+    expect(process.exitCode).toBe(EXIT_RUN_OK);
+    expect(onDisk(fixture.root)['stopReason']).toBe('COMPLETE');
+    expect(stdout.join('')).toContain('COMPLETE');
+  }, 900_000);
+});

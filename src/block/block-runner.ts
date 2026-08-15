@@ -65,26 +65,37 @@
  *
  * ── What this module may not compute ───────────────────────────────────────
  *
- * The dependency relation. It is projected once, at freeze time, by the
- * projection module in this directory — which this module does not import, and
- * must not. A runner that re-derived the relation would answer "may B continue
- * after A?" from a roadmap an operator can edit while the run is in flight,
- * which is the opposite of frozen-plan authority. It reads
- * `ledger.frozenDependencies` and asks `independenceIsEstablished` a question.
+ * The dependency relation. `block-dependencies.ts` projects it once, at freeze
+ * time — and this module does not import that one, and must not. A runner that
+ * re-derived the relation would answer "may B continue after A?" from a roadmap
+ * an operator can edit while the run is in flight, which is the opposite of
+ * frozen-plan authority. It reads `ledger.frozenDependencies` and asks
+ * `independenceIsEstablished` a question.
  *
- * The plan, either. This module never plans; it receives the caller's single
- * reading as {@link AttendedBlockRequest.planning} and both filters by it and
- * hands it to `startPlannedTask`, so there is no gate below here that could
- * consult a second reading. Forbidding the import is not enough on its own — the
- * reason `startPlannedTask` exists is that the general start path planned again
- * on its own account, which put a mid-run roadmap edit back in charge of what
- * runs while every module in `src/block/` looked innocent.
+ * The plan, either. This module never calls `planNextTask`; it receives the
+ * caller's single reading as {@link AttendedBlockRequest.planning} and both
+ * filters by it and hands it to `startPlannedTask`, so there is no gate below
+ * here that could consult a second reading. Forbidding the import is not enough
+ * on its own — the reason `startPlannedTask` exists is that the general start
+ * path planned again on its own account, which put a mid-run roadmap edit back
+ * in charge of what runs while every module in `src/block/` looked innocent.
  *
- * Neither the projection module's file name nor the planner's function name is
- * spelled out anywhere in this file, and that is deliberate rather than coy:
- * both properties are pinned by a grep over `src/`, and a prose mention would
- * turn a zero-match pin into a list a reader has to adjudicate. The names are in
- * `block-definition.ts` and `start-task.ts`, next to the code that owns them.
+ * Both names were once deliberately left out of this file, because both
+ * properties were pinned by a substring grep over `src/` and a prose mention
+ * would have turned a zero-match pin into a list a reader has to adjudicate.
+ * That was a module made less clear to keep a count at zero, and the count was
+ * measuring the wrong thing anyway: a grep sees that a file *says a word*, not
+ * that it *depends on a module*.
+ *
+ * What backs each claim now, stated exactly rather than jointly, because the two
+ * are not equally well pinned. The relation is pinned over **imports**, in
+ * `tests/v2-08-attended-block-runner.test.ts`: the projection's exports have one
+ * production importer, the CLI freeze site, so this module reaching them fails
+ * there. The plan is not pinned that way. It rests on what this module imports
+ * from the planner — the `TaskPlanningSuccess` *type* and nothing callable — and
+ * on `startPlannedTask` having no way to take a reading of its own, which is
+ * pinned by effect one layer down. An import-scoped assertion for the block
+ * layer's planner use is worth having and is not in this commit.
  *
  * One consequence, stated rather than left to be discovered: **a mid-run edit is
  * invisible to this invocation, in both directions.** It cannot stop a member

@@ -144,8 +144,14 @@ export interface RunCommandSeams {
  * retried: a second attempt would start the subscription CLIs again to ask a
  * question already answered, and "it failed and then it passed" is not a state
  * this command should be able to reach inside one invocation.
+ *
+ * Exported for `block-command.ts`, which needs exactly this and must not write
+ * its own. Two memoising preflights in one binary are two chances for one
+ * invocation to start the subscription CLIs twice — and the second copy would be
+ * free to differ on the one decision that matters here, which is that a failure
+ * is remembered rather than retried.
  */
-function onceOnlyPreflight(
+export function onceOnlyPreflight(
   override?: () => Promise<AuthPreflightEvidence | null>,
 ): () => Promise<AuthPreflightEvidence | null> {
   const run =

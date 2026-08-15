@@ -28,6 +28,8 @@
  * outcome itself is the execution slice's decision, not this table's.
  */
 
+import type { BlockStopReason } from '../block/block-ledger.js';
+import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
 import type { RunOutcome } from '../run/run-driver.js';
 import type { RunPlanConclusion } from '../run/run-plan.js';
@@ -250,6 +252,66 @@ const RELEASE_EXIT_CODES = Object.freeze({
 
 export function exitCodeForReleaseOutcome(outcome: ReleaseOutcome): CliExitCode {
   return RELEASE_EXIT_CODES[outcome];
+}
+
+/**
+ * What a block run exits with (V2-08).
+ *
+ * Two tables rather than one, because a block run ends in two different ways
+ * and only one of them has a reason. `BLOCK_RUN_ENDED` is graded by the reason
+ * the ledger carries; the other four outcomes are graded on their own, and both
+ * tables are total by `satisfies`, so a new reason or a new outcome fails the
+ * build here until somebody decides what an operator should do about it.
+ *
+ * Three judgements worth stating:
+ *
+ * `NO_ELIGIBLE_TASK` is 2, matching `PLAN_EXIT_CODES` above. The same fact
+ * learned on the way to executing is still the same fact.
+ *
+ * `DURABLE_WRITE_FAILED` and `RECONCILIATION_UNRESOLVED` are 3 while the other
+ * two unrecorded outcomes are 4. Code 4 says "nothing durable is wrong, and
+ * re-invoking under other conditions can differ", which is true of a lease
+ * somebody else holds and of a gate that was not satisfied. It is not true of a
+ * disk or a permission that refused a write — an operator has to go and fix
+ * something, and a scheduler told 4 would retry into the same refusal forever —
+ * and it is not true of a reconciliation the authoritative primitive refused
+ * either: task state moved under a held execution lease, which is a fact about
+ * this repository that another invocation will meet again.
+ *
+ * `ACTIVE_TASK_UNRESOLVED` is 3 rather than 5. The run is over — a stop reason
+ * is written once — so "call again" would be advice that cannot be taken.
+ *
+ * Nothing here exits 5 at all, and that is the lifetime decision showing
+ * through: a block run does not outlive its invocation, so there is no state in
+ * which calling again continues anything. `EXIT_RUN_CALL_AGAIN` stays what it
+ * is — `run --attended`'s answer for one task — and `block` simply never
+ * produces it.
+ */
+const BLOCK_STOP_EXIT_CODES = Object.freeze({
+  COMPLETE: EXIT_RUN_OK,
+  TASK_BLOCKED: EXIT_RUN_NEEDS_OPERATOR,
+  TASK_ABANDONED: EXIT_RUN_NEEDS_OPERATOR,
+  NO_ELIGIBLE_TASK: EXIT_RUN_INPUT_UNUSABLE,
+  OPERATOR_STOPPED: EXIT_RUN_REFUSED,
+  LEDGER_DIVERGED: EXIT_RUN_NEEDS_OPERATOR,
+  STATE_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
+  DEFINITION_DRIFTED: EXIT_RUN_NEEDS_OPERATOR,
+  ACTIVE_TASK_UNRESOLVED: EXIT_RUN_NEEDS_OPERATOR,
+}) satisfies Record<BlockStopReason, CliExitCode>;
+
+const BLOCK_OUTCOME_EXIT_CODES = Object.freeze({
+  LEASE_AUTHORITY_UNCERTAIN: EXIT_RUN_REFUSED,
+  DURABLE_WRITE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  RUN_GATE_REFUSED: EXIT_RUN_REFUSED,
+  RECONCILIATION_UNRESOLVED: EXIT_RUN_NEEDS_OPERATOR,
+}) satisfies Record<Exclude<BlockRunOutcome, 'BLOCK_RUN_ENDED'>, CliExitCode>;
+
+export function exitCodeForBlockRun(result: AttendedBlockResult): CliExitCode {
+  if (result.outcome !== 'BLOCK_RUN_ENDED') return BLOCK_OUTCOME_EXIT_CODES[result.outcome];
+  // `BLOCK_RUN_ENDED` carries a reason by construction — `RunState.stop` is the
+  // only producer and it always names one. A missing reason would be this
+  // module's own defect rather than a run outcome, so it exits 1.
+  return result.stopReason === null ? EXIT_RUN_UNEXPECTED : BLOCK_STOP_EXIT_CODES[result.stopReason];
 }
 
 /*

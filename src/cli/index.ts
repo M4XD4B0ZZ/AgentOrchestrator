@@ -16,6 +16,7 @@
 import { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
+import { registerBlockCommand } from './block-command.js';
 import { registerDoctorCommand } from './doctor-command.js';
 import { registerLeaseCommand } from './lease-command.js';
 import { registerReleaseCommand } from './release-command.js';
@@ -31,6 +32,7 @@ const DESCRIPTION = [
   '  - the read-only `run` plan: which task is next, what its durable state',
   '    permits, and on whose authority anything may continue',
   '  - attended execution of one task: `run --attended`',
+  '  - attended execution of a block of independent tasks: `block --attended`',
   '  - `release --attended`: hand back a workspace a crashed start left behind,',
   '    and only one proven to be that task’s own untouched leftovers',
   '  - the repository execution lease: read-only `lease status` to inspect it',
@@ -50,7 +52,10 @@ const DESCRIPTION = [
   'names the same object once the removal runs. Clearing one is a decision outside',
   'this tool.',
   '',
-  'Unattended running, multi-task blocks and opening pull requests are not in',
+  'A block runs attended and sequentially: one lease for the whole run, one active',
+  'task at a time, and a task that fails locally is recorded and does not end the',
+  'run — provided the frozen plan establishes that the members are independent.',
+  'Dependent execution, unattended running and opening pull requests are not in',
   'this build.',
 ].join('\n');
 
@@ -81,6 +86,7 @@ export function buildProgram(): Command {
 
   registerDoctorCommand(program);
   registerRunCommand(program);
+  registerBlockCommand(program);
   registerReleaseCommand(program);
   registerLeaseCommand(program);
 
