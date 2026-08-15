@@ -2051,6 +2051,38 @@ function replaceFailingAfter(n: number): ReplaceFn {
   };
 }
 
+/**
+ * A replace seam that stages every document it is asked to write, performs
+ * the real rename for the first `n` calls, and fails every call after that.
+ *
+ * `recordingLedgerReplace`'s and `replaceFailingAfter`'s behaviours combined
+ * into a seam of their own, rather than a change to either: Task 8's cases
+ * depend on `recordingLedgerReplace` always succeeding, and
+ * `replaceFailingAfter` records nothing to inspect. This is what lets a case
+ * reach a write *after* the ledger already exists — case 3's fixture fails on
+ * the very first call and so can never open the ledger at all — while still
+ * seeing every document staged along the way, not only the one that landed.
+ */
+function recordingReplaceFailingAfter(
+  n: number,
+): { readonly replace: ReplaceFn; readonly staged: () => readonly string[] } {
+  const stagedDocuments: string[] = [];
+  let seen = 0;
+  return {
+    replace: ((from, to) => {
+      stagedDocuments.push(readFileSync(from, 'utf8'));
+      seen += 1;
+      if (seen > n) {
+        const error = new Error('replace refused by the test seam') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }
+      renameSync(from, to);
+    }) as ReplaceFn,
+    staged: (): readonly string[] => stagedDocuments,
+  };
+}
+
 describe('a durable write that is not possible is reported, never claimed', () => {
   it('reports the failure of the very first write, with no ledger on disk', async () => {
     const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
@@ -2110,5 +2142,35 @@ describe('a durable write that is not possible is reported, never claimed', () =
       expect(document['stopReason']).toBeNull();
     }
     expect(attempted.length).toBeGreaterThan(0);
+  }, 600_000);
+
+  // The case above shares case 1's fixture — the very first write fails — so
+  // it can only ever see `openRun`'s single, pre-ledger attempt; there is no
+  // `LedgerLoadSuccess` in scope there for a bug to hand `stopBlockRun`, so no
+  // fallback stop write is even constructible on that path. This case reaches
+  // a write *after* the ledger exists — the creation lands, and A-001's
+  // activation is what fails — which is the one route a fallback stop write
+  // could actually be attempted on, and staged, even though it too fails to
+  // land and the file never shows it.
+  it('does not try to record a stop reason about a later write it could not make, either', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    const seam = recordingReplaceFailingAfter(1);
+
+    const result = await runBlock(fixture, independentBlock(['A-001', 'B-001']), {
+      ledgerReplace: seam.replace,
+    });
+
+    expect(result.outcome).toBe('DURABLE_WRITE_FAILED');
+    expect(result.stopReason).toBeNull();
+    // Every document the run staged — the creation and the failed activation
+    // attempt alike — carries no stop reason.
+    for (const staged of seam.staged()) {
+      const document = JSON.parse(staged) as Record<string, unknown>;
+      expect(document['stopReason']).toBeNull();
+    }
+    // Two writes were actually attempted: an empty array would make the loop
+    // above pass over nothing, and one entry alone would not prove this case
+    // reached past the creation.
+    expect(seam.staged().length).toBeGreaterThan(1);
   }, 600_000);
 });
