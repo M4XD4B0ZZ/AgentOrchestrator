@@ -10,7 +10,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 import { Command } from 'commander';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   BLOCK_LEDGER_SCHEMA_VERSION,
@@ -49,7 +49,7 @@ import {
   commitObjectPresent,
 } from '../src/worktree/commit-probes.js';
 import { runGitCommand, type GitRunner } from '../src/worktree/git-command.js';
-import { prepareTaskWorkspace } from '../src/worktree/prepare-workspace.js';
+import { prepareTaskWorkspace, proveSourcePreflight } from '../src/worktree/prepare-workspace.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import {
   createRepoFixture,
@@ -64,6 +64,7 @@ import {
   taskWithId,
   trackWorkspacesOf,
 } from './helpers/worktree-fixtures.js';
+import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
 import { passingReview } from './fixtures.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import {
@@ -99,6 +100,18 @@ async function realRepository(): Promise<ResolvedRepository> {
 }
 
 const headOf = (path: string) => fixtureGit(path, ['rev-parse', 'HEAD']).trim();
+
+/** A real Git repository, with no profile resolved for it. */
+const gitFixtureRoot = () =>
+  createRepoFixture({ defaultBranch: 'main', profile: FIXTURE_A_PROFILE });
+
+/** Commits one file at `root` and returns the new HEAD. */
+function commitAt(root: string, relativePath: string): string {
+  writeRepoFile(root, relativePath, 'later\n');
+  fixtureGit(root, ['add', '--all']);
+  fixtureGit(root, ['commit', '--quiet', '-m', `add ${relativePath}`]);
+  return headOf(root);
+}
 
 /** Moves the default branch on, so a frozen base stops being the tip. */
 function commitOnDefaultBranch(repository: ResolvedRepository, relativePath: string): string {
@@ -218,33 +231,35 @@ describe('the commit probes separate an answer from a refusal to answer', () => 
  */
 describe('the commit probes really ask Git, against a repository that exists', () => {
   it('answers presence, type, reachability and ancestry from real objects', async () => {
-    const repository = await realRepository();
-    const first = headOf(repository.root);
-    const second = commitOnDefaultBranch(repository, 'second.txt');
-    const blob = fixtureGit(repository.root, ['rev-parse', 'HEAD:second.txt']).trim();
+    // A bare fixture root, not a resolved repository: these probes take a `cwd`
+    // and a commit, so resolving a profile would be cost with nothing behind it.
+    const root = gitFixtureRoot();
+    const first = headOf(root);
+    const second = commitAt(root, 'second.txt');
+    const blob = fixtureGit(root, ['rev-parse', 'HEAD:second.txt']).trim();
     const missing = 'f'.repeat(40);
 
-    expect(await commitObjectPresent(runGitCommand, repository.root, second)).toBe(true);
-    expect(await commitObjectPresent(runGitCommand, repository.root, missing)).toBe(false);
-    expect(await commitObjectPresent(runGitCommand, repository.root, blob)).toBe(false);
+    expect(await commitObjectPresent(runGitCommand, root, second)).toBe(true);
+    expect(await commitObjectPresent(runGitCommand, root, missing)).toBe(false);
+    expect(await commitObjectPresent(runGitCommand, root, blob)).toBe(false);
 
-    expect(await commitIsReferenced(runGitCommand, repository.root, second)).toBe(true);
+    expect(await commitIsReferenced(runGitCommand, root, second)).toBe(true);
 
-    expect(await classifyAncestry(runGitCommand, repository.root, first, second)).toBe('ANCESTOR');
-    expect(await classifyAncestry(runGitCommand, repository.root, second, first)).toBe('NOT_ANCESTOR');
-    expect(await classifyAncestry(runGitCommand, repository.root, missing, second)).toBe('INDETERMINATE');
+    expect(await classifyAncestry(runGitCommand, root, first, second)).toBe('ANCESTOR');
+    expect(await classifyAncestry(runGitCommand, root, second, first)).toBe('NOT_ANCESTOR');
+    expect(await classifyAncestry(runGitCommand, root, missing, second)).toBe('INDETERMINATE');
   });
 
   it('calls a commit no ref contains unreferenced, which is the discarded-work case', async () => {
-    const repository = await realRepository();
-    fixtureGit(repository.root, ['checkout', '--quiet', '-b', 'scratch']);
-    const orphaned = commitOnDefaultBranch(repository, 'scratch.txt');
-    fixtureGit(repository.root, ['checkout', '--quiet', 'main']);
-    fixtureGit(repository.root, ['branch', '-D', 'scratch']);
+    const root = gitFixtureRoot();
+    fixtureGit(root, ['checkout', '--quiet', '-b', 'scratch']);
+    const orphaned = commitAt(root, 'scratch.txt');
+    fixtureGit(root, ['checkout', '--quiet', 'main']);
+    fixtureGit(root, ['branch', '-D', 'scratch']);
 
     // The object survives until it is pruned; no ref reaches it any more.
-    expect(await commitObjectPresent(runGitCommand, repository.root, orphaned)).toBe(true);
-    expect(await commitIsReferenced(runGitCommand, repository.root, orphaned)).toBe(false);
+    expect(await commitObjectPresent(runGitCommand, root, orphaned)).toBe(true);
+    expect(await commitIsReferenced(runGitCommand, root, orphaned)).toBe(false);
   });
 });
 
@@ -490,17 +505,23 @@ describe('a workspace is created at the base it was told, not at one it derived'
   });
 
   // Specificity (G6): the default-branch path is unchanged for every existing caller.
+  // Asked at `proveSourcePreflight`, which is where the switch on `base` lives,
+  // rather than by creating a second workspace. That the worktree is then made
+  // *at* the pinned commit is the positive case above, and every V1-03 control
+  // asserts it for the default-branch path already — so a second `worktree add`
+  // here would buy nothing and cost the budget a row.
   it('still resolves the declared default branch when told to', async () => {
     const repository = await realRepository();
     const tip = headOf(repository.root);
+    const derived = deriveTaskWorkspaceIdentity(repository, 'task-a');
+    expect(derived.ok).toBe(true);
+    if (!derived.ok) return;
 
-    const prepared = await prepareTaskWorkspace(repository, taskWithId('task-a'), {
-      git: runGitCommand,
-      lease: leaseFor(repository),
-      base: { kind: 'DEFAULT_BRANCH_TIP' },
+    const preflight = await proveSourcePreflight(runGitCommand, derived.identity, {
+      kind: 'DEFAULT_BRANCH_TIP',
     });
 
-    expect(prepared.ok && prepared.workspace.basePinnedCommit).toBe(tip);
+    expect(preflight).toEqual({ ok: true, basePinnedCommit: tip });
   });
 
   it('refuses a pinned base this repository does not have, and creates nothing', async () => {
@@ -644,6 +665,18 @@ describe('a start may be authorised for a dependency this run satisfied', () => 
     );
 
     expect(start.outcome).toBe('STARTED');
+    // Written from the argument, and `null` lands as `null`. Asserted here
+    // rather than in a second repository of its own: the standalone entry point
+    // passes `null` as a literal, so what needs proving is that the value
+    // reaches the record - and this start is already paid for.
+    expect(reload(repository.root, 'B-001').state.scopeAuthorityCommit).toBeNull();
+
+    // And the standalone entry point, whose own argument is that literal. The
+    // same repository, the same lease, one more workspace rather than one more
+    // fixture.
+    const standalone = await startTask({ repository, taskId: 'A-001' }, startDeps(repository));
+    expect(standalone.outcome).toBe('STARTED');
+    expect(reload(repository.root, 'A-001').state.scopeAuthorityCommit).toBeNull();
   });
 
   it('still refuses when the caller names a different dependency than the one blocking it', async () => {
@@ -768,25 +801,6 @@ describe('the scope declaration comes from the authority, the delta from the bas
     });
 
     expect(assessment).toMatchObject({ verdict: 'WITHIN_SCOPE', offences: [] });
-  });
-});
-
-describe('an ordinary task carries no scope authority of its own', () => {
-  it('writes no scope authority for a task started outside a block', async () => {
-    const repository = await chainRepository({ 'A-001': [] });
-
-    const started = await startTask(
-      { repository, taskId: 'A-001' },
-      {
-        git: runGitCommand,
-        now: tickingClock(),
-        authPreflight: authPreflightPasses,
-        lease: leaseFor(repository),
-      },
-    );
-
-    expect(started.outcome).toBe('STARTED');
-    expect(reload(repository.root, 'A-001').state.scopeAuthorityCommit).toBeNull();
   });
 });
 
@@ -1245,8 +1259,19 @@ describe('the freeze site refuses a block no member could be built on', () => {
 
   const members = ['A-001', 'B-001', 'C-001', 'D-001'];
 
+  /**
+   * One fixture for both refusals, and it is safe to share precisely because of
+   * what is being proved: neither path writes anything, so neither can leave the
+   * repository in a state the other would read. A fixture each would buy no
+   * isolation and would cost the test budget a row.
+   */
+  let shapeless: ResolvedRepository;
+  beforeAll(async () => {
+    shapeless = await chainRepository(diamond);
+  });
+
   it('refuses it in the read-only report, before any lease is taken', async () => {
-    const repository = await chainRepository(diamond);
+    const repository = shapeless;
 
     const printed = await runBlockCli([
       '--repository', repository.root, '--block', BLOCK_ID, '--tasks', ...members, '--run', RUN_ID,
@@ -1259,7 +1284,7 @@ describe('the freeze site refuses a block no member could be built on', () => {
   });
 
   it('refuses it in the attended path too, and opens no run', async () => {
-    const repository = await chainRepository(diamond);
+    const repository = shapeless;
 
     const printed = await runBlockCli([
       '--repository', repository.root, '--block', BLOCK_ID, '--tasks', ...members,

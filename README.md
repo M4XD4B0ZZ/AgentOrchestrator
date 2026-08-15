@@ -4822,6 +4822,70 @@ The block produces a **stack**: `B`'s branch contains `A`'s commits, so a pull
 request for `B` carries `A`'s work. That is what "dependent execution" means here,
 and merging out of order is an operator decision this build does not model.
 
+### What the controls cost, measured
+
+Re-measured with `scripts/measure-verify.sh` — the script the baseline was
+produced with, unchanged, on the same machine, from a clean tree — because a
+comparison is only worth making if both sides were measured the same way.
+
+```
+                    baseline (pre-V2-09)      V2-09
+npm run verify              289.4 s          238.0 s
+  foundation-safe           261.7 s          214.7 s
+  files / tests           79 / 2928        80 / 2994
+```
+
+**The slice added 66 tests and no wall-clock time, and that is a fact about
+parallelism rather than a saving.** `foundation-safe` runs test files
+concurrently, so its wall clock is bounded below by its slowest file — 212.0 s
+for `v2-08-attended-block-runner.test.ts`, which V2-09 does not touch. The new
+file's 103.9 s of work fits inside that critical path and never extends it.
+
+**The total came in 51 s below the recorded baseline, and that is not attributed
+to anything this slice did.** Nothing here removes work; the one change that
+touches a hot path adds a subprocess rather than removing one, because
+`commitObjectPresent` used to be refused at the argument gate without spawning
+and now really runs `cat-file`. Two consecutive measurements today agree to
+within 0.1 s, so the current figure is stable — the baseline was taken in an
+earlier session and the difference is most likely machine state. Reported as
+unexplained rather than banked.
+
+Every control this slice added that costs more than 2 s, with the defect it
+proves that a cheaper one cannot. Measured under full parallel load, which is
+what the baseline was measured under and roughly twice what the file costs when
+run alone:
+
+| Control | s | Defect only this can prove |
+| --- | --- | --- |
+| E2E-1 the whole command, chained | 18.4 | lease + snapshot + relation + block base + ledger + workspace + scope authority, satisfied at the same instant |
+| G-5 authority survives the block run | 18.0 | the guarantee holds after the invocation that made it |
+| G-1 the chain lands | 16.8 | the worktree is really at the predecessor's commit |
+| G-4 older-run result refused | 9.7 | ancestry of two real commit histories |
+| G-3 unreferenced base refused | 8.8 | reachability is a Git fact, not a record fact |
+| E2E-2 the predecessor blocks | 7.8 | the widening rule does not over-reach end to end |
+| the widened start gate | 5.6 | a frozen-ineligible member really starts, and records no authority of its own |
+| G-6 frozen base beats a moving branch | 3.1 | which commit `worktree add` used |
+
+Six git-tier rows of the eight allowed, and exactly two end-to-end.
+
+**The count was over budget first, and controls moved down a tier rather than
+being deleted.** Measured alone the file had six tests over 2 s; measured under
+load — the honest comparison, because that is how the baseline was taken — it had
+thirteen, eleven of them git-tier against a limit of eight. Four moved:
+
+- the default-branch specificity case now asks `proveSourcePreflight`, which is
+  where the switch on the base actually lives, instead of creating a second
+  workspace to observe a commit every V1-03 control already asserts;
+- the two real-repository probe controls use a bare fixture root instead of a
+  resolved repository, because a probe takes a `cwd` and a commit and has no use
+  for a parsed profile;
+- the two freeze-site refusals share one fixture, which is safe for exactly the
+  reason under test: neither path writes anything;
+- the standalone "no scope authority" assertion folded into the start-gate
+  control, which was already paying for a repository and a start.
+
+None was deleted and none lost an assertion.
+
 ### Carried forward from V2-09, deliberately
 
 - **F-C1 — a ledger whose roots do not agree on one base cannot be chained onto
