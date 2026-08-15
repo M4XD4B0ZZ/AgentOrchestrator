@@ -6,7 +6,7 @@
  * table and each carries the defect it proves that a cheaper test cannot.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 import {
   BLOCK_LEDGER_SCHEMA_VERSION,
@@ -22,6 +22,50 @@ import {
   commitIsReferenced,
   commitObjectPresent,
 } from '../src/worktree/commit-probes.js';
+import { runGitCommand } from '../src/worktree/git-command.js';
+import { prepareTaskWorkspace } from '../src/worktree/prepare-workspace.js';
+import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
+import {
+  createRepoFixture,
+  FIXTURE_A_PROFILE,
+  git as fixtureGit,
+  removeRepoFixtures,
+  writeRepoFile,
+} from './helpers/repo-fixtures.js';
+import {
+  removeTrackedWorkspaces,
+  resolveFixture,
+  taskWithId,
+  trackWorkspacesOf,
+} from './helpers/worktree-fixtures.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
+
+afterAll(() => {
+  releaseTestLeases();
+  removeTrackedWorkspaces();
+  removeRepoFixtures();
+});
+
+/** A resolved fixture repository whose workspaces will be cleaned up. */
+async function realRepository(): Promise<ResolvedRepository> {
+  const root = createRepoFixture({ defaultBranch: 'main', profile: FIXTURE_A_PROFILE });
+  const repository = await resolveFixture(root);
+  trackWorkspacesOf(repository);
+  return repository;
+}
+
+const headOf = (path: string) => fixtureGit(path, ['rev-parse', 'HEAD']).trim();
+
+/** Moves the default branch on, so a frozen base stops being the tip. */
+function commitOnDefaultBranch(repository: ResolvedRepository, relativePath: string): string {
+  writeRepoFile(repository.root, relativePath, 'later\n');
+  fixtureGit(repository.root, ['add', '--all']);
+  fixtureGit(repository.root, ['commit', '--quiet', '-m', `add ${relativePath}`]);
+  return headOf(repository.root);
+}
+
+const branchExists = (root: string, branch: string) =>
+  fixtureGit(root, ['branch', '--list', branch]).trim().length > 0;
 
 const rows = (spec: Record<string, readonly string[]>) =>
   Object.entries(spec).map(([taskId, dependsOn]) => ({ taskId, dependsOn }));
@@ -67,6 +111,16 @@ describe('the chain shape is read from the frozen relation', () => {
 const gitReturning = (result: Partial<{ outcome: string; stdout: string; exitCode: number | null }>) =>
   (async () => ({ outcome: 'OK', stdout: '', exitCode: 0, ...result })) as never;
 
+/** A runner whose reply depends on the first two argv words. */
+const answering = (
+  answers: Record<string, { outcome: string; stdout?: string; exitCode?: number | null }>,
+) =>
+  (async (_cwd: string, args: readonly string[]) => ({
+    stdout: '',
+    exitCode: 0,
+    ...(answers[`${args[0]} ${args[1]}`] ?? { outcome: 'OK' }),
+  })) as never;
+
 describe('the commit probes separate an answer from a refusal to answer', () => {
   it('reads exit 1 as a genuine "no" and 128 as "could not evaluate"', async () => {
     expect(await classifyAncestry(gitReturning({ outcome: 'OK' }), 'C:/r', 'a', 'b')).toBe('ANCESTOR');
@@ -78,10 +132,20 @@ describe('the commit probes separate an answer from a refusal to answer', () => 
       .toBe('INDETERMINATE');
   });
 
-  it('answers presence only on exit 0 and exit 1', async () => {
-    expect(await commitObjectPresent(gitReturning({ outcome: 'OK' }), 'C:/r', 'a')).toBe(true);
-    expect(await commitObjectPresent(gitReturning({ outcome: 'NONZERO_EXIT', exitCode: 1 }), 'C:/r', 'a')).toBe(false);
-    expect(await commitObjectPresent(gitReturning({ outcome: 'NONZERO_EXIT', exitCode: 128 }), 'C:/r', 'a')).toBeNull();
+  it('answers presence from the object type, and separates absent from unreadable', async () => {
+    expect(await commitObjectPresent(gitReturning({ outcome: 'OK', stdout: 'commit' }), 'C:/r', 'a')).toBe(true);
+    // Present, and not something a workspace can be built on.
+    expect(await commitObjectPresent(gitReturning({ outcome: 'OK', stdout: 'blob' }), 'C:/r', 'a')).toBe(false);
+    // `cat-file -t` exits 128 for a missing object and for a broken repository
+    // alike, so the second question is what makes these two different answers.
+    expect(await commitObjectPresent(
+      answering({ 'cat-file -t': { outcome: 'NONZERO_EXIT', exitCode: 128 },
+                  'cat-file -e': { outcome: 'NONZERO_EXIT', exitCode: 1 } }), 'C:/r', 'a')).toBe(false);
+    expect(await commitObjectPresent(
+      answering({ 'cat-file -t': { outcome: 'NONZERO_EXIT', exitCode: 128 },
+                  'cat-file -e': { outcome: 'NONZERO_EXIT', exitCode: 128 } }), 'C:/r', 'a')).toBeNull();
+    expect(await commitObjectPresent(gitReturning({ outcome: 'REFUSED_UNSAFE_ARGUMENT', exitCode: null }), 'C:/r', 'a'))
+      .toBeNull();
   });
 
   it('calls a commit referenced when some ref contains it, and unknown when Git could not say', async () => {
@@ -89,6 +153,54 @@ describe('the commit probes separate an answer from a refusal to answer', () => 
       .toBe(true);
     expect(await commitIsReferenced(gitReturning({ outcome: 'OK', stdout: '' }), 'C:/r', 'a')).toBe(false);
     expect(await commitIsReferenced(gitReturning({ outcome: 'UNAVAILABLE', exitCode: null }), 'C:/r', 'a')).toBeNull();
+  });
+});
+
+/**
+ * The same three probes against a real repository, and the reason they exist.
+ *
+ * Every assertion above drives an injected runner, so all of them pass while the
+ * probe asks Git nothing at all: an argument the seam refuses as shell-unsafe
+ * never spawns, comes back `REFUSED_UNSAFE_ARGUMENT`, and is classified as "could
+ * not evaluate" — which is a legitimate answer for the classifier and a dead
+ * probe in production. That is not hypothetical. Two of these three were written
+ * with `<sha>^{commit}` and `--format=%(refname)`, both of which contain
+ * characters `SAFE_ARG_PATTERN` excludes, and both answered `null` for every
+ * input from the day they were written.
+ *
+ * These cases are cheap — a fixture repository and no worktree — and they are the
+ * only ones that can fail when a probe's *arguments* are wrong rather than its
+ * reading of the reply.
+ */
+describe('the commit probes really ask Git, against a repository that exists', () => {
+  it('answers presence, type, reachability and ancestry from real objects', async () => {
+    const repository = await realRepository();
+    const first = headOf(repository.root);
+    const second = commitOnDefaultBranch(repository, 'second.txt');
+    const blob = fixtureGit(repository.root, ['rev-parse', 'HEAD:second.txt']).trim();
+    const missing = 'f'.repeat(40);
+
+    expect(await commitObjectPresent(runGitCommand, repository.root, second)).toBe(true);
+    expect(await commitObjectPresent(runGitCommand, repository.root, missing)).toBe(false);
+    expect(await commitObjectPresent(runGitCommand, repository.root, blob)).toBe(false);
+
+    expect(await commitIsReferenced(runGitCommand, repository.root, second)).toBe(true);
+
+    expect(await classifyAncestry(runGitCommand, repository.root, first, second)).toBe('ANCESTOR');
+    expect(await classifyAncestry(runGitCommand, repository.root, second, first)).toBe('NOT_ANCESTOR');
+    expect(await classifyAncestry(runGitCommand, repository.root, missing, second)).toBe('INDETERMINATE');
+  });
+
+  it('calls a commit no ref contains unreferenced, which is the discarded-work case', async () => {
+    const repository = await realRepository();
+    fixtureGit(repository.root, ['checkout', '--quiet', '-b', 'scratch']);
+    const orphaned = commitOnDefaultBranch(repository, 'scratch.txt');
+    fixtureGit(repository.root, ['checkout', '--quiet', 'main']);
+    fixtureGit(repository.root, ['branch', '-D', 'scratch']);
+
+    // The object survives until it is pruned; no ref reaches it any more.
+    expect(await commitObjectPresent(runGitCommand, repository.root, orphaned)).toBe(true);
+    expect(await commitIsReferenced(runGitCommand, repository.root, orphaned)).toBe(false);
   });
 });
 
@@ -191,7 +303,7 @@ describe('a predecessor result is proved fit before it becomes a base', () => {
     (async (_cwd: string, args: readonly string[]) => {
       const key = `${args[0]} ${args[1]}`;
       const healthy: Record<string, { outcome: string; stdout?: string }> = {
-        'rev-parse --verify': { outcome: 'OK' },
+        'cat-file -t': { outcome: 'OK', stdout: 'commit' },
         'for-each-ref --count=1': { outcome: 'OK', stdout: 'refs/heads/agent/task-a2' },
         'merge-base --is-ancestor': { outcome: 'OK' },
       };
@@ -212,8 +324,8 @@ describe('a predecessor result is proved fit before it becomes a base', () => {
   it.each([
     ['PREDECESSOR_NOT_SETTLED', { a2: { disposition: 'ACTIVE' as const } }, {}],
     ['PREDECESSOR_RESULT_ABSENT', { a2: { disposition: 'SETTLED' as const, resultCommit: null } }, {}],
-    ['BASE_OBJECT_ABSENT', {}, { 'rev-parse --verify': { outcome: 'NONZERO_EXIT', exitCode: 1 } }],
-    ['BASE_OBJECT_UNREADABLE', {}, { 'rev-parse --verify': { outcome: 'NONZERO_EXIT', exitCode: 128 } }],
+    ['BASE_OBJECT_ABSENT', {}, { 'cat-file -t': { outcome: 'OK', stdout: 'blob' } }],
+    ['BASE_OBJECT_UNREADABLE', {}, { 'cat-file -t': { outcome: 'UNAVAILABLE' }, 'cat-file -e': { outcome: 'UNAVAILABLE' } }],
     ['BASE_NOT_REFERENCED', {}, { 'for-each-ref --count=1': { outcome: 'OK', stdout: '' } }],
     [
       'BASE_NOT_DESCENDED_FROM_BLOCK_BASE',
@@ -236,6 +348,7 @@ describe('a predecessor result is proved fit before it becomes a base', () => {
     // refusal from BASE_NOT_DESCENDED_FROM_BLOCK_BASE.
     let call = 0;
     const git = (async (_cwd: string, args: readonly string[]) => {
+      if (args[0] === 'cat-file') return { outcome: 'OK', stdout: 'commit', exitCode: 0 };
       if (args[0] !== 'merge-base') return { outcome: 'OK', stdout: 'refs/heads/x', exitCode: 0 };
       call += 1;
       return call === 1
@@ -305,5 +418,57 @@ describe('a predecessor result is proved fit before it becomes a base', () => {
       blockBaseCommit: BASE,
     });
     expect(result).toEqual({ ok: true, commit: RESULT });
+  });
+});
+
+/* ═════════════════ the workspace base is a parameter ═════════════════════ */
+
+describe('a workspace is created at the base it was told, not at one it derived', () => {
+  // Git-tier control G-6. The effect is a worktree created at a commit that is
+  // no longer the branch tip, and no cheaper test can observe which commit
+  // `git worktree add` actually used.
+  it('pins a workspace at the base it was given, even after the default branch moves', async () => {
+    const repository = await realRepository();
+    const frozen = headOf(repository.root);
+    const moved = commitOnDefaultBranch(repository, 'later.txt');
+    expect(moved).not.toBe(frozen);
+
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('task-a'), {
+      git: runGitCommand,
+      lease: leaseFor(repository),
+      base: { kind: 'PINNED_COMMIT', commit: frozen },
+    });
+
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.workspace.basePinnedCommit).toBe(frozen);
+    expect(headOf(prepared.workspace.worktreePath)).toBe(frozen);
+  });
+
+  // Specificity (G6): the default-branch path is unchanged for every existing caller.
+  it('still resolves the declared default branch when told to', async () => {
+    const repository = await realRepository();
+    const tip = headOf(repository.root);
+
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('task-a'), {
+      git: runGitCommand,
+      lease: leaseFor(repository),
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
+    });
+
+    expect(prepared.ok && prepared.workspace.basePinnedCommit).toBe(tip);
+  });
+
+  it('refuses a pinned base this repository does not have, and creates nothing', async () => {
+    const repository = await realRepository();
+
+    const prepared = await prepareTaskWorkspace(repository, taskWithId('task-a'), {
+      git: runGitCommand,
+      lease: leaseFor(repository),
+      base: { kind: 'PINNED_COMMIT', commit: 'f'.repeat(40) },
+    });
+
+    expect(prepared).toMatchObject({ ok: false, code: 'BASE_COMMIT_ABSENT', residue: false });
+    expect(branchExists(repository.root, 'agent/task-a')).toBe(false);
   });
 });

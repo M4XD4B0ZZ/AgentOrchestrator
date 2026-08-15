@@ -316,7 +316,7 @@ describe('an effect never lands in a repository whose lease was not proved', () 
     const prepared = await prepareTaskWorkspace(
       rootShiftsWhenTheGateAsks(leased.repository, foreign.root, leased.root),
       taskWithId(TASK_ID),
-      { git: runGitCommand, lease: evidence },
+      { git: runGitCommand, lease: evidence, base: { kind: 'DEFAULT_BRANCH_TIP' } },
     );
 
     // Whichever repository the snapshot names, it names one — so either the
@@ -337,6 +337,7 @@ describe('an effect never lands in a repository whose lease was not proved', () 
     const prepared = await prepareTaskWorkspace(foreign.repository, taskWithId(TASK_ID), {
       git: runGitCommand,
       lease: foreignLease,
+      base: { kind: 'DEFAULT_BRANCH_TIP' },
     });
     if (!prepared.ok) throw new Error(`the workspace was not prepared: ${prepared.code}`);
     expect(releaseRepositoryExecutionLease(foreignLease).code).toBe('RELEASED');

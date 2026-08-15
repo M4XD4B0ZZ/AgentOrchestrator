@@ -176,7 +176,10 @@ export async function startTask(options: {
 
   // Before any state is seeded — a persisted state is an untracked file, and
   // preparation refuses a dirty source repository.
-  const prepared = await prepareTaskWorkspace(repository, taskWithId(taskId), { lease: leaseFor(repository) });
+  const prepared = await prepareTaskWorkspace(repository, taskWithId(taskId), {
+    lease: leaseFor(repository),
+    base: { kind: 'DEFAULT_BRANCH_TIP' },
+  });
   if (!prepared.ok) throw new Error(`workspace did not prepare: ${prepared.code}`);
 
   return { repository, root, workspace: prepared.workspace, taskId };

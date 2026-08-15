@@ -1385,7 +1385,12 @@ describe('a start may be authorised by a planning result it did not take', () =>
       .toBe(false);
 
     const started = await startPlannedTask(
-      { repository: fixture.repository, taskId: 'B-001', planning: frozen },
+      {
+        repository: fixture.repository,
+        taskId: 'B-001',
+        planning: frozen,
+        base: { kind: 'DEFAULT_BRANCH_TIP' },
+      },
       { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
     );
 
@@ -1402,7 +1407,12 @@ describe('a start may be authorised by a planning result it did not take', () =>
     expect(frozen.selection.eligibility.find((e) => e.taskId === 'B-001')?.eligible).toBe(false);
 
     const started = await startPlannedTask(
-      { repository: fixture.repository, taskId: 'B-001', planning: frozen },
+      {
+        repository: fixture.repository,
+        taskId: 'B-001',
+        planning: frozen,
+        base: { kind: 'DEFAULT_BRANCH_TIP' },
+      },
       { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: leaseFor(fixture.repository) },
     );
 

@@ -62,21 +62,50 @@ export async function classifyAncestry(
   return 'INDETERMINATE';
 }
 
-/** `true`/`false` when Git resolved the object, `null` when it could not say. */
+/**
+ * `true`/`false` when Git resolved the object, `null` when it could not say.
+ *
+ * ── Why not `rev-parse --verify <sha>^{commit}` ────────────────────────────
+ *
+ * That is the idiomatic spelling and this build cannot use it. The Git seam
+ * refuses any argument that is not shell-inert — `SAFE_ARG_PATTERN` in
+ * `doctor/exec.ts` deliberately excludes `^`, `{` and `}`, because the command
+ * line it builds is handed to `cmd.exe /s` verbatim and `^` is that shell's
+ * escape character. So `<sha>^{commit}` never spawns: it comes back
+ * `REFUSED_UNSAFE_ARGUMENT`, which is not `OK` and not exit 1, so the probe
+ * answered `null` for every input it was ever given.
+ *
+ * That was measured, not reasoned about, and it had been true since the probe
+ * was written: the existing tests drive an injected runner, so they proved the
+ * *classification* of Git's answers and never that Git was asked anything. The
+ * real-repository controls in `tests/v2-09-dependent-commit-chain.test.ts` exist
+ * because of it — an argument-safety refusal is invisible to a seam test by
+ * construction.
+ *
+ * Dropping the peel is not an option either: `rev-parse --verify` returns exit 0
+ * for *any* full-length hex string, whether or not the repository has it.
+ *
+ * ── So: `cat-file`, and two questions on the unhappy path only ─────────────
+ *
+ * `cat-file -t` names the object's type, which answers "is this a commit"
+ * exactly — a blob is present and is not something a workspace can be built on.
+ * Its one weakness is that a missing object and an unreadable repository both
+ * exit 128, and those must not be the same answer. `cat-file -e` separates them
+ * with the clean 0/1/128 protocol, and is asked only when the first question
+ * failed, so the happy path stays a single subprocess.
+ */
 export async function commitObjectPresent(
   git: GitRunner,
   cwd: string,
   commit: string,
 ): Promise<boolean | null> {
-  const probe = await git(cwd, [
-    'rev-parse',
-    '--verify',
-    '--quiet',
-    '--end-of-options',
-    `${commit}^{commit}`,
-  ]);
-  if (probe.outcome === 'OK') return true;
-  if (probe.outcome === 'NONZERO_EXIT' && probe.exitCode === ANSWERED_NO_EXIT) return false;
+  const type = await git(cwd, ['cat-file', '-t', '--end-of-options', commit]);
+  if (type.outcome === 'OK') return type.stdout === 'commit';
+
+  const existence = await git(cwd, ['cat-file', '-e', '--end-of-options', commit]);
+  if (existence.outcome === 'NONZERO_EXIT' && existence.exitCode === ANSWERED_NO_EXIT) return false;
+  // Either Git could not be read, or it says the object exists while refusing to
+  // name its type. Both are refusals to answer, and neither is "it is gone".
   return null;
 }
 
@@ -90,18 +119,19 @@ export async function commitObjectPresent(
  *
  * `--count=1` because the question is existential; the ref that answers it is
  * not interesting and must not reach an operator-facing report.
+ *
+ * No `--format`, for the reason {@link commitObjectPresent} sets out at length:
+ * `%(refname)` contains `%`, `(` and `)`, none of which the seam's shell-inert
+ * allow-list admits, so the flag would refuse the whole command rather than
+ * shape its output. The default format is read for its *length* alone, which is
+ * all this question needs, and the bytes never leave this function.
  */
 export async function commitIsReferenced(
   git: GitRunner,
   cwd: string,
   commit: string,
 ): Promise<boolean | null> {
-  const probe = await git(cwd, [
-    'for-each-ref',
-    '--count=1',
-    `--contains=${commit}`,
-    '--format=%(refname)',
-  ]);
+  const probe = await git(cwd, ['for-each-ref', '--count=1', `--contains=${commit}`]);
   if (probe.outcome !== 'OK') return null;
   return probe.stdout.length > 0;
 }

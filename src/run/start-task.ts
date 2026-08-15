@@ -109,6 +109,7 @@ import type { GitRunner } from '../worktree/git-command.js';
 import {
   prepareTaskWorkspace,
   type TaskWorkspace,
+  type WorkspaceBase,
   type WorkspacePreparationFailureCode,
 } from '../worktree/prepare-workspace.js';
 
@@ -237,6 +238,16 @@ export interface StartTaskRequest {
  */
 export type PlannedStartRequest = StartTaskRequest & {
   readonly planning: TaskPlanningSuccess;
+  /**
+   * The commit this task's workspace is to be built on.
+   *
+   * **Required**, because the caller that froze a plan is also the caller that
+   * knows whether this member is a root of its block or is chained onto a
+   * sibling's result. A default here would be this module deciding that on the
+   * caller's behalf, from the one source — the current default branch — that a
+   * frozen run is specifically not allowed to consult.
+   */
+  readonly base: WorkspaceBase;
 };
 
 export interface StartTaskDependencies {
@@ -412,6 +423,7 @@ async function startAgainstPlan(
   repository: ResolvedRepository,
   taskId: string,
   planning: TaskPlanningSuccess,
+  base: WorkspaceBase,
   deps: StartTaskDependencies,
 ): Promise<StartTaskResult> {
   const stop = (from: Partial<StartTaskResult> & { readonly outcome: StartTaskOutcome }) =>
@@ -491,6 +503,7 @@ async function startAgainstPlan(
   const prepared = await prepareTaskWorkspace(repository, task, {
     git: deps.git,
     lease: deps.lease,
+    base,
   });
 
   // A collision may be this task's own crashed start. Only there is adoption
@@ -540,7 +553,10 @@ async function startAgainstPlan(
       });
     }
 
-    const adoption = await assessWorkspaceAdoption(repository, taskId, { git: deps.git });
+    // Assessed against the base this start was told, never against a re-derived
+    // branch tip: the question is whether the thing in the way is the workspace
+    // *this* start would have created.
+    const adoption = await assessWorkspaceAdoption(repository, taskId, { git: deps.git, base });
     if (adoption.verdict !== 'ADOPTABLE_PRISTINE_ORPHAN') {
       // The refusal now names *why* the thing in the way is not ours, which is
       // the difference between "delete a stale worktree" and "somebody is
@@ -631,7 +647,7 @@ export async function startPlannedTask(
   const repository = snapshotRepositoryRecord(request.repository);
   const gated = gateStart(repository, taskId, deps);
   if (gated !== null) return gated;
-  return startAgainstPlan(repository, taskId, request.planning, deps);
+  return startAgainstPlan(repository, taskId, request.planning, request.base, deps);
 }
 
 /**
@@ -683,5 +699,8 @@ export async function startTask(
     });
   }
 
-  return startAgainstPlan(repository, taskId, planning, deps);
+  // Today's behaviour, written down. A task started outside a block is built on
+  // the tip of its repository's declared default branch, which is what this path
+  // has always resolved for itself one layer further in.
+  return startAgainstPlan(repository, taskId, planning, { kind: 'DEFAULT_BRANCH_TIP' }, deps);
 }

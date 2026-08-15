@@ -54,6 +54,7 @@ import {
 import type { TaskDefinition } from '../plan/task-definition.js';
 import { localBranchRef } from '../repo/branch-name.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
+import { commitObjectPresent } from './commit-probes.js';
 import { runGitCommand, type GitRunner } from './git-command.js';
 import {
   deriveTaskWorkspaceIdentity,
@@ -88,6 +89,18 @@ export const WORKSPACE_PREPARATION_FAILURE_CODES = [
   'BASE_BRANCH_NOT_FOUND',
   /** The base branch resolved to something that is not a full object name. */
   'BASE_COMMIT_UNRESOLVED',
+  /**
+   * A caller pinned this start to a commit, and the commit is not in this
+   * repository.
+   *
+   * Kept apart from {@link BASE_BRANCH_NOT_FOUND}: that one says the repository
+   * is misconfigured, and this one says the *caller* named a commit nothing here
+   * has. An operator whose chained predecessor's result was pruned needs to be
+   * told the second, and would go looking at their profile if told the first.
+   */
+  'BASE_COMMIT_ABSENT',
+  /** Git could not evaluate whether the pinned base exists. Never an answer. */
+  'BASE_COMMIT_UNREADABLE',
   /** A branch with the derived name already exists. */
   'TASK_BRANCH_EXISTS',
   /** Something already exists at the derived worktree path. */
@@ -147,6 +160,9 @@ const PREPARATION_DETAIL: Readonly<Record<WorkspacePreparationFailureCode, strin
       'The repository has uncommitted or untracked changes, so no base state can be pinned.',
     BASE_BRANCH_NOT_FOUND: 'The declared default branch does not exist in this repository.',
     BASE_COMMIT_UNRESOLVED: 'The declared default branch did not resolve to a full commit name.',
+    BASE_COMMIT_ABSENT: 'The commit this task was to be built on is not in this repository.',
+    BASE_COMMIT_UNREADABLE:
+      'Git could not establish whether the commit this task was to be built on exists.',
     TASK_BRANCH_EXISTS: 'A branch with the name derived for this task already exists.',
     WORKTREE_PATH_OCCUPIED: 'A filesystem object already exists at the derived worktree path.',
     WORKTREE_ALREADY_REGISTERED:
@@ -204,9 +220,41 @@ export type WorkspacePreparationResult =
   | WorkspacePreparationSuccess
   | WorkspacePreparationFailure;
 
+/**
+ * Which commit a workspace is to be created at.
+ *
+ * ── Why this is told rather than read ──────────────────────────────────────
+ *
+ * For as long as every task started from the default branch, "the base" and
+ * "the tip of the declared default branch" were the same sentence, and reading
+ * the branch was the cheapest way to say it. A chained task breaks the identity:
+ * it starts from its predecessor's result commit, which is on no branch anybody
+ * declared. Folding that back into "read the branch" would make the workspace
+ * receipt name a commit the work is not actually based on — and the receipt is
+ * what the durable state, the scope delta and every later ancestry check are all
+ * built from.
+ *
+ * So the base arrives as a value, and the two kinds are kept distinct rather
+ * than collapsed into an optional commit: `DEFAULT_BRANCH_TIP` is a *question*
+ * this module answers against the repository, and `PINNED_COMMIT` is an *answer*
+ * the caller already has. An `undefined` standing for the first would make
+ * "nobody said" and "the branch, please" the same input.
+ */
+export type WorkspaceBase =
+  | { readonly kind: 'DEFAULT_BRANCH_TIP' }
+  | { readonly kind: 'PINNED_COMMIT'; readonly commit: string };
+
 export interface WorkspacePreparationOptions {
   /** The Git seam. Defaults to the real one. */
   readonly git?: GitRunner;
+  /**
+   * The commit to build on. **Required**, so every caller states its answer.
+   *
+   * Not defaulted to the default-branch tip: a caller that forgot to pass a
+   * chained base would then silently get a workspace built on the wrong tree,
+   * and the receipt would look exactly as convincing as a correct one.
+   */
+  readonly base: WorkspaceBase;
   /**
    * The execution lease, re-proved here immediately before the branch and the
    * worktree are created.
@@ -283,7 +331,7 @@ export async function prepareTaskWorkspace(
   const identity = derived.identity;
 
   // --- 2. Git preflight on the source repository ---------------------------
-  const preflight = await proveSourcePreflight(git, identity);
+  const preflight = await proveSourcePreflight(git, identity, options.base);
   if (!preflight.ok) return preparationFailure(preflight.code);
   const basePinnedCommit = preflight.basePinnedCommit;
 
@@ -362,13 +410,21 @@ export type PreflightResult =
   | { readonly ok: false; readonly code: WorkspacePreparationFailureCode };
 
 /**
- * The four questions that must all be answered before a base can be pinned.
+ * The three checkout questions, and then the base itself.
  *
  * Ordered from "is this even the repository we think it is" outwards, so a
  * misconfigured root is never reported as a dirty tree.
  *
- * Exported because adoption needs the *same* four answers and the same pinned
- * commit (V2-06A): a workspace may only be adopted if the source checkout still
+ * ── Two questions that used to be one ──────────────────────────────────────
+ *
+ * The checkout questions are about the *source repository* and are asked
+ * whatever the base is: a dirty or wandering checkout is the wrong place to
+ * create anything from, and that is true of a chained start exactly as it is of
+ * a root one. The base is the separate question, and it is now **told** rather
+ * than assumed — see {@link WorkspaceBase}.
+ *
+ * Exported because adoption needs the *same* answers and the same pinned commit
+ * (V2-06A): a workspace may only be adopted if the source checkout still
  * satisfies every invariant a fresh start would have required of it, and the
  * commit an orphan must be sitting at is precisely the one a fresh start would
  * have pinned. Re-deriving that elsewhere would be a second opinion about what
@@ -377,6 +433,7 @@ export type PreflightResult =
 export async function proveSourcePreflight(
   git: GitRunner,
   identity: TaskWorkspaceIdentity,
+  base: WorkspaceBase,
 ): Promise<PreflightResult> {
   const root = identity.repositoryRoot;
 
@@ -405,22 +462,33 @@ export async function proveSourcePreflight(
   if (status.outcome !== 'OK') return { ok: false, code: 'GIT_UNAVAILABLE' };
   if (status.stdout.length > 0) return { ok: false, code: 'SOURCE_WORKTREE_DIRTY' };
 
-  const base = await git(root, [
+  // A pinned base is not looked up in a branch, and it is not believed either:
+  // the object must be a commit that this repository really holds, or the
+  // `worktree add` below would fail with Git's own message instead of a typed
+  // refusal an operator can act on.
+  if (base.kind === 'PINNED_COMMIT') {
+    const present = await commitObjectPresent(git, root, base.commit);
+    if (present === null) return { ok: false, code: 'BASE_COMMIT_UNREADABLE' };
+    if (!present) return { ok: false, code: 'BASE_COMMIT_ABSENT' };
+    return { ok: true, basePinnedCommit: base.commit };
+  }
+
+  const resolved = await git(root, [
     'rev-parse',
     '--verify',
     '--quiet',
     '--end-of-options',
     localBranchRef(identity.baseBranch),
   ]);
-  if (base.outcome === 'UNAVAILABLE' || base.outcome === 'REFUSED_UNSAFE_ARGUMENT') {
+  if (resolved.outcome === 'UNAVAILABLE' || resolved.outcome === 'REFUSED_UNSAFE_ARGUMENT') {
     return { ok: false, code: 'GIT_UNAVAILABLE' };
   }
-  if (base.outcome !== 'OK') return { ok: false, code: 'BASE_BRANCH_NOT_FOUND' };
-  if (!GIT_OBJECT_NAME_PATTERN.test(base.stdout)) {
+  if (resolved.outcome !== 'OK') return { ok: false, code: 'BASE_BRANCH_NOT_FOUND' };
+  if (!GIT_OBJECT_NAME_PATTERN.test(resolved.stdout)) {
     return { ok: false, code: 'BASE_COMMIT_UNRESOLVED' };
   }
 
-  return { ok: true, basePinnedCommit: base.stdout };
+  return { ok: true, basePinnedCommit: resolved.stdout };
 }
 
 // ── Collisions ──────────────────────────────────────────────────────────────
