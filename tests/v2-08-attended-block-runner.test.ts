@@ -2174,3 +2174,346 @@ describe('a durable write that is not possible is reported, never claimed', () =
     expect(seam.staged().length).toBeGreaterThan(1);
   }, 600_000);
 });
+
+import { settleBlockTask } from '../src/block/block-progress.js';
+import { applyForcedProgress } from '../src/block/block-runner.js';
+import { reconcileBlockRun } from '../src/block/reconcile-block.js';
+
+/**
+ * Moves a real task's durable state to `READY_FOR_PR`, the settlement proof.
+ *
+ * The same helper `tests/v2-07-block-ledger.test.ts:123` already uses, repeated
+ * here rather than shared: a fixture shared between two suites is a fixture
+ * neither suite can change.
+ */
+function driveToReadyForPr(fixture: Fixture, taskId: string): void {
+  const loaded = loadTaskState(fixture.root, taskId);
+  if (!loaded.ok) throw new Error('fixture: the task never started');
+  const saved = saveTaskState(
+    {
+      ...loaded.state,
+      state: 'READY_FOR_PR',
+      stateEnteredAt: '2026-08-14T10:00:00.000Z',
+      reviewRound: 1,
+      worktreeCleanAtCheckpoint: true,
+    },
+    { repositoryRoot: fixture.root, expectedRevision: loaded.revision },
+  );
+  if (!saved.ok) throw new Error(`could not drive to READY_FOR_PR: ${saved.code}`);
+}
+
+/**
+ * The state a task's own record is in, read from disk.
+ *
+ * Used only to assert a *premise*. Several cases below turn on the record
+ * saying `READY_FOR_PR` while the ledger says something else, and a case that
+ * assumed that instead of asserting it would pass identically against a fixture
+ * whose record never moved — refusing, or recognising, for the wrong reason.
+ */
+function recordedStateOf(root: string, taskId: string): string {
+  const loaded = loadTaskState(root, taskId);
+  if (!loaded.ok) throw new Error(`fixture: ${taskId} has no usable record`);
+  return loaded.state.state;
+}
+
+/** Whether the reconciler is offering this ledger progress at all. */
+function progressIsOffered(fixture: Fixture): boolean {
+  return reconcileBlockRun(reload(fixture.root).ledger, { repositoryRoot: fixture.root })
+    .progressAvailable;
+}
+
+describe('positive reconciliation is applied only where it is forced', () => {
+  it('recognises a PLANNED task that already finished, through the primitive', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    // B-001 reaches READY_FOR_PR before the run exists — a real state, driven
+    // the way the suite drives every other one. The ledger is created by the
+    // run itself: a block run does not adopt a ledger somebody else started.
+    await reallyStart(fixture, 'B-001');
+    driveToReadyForPr(fixture, 'B-001');
+
+    const result = await runBlock(fixture);
+
+    // Both settled: A-001 by being driven, B-001 by being recognised.
+    expect(result.stopReason).toBe('COMPLETE');
+    const entries = onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[];
+    expect(entries.map((task) => task['disposition'])).toEqual(['SETTLED', 'SETTLED']);
+    // Which of the two settled *how*, because "both are SETTLED" alone is
+    // compatible with a run that drove B-001 as well — and then this case would
+    // pin execution rather than reconciliation. A-001 carries a driver answer
+    // and B-001 carries none.
+    expect(result.tasks[0]?.runOutcome).toBe('TASK_COMPLETED');
+    expect(result.tasks[1]?.runOutcome).toBeNull();
+    // And it is evidence-backed, because it went through settleBlockTask rather
+    // than through a direct write. A reconciliation that bypassed the primitive
+    // would be a second, weaker way to assert progress.
+    expect(entries[1]?.['evidenceRevision']).not.toBeNull();
+    expect(entries[1]?.['resultCommit']).not.toBeNull();
+  }, 600_000);
+
+  it('terminates when every member is already finished, having driven nothing', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+    await reallyStart(fixture, 'B-001');
+    driveToReadyForPr(fixture, 'B-001');
+    // A working agent rather than a throwing one, so "nothing was driven" is
+    // measured at the seam instead of being inferred from a run that fell over.
+    const agent = recordedAgent({
+      claude: () => writerSuccess(),
+      codex: () => reviewResult(passingReview()),
+    });
+
+    // The whole run is reconciliation: two entries recognised, nothing driven.
+    // That the loop *ends* is the idempotence property doing its work — a
+    // reconciliation that re-applied itself would never stop finding progress.
+    const result = await runBlock(fixture, independentBlock(['A-001', 'B-001']), {
+      agent: agent.runner,
+    });
+
+    expect(result.stopReason).toBe('COMPLETE');
+    expect(result.steps).toBe(0);
+    expect(result.tasks.every((task) => task.runOutcome === null)).toBe(true);
+    // The same fact on the other side of the seam. `steps` and `runOutcome` are
+    // both the runner's own bookkeeping; this is the repository's.
+    expect(agent.calls.length).toBe(0);
+    // And both were recognised rather than merely left alone: COMPLETE is only
+    // reachable when every entry is SETTLED, but asserting it here says which
+    // ledger the reason was written over.
+    expect(
+      (onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[]).map(
+        (task) => task['disposition'],
+      ),
+    ).toEqual(['SETTLED', 'SETTLED']);
+  }, 600_000);
+
+  it('changes nothing when the same settlement is recorded twice', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+    const created = readFileSync(ledgerPath(fixture.root));
+    expect(
+      settleBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('RECORDED');
+    const after = readFileSync(ledgerPath(fixture.root));
+    // The instrument, proved able to see a change before it is used to assert
+    // there was none: the first settlement moved these bytes.
+    expect(after.equals(created)).toBe(false);
+
+    // Condition six, at the primitive that enforces it. Asserted on the bytes
+    // and not only on the outcome: "it answered DISPOSITION_UNCHANGED" is
+    // compatible with a write that changed a timestamp.
+    const again = settleBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root });
+
+    expect(again.outcome).toBe('DISPOSITION_UNCHANGED');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(after)).toBe(true);
+  }, 600_000);
+
+  it('does not repair an ACTIVE task, even when its record looks finished', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    expect(
+      activateBlockTask(reload(fixture.root), 'A-001', { repositoryRoot: fixture.root }).outcome,
+    ).toBe('RECORDED');
+    driveToReadyForPr(fixture, 'A-001');
+    const before = readFileSync(ledgerPath(fixture.root));
+
+    // The premise, in all three parts, because a case that refused for any
+    // other reason would pass just as well against a function that reconciles
+    // nothing at all: the entry really is ACTIVE, its record really says
+    // READY_FOR_PR, and the reconciler really is offering this ledger progress.
+    // Without the third, a proof that failed for an unrelated reason would take
+    // `applyForcedProgress` out at its first line and look like this refusal.
+    expect(
+      (onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[])[0]?.['disposition'],
+    ).toBe('ACTIVE');
+    expect(recordedStateOf(fixture.root, 'A-001')).toBe('READY_FOR_PR');
+    expect(progressIsOffered(fixture)).toBe(true);
+
+    // Asked of the function that draws the line, because the runner reaches
+    // this state only through its own activation and would conclude the task in
+    // the same iteration — the run-level path cannot hold the two apart.
+    //
+    // The entry is ACTIVE and the record says READY_FOR_PR. Declaring it
+    // settled from a reconciliation would be choosing between "drive it" and
+    // "call it done", which is the moment the six conditions stop holding.
+    const step = applyForcedProgress(reload(fixture.root), fixture.root, {
+      repositoryRoot: fixture.root,
+    });
+
+    expect(step.kind).toBe('OPEN');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+  }, 600_000);
+
+  it('applies the forced case at the same function, so the refusal above is not blanket', async () => {
+    // The control. Without it, an implementation that reconciles nothing at all
+    // passes the case above.
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+    // The one difference from the case above, asserted rather than left to the
+    // reader: the entry is PLANNED and not ACTIVE. Everything else is the same
+    // fixture, so the two cases differ in the disposition and nothing else.
+    expect(
+      (onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[])[0]?.['disposition'],
+    ).toBe('PLANNED');
+    expect(recordedStateOf(fixture.root, 'A-001')).toBe('READY_FOR_PR');
+
+    const step = applyForcedProgress(reload(fixture.root), fixture.root, {
+      repositoryRoot: fixture.root,
+    });
+
+    expect(step.kind).toBe('OPEN');
+    const entries = onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[];
+    expect(entries[0]?.['disposition']).toBe('SETTLED');
+    // Through the primitive, so it carries the evidence a direct write could
+    // not have produced.
+    expect(entries[0]?.['evidenceRevision']).not.toBeNull();
+    expect(entries[0]?.['resultCommit']).not.toBeNull();
+  }, 600_000);
+
+  // The classification that Task 7's first draft got wrong: every non-RECORDED
+  // grade was reported as DURABLE_WRITE_FAILED, which sends an operator to look
+  // at a disk that is working. `recordingResultFor` distinguishes four classes
+  // and `applyForcedProgress` must keep all four apart.
+  it('reports a reconciliation the primitive did not confirm under its own name', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+    // The premise, taken before the stop: this reconciliation is the forced one,
+    // so what the case measures below is the *primitive's* refusal and not a
+    // reconciliation that was never on offer.
+    expect(progressIsOffered(fixture)).toBe(true);
+    expect(recordedStateOf(fixture.root, 'A-001')).toBe('READY_FOR_PR');
+    // The ledger stops, so the reconciliation still reads as forced — A-001 is
+    // PLANNED and its record says READY_FOR_PR — while the primitive refuses it
+    // (`RUN_ALREADY_STOPPED`, graded UNRESOLVED).
+    expect(
+      stopBlockRun(reload(fixture.root), 'OPERATOR_STOPPED', {
+        repositoryRoot: fixture.root,
+      }).outcome,
+    ).toBe('RECORDED');
+    const before = readFileSync(ledgerPath(fixture.root));
+    expect(
+      (onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[])[0]?.['disposition'],
+    ).toBe('PLANNED');
+
+    const step = applyForcedProgress(reload(fixture.root), fixture.root, {
+      repositoryRoot: fixture.root,
+    });
+
+    expect(step.kind).toBe('ENDED');
+    if (step.kind !== 'ENDED') return;
+    // Its own outcome. Not DURABLE_WRITE_FAILED — nothing is wrong with the
+    // disk — and not ACTIVE_TASK_UNRESOLVED, which is a persisted claim about an
+    // ACTIVE task while this entry is PLANNED.
+    expect(step.outcome).toBe('RECONCILIATION_UNRESOLVED');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+  }, 600_000);
+
+  // The fourth grade, and the one the brief's set left without a case. Two of
+  // `recordingResultFor`'s four classes are pinned above — RECORDED by the
+  // control, UNRESOLVED by the case before this one — and `WRITE_FAILED` was
+  // not, so collapsing its arm into the UNRESOLVED one reddened nothing.
+  // Measured by mutant; see the task report.
+  it('reports a reconciliation whose write could not land as a failed write', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [] });
+    startRun(fixture);
+    await reallyStart(fixture, 'A-001');
+    driveToReadyForPr(fixture, 'A-001');
+    // Same forced reconciliation as the control, so the *only* difference is
+    // that the write cannot land.
+    expect(progressIsOffered(fixture)).toBe(true);
+    const before = readFileSync(ledgerPath(fixture.root));
+
+    const step = applyForcedProgress(reload(fixture.root), fixture.root, {
+      repositoryRoot: fixture.root,
+      replace: alwaysFailingReplace(),
+    });
+
+    expect(step.kind).toBe('ENDED');
+    if (step.kind !== 'ENDED') return;
+    // A disk that will not take a write is not a proof race, and the two send an
+    // operator to different places.
+    expect(step.outcome).toBe('DURABLE_WRITE_FAILED');
+    expect(step.detail).toContain('WRITE_FAILED');
+    expect(readFileSync(ledgerPath(fixture.root)).equals(before)).toBe(true);
+  }, 600_000);
+});
+
+// What the RECONCILIATION_UNRESOLVED case above does and does not establish,
+// written down rather than assumed: it pins the *classification* — an UNRESOLVED
+// grade from the forced path is reported as RECONCILIATION_UNRESOLVED and
+// nothing is repaired or retried. It does not reproduce the condition an
+// operator will actually meet, which is evidence moving between the
+// reconciliation read and the primitive's own check
+// (`TASK_STATE_DOES_NOT_PROVE_IT`). That is a race, and a case that tried to
+// arrange it deterministically would need a seam inside `applyForcedProgress` —
+// a seam whose only purpose is to make a test pass is a hole in the function it
+// is testing. The stopped-ledger route reaches the same branch through a
+// condition the runner grades as a fail-closed floor.
+//
+// The fourth grade, `STATE_UNUSABLE`, has no case at all and cannot have a
+// deterministic one for the same reason and one more: the reconciler only offers
+// a task whose record it just read *and found to be* READY_FOR_PR, so reaching
+// `settleBlockTask`'s TASK_STATE_UNUSABLE needs the record to become unreadable
+// between those two reads. Its arm in `applyForcedProgress` is a fail-closed
+// floor like the activation guard in `driveOneTask`, and removing it reddens
+// nothing — measured, and recorded in the task report rather than left to be
+// discovered.
+
+describe('positive reconciliation stops rather than guessing', () => {
+  // The mechanism here is the one the `ACTIVE_TASK_UNRESOLVED` case above
+  // already drives, and this case asserts a subset of that case's facts plus
+  // the driver answer that is its premise. It is kept because it states the
+  // rule from the reconciliation side — what happens when the six conditions
+  // cannot be met at all — and not because it reaches code the other case does
+  // not. Read honestly: nothing below enters `applyForcedProgress`. The task is
+  // ACTIVE, which forced reconciliation refuses by construction, so what is
+  // measured is the run declining to invent an outcome rather than a repair
+  // being weighed and rejected.
+  it('stops rather than choosing when the evidence supports no single successor', async () => {
+    const fixture = await repoWith({ 'A-001': [], 'B-001': [], 'C-001': [] });
+    // A second writer moves the task on mid-drive, so this run's own write is
+    // refused and the task ends neither finished, nor blocked, nor aborted.
+    // Nothing may be recorded for it, and there is no repair that is not a
+    // guess — so the block stops and invents nothing.
+    const agent = recordedAgent({
+      claude: () => {
+        movedByAnotherWriter(fixture, 'A-001');
+        return writerSuccess();
+      },
+      codex: () => reviewResult(passingReview()),
+    });
+    const result = await runAttendedBlock(
+      {
+        repository: fixture.repository,
+        definition: independentBlock(['A-001', 'B-001', 'C-001']),
+        runId: RUN_ID,
+        lease: leaseFor(fixture.repository),
+        maxStepsPerTask: 8,
+        planning: planningOf(fixture),
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    // The premise: the run really did try to record something and was refused,
+    // rather than never getting that far.
+    expect(result.tasks[0]?.runOutcome).toBe('STATE_CONFLICT');
+    expect(result.stopReason).toBe('ACTIVE_TASK_UNRESOLVED');
+    const entries = onDisk(fixture.root)['tasks'] as readonly Record<string, unknown>[];
+    // Nothing was invented for it, and the block stopped rather than guessing.
+    expect(entries[0]?.['disposition']).toBe('ACTIVE');
+    expect(entries[0]?.['evidenceRevision']).toBeNull();
+    expect(entries[0]?.['resultCommit']).toBeNull();
+  }, 900_000);
+});

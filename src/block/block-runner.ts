@@ -622,8 +622,18 @@ function checkRecords(ledger: BlockRunLedger, repositoryRoot: string): BlockStop
  * Applied through `settleBlockTask` rather than by writing the ledger. A repair
  * path that bypassed the primitive would be a second, weaker way to assert
  * progress: the one thing the ledger exists to prevent.
+ *
+ * Exported for one reason: the repair-versus-choice line is the whole of this
+ * slice's answer to "which positive reconciliations may be applied alone", and
+ * the runner reaches an `ACTIVE` entry only through its own activation — which
+ * it then concludes in the same iteration. So the run-level path cannot hold
+ * "applied because forced" and "refused because it would be a choice" apart,
+ * and a decision that cannot be inspected cannot be reviewed.
+ *
+ * It is not part of any consumer's API. `block-command.ts` calls
+ * `runAttendedBlock` and nothing else.
  */
-function applyForcedProgress(
+export function applyForcedProgress(
   current: LedgerLoadSuccess,
   repositoryRoot: string,
   options: BlockProgressOptions,
