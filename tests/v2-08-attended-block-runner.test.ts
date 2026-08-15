@@ -391,6 +391,122 @@ describe('the projection is computed at freeze time and nowhere else', () => {
   });
 });
 
+/** The one module that must keep importing the planner's *type*. */
+const RUNNER_SOURCE = join(PACKAGE_ROOT, 'src', 'block', 'block-runner.ts');
+
+/**
+ * Every module under `src/block/` that imports `planNextTask` as a **value**.
+ *
+ * The distinction is the whole assertion, and a naive version gets it backwards.
+ * `block-runner.ts` imports `TaskPlanningSuccess` from the very same module and
+ * must go on doing so: taking a planning result as a value it is *given*, while
+ * having no way to produce one, is exactly the shape the design wants. A scan
+ * that reddened on that would force the runner to stop naming the type it
+ * legitimately consumes — the same trade the substring grep extracted from its
+ * header prose, one level up.
+ *
+ * So a declaration is classified, not counted:
+ *
+ *   `import type { … } from`   erased at compile time; carries no value and can
+ *                              call nothing. Not a reach.
+ *   `import { …, type X } from`  the inline modifier, per specifier. The type
+ *                              specifiers are struck out before the name is
+ *                              looked for, so `{ type TaskPlanningSuccess,
+ *                              planNextTask }` is a reach and `{ type
+ *                              planNextTask }` is not.
+ *   `import * as p from`       a namespace binding is the whole module as a
+ *                              value, planner included. A reach.
+ *   `export … from`            hands names on to somebody else. Counted as a
+ *                              reach unless it is `export type`, which is the
+ *                              conservative direction: this guard should fail
+ *                              closed on a re-export rather than adjudicate
+ *                              which names crossed it.
+ *   `import('…')`              dynamic, and a value by construction. A reach.
+ *
+ * Every occurrence of the planner's module path is walked back to the
+ * declaration that owns it, rather than a window being taken forward from a
+ * keyword. The forward version was written first and was wrong in the direction
+ * that matters: any `export` within a few hundred characters above a type-only
+ * import was read as the declaration, so `block-conclusion.ts`'s last exported
+ * function made a legitimate `import type` register as a value reach. Measured,
+ * not imagined — it is the mutant in §5.6 of the task report.
+ *
+ * Comments are stripped once, up front. They may quote a module path, name the
+ * function in prose — which `block-runner.ts:75` now legitimately does — or
+ * contain anything at all, and none of that is a dependency.
+ *
+ * Anything this scan cannot classify counts as a reach. A specifier that no
+ * import or export declaration accounts for is a module doing something with the
+ * planner's path that deserves to be looked at, not something to assume benign.
+ */
+function blockLayerPlannerValueImports(): string[] {
+  const reaching: string[] = [];
+
+  for (const file of sourceFiles(join(PACKAGE_ROOT, 'src', 'block'))) {
+    const text = readFileSync(file, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/\/\/[^\n]*/g, ' ');
+    let reaches = false;
+
+    for (const hit of text.matchAll(/['"][^'"]*plan-next-task\.js['"]/g)) {
+      const before = text.slice(0, hit.index);
+      // A dynamic import is a value by construction.
+      if (/\bimport\s*\(\s*$/.test(before)) {
+        reaches = true;
+        continue;
+      }
+
+      // The declaration this specifier belongs to: from the last import or
+      // export keyword that opens a line, and it may not cross a statement end.
+      let head = '';
+      let keyword = '';
+      for (const open of before.matchAll(/(?:^|\n)[ \t]*(import|export)\b/g)) {
+        head = before.slice((open.index ?? 0) + open[0].length - (open[1] ?? '').length);
+        keyword = open[1] ?? '';
+      }
+      if (head === '' || head.includes(';') || !/\bfrom\s*$/.test(head)) {
+        reaches = true;
+        continue;
+      }
+
+      const clause = head
+        .replace(/^(?:import|export)\b/, '')
+        .replace(/\bfrom\s*$/, '')
+        .trim();
+      if (/^type\b/.test(clause)) continue;
+      if (keyword === 'export' || clause.startsWith('*')) {
+        reaches = true;
+        continue;
+      }
+      // Inline type specifiers struck out first, so what remains is the value
+      // half of the clause and nothing else.
+      if (/\bplanNextTask\b/.test(clause.replace(/\btype\s+\w+/g, ''))) reaches = true;
+    }
+
+    if (reaches) reaching.push(relative(PACKAGE_ROOT, file));
+  }
+  return reaching.sort();
+}
+
+describe('the block layer takes no reading of the roadmap of its own', () => {
+  it('imports the planning result as a type and the planner as nothing', () => {
+    // The symmetric half of the pin above, and it replaces a `git grep -n
+    // "planNextTask" -- src/block/` that Task 11 defeated the moment the
+    // runner's header was allowed to name the function again. That grep could
+    // not tell "the header mentions it" from "the code calls it"; this can.
+    //
+    // Read, and not merely asserted empty: an empty list is also what a runner
+    // that had stopped importing the planning type altogether would produce, and
+    // that runner would be free to plan from somewhere else entirely. The
+    // premise is checked first so the absence below is an absence of a *value*
+    // import beside a type import that is really there.
+    expect(readFileSync(RUNNER_SOURCE, 'utf8')).toMatch(
+      /import\s+type\s*\{[^}]*\bTaskPlanningSuccess\b[^}]*\}\s*from\s*['"][^'"]*plan-next-task\.js['"]/,
+    );
+    expect(blockLayerPlannerValueImports()).toEqual([]);
+  });
+});
+
 afterEach(() => {
   releaseTestLeases();
   removeRepoFixtures();
