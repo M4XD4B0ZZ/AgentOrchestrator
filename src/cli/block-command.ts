@@ -62,7 +62,7 @@ import type { AgentRunner } from '../agent/agent-command.js';
 import { independenceIsEstablished } from '../block/block-conclusion.js';
 import { projectBlockDependencies } from '../block/block-dependencies.js';
 import { defineBlock } from '../block/block-definition.js';
-import { runAttendedBlock } from '../block/block-runner.js';
+import { runAttendedBlock, type AttendedBlockResult } from '../block/block-runner.js';
 import { chainShapeOf, uniqueMaximumOf } from '../block/chain-shape.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import { formatSafeError } from '../core/safe-error.js';
@@ -70,6 +70,11 @@ import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
 } from '../lease/execution-lease.js';
+import {
+  createOperatorNotifier,
+  notifyBlockRun,
+  type OperatorNotifier,
+} from '../notify/notification.js';
 import { planNextTask } from '../plan/plan-next-task.js';
 import { localBranchRef } from '../repo/branch-name.js';
 import { resolveRepository, type ResolvedRepository } from '../repo/resolve-repository.js';
@@ -81,6 +86,8 @@ import {
   BLOCK_BASE_UNRESOLVED_SENTENCE,
   CHAIN_SHAPE_SENTENCE,
   renderBlockRun,
+  renderNotificationResult,
+  renderNotifierState,
 } from './render-block-run.js';
 import { line } from './render-attended-run.js';
 import { renderLeaseRefusal } from './render-lease.js';
@@ -119,6 +126,23 @@ export interface BlockCommandSeams {
   readonly authPreflight?: () => Promise<AuthPreflightEvidence | null>;
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
+  /**
+   * The operator notifier, normally built from the OS user's own configuration.
+   *
+   * Substitutable for the same reason the three above are: the real one reads a
+   * file under the real user profile and posts to a real endpoint, and a test
+   * that wanted to drive this command end to end had no way to avoid either.
+   *
+   * It grants nothing. A notifier is `ARMED` only because a configuration file
+   * says so — `createOperatorNotifier` decides that from the file, not from its
+   * arguments — so a test that wants an armed one writes a configuration into a
+   * scratch profile and builds the real notifier over it. And nothing this seam
+   * can be handed causes real egress: the transport it carries *is* the
+   * substitute. That the shipped binary opens no socket without the file is
+   * therefore not measured here at all, but against `dist` in a process with no
+   * seams in it.
+   */
+  readonly notifier?: OperatorNotifier;
 }
 
 /** The one report shape both modes' refusals use. */
@@ -310,6 +334,16 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
           return;
         }
 
+        // Whether this machine reports its endings, decided here: above the
+        // lease line, because reading the operator's own configuration file is
+        // no more a reason to become the repository's writer than parsing an
+        // argument is — and *before* the run, because the alternative is an
+        // operator learning that their notification is misconfigured from the
+        // message that never arrives. It cannot refuse the run: a notifier with
+        // authority over whether work happens is the one thing this may not be.
+        const notifier = seams.notifier ?? createOperatorNotifier();
+        process.stdout.write(renderNotifierState(notifier));
+
         const acquired = acquireRepositoryExecutionLease(
           repository,
           { runId: options.run, blockId: options.block },
@@ -320,6 +354,12 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
           process.exitCode = EXIT_RUN_REFUSED;
           return;
         }
+
+        // Held outside the `try` so the notification can be sent after the lease
+        // has been given back. `null` means no run happened — every refusal
+        // below produces no result, and there is nothing to report about a run
+        // that never opened.
+        let outcome: AttendedBlockResult | null = null;
 
         try {
           // Everything below is under the lease, including the input refusals. A
@@ -378,7 +418,7 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
             return;
           }
 
-          const result = await runAttendedBlock(
+          outcome = await runAttendedBlock(
             {
               repository,
               definition: defined.definition,
@@ -400,14 +440,29 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
               ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
             },
           );
-          process.stdout.write(renderBlockRun(repository, result));
-          process.exitCode = exitCodeForBlockRun(result);
+          process.stdout.write(renderBlockRun(repository, outcome));
+          process.exitCode = exitCodeForBlockRun(outcome);
         } finally {
           // Released on every path out, including a throw and including the
           // input refusals above. The lease is taken once for the whole block
           // run and given back once - never per task, which would leave a window
           // between tasks that a second writer fits into perfectly.
           releaseRepositoryExecutionLease(acquired.evidence);
+        }
+
+        // After the lease, deliberately. A notification is not a repository
+        // effect and needs no authority over one, and holding the repository's
+        // only writer slot open across a network round trip would make a second
+        // operator wait on somebody else's push.
+        //
+        // Also after the report and after the exit code: the console is the
+        // truth that is always available, and `notifyBlockRun` is total, so
+        // nothing here can reach the `catch` below and relabel a finished run as
+        // an internal failure. Only the repository's *declared id* is handed
+        // over; its root stays here.
+        if (outcome !== null) {
+          const notified = await notifyBlockRun(notifier, repository.id, outcome);
+          process.stdout.write(renderNotificationResult(notified));
         }
       } catch (error: unknown) {
         // An unexpected failure must not print an exception message: those

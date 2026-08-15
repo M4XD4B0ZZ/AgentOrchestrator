@@ -4928,12 +4928,171 @@ None was deleted and none lost an assertion.
   Accepted: each build's published schema describes its own output, and the
   alternative is a second spelling of "no authority recorded" in the type.
 
+## The operator notification (V2-10)
+
+An attended block run can take an hour. The operator is present in the sense the
+lease and the auth preflight mean — they started it, they are answerable for it —
+and absent in the sense that matters here: they are not watching the console. So
+when the orchestrator stops working usefully on its own, something has to say so.
+
+```text
+AttendedBlockResult
+        |
+        v
+attentionForBlockRun(result)        ATTENTION | SILENT
+        |
+        v
+NotificationTransport
+        |
+        +-- ntfy
+```
+
+### It observes; it never decides
+
+The notifier runs after the run is over, on the result the run already produced.
+It is called from one place — `block-command.ts`, after the `finally` that gives
+the execution lease back — and it changes nothing: not the stop reason, not a
+task disposition, not the ledger, not the process exit code. A failed push is
+printed and nothing else. `notifyBlockRun` is total, so a transport that throws
+cannot reach the command's own `catch` and relabel a finished run as an internal
+failure.
+
+Two of the endings it reports (`DURABLE_WRITE_FAILED`, `LEASE_AUTHORITY_UNCERTAIN`)
+exist precisely because the ledger may *not* be made to carry them. The payload is
+therefore built from the runner's result rather than from a re-read of the
+ledger — a notification path that needed a durable write first would be
+unavailable in exactly the cases it exists for.
+
+### Opt-in is the absence of a file
+
+```text
+<OS user profile>\.agent-orchestrator\notify.yaml
+
+endpoint: https://ntfy.sh/
+topic: <your topic>
+token: <optional access token>
+```
+
+No file: notifications are off, no transport is constructed, and no socket is
+opened. A file that cannot be used is also off — reported immediately, by a
+closed code, and the run still proceeds: a notifier with authority over whether
+work happens is the one thing this may not be.
+
+The endpoint, the topic and the token come from that file and nowhere else. Not
+from the repository profile, not from repository content, not from a CLI option,
+not from the environment. The root it sits under is derived from `os.userInfo()`
+and cannot be relocated by anything a caller, a parent process or a repository
+file can set, so a target repository cannot place this file whatever it contains.
+The state is decided **before** the run, above the lease line, because an
+operator who is about to walk away has to learn now that nothing will reach them.
+
+### Bounded egress
+
+`https://` to a host the operator chose; plain `http://` only to the literal
+loopback addresses `127.0.0.1` and `::1` — not `localhost`, which is a name
+answered by DNS or a hosts file, neither of which this process owns. Every other
+scheme is refused, as is a URL carrying credentials, a query or a fragment. One
+attempt, a timeout, `redirect: 'error'` so an allowed endpoint cannot forward the
+request out of the validated boundary, and no retry.
+
+The payload is a JSON document, and the title, priority and tags go in it rather
+than in ntfy's header form. A header value is a line in a request, and no value
+derived from a run belongs in one. The single dynamic header is `Authorization`,
+carrying the operator's own configured token, which the configuration contract has
+already refused if it is not header-safe.
+
+What goes on the wire: the repository's *declared id* — never its root — the
+block and run ids, the ending, the step count, the task ids with their
+dispositions, and one static sentence saying what to do. No prompt, no agent
+output, no verifier output, no exception text, no path: none of those is
+representable in an `AttendedBlockResult`.
+
+### `detail` is gated at the boundary, and the gate claims only what it proves
+
+`AttendedBlockResult.detail` is documented as an allow-listed code from a closed
+vocabulary. That is not quite true: `block-store.ts` builds
+`LEDGER_CONTRACT_VIOLATION:<message>` out of a Zod issue, so one producer's text
+is authored by a dependency's formatter. Every value that reaches the field today
+*is* code-shaped, by a chain of upstream validations — and a chain of upstream
+validations is not a claim worth exporting over a network on somebody else's
+behalf.
+
+So the shape is checked where the exporting happens. A value matching
+`^[A-Z][A-Z0-9_]*(:[A-Z][A-Z0-9_,]*)?$` is sent; anything else becomes
+`DETAIL_WITHHELD`. Stated narrowly, because the narrow statement is the true one:
+this does **not** prove that `detail` is a globally closed vocabulary. It proves
+that unbounded free text does not leave the machine.
+
+### Which endings notify
+
+`COMPLETE` is silent — it is the intended end. `OPERATOR_STOPPED` is silent too:
+it is the one ending a human caused, and telling them about their own
+intervention is noise. The other eleven notify.
+
+The decision is **not** derived from the exit code. "The shell should say
+something went wrong" and "this person's phone should buzz" are two questions:
+`OPERATOR_STOPPED` exits 4 and is silent. Two total tables answer them
+separately, and one cross-invariant ties them without coupling them — every
+ending the exit table grades `EXIT_RUN_OK` must be silent here.
+
+Completeness is the compiler's (`satisfies Record<…>`). Correctness is the
+suite's, and it takes two forms, because the operator-facing sentence is where a
+swap would otherwise survive: each sentence must carry a token of its own, and
+**no other sentence may carry it** — checked over every pair, so a permutation of
+any size fails. Exchanging `TASK_BLOCKED`'s advice with `NO_ELIGIBLE_TASK`'s
+leaves both dispositions correct and both operators looking for the wrong thing;
+that mutant dies here.
+
+### "No egress without opt-in", measured against the shipped artefact
+
+`test:dist-notify-egress` runs `dist/cli/index.js` twice as a real process, with
+a self-verifying preload that points the OS profile at a scratch directory and
+arms every socket surface — `fetch`, `net`, `http`, `https`, `dns`.
+
+Without a configuration the run must complete having opened nothing. That control
+is not vacuous, and the measurement is on the record: with the opt-in check
+removed, the unconfigured run reaches `fetch` and the gate dies with exit 96.
+With a configuration pointing at a loopback server, exactly one POST arrives, its
+bytes are read, and the payload is checked to name the same ending the console
+printed.
+
+What the gate deliberately does **not** claim: it does not kill the `detail`
+form-gate mutant. Neither ending reachable there carries free text, so removing
+the gate changes nothing in those bytes. That mutant is killed in
+`tests/v2-10-operator-notification.test.ts`, on the pair it exists for.
+
+### What V2-10 is not
+
+No notification for `run --attended`, no "completed successfully" push, no
+retries, no second channel, and no product-side PR/CI/merge concept. The
+orchestrator still hands a finished task to a human and stops.
+
+### Carried forward from V2-10, deliberately
+
+- **F-D1 — an exception is not notified.** A throw hours into a run reaches the
+  command's `catch` and produces no `AttendedBlockResult`, so there is nothing to
+  observe. Building a payload out of the exception would be reconstructing an
+  ending rather than reporting one, which is the rule the whole slice is organised
+  around. Accepted and stated: an internal failure is silent to an absent
+  operator.
+- **F-D2 — a failed push is indistinguishable from a quiet run.** The console says
+  `NOT DELIVERED (<code>)`, and an operator who has walked away sees neither that
+  nor the notification. There is no second channel and no retry, because both
+  would be the notifier deciding things on its own.
+- **F-D3 — the `detail` form gate is not a proof of closed vocabulary.** It bounds
+  the shape of what leaves the machine. Whether `detail` is genuinely closed is a
+  property of its producers, and `block-store.ts` still builds one value out of a
+  Zod message.
+- **F-D4 — a refusal above `runAttendedBlock` never notifies.** A lease refusal, an
+  unusable input, an unresolvable block base: all of them happen in the first
+  seconds, while the operator is still there, and none of them produces a result to
+  observe. Deliberate, and the boundary is pinned by test.
+
 ## Not implemented yet
 
-Still missing, deliberately: the operator notification a long run needs
-(V2-10); unattended operation; owned process containment; and any product-side
-PR/CI/merge automation. `READY_FOR_PR` remains terminal — the orchestrator hands
-a finished task to a human and stops there.
+Still missing, deliberately: unattended operation; owned process containment; and
+any product-side PR/CI/merge automation. `READY_FOR_PR` remains terminal — the
+orchestrator hands a finished task to a human and stops there.
 
 **The lease came before the block runner, not after it**, and V2-07 is what forced
 that change of order. The ledger's compare-and-swap is advisory, so two concurrent
@@ -4952,7 +5111,7 @@ V2-08  attended block runner                <- shipped
          |
 V2-09  dependent tasks / commit chain        <- shipped
          |
-V2-10  operator notification
+V2-10  operator notification                 <- shipped
          |
        the dogfood block, then the closing audit
 ```
