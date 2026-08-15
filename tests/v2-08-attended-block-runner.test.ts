@@ -45,7 +45,7 @@ import {
   resolveFixture,
   trackWorkspacesOf,
 } from './helpers/worktree-fixtures.js';
-import { e2eProfile, taskFile } from './helpers/e2e-fixtures.js';
+import { e2eProfile, headOf, taskFile } from './helpers/e2e-fixtures.js';
 
 /** Rows for a block whose members depend on nothing. */
 function independentRows(taskIds: readonly string[]): readonly FrozenTaskDependency[] {
@@ -1531,6 +1531,7 @@ async function runBlock(
       lease: leaseFor(fixture.repository),
       maxStepsPerTask: 8,
       planning: planningOf(fixture),
+      blockBaseCommit: headOf(fixture.root),
     },
     {
       now: tickingClock(),
@@ -1580,6 +1581,7 @@ describe('the attended block runner', () => {
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
         planning: planningOf(fixture),
+        blockBaseCommit: headOf(fixture.root),
       },
       {
         now: tickingClock(),
@@ -1648,6 +1650,7 @@ describe('the attended block runner', () => {
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
         planning: frozen,
+        blockBaseCommit: headOf(fixture.root),
       },
       {
         now: tickingClock(),
@@ -1699,6 +1702,7 @@ describe('the attended block runner', () => {
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
         planning: planningOf(fixture),
+        blockBaseCommit: headOf(fixture.root),
       },
       {
         now: tickingClock(),
@@ -1729,6 +1733,7 @@ describe('the invocation absorbs the driver budget rather than ending on it', ()
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 1,
         planning: planningOf(fixture),
+        blockBaseCommit: headOf(fixture.root),
       },
       {
         now: tickingClock(),
@@ -1808,6 +1813,7 @@ describe('the invocation absorbs the driver budget rather than ending on it', ()
         lease: evidence,
         maxStepsPerTask: 1,
         planning: planningOf(fixture),
+        blockBaseCommit: headOf(fixture.root),
       },
       {
         now: tickingClock(),
@@ -1866,6 +1872,7 @@ describe('a run that may have stopped being the writer writes nothing at all', (
         lease: evidence,
         maxStepsPerTask: 8,
         planning: planningOf(fixture),
+        blockBaseCommit: headOf(fixture.root),
       },
       {
         now: tickingClock(),
@@ -1945,6 +1952,7 @@ describe('the invocation acts on the plan as it was when it opened', () => {
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
         planning: snapshot,
+        blockBaseCommit: headOf(fixture.root),
       },
       {
         now: tickingClock(),
@@ -2036,6 +2044,7 @@ async function runWithHookAfterFirstTask(
       lease: leaseFor(fixture.repository),
       maxStepsPerTask: 8,
       planning,
+      blockBaseCommit: headOf(fixture.root),
     },
     {
       now: tickingClock(),
@@ -2244,6 +2253,7 @@ describe('each class-2 condition ends the run under its own name', () => {
         lease: leaseFor(fixture.repository),
         maxStepsPerTask: 8,
         planning,
+        blockBaseCommit: headOf(fixture.root),
       },
       {
         now: tickingClock(),

@@ -126,13 +126,17 @@ import { startPlannedTask } from '../run/start-task.js';
 import type { ReplaceFn, TempSuffixFn } from '../state/atomic-file.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import type { GitRunner } from '../worktree/git-command.js';
+import type { WorkspaceBase } from '../worktree/prepare-workspace.js';
 import {
   conclusionForRunOutcome,
   endReasonFor,
   independenceIsEstablished,
+  memberRunnability,
   recordingResultFor,
   startConclusionFor,
 } from './block-conclusion.js';
+import { proveChainBase } from './chain-fitness.js';
+import { uniqueMaximumOf } from './chain-shape.js';
 import type { BlockDefinition } from './block-definition.js';
 import {
   entryFor,
@@ -292,6 +296,21 @@ export interface AttendedBlockRequest {
    * repository's own files still bound.
    */
   readonly planning: TaskPlanningSuccess;
+  /**
+   * The commit this block is frozen on, read once by the caller under the lease.
+   *
+   * Two different things rest on it, which is why it is one value and not two:
+   *
+   *  - it is the **execution base** of every root member, so a default branch
+   *    that moves mid-run cannot give two roots two different bases;
+   *  - it is the **scope authority** of every member, root or chained, so a
+   *    predecessor's agent can hand its successor code and never permission.
+   *
+   * Not re-read per task, and not re-derived here. "The commit this block was
+   * frozen on" has to have one answer, and a second reading is how it would
+   * acquire two.
+   */
+  readonly blockBaseCommit: string;
 }
 
 export interface AttendedBlockDependencies {
@@ -346,14 +365,6 @@ export async function runAttendedBlock(
   let current = opened.ledger;
   state.seen(current.ledger);
 
-  // The eligibility snapshot, derived from the caller's one reading and not
-  // re-read here — nor taken as a second argument that could disagree with it.
-  const eligible = new Set(
-    request.planning.selection.eligibility
-      .filter((entry) => entry.eligible)
-      .map((entry) => entry.taskId),
-  );
-
   for (;;) {
     // The lease, re-proved every iteration rather than trusted once. A step is
     // a subprocess that took minutes, and a lease taken before it is not a
@@ -373,12 +384,14 @@ export async function runAttendedBlock(
     current = reconciled.ledger;
     state.seen(current.ledger);
 
-    const next = chooseTask(current.ledger, eligible);
+    // Asked again on every iteration: the settlement the last one recorded is
+    // what can make the next member runnable.
+    const next = chooseTask(current.ledger, request.planning);
     if (next.kind === 'NONE') {
       return state.stop(current, endReasonFor(current.ledger.tasks), ledgerOptions);
     }
 
-    const driven = await driveOneTask(next.taskId, current, request, deps, ledgerOptions, evidence);
+    const driven = await driveOneTask(next, current, request, deps, ledgerOptions, evidence);
     // Recorded before the exit is taken, so a run that ends on this task still
     // reports what the driver said about it and what it cost.
     state.record(next.taskId, driven.runOutcome, driven.steps);
@@ -433,7 +446,14 @@ interface DrivenStep {
 }
 
 type TaskChoice =
-  | { readonly kind: 'TASK'; readonly taskId: string }
+  | {
+      readonly kind: 'TASK';
+      readonly taskId: string;
+      /** Empty for a frozen-eligible member; the settled members that unlocked it otherwise. */
+      readonly satisfiedBy: readonly string[];
+      /** `null` for a root member — its base is the block base. */
+      readonly maximum: string | null;
+    }
   | { readonly kind: 'NONE' };
 
 const ended = (outcome: BlockRunOutcome, detail: string | null): FinishedStep =>
@@ -708,33 +728,50 @@ export function applyForcedProgress(
 /**
  * The next task to drive, or that there is not one.
  *
- * The candidates are the `PLANNED` members, in frozen order, filtered by the
- * **snapshot** of the repository's own eligibility report that the caller took
- * before the run. Two properties, and both are deliberate:
+ * The candidates are the `PLANNED` members, in frozen order. Whether one may run
+ * is `memberRunnability`'s answer, over the **snapshot** of the repository's own
+ * eligibility report that the caller took before the run plus this ledger's own
+ * settlements. Three properties, and all three are deliberate:
  *
  * The filter is not answered from `frozenDependencies`. A member with no frozen
  * block-member dependency may still be waiting on a non-member, and a runner
  * reading "no frozen edge" as "eligible" would start a task the repository says
- * cannot run. The frozen relation answers independence; the planner answers
+ * cannot run. The frozen relation answers *shape*; the planner answers
  * eligibility; folding either into the other loses one of the two.
  *
- * And it is a snapshot rather than a fresh reading. This module imports no
- * planner, and the task it picks is started through `startPlannedTask`, which
- * gates against the very same reading — so there is no moment at which an edited
- * roadmap could change which task runs next, in this function or below it. The
- * invocation acts on the plan as it was when the operator asked for it, which is
- * the same instant the relation was frozen at and the lease was taken.
+ * The eligibility half is a snapshot rather than a fresh reading. This module
+ * imports no planner, and the task it picks is started through
+ * `startPlannedTask`, which gates against the very same reading — so there is no
+ * moment at which an edited roadmap could change which task runs next, in this
+ * function or below it. What V2-09 added is not a second reading: it is this
+ * run's own settlements, which are monotone and were proved against each task's
+ * durable record before they were written.
+ *
+ * And it is asked **per iteration** rather than once. That is the whole of the
+ * chain's scheduling: a member ineligible at freeze can become runnable when its
+ * predecessor settles, and a set computed before the loop could never say so.
  *
  * There is no `ACTIVE` arm, and there cannot be one: a task becomes `ACTIVE`
  * only when this loop activates it, and it is concluded before the next
  * iteration. An `ACTIVE` entry at the top of an iteration would mean a resumed
  * run, which this runner does not have.
  */
-function chooseTask(ledger: BlockRunLedger, eligible: ReadonlySet<string>): TaskChoice {
+function chooseTask(ledger: BlockRunLedger, planning: TaskPlanningSuccess): TaskChoice {
   for (const entry of ledger.tasks) {
     if (entry.disposition !== 'PLANNED') continue;
-    if (!eligible.has(entry.taskId)) continue;
-    return Object.freeze({ kind: 'TASK' as const, taskId: entry.taskId });
+    const runnable = memberRunnability(entry.taskId, planning.selection.eligibility, ledger.tasks);
+    if (!runnable.runnable) continue;
+    const maximum = uniqueMaximumOf(ledger.frozenDependencies, entry.taskId);
+    // A block with no chain shape is refused at freeze, so this is a fail-closed
+    // floor rather than a branch that runs. Skipping the member is the safe
+    // direction: it cannot be given a base, so it must not be started.
+    if (!maximum.ok) continue;
+    return Object.freeze({
+      kind: 'TASK' as const,
+      taskId: entry.taskId,
+      satisfiedBy: runnable.satisfiedBy,
+      maximum: maximum.maximum,
+    });
   }
 
   return Object.freeze({ kind: 'NONE' as const });
@@ -756,7 +793,7 @@ function chooseTask(ledger: BlockRunLedger, eligible: ReadonlySet<string>): Task
  * reported, an unusable record and an unestablished outcome are recorded.
  */
 async function driveOneTask(
-  taskId: string,
+  choice: TaskChoice & { readonly kind: 'TASK' },
   current: LedgerLoadSuccess,
   request: AttendedBlockRequest,
   deps: AttendedBlockDependencies,
@@ -764,7 +801,30 @@ async function driveOneTask(
   evidence: AuthPreflightEvidence,
 ): Promise<DrivenStep> {
   const { repository, lease, maxStepsPerTask } = request;
+  const taskId = choice.taskId;
   const nothing = (step: RunStep): DrivenStep => ({ step, runOutcome: null, steps: 0 });
+
+  // The base, and the proof that it is one. A root member is pinned at the block
+  // base — the same commit for every root, whatever the default branch has done
+  // since the operator asked. A chained member is pinned at its unique maximum's
+  // recorded result, and only after Git has confirmed the commit is real,
+  // referenced, descended from the block base and containing every predecessor
+  // this member requires.
+  let base: WorkspaceBase = { kind: 'PINNED_COMMIT', commit: request.blockBaseCommit };
+  if (choice.maximum !== null) {
+    const proven = await proveChainBase(deps.git, repository.root, {
+      ledger: current.ledger,
+      taskId,
+      maximum: choice.maximum,
+      blockBaseCommit: request.blockBaseCommit,
+    });
+    // A gate refusal, exactly like a refused workspace: the run ends in the
+    // report, this member stays `PLANNED` — which is true, nothing was started
+    // for it — and the ledger is byte-identical across the condition. It is not
+    // a claim about the member's outcome, and it is not a durable-write problem.
+    if (!proven.ok) return nothing(ended('RUN_GATE_REFUSED', proven.code));
+    base = { kind: 'PINNED_COMMIT', commit: proven.commit };
+  }
 
   // `startPlannedTask`, never the planning start path: the gates below this line
   // are answered from the reading the block was frozen against. A start that
@@ -772,17 +832,16 @@ async function driveOneTask(
   // legitimately chose, and a roadmap edited mid-run would be back in charge of
   // what runs.
   const start = await startPlannedTask(
-    // The base and the widening this runner has always used, now said out loud.
-    // Task 7 of V2-09 replaces both — the block base for a root member, a proved
-    // predecessor result and the settlements that unlocked it for a chained one;
-    // until then this is V2-08's behaviour, unchanged and merely explicit.
     {
       repository,
       taskId,
       planning: request.planning,
-      base: { kind: 'DEFAULT_BRANCH_TIP' },
-      satisfiedDependencies: [],
-      scopeAuthorityCommit: null,
+      base,
+      satisfiedDependencies: choice.satisfiedBy,
+      // Every member of the block, chained or root, is judged against the commit
+      // the block was frozen at — and it is written into the task's own record
+      // here, once, so the answer outlives this invocation.
+      scopeAuthorityCommit: request.blockBaseCommit,
     },
     { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease },
   );

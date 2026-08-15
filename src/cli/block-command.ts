@@ -55,11 +55,13 @@ import {
   releaseRepositoryExecutionLease,
 } from '../lease/execution-lease.js';
 import { planNextTask } from '../plan/plan-next-task.js';
+import { localBranchRef } from '../repo/branch-name.js';
 import { resolveRepository, type ResolvedRepository } from '../repo/resolve-repository.js';
 import { READ_ONLY_TRAILER } from '../run/render-run-plan.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import { runGitCommand } from '../worktree/git-command.js';
-import { renderBlockRun } from './render-block-run.js';
+import { GIT_OBJECT_NAME_PATTERN } from '../worktree/prepare-workspace.js';
+import { BLOCK_BASE_UNRESOLVED_SENTENCE, renderBlockRun } from './render-block-run.js';
 import { line } from './render-attended-run.js';
 import { renderLeaseRefusal } from './render-lease.js';
 import { DEFAULT_MAX_STEPS, onceOnlyPreflight } from './run-command.js';
@@ -300,6 +302,25 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
             return;
           }
 
+          // The block base, read once, under the lease, from the same instant as
+          // the plan. Not re-read per task: a default branch that moves mid-run
+          // would otherwise give two roots two different bases, and "the commit
+          // this block was frozen on" would stop having one answer — which is
+          // exactly what the chain's ancestry proof and the scope authority both
+          // rest on.
+          const base = await runGitCommand(repository.root, [
+            'rev-parse',
+            '--verify',
+            '--quiet',
+            '--end-of-options',
+            localBranchRef(repository.defaultBranch),
+          ]);
+          if (base.outcome !== 'OK' || !GIT_OBJECT_NAME_PATTERN.test(base.stdout)) {
+            report([line('Failure', 'BLOCK_BASE_UNRESOLVED'), `  ${BLOCK_BASE_UNRESOLVED_SENTENCE}`]);
+            process.exitCode = EXIT_RUN_REFUSED;
+            return;
+          }
+
           const result = await runAttendedBlock(
             {
               repository,
@@ -312,6 +333,7 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
               // start gate are one reading of the roadmap at one instant, taken
               // under this lease.
               planning: planned,
+              blockBaseCommit: base.stdout,
             },
             {
               now: () => new Date().toISOString(),

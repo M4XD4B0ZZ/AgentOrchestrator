@@ -15,14 +15,19 @@ import {
   BLOCK_LEDGER_SCHEMA_VERSION,
   parseBlockRunLedger,
   type BlockRunLedger,
+  entryFor,
   type BlockTaskEntry,
   type TaskDisposition,
 } from '../src/block/block-ledger.js';
 import { memberRunnability } from '../src/block/block-conclusion.js';
-import { fingerprintFrozenMembership } from '../src/block/block-definition.js';
+import { projectBlockDependencies } from '../src/block/block-dependencies.js';
+import { runAttendedBlock } from '../src/block/block-runner.js';
+import { loadBlockLedger } from '../src/block/block-store.js';
+import { defineBlock, fingerprintFrozenMembership } from '../src/block/block-definition.js';
 import { planNextTask, type TaskPlanningSuccess } from '../src/plan/plan-next-task.js';
 import type { TaskEligibility } from '../src/plan/select-task.js';
 import { REPO_PROFILE_RELATIVE_PATH } from '../src/repo/profile-location.js';
+import { runTask } from '../src/run/run-driver.js';
 import { startPlannedTask, startTask } from '../src/run/start-task.js';
 import { assessTaskScope } from '../src/scope/assess-scope.js';
 import { proveChainBase } from '../src/block/chain-fitness.js';
@@ -32,7 +37,7 @@ import {
   commitIsReferenced,
   commitObjectPresent,
 } from '../src/worktree/commit-probes.js';
-import { runGitCommand } from '../src/worktree/git-command.js';
+import { runGitCommand, type GitRunner } from '../src/worktree/git-command.js';
 import { prepareTaskWorkspace } from '../src/worktree/prepare-workspace.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import {
@@ -48,9 +53,25 @@ import {
   taskWithId,
   trackWorkspacesOf,
 } from './helpers/worktree-fixtures.js';
+import { passingReview } from './fixtures.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
+import {
+  acquireRepositoryExecutionLease,
+  releaseRepositoryExecutionLease,
+} from '../src/lease/execution-lease.js';
 import { authPreflightPasses } from './helpers/auth-evidence.js';
-import { e2eProfile, reload, taskFile, tickingClock } from './helpers/e2e-fixtures.js';
+import type { AgentCommandResult } from '../src/agent/agent-command.js';
+import {
+  e2eProfile,
+  recordedAgent,
+  recordedVerify,
+  reload,
+  reviewResult,
+  taskFile,
+  tickingClock,
+  writerSuccess,
+  writerThatCommits,
+} from './helpers/e2e-fixtures.js';
 
 afterAll(() => {
   releaseTestLeases();
@@ -563,12 +584,13 @@ describe('a settled member satisfies a dependency inside the run, and nothing el
  */
 async function chainRepository(
   tasks: Readonly<Record<string, readonly string[]>>,
+  profile: string = e2eProfile(),
 ): Promise<ResolvedRepository> {
   const files: Record<string, string> = { '.gitignore': '.agent-orchestrator/runtime/\n' };
   for (const [taskId, dependsOn] of Object.entries(tasks)) {
     files[`tasks/${taskId}.md`] = taskFile(taskId, { dependsOn });
   }
-  const root = createRepoFixture({ defaultBranch: 'main', profile: e2eProfile(), files });
+  const root = createRepoFixture({ defaultBranch: 'main', profile, files });
   const repository = await resolveFixture(root);
   trackWorkspacesOf(repository);
   return repository;
@@ -755,4 +777,336 @@ describe('an ordinary task carries no scope authority of its own', () => {
     expect(started.outcome).toBe('STARTED');
     expect(reload(repository.root, 'A-001').state.scopeAuthorityCommit).toBeNull();
   });
+});
+
+/* ═════════════════════ the runner drives a chain ═════════════════════════ */
+
+const RUN_ID = 'run-1';
+const BLOCK_ID = 'block-1';
+
+/** A frozen block over `taskIds`, with the relation the roadmap really holds. */
+function frozenBlock(repository: ResolvedRepository, taskIds: readonly string[]) {
+  const planned = planningOf(repository);
+  const projected = projectBlockDependencies(planned.graph, taskIds);
+  if (!projected.ok) throw new Error(`fixture relation is not projectable: ${projected.code}`);
+  const defined = defineBlock(BLOCK_ID, taskIds, projected.dependencies);
+  if (!defined.ok) throw new Error(`fixture block is not a block: ${defined.code}`);
+  return defined.definition;
+}
+
+type ClaudeHandler = (call: {
+  readonly cwd: string;
+  readonly payload: string;
+  readonly index: number;
+}) => AgentCommandResult;
+
+async function runChainedBlock(
+  repository: ResolvedRepository,
+  options: {
+    readonly taskIds?: readonly string[];
+    readonly blockBaseCommit?: string;
+    readonly claude?: ClaudeHandler;
+    readonly git?: GitRunner;
+  } = {},
+) {
+  const taskIds = options.taskIds ?? ['A-001', 'B-001'];
+  const claude: ClaudeHandler =
+    options.claude ?? ((call) => writerThatCommits('src/work.ts', `// ${call.index}\n`)(call));
+  const agent = recordedAgent({ claude, codex: () => reviewResult(passingReview()) });
+  return runAttendedBlock(
+    {
+      repository,
+      definition: frozenBlock(repository, taskIds),
+      runId: RUN_ID,
+      lease: leaseFor(repository),
+      maxStepsPerTask: 8,
+      planning: planningOf(repository),
+      blockBaseCommit: options.blockBaseCommit ?? headOf(repository.root),
+    },
+    {
+      now: tickingClock(),
+      git: options.git ?? runGitCommand,
+      authPreflight: authPreflightPasses,
+      agent: agent.runner,
+      verify: recordedVerify().runner,
+    },
+  );
+}
+
+function ledgerOf(root: string): BlockRunLedger {
+  const loaded = loadBlockLedger(root, RUN_ID);
+  if (!loaded.ok) throw new Error(`the ledger did not load: ${loaded.code}`);
+  return loaded.ledger;
+}
+
+describe('the runner bases a dependent member on its predecessor', () => {
+  // Git-tier control G-1. The effect is a worktree whose history really contains
+  // the predecessor's commit, and no cheaper control can observe which commit
+  // `git worktree add` used.
+  it('bases a dependent member on the predecessor result commit', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+
+    const result = await runChainedBlock(repository);
+
+    expect(result).toMatchObject({ outcome: 'BLOCK_RUN_ENDED', stopReason: 'COMPLETE' });
+    const ledger = ledgerOf(repository.root);
+    const a = entryFor(ledger, 'A-001');
+    const b = entryFor(ledger, 'B-001');
+    expect(a?.resultCommit).toEqual(expect.any(String));
+    // The ledger says so...
+    expect(b?.baseCommit).toBe(a?.resultCommit);
+    // ...and the durable task record says so...
+    const state = reload(repository.root, 'B-001').state;
+    expect(state.basePinnedCommit).toBe(a?.resultCommit);
+    // ...and so does Git, which is the only one of the three that is an effect.
+    expect(await classifyAncestry(runGitCommand, state.worktreePath, a?.resultCommit ?? '', 'HEAD'))
+      .toBe('ANCESTOR');
+  }, 600_000);
+
+  // Git-tier control G-3. Reachability is a Git fact and not a record fact: the
+  // ledger still names the commit, the object still exists, and no ref reaches
+  // it. The release happens on the Git seam rather than in an agent handler
+  // because the window it has to land in - after A has settled, before B's base
+  // is proved - is not one any agent or verify call sits inside. What the seam
+  // does is real: it removes A's worktree and deletes A's branch, exactly as
+  // `agent-loop release` would, and every answer below still comes from Git.
+  it('refuses to chain onto a result no ref contains any more', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+
+    let released = false;
+    const releasingGit: GitRunner = async (cwd, args) => {
+      // `for-each-ref --contains` is issued by the chain proof and by nothing
+      // else, so this fires once, in the one instant that matters.
+      if (!released && args[0] === 'for-each-ref') {
+        released = true;
+        const worktree = reload(repository.root, 'A-001').state.worktreePath;
+        fixtureGit(repository.root, ['worktree', 'remove', '--force', worktree]);
+        fixtureGit(repository.root, ['branch', '-D', 'ao/task/A-001']);
+      }
+      return runGitCommand(cwd, args);
+    };
+
+    const result = await runChainedBlock(repository, { git: releasingGit });
+
+    expect(result).toMatchObject({ outcome: 'RUN_GATE_REFUSED', detail: 'BASE_NOT_REFERENCED' });
+    expect(entryFor(ledgerOf(repository.root), 'B-001')?.disposition).toBe('PLANNED');
+  }, 600_000);
+
+  // Git-tier control G-4. The ancestry of two real commit histories. A-001 was
+  // started before this block, off a commit on another line; the block is frozen
+  // somewhere else; A settles legitimately, and its result is real, referenced
+  // and useless as a base for B because the chain would leave the line the run is
+  // authorised for. No record-level check can see this - both commits exist and
+  // both entries are honest.
+  it('refuses a predecessor result that does not descend from the block base', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+
+    // A line the block will not be frozen on...
+    fixtureGit(repository.root, ['checkout', '--quiet', '-b', 'elsewhere']);
+    const elsewhere = commitOnDefaultBranch(repository, 'elsewhere.txt');
+    fixtureGit(repository.root, ['checkout', '--quiet', 'main']);
+    // ...and the block base, which moved on independently of it.
+    const blockBaseCommit = commitOnDefaultBranch(repository, 'blockbase.txt');
+
+    // A-001 is started against the other line, before the block opens.
+    const started = await startPlannedTask(
+      {
+        repository,
+        taskId: 'A-001',
+        planning: planningOf(repository),
+        base: { kind: 'PINNED_COMMIT', commit: elsewhere },
+        satisfiedDependencies: [],
+        scopeAuthorityCommit: null,
+      },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: leaseFor(repository),
+      },
+    );
+    expect(started.outcome).toBe('STARTED');
+
+    const result = await runChainedBlock(repository, { blockBaseCommit });
+
+    expect(result).toMatchObject({
+      outcome: 'RUN_GATE_REFUSED',
+      detail: 'BASE_NOT_DESCENDED_FROM_BLOCK_BASE',
+    });
+    expect(entryFor(ledgerOf(repository.root), 'A-001')?.disposition).toBe('SETTLED');
+    expect(entryFor(ledgerOf(repository.root), 'B-001')?.disposition).toBe('PLANNED');
+  }, 600_000);
+});
+
+/**
+ * The two rules pinned against each other, without a repository.
+ *
+ * G3 (a settled member satisfies a dependency) and G4 (the base it offers is
+ * fit) are separate conditions, and a build that collapsed them into one would
+ * pass every control above. These two say which is which: each holds while the
+ * other fails, and the two answers differ.
+ */
+describe('run-local runnability and chain fitness are two rules, not one', () => {
+  const eligibility = (unsatisfied: readonly string[]) =>
+    [{
+      taskId: 'task-b',
+      eligible: false,
+      reason: 'BLOCKED_BY_DEPENDENCIES',
+      unsatisfiedDependencies: unsatisfied,
+      unlockCount: 0,
+    }] as readonly TaskEligibility[];
+
+  it('holds a member runnable while its base is unfit', async () => {
+    const ledger = chainLedger({ a2: { disposition: 'SETTLED', resultCommit: RESULT } });
+
+    expect(memberRunnability('task-b', eligibility(['task-a2']), ledger.tasks))
+      .toEqual({ runnable: true, satisfiedBy: ['task-a2'] });
+
+    const git = answering({
+      'cat-file -t': { outcome: 'OK', stdout: 'commit' },
+      'for-each-ref --count=1': { outcome: 'OK', stdout: '' },
+    });
+    expect(await proveChainBase(git, 'C:/r', {
+      ledger, taskId: 'task-b', maximum: 'task-a2', blockBaseCommit: BASE,
+    })).toEqual({ ok: false, code: 'BASE_NOT_REFERENCED' });
+  });
+
+  it('holds a base fit while its member is not runnable', async () => {
+    // The dependency the *planner* still calls unsatisfied is not a member, so
+    // nothing in this run could ever satisfy it — while the frozen relation's
+    // required set is settled and its base proves out perfectly.
+    const ledger = chainLedger({ a2: { disposition: 'SETTLED', resultCommit: RESULT } });
+
+    expect(memberRunnability('task-b', eligibility(['task-outside']), ledger.tasks))
+      .toEqual({ runnable: false, reason: 'DEPENDENCY_OUTSIDE_BLOCK' });
+
+    const git = answering({
+      'cat-file -t': { outcome: 'OK', stdout: 'commit' },
+      'for-each-ref --count=1': { outcome: 'OK', stdout: 'refs/heads/x' },
+    });
+    expect(await proveChainBase(git, 'C:/r', {
+      ledger, taskId: 'task-b', maximum: 'task-a2', blockBaseCommit: BASE,
+    })).toEqual({ ok: true, commit: RESULT });
+  });
+});
+
+/**
+ * Git-tier control **G-5**: the authority outlives the invocation that made it.
+ *
+ * This is the control the plan's review demanded, and nothing that stays inside
+ * one invocation can stand in for it. The claim is that a chained task is judged
+ * against the block base *after the block run is over* — so the state has to be
+ * written by a real chained start, the block run has to end with that task
+ * unfinished, and a caller that knows nothing about blocks has to drive it
+ * afterwards.
+ *
+ * The counter-example is the review's own, and it is not exotic: A commits a
+ * profile widening the allowed scope, B is chained onto A's result, the run ends
+ * before B finishes, and the roadmap is then marked DONE for A. `status: DONE` is
+ * a markdown field. It says nothing about which commits reached the default
+ * branch or in what shape, and this build treats it as evidence nowhere.
+ */
+describe('a chained task keeps the scope it was started under, after its run is over', () => {
+  it('judges a chained task against the block base even after the block run ended', async () => {
+    // The block-base profile allows the profile file itself and `src/a`, so A's
+    // widening is a legitimate change *within* A's own scope. That matters: the
+    // question is whether a lawful profile change decides its successor's
+    // permissions, not whether an unlawful one can be made at all.
+    const repository = await chainRepository(
+      { 'A-001': [], 'B-001': ['A-001'] },
+      scopedProfile(['.agent-orchestrator', 'src/a']),
+    );
+    const blockBase = headOf(repository.root);
+
+    // A widens the profile and commits it. B is then started chained onto A's
+    // result — and the run ends there, with B started and unfinished, because
+    // this invocation stops being the repository's writer. That is the shape the
+    // claim needs: any way of ending the run would do, and a lost lease is the
+    // one that leaves B's record healthy and continuable rather than blocked.
+    const lease = leaseFor(repository);
+    const agent = recordedAgent({
+      claude: (call) => {
+        if (call.index === 0) {
+          return writerThatCommits(
+            REPO_PROFILE_RELATIVE_PATH,
+            scopedProfile(['.agent-orchestrator', 'src']),
+          )(call);
+        }
+        releaseRepositoryExecutionLease(lease);
+        return writerSuccess();
+      },
+      codex: () => reviewResult(passingReview()),
+    });
+    const result = await runAttendedBlock(
+      {
+        repository,
+        definition: frozenBlock(repository, ['A-001', 'B-001']),
+        runId: RUN_ID,
+        lease,
+        maxStepsPerTask: 8,
+        planning: planningOf(repository),
+        blockBaseCommit: blockBase,
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: authPreflightPasses,
+        agent: agent.runner,
+        verify: recordedVerify().runner,
+      },
+    );
+    expect(result.outcome).toBe('LEASE_AUTHORITY_UNCERTAIN');
+
+    const chained = reload(repository.root, 'B-001').state;
+    const a = entryFor(ledgerOf(repository.root), 'A-001');
+    expect(chained.basePinnedCommit).toBe(a?.resultCommit);
+    // Durable, not remembered. Without this line the guarantee below would be a
+    // property of the invocation that has just ended.
+    expect(chained.scopeAuthorityCommit).toBe(blockBase);
+
+    // Now a caller that knows nothing about blocks, and a roadmap that has since
+    // been marked DONE for A — which proves nothing about Git.
+    writeRepoFile(repository.root, 'tasks/A-001.md', taskFile('A-001', { status: 'DONE' }));
+    fixtureGit(repository.root, ['add', '--all']);
+    fixtureGit(repository.root, ['commit', '--quiet', '-m', 'mark A done by hand']);
+
+    const continuationLease = acquireRepositoryExecutionLease(
+      repository,
+      { runId: null, blockId: null },
+      { now: () => new Date().toISOString() },
+    );
+    if (!continuationLease.ok) throw new Error(`no lease: ${continuationLease.code}`);
+
+    const continued = await runTask(
+      {
+        repository,
+        taskId: 'B-001',
+        taskBrief: 'continue the chained task',
+        attendedContinuation: true,
+        authEvidence: null,
+        // A genuinely fresh lease. Not `leaseFor`, which memoises per repository
+        // and would hand back the evidence the block run gave up: this caller is
+        // a separate one, and it takes the repository's turn as writer for
+        // itself.
+        lease: continuationLease.evidence,
+        maxSteps: 4,
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        agent: recordedAgent({
+          claude: (call) => writerThatCommits('src/b/x.ts', 'work\n')(call),
+          codex: () => reviewResult(passingReview()),
+        }).runner,
+        verify: recordedVerify().runner,
+      },
+    );
+
+    // `src/b/**` was never allowed by the profile at the block base, and that is
+    // still the profile that governs — however long afterwards this happens, and
+    // whatever the roadmap has since been edited to say.
+    expect(continued.outcome).toBe('SCOPE_VIOLATION');
+    expect(reload(repository.root, 'B-001').state.state).toBe('SCOPE_VIOLATION');
+    releaseRepositoryExecutionLease(continuationLease.evidence);
+  }, 600_000);
 });

@@ -74,6 +74,20 @@ export const BLOCK_OUTCOME_SENTENCES: Readonly<Record<BlockRunOutcome, string>> 
 });
 
 /**
+ * The block base could not be resolved, so no run was opened.
+ *
+ * Not a stop reason and not a run outcome: it happens above `runAttendedBlock`,
+ * under the lease, before any ledger exists. Every member's execution base and
+ * every member's scope authority are that one commit, so a run that cannot name
+ * it has nothing to freeze against and refuses rather than falling back to
+ * whatever the default branch says later.
+ */
+export const BLOCK_BASE_UNRESOLVED_SENTENCE =
+  'The declared default branch did not resolve to a commit, so the block has no base to\n' +
+  '  freeze on. Nothing was started and no ledger was written. Check that the branch this\n' +
+  '  repository declares exists locally and points at a commit.';
+
+/**
  * One static sentence per stop reason. Closed, distinct, and pinned by test.
  *
  * These are the endings the ledger *does* carry, so none of them has anything to
