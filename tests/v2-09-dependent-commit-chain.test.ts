@@ -9,6 +9,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { chainShapeOf, uniqueMaximumOf } from '../src/block/chain-shape.js';
+import {
+  classifyAncestry,
+  commitIsReferenced,
+  commitObjectPresent,
+} from '../src/worktree/commit-probes.js';
 
 const rows = (spec: Record<string, readonly string[]>) =>
   Object.entries(spec).map(([taskId, dependsOn]) => ({ taskId, dependsOn }));
@@ -48,5 +53,33 @@ describe('the chain shape is read from the frozen relation', () => {
   // Specificity (G6): the shape rule must not refuse the blocks V2-08 already runs.
   it('accepts a wholly independent block, which is the shape V2-08 supports', () => {
     expect(chainShapeOf(rows({ 'task-a': [], 'task-b': [], 'task-c': [] }))).toEqual({ ok: true });
+  });
+});
+
+const gitReturning = (result: Partial<{ outcome: string; stdout: string; exitCode: number | null }>) =>
+  (async () => ({ outcome: 'OK', stdout: '', exitCode: 0, ...result })) as never;
+
+describe('the commit probes separate an answer from a refusal to answer', () => {
+  it('reads exit 1 as a genuine "no" and 128 as "could not evaluate"', async () => {
+    expect(await classifyAncestry(gitReturning({ outcome: 'OK' }), 'C:/r', 'a', 'b')).toBe('ANCESTOR');
+    expect(await classifyAncestry(gitReturning({ outcome: 'NONZERO_EXIT', exitCode: 1 }), 'C:/r', 'a', 'b'))
+      .toBe('NOT_ANCESTOR');
+    expect(await classifyAncestry(gitReturning({ outcome: 'NONZERO_EXIT', exitCode: 128 }), 'C:/r', 'a', 'b'))
+      .toBe('INDETERMINATE');
+    expect(await classifyAncestry(gitReturning({ outcome: 'UNAVAILABLE', exitCode: null }), 'C:/r', 'a', 'b'))
+      .toBe('INDETERMINATE');
+  });
+
+  it('answers presence only on exit 0 and exit 1', async () => {
+    expect(await commitObjectPresent(gitReturning({ outcome: 'OK' }), 'C:/r', 'a')).toBe(true);
+    expect(await commitObjectPresent(gitReturning({ outcome: 'NONZERO_EXIT', exitCode: 1 }), 'C:/r', 'a')).toBe(false);
+    expect(await commitObjectPresent(gitReturning({ outcome: 'NONZERO_EXIT', exitCode: 128 }), 'C:/r', 'a')).toBeNull();
+  });
+
+  it('calls a commit referenced when some ref contains it, and unknown when Git could not say', async () => {
+    expect(await commitIsReferenced(gitReturning({ outcome: 'OK', stdout: 'refs/heads/agent/task-a' }), 'C:/r', 'a'))
+      .toBe(true);
+    expect(await commitIsReferenced(gitReturning({ outcome: 'OK', stdout: '' }), 'C:/r', 'a')).toBe(false);
+    expect(await commitIsReferenced(gitReturning({ outcome: 'UNAVAILABLE', exitCode: null }), 'C:/r', 'a')).toBeNull();
   });
 });

@@ -52,6 +52,7 @@
 import { existsSync } from 'node:fs';
 
 import { localBranchRef } from '../repo/branch-name.js';
+import { classifyAncestry, commitObjectPresent } from '../worktree/commit-probes.js';
 import type { TaskState } from '../core/task-state.js';
 import type { GitRunner } from '../worktree/git-command.js';
 import { findByPath, listWorktrees } from '../worktree/worktree-registry.js';
@@ -110,74 +111,6 @@ export interface ObservedRuntime {
 export interface RuntimeObservationOptions {
   /** Filesystem existence seam. Defaults to the real one. */
   readonly exists?: (path: string) => boolean;
-}
-
-/**
- * What the ancestry probe established — including that it established nothing.
- *
- * The distinction is the same one `worktree/remove-workspace.ts` documents for
- * its own probe, and for the same reason: `merge-base --is-ancestor` answers
- * with its exit status, where **0** is yes, **1** is a genuine no, and anything
- * else (128 in practice) is a refusal to evaluate. Reporting a refusal as "no"
- * would tell an operator their base commit was rewritten when in truth the
- * repository could not be read.
- *
- * This slice asks about a *commit object*, not about a base branch, so it does
- * not repeat that module's extra "the base branch is gone" probe — the
- * follow-up here asks whether the pinned object still exists at all.
- */
-type AncestryVerdict = 'ANCESTOR' | 'NOT_ANCESTOR' | 'INDETERMINATE';
-
-async function classifyAncestry(
-  git: GitRunner,
-  worktreePath: string,
-  ancestorCommit: string,
-): Promise<AncestryVerdict> {
-  const probe = await git(worktreePath, [
-    'merge-base',
-    '--is-ancestor',
-    '--end-of-options',
-    ancestorCommit,
-    'HEAD',
-  ]);
-  if (probe.outcome === 'OK') return 'ANCESTOR';
-  if (probe.outcome === 'NONZERO_EXIT' && probe.exitCode === 1) return 'NOT_ANCESTOR';
-  return 'INDETERMINATE';
-}
-
-/**
- * The one exit code `rev-parse --verify --quiet` uses to *answer* "no".
- *
- * The protocol, stated because this is a place that reads an exit status:
- *
- *  - **0** — the object resolved. It exists;
- *  - **1** — `--quiet` suppressed the diagnostic and Git reports "does not
- *    resolve". A real answer, and the only non-zero one that is;
- *  - **anything else** (128 in practice) — Git could not evaluate the question:
- *    a repository it cannot read, a refusal, a bad invocation. Never an answer.
- *
- * Same discipline as the ancestry probe above, and for the same reason. An
- * indeterminate failure reported as "the commit is gone" sends an operator
- * hunting for a force-push that never happened.
- */
-const OBJECT_NOT_FOUND_EXIT = 1;
-
-/** `true`/`false` when Git resolved the object, `null` when it could not say. */
-async function commitObjectPresent(
-  git: GitRunner,
-  worktreePath: string,
-  commit: string,
-): Promise<boolean | null> {
-  const probe = await git(worktreePath, [
-    'rev-parse',
-    '--verify',
-    '--quiet',
-    '--end-of-options',
-    `${commit}^{commit}`,
-  ]);
-  if (probe.outcome === 'OK') return true;
-  if (probe.outcome === 'NONZERO_EXIT' && probe.exitCode === OBJECT_NOT_FOUND_EXIT) return false;
-  return null;
 }
 
 /**
@@ -243,7 +176,7 @@ export async function observeRuntime(
     worktreeClean = status.outcome === 'OK' ? status.stdout === '' : null;
 
     if (state.basePinnedCommit !== null) {
-      const verdict = await classifyAncestry(git, authorisedPath, state.basePinnedCommit);
+      const verdict = await classifyAncestry(git, authorisedPath, state.basePinnedCommit, 'HEAD');
       if (verdict === 'ANCESTOR') {
         basePinnedCommitIsAncestor = true;
         // It is an ancestor, therefore it exists. No second call on the happy path.
