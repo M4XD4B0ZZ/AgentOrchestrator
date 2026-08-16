@@ -3019,6 +3019,44 @@ and because the failure mode it describes — a command that cannot start is
   which is precisely the failure this slice exists to remove — the first dogfood
   was green because every control substituted the seam above the effect. So the
   number is stated instead of being met. **Scope:** `tests/dogfood-rem-001.test.ts`.
+- **D-REM-001-7 — a task id, once used, cannot be made runnable again by any
+  product operation.** Established read-only, from the source, as the
+  rerun-preparation question DOGFOOD-REM-001 was required to answer before a
+  second dogfood.
+
+  `release` refuses these records, and refuses them correctly:
+  `assessWorkspaceAdoption` requires the **positive absence** of a durable state
+  (`STATE_ALREADY_EXISTS`, `worktree/adopt-workspace.ts`), so
+  `releaseTaskWorkspace` answers `NOT_RELEASABLE` for any task that has one. The
+  first dogfood's `CARGO-UI-001A` / `CARGO-UI-001B` records have durable state —
+  A is precisely the false `READY_FOR_PR` that `PREDECESSOR_DELIVERED_NOTHING`
+  now refuses to chain from.
+
+  And **nothing else removes or archives a task state**. There is no
+  `removeTaskState` anywhere in `src/`; `state-store.ts` states its own contract
+  as a record found being "not migrated, not truncated, not renamed aside, not
+  deleted", and the only `unlink` in the state layer is `atomic-file.ts`
+  discarding its own temp file. The record's path is derived from the repository
+  root and the task id (`state-location.ts`), so the id and the record are the
+  same fact.
+
+  So the answer to "is there a canonical path?" is **no**, and that is recorded
+  as a finding rather than resolved by hand. Deleting the two files would free
+  the ids, destroy the forensic evidence, and prove nothing about the product.
+
+  **It is not a rerun blocker**, because the plan's third option is available and
+  is hereby taken deliberately: the second dogfood runs on **fresh task ids**,
+  and the first dogfood's records stay exactly where they are as evidence. That
+  costs nothing — the ids are labels — and it preserves the artefacts by
+  construction rather than by an operator remembering to copy them.
+
+  What is left open is the product question underneath: an orchestrator that can
+  never retire a task id accumulates records forever, and a repository that
+  genuinely wants to re-run a task has no supported way to say so. Adding one is
+  a decision of its own — what evidence must survive, what proof authorises the
+  removal, whether it is a new command or a widening of `release` — and is
+  deliberately not made here. **Scope:** `run/release-workspace.ts`,
+  `worktree/adopt-workspace.ts`, `state/state-store.ts`.
 - **D-REM-001-1** — `git worktree add` through this product's seam **runs the
   target repository's `post-checkout` hook**. Measured, with a sentinel. So the
   orchestrator already executes target-repository hook code today, before any
@@ -5316,10 +5354,11 @@ all of these are true:
     blocks again.
 11. `npm run verify` passes on a clean machine, and the opt-in gate has been run
     at least once.
-12. The rerun-preparation question is answered in writing: whether the first
-    dogfood's artefacts can be re-run over, must be preserved, or need a product
-    change first. Not resolved by improvisation — if the product has no safe
-    path, that is a finding and belongs in the register before the rerun.
+12. The rerun-preparation question is answered in writing — **it is**, as
+    register entry D-REM-001-7: there is no canonical path to make a used task
+    id runnable again, so the second dogfood runs on **fresh task ids** and the
+    first dogfood's records stay untouched as evidence. The missing operation is
+    recorded as a finding rather than improvised around.
 
 Then the run can deliver what the first could not:
 
