@@ -55,6 +55,32 @@ What *is* implemented:
     stores; it does not drive. See
     [The block-run ledger](#the-block-run-ledger-v2-07).
 
+## Status, and where to start
+
+**Released for attended, supervised use on real projects.** The closing audit
+found no `ATTENDED_RELEASE_BLOCKER`; unattended operation stays unsupported until
+U1–U4 are resolved. See
+[The closing audit](#the-closing-audit-attended-release-gate).
+
+This README is the design record: what was built, why it was built that way, and
+what each guarantee is actually worth. **If you want to *run* the orchestrator on
+a project, read [`docs/OPERATOR-GUIDE.md`](docs/OPERATOR-GUIDE.md) instead** — how
+to prepare a repository, what a preview must show before an attended run, what
+`COMPLETE` does and does not mean, how to stop a run and what the stale lease it
+leaves behind requires of you.
+
+```powershell
+npm install
+npm run build
+
+# always the preview first: it starts no agent, writes nothing, takes no lease
+node .\dist\cli\index.js block `
+  --repository "D:\Path\To\Project" `
+  --block PROJECT-AREA-001 `
+  --tasks PROJECT-AREA-001A PROJECT-AREA-001B `
+  --run project-area-001-20260816-01
+```
+
 ## Requirements
 
 - Windows, Node.js major in `{22, 24}` — a whitelist, not a floor; see
