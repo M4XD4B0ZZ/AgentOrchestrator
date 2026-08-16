@@ -3057,6 +3057,31 @@ and because the failure mode it describes — a command that cannot start is
   removal, whether it is a new command or a widening of `release` — and is
   deliberately not made here. **Scope:** `run/release-workspace.ts`,
   `worktree/adopt-workspace.ts`, `state/state-store.ts`.
+- **D-REM-001-8 — a quoted refusal string is evidence only if it came from the
+  emitter.** Rerun-gate item 10 was written as a literal-string comparison
+  against two phrases the G5 analysis had recorded as the CLI's own narration:
+  *"outside my allowed folder"* and *"This path is outside the working folder"*.
+  Neither is CLI output. Both are an **agent's paraphrase** of a refusal it
+  received, taken from the probe sessions' assistant text, and the word
+  "outside" appears **zero times** in either dogfood writer transcript. So the
+  comparison as specified could only ever return "no match" — and the gate's own
+  rule made "no match" mean *a live second mechanism*, which would have blocked
+  the second dogfood on a phantom.
+
+  The rule that replaces it: **quoted refusal strings used as evidence must come
+  from the emitting CLI or tool, not from an agent's paraphrase or diagnosis of
+  that refusal.** Before pinning a check to a literal string, confirm the string
+  is in the emitter's output — a `tool_result` — and not in an assistant `text`
+  block. The two are indistinguishable once copied into a plan.
+
+  G5 itself closes, on the instrument named in item 10 rather than on the string
+  comparison: within one dogfood session, for one target path in one worktree,
+  `printf > src/ui/.permcheck.tmp` and `rm src/ui/.permcheck.tmp` were reported
+  as *requiring approval* while `touch src/ui/.permcheck.tmp` was reported as
+  *blocked … allowed working directories*. One path, one moment, two messages —
+  one a permission refusal, one a path refusal. That co-occurrence is what shows
+  the path prose to be a permission denial, and no string match could have shown
+  it.
 - **D-REM-001-1** — `git worktree add` through this product's seam **runs the
   target repository's `post-checkout` hook**. Measured, with a sentinel. So the
   orchestrator already executes target-repository hook code today, before any
@@ -5348,10 +5373,15 @@ all of these are true:
    byte-identical no-boundary variant green.
 9. The no-effect controls are inverted rather than deleted, and the deliberate
    scope-violation and lease-loss cases stay green.
-10. **The G5 residual is closed:** the dogfood transcript's literal refusal
-    strings compared against the measured permission-denial prose. Match → the
-    same defect, closed. No match → a live second mechanism, and the rerun
-    blocks again.
+10. **G5 residual closed.** The dogfood's literal CLI refusal strings match the
+    measured pre-fix corpus in both observed refusal families. The apparent
+    in-worktree path refusal is the same permission-denial mechanism expressed
+    in path language, proven within one dogfood session: for the same worktree
+    and the same target path, one command form reported that approval was
+    required while another emitted the "blocked … allowed working directories"
+    refusal; reads of that directory succeeded, `Get-Location` matched the
+    allowed worktree exactly, and the directory was not a junction. No
+    independent path/sandbox mechanism remains evidenced.
 11. `npm run verify` passes on a clean machine, and the opt-in gate has been run
     at least once.
 12. The rerun-preparation question is answered in writing — **it is**, as
@@ -5390,9 +5420,19 @@ both tasks complete, or stop truthfully for a genuine product reason
   defect. Three candidate mechanisms were probed and all three falsified — writes
   succeed in a plain clone, in a linked worktree whose `.git` is a file pointing
   outside its own directory, and through an NTFS junction. The positive
-  explanation is that the CLI narrates permission denials in path language
-  ("outside my allowed folder"), including when the true cause is an unmatched
-  permission rule.
+  explanation is that the CLI emits a working-directory refusal for a
+  write-class operation whose true cause is an unmatched permission rule:
+  `mkdir`, `touch`, `new-item` and an output redirection, all onto paths under
+  the declared worktree, were refused with "was blocked. For security, Claude
+  Code may only … in the allowed working directories for this session:
+  '<that same worktree>'".
+
+  The evidence for that is an **emitter** string, and the distinction is the
+  point — see **D-REM-001-8**. The phrases originally quoted here as the CLI's
+  narration ("outside my allowed folder", "This path is outside the working
+  folder") are not CLI output at all; they are the probe agents' own
+  descriptions of a denial, and the word "outside" does not occur anywhere in
+  the dogfood writer transcripts.
 
 ## Not implemented yet
 
