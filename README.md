@@ -5434,6 +5434,212 @@ both tasks complete, or stop truthfully for a genuine product reason
   descriptions of a denial, and the word "outside" does not occur anywhere in
   the dogfood writer transcripts.
 
+## The closing audit (attended release gate)
+
+Before AgentOrchestrator was used on any project other than its own, one closing
+audit was run against `main` at 877ffdc, on 2026-08-16, with the second
+dogfood's `DOGFOOD_PASS` as the evidence base and no new feature scope. It asked
+a single question — *is there a known or newly-findable defect that makes this
+build unsafe or unreliable for **attended** production use on real projects?* —
+and required every item to land in exactly one of three classes.
+
+The canonical gate was run first, so the audit rests on a measured-green `main`
+rather than on an assumption: 82 test files, **3087 passed, 2 skipped, exit 0**
+(236 s parallel, plus the serial tree-kill gate). Then the attended path was read
+end to end at the source — `cli/block-command.ts` → `block/block-runner.ts` →
+`run/start-task.ts` → `block/block-progress.ts` → `notify/*`, with the lease,
+scope, chain-fitness and commit surfaces underneath it — and where reading
+produced a claim about behaviour, the claim was measured rather than predicted.
+Fifteen items were examined: the eight carried-forward residuals named for the
+audit, and seven conditions found by reading the attended path itself.
+
+**The end state:**
+
+```text
+Closing Audit: PASS for attended real-world use.
+No ATTENDED_RELEASE_BLOCKER found.
+Unattended operation remains unsupported until U1–U4 are resolved.
+```
+
+**The classification, recorded unchanged:**
+
+```text
+ATTENDED_RELEASE_BLOCKER
+→ none
+
+UNATTENDED_BLOCKER
+→ U1–U4
+
+ACCEPTED_LIMIT / FOLLOWUP
+→ including A1–A6
+```
+
+This section records that outcome and the items the audit found. It reclassifies
+nothing else: the `F-` and `DOGFOOD-` items the audit examined keep the
+dispositions their own registers already give them, and **no finding here was
+remediated** — the audit changed no file in the repository.
+
+### The four unattended blockers, which are not follow-ups (U1–U4)
+
+They are all one shape: **the run's ending, and the machine's state after it,
+depend on a human being there.** That is precisely what `--attended` asserts,
+which is why none of them blocks the attended release; and each one is fatal to
+unsupervised automation, so they are recorded here as **blockers for unattended
+use** and are not to be read as follow-ups.
+
+- **U1 — an interrupted run leaves the lease, and no product command removes
+  it.** Measured, not reasoned: a real holder process took a real lease over a
+  scratch repository and was terminated the way a console interrupt terminates
+  it.
+
+  ```text
+  while holder alive : HELD / owner pid 22092
+  holder ending      : {"code":null,"signal":"SIGINT"}
+  holder stdout      : "HELD"        <- the release in `finally` never printed
+  lease file exists  : true
+  after interrupt    : HELD / liveness NOT_FOUND
+  recovery verdict   : STALE_OWNER_GONE
+  next acquire       : STALE_LEASE_RECOVERY_UNSAFE
+  ```
+
+  `block-runner.ts` installs no signal handling (F-B3), so a console interrupt —
+  the ordinary way an operator stops a run — terminates the process without
+  unwinding, and the `finally` that returns the lease never runs. The next
+  invocation is refused `STALE_LEASE_RECOVERY_UNSAFE`, and the attended break was
+  shipped twice and withdrawn twice, so clearing it means deleting a file inside
+  `.git` by hand. **Attended:** loud, fail-closed and correct — the refusal
+  sentence says exactly this, and `lease status` prints the path, so an operator
+  who is present pays one manual step. **Unattended:** a single crash makes the
+  repository permanently unrunnable, which no scheduler recovers from.
+- **U2 (F-D2) — a failed notification is indistinguishable from a silent run.**
+  One bounded attempt, ten seconds, no retry and no second channel. A dropped
+  push prints `NOT DELIVERED (<code>)` to a console nobody is reading, and since
+  `COMPLETE` is also silent, a quiet phone carries no information at all.
+  **Attended:** acceptable, because the console holds the truth and the operator
+  returns to it — they started the run and are answerable for it.
+  **Unattended:** the notifier would be the only signal, and a best-effort
+  channel with no acknowledgement cannot be one.
+- **U3 (F-D1, F-D4) — an exception, and every refusal above the runner, notify
+  nobody.** A throw leaves `outcome` null, so there is no result to observe and
+  nothing is sent; a lease refusal, an unusable input or an unresolvable block
+  base all happen before a result exists. Both are correct as designed — building
+  a payload out of an exception would be reconstructing an ending rather than
+  reporting one — and neither loses work: the `finally` still returns the lease
+  on a throw, task states stay durable, and the above-runner refusals happen in
+  the first seconds while the operator is still standing there. **Unattended:**
+  together with U2 this means the absence of a message proves nothing, which is
+  the property unsupervised running would have to rest on.
+- **U4 (F-B5, D-REM-001-7) — nothing continues an interrupted run, and no task id
+  is ever freed.** The run id is spent (`startBlockRun` refuses it), the
+  interrupted task may be left `ACTIVE` in the ledger, and `release` refuses any
+  task that has a durable state — `assessWorkspaceAdoption` requires the positive
+  absence of one, so it accepts pristine orphans and nothing else, confirmed at
+  `worktree/adopt-workspace.ts:242`. **Attended:** the record still says what
+  happened and which task was in flight; a human resumes the task itself or
+  starts a new run id. **Unattended:** there is no retry an automation could
+  perform.
+
+### Found by the closing audit, carried rather than closed (A1–A6)
+
+All six are `ACCEPTED_LIMIT` / `FOLLOWUP`. None of them is an
+`ATTENDED_RELEASE_BLOCKER`, and none of them changes the classification of
+anything already in the registers above.
+
+- **A1 — `COMPLETE` is silent, and a completed block is when a human must act.**
+  Correctly classified — the emitter prints `SILENT - this ending does not need
+  an operator` (`cli/render-block-run.ts:174`) — and consistent with V2-10's
+  stated scope of no success push. Worth stating as an operational consequence
+  rather than as a defect: a block that finishes at `READY_FOR_PR` has left pull
+  requests for a human to open, and an operator who walked away learns that only
+  by coming back. The notifier reports faults, not readiness.
+- **A2 — finished work has no product-side cleanup.** The consequence of U4 in
+  ordinary use rather than after a crash: every completed task leaves a worktree
+  and a branch that `release` will not take (it has durable state), and its id can
+  never be made runnable again. On a real project this accumulates **one
+  worktree, one branch and one spent id per task**. All of it is honest and
+  inspectable; none of it is automatic. Cleaning it up is **product ergonomics
+  and operations, not a correctness blocker for attended operation** — an
+  operator can see and remove all three by hand.
+- **A3 — a proved chain base is not compared against the base the member already
+  has.** `driveOneTask` proves a chained member's base through `proveChainBase`,
+  then calls `startPlannedTask`, which answers `ALREADY_STARTED` for a task that
+  already has a durable state — graded `DRIVE` (`block-conclusion.ts:250`). On
+  that path the proved commit is discarded and the existing workspace pin is
+  used, with nothing comparing the two: a **possibly missing equality check**.
+
+  **No harmful case was reached.** A dependent member cannot be started
+  standalone (`BLOCKED_BY_DEPENDENCIES` → `TASK_INELIGIBLE`), a re-run of the
+  same block re-derives the same base, and a moved default branch is caught by
+  `CHAIN_ANCHOR_MISSING`; the ledger also records the truth, because
+  `block-evidence.ts:199` proves the entry's `baseCommit` against the record's own
+  pin. So the property holds today by three separate arguments — and **none of
+  the three is measured**: the suite pins only that `ALREADY_STARTED` grades
+  `DRIVE`. That is why this is a **follow-up and not an attended blocker**: the
+  harmful case is unreachable today, but the safety rests on argument rather than
+  on a control. One equality check would make it structural.
+- **A4 — how to stop a run is documented only inside a refusal.** The consequence
+  measured in U1 is stated accurately in two places an operator reaches only
+  *after* they have hit it: the `STALE_LEASE_RECOVERY_UNSAFE` sentence and the
+  `lease-recovery.ts` module header. The README has no "stopping a run" section,
+  so the first interrupt of the first real project is where this gets learned. A
+  **documentation gap**, not a runtime defect.
+- **A5 — an orphaned agent process survives its orchestrator.** Already the stated
+  reason a stale lease is never taken over automatically, and the liveness
+  sentence says so: a dead owner does not prove that no agent survived it. What
+  follows from U1 is that the operator clearing the lease by hand is the one
+  making that judgement, with no instrument offered for it. Correct as designed —
+  this is precisely why unattended running needs owned process containment first
+  — and an **operations gap** worth one sentence of operator guidance.
+- **A6 — README's historical "verbatim" wording.** Documentation precision,
+  carried in as named. No behaviour depends on it.
+
+### What the audit checked and found sound
+
+Recorded because an audit that lists only findings does not say where it looked.
+
+- **Scope authority is durable, not invocation-scoped.** `assessTaskScope` reads
+  `scopeAuthorityCommit` off the persisted state and falls back to the base pin in
+  exactly one place; `readPinnedScope` takes the declaration out of the commit
+  with `--no-replace-objects`. A predecessor hands its successor code and never
+  permission, and the answer outlives the block run that made it.
+- **The verification policy cannot be rewritten by a writer.** It comes from
+  `repository.verification` — one reading of the source checkout taken at
+  invocation start and carried by value — not from the worktree the writing agent
+  can edit.
+- **The lease is re-proved at every effect, not once.** Every loop iteration,
+  between driver continuations, before workspace creation, before the first
+  durable write, and again immediately before a release deletes anything.
+- **Endings that cannot be written are not written.** The four unrecorded
+  outcomes leave the ledger at its last provably durable state instead of
+  asserting a stop the run had no authority to make.
+- **The commit path proves what it committed.** Control two refuses before
+  staging when Git would run a program for a path in the commit; control one
+  compares the object's own path set against the approved one afterwards, and a
+  refusal keeps the commit as evidence rather than undoing it.
+- **Nothing in `src/` can write outside the runtime root and the task worktree,**
+  and the runtime directory is proven ignorable before the first durable write.
+
+Two things were **not** done, and are stated rather than implied: no adversarial
+escalation attempt was made against a live predecessor profile (DOGFOOD-L1 stands
+as carried), and no third dogfood was run. The notification wording quoted above
+is taken from the emitter, `cli/render-block-run.ts:174`, rather than from any
+paraphrase of it — per the rule D-REM-001-8 established.
+
+### The status this establishes
+
+**AgentOrchestrator is released for supervised use on real projects.** The four
+`UNATTENDED_BLOCKER` items are all the one shape named above, and that bound is
+what the build already claims; nothing found argues for another round of
+hardening before first use.
+
+Two things are worth doing that are **not** release gates, and deliberately not
+done here: give the README a short section on stopping a run, naming the lease
+file and the surviving-agent judgement (A4, A5), and add the base equality check
+that would make A3 structural. A3 is a very small hardening fix — an equality
+check is cheap and makes the chain authority structural — and it belongs *after*
+the first regular use, not before it. Taking either one now would move the
+finish line again after a passed dogfood and a passed closing audit.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment; and
@@ -5461,7 +5667,7 @@ V2-10  operator notification                 <- shipped
          |
 DOGFOOD-REM-001  the first dogfood's two defects   <- shipped
          |
-       the second dogfood, then the closing audit
+       the second dogfood, then the closing audit  <- both done
 ```
 
 One prerequisite is now explicit that was not before. **Unattended running needs
