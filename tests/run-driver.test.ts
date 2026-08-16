@@ -979,6 +979,12 @@ describe('an authorised quota resume', () => {
     const agent = scriptedAgent(
       agentCommandResult({ stdout: findingsReview() }),
       agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      // The second review, which the cycle now reaches inside four calls: a
+      // call holding a remediation brief takes one further step to discharge it
+      // (DOGFOOD-REM-001 Task 8), so `REVIEWING → REMEDIATING → VERIFYING` is
+      // two writes in one call rather than two calls. The cycle is the same
+      // cycle; it is observed in fewer invocations.
+      agentCommandResult({ stdout: codexTranscript(passingReview()) }),
     );
     const seen: (string | null)[] = [];
 
@@ -1001,7 +1007,7 @@ describe('an authorised quota resume', () => {
       expect(after.reportedResetAt).toBeNull();
     }
 
-    expect(seen).toEqual(['REVIEWING', 'REMEDIATING', 'VERIFYING', 'REVIEWING']);
+    expect(seen).toEqual(['REVIEWING', 'VERIFYING', 'REVIEWING', 'READY_FOR_PR']);
   });
 });
 
@@ -1586,16 +1592,26 @@ describe('a refused write stops the run', () => {
 
     // The restart. Same phase, same round — the interrupted review was not a
     // completed one, and nothing pretends it was.
-    const second = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+    const second = scriptedAgent(
+      agentCommandResult({ stdout: findingsReview() }),
+      // The writer the re-run review hands its brief to, in the same call.
+      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+    );
     const resumed = await runTask(
       request(root, { maxSteps: 1 }),
-      deps(root, { agent: second.runner }),
+      deps(root, { agent: second.runner, git: scriptedGit(root, { writingPass: true }) }),
     );
 
-    expect(resumed.steps).toBe(1);
-    expect(second.calls).toHaveLength(1);
+    // Two writes, not one: the review lands `REMEDIATING` and the same call
+    // then discharges the remediation brief it is holding (DOGFOOD-REM-001
+    // Task 8). The property this case is about is untouched — the *same* phase
+    // was re-run and the round it consumed is the round it was always going to
+    // consume — and the extra step is what stops that brief's detail from being
+    // lost at the boundary.
+    expect(resumed.steps).toBe(2);
+    expect(second.calls).toHaveLength(2);
     const finished = reload(root).state;
-    expect(finished.state).toBe('REMEDIATING');
+    expect(finished.state).toBe('VERIFYING');
     expect(finished.reviewRound).toBe(1);
     expect(finished.findingHistory).toHaveLength(1);
   });

@@ -841,6 +841,69 @@ describe('the reviewer is told what the task requires', () => {
   });
 });
 
+/* ════ 3c. A step budget does not cost the remediation its detail ═══════════ */
+
+describe('a step-budget boundary does not cost the remediation its detail', () => {
+  /**
+   * Drives one task from `REVIEWING` under `maxSteps` and returns the
+   * instructions the writer was actually handed.
+   *
+   * The review reports a finding naming a real path and a real rule. Those two
+   * strings are the only actionable content a review produces — the durable
+   * record keeps `{round, severity, fingerprint}` and fingerprints are one-way
+   * — so whether they reach the writer is the whole question.
+   */
+  async function remediationPayloadWith(options: {
+    readonly maxSteps: number;
+  }): Promise<{ payload: string; steps: number }> {
+    const taskId = `REM-001-BD${payloadCase++}`;
+    const started = await startTask({ taskId });
+    seedState(started, { state: 'REVIEWING', reviewRound: 0 });
+    const agent = recordedAgent({
+      codex: () => reviewResult(findingsReview('src/named.ts', 'e2e.named')),
+      claude: writerThatEdits('src/named.ts', '// fixed\n'),
+    });
+
+    let steps = 0;
+    // Re-entered the way `block --attended` does, so the boundary is crossed by
+    // a real second call rather than simulated inside one.
+    for (let call = 0; call < 4; call += 1) {
+      const run = await runTask(
+        { ...request(started), maxSteps: options.maxSteps },
+        deps({ verify: recordedVerify().runner, agent: agent.runner }),
+      );
+      steps += run.steps;
+      if (agent.countFor('claude') > 0 || run.steps === 0) break;
+    }
+
+    const payload = agent.calls.find((call) => call.agent === 'claude')?.payload;
+    if (payload === undefined) throw new Error('the writer was never briefed');
+    return { payload, steps };
+  }
+
+  it('hands the writer the same actionable finding across the boundary', async () => {
+    // maxSteps: 1 from REVIEWING puts the boundary exactly at the problematic
+    // edge, with no timing dependence: the review step is the whole budget.
+    const { payload, steps } = await remediationPayloadWith({ maxSteps: 1 });
+
+    expect(payload).toContain('src/named.ts');
+    expect(payload).toContain('e2e.named');
+    expect(payload).not.toContain('did not survive');
+    // The overrun is bounded at one: the extra iteration discharges an
+    // obligation it then clears, so it cannot recur.
+    expect(steps).toBeLessThanOrEqual(3);
+  });
+
+  it('produces byte-identical instructions when no boundary intervenes', async () => {
+    // Specificity: without this, a fix that ALWAYS degrades passes the first
+    // case. `buildRemediationPayload` is documented deterministic, so byte
+    // equality is the strongest available assertion.
+    const withBoundary = await remediationPayloadWith({ maxSteps: 1 });
+    const without = await remediationPayloadWith({ maxSteps: 4 });
+    expect(withBoundary.payload).toBe(without.payload);
+  });
+});
+
 /* ═══════ 4. READY_FOR_PR refuses a task that delivered nothing ═════════════ */
 
 describe('a task that delivered nothing does not reach READY_FOR_PR', () => {

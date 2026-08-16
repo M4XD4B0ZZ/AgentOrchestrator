@@ -379,6 +379,14 @@ export interface RunRequest {
    * Not the bound on the loop — `maxReviewRounds` is, and it is the
    * repository's. This is the bound on one *invocation*, so that a driver
    * cannot run away if a future edge makes an unbounded cycle reachable.
+   *
+   * **It is not a strict ceiling in exactly one case, and that case clears
+   * itself.** A call holding a live remediation brief when the budget runs out
+   * takes one further step to discharge it, because the brief is the only copy
+   * of the review's actionable detail and nothing durable carries it. The
+   * overrun is at most one step: the brief is consumed and cleared by the step
+   * that spends it. See the loop below for why this is preferable to persisting
+   * a reviewer-authored path.
    */
   readonly maxSteps: number;
 }
@@ -489,7 +497,41 @@ export async function runTask(
    */
   let remediationPayload: string | undefined;
 
-  for (let iteration = 0; iteration < maxSteps; iteration += 1) {
+  // The budget bounds steps that **begin new work**.
+  //
+  // ── Why an outstanding remediation brief buys one more iteration ─────────
+  //
+  // A review's actionable content is its findings' `path` and `rule`, and
+  // neither is persisted: the durable record keeps `{round, severity,
+  // fingerprint}`, and a fingerprint is one-way by construction. The precise
+  // brief lives in `remediationPayload` below — a local, which dies with this
+  // frame. So a budget that expired between the review that produced it and the
+  // remediation that consumes it silently downgraded the next writer's
+  // instructions from "fix src/named.ts, rule e2e.named" to "something was
+  // wrong in round 1", and the run *reported success*: `STEP_BUDGET_EXHAUSTED`
+  // means "call again", and calling again is exactly what loses it.
+  //
+  // Both invocation models needed this. `run --attended` calls `runTask` once
+  // and exits, so no in-memory carry is even possible there; `block --attended`
+  // re-enters `runTask`, where the local is re-declared. Moving the boundary
+  // fixes both; carrying the payload through the caller would fix one and would
+  // re-open caller-authored prompt text, which both producers refuse.
+  //
+  // It terminates, and that is not an assumption: the extra iteration exists
+  // only while a payload is outstanding, `runRemediateStep` consumes it, and the
+  // assignment below clears it on any edge that is not `REMEDIATING`. The
+  // overrun is therefore at most one step and cannot recur.
+  //
+  // Not persisting `path`/`rule` instead is deliberate: that would write
+  // agent-authored free text into the durable record, and a persisted path is a
+  // durable claim that can go stale — a renamed file would aim the writer at
+  // something no reviewer ever saw. Fingerprints do not have that problem;
+  // paths do.
+  for (
+    let iteration = 0;
+    iteration < maxSteps || remediationPayload !== undefined;
+    iteration += 1
+  ) {
     // --- 0. Is this run still the repository's writer? -----------------------
     //
     // Re-proved every iteration, and *first*, for the same reason
