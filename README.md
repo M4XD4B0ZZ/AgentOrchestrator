@@ -5621,8 +5621,9 @@ Recorded because an audit that lists only findings does not say where it looked.
 
 Two things were **not** done, and are stated rather than implied: no adversarial
 escalation attempt was made against a live predecessor profile (DOGFOOD-L1 stands
-as carried), no third dogfood was run, and the notification wording quoted above
-is taken from the emitter rather than from a paraphrase of it, per D-REM-001-8.
+as carried), and no third dogfood was run. The notification wording quoted above
+is taken from the emitter, `cli/render-block-run.ts:174`, rather than from any
+paraphrase of it — per the rule D-REM-001-8 established.
 
 ### The status this establishes
 
