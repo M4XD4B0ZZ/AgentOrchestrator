@@ -2997,6 +2997,28 @@ and because the failure mode it describes — a command that cannot start is
   fixed — so a scheduler that retries on 4 loops forever against a UNC-hosted
   repository. The runtime gate got its own code 6 for exactly this reason;
   the lease-location gate makes the same class of statement and did not.
+- **D-REM-001-6 — the test budget was wrong for this slice, and is raised
+  deliberately rather than met by simulation.** DOGFOOD-REM-001 was planned with
+  a ceiling of five new controls above 2 s. Measured inside the parallel gate,
+  where durations roughly double, it lands at **twelve**: 17.0 s, 13.0 s, 8.6 s,
+  7.9 s, 5.5 s, 5.0 s, 4.8 s, 4.6 s, 4.5 s, 4.4 s, 4.1 s, 3.3 s. The whole
+  `test:foundation-safe` gate went from ~216 s to ~236 s, so the developer loop
+  pays about 9%.
+
+  The plan's own remedies were applied in its order and are what took the count
+  from seventeen to twelve: the step-budget pair was merged into one case with
+  two fixtures instead of three, and four of the five reviewer-payload controls
+  were moved off a real run onto the pure builder they actually test, leaving one
+  real step to prove the transport.
+
+  The third remedy — lowering a control's tier — was **not** applied to any of
+  the twelve, and the plan forbids it here by name: every one of them measures an
+  effect that is Git's. A commit that really moved HEAD, a worktree that is
+  really clean, an identity really on an object, a scope violation that really
+  refused. Rewriting any of them against a mock would prove the mock agreed,
+  which is precisely the failure this slice exists to remove — the first dogfood
+  was green because every control substituted the seam above the effect. So the
+  number is stated instead of being met. **Scope:** `tests/dogfood-rem-001.test.ts`.
 - **D-REM-001-1** — `git worktree add` through this product's seam **runs the
   target repository's `post-checkout` hook**. Measured, with a sentinel. So the
   orchestrator already executes target-repository hook code today, before any

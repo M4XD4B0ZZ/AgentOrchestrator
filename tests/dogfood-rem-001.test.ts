@@ -24,8 +24,9 @@ import { CLAUDE_WRITER_ARGS } from '../src/agent/claude-writer.js';
 import { readClaudeResultEnvelope } from '../src/agent/internal/claude-result-envelope.js';
 import { renderRunResult } from '../src/cli/render-attended-run.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
+import { buildReviewPayload } from '../src/loop/findings.js';
 import { runImplementStep, runReviewStep } from '../src/loop/loop-step.js';
-import { readExecutionBrief } from '../src/plan/task-brief.js';
+import { readExecutionBrief, type ExecutionBrief } from '../src/plan/task-brief.js';
 import { runTask, type RunResult } from '../src/run/run-driver.js';
 import {
   commitTaskWork,
@@ -716,20 +717,17 @@ describe('the commit carries the orchestrator’s own identity', () => {
 
 describe('the reviewer is told what the task requires', () => {
   /**
-   * The payload a real review step would build, captured at the seam.
+   * The payload a real review step really built, captured at the seam.
    *
-   * Built through `runReviewStep` rather than by calling the builder directly:
-   * the defect was not that the builder was wrong, it was that the step never
-   * handed it anything but an id. A control on the builder alone would have
-   * been green throughout.
+   * Expensive — a real repository, a real worktree, a real step — so it is paid
+   * for **once**, by the case that needs it: the defect was never that the
+   * builder was wrong, it was that the step handed it nothing but an id, and
+   * only a real step can show that it now hands over the repository's own
+   * account of the task. Every other property below is a property of the
+   * builder, which is a pure function and is called as one.
    */
-  async function reviewPayloadFor(options: {
-    readonly body?: string;
-    readonly round?: number;
-    readonly contextFileContaining?: string;
-  }): Promise<string> {
+  async function reviewPayloadFromRealStep(body: string): Promise<string> {
     const taskId = `REM-001-RV${payloadCase++}`;
-    const body = options.body ?? 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.';
     const started = await startTask({
       taskId,
       files: {
@@ -747,13 +745,10 @@ describe('the reviewer is told what the task requires', () => {
           body,
           '',
         ].join('\n'),
-        ...(options.contextFileContaining === undefined
-          ? {}
-          : { 'README.md': `# fixture\n\n${options.contextFileContaining}\n` }),
+        'README.md': '# fixture\n\nCANARY-README-BODY\n',
       },
     });
-    const round = options.round ?? 1;
-    const current = seedState(started, { state: 'REVIEWING', reviewRound: round - 1 });
+    const current = seedState(started, { state: 'REVIEWING', reviewRound: 0 });
     const agent = recordedAgent({ codex: () => reviewResult(passingReview()) });
 
     await runReviewStep(current, {
@@ -771,16 +766,54 @@ describe('the reviewer is told what the task requires', () => {
     return payload;
   }
 
-  // The control asserts on the constructed PAYLOAD, not on a verdict. The
-  // product's obligation is to hand over the discriminating semantics; a
-  // scripted agent's verdict is whatever the fixture says and asserts nothing.
-  it('gives two tasks with the same diff materially different payloads', async () => {
-    const a = await reviewPayloadFor({
+  /** A brief as `readExecutionBrief` produces one, for the pure cases. */
+  function briefFor(overrides: Partial<ExecutionBrief> = {}): ExecutionBrief {
+    return {
+      taskId: 'REM-001-RV',
       body: 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.',
-    });
-    const b = await reviewPayloadFor({
-      body: 'Document the widget. ACCEPTANCE: README gains a Widget section.',
-    });
+      bodyTruncated: false,
+      contextSources: [],
+      contextComplete: true,
+      ...overrides,
+    };
+  }
+
+  // THE transport control, and the only one here that pays for a real run: the
+  // reviewer is handed the repository's own account of the task rather than its
+  // id. It also pins that a declared context source appears as a **path** with
+  // its contents left in the worktree.
+  it('hands the reviewer the repository’s own account of the task', async () => {
+    const payload = await reviewPayloadFromRealStep(
+      'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.',
+    );
+
+    expect(payload).toContain('src/widget.ts exports createWidget');
+    // Non-vacuous by construction: the canary is real text in a real file the
+    // brief had a path to.
+    //
+    // Where the guarantee actually lives, measured: the builder cannot leak a
+    // file's contents even if it wanted to, because `ContextSourceReport` gives
+    // it a repository-relative path and a status and no root to resolve them
+    // against. A mutant pasting contents *in the builder* stays green — it
+    // reads the wrong file. The mutant that reddens this is in `task-brief.ts`,
+    // which is the component that does hold the bytes.
+    expect(payload).toContain('README.md');
+    expect(payload).not.toContain('CANARY-README-BODY');
+  });
+
+  // The rest are properties of a pure builder, asserted on the builder. The
+  // control asserts on the constructed PAYLOAD, not on a verdict: the product's
+  // obligation is to hand over the discriminating semantics, and a scripted
+  // agent's verdict is whatever the fixture says and asserts nothing.
+  it('gives two tasks with the same diff materially different payloads', () => {
+    const a = buildReviewPayload(
+      briefFor({ body: 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.' }),
+      1,
+    );
+    const b = buildReviewPayload(
+      briefFor({ body: 'Document the widget. ACCEPTANCE: README gains a Widget section.' }),
+      1,
+    );
 
     expect(a).not.toBe(b);
     expect(a).toContain('src/widget.ts exports createWidget');
@@ -789,35 +822,17 @@ describe('the reviewer is told what the task requires', () => {
     expect(b).not.toContain('src/widget.ts exports createWidget');
   });
 
-  it('tells the reviewer which round it is', async () => {
-    expect(await reviewPayloadFor({ round: 3 })).toContain('round 3');
+  it('tells the reviewer which round it is', () => {
+    expect(buildReviewPayload(briefFor(), 3)).toContain('round 3');
   });
 
-  it('asks whether the tree satisfies the task, not only what it broke', async () => {
+  it('asks whether the tree satisfies the task, not only what it broke', () => {
     // Without this the round-3 PASS recurs: an empty diff introduces no defects.
-    expect(await reviewPayloadFor({})).toMatch(/satisf/i);
+    expect(buildReviewPayload(briefFor(), 1)).toMatch(/satisf/i);
   });
 
-  it('says so when the body was truncated', async () => {
-    // A body over the 8 KiB task-file cap, so the truncation is the reader's
-    // real one rather than a flag the fixture set.
-    const payload = await reviewPayloadFor({ body: `Add a widget. ${'x'.repeat(9_000)}` });
-    expect(payload).toMatch(/truncat/i);
-  });
-
-  it('carries context-source paths but never their contents', async () => {
-    // Non-vacuous by construction: the canary is real text in a real file the
-    // builder had a path to.
-    //
-    // Where the guarantee actually lives, measured: the builder cannot leak a
-    // file's contents even if it wanted to, because `ContextSourceReport` gives
-    // it a repository-relative path and a status and no root to resolve them
-    // against. A mutant pasting contents *in the builder* stays green — it
-    // reads the wrong file. The mutant that reddens this is in
-    // `task-brief.ts`, which is the component that does hold the bytes.
-    const payload = await reviewPayloadFor({ contextFileContaining: 'CANARY-README-BODY' });
-    expect(payload).toContain('README.md');
-    expect(payload).not.toContain('CANARY-README-BODY');
+  it('says so when the body was truncated', () => {
+    expect(buildReviewPayload(briefFor({ bodyTruncated: true }), 1)).toMatch(/truncat/i);
   });
 
   it('parks rather than degrading when the brief is unavailable', async () => {
@@ -866,8 +881,10 @@ describe('a step-budget boundary does not cost the remediation its detail', () =
 
     let steps = 0;
     // Re-entered the way `block --attended` does, so the boundary is crossed by
-    // a real second call rather than simulated inside one.
-    for (let call = 0; call < 4; call += 1) {
+    // a real second call rather than simulated inside one. Two calls are the
+    // most that can be needed: the call that produces the brief is the call
+    // that discharges it.
+    for (let call = 0; call < 2; call += 1) {
       const run = await runTask(
         { ...request(started), maxSteps: options.maxSteps },
         deps({ verify: recordedVerify().runner, agent: agent.runner }),
@@ -881,26 +898,27 @@ describe('a step-budget boundary does not cost the remediation its detail', () =
     return { payload, steps };
   }
 
-  it('hands the writer the same actionable finding across the boundary', async () => {
+  // One case, two properties, two fixtures — merged deliberately (G8). Each
+  // half needs a real repository driven through a real review, and split they
+  // paid for three of them to assert two things about one string.
+  it('hands the writer the same actionable finding across the boundary, byte for byte', async () => {
     // maxSteps: 1 from REVIEWING puts the boundary exactly at the problematic
     // edge, with no timing dependence: the review step is the whole budget.
-    const { payload, steps } = await remediationPayloadWith({ maxSteps: 1 });
+    const crossed = await remediationPayloadWith({ maxSteps: 1 });
 
-    expect(payload).toContain('src/named.ts');
-    expect(payload).toContain('e2e.named');
-    expect(payload).not.toContain('did not survive');
+    expect(crossed.payload).toContain('src/named.ts');
+    expect(crossed.payload).toContain('e2e.named');
+    expect(crossed.payload).not.toContain('did not survive');
     // The overrun is bounded at one: the extra iteration discharges an
     // obligation it then clears, so it cannot recur.
-    expect(steps).toBeLessThanOrEqual(3);
-  });
+    expect(crossed.steps).toBeLessThanOrEqual(3);
 
-  it('produces byte-identical instructions when no boundary intervenes', async () => {
-    // Specificity: without this, a fix that ALWAYS degrades passes the first
-    // case. `buildRemediationPayload` is documented deterministic, so byte
-    // equality is the strongest available assertion.
-    const withBoundary = await remediationPayloadWith({ maxSteps: 1 });
-    const without = await remediationPayloadWith({ maxSteps: 4 });
-    expect(withBoundary.payload).toBe(without.payload);
+    // Specificity: without this half, a fix that ALWAYS degrades passes the
+    // assertions above. `buildRemediationPayload` is documented deterministic,
+    // so byte equality against a run that never met the boundary is the
+    // strongest available assertion.
+    const uncrossed = await remediationPayloadWith({ maxSteps: 4 });
+    expect(crossed.payload).toBe(uncrossed.payload);
   });
 });
 
