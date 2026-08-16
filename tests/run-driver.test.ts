@@ -29,7 +29,15 @@
  * cannot be asked to produce on demand.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -73,7 +81,7 @@ import {
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
 import { releaseRepositoryExecutionLease } from '../src/lease/execution-lease.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
-import { cleanScopeAnswer } from './helpers/scope-git.js';
+import { cleanScopeAnswer, writingPassAnswer } from './helpers/scope-git.js';
 import { resolveFixture } from './helpers/worktree-fixtures.js';
 
 const TASK_ID = 'task-0001';
@@ -94,6 +102,40 @@ const tempDirs: string[] = [];
 function repoRoot(): string {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'ao-driver-')));
   tempDirs.push(dir);
+  // The task's own words, on disk in the worktree the state records.
+  //
+  // The rest of this suite's world is scripted, deliberately — see
+  // `scriptedGit`. This part cannot be: since DOGFOOD-REM-001 the review step
+  // reads the repository's account of the task and **parks** rather than
+  // briefing a reviewer with a bare id, and `readExecutionBrief` reads real
+  // files out of the authorised worktree. So the two files it needs really
+  // exist, and every case here keeps its own subject instead of stopping on a
+  // brief it never meant to withhold.
+  // The prose is read from the repository's own task source, the context from
+  // the authorised worktree — two different trees, and `readExecutionBrief`
+  // says why: a human correcting a task file edits it on the default branch.
+  const worktree = worktreeOf(dir);
+  mkdirSync(join(dir, 'tasks'), { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  writeFileSync(join(worktree, 'README.md'), '# fixture\n', 'utf8');
+  writeFileSync(
+    join(dir, 'tasks', `${TASK_ID}.md`),
+    [
+      '---',
+      `id: ${TASK_ID}`,
+      'title: add a widget',
+      'status: OPEN',
+      'kind: NORMAL',
+      'priority: NORMAL',
+      'currentFocus: true',
+      'dependsOn: []',
+      '---',
+      '',
+      'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
   return dir;
 }
 
@@ -213,6 +255,17 @@ interface GitScript {
   readonly registry?: GitCommandResult;
   readonly head?: GitCommandResult;
   readonly status?: GitCommandResult;
+  /**
+   * Answer as a repository in which the writing pass really changed a file and
+   * AO committed it.
+   *
+   * Off by default, because most cases here are about routing and refusals and
+   * are better served by a task that changed nothing. It is on for the cases
+   * whose subject *requires* a pass to complete: since DOGFOOD-REM-001 a pass
+   * with no effect parks, so a scripted world that changes nothing stops those
+   * runs one state early for a reason they are not about.
+   */
+  readonly writingPass?: boolean;
 }
 
 /** The porcelain listing a healthy repository produces for {@link taskState}. */
@@ -230,6 +283,14 @@ function scriptedGit(root: string, script: GitScript = {}) {
   const runner: GitRunner = async (cwd, args) => {
     calls.push({ cwd, args: [...args] });
     if (startsWith(args, ['worktree', 'list'])) return script.registry ?? OK(healthyRegistry(root));
+    // A pass that really changed something, for the cases whose subject needs
+    // one. Consulted before the answers below so that the commit path's
+    // `status --porcelain -z` is not swallowed by the reconciliation answer to
+    // `status --porcelain`, which is a different question of the same command.
+    if (script.writingPass === true) {
+      const writing = writingPassAnswer(args);
+      if (writing !== null) return writing;
+    }
     if (startsWith(args, ['status'])) return script.status ?? OK('');
     if (startsWith(args, ['merge-base', '--is-ancestor'])) return OK();
     if (startsWith(args, ['rev-parse']) && args.includes('HEAD')) return script.head ?? OK(SHA_B);
@@ -349,7 +410,6 @@ function request(root: string, overrides: Partial<RunRequest> = {}): RunRequest 
   return {
     repository: repo,
     taskId: TASK_ID,
-    taskBrief: 'Add a widget.',
     attendedContinuation: true,
     authEvidence: provenAuthEvidence(),
     // Acquired for real: the driver re-proves it against the file every
@@ -519,7 +579,7 @@ describe('execution authority comes from Git, never from the record', () => {
     const run = await runTask(
       request(root, { maxSteps: 3 }),
       deps(root, {
-        git: scriptedGit(root, { registry: OK(healthyRegistry(root, printed)) }),
+        git: scriptedGit(root, { registry: OK(healthyRegistry(root, printed)), writingPass: true }),
         verify: verify.runner,
         agent: agent.runner,
       }),
@@ -831,7 +891,12 @@ describe('an authorised quota resume', () => {
 
     const run = await runTask(
       request(root, { maxSteps: 2 }),
-      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      deps(root, {
+        agent: agent.runner,
+        verify: cappedVerify(0).runner,
+        // The remediation pass has to leave something behind to be admissible.
+        git: scriptedGit(root, { writingPass: true }),
+      }),
     );
 
     // The resume itself is one durable step; the remediation pass is the next.
@@ -914,6 +979,12 @@ describe('an authorised quota resume', () => {
     const agent = scriptedAgent(
       agentCommandResult({ stdout: findingsReview() }),
       agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      // The second review, which the cycle now reaches inside four calls: a
+      // call holding a remediation brief takes one further step to discharge it
+      // (DOGFOOD-REM-001 Task 8), so `REVIEWING → REMEDIATING → VERIFYING` is
+      // two writes in one call rather than two calls. The cycle is the same
+      // cycle; it is observed in fewer invocations.
+      agentCommandResult({ stdout: codexTranscript(passingReview()) }),
     );
     const seen: (string | null)[] = [];
 
@@ -923,7 +994,11 @@ describe('an authorised quota resume', () => {
     for (let step = 0; step < 4; step += 1) {
       const run = await runTask(
         request(root, { maxSteps: 1 }),
-        deps(root, { agent: agent.runner, verify: scriptedVerify({ exitCode: 0 }).runner }),
+        deps(root, {
+          agent: agent.runner,
+          verify: scriptedVerify({ exitCode: 0 }).runner,
+          git: scriptedGit(root, { writingPass: true }),
+        }),
       );
       if (run.steps === 0) break;
       const after = reload(root).state;
@@ -932,7 +1007,7 @@ describe('an authorised quota resume', () => {
       expect(after.reportedResetAt).toBeNull();
     }
 
-    expect(seen).toEqual(['REVIEWING', 'REMEDIATING', 'VERIFYING', 'REVIEWING']);
+    expect(seen).toEqual(['REVIEWING', 'VERIFYING', 'REVIEWING', 'READY_FOR_PR']);
   });
 });
 
@@ -1197,6 +1272,11 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
    */
   it('now resumes an IMPLEMENT pause, because the implement step exists', async () => {
     const root = repoRoot();
+    // This case's premise is a repository with **no task file**, which is what
+    // makes the implement step park without briefing anyone — see below. Every
+    // other case here now gets one, so this one takes it away again explicitly
+    // rather than depending on a fixture default that has since changed.
+    rmSync(join(root, 'tasks'), { recursive: true, force: true });
     const before = blockedOn(root, 'IMPLEMENT');
 
     const agent = cappedAgent(agentCommandResult(), 0);
@@ -1328,7 +1408,7 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
     const next = await runTask(
       request(root, { maxSteps: 1 }),
       deps(root, {
-        git: scriptedGit(root, mutated),
+        git: scriptedGit(root, { ...mutated, writingPass: true }),
         agent: scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() })).runner,
         verify: cappedVerify(0).runner,
       }),
@@ -1386,7 +1466,11 @@ describe('remediation is never started on invented evidence', () => {
 
     const run = await runTask(
       request(root, { maxSteps: 1 }),
-      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      deps(root, {
+        agent: agent.runner,
+        verify: cappedVerify(0).runner,
+        git: scriptedGit(root, { writingPass: true }),
+      }),
     );
 
     expect(run.steps).toBe(1);
@@ -1508,16 +1592,26 @@ describe('a refused write stops the run', () => {
 
     // The restart. Same phase, same round — the interrupted review was not a
     // completed one, and nothing pretends it was.
-    const second = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+    const second = scriptedAgent(
+      agentCommandResult({ stdout: findingsReview() }),
+      // The writer the re-run review hands its brief to, in the same call.
+      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+    );
     const resumed = await runTask(
       request(root, { maxSteps: 1 }),
-      deps(root, { agent: second.runner }),
+      deps(root, { agent: second.runner, git: scriptedGit(root, { writingPass: true }) }),
     );
 
-    expect(resumed.steps).toBe(1);
-    expect(second.calls).toHaveLength(1);
+    // Two writes, not one: the review lands `REMEDIATING` and the same call
+    // then discharges the remediation brief it is holding (DOGFOOD-REM-001
+    // Task 8). The property this case is about is untouched — the *same* phase
+    // was re-run and the round it consumed is the round it was always going to
+    // consume — and the extra step is what stops that brief's detail from being
+    // lost at the boundary.
+    expect(resumed.steps).toBe(2);
+    expect(second.calls).toHaveLength(2);
     const finished = reload(root).state;
-    expect(finished.state).toBe('REMEDIATING');
+    expect(finished.state).toBe('VERIFYING');
     expect(finished.reviewRound).toBe(1);
     expect(finished.findingHistory).toHaveLength(1);
   });
@@ -1748,7 +1842,6 @@ describe('task selection', () => {
     const outcome = await runNextTask(
       {
         repository: resolved,
-        taskBrief: (task) => task.title,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(resolved),

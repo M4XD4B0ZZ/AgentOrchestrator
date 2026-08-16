@@ -43,6 +43,7 @@ import {
   tickingClock,
   usageLimitResult,
   writerSuccess,
+  writerThatEdits,
 } from './helpers/e2e-fixtures.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 
@@ -108,7 +109,6 @@ function stepDeps(
     now: '2026-08-11T09:00:00.000Z',
     authorisedWorktreePath: current.state.worktreePath,
     verification: repository.verification,
-    taskBrief: 'unused by these steps',
     brief: readExecutionBrief(repository, current.state.taskId, current.state.worktreePath),
     lease: leaseAuthorityFor(repository),
     ...overrides,
@@ -282,9 +282,15 @@ describe('IMPLEMENTING → VERIFYING', () => {
     return { repository, root, current: loaded };
   }
 
+  // The writer edits and AO commits (DOGFOOD-REM-001 G1). This case used to
+  // drive `writerSuccess()`, which changes nothing — and passed, which is the
+  // defect the slice exists to remove: a writer with no authority to write was
+  // indistinguishable from one that had finished. The inversion (a no-effect
+  // pass parks) is pinned in tests/dogfood-rem-001.test.ts; this is its
+  // liveness sibling, and it must keep asserting that real work advances.
   it('runs the writer in the authorised worktree and enters VERIFYING', async () => {
     const { repository, root, current } = await atImplementing();
-    const agent = recordedAgent({ claude: () => writerSuccess() });
+    const agent = recordedAgent({ claude: writerThatEdits('src/work.ts', '// work\n') });
 
     const step = await runImplementStep(
       current,
@@ -476,7 +482,7 @@ describe('a task created by production code now runs', () => {
     );
     expect(start.outcome).toBe('STARTED');
 
-    const agent = recordedAgent({ claude: () => writerSuccess() });
+    const agent = recordedAgent({ claude: writerThatEdits('src/work.ts', '// work\n') });
     const verify = recordedVerify();
 
     // Three durable moves: the two setup hops and the implement pass. The
@@ -486,7 +492,6 @@ describe('a task created by production code now runs', () => {
       {
         repository,
         taskId: 'V2-04',
-        taskBrief: 'unused: the implement step reads the repository',
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(repository),

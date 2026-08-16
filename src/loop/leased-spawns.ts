@@ -36,6 +36,15 @@
  *    immediately before the effect — the same property, a different mechanism,
  *    and worth not blurring, because a reader who believes the seams cover the
  *    Git mutations will look for the wrong gate;
+ *  - **and there is now a fourth Git mutation: the commit.** DOGFOOD-REM-001
+ *    moved the commit from the writing agent to the orchestrator, so AO itself
+ *    writes an object into the target repository's history. That belongs here
+ *    rather than beside the other three, and it gets the *seam* treatment
+ *    ({@link leasedGit}) rather than a pre-check, for one reason: a commit is
+ *    the last thing a writing pass does, minutes of subprocess time after the
+ *    step began, which is exactly the window in which a lease is lost. A gate
+ *    proved at the top of the step and a commit written at the bottom of it are
+ *    not the same claim;
  *  - **a missing seam is a compile error.** `runClaudeWriter`,
  *    `runCodexReviewer` and `runVerification` no longer default their runner, so
  *    a forgetful call site does not build. This is enforcement;
@@ -68,6 +77,7 @@
 
 import { runAgentCommand, type AgentCommandResult, type AgentRunner } from '../agent/agent-command.js';
 import { verifyExecutionLeaseHeldFor, type ExecutionLeaseAuthority } from '../lease/execution-lease.js';
+import { runGitCommand, type GitCommandResult, type GitRunner } from '../worktree/git-command.js';
 import {
   runVerificationCommand,
   type VerificationCommandResult,
@@ -98,6 +108,28 @@ export function leasedAgent(deps: SpawnAuthority): AgentRunner {
   };
 }
 
+/**
+ * A Git runner that refuses to touch the repository when this run is no longer
+ * its writer.
+ *
+ * Handed to `commitTaskWork`, so the reads that decide *whether* to commit and
+ * the commit itself are fenced by one authority: a run that has lost the lease
+ * must not even ask, because the answer would be used to justify a write it may
+ * not make.
+ *
+ * `UNAVAILABLE` is the seam's existing vocabulary for "no process ran, and
+ * nothing it printed is evidence of anything". Every caller in the commit path
+ * already treats that as a refusal, so a lost lease stops the commit with the
+ * step that failed named, rather than being mistaken for a repository that had
+ * nothing to record.
+ */
+export function leasedGit(deps: SpawnAuthority & { readonly git?: GitRunner }): GitRunner {
+  return async (cwd, args) => {
+    if (!leaseHolds(deps)) return GIT_NOT_AUTHORISED;
+    return (deps.git ?? runGitCommand)(cwd, args);
+  };
+}
+
 /** The same, for the verification seam. See {@link leasedAgent}. */
 export function leasedVerify(deps: SpawnAuthority): VerificationRunner {
   return async (command, args, cwd) => {
@@ -124,6 +156,13 @@ export const AGENT_NOT_AUTHORISED: AgentCommandResult = Object.freeze({
   failureCode: null,
   errnoCode: null,
   durationMs: 0,
+});
+
+/** The Git seam's equivalent of {@link AGENT_NOT_AUTHORISED}. */
+export const GIT_NOT_AUTHORISED: GitCommandResult = Object.freeze({
+  outcome: 'UNAVAILABLE' as const,
+  stdout: '',
+  exitCode: null,
 });
 
 /** The verification seam's equivalent of {@link AGENT_NOT_AUTHORISED}. */

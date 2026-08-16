@@ -63,6 +63,7 @@ import {
   type AgentDisposition,
   type AgentFailureCode,
   type AgentProcessEvidence,
+  type PermissionDenialObservation,
 } from './agent-outcome.js';
 import { readClaudeResultEnvelope } from './internal/claude-result-envelope.js';
 
@@ -72,20 +73,110 @@ import { readClaudeResultEnvelope } from './internal/claude-result-envelope.js';
  * hand this boundary a command or an extra flag, because a repository-supplied
  * argument is a repository-supplied piece of a command line.
  *
+ * Every token below is bound to a measurement on CLI **2.1.233**, taken through
+ * the production adapter against throwaway repositories. Reproduce them with
+ * `npm run verify:writer-authority` before trusting any of this comment. **Do
+ * not substitute a remembered flag for a measured one** — three of the four
+ * decisions here contradict what the flag names suggest.
+ *
+ * The standing gate has since reproduced the split on **2.1.220** as well: the
+ * writer edited inside its worktree, the escape to a sibling was blocked, no MCP
+ * tool was reachable, and HEAD did not move — while the same gate's control,
+ * driving the pre-fix vector, still produced an unchanged file and
+ * `permission_denials: [Write]` under a `success` envelope. Two versions, the
+ * same behaviour; the version numbers are recorded rather than merged, because
+ * "measured somewhere" and "measured here" are different claims.
+ *
  * `--print` is the non-interactive mode; `--output-format json` is what makes
  * the result a structured document rather than prose to be scraped. The prompt
  * is not here — it goes on stdin, because it could not be an argv token even
  * if we wanted it to be.
  *
- * `--permission-mode` is deliberately absent. Choosing how much a writing
- * agent may do without asking is a policy decision with a blast radius far
- * beyond this slice, and defaulting it silently is how such a decision gets
- * made by accident.
+ * ── `--permission-mode acceptEdits`, and why its absence was a defect ───────
+ *
+ * This comment used to record that `--permission-mode` was *deliberately*
+ * absent, because choosing how much a writing agent may do without asking is a
+ * policy decision with a blast radius beyond that slice, and defaulting it
+ * silently is how such a decision gets made by accident. That reasoning is
+ * correct, and it is exactly what indicts the silence: leaving the mode unset
+ * did not defer the decision, it *made* it. Measured, and reproduced as the
+ * first dogfood run's root cause — with no mode, **every write is denied**, the
+ * seam still reports `RAN` / exit 0, the envelope still says
+ * `subtype: "success"`, and the only trace is `permission_denials: [Write,
+ * Bash]`. The product reported a delivered task and delivered nothing. So the
+ * grant is explicit now, and the decision is recorded rather than defaulted.
+ *
+ * `acceptEdits` is cwd-confined on its own — measured: both the escape to a
+ * sibling directory and the tamper of the main checkout were blocked, the
+ * latter even for a read.
+ *
+ * **No settings file carrying authorisation rules.** Rule-scoped permissions
+ * are only expressible through a settings file, and that route measured
+ * treacherous: an *unqualified* `Write`/`Edit` allow-rule grants unbounded
+ * write authority — the writer left the worktree and overwrote a tracked file
+ * in the sibling main checkout — while `Write(**)`/`Edit(**)` happens to
+ * restore containment. A semantics whose safe and unsafe spellings differ by
+ * two characters is not one to build a security boundary on when a flag will do.
+ *
+ * ── The two flags refused, each for a measured reason ───────────────────────
+ *
+ * `--bare` is refused. It would be hermetic, and it would break authentication:
+ * the installed binary's own help states its auth is strictly
+ * `ANTHROPIC_API_KEY` or `apiKeyHelper` via `--settings`, with OAuth and the
+ * keychain never read. AO runs on the subscription login that `auth:claude`
+ * preflights.
+ *
+ * `--safe-mode` is refused as the hermeticity mechanism. Measured: it
+ * suppressed user-scope configuration but the *project* `CLAUDE.md` still took
+ * effect — contradicting its own help text, which lists `CLAUDE.md` among what
+ * it disables. A flag whose documented and measured behaviour disagree is not a
+ * boundary.
+ *
+ * ── `--strict-mcp-config` is load-bearing and non-obvious ───────────────────
+ *
+ * `--tools` does **not** bound MCP authority. Measured: with the tool list
+ * below and no `--strict-mcp-config`, the writer held the *operator's* MCP
+ * tools and attempted one (`permission_denials:
+ * ["mcp__claude_ai_Gmail__list_labels"]`). With it, the tool set is exactly
+ * `Edit, Glob, Grep, Read, Write` and MCP is absent. Removing this flag widens
+ * authority to whatever the operator happens to have connected, which is not a
+ * property of this repository at all.
+ *
+ * ── The tool list, and why it is last ───────────────────────────────────────
+ *
+ * `Read Edit Write Glob Grep` — enough to change files, and no shell. There is
+ * no `Bash`, so the writer cannot commit, push or run anything: AO owns the
+ * commit (see `commitTaskWork`), and the writer's authority stops at the file
+ * contents. `--tools` is variadic, so it must come last or be followed by a
+ * `-`-prefixed token; it comes last, and `tests/dogfood-rem-001.test.ts` pins
+ * that by slicing the vector from `--tools` to its end.
+ *
+ * ── The cost of hermeticity, paid deliberately ─────────────────────────────
+ *
+ * `--setting-sources ''` (the empty string is shell-inert: `SAFE_ARG_PATTERN`
+ * is `*`-quantified) suppresses the target repository's own `CLAUDE.md` along
+ * with user-scope configuration. That is the point — the operator's machine
+ * must not decide the writer's behaviour — but those conventions are often
+ * genuinely useful. Where a repository wants them, the `CLAUDE.md` **path**
+ * travels in the payload's `CONTEXT SOURCES` section and the writer `Read`s it.
+ * The channel becomes explicit and AO-controlled instead of ambient. Paths
+ * only, never contents.
  */
 export const CLAUDE_WRITER_ARGS: readonly string[] = Object.freeze([
   '--print',
   '--output-format',
   'json',
+  '--setting-sources',
+  '',
+  '--strict-mcp-config',
+  '--permission-mode',
+  'acceptEdits',
+  '--tools',
+  'Read',
+  'Edit',
+  'Write',
+  'Glob',
+  'Grep',
 ]);
 
 /** What a caller must supply to run the writer once. */
@@ -133,6 +224,17 @@ interface ClaudeWriterOutcomeBase {
 export interface ClaudeWriterCompleted extends ClaudeWriterOutcomeBase {
   readonly ok: true;
   readonly disposition: 'AGENT_COMPLETED';
+  /**
+   * What this run was refused, as the envelope reported it.
+   *
+   * On the completed member alone, and that is the point: a completed writer
+   * that was denied `Write` is the shape the first dogfood run had, and it is
+   * indistinguishable from a healthy pass by every other field here. A failed
+   * run needs no such field — its diagnosis already says the run is unusable.
+   *
+   * Evidence, not a verdict (G6). Nothing in this module branches on it.
+   */
+  readonly permissionDenials: PermissionDenialObservation;
 }
 
 export interface ClaudeWriterFailed extends ClaudeWriterOutcomeBase {
@@ -240,7 +342,12 @@ export async function runClaudeWriter(
 
   if (envelope.verdict !== 'COMPLETED') return frozenFailure(evidence, 'AGENT_RESULT_MALFORMED');
 
-  return Object.freeze({ ...evidence, ok: true as const, disposition: 'AGENT_COMPLETED' as const });
+  return Object.freeze({
+    ...evidence,
+    ok: true as const,
+    disposition: 'AGENT_COMPLETED' as const,
+    permissionDenials: envelope.permissionDenials,
+  });
 }
 
 function frozenFailure(

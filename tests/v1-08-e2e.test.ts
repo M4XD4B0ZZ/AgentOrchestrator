@@ -54,6 +54,7 @@ import {
   reload,
   removeTree,
   reviewResult,
+  seedDeliveredState,
   seedState,
   startTask,
   taskFile,
@@ -61,7 +62,7 @@ import {
   tryReload,
   usageLimitResult,
   writerSuccess,
-  writerThatCommits,
+  writerThatEdits,
   type StartedTask,
 } from './helpers/e2e-fixtures.js';
 import { fingerprint, passingReview } from './fixtures.js';
@@ -82,7 +83,6 @@ function request(started: StartedTask, overrides: Record<string, unknown> = {}) 
   return {
     repository: started.repository,
     taskId: started.taskId,
-    taskBrief: 'Make the integrated pipeline behave.',
     attendedContinuation: true,
     authEvidence: provenAuthEvidence(),
     // Real, and re-proved by the driver on every iteration.
@@ -102,7 +102,9 @@ function deps(overrides: Record<string, unknown> = {}) {
 describe('a task the repository is happy with reaches READY_FOR_PR', () => {
   it('verifies, reviews clean, and settles — observing HEAD through real Git', async () => {
     const started = await startTask({ taskId: TASK_ID });
-    seedState(started);
+    // Work already delivered: settling additionally requires that the task did
+    // something (DOGFOOD-REM-001 R2), so the fixture commits before it verifies.
+    seedDeliveredState(started);
 
     const verify = recordedVerify();
     const agent = recordedAgent({ codex: () => reviewResult(passingReview()) });
@@ -170,7 +172,7 @@ describe('a task the repository is happy with reaches READY_FOR_PR', () => {
    */
   it('does not execute another task step for a terminal task', async () => {
     const started = await startTask({ taskId: TASK_ID });
-    seedState(started);
+    seedDeliveredState(started);
     const first = await runTask(
       request(started),
       deps({ verify: recordedVerify().runner, agent: recordedAgent({ codex: () => reviewResult(passingReview()) }).runner }),
@@ -206,7 +208,7 @@ describe('a review that finds something drives a real remediation cycle', () => 
     const agent = recordedAgent({
       // Round 1 finds something; round 2 is clean.
       codex: ({ index }) => reviewResult(index === 0 ? findingsReview() : passingReview()),
-      claude: writerThatCommits('src/fix.ts', 'export const fixed = true;\n'),
+      claude: writerThatEdits('src/fix.ts', 'export const fixed = true;\n'),
     });
 
     const run = await runTask(
@@ -248,7 +250,7 @@ describe('a review that finds something drives a real remediation cycle', () => 
 
     const agent = recordedAgent({
       codex: ({ index }) => reviewResult(index === 0 ? findingsReview('src/broken.ts', 'e2e.named') : passingReview()),
-      claude: writerThatCommits('src/fix.ts', 'export const fixed = true;\n'),
+      claude: writerThatEdits('src/fix.ts', 'export const fixed = true;\n'),
     });
 
     await runTask(
@@ -369,7 +371,7 @@ describe('the repository verdict is the repository\'s', () => {
 describe('a process that dies mid-step loses nothing and fabricates nothing', () => {
   it('re-runs the step when the write never landed, without consuming a round', async () => {
     const started = await startTask({ taskId: TASK_ID });
-    const before = seedState(started);
+    const before = seedDeliveredState(started);
 
     const crashing: ReplaceFn = () => {
       throw new Error('crash between the subprocess and the state file');
@@ -406,7 +408,7 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
 
   it('does not replay a transition whose write did land', async () => {
     const started = await startTask({ taskId: TASK_ID });
-    seedState(started);
+    seedDeliveredState(started);
 
     // The write lands and *then* the process dies, which is the one crash point
     // where the caller's report and the disk disagree.
@@ -460,7 +462,7 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
       codex: ({ index }) => reviewResult(index === 0 ? findingsReview() : passingReview()),
       claude: (call) => {
         crashArmed = true;
-        return writerThatCommits('src/fix.ts', 'export const fixed = true;\n')(call);
+        return writerThatEdits('src/fix.ts', 'export const fixed = true;\n')(call);
       },
     });
 
@@ -480,9 +482,15 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
     expect(headOf(started.workspace.worktreePath)).not.toBe(started.workspace.basePinnedCommit);
 
     // The restart reconciles rather than diverging, and finishes the task.
+    //
+    // Its writer edits rather than reporting a bare success: since
+    // DOGFOOD-REM-001 a pass that leaves nothing behind is inadmissible and
+    // parks, so a no-effect restart would stop this case one state short for a
+    // reason it is not about. The subject here is reconciliation surviving the
+    // writer's own authorised mutation.
     const restartAgent = recordedAgent({
       codex: () => reviewResult(passingReview()),
-      claude: () => writerSuccess(),
+      claude: writerThatEdits('src/fix-again.ts', 'export const again = true;\n'),
     });
     const restarted = await runTask(
       request(started),
@@ -532,29 +540,35 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
     expect(after.findingHistory).toEqual([]);
   });
 
+  /**
+   * The degraded brief, from a **genuine** restart.
+   *
+   * This case used to reach that state through `maxSteps: 1` and call the
+   * result "a new process", which mis-described what it exercised: a second
+   * `runTask` in the same process, across a step-budget boundary. That boundary
+   * no longer costs the detail (DOGFOOD-REM-001 Task 8), and asserting the loss
+   * there was asserting the defect.
+   *
+   * The property itself is real and is kept: a run that finds only a durable
+   * `findingHistory` — no live payload anywhere, because the process that built
+   * one is gone — must brief the writer from what survived and **say that it is
+   * degraded** rather than presenting a weaker prompt as a complete one. So the
+   * state is seeded directly at `REMEDIATING` with history and nothing else,
+   * which is what a restart really leaves behind.
+   */
   it('rebuilds a degraded brief after a restart, and says that it is degraded', async () => {
     const started = await startTask({ taskId: TASK_ID });
     seedState(started, {
-      state: 'REVIEWING',
-      currentCommit: started.workspace.basePinnedCommit,
+      state: 'REMEDIATING',
+      reviewRound: 1,
+      currentCommit: null,
+      worktreeCleanAtCheckpoint: false,
+      findingHistory: [{ round: 1, severity: 'high', fingerprint: fingerprint(1) }],
     });
 
-    // Round 1 finds something, and the run stops there.
-    const first = await runTask(
-      request(started, { maxSteps: 1 }),
-      deps({
-        verify: recordedVerify().runner,
-        agent: recordedAgent({ codex: () => reviewResult(findingsReview('src/named.ts', 'e2e.named')) }).runner,
-      }),
-    );
-    expect(first.outcome).toBe('STEP_BUDGET_EXHAUSTED');
-    expect(reload(started.root, TASK_ID).state.state).toBe('REMEDIATING');
-
-    // A new process: the in-memory payload is gone, and only the durable record
-    // remains. `path` and `rule` were agent text and were never persisted.
     const agent = recordedAgent({
       codex: () => reviewResult(passingReview()),
-      claude: () => writerSuccess(),
+      claude: writerThatEdits('src/fix.ts', 'export const fixed = true;\n'),
     });
     await runTask(request(started), deps({ verify: recordedVerify().runner, agent: agent.runner }));
 
@@ -563,6 +577,41 @@ describe('a process that dies mid-step loses nothing and fabricates nothing', ()
     expect(brief).toContain('review round 1');
     expect(brief).not.toContain('src/named.ts');
     expect(brief).not.toContain('e2e.named');
+  });
+
+  /**
+   * The same edge, asserting the opposite — the Task 8 effect control.
+   *
+   * `maxSteps: 1` from `REVIEWING` puts the budget boundary exactly between the
+   * review that produced a finding and the remediation that must act on it. The
+   * second call is a second `runTask` in this process, which is what
+   * `block --attended` really does, and the writer must still be told which
+   * path and which rule.
+   */
+  it('keeps the actionable finding across a step-budget boundary', async () => {
+    const started = await startTask({ taskId: TASK_ID });
+    seedState(started, {
+      state: 'REVIEWING',
+      currentCommit: started.workspace.basePinnedCommit,
+    });
+    const agent = recordedAgent({
+      codex: () => reviewResult(findingsReview('src/named.ts', 'e2e.named')),
+      claude: writerThatEdits('src/named.ts', '// fixed\n'),
+    });
+
+    const first = await runTask(
+      request(started, { maxSteps: 1 }),
+      deps({ verify: recordedVerify().runner, agent: agent.runner }),
+    );
+
+    // The budget bought one extra step to discharge the brief it was holding,
+    // so the remediation ran inside this call rather than being deferred with
+    // its detail dropped.
+    expect(first.steps).toBeLessThanOrEqual(2);
+    const brief = agent.calls.find((call) => call.agent === 'claude')?.payload ?? '';
+    expect(brief).toContain('src/named.ts');
+    expect(brief).toContain('e2e.named');
+    expect(brief).not.toContain('did not survive');
   });
 
   it('refuses a stale write rather than flattening the writer that got there first', async () => {
@@ -670,8 +719,8 @@ describe('one repository cannot reach into another', () => {
 
     expect(alpha.root).not.toBe(beta.root);
     expect(alpha.repository.id).toBe(beta.repository.id); // same profile id on purpose
-    seedState(alpha);
-    seedState(beta);
+    seedDeliveredState(alpha);
+    seedDeliveredState(beta);
 
     // Drive alpha to completion; beta must be untouched.
     const betaBefore = reload(beta.root, TASK_ID);
@@ -867,7 +916,7 @@ describe('a tampered state cannot make the main checkout a task workspace', () =
     // once compared as paths. If these ever disagree, the check above would
     // refuse every legitimate task.
     expect(started.workspace.workBranch).toBe(derived.identity.workBranch);
-    seedState(started);
+    seedDeliveredState(started);
     const run = await runTask(
       request(started),
       deps({ verify: recordedVerify().runner, agent: recordedAgent({ codex: () => reviewResult(passingReview()) }).runner }),
@@ -1014,12 +1063,11 @@ describe('selection reads the repository\'s own task files', () => {
       taskId: TASK_ID,
       files: { 'tasks/V1-08-B.md': taskFile('V1-08-B', { dependsOn: [TASK_ID] }) },
     });
-    seedState(started);
+    seedDeliveredState(started);
 
     const first = await runNextTask(
       {
         repository: started.repository,
-        taskBrief: (task) => `brief for ${task.id}`,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(started.repository),
@@ -1038,7 +1086,6 @@ describe('selection reads the repository\'s own task files', () => {
     const second = await runNextTask(
       {
         repository: started.repository,
-        taskBrief: (task) => `brief for ${task.id}`,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(started.repository),

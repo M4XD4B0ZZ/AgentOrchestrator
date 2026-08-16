@@ -83,6 +83,24 @@ export const MAX_REPORTED_OFFENCES = 32;
 
 export interface ScopeAssessment {
   readonly verdict: ScopeVerdict;
+  /**
+   * The changed paths this assessment classified as allowed.
+   *
+   * **Authority, not a report**, and the two differ in a way that matters here:
+   * {@link offences} is truncated at {@link MAX_REPORTED_OFFENCES} because it is
+   * shown to a human, while this is handed to `commitTaskWork` to be compared
+   * against what the commit actually contains — so truncating it would silently
+   * turn approved paths into unapproved ones and refuse honest work.
+   *
+   * Empty unless the verdict is `WITHIN_SCOPE`. A violation approves nothing,
+   * and an assessment that could not be reached approves nothing either; only
+   * a positive verdict is permission.
+   *
+   * It exists so that the gate which *made* the decision is the thing that
+   * states it. A commit path that re-derived this set would be measuring after
+   * whatever it is meant to catch, and would agree with itself (G12).
+   */
+  readonly approvedPaths: readonly string[];
   /** Up to {@link MAX_REPORTED_OFFENCES} offences, in Git's reporting order. */
   readonly offences: readonly ScopeOffence[];
   /** How many offences there were in total, however many are listed above. */
@@ -113,6 +131,7 @@ export interface ScopeAssessmentInput {
 function indeterminate(reason: ScopeIndeterminateReason): ScopeAssessment {
   return Object.freeze({
     verdict: 'INDETERMINATE' as const,
+    approvedPaths: Object.freeze([]),
     offences: Object.freeze([]),
     offenceCount: 0,
     offencesTruncated: false,
@@ -158,11 +177,15 @@ export async function assessTaskScope(input: ScopeAssessmentInput): Promise<Scop
   if (delta.outcome !== 'OBSERVED') return indeterminate(delta.refusal);
 
   const offences: ScopeOffence[] = [];
+  const allowed: string[] = [];
   let offenceCount = 0;
 
   for (const changed of delta.paths) {
     const decision = classifyPath(changed.path, scope.scope);
-    if (decision === 'ALLOWED') continue;
+    if (decision === 'ALLOWED') {
+      allowed.push(changed.path);
+      continue;
+    }
     offenceCount += 1;
     if (offences.length < MAX_REPORTED_OFFENCES) {
       offences.push(Object.freeze({ path: changed.path, change: changed.change, decision }));
@@ -171,6 +194,10 @@ export async function assessTaskScope(input: ScopeAssessmentInput): Promise<Scop
 
   return Object.freeze({
     verdict: offenceCount === 0 ? ('WITHIN_SCOPE' as const) : ('VIOLATION' as const),
+    // Only a positive verdict approves anything. On a violation the allowed
+    // paths are real but irrelevant: the pass is not going to be committed, and
+    // a set that survived the refusal would be an approval nobody granted.
+    approvedPaths: offenceCount === 0 ? Object.freeze([...allowed]) : Object.freeze([]),
     offences: Object.freeze([...offences]),
     offenceCount,
     offencesTruncated: offenceCount > offences.length,

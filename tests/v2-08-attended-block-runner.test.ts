@@ -1479,12 +1479,31 @@ import {
 } from '../src/lease/execution-lease.js';
 import type { GitRunner } from '../src/worktree/git-command.js';
 import { passingReview } from './fixtures.js';
-import { recordedAgent, recordedVerify, reviewResult, writerSuccess } from './helpers/e2e-fixtures.js';
+import {
+  recordedAgent,
+  recordedVerify,
+  reviewResult,
+  writerSuccess,
+  writerThatEdits,
+} from './helpers/e2e-fixtures.js';
 
-/** Seams that drive a task all the way to `READY_FOR_PR`. */
+/**
+ * Seams that drive a task all the way to `READY_FOR_PR`.
+ *
+ * The writer **edits**, and AO commits what it wrote (DOGFOOD-REM-001 G1). It
+ * used to report a bare success while changing nothing, which reached
+ * `READY_FOR_PR` all the same — the false completion this slice removes. Each
+ * task gets its own path so that two members of one block cannot be told apart
+ * only by their state file.
+ */
 function drivingSeams() {
+  let pass = 0;
   const agent = recordedAgent({
-    claude: () => writerSuccess(),
+    claude: (call) => {
+      pass += 1;
+      return writerThatEdits(`src/work-${pass}.ts`, `export const pass = ${pass};
+`)(call);
+    },
     codex: () => reviewResult(passingReview()),
   });
   const verify = recordedVerify();
@@ -1567,9 +1586,14 @@ describe('the attended block runner', () => {
     const seams = drivingSeams();
     // A-001's writer refuses for scope, which is blocking and carries no resume
     // point. B-001 and C-001 are driven normally.
+    let pass = 0;
     const agent = recordedAgent({
-      claude: (call) =>
-        call.cwd.includes('A-001') ? scopeViolatingWriter()(call) : writerSuccess(),
+      claude: (call) => {
+        pass += 1;
+        return call.cwd.includes('A-001')
+          ? scopeViolatingWriter()(call)
+          : writerThatEdits(`src/work-${pass}.ts`, `export const pass = ${pass};\n`)(call);
+      },
       codex: () => reviewResult(passingReview()),
     });
 
@@ -1912,8 +1936,9 @@ describe('the invocation acts on the plan as it was when it opened', () => {
     const snapshot = planningOf(fixture);
     const seams = drivingSeams();
     let edited = false;
+    let pass = 0;
     const agent = recordedAgent({
-      claude: () => {
+      claude: (call) => {
         if (!edited) {
           edited = true;
           // B-001 gains a dependency on a task that is not DONE. Anything that
@@ -1939,7 +1964,10 @@ describe('the invocation acts on the plan as it was when it opened', () => {
           git(fixture.root, ['add', '--all']);
           git(fixture.root, ['commit', '--quiet', '-m', 'the roadmap moves under the frozen plan']);
         }
-        return writerSuccess();
+        // The writer still has to leave work behind for the member to settle;
+        // the roadmap edit above is what this case is about, not the pass.
+        pass += 1;
+        return writerThatEdits(`src/work-${pass}.ts`, `export const pass = ${pass};\n`)(call);
       },
       codex: () => reviewResult(passingReview()),
     });
@@ -2019,8 +2047,16 @@ async function runWithHookAfterFirstTask(
   overrides: Partial<AttendedBlockDependencies> = {},
 ): Promise<AttendedBlockResult> {
   let driven = 0;
+  let pass = 0;
   const agent = recordedAgent({
-    claude: () => writerSuccess(),
+    // Editing, not merely reporting success: every case built on this helper
+    // depends on the first task really completing, and since DOGFOOD-REM-001 a
+    // pass that leaves nothing behind parks instead.
+    claude: (call) => {
+      pass += 1;
+      return writerThatEdits(`src/work-${pass}.ts`, `export const pass = ${pass};
+`)(call);
+    },
     codex: () => {
       driven += 1;
       if (driven === 1) hook();

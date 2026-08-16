@@ -104,6 +104,11 @@ import { classifyResume, type ResumeDecision } from '../state/resume-decision.js
 import type { ReplaceFn, TempSuffixFn } from '../state/atomic-file.js';
 import type { StateLoadSuccess } from '../state/state-store.js';
 import type { AgentRunner } from '../agent/agent-command.js';
+import {
+  mergePermissionDenials,
+  NO_PERMISSION_DENIALS,
+  type PermissionDenialObservation,
+} from '../agent/agent-outcome.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import type { GitRunner } from '../worktree/git-command.js';
 
@@ -293,6 +298,21 @@ export interface RunResult {
   readonly resume: ResumeDecision | null;
   /** The loop step the run stopped on, or `null` when none ran. */
   readonly lastStep: LoopStepResult | null;
+  /**
+   * What the writing agent was refused, **across every step of this run**.
+   *
+   * Run-level rather than per-step, and that placement is the whole point.
+   * `lastStep` cannot carry it: a writer pass that succeeds is followed by
+   * verification and review, so by the time a run ends `lastStep` is a later
+   * step whose own observation is `null` — the observation would vanish in
+   * exactly the case it exists for, a run that reported success while the
+   * writer had been refused.
+   *
+   * Aggregating, never last-writer-wins: see {@link mergePermissionDenials}.
+   * Never persisted (G2) — this is a report to the operator, and it is the
+   * `renderRunResult` line that makes it one.
+   */
+  readonly permissionDenials: PermissionDenialObservation;
 }
 
 /* ──────────────────────────── the inputs ────────────────────────────────── */
@@ -302,8 +322,6 @@ export interface RunRequest {
   readonly repository: ResolvedRepository;
   /** The task to drive. */
   readonly taskId: string;
-  /** What the task is, in the reviewer's and writer's own words. */
-  readonly taskBrief: string;
   /**
    * Whether this run may continue a task that reconciles but is not cleared for
    * unattended execution.
@@ -361,6 +379,14 @@ export interface RunRequest {
    * Not the bound on the loop — `maxReviewRounds` is, and it is the
    * repository's. This is the bound on one *invocation*, so that a driver
    * cannot run away if a future edge makes an unbounded cycle reachable.
+   *
+   * **It is not a strict ceiling in exactly one case, and that case clears
+   * itself.** A call holding a live remediation brief when the budget runs out
+   * takes one further step to discharge it, because the brief is the only copy
+   * of the review's actionable detail and nothing durable carries it. The
+   * overrun is at most one step: the brief is consumed and cleared by the step
+   * that spends it. See the loop below for why this is preferable to persisting
+   * a reviewer-authored path.
    */
   readonly maxSteps: number;
 }
@@ -399,6 +425,7 @@ function runResult(
     reconciliation: null,
     resume: null,
     lastStep: null,
+    permissionDenials: NO_PERMISSION_DENIALS,
     ...from,
   });
 }
@@ -431,9 +458,16 @@ export async function runTask(
   request: RunRequest,
   deps: RunDependencies,
 ): Promise<RunResult> {
-  const { repository, taskId, taskBrief, maxSteps } = request;
+  const { repository, taskId, maxSteps } = request;
+
+  // Accumulated here rather than read off the step this run happens to stop on.
+  // Every `stop` below is a way this run can end, and an operator is owed the
+  // same answer on all of them, so the accumulation is attached in one place
+  // instead of at each return — a rule that holds by being unavoidable rather
+  // than by every future exit remembering it.
+  let permissionDenials = NO_PERMISSION_DENIALS;
   const stop = (from: Partial<RunResult> & { readonly outcome: RunOutcome }): RunResult =>
-    runResult({ taskId, ...from });
+    runResult({ taskId, permissionDenials, ...from });
 
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) {
     return stop({ outcome: 'NO_PROGRESS', reasonCodes: Object.freeze(['STEP_BUDGET_INVALID']) });
@@ -463,7 +497,41 @@ export async function runTask(
    */
   let remediationPayload: string | undefined;
 
-  for (let iteration = 0; iteration < maxSteps; iteration += 1) {
+  // The budget bounds steps that **begin new work**.
+  //
+  // ── Why an outstanding remediation brief buys one more iteration ─────────
+  //
+  // A review's actionable content is its findings' `path` and `rule`, and
+  // neither is persisted: the durable record keeps `{round, severity,
+  // fingerprint}`, and a fingerprint is one-way by construction. The precise
+  // brief lives in `remediationPayload` below — a local, which dies with this
+  // frame. So a budget that expired between the review that produced it and the
+  // remediation that consumes it silently downgraded the next writer's
+  // instructions from "fix src/named.ts, rule e2e.named" to "something was
+  // wrong in round 1", and the run *reported success*: `STEP_BUDGET_EXHAUSTED`
+  // means "call again", and calling again is exactly what loses it.
+  //
+  // Both invocation models needed this. `run --attended` calls `runTask` once
+  // and exits, so no in-memory carry is even possible there; `block --attended`
+  // re-enters `runTask`, where the local is re-declared. Moving the boundary
+  // fixes both; carrying the payload through the caller would fix one and would
+  // re-open caller-authored prompt text, which both producers refuse.
+  //
+  // It terminates, and that is not an assumption: the extra iteration exists
+  // only while a payload is outstanding, `runRemediateStep` consumes it, and the
+  // assignment below clears it on any edge that is not `REMEDIATING`. The
+  // overrun is therefore at most one step and cannot recur.
+  //
+  // Not persisting `path`/`rule` instead is deliberate: that would write
+  // agent-authored free text into the durable record, and a persisted path is a
+  // durable claim that can go stale — a renamed file would aim the writer at
+  // something no reviewer ever saw. Fingerprints do not have that problem;
+  // paths do.
+  for (
+    let iteration = 0;
+    iteration < maxSteps || remediationPayload !== undefined;
+    iteration += 1
+  ) {
     // --- 0. Is this run still the repository's writer? -----------------------
     //
     // Re-proved every iteration, and *first*, for the same reason
@@ -711,7 +779,6 @@ export async function runTask(
       now: deps.now(),
       authorisedWorktreePath,
       verification: repository.verification,
-      taskBrief,
       // Read fresh each iteration rather than once per run: a task file can be
       // corrected between steps, and a driver holding a stale answer would
       // park a task a human has already fixed. Reading it is not authoring it
@@ -732,6 +799,13 @@ export async function runTask(
       ...(deps.observe !== undefined ? { observe: deps.observe } : {}),
       ...(remediationPayload !== undefined ? { remediationPayload } : {}),
     });
+
+    // Merged before the outcome is read, so a step that blocked contributes as
+    // much as one that advanced: being refused a tool is not less true because
+    // the step it happened in went on to fail.
+    if (step.permissionDenials !== null) {
+      permissionDenials = mergePermissionDenials(permissionDenials, step.permissionDenials);
+    }
 
     const stopped = {
       state: step.state ?? state.state,
@@ -968,15 +1042,7 @@ export function selectRunTask(repository: ResolvedRepository): RunSelection {
   });
 }
 
-export interface RunNextRequest extends Omit<RunRequest, 'taskId' | 'taskBrief'> {
-  /**
-   * Builds the brief handed to the agents for the selected task.
-   *
-   * A function, because the task is not known until the selector has spoken —
-   * and supplied by the caller rather than composed here, because a brief is
-   * prompt text and this module authors none.
-   */
-  readonly taskBrief: (task: TaskDefinition) => string;
+export interface RunNextRequest extends Omit<RunRequest, 'taskId'> {
 }
 
 export interface RunNextResult {
@@ -1006,7 +1072,6 @@ export async function runNextTask(
     {
       repository: request.repository,
       taskId: task.id,
-      taskBrief: request.taskBrief(task),
       attendedContinuation: request.attendedContinuation,
       authEvidence: request.authEvidence,
       lease: request.lease,

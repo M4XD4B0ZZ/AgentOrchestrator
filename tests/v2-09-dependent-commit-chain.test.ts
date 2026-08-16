@@ -37,7 +37,7 @@ import {
   renderBlockRun,
 } from '../src/cli/render-block-run.js';
 import { REPO_PROFILE_RELATIVE_PATH } from '../src/repo/profile-location.js';
-import { loadTaskState } from '../src/state/state-store.js';
+import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
 import { runTask } from '../src/run/run-driver.js';
 import { startPlannedTask, startTask } from '../src/run/start-task.js';
 import { assessTaskScope } from '../src/scope/assess-scope.js';
@@ -82,7 +82,7 @@ import {
   taskFile,
   tickingClock,
   writerSuccess,
-  writerThatCommits,
+  writerThatEdits,
 } from './helpers/e2e-fixtures.js';
 
 afterAll(() => {
@@ -268,6 +268,8 @@ describe('the commit probes really ask Git, against a repository that exists', (
 const BASE = 'a'.repeat(40);
 const RESULT = 'b'.repeat(40);
 const FOREIGN = 'c'.repeat(40);
+/** A commit belonging to neither the block base nor the chain. */
+const ELSEWHERE = 'd'.repeat(40);
 const REVISION = '1'.repeat(64);
 
 /** What a case says about one member's entry; everything else keeps its default. */
@@ -380,6 +382,71 @@ describe('a predecessor result is proved fit before it becomes a base', () => {
     expect(result).toEqual({ ok: true, commit: RESULT });
   });
 
+  /*
+   * DOGFOOD-REM-001 Task 6. These live here rather than in
+   * `tests/dogfood-rem-001.test.ts` — where the plan lists them — because the
+   * ledger fixture above is what makes them meaningful, and a second copy of it
+   * in another file would be free to drift from this one.
+   */
+  describe('a tautological predecessor result is not proof of delivery', () => {
+    it('refuses a predecessor whose result is the tree it started on', async () => {
+      const result = await proveChainBase(gitAnswering({}), 'C:/r', {
+        ledger: chainLedger({
+          a2: { disposition: 'SETTLED', baseCommit: FOREIGN, resultCommit: FOREIGN },
+        }),
+        taskId: 'task-b',
+        maximum: 'task-a2',
+        blockBaseCommit: BASE,
+      });
+      expect(result).toEqual({ ok: false, code: 'PREDECESSOR_DELIVERED_NOTHING' });
+    });
+
+    it('checks every required predecessor, not only the maximum', async () => {
+      // a2's own commits are real; a1 delivered nothing. task-b requires both,
+      // so a rule applied to the maximum alone would wave this through.
+      const result = await proveChainBase(gitAnswering({}), 'C:/r', {
+        ledger: chainLedger({
+          a1: { disposition: 'SETTLED', baseCommit: BASE, resultCommit: BASE },
+        }),
+        taskId: 'task-b',
+        maximum: 'task-a2',
+        blockBaseCommit: BASE,
+      });
+      expect(result).toEqual({ ok: false, code: 'PREDECESSOR_DELIVERED_NOTHING' });
+    });
+
+    it('refuses before asking Git anything', async () => {
+      // The ledger is asked first, by design: a refusal available from the
+      // document must not cost a subprocess.
+      const asked: string[] = [];
+      const recording = (async (_cwd: string, args: readonly string[]) => {
+        asked.push(args.join(' '));
+        return { outcome: 'OK', stdout: 'commit', exitCode: 0 };
+      }) as never;
+
+      await proveChainBase(recording, 'C:/r', {
+        ledger: chainLedger({
+          a2: { disposition: 'SETTLED', baseCommit: FOREIGN, resultCommit: FOREIGN },
+        }),
+        taskId: 'task-b',
+        maximum: 'task-a2',
+        blockBaseCommit: BASE,
+      });
+
+      expect(asked).toEqual([]);
+    });
+
+    it('still accepts a predecessor whose result is a real descendant', async () => {
+      const result = await proveChainBase(gitAnswering({}), 'C:/r', {
+        ledger: chainLedger({}),
+        taskId: 'task-b',
+        maximum: 'task-a2',
+        blockBaseCommit: BASE,
+      });
+      expect(result).toEqual({ ok: true, commit: RESULT });
+    });
+  });
+
   it.each([
     ['PREDECESSOR_NOT_SETTLED', { a2: { disposition: 'ACTIVE' as const } }, {}],
     ['PREDECESSOR_RESULT_ABSENT', { a2: { disposition: 'SETTLED' as const, resultCommit: null } }, {}],
@@ -428,8 +495,14 @@ describe('a predecessor result is proved fit before it becomes a base', () => {
 
   it('refuses when no member of this run is recorded at the block base', async () => {
     // Every root came from an older run, so nothing durable names this base.
+    //
+    // `a1`'s base is a commit of its own rather than `FOREIGN`, which is also
+    // its default *result*: an entry whose result equals its base is refused
+    // `PREDECESSOR_DELIVERED_NOTHING` before the anchor is ever considered, and
+    // this case is about the anchor. The two rules are both right; only one of
+    // them is this case's subject.
     const result = await proveChainBase(gitAnswering({}), 'C:/r', {
-      ledger: chainLedger({ a1: { baseCommit: FOREIGN }, a2: { disposition: 'SETTLED', resultCommit: RESULT } }),
+      ledger: chainLedger({ a1: { baseCommit: ELSEWHERE }, a2: { disposition: 'SETTLED', resultCommit: RESULT } }),
       taskId: 'task-b',
       maximum: 'task-a2',
       blockBaseCommit: BASE,
@@ -836,7 +909,7 @@ async function runChainedBlock(
 ) {
   const taskIds = options.taskIds ?? ['A-001', 'B-001'];
   const claude: ClaudeHandler =
-    options.claude ?? ((call) => writerThatCommits('src/work.ts', `// ${call.index}\n`)(call));
+    options.claude ?? ((call) => writerThatEdits('src/work.ts', `// ${call.index}\n`)(call));
   const agent = recordedAgent({ claude, codex: () => reviewResult(passingReview()) });
   return runAttendedBlock(
     {
@@ -878,6 +951,11 @@ describe('the runner bases a dependent member on its predecessor', () => {
     const a = entryFor(ledger, 'A-001');
     const b = entryFor(ledger, 'B-001');
     expect(a?.resultCommit).toEqual(expect.any(String));
+    // The premise of this whole case, pinned rather than assumed: A really
+    // delivered. A fixture whose result equalled its own base would now be
+    // refused `PREDECESSOR_DELIVERED_NOTHING`, so a later fixture change that
+    // stopped delivering must fail here instead of quietly passing.
+    expect(a?.resultCommit).not.toBe(a?.baseCommit);
     // The ledger says so...
     expect(b?.baseCommit).toBe(a?.resultCommit);
     // ...and the durable task record says so...
@@ -886,6 +964,74 @@ describe('the runner bases a dependent member on its predecessor', () => {
     // ...and so does Git, which is the only one of the three that is an effect.
     expect(await classifyAncestry(runGitCommand, state.worktreePath, a?.resultCommit ?? '', 'HEAD'))
       .toBe('ANCESTOR');
+  }, 600_000);
+
+  /**
+   * DOGFOOD-REM-001 Task 6, end to end.
+   *
+   * The refusal exists for records written by an *earlier* run, because a task
+   * state survives every later one: a `PLANNED` ledger entry against a
+   * `READY_FOR_PR` record is `TASK_AHEAD_OF_LEDGER`, and `applyForcedProgress`
+   * then copies that record's commits straight into the new ledger. The first
+   * dogfood's records are exactly that shape — settled at the commit they
+   * started on — so they can re-enter a chain, and nothing stops them at load
+   * time.
+   *
+   * "B never ran" alone would be vacuous: a crash satisfies it too. So the
+   * ledger entry is asserted to be untouched — still `PLANNED`, with no base, no
+   * result and no evidence — which distinguishes a refusal from a failure.
+   */
+  it('does not start the successor on a tautological base', async () => {
+    const repository = await chainRepository({ 'A-001': [], 'B-001': ['A-001'] });
+
+    // A-001 finishes before the run exists, at the commit it started on. Written
+    // through the production store at the revision the start left behind, not
+    // hand-edited into place.
+    const started = await startTask(
+      { repository, taskId: 'A-001' },
+      {
+        git: runGitCommand,
+        now: tickingClock(),
+        authPreflight: authPreflightPasses,
+        lease: leaseFor(repository),
+      },
+    );
+    expect(started.outcome).toBe('STARTED');
+    const loaded = reload(repository.root, 'A-001');
+    expect(loaded.state.currentCommit).toBe(loaded.state.basePinnedCommit); // the premise
+    const saved = saveTaskState(
+      {
+        ...loaded.state,
+        state: 'READY_FOR_PR',
+        stateEnteredAt: '2026-08-16T10:00:00.000Z',
+        reviewRound: 1,
+        worktreeCleanAtCheckpoint: true,
+      },
+      { repositoryRoot: repository.root, expectedRevision: loaded.revision },
+    );
+    expect(saved.ok).toBe(true);
+
+    const result = await runChainedBlock(repository);
+
+    // The refusal reaches the operator under its own name, rather than as a
+    // generic gate failure: `detail` is the code this task added.
+    expect(result).toMatchObject({
+      outcome: 'RUN_GATE_REFUSED',
+      detail: 'PREDECESSOR_DELIVERED_NOTHING',
+      steps: 0,
+    });
+    const ledger = ledgerOf(repository.root);
+    // A settled by recognition, carrying the empty result it really has …
+    const a = entryFor(ledger, 'A-001');
+    expect(a?.resultCommit).toBe(a?.baseCommit);
+    // … and B untouched: refused, not failed.
+    expect(entryFor(ledger, 'B-001')).toMatchObject({
+      disposition: 'PLANNED',
+      baseCommit: null,
+      resultCommit: null,
+      evidenceRevision: null,
+    });
+    expect(loadTaskState(repository.root, 'B-001').classification).toBe('STATE_MISSING');
   }, 600_000);
 
   // Git-tier control G-3. Reachability is a Git fact and not a record fact: the
@@ -1052,7 +1198,7 @@ describe('a chained task keeps the scope it was started under, after its run is 
     const agent = recordedAgent({
       claude: (call) => {
         if (call.index === 0) {
-          return writerThatCommits(
+          return writerThatEdits(
             REPO_PROFILE_RELATIVE_PATH,
             scopedProfile(['.agent-orchestrator', 'src']),
           )(call);
@@ -1106,7 +1252,6 @@ describe('a chained task keeps the scope it was started under, after its run is 
       {
         repository,
         taskId: 'B-001',
-        taskBrief: 'continue the chained task',
         attendedContinuation: true,
         authEvidence: null,
         // A genuinely fresh lease. Not `leaseFor`, which memoises per repository
@@ -1120,7 +1265,7 @@ describe('a chained task keeps the scope it was started under, after its run is 
         now: tickingClock(),
         git: runGitCommand,
         agent: recordedAgent({
-          claude: (call) => writerThatCommits('src/b/x.ts', 'work\n')(call),
+          claude: (call) => writerThatEdits('src/b/x.ts', 'work\n')(call),
           codex: () => reviewResult(passingReview()),
         }).runner,
         verify: recordedVerify().runner,
@@ -1346,7 +1491,7 @@ describe('the block command drives a dependent chain end to end', () => {
       {
         authPreflight: authPreflightPasses,
         agent: recordedAgent({
-          claude: (call) => writerThatCommits('src/work.ts', `// ${call.index}\n`)(call),
+          claude: (call) => writerThatEdits('src/work.ts', `// ${call.index}\n`)(call),
           codex: () => reviewResult(passingReview()),
         }).runner,
         verify: recordedVerify().runner,

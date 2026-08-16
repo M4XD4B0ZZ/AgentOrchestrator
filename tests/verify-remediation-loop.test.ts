@@ -63,7 +63,7 @@ import {
   SHA_B,
   validCreatedState,
 } from './fixtures.js';
-import { cleanScopeGit } from './helpers/scope-git.js';
+import { cleanScopeGit, writingPassGit } from './helpers/scope-git.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 
 const NOW = '2026-08-10T09:00:00.000Z';
@@ -208,7 +208,6 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     now: NOW,
     authorisedWorktreePath: authorisedWorktree(root),
     verification: VERIFICATION,
-    taskBrief: 'Add a widget.',
     lease: leaseAuthorityAt(root),
     observe: settledObserver,
     // The Git a healthy repository would be, for the same reason `observe`
@@ -219,7 +218,29 @@ function deps(root: string, overrides: Partial<LoopDependencies> = {}): LoopDepe
     // without this every mutating step here would fail closed on "this is not
     // a repository", which is true and is not what any of them are asking.
     // A test that means to exercise the guard overrides it explicitly.
-    git: cleanScopeGit,
+    //
+    // It answers as a repository in which the writer really edited one allowed
+    // path and AO then committed it. It used to answer as one where nothing
+    // changed, which was a harmless backdrop until DOGFOOD-REM-001 made a
+    // no-effect pass inadmissible: every remediation case here would now park
+    // on the effect gate, one state short of the routing they are about.
+    git: writingPassGit,
+    // The task's own words, supplied explicitly for the same reason `git` and
+    // `observe` are: this root is synthetic, so `readExecutionBrief` has nothing
+    // to read. Since DOGFOOD-REM-001 the review step parks rather than briefing
+    // a reviewer with a bare id, so a case that withheld this would stop one
+    // state early for a reason it is not about.
+    brief: {
+      ok: true as const,
+      code: 'BRIEF' as const,
+      brief: {
+        taskId: TASK_ID,
+        body: 'Add a widget. ACCEPTANCE: src/widget.ts exports createWidget.',
+        bodyTruncated: false,
+        contextSources: [],
+        contextComplete: true,
+      },
+    },
     ...overrides,
   };
 }

@@ -29,6 +29,7 @@
  */
 
 import type { ReviewFinding } from '../agent/codex-reviewer.js';
+import type { ExecutionBrief } from '../plan/task-brief.js';
 import type { TaskState } from '../core/task-state.js';
 import { clampPayload, MAX_AGENT_PAYLOAD_CHARS } from './payload-budget.js';
 
@@ -81,14 +82,67 @@ export function appendFindings(
  *
  * Nothing here interpolates repository text into a command line — this is a
  * stdin payload, and the reviewer's argv is the frozen `CODEX_REVIEWER_ARGS`.
+ *
+ * ── What the reviewer used to be told, and why it was not enough ───────────
+ *
+ * This took a `taskBrief: string`, and both producers passed the **task id**.
+ * So a reviewer received two instruction lines, an identifier and an output
+ * schema: no title, no body, no acceptance criteria, no round. Two different
+ * tasks over one working tree produced payloads differing in a single token.
+ *
+ * Worse, it asked only about defects *introduced by* the current task — the one
+ * framing under which an empty diff is beyond reproach, because a task that did
+ * nothing introduced nothing. That is how the first dogfood run collected a
+ * clean review for work that did not exist. Handing over the body while leaving
+ * that framing in place would have been decorative, so both changed together:
+ * the reviewer is now asked whether the tree **satisfies the task as stated**,
+ * which makes a missing implementation a finding rather than an absence of one.
+ *
+ * ── The residual, stated rather than mitigated ─────────────────────────────
+ *
+ * `brief.body` is repository-authored text on a reviewer's instruction stream,
+ * so a hostile task file can try to instruct a PASS. That is identical in kind
+ * to the risk already accepted for the writer's payload, and it is bounded on
+ * the way back: the reviewer's *output* is parsed against a closed vocabulary in
+ * which a PASS carrying findings is `UNRECOGNISED`. Named here; no new machinery.
+ *
+ * Context sources appear as **paths**, never as contents — the same rule
+ * `buildImplementPayload` follows, and for the same reason.
  */
-export function buildReviewPayload(taskBrief: string): string {
-  return [
-    'Review the working tree of this repository for defects introduced by the',
-    'current task. You are read-only: do not modify any file.',
+export function buildReviewPayload(brief: ExecutionBrief, round: number): string {
+  const lines = [
+    `Review the working tree of this repository against task ${brief.taskId}`,
+    `(review round ${round}). You are read-only: do not modify any file.`,
     '',
-    'TASK BRIEF',
-    taskBrief,
+    'Answer two questions, and treat a failure of either as a finding:',
+    '  1. does the working tree SATISFY the task as stated below? Work that is',
+    '     absent, partial, or does not meet the stated criteria is a finding —',
+    '     an empty change satisfies nothing.',
+    '  2. does it introduce defects?',
+    '',
+    'TASK',
+    brief.body,
+  ];
+
+  if (brief.bodyTruncated) {
+    lines.push(
+      '',
+      '[The task text above was truncated at the payload budget. Read the task',
+      'file in the repository for the remainder.]',
+    );
+  }
+
+  if (brief.contextSources.length > 0) {
+    lines.push('', 'CONTEXT SOURCES (paths in this worktree — open them yourself as needed)');
+    for (const source of brief.contextSources) {
+      lines.push(
+        source.status === 'PRESENT' ? `- ${source.path}` : `- ${source.path} [${source.status}]`,
+      );
+    }
+  }
+
+  return clampPayload([
+    ...lines,
     '',
     'Reply with exactly one JSON document as your final message, and nothing else:',
     '',
@@ -114,7 +168,7 @@ export function buildReviewPayload(taskBrief: string): string {
     '- "rule" is a slug of [A-Za-z0-9] with inner "._:-", at most 128 characters.',
     '- any other shape, any unknown severity, any surrounding prose makes the',
     '  document unreadable, which is never read as "no problems found".',
-  ].join('\n');
+  ].join('\n'));
 }
 
 function severityTally(findings: readonly { readonly severity: string }[]): string {

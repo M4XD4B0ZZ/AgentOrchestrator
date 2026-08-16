@@ -225,6 +225,40 @@ export function seedState(
   return reload(started.root, workspace.taskId);
 }
 
+/**
+ * A first state for a task that has **already delivered work**.
+ *
+ * Since DOGFOOD-REM-001 `READY_FOR_PR` additionally requires the observed HEAD
+ * to differ from the base pin: a clean worktree sitting at the commit the task
+ * started from is an untouched task, not a finished one. A scenario seeded at
+ * `VERIFYING` with nothing committed therefore parks — correctly, and for a
+ * reason those scenarios are not about.
+ *
+ * So the work is real: a file is written and committed on the task's own branch
+ * before the state is seeded, and the state records that commit. The commit is
+ * made with the fixture's own Git rather than through the product, because this
+ * is *previous* work the scenario starts from — the writing agent's own
+ * inability to commit is a separate property, pinned in
+ * `tests/dogfood-rem-001.test.ts`.
+ */
+export function seedDeliveredState(
+  started: StartedTask,
+  overrides: Partial<TaskStateInput> = {},
+): StateLoadSuccess {
+  const worktreePath = started.workspace.worktreePath;
+  writeRepoFile(worktreePath, 'src/delivered.ts', 'export const delivered = true;\n');
+  git(worktreePath, ['add', '--all']);
+  git(worktreePath, [
+    '-c', 'user.name=AgentOrchestrator',
+    '-c', 'user.email=agent-orchestrator@local.invalid',
+    'commit', '--quiet', '-m', `AO:${started.taskId}:IMPLEMENT:r1`,
+  ]);
+  return seedState(started, {
+    currentCommit: git(worktreePath, ['rev-parse', 'HEAD']).trim(),
+    ...overrides,
+  });
+}
+
 /** The durable state as a caller would hold it. Fails loudly rather than silently. */
 export function reload(root: string, taskId: string): StateLoadSuccess {
   const loaded = loadTaskState(root, taskId);
@@ -331,21 +365,62 @@ export function writerSuccess(): AgentCommandResult {
   return agentCommandResult({ stdout: claudeSuccessEnvelope() });
 }
 
-/**
- * A Claude run that positively succeeded **and really changed the worktree**.
+/*
+ * There is deliberately no `writerThatCommits` here any more.
  *
- * The whole point of the remediation cycle test: the writer commits, so the
- * next reconciliation sees a HEAD the record did not name and a tree the record
- * did not describe — the exact conditions V1-07-RR-B2's checkpoint withdrawal
- * exists to survive, produced by a real `git commit` rather than by a script.
+ * It wrote a file and then ran `git add` + `git commit` as the agent, and every
+ * suite that needed a task to progress used it. Under DOGFOOD-REM-001 G1 that
+ * models a capability production does not grant: the writer's argument vector
+ * is `--tools Read Edit Write Glob Grep`, there is no shell, and AO commits the
+ * pass itself through `commitTaskWork`.
+ *
+ * Retiring it rather than leaving it unused is the point. It was the one
+ * fixture that manufactured `worktreeClean === true` *and* a moved HEAD in a
+ * single step, which is exactly the combination the first dogfood's false
+ * completion needed — a suite built on it could not tell a writer that had
+ * really done something from one that had not. {@link writerThatEdits} is its
+ * replacement: it writes, and it runs no git at all.
  */
-export function writerThatCommits(fileName: string, contents: string) {
+
+/**
+ * A Claude run that positively succeeded, **edited the worktree, and did not
+ * commit** — the shape the writer actually has once its authority is the
+ * measured one: `Read Edit Write Glob Grep`, no shell.
+ *
+ * `permissionDenials` is the whole reason this is not `writerThatCommits` with
+ * the commit removed. The envelope the CLI printed for the first dogfood run
+ * was a *success* that also reported denials, and a fixture that cannot produce
+ * that combination cannot drive the transport case at all: the observation has
+ * to survive a run which does **not** stop on the writer step.
+ */
+export function writerThatEdits(
+  fileName: string,
+  contents: string,
+  options: { readonly permissionDenials?: readonly string[] } = {},
+) {
   return (call: { readonly cwd: string }): AgentCommandResult => {
     writeRepoFile(call.cwd, fileName, contents);
-    git(call.cwd, ['add', '--all']);
-    git(call.cwd, ['commit', '--quiet', '-m', `remediation ${fileName}`]);
-    return writerSuccess();
+    return writerEnvelopeWithDenials(options.permissionDenials ?? []);
   };
+}
+
+/**
+ * The successful envelope, carrying denials in the CLI's own measured shape.
+ *
+ * The entries are objects with `tool_name`, `tool_use_id` and `tool_input`,
+ * because that is what 2.1.233 prints — a fixture that carried bare strings
+ * would let a reader that only understands strings pass.
+ */
+export function writerEnvelopeWithDenials(tools: readonly string[]): AgentCommandResult {
+  return agentCommandResult({
+    stdout: claudeSuccessEnvelope({
+      permission_denials: tools.map((tool, index) => ({
+        tool_name: tool,
+        tool_use_id: `toolu_${index}`,
+        tool_input: { note: 'foreign text that must never be carried' },
+      })),
+    }),
+  });
 }
 
 /** A Claude run refused for quota, in exactly the envelope V1-05 recognises. */

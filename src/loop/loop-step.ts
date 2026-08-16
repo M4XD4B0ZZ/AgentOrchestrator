@@ -93,7 +93,11 @@
 
 import { runClaudeWriter } from '../agent/claude-writer.js';
 import { codexReviewResumePoint, runCodexReviewer } from '../agent/codex-reviewer.js';
-import { interruptedResumePoint, type AgentBlockEvidence } from '../agent/agent-outcome.js';
+import {
+  interruptedResumePoint,
+  type AgentBlockEvidence,
+  type PermissionDenialObservation,
+} from '../agent/agent-outcome.js';
 import type { AgentRunner } from '../agent/agent-command.js';
 import { recordAgentInterruption } from '../agent/record-interruption.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
@@ -104,7 +108,8 @@ import type { TaskState } from '../core/task-state.js';
 import type { ResumePhase, TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
-import { leasedAgent, leasedVerify } from './leased-spawns.js';
+import { leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
+import { commitTaskWork, type CommitTaskWorkResult } from '../worktree/commit-task-work.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import { observeRuntime } from '../state/observe-runtime.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
@@ -182,6 +187,27 @@ export interface LoopStepResult {
    * whether or not the durable record of it landed.
    */
   readonly scope: ScopeAssessment | null;
+  /**
+   * What the writing agent was refused during this step, or `null` when no
+   * writer ran in it.
+   *
+   * `null` and `{ count: 0 }` are different answers and both are honest: a
+   * verify step never asked, while an implement step that asked and saw nothing
+   * refused did. In memory only — like `verification` and `scope`, this is
+   * reporting, and `TaskStateObjectSchema` is `.strict()` (G2).
+   */
+  readonly permissionDenials: PermissionDenialObservation | null;
+  /**
+   * What AO's own commit of this pass did, or `null` when no commit was
+   * attempted (every non-writing step, and a writing step that never got past
+   * its scope gate).
+   *
+   * Carried rather than persisted, like `scope` — it names repository paths and
+   * a commit id, and it is what an operator needs in front of them when a pass
+   * parks: which object exists, which paths it should not have contained, which
+   * configured driver stopped it.
+   */
+  readonly commit: CommitTaskWorkResult | null;
 }
 
 /** What the loop must be told about the world. */
@@ -229,8 +255,6 @@ export interface LoopDependencies extends AdvanceOptions {
   readonly authorisedWorktreePath: string;
   /** The repository's resolved verification policy. Never the raw profile. */
   readonly verification: ResolvedVerificationPolicy;
-  /** What the task is, in the reviewer's and writer's own words. */
-  readonly taskBrief: string;
   /**
    * The repository's own account of the task, read by `task-brief.ts`.
    *
@@ -282,12 +306,30 @@ function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutc
     verification: null,
     remediationPayload: null,
     scope: null,
+    permissionDenials: null,
+    commit: null,
     ...from,
   });
 }
 
 const NOT_APPLICABLE = result({ outcome: 'NOT_APPLICABLE' });
 const EXECUTION_UNAUTHORISED = result({ outcome: 'EXECUTION_UNAUTHORISED' });
+
+/**
+ * Attaches what the writer was refused to a result the scope guard built.
+ *
+ * A step that blocks on scope still ran a writer, and what that writer was
+ * refused is as true as what it wrote. The guard cannot say so itself — it is
+ * given a tree, not an agent run — so the step that owns both facts joins them
+ * here rather than letting the observation fall off the one path where an
+ * operator is already being asked to look at the writer's behaviour.
+ */
+function withDenials(
+  step: LoopStepResult,
+  permissionDenials: PermissionDenialObservation,
+): LoopStepResult {
+  return Object.freeze({ ...step, permissionDenials });
+}
 
 /**
  * Whether `deps.authorisedWorktreePath` is authority for *this* state.
@@ -339,6 +381,99 @@ function saved(save: StateSaveResult, state: TaskStateName, outcome: LoopStepOut
     return result({ ...extra, remediationPayload: null, outcome: 'STATE_NOT_RECORDED', save });
   }
   return result({ outcome, state, save, ...extra });
+}
+
+/* ────────────────────────── the orchestrator's commit ───────────────────── */
+
+/**
+ * Records the pass, or refuses it — and either way the writer never decides.
+ *
+ * ── Why this is a step of its own, between the gate and the move ───────────
+ *
+ * `runClaudeWriter` returning `ok` means a process ended cleanly and printed a
+ * recognised envelope. The first dogfood run proved what that is worth on its
+ * own: the writer had no authority to write, the envelope said success, and the
+ * task was reported as delivered. So a pass now has to leave an *object* behind,
+ * and the object has to be one AO made:
+ *
+ *   scope gate (already run)  → what did the writer actually touch?
+ *   commit                    → AO stages, AO authors, AO's identity
+ *   controls one and two      → and it contains exactly what was approved
+ *
+ * **Nothing changed → nothing recorded → the pass is inadmissible.** That is the
+ * whole of R2 in one line, and it parks rather than advancing, because a writing
+ * phase that produced no effect is not a phase that can be verified.
+ *
+ * ── The refusals are deliberately all one state ────────────────────────────
+ *
+ * Every way this can fail parks at `HUMAN_DECISION_REQUIRED` with a resume
+ * point: the transition table offers no state for "AO could not record the
+ * work", and inventing one is a product-contract change a runner slice may not
+ * make. The *reason* is not lost — it travels on `LoopStepResult.commit`, which
+ * carries the commit id, the unapproved paths or the configured driver keys,
+ * whichever applies.
+ *
+ * Refusals never undo. A commit that contained an unapproved path stays, and so
+ * do the writer's files: they are the evidence somebody is being asked to look
+ * at, and the undo is an effect too.
+ */
+async function commitPassOrPark(
+  current: StateLoadSuccess,
+  approvedPaths: readonly string[],
+  deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+): Promise<{ readonly blocked: LoopStepResult | null; readonly commit: CommitTaskWorkResult }> {
+  const state = current.state;
+  const { now, authorisedWorktreePath, phase, round } = deps;
+
+  const park = (commit: CommitTaskWorkResult): LoopStepResult => {
+    const save = advanceTaskState(
+      current,
+      {
+        ...state,
+        state: 'HUMAN_DECISION_REQUIRED',
+        stateEnteredAt: now,
+        resumeFrom: { phase, round },
+        reportedResetAt: null,
+      },
+      leaseAdvanceOptions(deps),
+    );
+    return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED', { commit });
+  };
+
+  // A task with no base pin cannot be committed against one, and the scope gate
+  // that ran before this refuses such a task already (`NO_BASE_PIN`). Asked
+  // again rather than assumed, because this module is entered directly.
+  if (state.basePinnedCommit === null) {
+    const commit = Object.freeze({
+      outcome: 'GIT_UNAVAILABLE' as const,
+      step: 'READ_COMMITTED_PATHS' as const,
+    });
+    return { blocked: park(commit), commit };
+  }
+
+  const commit = await commitTaskWork(leasedGit(deps), authorisedWorktreePath, {
+    taskId: state.taskId,
+    phase,
+    round,
+    // Handed down from the gate that approved them. Never re-derived here: a
+    // set measured at this point would be measured after any injection and
+    // would therefore contain it (G12).
+    approvedPaths,
+    basePinnedCommit: state.basePinnedCommit,
+  });
+
+  return { blocked: commit.outcome === 'COMMITTED' ? null : park(commit), commit };
+}
+
+/** The advance options, separated from the execution seams they travel with. */
+function leaseAdvanceOptions(deps: LoopDependencies): AdvanceOptions {
+  const {
+    now, authorisedWorktreePath, agent, verify, observe, git, brief, verification,
+    remediationPayload, ...advance
+  } = deps;
+  void now; void authorisedWorktreePath; void agent; void verify; void observe; void git;
+  void brief; void verification; void remediationPayload;
+  return advance;
 }
 
 /* ─────────────────────────── the scope guard ────────────────────────────── */
@@ -472,7 +607,6 @@ export async function runVerifyStep(
     now,
     authorisedWorktreePath,
     verification,
-    taskBrief,
     verify,
     agent,
     git,
@@ -480,7 +614,6 @@ export async function runVerifyStep(
     remediationPayload,
     ...advance
   } = deps;
-  void taskBrief;
   void agent;
   void git;
   void observe;
@@ -555,7 +688,7 @@ export async function runReviewStep(
   const state = current.state;
   if (state.state !== 'REVIEWING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, taskBrief, agent, observe, ...rest } = deps;
+  const { now, authorisedWorktreePath, brief, agent, observe, ...rest } = deps;
   const { verification, verify, git, remediationPayload, ...advance } = rest;
   void verification;
   void verify;
@@ -584,8 +717,36 @@ export async function runReviewStep(
     return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
   }
 
+  // The reviewer is told what the task requires, or no reviewer runs.
+  //
+  // Re-checked here rather than assumed from an earlier step, exactly as
+  // `runImplementStep` re-checks it: a restarted driver enters this step
+  // directly, and a task whose file was emptied in the meantime must not have a
+  // reviewer briefed from nothing. **Never a fallback to the task id** — that
+  // silent degrade is the defect being fixed here, and it would be untestable
+  // by absence, since a payload naming only an id looks exactly like a payload
+  // for a task with nothing to say.
+  if (brief === undefined || !brief.ok || !brief.brief.contextComplete) {
+    const save = advanceTaskState(
+      current,
+      {
+        ...state,
+        state: 'HUMAN_DECISION_REQUIRED',
+        stateEnteredAt: now,
+        resumeFrom: { phase: 'REVIEW', round },
+        reportedResetAt: null,
+      },
+      advance,
+    );
+    return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
+  }
+
   const review = await runCodexReviewer(
-    { worktreePath: authorisedWorktreePath, round, payload: buildReviewPayload(taskBrief) },
+    {
+      worktreePath: authorisedWorktreePath,
+      round,
+      payload: buildReviewPayload(brief.brief, round),
+    },
     { agent: leasedAgent(deps) },
   );
 
@@ -653,11 +814,48 @@ export async function runReviewStep(
   // A clean review. `READY_FOR_PR` additionally demands settled commits and a
   // clean worktree, which no reviewer can attest to, so they are observed here
   // and the state is only claimed when both were positively established.
+  //
+  // ── And that the task delivered something (DOGFOOD-REM-001 R2) ───────────
+  //
+  // The first dogfood run settled a task whose worktree was clean at exactly
+  // the commit it started from: nothing had been written, the reviewer had
+  // nothing to object to, and "clean and known" was read as "finished". A clean
+  // tree at the base pin is not a delivered task; it is an untouched one.
+  //
+  // The comparison is **observed HEAD vs. the record's pin**, and the two
+  // provenances are the point. `checkpoint.currentCommit` comes from the fresh
+  // `observeCompletion` immediately above; `basePinnedCommit` is a pin, which is
+  // a fact the record is entitled to state. Comparing `state.currentCommit`
+  // against `state.basePinnedCommit` instead would compare two values an earlier
+  // write chose — a record agreeing with itself — and would relocate the TOCTOU
+  // rather than close it.
+  //
+  // **What this conjunct does not own, measured.** A record naming a commit the
+  // worktree no longer has never reaches this line: `src/state/reconcile.ts`
+  // refuses it first with `CURRENT_COMMIT_MOVED`, the run ends `STATE_DIVERGED`
+  // with zero steps, and no reviewer is started. That was measured while
+  // building this gate's fixture, and it is recorded here so the guarantee is
+  // attributed to the component that actually holds it. What reaches *this*
+  // predicate is the ordinary shape — `currentCommit` withdrawn to `null` by the
+  // writing phase — which is why the control for it is seeded that way.
+  //
+  // No task-type discrimination. `kind` is `NORMAL | REMEDIATION`, is not in the
+  // task state, and affects only ranking; there is no no-op kind to exempt. If
+  // one ever exists the answer here is already right: it parks, and an operator
+  // says so.
+  //
+  // **Residual, named rather than hidden (G2):** this is a SHA-inequality test
+  // and is strictly weaker than a non-empty-diff test — `observeTaskDelta` is
+  // the primitive that would close it. It is not needed today because AO commits
+  // without `--allow-empty` (`commitTaskWork`), so no result commit can exist
+  // without staged changes; an empty commit would move HEAD and satisfy this.
+  // Closing-audit material.
   const checkpoint = await (observe ?? observeCompletion)(state);
   const settled =
     checkpoint.worktreeClean === true &&
     checkpoint.currentCommit !== null &&
-    state.basePinnedCommit !== null;
+    state.basePinnedCommit !== null &&
+    checkpoint.currentCommit !== state.basePinnedCommit;
 
   if (!settled) {
     const save = advanceTaskState(
@@ -716,13 +914,11 @@ export async function runRemediateStep(
     agent,
     git,
     remediationPayload,
-    taskBrief,
     verification,
     verify,
     observe,
     ...advance
   } = deps;
-  void taskBrief;
   void verification;
   void verify;
   void observe;
@@ -808,7 +1004,17 @@ export async function runRemediateStep(
   // `VERIFYING` either. A guard on only the first pass would be a sandbox a
   // writer escapes on its second attempt.
   const after = await enforceScope(current, { ...scopeGuard, writerRan: true });
-  if (after.blocked !== null) return after.blocked;
+  if (after.blocked !== null) return withDenials(after.blocked, writer.permissionDenials);
+
+  // AO records the pass. Nothing changed → nothing recorded → inadmissible.
+  const recorded = await commitPassOrPark(current, after.assessment.approvedPaths, {
+    ...deps,
+    phase: 'REMEDIATE',
+    round,
+  });
+  if (recorded.blocked !== null) {
+    return withDenials(recorded.blocked, writer.permissionDenials);
+  }
 
   // The scope guard read *which* paths the writer touched and nothing more, so
   // the checkpoint facts stay withdrawn. Verification is what looks next.
@@ -824,7 +1030,11 @@ export async function runRemediateStep(
     },
     advance,
   );
-  return saved(save, 'VERIFYING', 'ADVANCED', { scope: after.assessment });
+  return saved(save, 'VERIFYING', 'ADVANCED', {
+    scope: after.assessment,
+    permissionDenials: writer.permissionDenials,
+    commit: recorded.commit,
+  });
 }
 
 /* ─────────────────────────── the setup hops ─────────────────────────────── */
@@ -851,11 +1061,10 @@ export async function runWorktreeReadyStep(
   const state = current.state;
   if (state.state !== 'WORKTREE_READY') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, agent, git, remediationPayload, taskBrief, brief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, agent, git, remediationPayload, brief, verification, verify, observe, ...advance } = deps;
   void agent;
   void git;
   void remediationPayload;
-  void taskBrief;
   void brief;
   void verification;
   void verify;
@@ -898,11 +1107,10 @@ export async function runContextLoadingStep(
   const state = current.state;
   if (state.state !== 'CONTEXT_LOADING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, brief, agent, git, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, brief, agent, git, remediationPayload, verification, verify, observe, ...advance } = deps;
   void agent;
   void git;
   void remediationPayload;
-  void taskBrief;
   void verification;
   void verify;
   void observe;
@@ -992,9 +1200,8 @@ export async function runImplementStep(
   const state = current.state;
   if (state.state !== 'IMPLEMENTING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, agent, brief, git, remediationPayload, taskBrief, verification, verify, observe, ...advance } = deps;
+  const { now, authorisedWorktreePath, agent, brief, git, remediationPayload, verification, verify, observe, ...advance } = deps;
   void remediationPayload;
-  void taskBrief;
   void verification;
   void verify;
   void observe;
@@ -1068,7 +1275,19 @@ export async function runImplementStep(
   // before the durable move, so a task that wrote out of scope cannot reach
   // `VERIFYING` — and therefore cannot reach a reviewer either.
   const after = await enforceScope(current, { ...scopeGuard, writerRan: true });
-  if (after.blocked !== null) return after.blocked;
+  if (after.blocked !== null) return withDenials(after.blocked, writer.permissionDenials);
+
+  // AO records the pass. A writer that completed and changed nothing does not
+  // reach `VERIFYING` — it parks, because there is nothing for verification to
+  // look at and "the agent finished" is not the same claim as "the work exists".
+  const recorded = await commitPassOrPark(current, after.assessment.approvedPaths, {
+    ...deps,
+    phase: 'IMPLEMENT',
+    round,
+  });
+  if (recorded.blocked !== null) {
+    return withDenials(recorded.blocked, writer.permissionDenials);
+  }
 
   // The scope guard read *which* paths the writer touched and nothing more: it
   // has no opinion on whether the work is right, and it did not re-establish
@@ -1085,7 +1304,11 @@ export async function runImplementStep(
     },
     advance,
   );
-  return saved(save, 'VERIFYING', 'ADVANCED', { scope: after.assessment });
+  return saved(save, 'VERIFYING', 'ADVANCED', {
+    scope: after.assessment,
+    permissionDenials: writer.permissionDenials,
+    commit: recorded.commit,
+  });
 }
 
 /**

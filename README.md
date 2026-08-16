@@ -2997,6 +2997,62 @@ and because the failure mode it describes — a command that cannot start is
   fixed — so a scheduler that retries on 4 loops forever against a UNC-hosted
   repository. The runtime gate got its own code 6 for exactly this reason;
   the lease-location gate makes the same class of statement and did not.
+- **D-REM-001-6 — the test budget was wrong for this slice, and is raised
+  deliberately rather than met by simulation.** DOGFOOD-REM-001 was planned with
+  a ceiling of five new controls above 2 s. Measured inside the parallel gate,
+  where durations roughly double, it lands at **twelve**: 17.0 s, 13.0 s, 8.6 s,
+  7.9 s, 5.5 s, 5.0 s, 4.8 s, 4.6 s, 4.5 s, 4.4 s, 4.1 s, 3.3 s. The whole
+  `test:foundation-safe` gate went from ~216 s to ~236 s, so the developer loop
+  pays about 9%.
+
+  The plan's own remedies were applied in its order and are what took the count
+  from seventeen to twelve: the step-budget pair was merged into one case with
+  two fixtures instead of three, and four of the five reviewer-payload controls
+  were moved off a real run onto the pure builder they actually test, leaving one
+  real step to prove the transport.
+
+  The third remedy — lowering a control's tier — was **not** applied to any of
+  the twelve, and the plan forbids it here by name: every one of them measures an
+  effect that is Git's. A commit that really moved HEAD, a worktree that is
+  really clean, an identity really on an object, a scope violation that really
+  refused. Rewriting any of them against a mock would prove the mock agreed,
+  which is precisely the failure this slice exists to remove — the first dogfood
+  was green because every control substituted the seam above the effect. So the
+  number is stated instead of being met. **Scope:** `tests/dogfood-rem-001.test.ts`.
+- **D-REM-001-1** — `git worktree add` through this product's seam **runs the
+  target repository's `post-checkout` hook**. Measured, with a sentinel. So the
+  orchestrator already executes target-repository hook code today, before any
+  writing agent starts and outside everything DOGFOOD-REM-001 fenced. It was
+  fenced out of that slice deliberately: the commit path is where the new effect
+  was, and widening the slice to workspace preparation would have been a second
+  change. **Scope:** `worktree/prepare-workspace.ts`.
+- **D-REM-001-2** — a `.gitattributes` clean filter first executes during
+  `observeTaskDelta`'s own reads — `status` and `diff` must apply it to decide
+  whether a file differs from the index — so that exposure **predates** the
+  commit path and is older than the slice that first had to name it. Measured:
+  the sentinel appears at the observation, and after `git add` the staged blob is
+  the filter's output rather than the bytes on disk. Control two refuses the
+  commit; nothing yet bounds the observation. **Scope:** `scope/task-delta.ts`.
+- **D-REM-001-3** — path-independent executable configuration (`core.fsmonitor`
+  and relatives) is **not** covered by control two: it is unreachable via
+  `check-attr`, it already runs during today's observation, and refusing on its
+  mere presence would fail closed on ordinary machines for a pre-existing
+  exposure. Named as a non-goal rather than silently omitted. **Scope:**
+  `worktree/commit-task-work.ts`.
+- **D-REM-001-4** — the stale-record race the settlement conjunct was designed to
+  catch is caught **earlier**, by reconciliation (`CURRENT_COMMIT_MOVED`, zero
+  steps, no reviewer started) — measured while building that gate's fixture. The
+  conjunct is what refuses the ordinary shape: a `currentCommit` withdrawn to
+  `null` by a writing phase over a worktree still standing at the base pin.
+  Recorded because attributing a guarantee to the wrong line is how the
+  empty-delta defect survived review the first time.
+- **D-REM-001-5** — `commitTaskWork` names every approved path as an argument to
+  `check-attr`, so a repository containing a path the argument grammar cannot
+  express (a space, a `%`) refuses the commit rather than committing unchecked.
+  Fail-closed and deliberate, and unmeasured against a large delta: the argument
+  vector has an operating-system length limit that a big enough approved set
+  would reach, where the seam reports the spawn failure and the commit refuses.
+  **Scope:** `worktree/commit-task-work.ts`.
 - **L-V2-07P-1** — `classifyWindowsKey` lost its `process.platform === 'win32'`
   guard, so it now classifies on every platform: a POSIX `gitCommonDir`
   normalises to a shape matching none of the accept rules and every repository
@@ -5088,6 +5144,217 @@ orchestrator still hands a finished task to a human and stops.
   seconds, while the operator is still there, and none of them produces a result to
   observe. Deliberate, and the boundary is pinned by test.
 
+## The first dogfood, and what it proved (DOGFOOD-REM-001)
+
+The first time this orchestrator was pointed at a real task, it reported a
+delivered task and delivered nothing. Every test was green while it happened.
+That run is the most useful thing this repository has produced, and this section
+is what it cost.
+
+### The two defects, and how each hid
+
+**The writer had no authority to write.** `CLAUDE_WRITER_ARGS` carried
+`--print --output-format json` and nothing else, so no permission mode was set —
+and with no mode, every write is denied. The run looked exactly like a healthy
+one: the seam reported `RAN` with exit 0, the envelope said `subtype: "success"`
+and `is_error: false`, and the only trace of the truth was a field nothing read,
+`permission_denials: [Write, Bash]`.
+
+It hid because **no test pinned the vector**. `tests/claude-writer.test.ts`
+asserts that whatever the constant holds is passed through to the seam, which is
+equally true of an empty vector. Pass-through is not authority — and every
+control in the suite substitutes the agent seam, that is, replaces the layer
+*above* the argument vector, so nothing here could observe what the real CLI was
+given. That gap is now closed by `npm run verify:writer-authority`, which drives
+the real CLI through the shipped adapter and asserts on measured filesystem and
+git state rather than on the agent's prose.
+
+**A run with no effect could settle as complete.** `READY_FOR_PR` required a
+clean worktree and a known HEAD, and a task that never changed anything has
+both. The reviewer had nothing to object to, because it was asked only about
+defects *introduced by* the task — a task that did nothing introduces nothing —
+and because it was told the task's **id** and no more: `buildReviewPayload` took
+a string, and both producers passed `taskId`.
+
+### The authority split, measured
+
+The writer edits; the orchestrator commits. Not a convention — the writer holds
+`Read Edit Write Glob Grep` and no shell, so it cannot commit. Measured through
+the production adapter against throwaway repositories:
+
+| configuration | in-worktree edit | commit | tree | escape to sibling | tamper main checkout |
+| --- | --- | --- | --- | --- | --- |
+| the pre-fix vector (`--print --output-format json`) | **denied** | no | clean at base | — | — |
+| `+ --permission-mode acceptEdits` | yes | denied | dirty | blocked | blocked (even read) |
+| `+ --tools Read Edit Write Glob Grep` (shipped) | yes | **no shell tool exists** | dirty | blocked | blocked |
+| settings file, `allow: ["Write","Edit"]` | yes | yes | clean | **ESCAPED** | **TAMPERED** |
+| settings file, `allow: ["Write(**)","Edit(**)"]` | yes | yes | clean | blocked | blocked |
+
+The fourth row is why authorisation is expressed as a flag rather than a settings
+file: an unqualified `Write` allow-rule grants unbounded write authority, and the
+containment-restoring spelling differs from it by two characters.
+
+Two flags were refused for measured reasons. `--bare` would be hermetic and would
+break authentication — the installed binary's own help states its auth is
+strictly `ANTHROPIC_API_KEY` or `apiKeyHelper`, with OAuth and the keychain never
+read, and this product runs on the subscription login. `--safe-mode` was refused
+as the hermeticity mechanism because its documented and measured behaviour
+disagree: it suppressed user-scope configuration while the *project* `CLAUDE.md`
+still took effect.
+
+`--strict-mcp-config` is load-bearing and non-obvious: `--tools` does **not**
+bound MCP authority. Without it the writer held the operator's own MCP tools and
+attempted one.
+
+### Hermeticity has a cost, and it is paid deliberately
+
+`--setting-sources ''` suppresses the target repository's own `CLAUDE.md` along
+with user-scope configuration. That is the point — the operator's machine must
+not decide the writer's behaviour — but those conventions are often genuinely
+useful. Where a repository wants them, the `CLAUDE.md` **path** travels in the
+payload's context-sources section and the writer opens it itself. Paths only,
+never contents; the channel is explicit and orchestrator-controlled instead of
+ambient.
+
+### What the orchestrator's commit proves, and what it does not
+
+Two controls, and neither covers the other:
+
+- **Control one — path authority.** The committed path set equals the set the
+  scope gate approved, compared as sets from the same base pin. This covers
+  path-adding injection by *any* mechanism, including ones nobody has
+  enumerated. It proves nothing about the approved files' **bytes**, and nothing
+  about whether code ran.
+- **Control two — no configured content filter runs.** Before anything is
+  staged, Git is asked twice: which drivers the effective configuration defines
+  (`config --list --show-scope --name-only -z`, so the configured command never
+  enters this process at all) and which of them apply to the paths being staged
+  (`check-attr filter -z`). The predicate is the **conjunction**, and widening it
+  to either half is measurably wrong: this machine's system *and* global scopes
+  both define `filter.lfs.*`, so "any driver configured" refuses every commit in
+  every repository, while a `.gitattributes` naming a driver the configuration
+  never defines makes Git run nothing at all.
+
+The neutralisation of hooks and signing is **defence in depth, not the primary
+control**. Measured on git 2.55.0.windows.3: all four commit hooks fire on this
+path; `--no-verify` does not suppress them (`prepare-commit-msg` and
+`post-commit` still ran); `-c core.hooksPath=` does, is unconditionally
+shell-inert, and cannot be planted — a *relative* value stops suppressing the
+moment the writer creates that directory, which was measured by planting one.
+
+**Accepted consequences, stated rather than discovered:** a repository whose
+`pre-commit` formats or generates will see commits that skipped it; and the
+orchestrator will not commit a path whose assigned filter driver has an
+executable clean or process command configured in the effective Git
+configuration — LFS-tracked files included. It parks, and an operator commits.
+
+### The identity on the commit, and why the leak control is load-bearing
+
+Author and committer are `AgentOrchestrator <agent-orchestrator@local.invalid>`,
+supplied per invocation with `-c` and never written into any git-config at any
+scope. `.invalid` is reserved by RFC 2606, so it asserts no real address.
+
+The design predicted that the execution seam — which forwards `PATH` and
+`PATHEXT` and nothing else — would leave Git unable to see any ambient identity.
+**That prediction was wrong, and it was measured wrong**: `git config
+--show-origin --get user.email` answered out of the operator's global
+`~/.gitconfig`, and a commit made without `-c` was authored by whoever is logged
+in. The mechanism stands; the counter-control that a foreign identity must not
+reach the object is what actually holds the line.
+
+### Two layers of the settlement rule, and why the schema did not change
+
+- `READY_FOR_PR` additionally requires the **observed** HEAD to differ from the
+  record's base pin. Observed-vs-pin, never record-vs-record: comparing two
+  fields of one record would have it agree with itself and would relocate the
+  race rather than close it.
+- A chained member may not be built on a predecessor whose result commit is the
+  commit it started on (`PREDECESSOR_DELIVERED_NOTHING`). This is not redundant
+  with the first: task-state files survive every later run, and
+  `applyForcedProgress` copies a stale `READY_FOR_PR` record's commits straight
+  into a new ledger, so the first dogfood's own records can re-enter a chain.
+
+No durable schema change was needed for either, and none was made.
+
+### The rerun gate
+
+Carried here verbatim from the plan, so the session that runs the second dogfood
+does not have to reconstruct it. The second CargoCheck dogfood counts only when
+all of these are true:
+
+1. The measured vector is in production, pinned by a test, and
+   `npm run verify:writer-authority` passes **both** stages: the writer edits
+   inside the worktree and **cannot** commit (no shell, no MCP, escape blocked,
+   tree left dirty), then the orchestrator's path measures the delta, enforces
+   scope, commits, and leaves HEAD moved and the tree clean.
+2. Authority is hermetic — `--setting-sources ""` and `--strict-mcp-config` — so
+   the run proves something about the product and not about one laptop.
+3. A writer pass with no measured effect cannot be a success, and
+   `permission_denials` is reported **in the rendered operator output of a run
+   that continued past the writer step** — distinct tool names and count, on
+   failing and succeeding passes alike, accumulated across rounds — without
+   being a verdict.
+4. The commit is bounded on all of its controls: the committed path set equals
+   the approved set against a hook that tries to inject; a target repository
+   with a configured executable driver is refused *before* staging, with the
+   driver provably never run; signing is demanded and neutralised; and the
+   divergence case parks without an undo. The path-set check is not claimed to
+   be more than it is.
+5. `READY_FOR_PR` refuses an empty delta against freshly observed evidence, with
+   the negative and positive controls green and the record-vs-record mutant red.
+6. A tautological predecessor is refused by name, and the legal chain still
+   starts.
+7. The reviewer receives body, truncation flag and round, proven by the
+   differential payload control; absence parks rather than degrading.
+8. The remediation hand-off survives the budget boundary, with the
+   byte-identical no-boundary variant green.
+9. The no-effect controls are inverted rather than deleted, and the deliberate
+   scope-violation and lease-loss cases stay green.
+10. **The G5 residual is closed:** the dogfood transcript's literal refusal
+    strings compared against the measured permission-denial prose. Match → the
+    same defect, closed. No match → a live second mechanism, and the rerun
+    blocks again.
+11. `npm run verify` passes on a clean machine, and the opt-in gate has been run
+    at least once.
+12. The rerun-preparation question is answered in writing: whether the first
+    dogfood's artefacts can be re-run over, must be preserved, or need a product
+    change first. Not resolved by improvisation — if the product has no safe
+    path, that is a finding and belongs in the register before the rerun.
+
+Then the run can deliver what the first could not:
+
+```text
+real Claude writer actually edits
+        ↓
+AO commits → A produces A1, A1 != blockBase
+        ↓
+A SETTLED
+        ↓
+B.basePinnedCommit == A1
+        ↓
+B sees A's actual code
+        ↓
+both tasks complete, or stop truthfully for a genuine product reason
+```
+
+### Residuals, carried rather than closed
+
+- The settlement rule is a **SHA-inequality** test, which is strictly weaker than
+  a non-empty-diff test. `observeTaskDelta` is the primitive that would close it.
+  It is not needed today because the orchestrator commits without
+  `--allow-empty`, so no result commit exists without staged changes.
+- The reviewer's payload interpolates repository-authored task prose into an
+  instruction stream, so a hostile task file can try to instruct a PASS.
+  Identical in kind to a risk already accepted for the writer's payload, and
+  bounded on the way back: a PASS carrying findings is `UNRECOGNISED`.
+- The path/sandbox anomaly the dogfood also reported was closed as the same
+  defect. Three candidate mechanisms were probed and all three falsified — writes
+  succeed in a plain clone, in a linked worktree whose `.git` is a file pointing
+  outside its own directory, and through an NTFS junction. The positive
+  explanation is that the CLI narrates permission denials in path language
+  ("outside my allowed folder"), including when the true cause is an unmatched
+  permission rule.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment; and
@@ -5113,7 +5380,9 @@ V2-09  dependent tasks / commit chain        <- shipped
          |
 V2-10  operator notification                 <- shipped
          |
-       the dogfood block, then the closing audit
+DOGFOOD-REM-001  the first dogfood's two defects   <- shipped
+         |
+       the second dogfood, then the closing audit
 ```
 
 One prerequisite is now explicit that was not before. **Unattended running needs

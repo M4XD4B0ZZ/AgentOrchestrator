@@ -99,7 +99,13 @@ import { runGitCommand } from '../src/worktree/git-command.js';
 import { removeTaskWorkspace } from '../src/worktree/remove-workspace.js';
 import { authPreflightPasses, provenAuthEvidence } from './helpers/auth-evidence.js';
 import { createRepoFixture, git, removeRepoFixtures } from './helpers/repo-fixtures.js';
-import { e2eProfile, taskFile, tickingClock, writerSuccess } from './helpers/e2e-fixtures.js';
+import {
+  e2eProfile,
+  taskFile,
+  tickingClock,
+  writerSuccess,
+  writerThatEdits,
+} from './helpers/e2e-fixtures.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
 import {
   removeTrackedWorkspaces,
@@ -112,6 +118,22 @@ afterEach(() => {
   releaseTestLeases();
   removeRepoFixtures();
 });
+
+/**
+ * A writer seam that really edits, so the pass it drives is admissible.
+ *
+ * Since DOGFOOD-REM-001 a writing pass that leaves nothing behind parks instead
+ * of advancing, so these cases — whose subject is the *lease*, not the writer —
+ * have to produce a real effect to reach the phase they are about.
+ */
+function editingWriter() {
+  let index = 0;
+  return async (_id: string, _args: readonly string[], cwd: string) => {
+    index += 1;
+    return writerThatEdits(`src/lease-${index}.ts`, `export const step = ${index};
+`)({ cwd });
+  };
+}
 
 afterAll(() => {
   removeTrackedWorkspaces();
@@ -561,7 +583,6 @@ describe('no productive writer path runs without the lease', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: forged,
@@ -669,7 +690,6 @@ describe('no productive writer path runs without the lease', () => {
       {
         repository: target.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: foreign,
@@ -730,7 +750,6 @@ describe('a lease acquired minutes ago is not a lease held now', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
@@ -871,7 +890,6 @@ describe('no durable transition happens after the lease is lost', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
@@ -1323,7 +1341,6 @@ describe('a mutation never happens on a lease proved somewhere earlier', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
@@ -1558,7 +1575,6 @@ describe('the agent seam refuses to start a process without the lease', () => {
         now: tickingClock()(),
         authorisedWorktreePath: current.state.worktreePath,
         verification: fixture.repository.verification,
-        taskBrief: TASK_ID,
         brief: readExecutionBrief(fixture.repository, TASK_ID, current.state.worktreePath),
         lease: authority,
       });
@@ -1577,7 +1593,6 @@ describe('the agent seam refuses to start a process without the lease', () => {
       now: tickingClock()(),
       authorisedWorktreePath: current.state.worktreePath,
       verification: fixture.repository.verification,
-      taskBrief: TASK_ID,
       brief: readExecutionBrief(fixture.repository, TASK_ID, current.state.worktreePath),
       lease: authority,
       agent: async () => {
@@ -1756,7 +1771,6 @@ describe('every seam that starts a process is fenced, not just the writer', () =
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
-      taskBrief: TASK_ID,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -1768,7 +1782,7 @@ describe('every seam that starts a process is fenced, not just the writer', () =
 
     // Drive to VERIFYING, which is the phase that runs the verification command.
     for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING', 'VERIFYING'] as const) {
-      const advanced = await runLoopStep(current, stepDeps({ agent: async () => writerSuccess() }));
+      const advanced = await runLoopStep(current, stepDeps({ agent: editingWriter() }));
       expect(advanced.state).toBe(expected);
       current = loadTaskState(fixture.root, TASK_ID);
       if (!current.ok) throw new Error('state vanished');
@@ -1815,7 +1829,6 @@ describe('every seam that starts a process is fenced, not just the writer', () =
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
@@ -1878,7 +1891,6 @@ describe('a step started directly is fenced exactly like one the loop drives', (
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
-      taskBrief: TASK_ID,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -1889,7 +1901,7 @@ describe('a step started directly is fenced exactly like one the loop drives', (
     });
 
     for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING'] as const) {
-      const advanced = await runLoopStep(current, deps({ agent: async () => writerSuccess() }));
+      const advanced = await runLoopStep(current, deps({ agent: editingWriter() }));
       expect(advanced.state).toBe(expected);
       current = loadTaskState(fixture.root, TASK_ID);
       if (!current.ok) throw new Error('state vanished');
@@ -1932,7 +1944,6 @@ describe('a step started directly is fenced exactly like one the loop drives', (
       now: tickingClock()(),
       authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
       verification: fixture.repository.verification,
-      taskBrief: TASK_ID,
       brief: readExecutionBrief(
         fixture.repository,
         TASK_ID,
@@ -1943,7 +1954,7 @@ describe('a step started directly is fenced exactly like one the loop drives', (
     });
 
     for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING', 'VERIFYING'] as const) {
-      const advanced = await runLoopStep(current, deps({ agent: async () => writerSuccess() }));
+      const advanced = await runLoopStep(current, deps({ agent: editingWriter() }));
       expect(advanced.state).toBe(expected);
       current = loadTaskState(fixture.root, TASK_ID);
       if (!current.ok) throw new Error('state vanished');
@@ -2850,7 +2861,6 @@ describe('a gate is proved by what it stops, when the outcome no longer differs'
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        taskBrief: TASK_ID,
         attendedContinuation: true,
         authEvidence: provenAuthEvidence(),
         lease: evidence,

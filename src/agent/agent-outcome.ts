@@ -148,6 +148,73 @@ export interface AgentDiagnostics {
 }
 
 /**
+ * What authority the agent reached for and was refused.
+ *
+ * ── Why this exists at all ─────────────────────────────────────────────────
+ *
+ * The first dogfood run reported a delivered task and delivered nothing. The
+ * evidence was in the envelope the whole time: `subtype: "success"`,
+ * `is_error: false`, exit 0 — and `permission_denials: [Write, Bash]`. Nothing
+ * read that field, so a writer with no authority to write looked exactly like a
+ * writer that had nothing left to do.
+ *
+ * ── Evidence, never a verdict (G6) ─────────────────────────────────────────
+ *
+ * A denial does **not** make a run a failure, and this observation must never
+ * be turned into one. An agent may legitimately reach for a tool it does not
+ * need, be refused, and finish the work by another route; treating that as a
+ * failure would park healthy tasks. What decides whether a pass really did
+ * something is the measured delta, not this. This field's job is to make the
+ * refusal *visible to an operator*, which is the thing that was missing.
+ *
+ * ── The two numbers say different things, deliberately ─────────────────────
+ *
+ * `count` is how many denials the envelope reported — every entry, including
+ * one whose shape this reader does not recognise. `tools` is the distinct tool
+ * names it could actually read, in the order they first appeared. They differ
+ * exactly when the CLI reports a denial in an unfamiliar shape, and the split
+ * is the fail-loud direction: an unreadable entry still raises the count rather
+ * than disappearing. Under-reporting is the failure mode this whole observation
+ * exists to remove, so it is the one that must not be reintroduced by a
+ * permissive parse.
+ *
+ * Nothing else from an entry is carried. `tool_input` holds file paths and
+ * command lines — foreign free text — and this is reported to an operator.
+ */
+export interface PermissionDenialObservation {
+  /** How many denials the envelope reported, readable or not. */
+  readonly count: number;
+  /** The distinct tool names that could be read, in first-appearance order. */
+  readonly tools: readonly string[];
+}
+
+/** No denials, and the value for "nothing was asked". */
+export const NO_PERMISSION_DENIALS: PermissionDenialObservation = Object.freeze({
+  count: 0,
+  tools: Object.freeze([]),
+});
+
+/**
+ * Two observations as one, for a run that made several writing passes.
+ *
+ * **Aggregating, never last-writer-wins.** Round 1 denied and round 2 clean
+ * must still report round 1: the operator is being told what authority the
+ * writer reached for *during this run*, and a second pass that happened not to
+ * need the tool is not evidence that the first pass had it. Counts add; names
+ * are unioned in first-appearance order, so a tool refused in three rounds is
+ * named once and counted three times.
+ */
+export function mergePermissionDenials(
+  left: PermissionDenialObservation,
+  right: PermissionDenialObservation,
+): PermissionDenialObservation {
+  if (right.count === 0 && right.tools.length === 0) return left;
+  const tools = [...left.tools];
+  for (const tool of right.tools) if (!tools.includes(tool)) tools.push(tool);
+  return Object.freeze({ count: left.count + right.count, tools: Object.freeze(tools) });
+}
+
+/**
  * Exactly what `TaskState` needs to record a block, spelled the same way it is
  * spelled there so the caller copies rather than derives.
  */

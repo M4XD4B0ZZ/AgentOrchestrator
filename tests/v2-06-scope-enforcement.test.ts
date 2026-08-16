@@ -207,7 +207,6 @@ function deps(
     now: '2026-08-11T09:00:00.000Z',
     authorisedWorktreePath: current.state.worktreePath,
     verification: repository.verification,
-    taskBrief: 'unused by these steps',
     brief: readExecutionBrief(repository, TASK_ID, current.state.worktreePath),
     lease: leaseAuthorityFor(repository),
     ...overrides,
@@ -285,9 +284,13 @@ describe('the post-writer gate measures the effect', () => {
     ]);
   });
 
+  // The writer leaves its work uncommitted and AO commits it (DOGFOOD-REM-001
+  // G1). It used to be `writerCommitting`, which models authority production
+  // does not grant — and which left the tree clean, so this case would now park
+  // on the effect gate for a reason that has nothing to do with scope.
   it('lets a writer that stayed inside the allowed scope advance', async () => {
     const { repository, root, current } = await atImplementing();
-    const agent = recordedAgent({ claude: writerCommitting('src/feature.ts', 'export const f = 1;\n') });
+    const agent = recordedAgent({ claude: writerLeaving('src/feature.ts', 'export const f = 1;\n') });
 
     const step = await runImplementStep(current, deps(current, repository, { agent: agent.runner }));
 
@@ -305,7 +308,18 @@ describe('the post-writer gate measures the effect', () => {
     // `build/` is ignored by the fixture and is outside `src`. If ignored files
     // counted, every correctly configured repository would fail this gate — the
     // orchestrator writes its own runtime state into an ignored directory.
-    const agent = recordedAgent({ claude: writerLeaving('build/output.js', 'compiled\n') });
+    //
+    // The in-scope edit beside it is not decoration: since AO commits the pass,
+    // a writer that touched *only* ignored files leaves nothing to record and
+    // parks on the effect gate. That is correct, and it is a different property
+    // from this one — so the case gives the pass a real effect and keeps
+    // asserting the thing it is about, that the ignored file is not an offence.
+    const agent = recordedAgent({
+      claude: (call) => {
+        writerLeaving('build/output.js', 'compiled\n')(call);
+        return writerLeaving('src/feature.ts', 'export const f = 1;\n')(call);
+      },
+    });
 
     const step = await runImplementStep(current, deps(current, repository, { agent: agent.runner }));
 
@@ -766,7 +780,12 @@ describe('the remediation pass is guarded on the same terms', () => {
     // reached the way a real run reaches it.
     const toVerifying = await runImplementStep(
       current,
-      deps(current, repository, { agent: recordedAgent({ claude: () => writerSuccess() }).runner }),
+      deps(current, repository, {
+        // A pass has to leave something behind to reach VERIFYING at all now,
+        // so the setup hop edits. The property under test is the remediation
+        // guard below, not this hop.
+        agent: recordedAgent({ claude: writerLeaving('src/first.ts') }).runner,
+      }),
     );
     expect(toVerifying.state).toBe('VERIFYING');
 
@@ -793,11 +812,13 @@ describe('the remediation pass is guarded on the same terms', () => {
     const { repository, root, current } = await atImplementing();
     await runImplementStep(
       current,
-      deps(current, repository, { agent: recordedAgent({ claude: () => writerSuccess() }).runner }),
+      deps(current, repository, {
+        agent: recordedAgent({ claude: writerLeaving('src/first.ts') }).runner,
+      }),
     );
 
     const remediating = await enterRemediating(root, repository);
-    const agent = recordedAgent({ claude: writerCommitting('src/fixed.ts', 'export const fixed = 1;\n') });
+    const agent = recordedAgent({ claude: writerLeaving('src/fixed.ts', 'export const fixed = 1;\n') });
 
     const step = await runRemediateStep(
       remediating,
