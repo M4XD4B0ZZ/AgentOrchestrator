@@ -5672,6 +5672,17 @@ Still missing, deliberately: unattended operation; owned process containment; an
 any product-side PR/CI/merge automation. `READY_FOR_PR` remains terminal — the
 orchestrator hands a finished task to a human and stops there.
 
+Owned containment is still missing, but it is no longer an open *question*. A
+measurement spike on 2026-08-18 settled which mechanism can provide it on
+Windows and which cannot, and
+[`docs/decisions/2026-08-18-windows-owned-process-containment.md`](docs/decisions/2026-08-18-windows-owned-process-containment.md)
+records that: a Job Object that **creates** the process under its ownership owns
+the whole tree and kills it, including the real Claude Code tree; attaching a job
+to an already-spawned process is refuted, and `taskkill /T /F` reporting success
+is not evidence that no descendant survived. No technology is chosen there and
+nothing in `src/` changed — the record exists so that neither refuted variant is
+investigated a second time.
+
 **The lease came before the block runner, not after it**, and V2-07 is what forced
 that change of order. The ledger's compare-and-swap is advisory, so two concurrent
 writers of one ledger can each be told they succeeded while one of the two records
