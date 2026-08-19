@@ -502,7 +502,11 @@ internal static class Program
         // The job's own answer about what the child left behind. Anything still
         // counted here is killed by the close below, without a walk, a
         // taskkill, or a list of pids anyone had to keep.
-        Put("jobMembersAtEnd", JobMemberCount().ToString(CultureInfo.InvariantCulture));
+        List<int> membersAtEnd;
+        int countAtEnd = JobMembers(out membersAtEnd);
+        Put("jobMembersAtEnd", countAtEnd.ToString(CultureInfo.InvariantCulture));
+        Put("jobMemberPidsAtEnd", string.Join(",", membersAtEnd.ConvertAll(
+            delegate(int pid) { return pid.ToString(CultureInfo.InvariantCulture); }).ToArray()));
         WriteStatus();
 
         Native.CloseHandle(info.hProcess);
@@ -812,8 +816,29 @@ internal static class Program
 
     private static int JobMemberCount()
     {
+        List<int> pids;
+        return JobMembers(out pids);
+    }
+
+    /// <summary>
+    /// The job's own membership, as a count and as the pids behind it.
+    ///
+    /// The pids are not decoration. A count that disagrees with what the caller
+    /// can see running is unattributable — "five members, six processes" says
+    /// nothing about *which* one, and therefore nothing about whether a process
+    /// escaped the job or simply ended. The list makes that difference readable
+    /// from the outside.
+    /// </summary>
+    private static int JobMembers(out List<int> pids)
+    {
+        pids = new List<int>();
         const int capacity = 1024;
-        int headerSize = IntPtr.Size == 8 ? 16 : 8;
+        // JOBOBJECT_BASIC_PROCESS_ID_LIST is two DWORDs followed by the
+        // ULONG_PTR array, and the array starts at offset 8 on x86 and x64
+        // alike — 4 + 4 with no padding needed on either. A larger figure here
+        // is harmless while only the count at offset 4 is read, and silently
+        // wrong the moment the list itself is.
+        const int headerSize = 8;
         int size = headerSize + IntPtr.Size * capacity;
         IntPtr buffer = Marshal.AllocHGlobal(size);
         try
@@ -822,7 +847,12 @@ internal static class Program
             Marshal.WriteInt32(buffer, 0, capacity);
             if (!Native.QueryInformationJobObject(_job, Native.JobObjectBasicProcessIdList, buffer, (uint)size, IntPtr.Zero))
                 return -1;
-            return Marshal.ReadInt32(buffer, 4);
+            int returned = Marshal.ReadInt32(buffer, 4);
+            for (int i = 0; i < returned && i < capacity; i++)
+            {
+                pids.Add((int)(long)Marshal.ReadIntPtr(buffer, headerSize + IntPtr.Size * i));
+            }
+            return returned;
         }
         finally
         {

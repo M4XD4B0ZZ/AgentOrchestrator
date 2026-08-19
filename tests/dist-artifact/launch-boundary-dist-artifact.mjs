@@ -31,7 +31,8 @@
  *   3. helper death without the caller asking for it is `BOUNDARY_LOST`, and
  *      takes the tree — the defect the ADR added a fifth outcome for;
  *   4. AO death takes helper and tree with it, with no cleanup code running;
- *   5. descendants the child orphaned are job members, and die with the job;
+ *   5. processes the child orphaned — real ones, left by a root that is not
+ *      itself a Node process — are job members *by pid*, and die with the job;
  *   6. the child's real exit code survives the boundary;
  *   7. every failure to establish ownership refuses, and nothing ran;
  *   8. the shipped helper refuses a request that would weaken containment;
@@ -428,37 +429,91 @@ measure('AO death takes the helper and the whole tree, with no cleanup code', as
   );
 });
 
-measure('descendants the child orphaned are job members and die with the job', async (c) => {
-  // The root leaves when this case says so, not on a clock. Every descendant
-  // has to exist before the root exits, or the job is counting a tree that was
-  // never finished being built — which is what a timer produced on a loaded CI
-  // runner: 5 members where the tree has 6, and a failure that says nothing
-  // about containment. The flag turns "the tree is up" into an observation.
-  const flag = join(tempDir('ao-boundary-flag-'), 'root-may-exit.txt');
-  const { start, heartbeatDir } = await startTree({
-    lifetimeMs: 40_000,
-    rootLifetimeMs: 40_000,
-    rootExitFlag: flag,
+measure('processes the child orphaned are job members, by pid, and die with the job', async (c) => {
+  // ── what this case used to measure, and did not ──────────────────────────
+  //
+  // It used to launch a tree of Node processes, let the root exit, and assert
+  // that the job then had six members. It passed locally and failed on CI with
+  // five, and the reason turned out to be that it was measuring something else
+  // entirely: **the descendants were already dead**. Node puts every child it
+  // spawns into a kill-on-close job of its own, so a Node root takes its whole
+  // subtree with it when it exits — nothing was ever orphaned. The six members
+  // the job reported were the descendants' `conhost.exe` processes, which
+  // happened to be six as well. Measured by resolving the job's member pids
+  // against a process snapshot: not one of them was a fixture process.
+  //
+  // So the root here is not a Node process. It is a three-line program compiled
+  // for this case, which starts the long-lived children and exits. Nothing
+  // between it and them creates a job, so they are genuinely orphaned — and the
+  // assertion is on **pids**, not on a count: every process still running when
+  // the root exited must appear in the job's own member list. A count cannot
+  // tell a descendant from a conhost, which is exactly how the old version
+  // passed for years' worth of runs without measuring its claim.
+  const csc = locateCsc();
+  if (!c.check(csc !== null, 'the in-box C# compiler was not found')) return;
+
+  const heartbeatDir = tempDir('ao-boundary-hb-');
+  const buildDir = tempDir('ao-boundary-orphan-root-');
+  const source = join(buildDir, 'OrphanRoot.cs');
+  const rootExe = join(buildDir, 'orphan-root.exe');
+  const orphans = 4;
+  writeFileSync(
+    source,
+    [
+      'using System;',
+      'using System.Diagnostics;',
+      'using System.IO;',
+      'using System.Threading;',
+      'internal static class OrphanRoot {',
+      '  private static int Main(string[] a) {',
+      // a: node, fixture, heartbeatDir, count
+      '    int wanted = int.Parse(a[3]);',
+      '    for (int i = 0; i < wanted; i++) {',
+      '      ProcessStartInfo psi = new ProcessStartInfo(a[0],',
+      '        "\\"" + a[1] + "\\" \\"" + a[2] + "\\" 0 0 40000 40000");',
+      '      psi.UseShellExecute = false;',
+      '      Process.Start(psi);',
+      '    }',
+      // Leave only once every child is really running, so "still running when
+      // the root exited" is a fact rather than a hope.
+      '    while (Directory.GetFiles(a[2], "hb-*.txt").Length < wanted) Thread.Sleep(25);',
+      '    return 0;',
+      '  }',
+      '}',
+    ].join('\n'),
+    'utf8',
+  );
+  execFileSync(csc, ['/nologo', '/target:exe', `/out:${rootExe}`, source], { stdio: 'pipe' });
+
+  const start = await startOwnedProcess({
+    file: rootExe,
+    args: [process.execPath, treeFixture, heartbeatDir, String(orphans)],
   });
   if (!c.check(start.established, 'boundary refused')) return;
   const owned = start.process;
-  c.check(await waitForTree(heartbeatDir, 7, 30_000), 'the 7-process tree never appeared');
-  writeFileSync(flag, 'go', 'utf8');
+  owned.helper.stdout.resume();
+  owned.helper.stderr.resume();
 
   const ending = await owned.ending;
-  c.check(
-    ending.ending === 'CHILD_EXITED',
-    `the root's own exit was reported as ${ending.ending}`,
+  c.check(ending.ending === 'CHILD_EXITED', `the root's own exit was reported as ${ending.ending}`);
+
+  const orphanPids = [...heartbeats(heartbeatDir).keys()].map((name) =>
+    Number.parseInt(name.slice(3), 10),
   );
-  const membersAtEnd = ending.status?.jobMembersAtEnd ?? -1;
-  c.note(`job members when the root had exited: ${membersAtEnd}`);
-  // The kernel's own answer, and now an exact one: the tree was complete before
-  // the root was told to leave, so the six orphans it left behind were inside
-  // the ownership boundary, not merely reachable from it.
-  c.check(
-    membersAtEnd === 6,
-    `expected the 6 orphaned descendants to be job members, job reported ${membersAtEnd}`,
+  const memberPids = (ending.status?.raw?.jobMemberPidsAtEnd ?? '')
+    .split(',')
+    .filter((text) => text.length > 0)
+    .map((text) => Number.parseInt(text, 10));
+  const missing = orphanPids.filter((pid) => !memberPids.includes(pid));
+  c.note(
+    `orphans ${orphanPids.length}, job members ${memberPids.length}` +
+      `${missing.length === 0 ? '' : `, not in the job: ${missing.join(',')}`}`,
   );
+
+  c.check(orphanPids.length === orphans, `expected ${orphans} orphans, saw ${orphanPids.length}`);
+  // The kernel's own answer, per process: each orphan was inside the ownership
+  // boundary, not merely reachable from it.
+  c.check(missing.length === 0, `the job did not list ${missing.join(',')}`);
   const survivors = await liveCount(heartbeatDir);
   c.check(survivors === 0, `${survivors} orphan(s) outlived the job`);
   owned.dispose();

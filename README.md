@@ -5768,8 +5768,8 @@ nothing started.
 processes: ownership established and verified; the caller's own termination;
 **helper death → `BOUNDARY_LOST` with zero survivors**; **AO death → helper and
 tree gone, with no cleanup code running, and what it leaves behind unreadable
-as a completion**; orphaned descendants counted by the kernel as job members (6
-of them) and killed with the job; exit-code fidelity; three real fail-closed
+as a completion**; processes the child orphaned confirmed as job members **by
+pid** and killed with the job; exit-code fidelity; three real fail-closed
 refusals with a marker file proving nothing ran; the weakening-key refusals,
 with a positive control that the same request minus the key is accepted and
 runs; verify-before-execute; both placement modes; the argument vector, working
@@ -5803,12 +5803,23 @@ establishes "two independent lines of defence, and it takes both being wrong"
 inside this repository rather than by citation, and without it every "0
 survivors" above could be an instrument that cannot see anything.
 
-One measured fact belongs with the AO-death case, because it explains what that
-case deliberately does *not* assert: node puts every child it spawns into a
-kill-on-close job of its own, so when AO dies the helper is killed by that job
-— usually before its own owner watch can record anything. Containment holds
-twice over there; the owner watch is what covers an owner that is not the
+One measured fact runs through two of those cases: **node puts every child it
+spawns into a kill-on-close job of its own.** It explains what the AO-death case
+deliberately does not assert — when AO dies the helper is killed by that job,
+usually before its own owner watch can record anything, so containment holds
+twice over there and the owner watch is what covers an owner that is *not* the
 parent.
+
+It also invalidated an earlier version of the orphan case, which is worth
+stating because a green test hid it. That case launched a tree of Node
+processes, let the root exit, and asserted the job then had six members. A Node
+root takes its whole subtree with it, so nothing was ever orphaned; the six
+members were the descendants' `conhost.exe` processes, and resolving the job's
+member pids against a process snapshot showed that not one of them was a
+fixture process. The case now uses a root that is *not* a Node process — three
+lines of C# compiled for it — so the children it leaves behind are genuinely
+orphaned, and it asserts membership **by pid** rather than by a count that
+cannot tell a descendant from a conhost.
 
 ## Not implemented yet
 
