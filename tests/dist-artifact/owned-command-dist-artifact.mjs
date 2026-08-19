@@ -15,9 +15,11 @@
  *
  * Nine of the cases below run the same fixture down two paths — `runCommand`,
  * the contract AO has today, and `runOwnedCommand`, the one this slice adds.
- * The invocations are identical except for the heartbeat directory each half
- * writes into, which has to differ so that a survivor can be attributed to the
- * path that left it —
+ * Most of them go through `bothPaths`, which hands *one* argument vector to
+ * both, so the two halves share a heartbeat directory and a survivor is
+ * identified by its own `hb-<pid>` file rather than by which runner left it.
+ * Two cases build their halves separately and give each its own directory. The
+ * point of the comparison is not attribution, it is agreement —
  * and require them to agree about output, budgets, exit codes, timeouts and
  * stdin delivery. This is not an attempt to reproduce `runCommand`'s
  * `taskkill` containment, which the ADR replaces rather than imitates. It is
@@ -94,7 +96,9 @@
  *      what quotes each argument — told apart by an argument with a space;
  *  18. a budget and a timeout each name their own outcome when clearly ordered,
  *      and produce nothing but those two when armed to fire together;
- *  19. a deadline that expires during establishment is a timeout, and it stays
+ *  19. a request this repository cannot encode is refused as a thrown
+ *      programming error, and leaves no temporary directory behind;
+ *  20. a deadline that expires during establishment is a timeout, and it stays
  *      conservative about whether anything ran.
  *
  * The same-tick case — two policies triggering inside one turn of the loop — is
@@ -836,6 +840,35 @@ test('a budget the caller disabled bounds nothing, on both paths', async (c) => 
   c.equal(owned.stdout.length, direct.stdout.length, 'and on the byte count');
 });
 
+test('a request that cannot be encoded leaves no temporary directory behind', async (c) => {
+  // Measured, and it can only be measured here: run from `src` the adapter
+  // refuses with `BOUNDARY_EXECUTABLE_MISSING` before it reaches the encoder,
+  // so a vitest file cannot get to this path at all.
+  //
+  // `startOwnedProcess` creates its temporary directory before the encoder that
+  // refuses a NUL in an argument, and this module re-throws that refusal
+  // deliberately — a programming error, not a run outcome. So there is no
+  // result to carry a leftovers report, and before the fix there was no cleanup
+  // either: one refused request, one empty `ao-boundary-*` directory in TEMP
+  // for the life of the machine. Slice 3 will pass agent-derived text through
+  // `args`.
+  const before = new Set(
+    readdirSync(tmpdir()).filter((name) => name.startsWith('ao-boundary-')),
+  );
+  let threw = null;
+  try {
+    await runOwnedCommand({ file: process.execPath, args: [fixture, 'a\u0000b'] });
+  } catch (error) {
+    threw = error;
+  }
+  c.check(threw !== null, 'the request must be refused rather than encoded');
+  c.equal(threw?.constructor?.name, 'InvalidBoundaryRequestError', 'the refusal is a programming error');
+  const after = readdirSync(tmpdir()).filter(
+    (name) => name.startsWith('ao-boundary-') && !before.has(name),
+  );
+  c.check(after.length === 0, `no temporary directory is left behind, found ${JSON.stringify(after)}`);
+});
+
 // ── 18. the two policies, ordered and contending ────────────────────────────
 
 test('a budget and a timeout each name their own outcome, and never a third', async (c) => {
@@ -905,11 +938,11 @@ test('a budget and a timeout each name their own outcome, and never a third', as
   // every time — measured, and recorded in the note below — so the negative end
   // is what puts the deadline genuinely before there is any output to bound.
   const seen = new Map();
-  // Two of these are not a straddle at all, and they are here because the two
+  // Three of these are not a straddle at all, and they are here because the two
   // guards below must not be able to fail for a reason that is not a defect: a
-  // 1ms budget cannot reach ownership on any machine, and a budget four times
-  // measured establishment plus a second cannot fail to. The rest sweep the
-  // window between them, which is where the contention actually is.
+  // 1ms budget cannot reach ownership on any machine, and the two widest cannot
+  // fail to reach the flood. The rest sweep the window between them, which is
+  // where the contention actually is.
   const budgets = [
     1,
     ...[-90, -70, -50, -30, -15, -5, 0, 10, Math.round(establishMs / 2)].map((delta) =>
@@ -921,11 +954,12 @@ test('a budget and a timeout each name their own outcome, and never a third', as
     // ends when the helper reports membership, before the target has run a
     // line, so the slack has to cover a cold node start as well.
     //
-    // Two rather than one because the guard below is otherwise carried by a
-    // single budget: measured here, the sweep resolves to nine timeouts and two
-    // limit hits, and losing the one wide budget on a loaded runner would turn
-    // the gate red for a reason that is not a defect. Neither run costs its
-    // budget — a budget that fires ends the run at once.
+    // Two rather than one so that neither guard rests on a single run. Which
+    // way the middle of the sweep falls is a property of the machine, not of
+    // this file — it has been measured resolving mostly to timeouts on one run
+    // and mostly to limit hits on the next — so the two ends are what the
+    // guards are actually pinned to. Neither wide run costs its budget: a
+    // budget that fires ends the run at once.
     establishMs * 8 + 3_000,
     establishMs * 20 + 10_000,
   ];
@@ -967,7 +1001,7 @@ test('a budget and a timeout each name their own outcome, and never a third', as
   );
 });
 
-// ── 19. a deadline that expires during establishment ───────────────────────────────────────────────────
+// ── 20. a deadline that expires during establishment ───────────────────────────────────────────────────
 
 test('an unknown launch stays conservative about side effects', async (c) => {
   // A wall-clock budget too small for a process to start in. Establishment

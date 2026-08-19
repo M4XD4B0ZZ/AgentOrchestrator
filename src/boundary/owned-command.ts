@@ -76,6 +76,8 @@ import {
   type OwnedProcessRequest,
   type OwnedProcessStart,
 } from './start-owned-process.js';
+import { existsSync } from 'node:fs';
+
 import {
   InvalidBoundaryRequestError,
   type BoundaryEnding,
@@ -183,7 +185,7 @@ export type OwnedCommandFailureCode =
    * The boundary and this side disagree about what happened.
    *
    * Reported as a lost boundary, because "we do not know what happened to the
-   * tree" is exactly what it means. Six producers, and only the first is
+   * tree" is exactly what it means. Eight producers, and only the first is
    * unreachable:
    *
    *   - a `TERMINATED_BY_CALLER` ending with no policy here having asked — only
@@ -203,7 +205,9 @@ export type OwnedCommandFailureCode =
    *   - a child exit code no process could have exited with, which is why the
    *     launch nonce exists — a status file is not beyond a third party's
    *     reach;
-   *   - a termination reason this build does not declare.
+   *   - a termination reason this build does not declare;
+   *   - an ending that is absent, or is not an object at all;
+   *   - an ending naming a state this build does not declare.
    */
   | 'ENDING_INCONSISTENT';
 
@@ -340,8 +344,9 @@ function reportedExitCode(ending: BoundaryEnding): number | null {
  * Every combination lands on exactly one declared outcome, and the ones that
  * cannot be proven to be a completion are not one.
  *
- * Six combinations are contradictory rather than merely unusual, and all of
- * them fail closed rather than being rounded to the nearest plausible answer.
+ * Eight combinations are contradictory or unreadable rather than merely
+ * unusual, and all of them fail closed rather than being rounded to the nearest
+ * plausible answer.
  * They are enumerated on {@link OwnedCommandFailureCode}'s
  * `ENDING_INCONSISTENT` member, next to which of them are reachable.
  */
@@ -378,6 +383,12 @@ export function classifyOwnedCommand(
    * is what makes the enumeration in `tests/v3-02-owned-command.test.ts` a
    * statement about the whole product rather than about one row of it.
    */
+  // Presence before value, and for the same stated reason. The value check
+   // below was justified by "anything not type checked against this build" —
+  // and an absent ending is exactly what a JSON round trip makes of a helper
+  // that died before publishing one. Reading `.ending` off it threw a
+  // `TypeError` out of the one function whose contract is to fail closed.
+  if (ending === null || typeof ending !== 'object') return inconsistent();
   if (!KNOWN_ENDINGS.has(ending.ending)) return inconsistent();
 
   const provesOwnership = ending.ending === 'CHILD_EXITED' || ending.ending === 'TERMINATED_BY_CALLER';
@@ -751,9 +762,10 @@ function releaseHelper(owned: OwnedProcess): void {
       // Listened to before it is destroyed, and that ordering is the point. A
       // stream destroyed under an in-flight write reports it, and an `error`
       // with no listener is an uncaught exception in *this* process. One of the
-      // two callers reaches here before the run loop has attached its own stdin
-      // listener — and it is the path that exists for a boundary already known
-      // not to be behaving as constructed.
+      // three callers — the streams-unavailable branch — reaches here before
+      // the run loop has attached its own stdin listener, and it is the path
+      // that exists for a boundary already known not to be behaving as
+      // constructed.
       stream.on('error', () => {
         /* this process has stopped reading and writing this stream */
       });
@@ -785,10 +797,11 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
    * A temporary directory this run created and did **not** remove, or `null`.
    *
    * It is a leftovers report, not a location: `null` is the normal answer, and
-   * it means there is nothing here to reap. The first version of this field
-   * reported the working directory of every run — including the ones it had
-   * just deleted — so a caller doing the obvious thing with it would have aimed
-   * a recursive delete at a freed `mkdtemp` name on every command.
+   * it means this module created no temporary directory that is still there.
+   * The first version of this field reported the working directory of every run
+   * — including the ones it had just deleted — so a caller doing the obvious
+   * thing with it would have aimed a recursive delete at a freed `mkdtemp` name
+   * on every command.
    *
    * Non-null on exactly the three results that deliberately keep their
    * directory, because each of them may leave a helper still writing into it:
@@ -1056,9 +1069,10 @@ export async function runOwnedCommand(
         }),
         helperPid: null,
         childPid: null,
-        // Nothing to reap: `startOwnedProcess` removes a temporary directory
-        // it created before it reports a refusal, and a directory the caller
-        // supplied stays the caller's.
+        // Nothing to reap: `startOwnedProcess` disposes of a temporary directory
+        // it created when it refuses — deferred until its own ending settles,
+        // so shortly after rather than before it returns — and a directory the
+        // caller supplied stays the caller's.
         retainedWorkDir: null,
         ending: launch.ending,
       });
@@ -1072,8 +1086,15 @@ export async function runOwnedCommand(
      * Only a temporary directory *this* module caused to be created counts: one
      * the caller supplied is the caller's, is never removed here, and is not
      * this field's business.
+     *
+     * And it is *observed*, not inferred. Every removal on the boundary's side
+     * is an `rmSync` inside a swallowing `catch`, so "we called dispose" is not
+     * evidence that the directory is gone — an `EBUSY` from a scanner or from
+     * the helper's own staging file leaves it there. Asking the filesystem is
+     * the only way this field can mean what it says.
      */
-    const retained = (): string | null => (options.workDir === undefined ? owned.workDir : null);
+    const retained = (): string | null =>
+      options.workDir !== undefined || !existsSync(owned.workDir) ? null : owned.workDir;
     const stdout = new BoundedSink(usable(options.maxStdoutBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
     const stderr = new BoundedSink(usable(options.maxStderrBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
 
@@ -1205,11 +1226,15 @@ export async function runOwnedCommand(
     const remaining = deadline - Date.now();
     if (remaining <= 0) terminate('TIMEOUT');
     else {
-      // Not clamped here: `usableDelay` already bounded `timeoutMs` by
-      // `MAX_TIMER_MS`, and `remaining` is at most that. A second `Math.min`
-      // would be a bound neither test nor mutant could distinguish from its
-      // absence, which is how a check stops being one.
-      timer = setTimeout(() => terminate('TIMEOUT'), remaining);
+      // Clamped, and the clamp is not the redundancy an earlier round took it
+      // for. `usableDelay` bounds `timeoutMs`, but `remaining` is
+      // `deadline - Date.now()` and `Date.now()` is the wall clock: an NTP step
+      // backwards between the two readings makes `remaining` *larger* than the
+      // budget. With `timeoutMs: Infinity`, clamped to exactly `MAX_TIMER_MS`,
+      // a one-millisecond step is enough to push it over — and node turns an
+      // over-large delay into 1 ms, so the run this caller asked never to time
+      // out would terminate at once.
+      timer = setTimeout(() => terminate('TIMEOUT'), Math.min(remaining, MAX_TIMER_MS));
       timer.unref?.();
     }
 
@@ -1299,8 +1324,13 @@ export async function runOwnedCommand(
       // both, and reported on `retainedWorkDir` for a caller that can decide
       // later with more evidence than this module has.
       const abandoned = Object.freeze({ ...result, retainedWorkDir: retained() });
-      // And the helper is asked to die first, exactly as the
-      // streams-unavailable branch asks.
+      // The sinks come off first. The streams-unavailable branch has none to
+      // remove, so its symmetry does not cover this: a chunk delivered after
+      // `releaseHelper` would run `terminate` on a run that has already
+      // returned, arming a grace timer the `finally` has already been past.
+      outStream.off('data', onStdout);
+      errStream.off('data', onStderr);
+      // And the helper is asked to die, as the streams-unavailable branch asks.
       // Both branches exist for a boundary that is not behaving as constructed,
       // and this one is reached when node reports a *failed kill* — so the
       // helper may still be alive, still holding the only handle to a

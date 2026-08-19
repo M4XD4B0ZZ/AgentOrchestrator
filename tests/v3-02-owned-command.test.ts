@@ -28,9 +28,12 @@
 
 import type { ChildProcess } from 'node:child_process';
 import { getEventListeners } from 'node:events';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 import {
   classifyBoundaryEnding,
@@ -50,8 +53,26 @@ import {
 import type { OwnedProcessStart } from '../src/boundary/start-owned-process.js';
 
 const NONCE = 'b3f0f0c8-0000-4000-8000-000000000002';
-/** The working directory the fake boundary reports, so a case can name it. */
-const FAKE_WORK_DIR = 'C:\\fake';
+
+/**
+ * Every real directory a fake boundary made, removed when the file is done.
+ *
+ * The fake creates a real one, and its `dispose` really removes it, because
+ * `retainedWorkDir` is answered by asking the filesystem. A fake whose
+ * `dispose` only incremented a counter could only ever pin the counter, which
+ * is what the first version of these cases did.
+ */
+const fakeWorkDirs: string[] = [];
+
+afterAll(() => {
+  for (const dir of fakeWorkDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* a leftover temporary directory is not a test result */
+    }
+  }
+});
 
 /**
  * The byte budget a run actually applied, read back from what it kept.
@@ -224,6 +245,9 @@ function fakeBoundary(
     },
   });
 
+  const workDir = mkdtempSync(join(tmpdir(), 'ao-fake-boundary-'));
+  fakeWorkDirs.push(workDir);
+
   let starts = 0;
   let terminations = 0;
   let disposals = 0;
@@ -293,11 +317,16 @@ function fakeBoundary(
         assignedAtCreation: true,
         verifiedInJob: true,
         jobMembersAtStart: 1,
-        workDir: FAKE_WORK_DIR,
+        workDir,
         terminate,
         ending,
         dispose: () => {
           disposals += 1;
+          try {
+            rmSync(workDir, { recursive: true, force: true });
+          } catch {
+            /* the case asserts on the directory, so a failure here is visible */
+          }
         },
       },
     };
@@ -319,6 +348,7 @@ function fakeBoundary(
       if (!err.writableEnded) err.write(text);
     },
     stdinClosed: () => stdinClosedPromise,
+    workDir: () => workDir,
     /** Settles with the ending this fake was built for, as-is. */
     settle: () => {
       if (settled || options.endWith === undefined) return;
@@ -1806,6 +1836,9 @@ describe('the defects the seventh review found', () => {
     expect(completed.outcome).toBe('COMPLETED');
     expect(boundary.disposals()).toBe(1);
     expect(completed.retainedWorkDir).toBeNull();
+    // Observed, not counted: the field means "this is still there", and a
+    // `dispose` that silently failed would make the count a lie.
+    expect(existsSync(boundary.workDir())).toBe(false);
   });
 
   it('reports the directory it deliberately kept', async () => {
@@ -1818,7 +1851,8 @@ describe('the defects the seventh review found', () => {
     const result = await run;
     expect(result.failureCode).toBe('BOUNDARY_TERMINATION_UNCONFIRMED');
     expect(boundary.disposals()).toBe(0);
-    expect(result.retainedWorkDir).toBe(FAKE_WORK_DIR);
+    expect(result.retainedWorkDir).toBe(boundary.workDir());
+    expect(existsSync(boundary.workDir())).toBe(true);
     boundary.finish({ childExitCode: null });
   });
 
@@ -1864,7 +1898,8 @@ describe('the defects the seventh review found', () => {
     expect(result.outcome).toBe('BOUNDARY_LOST');
     expect(result.failureCode).toBe('ENDING_INCONSISTENT');
     expect(boundary.terminations()).toBe(1);
-    expect(result.retainedWorkDir).toBe(FAKE_WORK_DIR);
+    expect(result.retainedWorkDir).toBe(boundary.workDir());
+    expect(existsSync(boundary.workDir())).toBe(true);
     expect(boundary.disposals()).toBe(0);
   });
 
@@ -1890,4 +1925,43 @@ describe('the defects the seventh review found', () => {
       expect(result.failureCode, termination).toBe('ENDING_INCONSISTENT');
     }
   });
+});
+
+/**
+ * ── What the eighth adversarial review found ───────────────────────────────
+ *
+ * Two of these are defects in round 7's own work, and one is a leak measured
+ * against the shipped artefact on the module's documented re-throw path.
+ */
+describe('the defects the eighth review found', () => {
+  it('fails closed on an ending that is absent rather than throwing', () => {
+    // The round-7 guard read `ending.ending` before establishing that `ending`
+    // existed, so the input its own justification names — "a JSON round trip
+    // makes `null` of an absent value" — produced a `TypeError` out of the one
+    // function whose contract is to fail closed.
+    for (const absent of [null, undefined, 'CHILD_EXITED', 7]) {
+      const result = classifyOwnedCommand({
+        ending: absent as unknown as BoundaryEnding,
+        termination: 'TIMEOUT',
+      });
+      expect(result.outcome, String(absent)).toBe('BOUNDARY_LOST');
+      expect(result.failureCode, String(absent)).toBe('ENDING_INCONSISTENT');
+    }
+  });
+
+  it('reports the directory the streams-unavailable path keeps', () => {
+    // The third of the three retaining paths, and the one round 7 left
+    // unpinned: mutating its `retained()` to `null` passed the whole gate.
+    const boundary = fakeBoundary({ noStreams: true, ignoreTermination: true });
+    return runOwnedCommand(
+      { file: 'C:\\fixture.exe', terminationGraceMs: 20 },
+      { start: boundary.start },
+    ).then((result) => {
+      expect(result.failureCode).toBe('BOUNDARY_STREAMS_UNAVAILABLE');
+      expect(result.retainedWorkDir).toBe(boundary.workDir());
+      expect(existsSync(boundary.workDir())).toBe(true);
+      boundary.finish({ childExitCode: null });
+    });
+  });
+
 });

@@ -136,8 +136,11 @@ rely on that coincidence.
 > measures exactly that — a run completing with the child's own exit code *and*
 > a broken-pipe report, which the mechanism described above could not produce.
 > The requirement this paragraph exists for is unaffected, and is in fact
-> stronger: the boundary's reported delivery state is not merely more reliable
-> than the caller's own pipe, it is the only evidence there is.
+> stronger: for *this* question — did the child close its read end early? — the
+> boundary's report is not merely more reliable than the caller's own pipe, it
+> is the only evidence there is. The caller's own pipe still carries evidence
+> about a different question (whether this side finished handing the payload
+> over), and the adapter uses it for that and only that.
 
 ## Alternatives considered — not selected
 
