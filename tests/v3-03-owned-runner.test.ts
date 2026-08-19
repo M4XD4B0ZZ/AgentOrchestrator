@@ -309,6 +309,35 @@ describe.runIf(IS_WINDOWS)('a Windows command is created behind the boundary', (
     ).rejects.toBeInstanceOf(UnsafeArgumentError);
     expect(captured.options).toHaveLength(0);
   });
+
+  it('keeps UnsafeArgumentError the only exception, on this platform too', async () => {
+    // `runOwnedCommand` re-throws one condition — a request the boundary's
+    // transport cannot represent, such as an `=` inside an environment *name*.
+    // It is a programming error exactly as an unsafe argument is, and it must
+    // arrive as the same class: the three seams above catch
+    // `UnsafeArgumentError` and re-throw everything else, so a second exception
+    // type would escape on Windows and be a typed refusal on POSIX for the same
+    // call.
+    await expect(
+      runCommand(process.execPath, ['--version'], {
+        env: { PATH: process.env['PATH'] ?? '', 'BAD=NAME': 'x' },
+      }),
+    ).rejects.toBeInstanceOf(UnsafeArgumentError);
+  });
+
+  it('carries no part of the refused value in the message it throws', async () => {
+    const secret = 'AO_V303_SECRET_ENV_VALUE';
+    let message = '';
+    try {
+      await runCommand(process.execPath, ['--version'], {
+        env: { PATH: process.env['PATH'] ?? '', 'BAD=NAME': secret },
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).not.toContain(secret);
+    expect(message).not.toContain('BAD=NAME');
+  });
 });
 
 describe.skipIf(IS_WINDOWS)('POSIX keeps the path it had', () => {

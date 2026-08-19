@@ -419,13 +419,17 @@ A read-only local diagnosis. It:
   [Artefacts](#artefacts) and [Version detection](#version-detection)). Every
   probe runs with a wall-clock timeout **and**
   a hard byte budget per stream, both enforced while the output streams; a
-  child that exceeds either has termination **attempted, best-effort** — on
-  Windows via `taskkill /T /F` with a validated numeric PID, so a `.cmd`
-  shim's real program is targeted too, not just the shim. The module then
-  waits, with a bound, for the immediate child's `close` event — not for a
-  verified absence of the whole tree — reporting a distinct failure code
-  (`PROCESS_TREE_KILL_FAILED`) if that event is not observed within the grace
-  window. What that attempt does and does not guarantee is spelled out in
+  child that exceeds either is terminated. **On Windows that is now the launch
+  boundary's job** and the guarantee is the kernel's — the helper holding the
+  only handle to a `KILL_ON_JOB_CLOSE` job dies, and the job takes the target
+  and every descendant with it (see
+  [The productive Windows runner (V3 slice 3)](#the-productive-windows-runner-v3-slice-3)).
+  On POSIX termination stays **best-effort**, through the process group the
+  detached child leads: the module then waits, with a bound, for the immediate
+  child's `close` event — not for a verified absence of the whole tree —
+  reporting a distinct failure code (`PROCESS_TREE_KILL_FAILED`) if that event
+  is not observed within the grace window. What that attempt does and does not
+  guarantee is spelled out in
   [Windows process-tree termination](#windows-process-tree-termination);
 - checks that Claude Code reports a **Claude subscription** login and that
   Codex reports a **ChatGPT** login, using a fail-closed allow-list. The Codex
@@ -453,10 +457,18 @@ Every argument is first validated against a conservative allow-list
 shell metacharacters. Beyond that there are exactly **two** execution paths, and
 they have deliberately different properties.
 
+Where the process is *created* differs by platform since V3 slice 3 — on
+Windows it is the launch boundary's helper rather than `child_process.spawn` —
+but what is created does not: the same resolution, the same planning, the same
+allow-list and the same two paths decide the executable and the command line
+before either mechanism is reached.
+
 **A. Direct executables.** The resolved executable and its arguments are handed
-to `spawn` structurally: a literal argument vector, `shell: false`, no shell and
-no command processor anywhere in the chain. Nothing on this path is re-parsed by
-a shell or an interpreter.
+over structurally: a literal argument vector, `shell: false`, no shell and no
+command processor anywhere in the chain. Nothing on this path is re-parsed by a
+shell or an interpreter. On Windows the boundary rebuilds the command line with
+the same MSVCRT quoting rule node applies, measured identical across ten
+differential cases.
 
 **B. `.cmd` / `.bat` targets.** Node cannot spawn a batch file directly, so this
 path runs it through the trusted Windows command processor **on purpose**.
@@ -468,8 +480,10 @@ command line it parses is not freely constructed:
   through `src/doctor/internal/windows-system-tools.ts`. `COMSPEC` is never
   read, so a caller-controlled `COMSPEC` cannot substitute the interpreter;
 - it is invoked as `cmd.exe /d /s /c "<inner>"` with `shell: false` and
-  `windowsVerbatimArguments: true`, so Node performs no quoting of its own and
-  the string `cmd.exe` receives is exactly the one this module built;
+  verbatim command-line semantics, so nothing performs quoting of its own and
+  the string `cmd.exe` receives is exactly the one this module built. On Windows
+  that verbatim flag now travels to the boundary as part of the launch plan,
+  where the helper reproduces the same rule;
 - every argument is encoded by the strict, fail-closed batch codec
   (`src/doctor/internal/windows-batch-command.ts`): each one — including an
   empty one — is wrapped in a matched quote pair so it produces exactly one
@@ -487,6 +501,16 @@ that the batch command line is narrowly encoded and fail-closed, with no free,
 user-controlled command-string construction anywhere in it.
 
 ### Windows process-tree termination
+
+> **Superseded on Windows by V3 slice 3, and no longer wired to anything.**
+> `runCommand` does not use this mechanism any more: a Windows process's
+> lifetime is decided by the launch boundary's job object, because `taskkill`'s
+> success was measured as no evidence at all — exit code 0 in ten of ten rounds
+> with 38 orphaned descendants alive. The supervisor
+> (`src/doctor/internal/windows-process-tree-termination.ts`) is still in the
+> repository, still has both of its own test suites, and has **no production
+> caller**. This section describes it as it stands; the POSIX paragraph below is
+> the only part still on a productive path.
 
 The termination path is deliberately small, and its guarantee is deliberately
 narrow. It is a separate mechanism from the two execution paths above and shares
@@ -5679,14 +5703,14 @@ finish line again after a passed dogfood and a passed closing audit.
 
 ## The Windows launch boundary (V3 slice 1)
 
-**Delivered as an isolated component, and used by no runner.** This is slice 1
-of the sequence the ADR
+**Delivered as an isolated component.** This is slice 1 of the sequence the ADR
 ([`docs/decisions/2026-08-19-adr-windows-launch-boundary.md`](docs/decisions/2026-08-19-adr-windows-launch-boundary.md))
-sliced: the boundary and its contract exist and are verified; `runCommand`, the
-Claude writer, the verification runner and every other spawn path are
-**unchanged**, and nothing in the product yet obtains a contained process. That
-is the point of the slice, not a gap in it — moving the runners onto the
-boundary is slice 3, and it is its own decision to start.
+sliced: the boundary and its contract, built and verified without touching a
+single runner. It stayed unused through slice 2 as well, deliberately.
+
+**Slice 3 has since made it productive** — every Windows command now runs behind
+it; see "The productive Windows runner (V3 slice 3)" below. What this section
+describes is the component and its guarantees, which are unchanged by that.
 
 | Part | Where |
 | --- | --- |
@@ -5832,13 +5856,15 @@ cancellation, the stdin delivery vocabulary, and the translation of a boundary
 ending into a result a runner could consume. The boundary owns none of that, and
 still does not.
 
-`runCommand`, the Claude writer and the verification runner remain unchanged.
-The reachability pin in `tests/v2-07l-execution-lease.test.ts` now states the one
-edge this slice added and the absence of any consumer: the adapter is the only
-module that imports `start-owned-process`, and **nothing imports the adapter** —
+`runCommand`, the Claude writer and the verification runner were unchanged by
+*this* slice, and the reachability pin in `tests/v2-07l-execution-lease.test.ts`
+stated that as an assertion rather than an intention: the adapter was the only
+module importing `start-owned-process`, and nothing imported the adapter —
 type-only imports included, which is why those pins count erased imports too.
-When slice 3 wires a runner onto this path, that pin fails, and answering "what
-fences it?" is that slice's job rather than a discovery afterwards.
+
+Slice 3 created that reachability and the pin duly failed, which is what it was
+for. It was replaced rather than deleted: see slice 3 below for the structural
+statement that took its place.
 
 | Part | Where |
 | --- | --- |
@@ -5881,18 +5907,116 @@ a negative control — a deliberately weakened helper that leaves survivors — 
 it belongs to slice 1's gate, which has one. Here the survivor sweep is hygiene:
 whatever policy ended a run, nothing of that run is left executing.
 
-Two divergences from `runCommand` are recorded rather than smoothed over,
-because slice 3 has to reconcile them: `timeoutMs: Infinity` is effectively
-unbounded here and fires at 1ms there, and a stdin write that fails while the
-child exits cleanly is `FAILED` there and `UNCONFIRMED` here — this module does
-not state a verdict nobody observed.
+Two divergences from `runCommand` were recorded here rather than smoothed over,
+and slice 3 settled both. `timeoutMs: Infinity` was effectively unbounded here
+and fired at 1 ms there; `runCommand` now applies the same clamp on both
+platforms, from this module's own exported constant. A stdin write that fails
+while the child exits cleanly is `FAILED` on the POSIX path and `UNCONFIRMED`
+here; the weaker word stands, because behind a boundary the broken pipe is the
+*helper's* and says nothing about what the child received. Both are documented
+on the types themselves and pinned in `tests/v3-03-owned-runner.test.ts`.
+
+## The productive Windows runner (V3 slice 3)
+
+**Every Windows command AO runs is now created behind the launch boundary.**
+This is slice 3 of the ADR's sequence, and it is the first one that changes what
+a productive run does: the agent seam, the verification seam, the Git seam and
+every diagnostic probe reach `runCommand`, and on Windows `runCommand` hands a
+resolved launch plan to the owned adapter instead of spawning the target itself.
+
+    leased-spawns.ts  →  agent-command / verify-command / git-command
+                      →  doctor/exec.ts  (resolution, planning, budgets, policy)
+                      →  boundary/owned-command.ts
+                      →  boundary/start-owned-process.ts
+                      →  ao-launch.exe  →  strict Job Object  →  target + tree
+
+There is **no second path**. A boundary that cannot be established is
+`SPAWN_FAILED`; one established and then lost is `BOUNDARY_LOST`; nothing runs
+unowned, and no `taskkill` decides a Windows process's lifetime any more. The
+supervisor that used to is still in the repository and is wired to nothing.
+
+| Part | Where |
+| --- | --- |
+| The dispatch and the translation | `src/doctor/exec.ts` |
+| Its contract, dispatch and mapping | `tests/v3-03-owned-runner.test.ts` |
+| The productive real-process gate | `tests/dist-artifact/owned-command-dist-artifact.mjs` (case 5b) |
+| The reachability and lease pins | `tests/v2-07l-execution-lease.test.ts` |
+
+### What is preserved, and what is new
+
+`CommandResult` gained exactly one member, `BOUNDARY_LOST`, on `outcome` and on
+`failureCode`. Everything else is the contract AO already had: PATH/PATHEXT
+resolution, `.cmd`/`.bat` through the trusted `cmd.exe /d /s /c` route with its
+batch codec and verbatim command line, cwd, the environment, separate streams,
+per-stream byte budgets, timeouts, exit-code fidelity, the fixed failure codes
+and the four-word stdin vocabulary.
+
+`NOT_FOUND` in particular is **kept**, although the ADR's five-member list omits
+it. It answers a different question — "there is no such program on this machine"
+— it is decided by resolution before anything is launched, and a capability
+probe reads it. `processTreeKilled` is also kept, with its narrow legacy meaning
+intact: it says a *best-effort* mechanism reported success, none runs behind the
+boundary, so it is `false` there. Whether containment held is reported on
+`outcome`, where it is actually decided.
+
+### What fences it
+
+The boundary carries process **ownership** and no authority of its own: it
+contains whatever it is asked to start. So the question this slice had to answer
+is what may ask. The answer is unchanged by the boundary, and asserted
+structurally: `owned-command.ts` has exactly one importer and it is
+`doctor/exec.ts`; no module under `src/loop/`, `src/agent/`, `src/verify/` or
+`src/worktree/` may import any boundary module; and the productive runners stay
+reachable only through `leasedAgent`/`leasedVerify`, with the Git mutations
+fenced immediately before the effect. No lease logic went into the adapter or
+the native helper.
+
+### Two defects the productive path exposed
+
+Both were in slice 1/2 code, both were invisible to their own gates because
+those gates run a handful of commands rather than thousands, and both are now
+pinned by a counter-proof that was confirmed to fail against the unfixed code.
+
+**The status publish lost a race with its own reader.** The helper publishes by
+atomic rename; AO polls that same file to learn that ownership holds; and a file
+open for reading cannot be replaced, because a plain read handle carries no
+`FILE_SHARE_DELETE`. The rename failed, the staging file was deleted, and the
+child's exit code was never published — so a run that completed normally with
+exit code 0 came back `BOUNDARY_LOST / NO_CHILD_EXIT_OBSERVED`. Measured at 3 of
+320 fast commands under eight-way concurrency. The publish now retries, bounded.
+
+**A short-lived child's output was discarded.** The adapter attached its output
+listeners after establishment — and a fast child finishes inside that window, so
+node, with nothing reading the pipe, ended and destroyed the stream and took the
+buffered bytes with it. The run reported `COMPLETED`, exit code 0, empty
+`stdout`: indistinguishable from a command that printed nothing, which is the
+worst shape a defect can take on a path `git-query.ts` reads a repository's
+identity from. Measured at 4 of 60 identical `.cmd` runs. The streams are handed
+to the adapter in the same tick as the spawn now.
+
+### The costs, stated
+
+Establishment is a real cost: one extra process and a status handshake per
+command, ~30 ms on an idle machine and 228 ms as the worst of three under load
+(`test:dist-owned-command` prints the number every run). The suite's per-test
+ceiling was raised from 30 s to 90 s because of it, not to accommodate a flaky
+test — a case driving a real remediation loop pays that cost dozens of times.
+
+One test file was withdrawn rather than adapted:
+`tests/run-command-tree-kill-races.test.ts` pinned `runCommand`'s Windows
+tree-kill lifecycle, and that lifecycle no longer exists. The supervisor itself
+keeps both of its own suites, including the serial real-process gate in
+`verify`.
 
 ## Not implemented yet
 
-Still missing, deliberately: unattended operation; owned process containment in
-any productive runner; and any product-side PR/CI/merge automation.
-`READY_FOR_PR` remains terminal — the orchestrator hands a finished task to a
-human and stops there.
+Still missing, deliberately: unattended operation; owned process containment on
+POSIX; containment evidence in the lease and the recovery contract; and any
+product-side PR/CI/merge automation. `READY_FOR_PR` remains terminal — the
+orchestrator hands a finished task to a human and stops there.
+
+Owned process containment in the productive runner is **no longer** on that
+list on Windows: V3 slice 3 delivered it (below).
 
 Owned containment is still missing, but it is no longer an open *question*. A
 measurement spike on 2026-08-18 settled which mechanism can provide it on
@@ -5914,11 +6038,10 @@ cannot be established or kept is **fail-closed**, and a boundary lost mid-run is
 **`BOUNDARY_LOST`, never `COMPLETED`** — when the boundary was killed under
 measurement the tree died correctly and the run still looked like a normal
 completion, which is the failure that state exists to prevent. The ADR itself
-changed no `src/` file; **slices 1 and 2 have since been built** — see "The
-Windows launch boundary (V3 slice 1)" and "The owned-command adapter (V3 slice
-2)" above — and both are deliberately isolated components: no productive runner
-obtains a contained process yet, nothing in the product even imports the
-adapter, and each remaining slice is still its own decision to start.
+changed no `src/` file; **slices 1, 2 and 3 have since been built** — see the
+three sections above — so on Windows a productive runner now does obtain a
+contained process, and each remaining slice (lease and recovery evidence, then
+unattended recovery on top of it) is still its own decision to start.
 
 **The lease came before the block runner, not after it**, and V2-07 is what forced
 that change of order. The ledger's compare-and-swap is advisory, so two concurrent

@@ -107,6 +107,21 @@ import type { StdinDelivery } from '../doctor/exec.js';
 
 export type { StdinDelivery };
 
+/**
+ * Re-exported so that `../doctor/exec.js` needs one window onto this boundary
+ * and not two.
+ *
+ * It is the one exception `runOwnedCommand` lets out — a request the transport
+ * cannot represent is a programming error here, exactly as an unsafe argument
+ * is on the diagnostics path — and the runner has to catch it in order to keep
+ * its own "the only thrown error is `UnsafeArgumentError`" contract true on
+ * both platforms. Importing `./launch-boundary.js` there for one class would
+ * put a third module on the boundary's contract, which the reachability pin in
+ * `tests/v2-07l-execution-lease.test.ts` states there are exactly two of — and
+ * that pin is worth more than the directness.
+ */
+export { InvalidBoundaryRequestError };
+
 /** Default wall-clock budget for one owned command, establishment included. */
 export const DEFAULT_OWNED_TIMEOUT_MS = 20_000;
 

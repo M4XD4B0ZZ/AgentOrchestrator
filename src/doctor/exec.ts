@@ -84,6 +84,7 @@ import { realpathSync, statSync } from 'node:fs';
 import { delimiter as pathDelimiter, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import {
+  InvalidBoundaryRequestError,
   MAX_TIMER_MS,
   runOwnedCommand,
   type OwnedCommandFailureCode,
@@ -1142,22 +1143,48 @@ export async function runCommand(
      * contract, so the file this validated is the file that runs.
      */
     const runOwned = dependencies.runOwned ?? runOwnedCommand;
-    const owned = await runOwned({
-      file: plan.file,
-      args: plan.args,
-      verbatim: plan.verbatim,
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-      // The block libuv would have produced for the same call, so that moving
-      // the mechanism does not move the environment. See the note above.
-      env: withWindowsPlatformBackfill(options.env),
-      timeoutMs,
-      maxStdoutBytes,
-      maxStderrBytes,
-      // The same option under the name that layer gives it. Both mean "how long
-      // termination gets before it is reported as unconfirmed".
-      terminationGraceMs: killGraceMs,
-      ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
-    });
+    let owned: OwnedCommandResult;
+    try {
+      owned = await runOwned({
+        file: plan.file,
+        args: plan.args,
+        verbatim: plan.verbatim,
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        // The block libuv would have produced for the same call, so that moving
+        // the mechanism does not move the environment. See the note above.
+        env: withWindowsPlatformBackfill(options.env),
+        timeoutMs,
+        maxStdoutBytes,
+        maxStderrBytes,
+        // The same option under the name that layer gives it. Both mean "how long
+        // termination gets before it is reported as unconfirmed".
+        terminationGraceMs: killGraceMs,
+        ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+      });
+    } catch (error) {
+      // `runOwnedCommand` never throws for a failing *command* — but it does
+      // re-throw one condition, and this function's contract has to survive
+      // that. `InvalidBoundaryRequestError` is raised for a request the
+      // boundary's transport cannot represent: a NUL inside a value, or an `=`
+      // in an environment name. Both are programming errors in this repository,
+      // exactly as an unsafe argument is, and both are refused before anything
+      // is created.
+      //
+      // Translated into the one exception this module documents rather than let
+      // out as a second type. Otherwise the same call throwing
+      // `UnsafeArgumentError` on POSIX would throw something else on Windows,
+      // and the three seams above — which catch `UnsafeArgumentError` and
+      // re-throw everything else — would turn a bad argument into an escaping
+      // exception on one platform and a typed refusal on the other. The message
+      // is not carried: it may contain the offending value.
+      if (error instanceof InvalidBoundaryRequestError) {
+        throw new UnsafeArgumentError(
+          'Refusing to spawn a diagnostic process: the launch request contains a value the ' +
+            'boundary transport cannot represent. Details are withheld.',
+        );
+      }
+      throw error;
+    }
     return finish(toCommandResultFields(owned));
   }
 
