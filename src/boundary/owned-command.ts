@@ -185,7 +185,7 @@ export type OwnedCommandFailureCode =
    * The boundary and this side disagree about what happened.
    *
    * Reported as a lost boundary, because "we do not know what happened to the
-   * tree" is exactly what it means. Eight producers, and only the first is
+   * tree" is exactly what it means. Ten producers, and only the first is
    * unreachable:
    *
    *   - a `TERMINATED_BY_CALLER` ending with no policy here having asked — only
@@ -207,7 +207,10 @@ export type OwnedCommandFailureCode =
    *     reach;
    *   - a termination reason this build does not declare;
    *   - an ending that is absent, or is not an object at all;
-   *   - an ending naming a state this build does not declare.
+   *   - an ending naming a state this build does not declare;
+   *   - an observation that is not an object at all;
+   *   - an ending promise that rejected rather than resolving, which the run
+   *     loop reports rather than letting escape.
    */
   | 'ENDING_INCONSISTENT';
 
@@ -344,9 +347,9 @@ function reportedExitCode(ending: BoundaryEnding): number | null {
  * Every combination lands on exactly one declared outcome, and the ones that
  * cannot be proven to be a completion are not one.
  *
- * Eight combinations are contradictory or unreadable rather than merely
- * unusual, and all of them fail closed rather than being rounded to the nearest
- * plausible answer.
+ * Ten combinations are contradictory or unreadable rather than merely unusual,
+ * and all of them fail closed rather than being rounded to the nearest plausible
+ * answer.
  * They are enumerated on {@link OwnedCommandFailureCode}'s
  * `ENDING_INCONSISTENT` member, next to which of them are reachable.
  */
@@ -619,12 +622,15 @@ export interface StdinDeliveryObservation {
  * reported a broken pipe.
  */
 export function classifyStdinDelivery(observation: StdinDeliveryObservation): StdinDelivery {
-  // The observation itself, before anything in it. `JSON.stringify` drops a
-  // key whose value is `undefined`, and slice 3 is documented as passing these
-  // across a serialisation boundary — so `requested` arriving absent is the
-  // expected shape of "a payload was configured", not an exotic one. Read as
-  // falsy it answered `NOT_REQUESTED`: *no payload was ever configured*, which
-  // is the strongest false reassurance this vocabulary can give.
+  // The observation itself, before anything in it. An absent `requested` means
+  // one thing — somebody built this observation without deciding — and
+  // `undefined` survives no serialisation, so it is the shape a programmatic
+  // caller produces rather than one a JSON round trip creates. (An earlier
+  // version of this comment claimed the latter; `JSON.stringify` keeps `true`
+  // and `false` alike, and only drops the key when the value was already
+  // `undefined`.) Read as merely falsy it answered `NOT_REQUESTED`: *no payload
+  // was ever configured*, which is the strongest false reassurance this
+  // vocabulary can give, for a caller that had not said either way.
   //
   // `UNCONFIRMED` is the fail-closed answer here for the same reason it is
   // everywhere else in this function: it is what "nobody observed this" means.
@@ -640,8 +646,8 @@ export function classifyStdinDelivery(observation: StdinDeliveryObservation): St
   // this side did afterwards, including ending the run.
   if (observation.forwarded === STDIN_FORWARD_BROKEN) return 'FAILED';
   // The helper's other proven non-delivery: it stopped reading the payload
-  // part-way. Stronger evidence than `NO_CHANNEL` below, and it was falling
-  // through to the weakest word the vocabulary has.
+  // part-way. Stronger evidence than `NOT_HANDED_OVER` below, and it was
+  // falling through to the weakest word the vocabulary has.
   if (observation.forwarded === STDIN_FORWARD_SOURCE_FAILED) return 'FAILED';
   // Nothing was handed over at all, which is an observation rather than an
   // absence of one.
@@ -771,11 +777,11 @@ export interface OwnedCommandDependencies {
  * that ignored its own kill, and without this AO would hang on exit, held open
  * by the pipes of the process it had just declared unaccounted for.
  *
- * Three callers: the streams-unavailable branch, the unconfirmed-termination
- * branch, and a refused ending on a run whose ownership had been established.
- * Only the first reaches here before the run loop has attached its own stdin
- * error listener, which is why the listener below is attached before the
- * destroy rather than assumed to exist.
+ * Four callers: the streams-unavailable branch, the unconfirmed-termination
+ * branch, an ending promise that rejected, and a refused ending on a run whose
+ * ownership had been established. Only the first reaches here before the run
+ * loop has attached its own stdin error listener, which is why the listener
+ * below is attached before the destroy rather than assumed to exist.
  */
 function releaseHelper(owned: OwnedProcess): void {
   for (const stream of [owned.helper.stdout, owned.helper.stderr, owned.helper.stdin]) {
@@ -825,11 +831,12 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
    * thing with it would have aimed a recursive delete at a freed `mkdtemp` name
    * on every command.
    *
-   * Normally non-null on exactly the three results that deliberately keep their
+   * Normally non-null on the four results that deliberately keep their
    * directory, because each of them may leave a helper still writing into it:
-   * `BOUNDARY_STREAMS_UNAVAILABLE`, `BOUNDARY_TERMINATION_UNCONFIRMED`, and a
-   * refusal reported after ownership had been established. It is also non-null
-   * on an ordinary run whose removal did not take.
+   * `BOUNDARY_STREAMS_UNAVAILABLE`, `BOUNDARY_TERMINATION_UNCONFIRMED`, an
+   * ending promise that rejected, and a refusal reported after ownership had
+   * been established. It is also non-null on an ordinary run whose removal did
+   * not take.
    *
    * One gap, stated rather than papered over: a launch that never established
    * ownership is refused by `startOwnedProcess`, which removes its own
@@ -848,10 +855,11 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
    * The boundary's own report, or `null` where there is none to give.
    *
    * `null` does **not** mean nothing was launched — read {@link established}
-   * for that. It is also `null` on the two paths where a launch demonstrably
+   * for that. It is also `null` on the three paths where a launch demonstrably
    * happened and this module then gave up on it without an ending:
-   * `BOUNDARY_STREAMS_UNAVAILABLE` and `BOUNDARY_TERMINATION_UNCONFIRMED`,
-   * which are the two most dangerous results this module can return.
+   * `BOUNDARY_STREAMS_UNAVAILABLE`, `BOUNDARY_TERMINATION_UNCONFIRMED` and an
+   * ending promise that rejected, which are the most dangerous results this
+   * module can return.
    */
   readonly ending: BoundaryEnding | null;
 }
@@ -868,6 +876,60 @@ export async function runOwnedCommand(
   options: OwnedCommandOptions,
   dependencies: OwnedCommandDependencies = {},
 ): Promise<OwnedCommandResult> {
+  /**
+   * The request itself, before anything is launched for it.
+   *
+   * Everything else this module validates is a number with a documented
+   * fallback. These two have none, and one of them was the only caller-supplied
+   * value that reached a *throwing* sink after ownership was established:
+   * `Writable.end(chunk)` throws synchronously for a chunk that is neither a
+   * string nor a Buffer, and the throw escaped past a `finally` that clears
+   * timers and removes a listener but does not kill anything. Measured: the
+   * helper — holder of the only handle to the job containing the agent tree —
+   * was launched and then abandoned with no reference and no kill, for the rest
+   * of the machine's uptime.
+   *
+   * Refused here, where nothing has been created yet, rather than caught there,
+   * where something has. The run loop still guards the write as well: a value
+   * that gets past this and still throws is reported as a failed hand-over
+   * rather than as an escape.
+   */
+  if (
+    options === null ||
+    typeof options !== 'object' ||
+    typeof options.file !== 'string' ||
+    options.file.length === 0 ||
+    (options.stdin !== undefined && typeof options.stdin !== 'string')
+  ) {
+    return Object.freeze({
+      display: '',
+      file: typeof options?.file === 'string' ? options.file : '',
+      args: [],
+      established: false,
+      outcome: 'LAUNCH_REFUSED' as const,
+      failureCode: 'LAUNCH_REFUSED' as const,
+      exitCode: null,
+      boundaryFailureCode: null,
+      boundaryLostReason: null,
+      targetStarted: 'NO' as const,
+      sideEffectsPossible: false,
+      stdout: '',
+      stderr: '',
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      // Nothing was launched, so nothing received a payload — and the request
+      // that named one is exactly the request being refused.
+      stdinDelivery: (options?.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED') as StdinDelivery,
+      helperPid: null,
+      childPid: null,
+      retainedWorkDir: null,
+      ending: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs: 0,
+    });
+  }
+
   const start = dependencies.start ?? startOwnedProcess;
   const args = options.args ?? [];
   const display = [options.file, ...args].join(' ');
@@ -996,7 +1058,16 @@ export async function runOwnedCommand(
       stderr: '',
       stdoutTruncated: false,
       stderrTruncated: false,
-      stdinDelivery: stdinRequested ? 'FAILED' : 'NOT_REQUESTED',
+      // Through the classifier rather than by hand, which is the pattern an
+      // earlier round removed from the streams-unavailable branch and left
+      // here: hand-rolled, this line could be mutated to `NOT_REQUESTED` — "no
+      // payload was ever configured" — with the whole gate green.
+      stdinDelivery: classifyStdinDelivery({
+        requested: stdinRequested,
+        established: false,
+        localWrite: 'NOT_HANDED_OVER',
+        forwarded: null,
+      }),
       helperPid: null,
       childPid: null,
       retainedWorkDir: null,
@@ -1164,7 +1235,7 @@ export async function runOwnedCommand(
 
     const outStream = owned.helper.stdout;
     const errStream = owned.helper.stderr;
-    if (outStream === null || errStream === null) {
+    if (outStream === null || outStream === undefined || errStream === null || errStream === undefined) {
       // Unreachable through `startOwnedProcess`, which always asks for pipes.
       // Reported rather than assumed away: a stream that cannot be read is a
       // budget that cannot be enforced, and that is not a run to report on.
@@ -1226,7 +1297,11 @@ export async function runOwnedCommand(
      */
     let localWrite: LocalStdinWrite = 'PENDING';
     const input = owned.helper.stdin;
-    if (input === null) {
+    if (input === null || input === undefined) {
+      // Both spellings, because `releaseHelper` already admits both on these
+      // very handles — and if `undefined` is reachable there, `input.on(...)`
+      // below throws, which is the abandonment this function was just taught to
+      // refuse.
       localWrite = 'NOT_HANDED_OVER';
     } else {
       const fail = (): void => {
@@ -1245,8 +1320,16 @@ export async function runOwnedCommand(
       // Closed either way, payload or not: the boundary forwards this EOF to
       // the child, and a child that reads to end-of-file waits forever without
       // it.
-      if (options.stdin === undefined) input.end(record);
-      else input.end(options.stdin, record);
+      //
+      // Guarded, as defence in depth behind the entry check: a synchronous
+      // throw here would escape with a live helper already owning a tree, and a
+      // failed hand-over is data on this path like every other failure.
+      try {
+        if (options.stdin === undefined) input.end(record);
+        else input.end(options.stdin, record);
+      } catch {
+        localWrite = 'FAILED';
+      }
     }
 
     // From here an abort has something to act on — and the flag is re-read,
@@ -1266,6 +1349,10 @@ export async function runOwnedCommand(
       // a one-millisecond step is enough to push it over — and node turns an
       // over-large delay into 1 ms, so the run this caller asked never to time
       // out would terminate at once.
+      //
+      // No test kills this clamp, and none can without stepping the machine's
+      // clock. Disclosed rather than left to look pinned, exactly as the two
+      // unkillable mutants in `native/ao-launch/AoLaunch.cs` are.
       timer = setTimeout(() => terminate('TIMEOUT'), Math.min(remaining, MAX_TIMER_MS));
       timer.unref?.();
     }

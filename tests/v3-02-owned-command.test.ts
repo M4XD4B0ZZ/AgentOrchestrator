@@ -219,6 +219,8 @@ function fakeBoundary(
     readonly disposeFails?: boolean;
     /** An ending that rejects rather than resolving. */
     readonly rejectEnding?: boolean;
+    /** A helper that opened no stdin pipe at all. */
+    readonly noStdin?: boolean;
     /** How long the boundary takes to end after it is asked to. */
     readonly terminationDelayMs?: number;
   } = {},
@@ -315,10 +317,11 @@ function fakeBoundary(
     if (options.refuseWith !== undefined) {
       return { established: false, ending: options.refuseWith };
     }
-    const streams =
-      options.noStreams === true
-        ? { stdout: null, stderr: null, stdin: input }
-        : { stdout: out, stderr: err, stdin: input };
+    const streams = {
+      stdout: options.noStreams === true ? null : out,
+      stderr: options.noStreams === true ? null : err,
+      stdin: options.noStdin === true ? null : input,
+    };
     return {
       established: true,
       process: {
@@ -1086,6 +1089,12 @@ describe('the defects the first review found', () => {
     );
     expect(result.outcome).toBe('BOUNDARY_LOST');
     expect(result.failureCode).toBe('BOUNDARY_STREAMS_UNAVAILABLE');
+    // And it asks the helper to die. This branch keeps its working directory
+    // *because* the helper may still be running, releases the pipes so this
+    // process can exit, and would otherwise leave a live job containing the
+    // agent tree behind — the same defect pinned on the sibling branch, whose
+    // comment appeals to this one's symmetry.
+    expect(boundary.terminations()).toBe(1);
     boundary.finish({ childExitCode: null });
   });
 
@@ -1149,7 +1158,8 @@ describe('a broken pipe to the boundary proves nothing about the child', () => {
   it('is FAILED when nothing was handed over at all', () => {
     // A helper that opened no stdin pipe, or a run abandoned before the writer
     // ran. Nothing reached the boundary, and that is an observation rather than
-    // an absence of one.
+    // an absence of one. (This value was called `NO_CHANNEL` until it acquired
+    // its second producer, which had no missing channel at all.)
     expect(
       classifyStdinDelivery({ ...requested, localWrite: 'NOT_HANDED_OVER', forwarded: null }),
     ).toBe('FAILED');
@@ -1733,6 +1743,16 @@ describe('the defects the fifth review found', () => {
               if (result.outcome !== 'BOUNDARY_LOST') {
                 expect(result.boundaryLostReason, where).toBeNull();
               }
+              // A run this side terminated held ownership by definition, so it
+              // may not report the question as open. Pinned because the
+              // invariant below is satisfied by `UNKNOWN` just as well.
+              if (
+                result.outcome === 'TIMED_OUT' ||
+                result.outcome === 'OUTPUT_LIMIT_EXCEEDED' ||
+                (result.outcome === 'TERMINATED_BY_CALLER' && termination !== 'NONE')
+              ) {
+                expect(result.targetStarted, where).toBe('YES');
+              }
               expect(result.sideEffectsPossible, where).toBe(result.targetStarted !== 'NO');
             }
           }
@@ -2044,5 +2064,86 @@ describe('the defects the ninth review found', () => {
     expect(result.failureCode).toBe('ENDING_INCONSISTENT');
     expect(boundary.terminations()).toBe(1);
     expect(boundary.streamsDestroyed()).toBe(true);
+  });
+});
+
+/**
+ * ── What the tenth adversarial review found ────────────────────────────────
+ *
+ * One severe defect and three guards no test could kill. The severe one is the
+ * only caller-supplied value in this module that reached a *throwing* sink
+ * after ownership had been established.
+ */
+describe('the defects the tenth review found', () => {
+  it('refuses a payload it cannot write before it launches anything', async () => {
+    // `Writable.end(chunk)` throws synchronously for a chunk that is neither a
+    // string nor a Buffer, and the throw escaped past a `finally` that clears
+    // timers and removes a listener but kills nothing. Measured by the review:
+    // the helper — holder of the only handle to the job containing the agent
+    // tree — was launched and then abandoned with no reference and no kill.
+    const boundary = fakeBoundary();
+    const result = await runOwnedCommand(
+      { file: 'C:\\fixture.exe', stdin: 12_345 as unknown as string },
+      { start: boundary.start },
+    );
+    expect(result.outcome).toBe('LAUNCH_REFUSED');
+    expect(result.established).toBe(false);
+    expect(result.targetStarted).toBe('NO');
+    expect(result.sideEffectsPossible).toBe(false);
+    expect(result.stdinDelivery).toBe('FAILED');
+    // The point of refusing at the door: nothing was started, so there is
+    // nothing to have abandoned.
+    expect(boundary.starts()).toBe(0);
+  });
+
+  it('refuses a request with no target rather than throwing on it', async () => {
+    const boundary = fakeBoundary();
+    for (const bad of [null, undefined, {}, { file: '' }, { file: 7 }]) {
+      const result = await runOwnedCommand(bad as never, { start: boundary.start });
+      expect(result.outcome, JSON.stringify(bad)).toBe('LAUNCH_REFUSED');
+      expect(result.sideEffectsPossible, JSON.stringify(bad)).toBe(false);
+    }
+    expect(boundary.starts()).toBe(0);
+  });
+
+  it('reports a configured payload as failed when the launch never happened', async () => {
+    // `nothingRan` hand-rolled this verdict, so it could be mutated to
+    // NOT_REQUESTED — "no payload was ever configured" — with the whole gate
+    // green. Two ways in: a signal already aborted, and a starter that throws.
+    const cancelled = new AbortController();
+    cancelled.abort();
+    const aborted = await runOwnedCommand(
+      { file: 'C:\\fixture.exe', stdin: 'the instructions', signal: cancelled.signal },
+      { start: fakeBoundary().start },
+    );
+    expect(aborted.outcome).toBe('TERMINATED_BY_CALLER');
+    expect(aborted.stdinDelivery).toBe('FAILED');
+
+    const threw = await runOwnedCommand(
+      { file: 'C:\\fixture.exe', stdin: 'the instructions' },
+      {
+        start: () => {
+          throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+        },
+      },
+    );
+    expect(threw.outcome).toBe('LAUNCH_REFUSED');
+    expect(threw.stdinDelivery).toBe('FAILED');
+  });
+
+  it('reports a helper that opened no stdin channel', async () => {
+    // The `input === null` branch had no producer in any test: the case that
+    // looked like its coverage was exercising the streams-unavailable branch's
+    // `NOT_HANDED_OVER` instead.
+    const boundary = fakeBoundary({ noStdin: true });
+    const run = runOwnedCommand(
+      { file: 'C:\\fixture.exe', stdin: 'the instructions' },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    boundary.finish({ childExitCode: 0 });
+    const result = await run;
+    expect(result.outcome).toBe('COMPLETED');
+    expect(result.stdinDelivery).toBe('FAILED');
   });
 });

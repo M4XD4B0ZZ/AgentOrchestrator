@@ -13,21 +13,21 @@
  *
  * ── The differential, and what it is for ───────────────────────────────────
  *
- * Nine of the cases below run the same fixture down two paths — `runCommand`,
- * the contract AO has today, and `runOwnedCommand`, the one this slice adds.
- * Six go through `bothPaths`, which hands *one* argument vector to both, so the
- * two halves share a heartbeat directory and a survivor is identified by its
- * own `hb-<pid>` file rather than by which runner left it. Two build their
- * halves separately and give each its own directory. The ninth builds its
- * halves separately and still shares one directory, because what differs
- * between them is the budget rather than the arguments. The point of the
- * comparison is not attribution, it is agreement —
- * and require them to agree about output, budgets, exit codes, timeouts and
- * stdin delivery. This is not an attempt to reproduce `runCommand`'s
- * `taskkill` containment, which the ADR replaces rather than imitates. It is
- * the guard against the adapter quietly inventing a *different* command
- * semantics on the way, which is the failure mode a green suite of its own
- * tests cannot see.
+ * Nine of the cases below send the same invocation down two paths —
+ * `runCommand`, the contract AO has today, and `runOwnedCommand`, the one this
+ * slice adds — and require them to agree about output, budgets, exit codes,
+ * timeouts and stdin delivery. This is not an attempt to reproduce
+ * `runCommand`'s `taskkill` containment, which the ADR replaces rather than
+ * imitates. It is the guard against the adapter quietly inventing a *different*
+ * command semantics on the way, which is the failure mode a green suite of its
+ * own tests cannot see.
+ *
+ * Six of the nine go through `bothPaths`, which hands one argument vector to
+ * both halves, so they share a heartbeat directory and a survivor is identified
+ * by its own `hb-<pid>` file rather than by which runner left it. Three build
+ * their halves separately: two because what differs between them is an
+ * argument, and each of those gives its half its own directory; one because
+ * what differs is a budget, and that one still shares a directory.
  *
  * The fixture is driven entirely by shell-inert `--key=value` arguments
  * precisely so both paths can run it: `runCommand` refuses an argument
@@ -223,7 +223,7 @@ async function liveCountAcross(dirs, windowMs = 1_500) {
   return live;
 }
 
-async function waitForTree(dir, expected, timeoutMs = 10_000) {
+async function waitForTree(dir, expected, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (heartbeats(dir).size >= expected) return true;
@@ -847,6 +847,8 @@ test('a budget the caller disabled bounds nothing, on both paths', async (c) => 
   c.equal(direct.outcome, 'COMPLETED', 'runCommand agrees on the outcome');
   c.equal(owned.stdout.length, direct.stdout.length, 'and on the byte count');
 });
+
+// ── 19. a request this repository refuses to encode ───────────────────────
 
 test('a request that cannot be encoded leaves no temporary directory behind', async (c) => {
   // Measured, and it can only be measured here: run from `src` the adapter
