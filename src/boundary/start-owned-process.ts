@@ -30,11 +30,20 @@
  *
  * {@link OwnedProcess.terminate} kills the helper, and the helper holds the
  * only handle to a `KILL_ON_JOB_CLOSE` job, so the kernel takes the tree. There
- * is no second termination mechanism: no `taskkill`, no descendant walk, no
- * list of pids anyone has to keep correct.
+ * is no second termination mechanism in *this* module: no `taskkill`, no
+ * descendant walk, no list of pids anyone has to keep correct.
+ *
+ * There is, however, a second *coupling*, and it is worth knowing about rather
+ * than being surprised by: node puts every child it spawns into a kill-on-close
+ * job of its own (libuv does this on Windows), so a helper started here dies
+ * with this process even before its own owner watch notices. Measured, not
+ * assumed — it is why an AO-death status usually stops at `boundary=OK`
+ * instead of recording an owner loss, and why that case is classified from the
+ * absence of a child exit rather than from a flag.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -69,7 +78,17 @@ export function resolveBoundaryExecutable(): { path?: string } {
 }
 
 export interface OwnedProcessRequest {
-  /** Defaults to `SUSPENDED`, where membership is proven before any execution. */
+  /**
+   * Defaults to `JOBLIST`, and the difference is not a preference.
+   *
+   * `JOBLIST` places the process in the job **at creation**, so there is no
+   * moment at which a created process is not yet owned. `SUSPENDED` creates
+   * the process first and assigns it immediately afterwards, which proves
+   * membership before the target's first instruction but leaves a window: a
+   * helper killed *inside* it leaves a suspended process in no job, which
+   * nothing will resume or reap. Both were measured, including against the
+   * real Claude tree; the default is the one with no window.
+   */
   readonly mode?: BoundaryLaunchMode;
   /** The canonical application path. This module resolves nothing. */
   readonly file: string;
@@ -150,6 +169,7 @@ export async function startOwnedProcess(
         ending: 'BOUNDARY_REFUSED',
         failureCode: 'BOUNDARY_EXECUTABLE_MISSING',
         win32: null,
+        targetStarted: 'NO',
         status: null,
       },
     };
@@ -160,9 +180,36 @@ export async function startOwnedProcess(
   if (!ownWorkDir) mkdirSync(workDir, { recursive: true });
   const statusPath = join(workDir, 'status.txt');
   const requestPath = join(workDir, 'request.txt');
-  const mode = request.mode ?? 'SUSPENDED';
+  const mode = request.mode ?? 'JOBLIST';
+
+  // A launch's own name for its evidence. Everything read back has to carry
+  // it, which is what makes a status left behind by an earlier run in a reused
+  // directory impossible to mistake for this one's.
+  const nonce = randomUUID();
+
+  // And the earlier run's file is removed outright rather than only
+  // out-argued: the first poll below happens before the helper has written
+  // anything, so a stale `boundary=OK` would otherwise be read first.
+  try {
+    rmSync(statusPath, { force: true });
+  } catch {
+    /* checked immediately below, where it is a refusal rather than a throw */
+  }
+  if (existsSync(statusPath)) {
+    return {
+      established: false,
+      ending: {
+        ending: 'BOUNDARY_REFUSED',
+        failureCode: 'BOUNDARY_STATUS_FOREIGN',
+        win32: null,
+        targetStarted: 'NO',
+        status: null,
+      },
+    };
+  }
 
   const encoded = encodeBoundaryRequest({
+    nonce,
     mode,
     file: request.file,
     args: request.args ?? [],
@@ -190,13 +237,25 @@ export async function startOwnedProcess(
     helper.once('close', (code, signal) => done({ code, signal }));
   });
 
-  const dispose = (): void => {
+  let endingSettled = false;
+  let disposeRequested = false;
+  const removeWorkDir = (): void => {
     if (!ownWorkDir) return;
     try {
       rmSync(workDir, { recursive: true, force: true });
     } catch {
       /* a leftover temporary directory is not worth failing a run for */
     }
+  };
+  /**
+   * Deferred until the ending has been read, deliberately. `ending` reads the
+   * status file when the helper closes; a caller that disposed first would
+   * turn a genuinely completed run into `BOUNDARY_LOST / STATUS_UNREADABLE`,
+   * and no ordering rule in a doc comment would stop that from happening.
+   */
+  const dispose = (): void => {
+    disposeRequested = true;
+    if (endingSettled) removeWorkDir();
   };
 
   const ending = helperClosed.then((closed): BoundaryEnding => {
@@ -205,6 +264,7 @@ export async function startOwnedProcess(
         ending: 'BOUNDARY_REFUSED',
         failureCode: 'BOUNDARY_HELPER_SPAWN_FAILED',
         win32: null,
+        targetStarted: 'NO',
         status: null,
       };
     }
@@ -213,10 +273,16 @@ export async function startOwnedProcess(
       helperExitCode: closed.code,
       helperSignal: closed.signal,
       callerRequestedTermination,
+      expect: { nonce, helperPid: helper.pid },
     });
   });
   // Nothing may be lost if the caller only awaits `ending` later.
-  void ending.catch(() => undefined);
+  void ending
+    .catch(() => undefined)
+    .then(() => {
+      endingSettled = true;
+      if (disposeRequested) removeWorkDir();
+    });
 
   const terminate = (): void => {
     callerRequestedTermination = true;
@@ -236,12 +302,22 @@ export async function startOwnedProcess(
 
   for (;;) {
     const status = readStatusFile(statusPath);
-    if (status !== null && status.boundary === 'OK' && status.verifiedInJob && status.childPid !== null) {
+    if (
+      status !== null &&
+      // Identity first, and both halves of it: the pid this launch started is
+      // checked as well as the nonce, because `OwnedProcess.helperPid` is read
+      // from this file and a later adapter will act on it.
+      status.nonce === nonce &&
+      status.helperPid === (helper.pid ?? -1) &&
+      status.boundary === 'OK' &&
+      status.verifiedInJob &&
+      status.childPid !== null
+    ) {
       return {
         established: true,
         process: {
           helper,
-          helperPid: status.helperPid ?? helper.pid ?? -1,
+          helperPid: status.helperPid,
           childPid: status.childPid,
           mode: status.mode ?? mode,
           assignedAtCreation: status.assignedAtCreation,
@@ -276,6 +352,10 @@ export async function startOwnedProcess(
           ending: 'BOUNDARY_REFUSED',
           failureCode: 'BOUNDARY_NOT_ESTABLISHED_IN_TIME',
           win32: null,
+          // The helper never reported ownership, so what it may have started
+          // is exactly what this caller cannot know. The kill above took the
+          // tree either way.
+          targetStarted: lastStatus === null ? 'UNKNOWN' : lastStatus.targetStarted ? 'YES' : 'NO',
           status: lastStatus,
         },
       };

@@ -18,8 +18,23 @@ Decision and evidence:
 
 It creates a strict job (`KILL_ON_JOB_CLOSE`, neither breakaway flag), arms its
 coupling to the AO process that asked for the launch, creates the target inside
-the job, verifies membership before the target executes, forwards stdio, and
+the job, confirms membership before the target executes, forwards stdio, and
 reports a primitive status. That is the whole component.
+
+"Before the target executes" means one of two things, and which one depends on
+the placement mode:
+
+- **`JOBLIST`** (the default) has the kernel place the process in the job *at
+  creation*, so there is no instant at which a created process is not yet
+  owned. The membership check confirms what is already true. This is the mode
+  with no window;
+- **`SUSPENDED`** creates the process suspended, assigns it, checks membership
+  and only then resumes, so the check precedes the target's first instruction —
+  but between `CreateProcess` and `AssignProcessToJobObject` there is a window
+  in which a helper killed from outside leaves a suspended, unowned process
+  that nothing will resume or reap. The owner-death case is closed by a lock;
+  an external kill in that window is not, and that is why it is not the
+  default.
 
 It owns **no** AO domain logic: no byte budgets, no timeouts, no stdin
 vocabulary, no result classification, no task state. Those stay in TypeScript
@@ -49,6 +64,33 @@ out-of-process — no Node ABI dependency. A missing compiler fails the build
 rather than producing a `dist` without the boundary in it.
 
 `npm run build` runs it, so the ordinary gate always produces both artefacts.
+
+## What it does not defend against
+
+The boundary bounds **process lifetime**. It bounds no file, no network access
+and no credential, and — this part is easy to over-read — it is a guarantee
+against a *cooperative or crashing* tree, not against a hostile one. The
+contained process runs under the same user account as the helper, and on
+Windows that account has full access to both. Concretely, a deliberately
+hostile child can:
+
+- `DuplicateHandle` the job handle out of the helper (`PROCESS_DUP_HANDLE`),
+  after which it holds a reference to the job and `KILL_ON_JOB_CLOSE` no longer
+  fires when the helper dies — the "cancellation is helper death" mechanism is
+  defeated with no other change;
+- write the status file the TypeScript side reads. The per-launch nonce and the
+  helper-pid check make a *stale* or mismatched status impossible to mistake
+  for a live one — which is the failure that actually happens — but they are
+  not secrets against an account that can read the request file. That file is
+  deleted by the helper the moment it has been parsed, and it carries the
+  environment the caller substituted, so the window is short rather than
+  absent.
+
+Neither is a defect in the implementation; both are properties of same-account
+Windows security, and closing them needs a different security boundary (a
+separate account or an integrity level), not a different job configuration.
+They are written down because the alternative is that a later slice builds on a
+stronger promise than the mechanism makes.
 
 ## Verifying
 

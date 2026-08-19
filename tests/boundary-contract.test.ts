@@ -31,6 +31,8 @@ import {
 } from '../src/boundary/launch-boundary.js';
 
 const STATUS_PATH = 'C:\\Temp\\ao-boundary\\status.txt';
+/** A launch's own name for its evidence; the helper echoes it into the status. */
+const NONCE = 'a2f0f0c8-0000-4000-8000-000000000001';
 
 /** Reads an encoded request back into the `key -> values` shape the helper parses. */
 function decodeRequest(encoded: string): Map<string, string[]> {
@@ -58,6 +60,7 @@ function statusText(entries: Readonly<Record<string, string>>, eol = '\n'): stri
 /** The status of a run that established ownership and reported a child exit. */
 function completedStatus(exitCode: string): string {
   return statusText({
+    nonce: NONCE,
     helperPid: '4242',
     mode: 'SUSPENDED',
     jobCreated: 'true',
@@ -74,6 +77,7 @@ function completedStatus(exitCode: string): string {
 describe('encodeBoundaryRequest', () => {
   it('encodes every value as base64 so spaces, quotes and Unicode survive untouched', () => {
     const encoded = encodeBoundaryRequest({
+      nonce: NONCE,
       mode: 'SUSPENDED',
       file: 'C:\\Program Files\\node\\node.exe',
       args: ['--eval', 'console.log("日本 λ")', ''],
@@ -101,6 +105,7 @@ describe('encodeBoundaryRequest', () => {
     // test-only* build of the helper. If a request key ever reappeared here,
     // the production boundary would carry its own bypass.
     const encoded = encodeBoundaryRequest({
+      nonce: NONCE,
       mode: 'JOBLIST',
       file: 'C:\\Windows\\System32\\cmd.exe',
       args: [],
@@ -114,7 +119,14 @@ describe('encodeBoundaryRequest', () => {
     expect(keys.has('noHandleList')).toBe(false);
     expect(keys.has('failAt')).toBe(false);
     expect(keys.has('jobFlags')).toBe(false);
-    expect([...keys].sort()).toEqual(['file', 'mode', 'ownerPid', 'statusPath', 'verbatim']);
+    expect([...keys].sort()).toEqual([
+      'file',
+      'mode',
+      'nonce',
+      'ownerPid',
+      'statusPath',
+      'verbatim',
+    ]);
   });
 
   it('refuses an owner pid that is not a positive integer', () => {
@@ -123,6 +135,7 @@ describe('encodeBoundaryRequest', () => {
     for (const ownerPid of [0, -1, 1.5, Number.NaN]) {
       expect(() =>
         encodeBoundaryRequest({
+          nonce: NONCE,
           mode: 'SUSPENDED',
           file: 'C:\\Windows\\System32\\cmd.exe',
           args: [],
@@ -136,6 +149,7 @@ describe('encodeBoundaryRequest', () => {
 
   it('refuses an environment entry a block cannot represent', () => {
     const base = {
+      nonce: NONCE,
       mode: 'SUSPENDED',
       file: 'C:\\Windows\\System32\\cmd.exe',
       args: [] as readonly string[],
@@ -158,6 +172,7 @@ describe('encodeBoundaryRequest', () => {
   it('refuses a request line that could not be read back as one line', () => {
     expect(() =>
       encodeBoundaryRequest({
+        nonce: NONCE,
         mode: 'SUSPENDED',
         file: 'C:\\Windows\\System32\\cmd.exe',
         args: ['ok'],
@@ -330,6 +345,154 @@ describe('classifyBoundaryEnding', () => {
     expect(ending).toMatchObject({
       ending: 'BOUNDARY_REFUSED',
       failureCode: 'OWNED_CONTAINMENT_OWNER_GONE',
+      targetStarted: 'NO',
     });
+  });
+
+  // ── the owner-loss disjunction, one operand per test ─────────────────────
+  //
+  // Both operands are load-bearing and neither can be pinned by a case that
+  // supplies both: with `terminatedByOwnerLoss` *and* exit 93 present, either
+  // half could be deleted and the assertion would still hold. The exit code is
+  // not decoration — the helper swallows every status-write failure, so on a
+  // full disk or a locked status file exit 93 is the only surviving evidence
+  // that the owner was lost.
+
+  it('reports OWNER_LOST from the status flag alone', () => {
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(
+        statusText({
+          nonce: NONCE,
+          boundary: 'OK',
+          childPid: '1234',
+          verifiedInJob: 'true',
+          terminatedByOwnerLoss: 'true',
+          childExitCode: '0',
+        }),
+      ),
+      helperExitCode: 0,
+      helperSignal: null,
+      callerRequestedTermination: false,
+    });
+    expect(ending).toMatchObject({ ending: 'BOUNDARY_LOST', reason: 'OWNER_LOST' });
+  });
+
+  it('reports OWNER_LOST from the helper exit code alone', () => {
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(
+        statusText({
+          nonce: NONCE,
+          boundary: 'OK',
+          childPid: '1234',
+          verifiedInJob: 'true',
+          childExitCode: '0',
+        }),
+      ),
+      helperExitCode: BOUNDARY_HELPER_EXIT.OWNER_LOST,
+      helperSignal: null,
+      callerRequestedTermination: false,
+    });
+    expect(ending).toMatchObject({ ending: 'BOUNDARY_LOST', reason: 'OWNER_LOST' });
+  });
+
+  // ── the status has to belong to this launch ──────────────────────────────
+
+  it('refuses a status left behind by another launch', () => {
+    // The failure this prevents is mundane and reachable: a caller reuses a
+    // working directory, and the first read of the new launch happens before
+    // the helper has written anything — so the previous run's `boundary=OK`,
+    // with its child pid, would be accepted as this run's evidence.
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(completedStatus('0')),
+      helperExitCode: 0,
+      helperSignal: null,
+      callerRequestedTermination: false,
+      expect: { nonce: 'a-different-launch', helperPid: 4242 },
+    });
+    expect(ending).toMatchObject({
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'BOUNDARY_STATUS_FOREIGN',
+    });
+  });
+
+  it('refuses a status that names a different helper', () => {
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(completedStatus('0')),
+      helperExitCode: 0,
+      helperSignal: null,
+      callerRequestedTermination: false,
+      expect: { nonce: NONCE, helperPid: 9999 },
+    });
+    expect(ending).toMatchObject({
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'BOUNDARY_STATUS_FOREIGN',
+    });
+  });
+
+  it('accepts the status of the launch it belongs to', () => {
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(completedStatus('7')),
+      helperExitCode: 0,
+      helperSignal: null,
+      callerRequestedTermination: false,
+      expect: { nonce: NONCE, helperPid: 4242 },
+    });
+    expect(ending).toMatchObject({ ending: 'CHILD_EXITED', childExitCode: 7 });
+  });
+
+  // ── a refusal says whether anything ran ──────────────────────────────────
+
+  it('reports a refusal after the target started as one that had side effects', () => {
+    // `BOUNDARY_REFUSED` does not always mean "nothing ran": in JOBLIST mode
+    // the target executes from its first instruction, so a loss before the
+    // membership confirmation refuses a launch that had already started.
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(
+        statusText({
+          nonce: NONCE,
+          boundary: 'FAILED',
+          failure: 'OWNED_CONTAINMENT_VERIFY',
+          win32: '0',
+          childPid: '1234',
+          targetStarted: 'true',
+        }),
+      ),
+      helperExitCode: BOUNDARY_HELPER_EXIT.BOUNDARY_FAILURE,
+      helperSignal: null,
+      callerRequestedTermination: false,
+    });
+    expect(ending).toMatchObject({ ending: 'BOUNDARY_REFUSED', targetStarted: 'YES' });
+  });
+
+  it('reports a refusal with no status as an unknown, not as nothing having run', () => {
+    const ending = classifyBoundaryEnding({
+      status: null,
+      helperExitCode: BOUNDARY_HELPER_EXIT.BOUNDARY_FAILURE,
+      helperSignal: null,
+      callerRequestedTermination: false,
+    });
+    expect(ending).toMatchObject({ ending: 'BOUNDARY_REFUSED', targetStarted: 'UNKNOWN' });
+  });
+
+  it('reports an exit the boundary could not observe as BOUNDARY_LOST', () => {
+    // The helper writes no `childExitCode` when its wait was not satisfied or
+    // the exit code could not be read: an unprovable exit is not an exit, and
+    // publishing the 259 that `GetExitCodeProcess` answers for a still-running
+    // process would have been a completion the boundary never observed.
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(
+        statusText({
+          nonce: NONCE,
+          boundary: 'OK',
+          childPid: '1234',
+          verifiedInJob: 'true',
+          childExitUnobservable: 'true',
+        }),
+      ),
+      helperExitCode: 0,
+      helperSignal: null,
+      callerRequestedTermination: false,
+    });
+    expect(ending).toMatchObject({ ending: 'BOUNDARY_LOST', reason: 'NO_CHILD_EXIT_OBSERVED' });
   });
 });

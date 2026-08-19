@@ -5701,27 +5701,55 @@ boundary is slice 3, and it is its own decision to start.
 
 It creates a strict Job Object (`KILL_ON_JOB_CLOSE`, neither breakaway flag),
 arms its coupling to the AO process that asked for the launch, creates the
-target **inside** the job, verifies membership before the target executes,
+target **inside** the job, confirms membership before the target executes,
 forwards stdio, and keeps the only — non-inheritable — job handle. Cancellation
 is helper death: the kernel takes the tree when the last handle to the job
 closes. There is no `taskkill`, no descendant walk, and no list of pids anyone
 has to keep correct.
 
+"Before the target executes" means the default `JOBLIST` placement has the
+kernel put the process in the job *at creation* — there is no instant at which a
+created process is not yet owned — while `SUSPENDED` creates it suspended and
+checks before the resume. Both were measured; the default is the one with no
+window, and `native/README.md` states what the other one's window is.
+
 It owns **nothing else**. Byte budgets, timeouts, the stdin delivery
 vocabulary, result classification, lease and scope authority and task state all
 stay in TypeScript, exactly as the ADR splits them.
+
+It also bounds **process lifetime only**, against a cooperative or crashing
+tree — not against a hostile one running under the same Windows account. What
+that excludes is written down in `native/README.md` ("What it does not defend
+against") rather than left for a later slice to assume away.
 
 ### `BOUNDARY_LOST` is modelled here, before any runner consumes it
 
 `classifyBoundaryEnding` reports one of four endings — `CHILD_EXITED`,
 `TERMINATED_BY_CALLER`, `BOUNDARY_LOST`, `BOUNDARY_REFUSED` — and the
 load-bearing rule is that an *unknown* outcome is never a completion. A missing
-or unreadable status, a `boundary=OK` that carries no membership evidence, and
-a helper that vanished without reporting a child exit are all endings of their
+or unreadable status, a `boundary=OK` that carries no membership evidence, a
+status belonging to another launch, an exit the helper could not prove, and a
+helper that vanished without reporting a child exit are all endings of their
 own. That is the defect the spike found: when the helper was killed, the tree
 died correctly and the run still looked exactly like a finished one.
 `TERMINATED_BY_CALLER` exists so that a cancellation the caller asked for
 cannot be mistaken for a boundary that was lost.
+
+Two details keep those endings honest, and both came out of the slice's
+adversarial review:
+
+- **a status has to belong to its launch.** Every request carries a nonce the
+  helper echoes back, and the reader also requires the status to name the
+  helper it started. The first read of a launch happens before the helper has
+  written anything, so without that check a status left in a reused working
+  directory would be accepted as this run's evidence — complete with another
+  run's child pid;
+- **a refusal says whether anything ran.** `BOUNDARY_REFUSED` always means
+  ownership was not established and whatever was created has been terminated;
+  it does not always mean nothing executed, because in `JOBLIST` mode the
+  target runs from its first instruction. The ending therefore carries
+  `targetStarted` — `NO`, `YES` or `UNKNOWN` — and `UNKNOWN`, meaning no
+  readable status, is to be treated as `YES`.
 
 ### Fail closed, with no bypass to find
 
@@ -5736,23 +5764,43 @@ nothing started.
 
 ### How the guarantee is measured
 
-`test:dist-boundary` runs ten cases against the built artefacts with real
+`test:dist-boundary` runs fourteen cases against the built artefacts with real
 processes: ownership established and verified; the caller's own termination;
 **helper death → `BOUNDARY_LOST` with zero survivors**; **AO death → helper and
-tree gone, with no cleanup code running**; orphaned descendants counted by the
-kernel as job members (6 of them) and killed with the job; exit-code fidelity;
-three real fail-closed refusals with a marker file proving nothing ran; the
-weakening-key refusals; and `JOBLIST` placement.
+tree gone, with no cleanup code running, and what it leaves behind unreadable
+as a completion**; orphaned descendants counted by the kernel as job members (6
+of them) and killed with the job; exit-code fidelity; three real fail-closed
+refusals with a marker file proving nothing ran; the weakening-key refusals,
+with a positive control that the same request minus the key is accepted and
+runs; verify-before-execute; both placement modes; the argument vector, working
+directory and replaced environment arriving exactly; and a reused working
+directory being unable to lend its evidence to the next launch.
+
+The argument-vector case is **differential**: the same arguments — quotes,
+backslashes, a trailing backslash before a quote, Unicode, an empty argument,
+shell metacharacters — go through the boundary and through
+`child_process.spawn`, and the target reports what arrived. The boundary builds
+its own Win32 command line, so without that case its quoting would be asserted
+only by a comment citing a program this repository does not contain.
 
 Survivors are counted by **heartbeat** — every fixture process rewrites its own
 file ten times a second, and "alive" means the number kept growing — because
 the spike measured that a process walk counts a terminated process whose object
 is still referenced as alive. The instrument is only worth anything if it can
-see a survivor, so the last case builds a deliberately weakened helper
-(inheritable job handle **and** no handle list, the pair the spike measured as
-the one that breaks containment), kills it, and **requires** survivors. It
-reports 7, which is the whole fixture tree. Without that case every "0
+see a survivor, so the negative control builds a deliberately weakened helper
+and kills it, as a **pair** of runs: with only the job handle inheritable it
+requires **0** survivors, because the handle list holds on its own; with the
+handle list also gone it requires all **7** — the whole fixture tree. That pair
+establishes "two independent lines of defence, and it takes both being wrong"
+inside this repository rather than by citation, and without it every "0
 survivors" above could be an instrument that cannot see anything.
+
+One measured fact belongs with the AO-death case, because it explains what that
+case deliberately does *not* assert: node puts every child it spawns into a
+kill-on-close job of its own, so when AO dies the helper is killed by that job
+— usually before its own owner watch can record anything. Containment holds
+twice over there; the owner watch is what covers an owner that is not the
+parent.
 
 ## Not implemented yet
 

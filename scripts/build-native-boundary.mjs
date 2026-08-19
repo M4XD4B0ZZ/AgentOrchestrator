@@ -24,8 +24,8 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -50,6 +50,32 @@ export function locateCsc() {
 export class NativeBoundaryBuildError extends Error {}
 
 /**
+ * Clears the way for a fresh binary, including while an old one is running.
+ *
+ * Windows refuses to delete or overwrite the image file of a running process,
+ * and a boundary helper outliving the run that started it is ordinary here —
+ * an interrupted gate leaves one holding a tree it owns, exactly as designed.
+ * A build that failed on that would be a build that fails because containment
+ * worked. Windows does allow a running image to be *renamed*, so the old file
+ * is moved aside and swept up on the next build instead.
+ */
+function clearOutput(outFile) {
+  try {
+    rmSync(outFile, { force: true });
+  } catch {
+    renameSync(outFile, `${outFile}.superseded-${process.pid}`);
+  }
+  for (const name of readdirSync(dirname(outFile))) {
+    if (!name.startsWith(`${basename(outFile)}.superseded-`)) continue;
+    try {
+      rmSync(join(dirname(outFile), name), { force: true });
+    } catch {
+      /* still running; the next build tries again */
+    }
+  }
+}
+
+/**
  * Compiles the boundary.
  *
  * `defines` exists for exactly one caller: the negative control in
@@ -69,7 +95,7 @@ export function compileNativeBoundary({ outFile = BOUNDARY_OUTPUT, defines = [] 
   }
 
   mkdirSync(dirname(outFile), { recursive: true });
-  rmSync(outFile, { force: true });
+  clearOutput(outFile);
 
   const args = [
     '/nologo',

@@ -7,9 +7,16 @@
  * productive agent process on Windows is created by a small out-of-process
  * helper that owns it: the helper creates a strict Job Object
  * (`KILL_ON_JOB_CLOSE`, neither breakaway flag), creates the target **inside**
- * that job, verifies membership before the target may execute, keeps the only
+ * that job, confirms membership before the target may execute, keeps the only
  * — non-inheritable — job handle, passes exactly the three stdio handles, and
  * couples its own life to the AO process it serves.
+ *
+ * "Before the target may execute" means different things in the two placement
+ * modes, and the difference is stated rather than smoothed over: `JOBLIST` has
+ * the kernel place the process in the job at creation, so membership is true
+ * before the first instruction and the check confirms it; `SUSPENDED` creates
+ * the process suspended and checks before the resume, so the check precedes
+ * the first instruction. Neither is a fallback for the other.
  *
  * This module is the TypeScript half of that: the request the helper reads,
  * the status it writes, and the vocabulary an ending is reported in. It starts
@@ -91,6 +98,17 @@ export const BOUNDARY_FAILURE_CODES = [
   'BOUNDARY_STATUS_UNREADABLE',
   /** The status claims ownership without the evidence that establishes it. */
   'BOUNDARY_STATUS_INCONSISTENT',
+  /**
+   * The status file does not belong to this launch.
+   *
+   * A directory a caller reuses still holds the previous run's status, and the
+   * first read of a launch happens before the helper has written anything —
+   * so without an identity check the earlier run's `boundary=OK` is accepted
+   * as this one's, complete with its child pid.
+   */
+  'BOUNDARY_STATUS_FOREIGN',
+  /** A job handle could not be set to, or read back as, non-inheritable. */
+  'OWNED_CONTAINMENT_JOB_HANDLE',
   /** The helper executable is not where the build puts it. */
   'BOUNDARY_EXECUTABLE_MISSING',
   /** The helper process itself could not be started. */
@@ -134,6 +152,14 @@ export interface BoundaryLaunchRequest {
   readonly ownerPid: number;
   /** Where the helper writes its status. */
   readonly statusPath: string;
+  /**
+   * A value invented for this launch and echoed back in the status, so the
+   * status file's identity is checkable rather than assumed. It is not a
+   * secret against a hostile process on the same account — see the threat
+   * model in `native/README.md` — it is what makes a *stale* or mismatched
+   * status impossible to mistake for this run's.
+   */
+  readonly nonce: string;
 }
 
 /** A request that cannot be encoded. A programming error, not a run outcome. */
@@ -147,6 +173,7 @@ export class InvalidBoundaryRequestError extends Error {}
  * the other does not know about.
  */
 export const BOUNDARY_REQUEST_KEYS = Object.freeze([
+  'nonce',
   'mode',
   'file',
   'arg',
@@ -190,6 +217,8 @@ export function encodeBoundaryRequest(request: BoundaryLaunchRequest): string {
         'A boundary with no owner to watch could outlive the process it serves.',
     );
   }
+  if (request.nonce.length === 0) refuseRequest('nonce is empty.');
+  checkValue('nonce', request.nonce);
   if (request.file.length === 0) refuseRequest('file is empty.');
   if (request.statusPath.length === 0) refuseRequest('statusPath is empty.');
   checkValue('file', request.file);
@@ -198,6 +227,7 @@ export function encodeBoundaryRequest(request: BoundaryLaunchRequest): string {
   for (const arg of request.args) checkValue('an argument', arg);
 
   const lines = [
+    line('nonce', request.nonce),
     line('mode', request.mode),
     line('file', request.file),
     line('verbatim', request.verbatim ? 'true' : 'false'),
@@ -238,6 +268,19 @@ export interface BoundaryStatus {
   readonly childExitCode: number | null;
   readonly terminatedByOwnerLoss: boolean;
   readonly stdinForward: string | null;
+  /** Echoed from the request; `null` when the helper never got that far. */
+  readonly nonce: string | null;
+  /**
+   * Whether the target had begun executing when this status was written.
+   *
+   * A refusal is not always "nothing ran": the target can be resumed and then
+   * the boundary lost before it is confirmed. The job is terminated either
+   * way, but a caller deciding whether a launch had side effects needs the
+   * difference rather than the safer assumption.
+   */
+  readonly targetStarted: boolean;
+  /** The child ended, and the helper could not prove how. */
+  readonly childExitUnobservable: boolean;
   /** Every key the helper wrote, decoded, including ones this build ignores. */
   readonly raw: Readonly<Record<string, string>>;
 }
@@ -293,6 +336,9 @@ export function decodeBoundaryStatus(text: string): BoundaryStatus | null {
     childExitCode: readInt(raw, 'childExitCode'),
     terminatedByOwnerLoss: raw['terminatedByOwnerLoss'] === 'true',
     stdinForward: raw['stdinForward'] ?? null,
+    nonce: raw['nonce'] ?? null,
+    targetStarted: raw['targetStarted'] === 'true',
+    childExitUnobservable: raw['childExitUnobservable'] === 'true',
     raw: Object.freeze({ ...raw }),
   });
 }
@@ -334,8 +380,28 @@ export type BoundaryEnding =
       readonly ending: 'BOUNDARY_REFUSED';
       readonly failureCode: BoundaryFailureCode;
       readonly win32: number | null;
+      /**
+       * Whether the target had begun executing before the refusal.
+       *
+       * A refusal always means the boundary is not established and anything it
+       * created has been terminated. It does **not** always mean nothing ran:
+       * in `JOBLIST` mode the target executes from its first instruction, and a
+       * loss between then and the membership confirmation refuses a launch that
+       * had already started. `'UNKNOWN'` is the honest answer when no status
+       * could be read, and must be treated as `'YES'` by anything deciding
+       * whether a launch had side effects.
+       */
+      readonly targetStarted: 'NO' | 'YES' | 'UNKNOWN';
       readonly status: BoundaryStatus | null;
     };
+
+/** What the caller knows about the launch it is classifying. */
+export interface BoundaryLaunchIdentity {
+  /** The nonce this launch's request carried. */
+  readonly nonce: string;
+  /** The pid Node reports for the helper it started. */
+  readonly helperPid: number | undefined;
+}
 
 export interface BoundaryEndingObservation {
   /** The helper's status, or `null` when it could not be read. */
@@ -349,6 +415,15 @@ export interface BoundaryEndingObservation {
    * be indistinguishable from a boundary that was lost.
    */
   readonly callerRequestedTermination: boolean;
+  /**
+   * Who this status is supposed to belong to.
+   *
+   * When supplied, a status that does not carry this launch's nonce, or that
+   * names a different helper, is refused as foreign rather than read. A caller
+   * that omits it is saying it has no way to tell — which is only true of a
+   * test constructing a status by hand.
+   */
+  readonly expect?: BoundaryLaunchIdentity;
 }
 
 function refused(
@@ -356,7 +431,15 @@ function refused(
   win32: number | null,
   status: BoundaryStatus | null,
 ): BoundaryEnding {
-  return Object.freeze({ ending: 'BOUNDARY_REFUSED' as const, failureCode, win32, status });
+  return Object.freeze({
+    ending: 'BOUNDARY_REFUSED' as const,
+    failureCode,
+    win32,
+    // Unknown when there is no status to read it from, which is the reading a
+    // caller must treat as "it may have run".
+    targetStarted: status === null ? ('UNKNOWN' as const) : status.targetStarted ? ('YES' as const) : ('NO' as const),
+    status,
+  });
 }
 
 function lost(reason: BoundaryLostReason, status: BoundaryStatus | null): BoundaryEnding {
@@ -370,7 +453,20 @@ function lost(reason: BoundaryLostReason, status: BoundaryStatus | null): Bounda
  * and the ones that cannot be proven to be a completion are not one.
  */
 export function classifyBoundaryEnding(observation: BoundaryEndingObservation): BoundaryEnding {
-  const { status, helperExitCode, callerRequestedTermination } = observation;
+  const { status, helperExitCode, callerRequestedTermination, expect } = observation;
+
+  if (status !== null && expect !== undefined) {
+    // Identity before content. A status that belongs to another launch — the
+    // previous run in a reused directory, or one a third party wrote — would
+    // otherwise be read as this run's evidence, and its `boundary=OK` is
+    // exactly the value that decides a run is trustworthy.
+    const foreign =
+      status.nonce !== expect.nonce ||
+      (expect.helperPid !== undefined &&
+        status.helperPid !== null &&
+        status.helperPid !== expect.helperPid);
+    if (foreign) return refused('BOUNDARY_STATUS_FOREIGN', null, null);
+  }
 
   if (status === null) {
     // No readable report. If the helper's exit code says it refused, that is

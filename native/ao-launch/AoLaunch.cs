@@ -12,7 +12,10 @@
 //     -> arm the coupling to the AO process that asked for the launch
 //     -> create pipes
 //     -> create the target INSIDE the job
-//     -> verify membership before the target executes
+//     -> confirm membership before the target executes (JOBLIST: the kernel
+//        placed it at creation, so the check confirms what is already true;
+//        SUSPENDED: the check precedes the resume, so it precedes the target's
+//        first instruction)
 //     -> forward stdio, report a primitive status, and terminate the job when
 //        the owner is lost or when this process ends, whichever comes first.
 //
@@ -64,6 +67,7 @@ internal static class Native
 
     internal const uint HANDLE_FLAG_INHERIT = 0x00000001;
     internal const uint INFINITE = 0xFFFFFFFF;
+    internal const uint WAIT_OBJECT_0 = 0;
 
     // PROC_THREAD_ATTRIBUTE_INPUT (0x00020000) | number
     internal static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = (IntPtr)0x00020002;
@@ -188,6 +192,9 @@ internal static class Native
     internal static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern bool GetHandleInformation(IntPtr handle, out uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern bool CloseHandle(IntPtr handle);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -246,6 +253,14 @@ internal sealed class Request
     public readonly List<string> Env = new List<string>();  // "K=V"; empty = inherit
     public int OwnerPid = -1;                      // the AO process this boundary serves
     public string StatusPath;
+    /// <summary>
+    /// A value the caller invents per launch and the status echoes back. It
+    /// makes the status file's *identity* checkable: without it, a status left
+    /// behind by an earlier run in a reused directory reads exactly like this
+    /// run's, and the caller would accept another launch's evidence as this
+    /// one's.
+    /// </summary>
+    public string Nonce;
 
 #if AO_BOUNDARY_TEST_CONTROLS
     // Present ONLY in the build the negative controls use. See the file header:
@@ -279,8 +294,17 @@ internal static class Program
         {
             request = ReadRequest(argv[0]);
             _statusPath = request.StatusPath;
+            Put("nonce", request.Nonce);
             Put("helperPid", CurrentProcessId.ToString(CultureInfo.InvariantCulture));
             Put("mode", request.Mode);
+
+            // The request has been read, and it carries the environment the
+            // caller substituted — credentials included. It is not needed
+            // again, and it sits in a directory the contained process can
+            // read, so its lifetime ends here rather than whenever a caller
+            // remembers to clean up.
+            try { File.Delete(argv[0]); } catch { /* best effort */ }
+
             return Run(request);
         }
         catch (BoundaryFailure failure)
@@ -315,17 +339,35 @@ internal static class Program
 
         // The job handle must not be inheritable: a child holding a handle to
         // the job keeps it alive, and KILL_ON_JOB_CLOSE then never fires. The
-        // handle list below is the second, independent line of defence, and
-        // the spike measured that it takes BOTH being wrong to lose the tree.
+        // handle list below is the second, independent line of defence, and it
+        // takes BOTH being wrong to lose the tree — measured in this
+        // repository, as a pair of control runs, rather than carried over as a
+        // claim: an inheritable handle alone leaves 0 survivors, an
+        // inheritable handle with no handle list leaves all 7.
         bool inheritJobHandle = false;
 #if AO_BOUNDARY_TEST_CONTROLS
         inheritJobHandle = request.InheritJobHandle;
 #endif
-        Native.SetHandleInformation(
-            _job,
-            Native.HANDLE_FLAG_INHERIT,
-            inheritJobHandle ? Native.HANDLE_FLAG_INHERIT : 0);
-        Put("jobHandleInheritable", inheritJobHandle ? "true" : "false");
+        if (!Native.SetHandleInformation(
+                _job,
+                Native.HANDLE_FLAG_INHERIT,
+                inheritJobHandle ? Native.HANDLE_FLAG_INHERIT : 0))
+        {
+            throw new BoundaryFailure("OWNED_CONTAINMENT_JOB_HANDLE");
+        }
+
+        // Reported from the handle, not from the intent. Echoing the local
+        // variable made the status a restatement of the request: a mutant that
+        // set HANDLE_FLAG_INHERIT here would still have reported `false`, and
+        // every case in both suites would still have passed.
+        uint jobHandleFlags;
+        if (!Native.GetHandleInformation(_job, out jobHandleFlags))
+        {
+            throw new BoundaryFailure("OWNED_CONTAINMENT_JOB_HANDLE");
+        }
+        Put(
+            "jobHandleInheritable",
+            (jobHandleFlags & Native.HANDLE_FLAG_INHERIT) != 0 ? "true" : "false");
 
         ConfigureJob();
         FailPoint(request, "AFTER_JOB", "OWNED_CONTAINMENT_JOB_CONFIGURE");
@@ -343,8 +385,21 @@ internal static class Program
         bool assignedAtCreation;
         lock (_ownershipGate)
         {
+            // Under the gate, and only here, the owner's state is stable. An
+            // owner already lost means there is nothing left to launch for, and
+            // creating anything now would be creating it for nobody.
+            if (Interlocked.CompareExchange(ref _terminatedByOwnerLoss, 0, 0) == 1)
+            {
+                throw new BoundaryFailure(BoundaryFailure.OwnerGone, 0);
+            }
             CreateTarget(request, pipes, out info, out assignedAtCreation);
         }
+
+        // In JOBLIST mode the target is a job member from its first
+        // instruction, which also means it is already executing here: the
+        // membership check below confirms what the kernel established, and
+        // cannot precede it.
+        if (assignedAtCreation) Put("targetStarted", "true");
 
         // The child's ends of the pipes are closed here: while this process
         // still holds one, EOF never reaches the reader.
@@ -383,6 +438,11 @@ internal static class Program
                 throw new BoundaryFailure("OWNED_CONTAINMENT_RESUME");
             }
         }
+        // From here the target is executing in either mode. A refusal after
+        // this point is still a refusal — the job is terminated with it — but
+        // it is no longer one that can claim nothing ran, and the caller is
+        // told which kind it got rather than having to assume the safer one.
+        if (!assignedAtCreation) Put("targetStarted", "true");
         Native.CloseHandle(info.hThread);
         Put("boundary", "OK");
         // An early status: the caller may read the child pid, and may know that
@@ -393,15 +453,32 @@ internal static class Program
         Thread pumpErr = Pump(pipes.StderrRead, StandardHandles.Error);
         PumpStdin(pipes.StdinWrite);
 
-        Native.WaitForSingleObject(info.hProcess, Native.INFINITE);
+        uint waited = Native.WaitForSingleObject(info.hProcess, Native.INFINITE);
 
         // Drain: the child is gone, but its output may still be in the pipe.
         pumpOut.Join(5000);
         pumpErr.Join(5000);
 
+        // The one place in this component where the evidence for a *completion*
+        // is produced, so it is the one place that may not be produced from an
+        // unchecked call. An unsatisfied wait leaves a running child and
+        // `GetExitCodeProcess` then answers STILL_ACTIVE (259) — a value a
+        // process may also legitimately exit with, which is why the wait's own
+        // result decides this and a 259-guard would not. A failed call answers
+        // 0, which would have been published as a clean success.
+        //
+        // When the exit cannot be proven, nothing is written: the absence of
+        // `childExitCode` is exactly what the caller classifies as
+        // BOUNDARY_LOST, which is the truthful answer here.
         uint exitCode;
-        Native.GetExitCodeProcess(info.hProcess, out exitCode);
-        Put("childExitCode", unchecked((int)exitCode).ToString(CultureInfo.InvariantCulture));
+        if (waited == Native.WAIT_OBJECT_0 && Native.GetExitCodeProcess(info.hProcess, out exitCode))
+        {
+            Put("childExitCode", unchecked((int)exitCode).ToString(CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            Put("childExitUnobservable", "true");
+        }
         Put("terminatedByOwnerLoss", _terminatedByOwnerLoss == 1 ? "true" : "false");
         // The job's own answer about what the child left behind. Anything still
         // counted here is killed by the close below, without a walk, a
@@ -584,10 +661,23 @@ internal static class Program
     /// signals.
     ///
     /// It is armed before the target exists, and it takes `_ownershipGate`
-    /// before terminating. Without that gate, an owner dying inside the window
-    /// between `CreateProcess` and `AssignProcessToJobObject` would leave a
-    /// suspended, unowned process behind that nothing would ever resume or
-    /// reap.
+    /// before terminating — and holds it across the exit. Without that gate, an
+    /// owner dying inside the window between `CreateProcess` and
+    /// `AssignProcessToJobObject` would leave a suspended, unowned process
+    /// behind that nothing would ever resume or reap. Releasing the gate before
+    /// exiting reopens exactly that window, which is why `Environment.Exit` is
+    /// inside it.
+    ///
+    /// **This watch is not the only thing that couples the two lifetimes, and
+    /// usually not the fastest.** Node puts every child it spawns into a
+    /// kill-on-close job of its own (libuv does this on Windows), so when the
+    /// AO process that spawned this helper dies, this process is killed by that
+    /// job immediately — before this watcher can run, which is why an
+    /// AO-death status usually stops at `boundary=OK` rather than recording
+    /// `terminatedByOwnerLoss`. The tree still dies, twice over: this process's
+    /// death closes the only handle to its own strict job. What the watch
+    /// covers is the case where the owner is *not* the parent, where nothing
+    /// else would notice at all.
     /// </summary>
     private static void WatchOwner(int ownerPid)
     {
@@ -609,11 +699,20 @@ internal static class Program
                 Put("terminatedByOwnerLoss", "true");
                 Native.TerminateJobObject(_job, 0xDEAD);
                 WriteStatus();
+
+                // The exit belongs INSIDE the gate. Released first, it lets the
+                // main thread enter `CreateTarget` in the moment between the
+                // release and the exit, and the exit then lands between
+                // `CreateProcess` and `AssignProcessToJobObject` — leaving a
+                // suspended process in no job, with no helper left to resume or
+                // reap it. That is the orphan this gate exists to prevent, and
+                // it was reachable while the exit sat outside.
+                //
+                // The boundary leaves with the tree it owned. Nothing of it
+                // survives its owner, and no cleanup code had to run to make
+                // that true: closing this process's handles closes the job.
+                Environment.Exit(ExitCode.OwnerLost);
             }
-            // The boundary leaves with the tree it owned. Nothing of it
-            // survives its owner, and no cleanup code had to run to make that
-            // true: closing this process's handles closes the job.
-            Environment.Exit(ExitCode.OwnerLost);
         });
         watcher.IsBackground = true;
         watcher.Start();
@@ -827,6 +926,11 @@ internal static class Program
                         throw new BoundaryFailure("OWNED_CONTAINMENT_REQUEST_INVALID", 0);
                     break;
                 case "statusPath": request.StatusPath = value; break;
+                case "nonce":
+                    if (value.Length == 0)
+                        throw new BoundaryFailure("OWNED_CONTAINMENT_REQUEST_INVALID", 0);
+                    request.Nonce = value;
+                    break;
 #if AO_BOUNDARY_TEST_CONTROLS
                 case "failAt": request.FailAt = value; break;
                 case "inheritJobHandle": request.InheritJobHandle = value == "true"; break;
@@ -842,6 +946,7 @@ internal static class Program
         if (request.Mode == null
             || string.IsNullOrEmpty(request.File)
             || string.IsNullOrEmpty(request.StatusPath)
+            || string.IsNullOrEmpty(request.Nonce)
             || request.OwnerPid <= 0)
         {
             throw new BoundaryFailure("OWNED_CONTAINMENT_REQUEST_INVALID", 0);

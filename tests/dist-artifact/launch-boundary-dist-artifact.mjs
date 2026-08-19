@@ -36,8 +36,15 @@
  *   7. every failure to establish ownership refuses, and nothing ran;
  *   8. the shipped helper refuses a request that would weaken containment;
  *   9. nothing executes before membership has been verified;
- *  10. the containment settings are load-bearing (negative control);
- *  11. `JOBLIST` placement contains the same way `SUSPENDED` does.
+ *  10. the containment settings are load-bearing, and it takes BOTH of them
+ *      being wrong to lose the tree (negative control, run as a pair);
+ *  11. `SUSPENDED` placement contains the tree the way the `JOBLIST` default
+ *      does;
+ *  12. the argument vector the target receives is identical to the one
+ *      `child_process.spawn` delivers, across quoting, backslashes, Unicode,
+ *      empty and shell-metacharacter arguments;
+ *  13. the working directory and a replaced environment arrive exactly;
+ *  14. a reused working directory cannot lend its evidence to the next launch.
  *
  * Deliberately **not** measured here: byte budgets, stdin delivery vocabulary,
  * timeouts, result classification. Those are AO's, they stay in TypeScript,
@@ -47,8 +54,16 @@
  * one did not.
  */
 
-import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -58,6 +73,7 @@ const repoRoot = resolve(scriptDir, '..', '..');
 const fixtureDir = join(scriptDir, 'fixtures');
 const treeFixture = join(fixtureDir, 'boundary-tree-fixture.mjs');
 const aoStandIn = join(fixtureDir, 'boundary-ao-stand-in.mjs');
+const echoFixture = join(fixtureDir, 'boundary-echo-fixture.mjs');
 
 const startModuleUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'start-owned-process.js'))
   .href;
@@ -66,7 +82,7 @@ const contractModuleUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'laun
 const buildModuleUrl = pathToFileURL(join(repoRoot, 'scripts', 'build-native-boundary.mjs')).href;
 
 const { startOwnedProcess, resolveBoundaryExecutable } = await import(startModuleUrl);
-const { decodeBoundaryStatus } = await import(contractModuleUrl);
+const { decodeBoundaryStatus, classifyBoundaryEnding } = await import(contractModuleUrl);
 const { compileNativeBoundary } = await import(buildModuleUrl);
 
 const taskkill = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'taskkill.exe');
@@ -251,7 +267,9 @@ class Case {
 async function startTree(options = {}) {
   const heartbeatDir = tempDir('ao-boundary-hb-');
   const start = await startOwnedProcess({
-    mode: options.mode ?? 'SUSPENDED',
+    // No mode unless the case asks for one: the default is the module's, and
+    // case 1 asserts what that default actually is.
+    ...(options.mode === undefined ? {} : { mode: options.mode }),
     file: process.execPath,
     args: [
       treeFixture,
@@ -278,6 +296,10 @@ measure('ownership is established and verified before the tree runs', async (c) 
   c.check(owned.childPid > 0, 'no child pid was reported');
   c.check(owned.helperPid > 0, 'no helper pid was reported');
   c.check(owned.verifiedInJob === true, 'ownership was reported without membership evidence');
+  c.check(
+    owned.mode === 'JOBLIST' && owned.assignedAtCreation === true,
+    `the default launch did not place the process in the job at creation (${owned.mode}/${String(owned.assignedAtCreation)})`,
+  );
   c.check(
     owned.jobMembersAtStart === 1,
     `expected exactly the child in the job at start, saw ${owned.jobMembersAtStart}`,
@@ -371,6 +393,32 @@ measure('AO death takes the helper and the whole tree, with no cleanup code', as
   );
   const survivors = await liveCount(heartbeatDir);
   c.check(survivors === 0, `${survivors} process(es) survived their owner`);
+
+  // What the evidence left behind must NOT say. Nobody survives to classify
+  // this run — the caller that would have was the process killed — so the
+  // property that matters is that whoever reads the status afterwards cannot
+  // read it as a completion.
+  //
+  // It is deliberately not asserted that the status records `OWNER_LOST`, and
+  // the reason was measured rather than assumed: **node puts every child it
+  // spawns into its own kill-on-close job** (libuv does this on Windows), so
+  // when AO dies the helper is killed by that job immediately — usually before
+  // its own owner watch can write anything. Containment therefore holds twice
+  // over here, and the owner watch is what covers the case where the owner is
+  // *not* the parent, which the contract tests pin instead. An assertion on
+  // the flag would have been an assertion on which of two races won.
+  const status = readStatus(workDir);
+  c.check(status !== null, 'the boundary left no status behind');
+  const ending = classifyBoundaryEnding({
+    status,
+    helperExitCode: null,
+    helperSignal: null,
+    callerRequestedTermination: false,
+  });
+  c.check(
+    ending.ending === 'BOUNDARY_LOST',
+    `a destroyed run reads as ${ending.ending}, not as a lost boundary`,
+  );
 });
 
 measure('descendants the child orphaned are job members and die with the job', async (c) => {
@@ -479,6 +527,10 @@ measure('the shipped helper refuses any request that would weaken containment', 
     const dir = tempDir('ao-boundary-weaken-');
     const marker = join(dir, 'ran.txt');
     const requestPath = writeRawRequest(dir, [
+      // A complete, valid request in every other respect — so the refusal
+      // below is attributable to the weakening key and not to a request the
+      // helper would have rejected anyway.
+      ['nonce', 'weakening-refusal-case'],
       ['mode', 'SUSPENDED'],
       ['file', process.execPath],
       ['arg', '-e'],
@@ -498,6 +550,26 @@ measure('the shipped helper refuses any request that would weaken containment', 
     );
     c.check(!existsSync(marker), `${key}: the target ran despite the refusal`);
   }
+
+  // The positive control, without which every assertion above could be
+  // satisfied by a helper that refuses hand-written requests as such. The same
+  // request minus the weakening key has to be accepted and has to run.
+  const okDir = tempDir('ao-boundary-weaken-ok-');
+  const okMarker = join(okDir, 'ran.txt');
+  const okRequest = writeRawRequest(okDir, [
+    ['nonce', 'weakening-refusal-positive-control'],
+    ['mode', 'SUSPENDED'],
+    ['file', process.execPath],
+    ['arg', '-e'],
+    ['arg', `require("fs").writeFileSync(${JSON.stringify(okMarker)}, "ran")`],
+    ['verbatim', 'false'],
+    ['ownerPid', String(process.pid)],
+    ['statusPath', join(okDir, 'status.txt')],
+  ]);
+  const okHelper = spawnHelper(exe.path, okRequest);
+  const okExit = await helperExit(okHelper);
+  c.check(okExit.code === 0, `the control request was refused with exit ${okExit.code}`);
+  c.check(existsSync(okMarker), 'the control request did not run its target');
 });
 
 measure('nothing executes before membership has been verified', async (c) => {
@@ -509,6 +581,7 @@ measure('nothing executes before membership has been verified', async (c) => {
   const dir = tempDir('ao-boundary-verify-');
   const marker = join(dir, 'ran.txt');
   const requestPath = writeRawRequest(dir, [
+    ['nonce', 'verify-before-execute-case'],
     ['mode', 'SUSPENDED'],
     ['file', process.execPath],
     ['arg', '-e'],
@@ -532,33 +605,28 @@ measure('nothing executes before membership has been verified', async (c) => {
   c.check(!existsSync(marker), 'the target executed before its membership was accepted');
 });
 
-measure('the containment settings are load-bearing (negative control)', async (c) => {
-  // The whole suite's credibility rests on this case. It builds a helper that
-  // keeps the job handle inheritable *and* passes no handle list — the exact
-  // pair the spike measured as the one that breaks containment — kills it, and
-  // requires survivors. If this reports zero, every "0 survivors" above is
-  // measuring an instrument that cannot see anything.
+/** Runs the fixture tree through the control build with the given weakening. */
+async function weakenedRun(c, weakening) {
   const control = controlExe();
-  c.check(existsSync(control), 'the control helper did not build');
-
   const heartbeatDir = tempDir('ao-boundary-hb-');
   const requestDir = tempDir('ao-boundary-control-run-');
   const requestPath = writeRawRequest(requestDir, [
+    ['nonce', `control-${weakening.map(([key]) => key).join('-')}`],
     ['mode', 'SUSPENDED'],
     ['file', process.execPath],
     ['arg', treeFixture],
     ['arg', heartbeatDir],
     ['arg', '2'],
     ['arg', '2'],
-    // A bounded lifetime: these processes are *meant* to escape, so they must
-    // also be guaranteed to end without anyone remembering to kill them.
+    // A bounded lifetime: these processes are *meant* to escape in one of the
+    // two runs, so they must also be guaranteed to end without anyone
+    // remembering to kill them.
     ['arg', '60000'],
     ['arg', '60000'],
     ['verbatim', 'false'],
     ['ownerPid', String(process.pid)],
     ['statusPath', join(requestDir, 'status.txt')],
-    ['inheritJobHandle', 'true'],
-    ['noHandleList', 'true'],
+    ...weakening,
   ]);
   const helper = spawnHelper(control, requestPath);
   c.check(await waitForTree(heartbeatDir, 7, 20_000), 'the control tree never appeared');
@@ -570,21 +638,49 @@ measure('the containment settings are load-bearing (negative control)', async (c
   // bound as containment. The first version of this case did exactly that and
   // reported zero survivors over processes that had simply timed out.
   const survivors = await livePids(heartbeatDir);
-  c.note(`survivors of the weakened boundary: ${survivors.length}`);
-  c.check(
-    survivors.length > 0,
-    'the weakened boundary left no survivors — the instrument cannot see one',
-  );
   for (const pid of survivors) killOnly(pid);
+  return survivors;
+}
+
+measure('the containment settings are load-bearing (negative control)', async (c) => {
+  // The whole suite's credibility rests on this case, and it is run as a pair
+  // so that the claim it establishes is the one the source makes: the handle
+  // list and the non-inheritable job handle are *two independent* lines of
+  // defence, and it takes both being wrong to lose the tree.
+  c.check(existsSync(controlExe()), 'the control helper did not build');
+
+  const oneWrong = await weakenedRun(c, [['inheritJobHandle', 'true']]);
+  c.note(`survivors with only the job handle inheritable: ${oneWrong.length}`);
+  c.check(
+    oneWrong.length === 0,
+    `the handle list alone did not hold: ${oneWrong.length} survivor(s)`,
+  );
+
+  const bothWrong = await weakenedRun(c, [
+    ['inheritJobHandle', 'true'],
+    ['noHandleList', 'true'],
+  ]);
+  c.note(`survivors with both wrong: ${bothWrong.length}`);
+  // Exactly the whole fixture tree, not merely "some": a weakened boundary
+  // that leaked 1 of 7 would satisfy a `> 0` assertion while meaning something
+  // quite different, and the README quotes this number.
+  c.check(
+    bothWrong.length === 7,
+    `expected the whole 7-process tree to escape, saw ${bothWrong.length}`,
+  );
 });
 
-measure('JOBLIST placement contains the tree the same way', async (c) => {
-  const { start, heartbeatDir } = await startTree({ mode: 'JOBLIST' });
-  if (!c.check(start.established, 'boundary refused in JOBLIST mode')) return;
+measure('SUSPENDED placement contains the tree the same way', async (c) => {
+  // The default is JOBLIST — placement at creation, no window in which a
+  // created process is not yet owned. SUSPENDED is the other measured mode,
+  // and it is the one that proves membership before the target's first
+  // instruction, so both are exercised.
+  const { start, heartbeatDir } = await startTree({ mode: 'SUSPENDED' });
+  if (!c.check(start.established, 'boundary refused in SUSPENDED mode')) return;
   const owned = start.process;
   c.check(
-    owned.assignedAtCreation === true,
-    'JOBLIST mode did not report placement at creation',
+    owned.assignedAtCreation === false,
+    'SUSPENDED mode reported placement at creation',
   );
   c.check(await waitForTree(heartbeatDir, 7, 20_000), 'the 7-process tree never appeared');
   owned.terminate();
@@ -594,8 +690,150 @@ measure('JOBLIST placement contains the tree the same way', async (c) => {
     `unexpected ending ${ending.ending}`,
   );
   const survivors = await liveCount(heartbeatDir);
-  c.check(survivors === 0, `${survivors} process(es) survived in JOBLIST mode`);
+  c.check(survivors === 0, `${survivors} process(es) survived in SUSPENDED mode`);
   owned.dispose();
+});
+
+measure('what the target receives is what the caller asked for', async (c) => {
+  // The boundary builds its own Win32 command line rather than letting Node do
+  // it, so this is a differential check against `child_process.spawn`: the
+  // same arguments through both paths, and the target reports what arrived.
+  // Without it, the quoting rules in `CommandLine.Build` would be asserted
+  // only by a comment citing a measurement made against the spike helper —
+  // a program this repository does not contain.
+  const cases = [
+    ['plain', 'a', 'b'],
+    ['with spaces', 'two words'],
+    ['with "quotes"', 'say "hi"'],
+    ['backslashes', 'C:\\dir\\', 'C:\\a b\\c\\'],
+    ['trailing backslash before quote', 'a\\', '"b\\"'],
+    ['unicode', 'λ', '日本語'],
+    ['empty', '', 'after-empty'],
+    ['shell metacharacters', 'a&b|c>d<e^f%g', '(h)'],
+  ];
+
+  for (const args of cases) {
+    const label = args[0];
+    const start = await startOwnedProcess({
+      file: process.execPath,
+      args: [echoFixture, ...args],
+    });
+    if (!c.check(start.established, `boundary refused for ${label}`)) continue;
+    const owned = start.process;
+    let text = '';
+    owned.helper.stdout.on('data', (chunk) => {
+      text += chunk.toString('utf8');
+    });
+    owned.helper.stderr.resume();
+    const ending = await owned.ending;
+    c.check(ending.ending === 'CHILD_EXITED', `${label}: ended as ${ending.ending}`);
+
+    const control = spawnSync(process.execPath, [echoFixture, ...args], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    let owned_argv = null;
+    let control_argv = null;
+    try {
+      owned_argv = JSON.parse(text).argv;
+      control_argv = JSON.parse(control.stdout).argv;
+    } catch {
+      /* reported by the assertion below */
+    }
+    c.check(
+      owned_argv !== null && JSON.stringify(owned_argv) === JSON.stringify(control_argv),
+      `${label}: boundary delivered ${JSON.stringify(owned_argv)}, spawn delivered ${JSON.stringify(control_argv)}`,
+    );
+    owned.dispose();
+  }
+});
+
+measure('the working directory and the environment arrive exactly', async (c) => {
+  const cwd = join(tempDir('ao-boundary-cwd-'), 'cwd with spaces und Ümläute');
+  mkdirSync(cwd, { recursive: true });
+
+  const start = await startOwnedProcess({
+    file: process.execPath,
+    args: [echoFixture],
+    cwd,
+    // An environment supplied is an environment *replaced*, so this also
+    // measures that nothing of the caller's own leaks in.
+    env: {
+      AO_BOUNDARY_PROBE: 'value with "quotes" and spaces',
+      AO_BOUNDARY_UNICODE: 'λ 日本',
+      SystemRoot: process.env['SystemRoot'],
+    },
+  });
+  if (!c.check(start.established, 'boundary refused')) return;
+  const owned = start.process;
+  let text = '';
+  owned.helper.stdout.on('data', (chunk) => {
+    text += chunk.toString('utf8');
+  });
+  owned.helper.stderr.resume();
+  const ending = await owned.ending;
+  c.check(ending.ending === 'CHILD_EXITED', `ended as ${ending.ending}`);
+
+  let report = null;
+  try {
+    report = JSON.parse(text);
+  } catch {
+    /* reported below */
+  }
+  c.check(report !== null, `the target reported nothing readable: ${text.slice(0, 200)}`);
+  if (report === null) return;
+  c.check(
+    report.cwd.toLowerCase() === cwd.toLowerCase(),
+    `cwd arrived as ${report.cwd}`,
+  );
+  c.check(
+    report.env.AO_BOUNDARY_PROBE === 'value with "quotes" and spaces',
+    `environment value arrived as ${String(report.env.AO_BOUNDARY_PROBE)}`,
+  );
+  c.check(report.env.AO_BOUNDARY_UNICODE === 'λ 日本', 'a Unicode environment value was lost');
+  c.check(report.env.PATH === null, 'the environment was extended rather than replaced');
+  c.check(report.envCount === 3, `expected exactly the 3 supplied variables, saw ${report.envCount}`);
+  owned.dispose();
+});
+
+measure('a reused working directory cannot lend its evidence to the next launch', async (c) => {
+  // The first read of a launch happens before the helper has written
+  // anything. A previous run's status left in a reused directory would
+  // therefore be read first — `boundary=OK`, `verifiedInJob=true`, and another
+  // run's child pid — and the caller would be told ownership was established
+  // by evidence belonging to a process that has already exited.
+  const workDir = tempDir('ao-boundary-reuse-');
+
+  const first = await startOwnedProcess({
+    file: process.execPath,
+    args: ['-e', 'process.exit(3)'],
+    workDir,
+  });
+  if (!c.check(first.established, 'the first launch was refused')) return;
+  first.process.helper.stdout.resume();
+  first.process.helper.stderr.resume();
+  const firstEnding = await first.process.ending;
+  c.check(firstEnding.ending === 'CHILD_EXITED', `first launch ended as ${firstEnding.ending}`);
+  const firstChild = first.process.childPid;
+  c.check(existsSync(join(workDir, 'status.txt')), 'the first launch left no status to reuse');
+
+  const second = await startOwnedProcess({
+    file: process.execPath,
+    args: ['-e', 'process.exit(4)'],
+    workDir,
+  });
+  if (!c.check(second.established, 'the second launch was refused')) return;
+  second.process.helper.stdout.resume();
+  second.process.helper.stderr.resume();
+  c.check(
+    second.process.childPid !== firstChild,
+    'the second launch was established on the first launch’s evidence',
+  );
+  const secondEnding = await second.process.ending;
+  c.check(
+    secondEnding.ending === 'CHILD_EXITED' && secondEnding.childExitCode === 4,
+    `the second launch reported ${secondEnding.ending}/${String(secondEnding.childExitCode)}`,
+  );
 });
 
 // ── run ─────────────────────────────────────────────────────────────────────
