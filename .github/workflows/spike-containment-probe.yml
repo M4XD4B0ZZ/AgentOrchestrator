@@ -1,0 +1,401 @@
+# A measurement, not a gate.
+#
+# Spike 2 measured owned process containment on one developer machine
+# (Windows 10 Pro N 19045). One open question could not be answered there,
+# because answering it needs a GitHub-hosted runner: is a `windows-latest`
+# process already inside a Job Object, and does a strict job nested inside
+# whatever is there still own and kill the tree it creates?
+#
+# This workflow answers exactly that, and nothing else. It is deliberately:
+#
+#   * opt-in     - `workflow_dispatch`, plus this file's own pull request, so
+#                  it never runs on ordinary changes;
+#   * read-only  - it builds nothing from `src/`, installs nothing, and touches
+#                  no product code. The probe is inlined below rather than
+#                  added to the tree, because it is throwaway measurement code;
+#   * non-gating - a measurement outcome never fails the job. Only a broken
+#                  harness does. `verify` remains this repository's gate.
+#
+# The result is printed to the log and uploaded as an artefact, to be preserved
+# with the rest of the spike evidence outside this repository.
+name: spike containment probe
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/spike-containment-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: containment probe (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Locate the in-box C# compiler
+        id: csc
+        shell: bash
+        run: |
+          csc="/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+          if [ ! -f "$csc" ]; then
+            echo "The in-box .NET Framework compiler is absent on this runner." >&2
+            echo "That is a harness failure, not a measurement result." >&2
+            exit 1
+          fi
+          echo "path=$csc" >> "$GITHUB_OUTPUT"
+
+      - name: Write the probe
+        shell: bash
+        run: |
+          mkdir -p probe
+          cat > probe/CiProbe.cs <<'PROBE'
+          // Throwaway containment probe for a GitHub-hosted Windows runner.
+          //
+          // measure : reports the runner's own job membership, then creates a
+          //           strict job, launches a three-generation tree inside it,
+          //           tries to break one child out, terminates the job and
+          //           counts survivors from an independent process walk.
+          // fixture : the tree member. Spawns the next generation and waits.
+          using System;
+          using System.Collections.Generic;
+          using System.Diagnostics;
+          using System.Globalization;
+          using System.IO;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          using System.Threading;
+
+          internal static class P
+          {
+              const uint CREATE_SUSPENDED = 0x00000004;
+              const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+              const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+              const int JobObjectExtendedLimitInformation = 9;
+              const int JobObjectBasicProcessIdList = 3;
+              const uint KILL_ON_JOB_CLOSE = 0x00002000;
+              const uint TH32CS_SNAPPROCESS = 0x00000002;
+              const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000;
+              static readonly IntPtr PROC_THREAD_ATTRIBUTE_JOB_LIST = (IntPtr)0x0002000D;
+
+              [StructLayout(LayoutKind.Sequential)] struct STARTUPINFO {
+                  public int cb; public IntPtr lpReserved, lpDesktop, lpTitle;
+                  public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute;
+                  public uint dwFlags; public ushort wShowWindow, cbReserved2;
+                  public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
+              [StructLayout(LayoutKind.Sequential)] struct STARTUPINFOEX {
+                  public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
+              [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION {
+                  public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+              [StructLayout(LayoutKind.Sequential)] struct IO_COUNTERS {
+                  public ulong a, b, c, d, e, f; }
+              [StructLayout(LayoutKind.Sequential)] struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                  public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags;
+                  public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize; public uint ActiveProcessLimit;
+                  public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; }
+              [StructLayout(LayoutKind.Sequential)] struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+                  public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation; public IO_COUNTERS IoInfo;
+                  public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed; }
+              [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct PROCESSENTRY32W {
+                  public uint dwSize, cntUsage, th32ProcessID; public IntPtr th32DefaultHeapID;
+                  public uint th32ModuleID, cntThreads, th32ParentProcessID; public int pcPriClassBase;
+                  public uint dwFlags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile; }
+
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern IntPtr CreateJobObjectW(IntPtr a, string n);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr j, int c, IntPtr i, uint l);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr j, int c, IntPtr i, uint l, IntPtr r);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr j, IntPtr p);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsProcessInJob(IntPtr p, IntPtr j, out bool r);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr j, uint c);
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool CreateProcessW(
+                  string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd,
+                  ref STARTUPINFOEX si, out PROCESS_INFORMATION pi);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern uint ResumeThread(IntPtr t);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr h);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr GetCurrentProcess();
+              [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint a, bool i, int pid);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr p, out long c, out long e, out long k, out long u);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr p, out uint code);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint f, uint pid);
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr s, ref PROCESSENTRY32W e);
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr s, ref PROCESSENTRY32W e);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool InitializeProcThreadAttributeList(IntPtr l, int c, int f, ref IntPtr s);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern bool UpdateProcThreadAttribute(IntPtr l, uint f, IntPtr a, IntPtr v, IntPtr s, IntPtr p, IntPtr r);
+              [DllImport("kernel32.dll", SetLastError = true)] static extern void DeleteProcThreadAttributeList(IntPtr l);
+
+              static readonly List<string> Report = new List<string>();
+              static void Say(string key, string value) {
+                  Report.Add("\"" + key + "\":" + (value == "true" || value == "false" || value == "null" ? value : "\"" + value + "\""));
+                  Console.Error.WriteLine(key + " = " + value);
+              }
+
+              static IntPtr StrictJob(out int error) {
+                  error = 0;
+                  IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+                  if (job == IntPtr.Zero) { error = Marshal.GetLastWin32Error(); return IntPtr.Zero; }
+                  var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                  limits.BasicLimitInformation.LimitFlags = KILL_ON_JOB_CLOSE;
+                  int size = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+                  IntPtr buffer = Marshal.AllocHGlobal(size);
+                  try {
+                      Marshal.StructureToPtr(limits, buffer, false);
+                      if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, buffer, (uint)size)) {
+                          error = Marshal.GetLastWin32Error(); CloseHandle(job); return IntPtr.Zero;
+                      }
+                  } finally { Marshal.FreeHGlobal(buffer); }
+                  return job;
+              }
+
+              static int JobMembers(IntPtr job) {
+                  int header = IntPtr.Size == 8 ? 16 : 8;
+                  int size = header + IntPtr.Size * 512;
+                  IntPtr buffer = Marshal.AllocHGlobal(size);
+                  try {
+                      for (int i = 0; i < size; i++) Marshal.WriteByte(buffer, i, 0);
+                      Marshal.WriteInt32(buffer, 0, 512);
+                      if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList, buffer, (uint)size, IntPtr.Zero)) return -1;
+                      return Marshal.ReadInt32(buffer, 4);
+                  } finally { Marshal.FreeHGlobal(buffer); }
+              }
+
+              // Identity is (pid, creation time). A pid alone is not one: Windows
+              // reuses pids, and a reused pid counted as a survivor turns a clean
+              // kill into a false alarm - which is exactly what a pid-only version
+              // of this probe reported before it was fixed.
+              static long Created(int pid) {
+                  IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                  if (handle == IntPtr.Zero) return 0;
+                  try {
+                      long c, e, k, u;
+                      return GetProcessTimes(handle, out c, out e, out k, out u) ? c : 0;
+                  } finally { CloseHandle(handle); }
+              }
+
+              // Running, not merely openable. A terminated process whose object is
+              // still referenced can be opened and still reports its creation time,
+              // so identity alone counts a corpse as a survivor. STILL_ACTIVE (259)
+              // is the fact being asserted.
+              static bool StillRunning(int pid) {
+                  IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                  if (handle == IntPtr.Zero) return false;
+                  try {
+                      uint code;
+                      return GetExitCodeProcess(handle, out code) && code == 259;
+                  } finally { CloseHandle(handle); }
+              }
+
+              static Dictionary<int, string> Names = new Dictionary<int, string>();
+
+              static List<KeyValuePair<int, long>> Descendants(int root) {
+                  var parents = new Dictionary<int, int>();
+                  var live = new List<KeyValuePair<int, long>>();
+                  IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                  var entry = new PROCESSENTRY32W();
+                  entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32W));
+                  if (Process32FirstW(snapshot, ref entry)) {
+                      do {
+                          parents[(int)entry.th32ProcessID] = (int)entry.th32ParentProcessID;
+                          Names[(int)entry.th32ProcessID] = entry.szExeFile;
+                          entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32W));
+                      } while (Process32NextW(snapshot, ref entry));
+                  }
+                  CloseHandle(snapshot);
+                  foreach (var pair in parents) {
+                      if (pair.Key == root) continue;
+                      int walker = pair.Key, guard = 0;
+                      while (walker != 0 && guard++ < 64) {
+                          if (walker == root) { live.Add(new KeyValuePair<int, long>(pair.Key, Created(pair.Key))); break; }
+                          int next;
+                          if (!parents.TryGetValue(walker, out next)) break;
+                          walker = next;
+                      }
+                  }
+                  if (parents.ContainsKey(root)) live.Add(new KeyValuePair<int, long>(root, Created(root)));
+                  return live;
+              }
+
+              static bool Launch(IntPtr job, string exe, string args, bool breakaway, bool viaJobList, out PROCESS_INFORMATION info, out int error) {
+                  var startup = new STARTUPINFOEX();
+                  startup.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+                  IntPtr list = IntPtr.Zero, jobArray = IntPtr.Zero;
+                  error = 0;
+                  try {
+                      uint flags = viaJobList ? EXTENDED_STARTUPINFO_PRESENT : CREATE_SUSPENDED;
+                      if (breakaway) flags |= CREATE_BREAKAWAY_FROM_JOB;
+                      if (viaJobList) {
+                          IntPtr size = IntPtr.Zero;
+                          InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                          list = Marshal.AllocHGlobal(size);
+                          if (!InitializeProcThreadAttributeList(list, 1, 0, ref size)) { error = Marshal.GetLastWin32Error(); info = default(PROCESS_INFORMATION); return false; }
+                          jobArray = Marshal.AllocHGlobal(IntPtr.Size);
+                          Marshal.Copy(new IntPtr[] { job }, 0, jobArray, 1);
+                          if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, jobArray, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero)) {
+                              error = Marshal.GetLastWin32Error(); info = default(PROCESS_INFORMATION); return false;
+                          }
+                          startup.lpAttributeList = list;
+                      }
+                      if (!CreateProcessW(exe, new StringBuilder("\"" + exe + "\" " + args), IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, null, ref startup, out info)) {
+                          error = Marshal.GetLastWin32Error(); return false;
+                      }
+                      if (!viaJobList) {
+                          if (!AssignProcessToJobObject(job, info.hProcess)) {
+                              error = Marshal.GetLastWin32Error();
+                              TerminateJobObject(job, 0xDEAD);
+                              return false;
+                          }
+                          ResumeThread(info.hThread);
+                      }
+                      return true;
+                  } finally {
+                      if (list != IntPtr.Zero) { DeleteProcThreadAttributeList(list); Marshal.FreeHGlobal(list); }
+                      if (jobArray != IntPtr.Zero) Marshal.FreeHGlobal(jobArray);
+                  }
+              }
+
+              static int Main(string[] argv) {
+                  string exe = Process.GetCurrentProcess().MainModule.FileName;
+                  if (argv.Length > 0 && argv[0] == "fixture") {
+                      int depth = int.Parse(argv[1], CultureInfo.InvariantCulture);
+                      if (depth > 0) {
+                          var start = new ProcessStartInfo(exe, "fixture " + (depth - 1).ToString(CultureInfo.InvariantCulture));
+                          start.UseShellExecute = false;
+                          Process.Start(start);
+                      }
+                      Thread.Sleep(600000);
+                      return 0;
+                  }
+
+                  // The escape attempt has to be made from INSIDE the job. Made
+                  // from the owner - which holds the job handle but is not a
+                  // member - it proves nothing, and an earlier version of this
+                  // probe reported exactly that false "escape succeeded".
+                  if (argv.Length > 1 && argv[0] == "escape") {
+                      var startup = new STARTUPINFOEX();
+                      startup.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+                      PROCESS_INFORMATION child;
+                      bool ok = CreateProcessW(exe, new StringBuilder("\"" + exe + "\" fixture 0"), IntPtr.Zero, IntPtr.Zero,
+                          false, CREATE_BREAKAWAY_FROM_JOB, IntPtr.Zero, null, ref startup, out child);
+                      int win32 = ok ? 0 : Marshal.GetLastWin32Error();
+                      File.WriteAllText(argv[1], (ok ? "ESCAPED " : "REFUSED ") + win32.ToString(CultureInfo.InvariantCulture) +
+                          " " + (ok ? child.dwProcessId.ToString(CultureInfo.InvariantCulture) : "0"), new UTF8Encoding(false));
+                      Thread.Sleep(600000);
+                      return 0;
+                  }
+
+                  // 1. What the runner already is.
+                  bool inJob;
+                  IsProcessInJob(GetCurrentProcess(), IntPtr.Zero, out inJob);
+                  Say("runnerAlreadyInJob", inJob ? "true" : "false");
+
+                  // 2. A strict job nested inside whatever that is.
+                  int error;
+                  IntPtr job = StrictJob(out error);
+                  if (job == IntPtr.Zero) { Say("strictJobCreated", "false"); Say("win32", error.ToString(CultureInfo.InvariantCulture)); Emit(); return 0; }
+                  Say("strictJobCreated", "true");
+
+                  // 3. Create a three-generation tree inside it.
+                  PROCESS_INFORMATION info;
+                  bool created = Launch(job, exe, "fixture 2", false, false, out info, out error);
+                  Say("createSuspendedLaunch", created ? "true" : "false");
+                  if (!created) { Say("win32", error.ToString(CultureInfo.InvariantCulture)); Emit(); return 0; }
+                  bool memberOfOurJob;
+                  IsProcessInJob(info.hProcess, job, out memberOfOurJob);
+                  Say("rootInOurJob", memberOfOurJob ? "true" : "false");
+                  Thread.Sleep(4000);
+                  var tree = Descendants(info.dwProcessId);
+                  Say("treeSize", tree.Count.ToString(CultureInfo.InvariantCulture));
+                  Say("jobMembers", JobMembers(job).ToString(CultureInfo.InvariantCulture));
+
+                  // 4. Can a member of the job break out of it? Asked from inside.
+                  string escapeReport = Path.Combine(Directory.GetCurrentDirectory(), "escape.txt");
+                  if (File.Exists(escapeReport)) File.Delete(escapeReport);
+                  PROCESS_INFORMATION escape;
+                  bool escapeLaunched = Launch(job, exe, "escape \"" + escapeReport + "\"", false, false, out escape, out error);
+                  Say("escapeProbeLaunched", escapeLaunched ? "true" : "false");
+                  for (int i = 0; i < 100 && !File.Exists(escapeReport); i++) Thread.Sleep(100);
+                  Say("breakawayFromInside", File.Exists(escapeReport) ? File.ReadAllText(escapeReport) : "NO_REPORT");
+
+                  // 5. Does PROC_THREAD_ATTRIBUTE_JOB_LIST work on this runner?
+                  IntPtr second = StrictJob(out error);
+                  PROCESS_INFORMATION viaList;
+                  bool jobListWorked = second != IntPtr.Zero && Launch(second, exe, "fixture 0", false, true, out viaList, out error);
+                  Say("jobListLaunch", jobListWorked ? "true" : "false");
+                  Say("jobListWin32", error.ToString(CultureInfo.InvariantCulture));
+                  if (jobListWorked) { TerminateJobObject(second, 0xDEAD); }
+                  if (second != IntPtr.Zero) CloseHandle(second);
+
+                  // 6. Terminate, then count survivors from the process table.
+                  TerminateJobObject(job, 0xDEAD);
+                  Thread.Sleep(1500);
+                  int survivors = 0;
+                  var survivorNames = new List<string>();
+                  foreach (var member in tree) {
+                      long now = Created(member.Key);
+                      // Same pid, same creation time, and still running: identity
+                      // rules out a reused pid, STILL_ACTIVE rules out a corpse.
+                      if (now != 0 && now == member.Value && StillRunning(member.Key)) {
+                          survivors++;
+                          string name;
+                          survivorNames.Add(member.Key.ToString(CultureInfo.InvariantCulture) + ":" +
+                              (Names.TryGetValue(member.Key, out name) ? name : "?"));
+                      }
+                  }
+                  Say("survivorsAfterJobKill", survivors.ToString(CultureInfo.InvariantCulture));
+                  Say("survivorDetail", survivors == 0 ? "none" : string.Join(" ", survivorNames.ToArray()));
+                  Say("treeMembers", string.Join(" ", TreeNames(tree)));
+                  Say("jobMembersAfterKill", JobMembers(job).ToString(CultureInfo.InvariantCulture));
+                  CloseHandle(job);
+                  Emit();
+                  return 0;
+              }
+
+              static string[] TreeNames(List<KeyValuePair<int, long>> tree) {
+                  var names = new List<string>();
+                  foreach (var member in tree) {
+                      string name;
+                      names.Add(member.Key.ToString(CultureInfo.InvariantCulture) + ":" +
+                          (Names.TryGetValue(member.Key, out name) ? name : "?"));
+                  }
+                  return names.ToArray();
+              }
+
+              static void Emit() {
+                  string json = "{" + string.Join(",", Report.ToArray()) + "}";
+                  Console.WriteLine(json);
+                  File.WriteAllText("probe-result.json", json, new UTF8Encoding(false));
+              }
+          }
+          PROBE
+
+      - name: Compile the probe
+        shell: bash
+        run: |
+          "${{ steps.csc.outputs.path }}" -nologo -platform:x64 -out:probe/CiProbe.exe probe/CiProbe.cs
+
+      - name: Measure
+        shell: bash
+        run: |
+          # A measurement outcome is never a job failure: this step fails only if
+          # the probe itself could not run to completion.
+          ./probe/CiProbe.exe measure
+          test -f probe-result.json
+
+      - name: Report
+        if: always()
+        shell: bash
+        run: |
+          echo '### windows-latest containment probe' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat probe-result.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo '{"error":"no result"}' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: containment-probe-result
+          path: probe-result.json
+          if-no-files-found: warn
