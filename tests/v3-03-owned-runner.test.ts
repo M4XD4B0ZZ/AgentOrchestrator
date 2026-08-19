@@ -934,22 +934,21 @@ describe.runIf(IS_WINDOWS)('a short-lived child’s output survives a slow estab
 
 describe('a refusal after establishment does not wait on the helper’s pipes', () => {
   it('returns at once rather than draining a stream a live helper may hold', async () => {
-    // The drain added above waits for the output streams before reading the
-    // sinks, and *which* endings may be waited on is a decision rather than a
-    // detail. `BOUNDARY_REFUSED` after establishment has two producers, and one
-    // of them — node emitting `error` on the child process when a **kill**
-    // fails, not only when a spawn does — arrives with the helper possibly
-    // still running and still holding these pipes.
+    // A standing guard against re-introducing a wait on the helper's streams.
     //
-    // Waiting there is the deadlock shape this repository already has a name
-    // for: the pipe you wait on is held by the survivor you are counting. The
-    // run would have stalled for the whole grace window on a boundary it had
-    // just declared unaccounted for — five seconds by default, and up to
-    // whatever a caller passed.
+    // One version of this slice had one, and it had to be excluded for exactly
+    // this ending before being withdrawn altogether: `BOUNDARY_REFUSED` after
+    // establishment has two producers, and one of them — node emitting `error`
+    // on the child process when a **kill** fails, not only when a spawn does —
+    // arrives with the helper possibly still running and still holding these
+    // pipes. Waiting there is the deadlock shape this repository already has a
+    // name for: the pipe you wait on is held by the survivor you are counting.
+    // The run stalled for the whole grace window on a boundary it had just
+    // declared unaccounted for — measured at 30s against this case's grace.
     //
     // Driven against a substituted launch, because a failed kill cannot be
-    // provoked from a real one. The streams below never end, so a drain that is
-    // not excluded here cannot finish before its bound.
+    // provoked from a real one. The streams below never end, so any wait on
+    // them shows up here as the full grace window.
     const { PassThrough } = await import('node:stream');
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -1023,30 +1022,35 @@ describe.runIf(IS_WINDOWS)('the boundary publishes its final status even under a
     mkdirSync(workDir, { recursive: true });
 
     let held: number | undefined;
-    const holdStatusOpen = (): void => {
-      // Opened as soon as the file exists — which is the establishment write,
-      // the one the caller's own poll would have been holding.
-      const attempt = (): void => {
-        if (held !== undefined) return;
-        try {
-          held = openSync(statusPath, 'r');
-        } catch {
-          setTimeout(attempt, 1).unref?.();
-        }
-      };
-      attempt();
-    };
-    holdStatusOpen();
-    // Released after 200 ms: far longer than a single failed attempt, and far
-    // inside the helper's two-second retry budget. Both margins are wide on
-    // purpose — the release runs on this worker's own event loop, and a
-    // parallel gate can delay a timer by a great deal more than the delay it
-    // was given. This case failed exactly that way once, with the budget an
-    // order of magnitude smaller.
-    setTimeout(() => {
+    let released = false;
+    const release = (): void => {
       if (held !== undefined) closeSync(held);
       held = undefined;
-    }, 200).unref?.();
+      released = true;
+    };
+    // Opened as soon as the file exists — which is the establishment write, the
+    // one the caller's own poll would have been holding.
+    const attempt = (): void => {
+      if (held !== undefined || released) return;
+      try {
+        held = openSync(statusPath, 'r');
+      } catch {
+        setTimeout(attempt, 1).unref?.();
+        return;
+      }
+      // Armed *here*, not before the retry loop, and that is not a tidy-up.
+      // Started at the top of the case, the 200 ms clock runs while the helper
+      // is still establishing — measured at up to 228 ms under load — so the
+      // release could fire before the file existed, no-op, and leave the retry
+      // loop to open a handle nothing would ever close. The helper would then
+      // exhaust its whole two-second budget and the case would fail with the
+      // very defect it exists to pin.
+      //
+      // Measured from the open, the hold is 200 ms of a two-second budget
+      // whatever establishment cost.
+      setTimeout(release, 200).unref?.();
+    };
+    attempt();
 
     const script = join(workDir, 'publish.cjs');
     writeFileSync(script, "process.stdout.write('PUBLISHED');\n", 'utf8');
@@ -1062,7 +1066,7 @@ describe.runIf(IS_WINDOWS)('the boundary publishes its final status even under a
       { runOwned: async (options) => await runOwnedCommand({ ...options, workDir }) },
     );
 
-    if (held !== undefined) closeSync(held);
+    release();
     expect(result.outcome).toBe('COMPLETED');
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('PUBLISHED');

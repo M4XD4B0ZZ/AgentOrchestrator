@@ -467,8 +467,11 @@ before either mechanism is reached.
 over structurally: a literal argument vector, `shell: false`, no shell and no
 command processor anywhere in the chain. Nothing on this path is re-parsed by a
 shell or an interpreter. On Windows the boundary rebuilds the command line with
-the same MSVCRT quoting rule node applies, measured identical across ten
-differential cases.
+the same MSVCRT quoting rule node applies. That equivalence is measured against
+this repository's own artefact rather than quoted from the spike: eight
+differential argv cases in
+[`tests/dist-artifact/launch-boundary-dist-artifact.mjs`](tests/dist-artifact/launch-boundary-dist-artifact.mjs),
+plus one for the `.cmd` verbatim route.
 
 **B. `.cmd` / `.bat` targets.** Node cannot spawn a batch file directly, so this
 path runs it through the trusted Windows command processor **on purpose**.
@@ -6016,7 +6019,8 @@ product-side PR/CI/merge automation. `READY_FOR_PR` remains terminal — the
 orchestrator hands a finished task to a human and stops there.
 
 Owned process containment in the productive runner is **no longer** on that
-list on Windows: V3 slice 3 delivered it (below).
+list on Windows: V3 slice 3 delivered it — see "The productive Windows runner
+(V3 slice 3)" above.
 
 Owned containment is still missing, but it is no longer an open *question*. A
 measurement spike on 2026-08-18 settled which mechanism can provide it on

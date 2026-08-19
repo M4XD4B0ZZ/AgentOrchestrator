@@ -2383,12 +2383,14 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // nothing said so, so nothing noticed when a review added a second and
     // started 57 real unfenced processes with the whole suite green.
     //
-    // The second entry is the V3 launch boundary (slice 1). It spawns the
-    // native helper, so it genuinely can start a process — and it is the one
-    // module here that no fenced path reaches, which the next assertion is
-    // what states. Listing it without that assertion would turn this pin from
-    // "one fenced module starts processes" into "two modules do, one of them
-    // unaccounted for".
+    // The second entry is the V3 launch boundary. It spawns the native helper,
+    // so it genuinely can start a process — and since slice 3 it is reached by
+    // the fenced paths rather than by nothing: `leased-spawns` → a runner →
+    // `doctor/exec.ts` → `owned-command.ts` → here. Which route exists, and
+    // that there is exactly one, is what the next case states. Listing a second
+    // process-starting module without that would turn this pin from "one fenced
+    // module starts processes" into "two modules do, one of them unaccounted
+    // for".
     expect(modulesImporting(/node:child_process/, { values: false })).toEqual([
       join('src', 'boundary', 'start-owned-process.ts'),
       join('src', 'doctor', 'exec.ts'),
@@ -2521,8 +2523,13 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // its `^export[\s\S]*?from '…'` arm will happily start at an `export const`
     // and run on until the word `from` turns up inside a doc comment — so a
     // pattern matching a bare identifier reports whichever files happen to have
-    // prose between the two. Measured here: matching `\brunCommand\b` listed
-    // `doctor/exec.ts` as an importer of itself.
+    // prose between the two. Measured, and asserted rather than only claimed,
+    // so this paragraph is a pin and not a story: matching the bare name
+    // reports `doctor/exec.ts` as an importer of itself, which is exactly why
+    // no pin in this file uses one.
+    expect(modulesImporting(/\brunCommand\b/, { values: false })).toContain(
+      join('src', 'doctor', 'exec.ts'),
+    );
   });
 
   it('keeps every import static, which is what the reachability pins assume', () => {

@@ -850,61 +850,6 @@ function releaseHelper(owned: OwnedProcess): void {
   owned.helper.unref?.();
 }
 
-/**
- * Waits for every stream to have delivered what it holds, or for `limitMs`.
- *
- * A stream that has already ended, or that never had a readable side, resolves
- * at once, so the common case costs one microtask. The timer is unref'd and
- * cleared on every exit, because a diagnostic must never hold this process open
- * on its own.
- *
- * `'error'` settles it like `'end'` does. A stream that failed has no more
- * bytes to give, and waiting out the whole bound for one would turn a stream
- * error into a delay on every command that hit one.
- */
-async function drainStreams(
-  streams: readonly (NodeJS.ReadableStream | null | undefined)[],
-  limitMs: number,
-): Promise<void> {
-  const pending = streams.filter(
-    (stream): stream is NodeJS.ReadableStream & { readableEnded?: boolean; destroyed?: boolean } =>
-      stream !== null && stream !== undefined,
-  );
-  const detach: (() => void)[] = [];
-  const waits = pending
-    .filter((stream) => stream.readableEnded !== true && stream.destroyed !== true)
-    .map(
-      async (stream) =>
-        await new Promise<void>((done) => {
-          const settle = (): void => done();
-          stream.once('end', settle);
-          stream.once('close', settle);
-          stream.once('error', settle);
-          // Removed when the *bound* wins, which is the case these listeners
-          // outlive: a stream that never ends keeps three of them, on a run
-          // that has already been reported, retaining its own closure.
-          detach.push(() => {
-            stream.off?.('end', settle);
-            stream.off?.('close', settle);
-            stream.off?.('error', settle);
-          });
-        }),
-    );
-  if (waits.length === 0) return;
-
-  let timer: NodeJS.Timeout | undefined;
-  const bound = new Promise<void>((done) => {
-    timer = setTimeout(done, limitMs);
-    timer.unref?.();
-  });
-  try {
-    await Promise.race([Promise.all(waits), bound]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    for (const remove of detach) remove();
-  }
-}
-
 export interface OwnedCommandResult extends OwnedCommandClassification {
   readonly display: string;
   readonly file: string;
@@ -1606,49 +1551,31 @@ export async function runOwnedCommand(
     }
 
     /**
-     * The boundary has ended. The *streams* may not have, and those are two
-     * different facts.
+     * The boundary has ended, and by then the streams have too.
      *
-     * Measured, and it is the reason this exists: a `.cmd` target through
-     * `cmd.exe` lost its entire output in 4 of 60 identical runs, reported as a
-     * clean `COMPLETED` with `exitCode: 0` and an empty `stdout`. A caller
-     * cannot tell that apart from a command that printed nothing, which makes
-     * it the worst shape a defect can take on this path — `git-query.ts` reads
-     * a repository's identity out of exactly such a string.
+     * Not an assumption: `owned.ending` derives from the helper's `close`, and
+     * node emits `close` only once the process has ended *and* its stdio
+     * streams have closed — which, for a stream in flowing mode, is after every
+     * `data` it will ever emit. The sinks are therefore complete here.
      *
-     * The cause is an ordering, not a lost byte. A short-lived child can finish
-     * before `startOwnedProcess` has even returned: the establishment poll then
-     * reads a *final* status, and the helper's `close` has already fired, so
-     * `owned.ending` is an already-settled promise by the time the `data`
-     * listeners above are attached. Awaiting it therefore resolves on the next
-     * microtask, while a stream's buffered chunks are delivered a tick later —
-     * so the sinks are read before anything has been put in them.
+     * An earlier version of this slice awaited the streams as well, on the
+     * reasoning that a short-lived child could finish before its listeners were
+     * attached. That was a real defect and it is fixed one layer up, by handing
+     * the streams over in the same tick as the spawn
+     * (`OwnedProcessRequest.onHelperSpawned`) — so the wait repaired nothing,
+     * and it was withdrawn rather than kept as a second mechanism with a
+     * measurement borrowed from the first. Measured before removing it: 120 of
+     * 120 fast `.cmd` runs kept their output without it.
      *
-     * Waiting for a pipe is exactly how a containment measurement deadlocks on
-     * the survivors it is counting, so *which* endings may be waited on is a
-     * decision rather than a detail — and one of them may not.
-     *
-     * For `CHILD_EXITED`, `TERMINATED_BY_CALLER` and `BOUNDARY_LOST`, `ending`
-     * arrives from the helper's `close`: the helper is gone, so the job it held
-     * is closed and everything in it was taken by `KILL_ON_JOB_CLOSE`. No
-     * process is left that could hold these handles open, and the bound is a
-     * backstop rather than a routine wait.
-     *
-     * `BOUNDARY_REFUSED` is the exception, and it is excluded. One of its two
-     * producers is a helper `error` event — node emits one when a *kill* fails,
-     * not only when a spawn does — which arrives with the helper **possibly
-     * still running and still holding these pipes**. That is the deadlock shape
-     * exactly, and the branch below already says so about the working
-     * directory; waiting for such a helper's streams would have stalled a run
-     * that had just declared it unaccounted for, for the whole grace window —
-     * five seconds by default, and up to whatever a caller passed. There is
-     * nothing to wait for there anyway: that branch reports no output.
-     *
-     * Either way the bound wins over the wait: losing output is bad, hanging on
-     * it is worse.
+     * Nothing here waits on a pipe, which also settles a question that would
+     * otherwise need answering every time this code is read: one of
+     * `BOUNDARY_REFUSED`'s two producers is a helper `error` event — node emits
+     * one when a *kill* fails, not only when a spawn does — so it can arrive
+     * with the helper still running and still holding these handles. Waiting
+     * for a pipe held by the process you have just declared unaccounted for is
+     * exactly how a containment measurement deadlocks on its own survivors.
      */
     const ending = settled;
-    if (ending.ending !== 'BOUNDARY_REFUSED') await drainStreams([outStream, errStream], graceMs);
     const classification = classifyOwnedCommand({ ending, termination, ownershipEstablished: true });
     const result = finish({
       ...classification,

@@ -364,11 +364,15 @@ export function classifyProbe(result: CommandResult): ProbeAvailability {
   // `UNAVAILABLE_IN_INSTALLED_VERSION` — *the installed CLI does not understand
   // this sub-command* — about a run whose supervision AO had lost, in an
   // artefact whose own `facts.outcome` said `BOUNDARY_LOST` on the next line.
-  // And a lost boundary may carry an exit code (`launch-boundary.ts`: "Ownership
-  // semantics took the tree down. An exit code may even be present — it is
-  // still not a completion"), so a zero one with output would have answered
-  // `AVAILABLE`: a positive capability claim, feeding the auth preflight, from
-  // a run nothing supervised.
+  // The boundary's own vocabulary can carry an exit code alongside a loss
+  // (`launch-boundary.ts`: "Ownership semantics took the tree down. An exit
+  // code may even be present — it is still not a completion"), and a zero one
+  // with output would have been read here as `AVAILABLE` — a positive
+  // capability claim, feeding the auth preflight, from a run nothing
+  // supervised. That half was not reachable through `runCommand`, which nulls
+  // the exit code on every lost-boundary result; it is guarded anyway, because
+  // this function's job is to be right about the value it is handed rather than
+  // about the one its current caller happens to produce.
   //
   // Inverted deliberately, so that a sixth `CommandOutcome` cannot repeat this.
   // A probe is evidence about an installed CLI only if the process ran to

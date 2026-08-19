@@ -53,7 +53,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { CommandResult } from '../src/doctor/exec.js';
 import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
@@ -113,6 +113,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 const { runCommand, UnsafeArgumentError } = await import('../src/doctor/exec.js');
 const { runCapabilityDump, CAPABILITY_PROBES } = await import('../src/doctor/capabilities.js');
+const { resolveBoundaryExecutable } = await import('../src/boundary/start-owned-process.js');
 
 const tempDirs: string[] = [];
 /**
@@ -459,6 +460,19 @@ describe.skipIf(IS_WINDOWS)('deterministic synchronous spawn() throw', () => {
 describe.runIf(IS_WINDOWS)('a boundary helper that cannot be started is contained', () => {
   /** Matches the native helper, whatever directory the build put it in. */
   const isBoundaryHelper = (file: string): boolean => /ao-launch\.exe$/i.test(file);
+
+  beforeAll(() => {
+    // Without a built helper every case in this group passes while measuring
+    // nothing: `resolveBoundaryExecutable()` answers `{}`, the launch is refused
+    // before anything is spawned, and the result is the same `SPAWN_FAILED`
+    // with a `null` errno that these cases assert — for the wrong reason, and
+    // with the `throwFor` hook below intercepting no call at all.
+    //
+    // `npm run verify` builds before it tests, so this is a guard against a
+    // bare `vitest run` quietly reporting a green group, not an expected
+    // condition.
+    expect(resolveBoundaryExecutable().path).toBeDefined();
+  });
 
   it('resolves to the canonical SPAWN_FAILED shape and leaks nothing', async () => {
     const dir = makeTempDir();

@@ -79,10 +79,18 @@ const moduleDir = dirname(fileURLToPath(import.meta.url));
  * and never will be, because the build script writes the helper to
  * `dist/native/`. Without this the whole suite would run against a boundary
  * that is permanently absent, and every case would pass while measuring a
- * refusal. From `src/boundary/` the second candidate is the repository's own
- * `dist/native/ao-launch.exe`; from `dist/boundary/` it is `dist/dist/native/`,
- * which no build produces, so a shipped artefact is decided by the first
- * candidate alone.
+ * refusal.
+ *
+ * The arithmetic, because an earlier version of this note got it wrong and a
+ * false model of where the second candidate points is worse than no note. Both
+ * candidates are `resolve`d from this module's directory, so from
+ * `<root>/src/boundary/` they are `<root>/src/native/` (absent, always) and
+ * `<root>/dist/native/` (the build's own output). From `<root>/dist/boundary/`
+ * they are `<root>/dist/native/` and — walking up two and back down into
+ * `dist/native` — **the same path again**. So a shipped artefact resolves the
+ * same file either way; the second candidate is redundant there rather than
+ * nonexistent, and it can no more reach outside the installed tree than the
+ * first can.
  *
  * It is a *location*, not a fallback: neither candidate is an ordinary spawn,
  * and a run that finds neither is refused rather than downgraded.
@@ -322,10 +330,26 @@ export async function startOwnedProcess(
     throw error;
   }
 
-  // Before the first `await` in this function, and that ordering is the whole
-  // point: see `OwnedProcessRequest.onHelperSpawned`. A callback that throws is
-  // the caller's programming error and is left to propagate — but the helper
-  // exists by then, so it is killed first rather than abandoned holding a job.
+  let callerRequestedTermination = false;
+  let spawnFailure: Error | null = null;
+  const helperClosed = new Promise<{ code: number | null; signal: string | null }>((done) => {
+    helper.once('error', (error) => {
+      spawnFailure = error;
+      done({ code: null, signal: null });
+    });
+    helper.once('close', (code, signal) => done({ code, signal }));
+  });
+
+  // After the listeners above and still before the first `await`, and both
+  // halves of that are deliberate.
+  //
+  // Before any `await`, because that is the whole point of the callback: see
+  // `OwnedProcessRequest.onHelperSpawned`. After the listeners, because a
+  // callback that throws leaves this function on the throw path with a live
+  // `ChildProcess` — and an `'error'` on one with no listener is a process-level
+  // throw in AO, not a rejected promise. The helper is killed and the directory
+  // removed on the way out, but node may still emit `'error'` for an
+  // asynchronous spawn failure or a refused kill after that.
   if (request.onHelperSpawned !== undefined) {
     try {
       request.onHelperSpawned(helper);
@@ -339,16 +363,6 @@ export async function startOwnedProcess(
       throw error;
     }
   }
-
-  let callerRequestedTermination = false;
-  let spawnFailure: Error | null = null;
-  const helperClosed = new Promise<{ code: number | null; signal: string | null }>((done) => {
-    helper.once('error', (error) => {
-      spawnFailure = error;
-      done({ code: null, signal: null });
-    });
-    helper.once('close', (code, signal) => done({ code, signal }));
-  });
 
   let endingSettled = false;
   let disposeRequested = false;
