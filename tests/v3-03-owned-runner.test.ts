@@ -36,8 +36,7 @@
  * `npm run verify` builds before it tests, which is the gate these run under.
  */
 
-import { mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
@@ -65,12 +64,28 @@ import {
 } from '../src/boundary/owned-command.js';
 import { toAgentCommandResult } from '../src/agent/agent-command.js';
 import { toVerificationCommandResult } from '../src/verify/verify-command.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 const IS_WINDOWS = process.platform === 'win32';
 
 const tempDirs: string[] = [];
+/**
+ * Canonical by construction, and that is not a detail this file may skip.
+ *
+ * Every real-process case below hands a temporary path to `runCommand` as an
+ * *argument*, and `SAFE_ARG_PATTERN` deliberately excludes the tilde. A GitHub
+ * Actions Windows runner reports `os.tmpdir()` as an 8.3 alias under
+ * `RUNNER~1`, so a raw `mkdtemp` path is refused by the product — correctly,
+ * and before this file's own subject is ever reached. Measured: the first CI
+ * run of this file failed thirteen cases that way, having passed on a machine
+ * whose temp path happens to be canonical.
+ *
+ * `makeCanonicalTempDir` exists for exactly this, and its own header says so.
+ * The alias is a real thing real Windows machines produce; a test layer that
+ * only works when it is absent is the defect, not the alias.
+ */
 function makeTempDir(prefix = 'ao-v303-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = makeCanonicalTempDir(prefix);
   tempDirs.push(dir);
   return dir;
 }
