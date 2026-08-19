@@ -227,6 +227,29 @@ function fakeBoundary(
 ) {
   const out = new PassThrough();
   const err = new PassThrough();
+  /**
+   * Whether the adapter has *ever* read each stream.
+   *
+   * Recorded from `'newListener'` rather than sampled with `listenerCount`,
+   * because the two answer different questions and only this one is stable. The
+   * adapter detaches its sinks before it returns — on every exit, so that a
+   * chunk arriving afterwards cannot terminate a run that has already been
+   * reported — so a run that finishes before the first poll of `established()`
+   * leaves a listener count of zero on streams it did read. Sampling then hung
+   * for 500 polls and failed with "the adapter never attached its output
+   * sinks", intermittently, on the 20ms-timeout cases.
+   *
+   * `dataListeners()` below still reports the live count, deliberately: that is
+   * what the detachment cases assert, and it is a different question again.
+   */
+  let outRead = false;
+  let errRead = false;
+  out.on('newListener', (event) => {
+    if (event === 'data') outRead = true;
+  });
+  err.on('newListener', (event) => {
+    if (event === 'data') errRead = true;
+  });
   const written: Buffer[] = [];
   let closeStdin: () => void = () => {};
   const stdinClosedPromise = new Promise<void>((done) => {
@@ -403,7 +426,7 @@ function fakeBoundary(
      */
     established: async (): Promise<void> => {
       for (let attempt = 0; attempt < 500; attempt += 1) {
-        if (out.listenerCount('data') > 0 && err.listenerCount('data') > 0) return;
+        if (outRead && errRead) return;
         await new Promise((done) => setTimeout(done, 1));
       }
       throw new Error('the adapter never attached its output sinks');
