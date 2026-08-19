@@ -5683,6 +5683,18 @@ is not evidence that no descendant survived. No technology is chosen there and
 nothing in `src/` changed — the record exists so that neither refuted variant is
 investigated a second time.
 
+A second spike then measured the smallest boundary that can use that mechanism —
+a small out-of-process helper that creates and owns the target — against this
+runner's actual contract, and
+[`docs/decisions/2026-08-19-adr-windows-launch-boundary.md`](docs/decisions/2026-08-19-adr-windows-launch-boundary.md)
+chooses it. Two things in that ADR bind whatever implements it: containment that
+cannot be established or kept is **fail-closed**, and a boundary lost mid-run is
+**`BOUNDARY_LOST`, never `COMPLETED`** — when the boundary was killed under
+measurement the tree died correctly and the run still looked like a normal
+completion, which is the failure that state exists to prevent. Still no `src/`
+change: the ADR chooses a technology and slices the work, and each slice remains
+its own decision to start.
+
 **The lease came before the block runner, not after it**, and V2-07 is what forced
 that change of order. The ledger's compare-and-swap is advisory, so two concurrent
 writers of one ledger can each be told they succeeded while one of the two records
