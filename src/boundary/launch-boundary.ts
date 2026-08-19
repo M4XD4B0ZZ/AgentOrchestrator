@@ -431,13 +431,23 @@ function refused(
   win32: number | null,
   status: BoundaryStatus | null,
 ): BoundaryEnding {
+  // `NO` is the one value a caller acts on to conclude a launch had no side
+  // effects, so it is only ever taken from a status this launch can claim. No
+  // status at all, and a status that never named its launch, both answer
+  // `UNKNOWN` — which callers must treat as "it may have run". A status may
+  // still report the *code* it refused with without proving whose it is; that
+  // direction cannot mislead anyone into skipping a cleanup.
+  const targetStarted =
+    status === null || status.nonce === null
+      ? ('UNKNOWN' as const)
+      : status.targetStarted
+        ? ('YES' as const)
+        : ('NO' as const);
   return Object.freeze({
     ending: 'BOUNDARY_REFUSED' as const,
     failureCode,
     win32,
-    // Unknown when there is no status to read it from, which is the reading a
-    // caller must treat as "it may have run".
-    targetStarted: status === null ? ('UNKNOWN' as const) : status.targetStarted ? ('YES' as const) : ('NO' as const),
+    targetStarted,
     status,
   });
 }

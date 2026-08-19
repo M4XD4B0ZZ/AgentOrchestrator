@@ -336,7 +336,12 @@ describe('classifyBoundaryEnding', () => {
     // Nothing ran: the helper refuses to launch for an owner it cannot watch.
     const ending = classifyBoundaryEnding({
       status: decodeBoundaryStatus(
-        statusText({ boundary: 'FAILED', failure: 'OWNED_CONTAINMENT_OWNER_GONE', win32: '87' }),
+        statusText({
+          nonce: NONCE,
+          boundary: 'FAILED',
+          failure: 'OWNED_CONTAINMENT_OWNER_GONE',
+          win32: '87',
+        }),
       ),
       helperExitCode: BOUNDARY_HELPER_EXIT.OWNER_ALREADY_GONE,
       helperSignal: null,
@@ -446,10 +451,13 @@ describe('classifyBoundaryEnding', () => {
       callerRequestedTermination: false,
       expect: { nonce: NONCE, helperPid: 4242 },
     });
+    // The code survives; the claim that nothing ran does not. `NO` is the value
+    // a caller acts on to skip a cleanup, so it is only ever taken from a
+    // status this launch can prove is its own.
     expect(ending).toMatchObject({
       ending: 'BOUNDARY_REFUSED',
       failureCode: 'OWNED_CONTAINMENT_JOB_CREATE',
-      targetStarted: 'NO',
+      targetStarted: 'UNKNOWN',
     });
   });
 

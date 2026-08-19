@@ -507,7 +507,16 @@ internal static class Program
 
         Native.CloseHandle(info.hProcess);
         Native.CloseHandle(_job);
-        return ExitCode.ChildObserved;
+
+        // Owner loss ends this process from two directions: the watcher exits
+        // 93 while holding the gate, and the main thread — woken by the child
+        // dying inside the terminated job — walks out through here. The watcher
+        // normally wins, but nothing enforces that, and this branch returning
+        // "the child was observed to exit" would report a run the boundary
+        // destroyed as one that finished. The exit code is evidence, and on the
+        // path where the status write fails it is the *only* surviving
+        // evidence, so it says the same thing whichever thread gets there.
+        return _terminatedByOwnerLoss == 1 ? ExitCode.OwnerLost : ExitCode.ChildObserved;
     }
 
     private static void ConfigureJob()

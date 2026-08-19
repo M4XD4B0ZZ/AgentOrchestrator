@@ -48,7 +48,9 @@
  *  14. a reused working directory cannot lend its evidence to the next launch;
  *  15. an owner that is *not* the parent is watched, and its loss exits the
  *      helper with 93 and takes the tree — the only case that reaches the
- *      owner watch at all.
+ *      owner watch at all;
+ *  16. the verbatim route works for a target path containing a space, which is
+ *      the one construction where the boundary deliberately differs from Node.
  *
  * Deliberately **not** measured here: byte budgets, stdin delivery vocabulary,
  * timeouts, result classification. Those are AO's, they stay in TypeScript,
@@ -87,7 +89,7 @@ const buildModuleUrl = pathToFileURL(join(repoRoot, 'scripts', 'build-native-bou
 
 const { startOwnedProcess, resolveBoundaryExecutable } = await import(startModuleUrl);
 const { decodeBoundaryStatus, classifyBoundaryEnding } = await import(contractModuleUrl);
-const { compileNativeBoundary } = await import(buildModuleUrl);
+const { compileNativeBoundary, locateCsc } = await import(buildModuleUrl);
 
 const taskkill = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'taskkill.exe');
 
@@ -748,6 +750,79 @@ measure('the verbatim route delivers the argument vector a .cmd shim sees', asyn
   c.check(
     JSON.stringify(direct) === JSON.stringify(args),
     `the control itself did not deliver the arguments: ${JSON.stringify(direct)}`,
+  );
+  start.process.dispose();
+});
+
+measure('the verbatim route survives a target path with a space in it', async (c) => {
+  // The one place the boundary deliberately does *not* reproduce Node: in
+  // verbatim mode libuv passes argv[0] unquoted, so a target whose path
+  // contains a space is split by the child's own C runtime and the tail of the
+  // path arrives as an argument. The boundary quotes argv[0], which is the
+  // correct construction — and a claim of "correct" needs a case, because the
+  // route AO actually uses verbatim (`cmd.exe`, no space, and cmd ignores its
+  // own argv[0]) cannot see the difference at all.
+  //
+  // The target is compiled here rather than borrowed: it has to report its own
+  // argument vector from a path that has a space in it, which no program on
+  // this machine does.
+  const csc = locateCsc();
+  if (!c.check(csc !== null, 'the in-box C# compiler was not found')) return;
+
+  const dir = join(tempDir('ao-boundary-verbatim-space-'), 'a directory with spaces');
+  mkdirSync(dir, { recursive: true });
+  const source = join(dir, 'Echo.cs');
+  const exe = join(dir, 'echo target.exe');
+  writeFileSync(
+    source,
+    [
+      'using System;',
+      'using System.IO;',
+      'using System.Text;',
+      'internal static class Echo {',
+      '  private static int Main(string[] args) {',
+      // Explicit UTF-8 bytes. `Console.Out` encodes for the console code page,
+      // which turns a Unicode argument into question marks on its way through a
+      // pipe — indistinguishable, from the outside, from the boundary having
+      // mangled it.
+      '    byte[] bytes = new UTF8Encoding(false).GetBytes(string.Join("\\u0001", args));',
+      '    Stream stdout = Console.OpenStandardOutput();',
+      '    stdout.Write(bytes, 0, bytes.Length);',
+      '    stdout.Flush();',
+      '    return 0;',
+      '  }',
+      '}',
+    ].join('\n'),
+    'utf8',
+  );
+  execFileSync(csc, ['/nologo', '/target:exe', `/out:${exe}`, source], { stdio: 'pipe' });
+
+  // Verbatim means untouched: the caller does the quoting, exactly as
+  // `runCommand` does today when it builds its `cmd.exe /d /s /c` line. What
+  // the boundary must not leave unquoted is *argv[0]*.
+  const args = ['first', '"two words"', '日本'];
+  const expected = ['first', 'two words', '日本'];
+  const start = await startOwnedProcess({
+    file: exe,
+    args,
+    verbatim: true,
+  });
+  if (!c.check(start.established, 'boundary refused the verbatim launch')) return;
+  let text = '';
+  start.process.helper.stdout.on('data', (chunk) => {
+    text += chunk.toString('utf8');
+  });
+  start.process.helper.stderr.resume();
+  const ending = await start.process.ending;
+  c.check(ending.ending === 'CHILD_EXITED', `ended as ${ending.ending}`);
+
+  // Unquoted argv[0] makes the child read "a" as its program name and
+  // "directory with spaces\\echo target.exe" as arguments, so the vector it
+  // reports is not the one that was asked for.
+  const delivered = text.length === 0 ? [] : text.split('\u0001');
+  c.check(
+    JSON.stringify(delivered) === JSON.stringify(expected),
+    `the target received ${JSON.stringify(delivered)}`,
   );
   start.process.dispose();
 });

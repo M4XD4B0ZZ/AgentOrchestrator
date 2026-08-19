@@ -5764,7 +5764,7 @@ nothing started.
 
 ### How the guarantee is measured
 
-`test:dist-boundary` runs fifteen cases against the built artefacts with real
+`test:dist-boundary` runs sixteen cases against the built artefacts with real
 processes: ownership established and verified; the caller's own termination;
 **helper death → `BOUNDARY_LOST` with zero survivors**; **AO death → helper and
 tree gone, with no cleanup code running, and what it leaves behind unreadable
@@ -5781,9 +5781,13 @@ every other launch here is owned by the process that spawned it.
 The argument-vector cases are **differential**: the same arguments — quotes,
 backslashes, a trailing backslash before a quote, Unicode, an empty argument,
 shell metacharacters — go through the boundary and through
-`child_process.spawn`, and the target reports what arrived. A second one covers
-the verbatim `cmd.exe /d /s /c` route a `.cmd` shim is started through, which is
-how AO starts the Claude CLI. The boundary builds
+`child_process.spawn`, and the target reports what arrived. Two more cover the
+verbatim `cmd.exe /d /s /c` route a `.cmd` shim is started through, which is how
+AO starts the Claude CLI — including the one construction where the boundary
+deliberately differs from Node. In verbatim mode libuv passes `argv[0]`
+unquoted, so a target whose path contains a space is split by the child's own C
+runtime; the boundary quotes it, and a case with a compiled target under a
+spaced path holds that behaviour in place. The boundary builds
 its own Win32 command line, so without that case its quoting would be asserted
 only by a comment citing a program this repository does not contain.
 

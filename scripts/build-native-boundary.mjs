@@ -62,10 +62,13 @@ export class NativeBoundaryBuildError extends Error {}
  *
  * The compile writes to a per-process staging name and only then takes the
  * output path, rather than clearing the path first. Clearing first opens a
- * window in which `dist/` has no boundary at all, and a second build entering
- * that window can carry off the artefact the first one is still writing — which
- * would let a build report success over a `dist/native/` that another build
- * then failed to fill.
+ * window in which `dist/` has no boundary at all for the whole compile, and a
+ * second build entering that window can carry off the artefact the first one is
+ * still writing — which would let a build report success over a `dist/native/`
+ * that another build then failed to fill. One rename-wide window remains, and
+ * only when a helper is still running: the old image has to be moved aside
+ * before the new one can take its name. A failure there propagates, so the
+ * build reports it rather than claiming a boundary that is not present.
  */
 function stage(outFile) {
   return `${outFile}.building-${process.pid}`;
@@ -80,8 +83,14 @@ function publish(staged, outFile) {
     renameSync(outFile, `${outFile}.superseded-${process.pid}`);
     renameSync(staged, outFile);
   }
+  // Both leftovers this scheme can produce: images parked aside because they
+  // were running, and staging files a build died before publishing. Neither is
+  // ever `outFile` itself, so a sweep cannot remove the boundary.
   for (const name of readdirSync(dirname(outFile))) {
-    if (!name.startsWith(`${basename(outFile)}.superseded-`)) continue;
+    const leftover =
+      name.startsWith(`${basename(outFile)}.superseded-`) ||
+      name.startsWith(`${basename(outFile)}.building-`);
+    if (!leftover || name === basename(staged)) continue;
     try {
       rmSync(join(dirname(outFile), name), { force: true });
     } catch {
