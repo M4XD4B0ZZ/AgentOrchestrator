@@ -373,7 +373,12 @@ jobs:
       - name: Compile the probe
         shell: bash
         run: |
-          "${{ steps.csc.outputs.path }}" -nologo -platform:x64 -out:probe/CiProbe.exe probe/CiProbe.cs
+          # csc reads its file arguments as Windows paths: a forward-slash path
+          # is silently mangled ("probe/CiProbe.cs" became "CiProbe.cs" in the
+          # repository root, and the compile failed with CS1504).
+          src="$(cygpath -w probe/CiProbe.cs)"
+          out="$(cygpath -w probe/CiProbe.exe)"
+          "${{ steps.csc.outputs.path }}" -nologo -platform:x64 "-out:$out" "$src"
 
       - name: Measure
         shell: bash
