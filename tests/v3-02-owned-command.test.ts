@@ -165,6 +165,10 @@ function fakeBoundary(
     readonly onStart?: () => void;
     /** How long establishment takes. Long enough to expire a deadline in. */
     readonly startDelayMs?: number;
+    /** A stdin channel that refuses the payload outright. */
+    readonly failStdin?: boolean;
+    /** Streams that raise when this module lets go of them. */
+    readonly errorOnRelease?: boolean;
     /** How long the boundary takes to end after it is asked to. */
     readonly terminationDelayMs?: number;
   } = {},
@@ -180,7 +184,16 @@ function fakeBoundary(
     write(chunk: Buffer, _encoding, done) {
       written.push(Buffer.from(chunk));
       if (options.stallStdin === true) return;
+      if (options.failStdin === true) {
+        done(new Error('the child closed its read end'));
+        return;
+      }
       done();
+    },
+    destroy(error, done) {
+      // A pipe that reports a failure as it goes, which is what a real one
+      // does when the process on the other end has just been killed.
+      done(options.errorOnRelease === true ? new Error('EPIPE') : error);
     },
     final(done) {
       closeStdin();
@@ -285,6 +298,8 @@ function fakeBoundary(
     stdinClosed: () => stdinClosedPromise,
     /** How many output sinks are still attached. */
     dataListeners: () => out.listenerCount('data') + err.listenerCount('data'),
+    /** Whether the payload channel was destroyed too. */
+    stdinDestroyed: () => input.destroyed,
     /**
      * Whether the output streams were destroyed rather than only detached.
      *
@@ -1317,5 +1332,207 @@ describe('a helper that survived to report a child exit was not the reason a wri
         boundaryObservedChildExit: true,
       }),
     ).toBe('FAILED');
+  });
+});
+
+/**
+ * ── What the third adversarial review found ────────────────────────────────
+ *
+ * The round that caught the round-2 fixes. The worst of them is the first:
+ * the override written to honour a cancellation during establishment was
+ * applied to *every* ending on that path, including the one that means "we do
+ * not know what happened to the tree".
+ */
+describe('the defects the third review found', () => {
+  it('never lets a cancellation overwrite a lost boundary', () => {
+    // Measured through the shipped artefact by the review: an abort raised
+    // during establishment, with a helper killed in the same window, produced
+    // `outcome: TERMINATED_BY_CALLER` carrying `boundaryLostReason:
+    // STATUS_UNREADABLE` — the most benign word in the vocabulary over the
+    // state that exists to prevent exactly that, and a self-contradictory
+    // result besides.
+    const lost: BoundaryEnding = {
+      ending: 'BOUNDARY_LOST',
+      reason: 'STATUS_UNREADABLE',
+      status: null,
+    };
+    const result = classifyOwnedCommand({
+      ending: lost,
+      termination: 'NONE',
+      cancelledBeforeOwnership: true,
+    });
+    expect(result.outcome).toBe('BOUNDARY_LOST');
+    expect(result.failureCode).toBe('BOUNDARY_LOST');
+    expect(result.boundaryLostReason).toBe('STATUS_UNREADABLE');
+  });
+
+  it('reports a cancellation that raced a refusal as a cancellation', () => {
+    const refused: BoundaryEnding = {
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'BOUNDARY_NOT_ESTABLISHED_IN_TIME',
+      win32: null,
+      targetStarted: 'UNKNOWN',
+      status: null,
+    };
+    const result = classifyOwnedCommand({
+      ending: refused,
+      termination: 'NONE',
+      cancelledBeforeOwnership: true,
+    });
+    expect(result.outcome).toBe('TERMINATED_BY_CALLER');
+    expect(result.failureCode).toBe('TERMINATED_BY_CALLER');
+    // The boundary's evidence is kept: it is what says whether anything ran.
+    expect(result.boundaryFailureCode).toBe('BOUNDARY_NOT_ESTABLISHED_IN_TIME');
+    expect(result.boundaryLostReason).toBeNull();
+    expect(result.targetStarted).toBe('UNKNOWN');
+  });
+
+  it('reports an expired deadline as a timeout only for the refusal that means it', () => {
+    const notInTime: BoundaryEnding = {
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'BOUNDARY_NOT_ESTABLISHED_IN_TIME',
+      win32: null,
+      targetStarted: 'UNKNOWN',
+      status: null,
+    };
+    expect(
+      classifyOwnedCommand({ ending: notInTime, termination: 'NONE', deadlineExpired: true }),
+    ).toMatchObject({ outcome: 'TIMED_OUT', failureCode: 'TIMEOUT' });
+
+    // The half that had no test of its own. A permanent installation defect
+    // must not become a retryable timeout just because a small budget happened
+    // to expire while it was being discovered.
+    const missing: BoundaryEnding = {
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'BOUNDARY_EXECUTABLE_MISSING',
+      win32: null,
+      targetStarted: 'NO',
+      status: null,
+    };
+    expect(
+      classifyOwnedCommand({ ending: missing, termination: 'NONE', deadlineExpired: true }),
+    ).toMatchObject({ outcome: 'LAUNCH_REFUSED', failureCode: 'LAUNCH_REFUSED' });
+  });
+
+  it('lets an explicit cancellation outrank an expired deadline', () => {
+    const notInTime: BoundaryEnding = {
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'BOUNDARY_NOT_ESTABLISHED_IN_TIME',
+      win32: null,
+      targetStarted: 'UNKNOWN',
+      status: null,
+    };
+    expect(
+      classifyOwnedCommand({
+        ending: notInTime,
+        termination: 'NONE',
+        cancelledBeforeOwnership: true,
+        deadlineExpired: true,
+      }),
+    ).toMatchObject({ outcome: 'TERMINATED_BY_CALLER' });
+  });
+
+  it('carries an abort during establishment through the classifier, not around it', async () => {
+    // The run loop's half of the first case: a boundary that dies during
+    // establishment while the caller is cancelling.
+    const canceller = new AbortController();
+    const boundary = fakeBoundary({
+      onStart: () => canceller.abort(),
+      refuseWith: { ending: 'BOUNDARY_LOST', reason: 'STATUS_UNREADABLE', status: null },
+    });
+    const result = await runOwnedCommand(
+      { file: 'C:\\fixture.exe', signal: canceller.signal, timeoutMs: 30_000 },
+      { start: boundary.start },
+    );
+    expect(result.outcome).toBe('BOUNDARY_LOST');
+    expect(result.boundaryLostReason).toBe('STATUS_UNREADABLE');
+  });
+
+  it('reads a failed write as failed when the boundary lived to report the exit', async () => {
+    // The wiring of the rule the second review asked for. It was pinned only
+    // as a pure function: no end-to-end situation reached it, because the one
+    // harness case that gets a failed write also gets a `BROKEN_PIPE` report,
+    // which short-circuits three lines earlier. Hardcoding the flag to `false`
+    // survived the whole suite.
+    const boundary = fakeBoundary({ failStdin: true });
+    const run = runOwnedCommand(
+      { file: 'C:\\fixture.exe', stdin: 'the instructions' },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    boundary.finish({ childExitCode: 0 });
+    const result = await run;
+    expect(result.outcome).toBe('COMPLETED');
+    expect(result.stdinDelivery).toBe('FAILED');
+  });
+
+  it('reads the boundary own proven read failure as a failure', () => {
+    // `SOURCE_READ_FAILED` means the helper knows it stopped reading the
+    // payload part-way. That is stronger evidence than `NO_CHANNEL`, which
+    // already maps to FAILED — and it was falling through to the weakest word
+    // the vocabulary has.
+    expect(
+      classifyStdinDelivery({
+        requested: true,
+        established: true,
+        localWrite: 'COMPLETED',
+        forwarded: 'SOURCE_READ_FAILED',
+      }),
+    ).toBe('FAILED');
+  });
+
+  it('does not hang or truncate on a budget that is not a number', async () => {
+    // `terminationGraceMs` was validated in round 2 with the reasoning
+    // "caller-supplied, and therefore checked". Its two siblings were not.
+    //
+    // `timeoutMs: NaN` is the shape a missing config value takes after
+    // `parseInt`, and it is the worst of the three: the deadline becomes NaN,
+    // the establishment budget with it, and `startOwnedProcess` polls a helper
+    // that neither establishes nor exits — forever, with the abort listener not
+    // yet armed to rescue it.
+    for (const timeoutMs of [Number.NaN, -1]) {
+      const boundary = fakeBoundary();
+      const run = runOwnedCommand({ file: 'C:\\fixture.exe', timeoutMs }, { start: boundary.start });
+      await boundary.established();
+      boundary.stdout('output');
+      boundary.finish({ childExitCode: 0 });
+      const result = await run;
+      expect(result.outcome, String(timeoutMs)).toBe('COMPLETED');
+      expect(result.stdout, String(timeoutMs)).toBe('output');
+    }
+
+    // The milder sibling: a byte budget that is not a number cut every stream
+    // off at its first byte, so every run reported an output-limit failure over
+    // empty output.
+    const boundary = fakeBoundary();
+    const run = runOwnedCommand(
+      { file: 'C:\\fixture.exe', maxStdoutBytes: Number.NaN, maxStderrBytes: -5 },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    boundary.stdout('all of it');
+    boundary.stderr('all of that too');
+    boundary.finish({ childExitCode: 0 });
+    const result = await run;
+    expect(result.outcome).toBe('COMPLETED');
+    expect(result.stdout).toBe('all of it');
+    expect(result.stderr).toBe('all of that too');
+    expect(result.stdoutTruncated).toBe(false);
+  });
+
+  it('does not raise on a stream that errors while being released', async () => {
+    // The abandoned paths destroy the helper's streams, and the
+    // streams-unavailable one does it before this module has attached its own
+    // stdin error listener. An `EPIPE` there is an uncaught exception in *this*
+    // process, which is exactly what that listener exists to prevent elsewhere.
+    const boundary = fakeBoundary({ noStreams: true, ignoreTermination: true, errorOnRelease: true });
+    const result = await runOwnedCommand(
+      { file: 'C:\\fixture.exe', stdin: 'the instructions', terminationGraceMs: 20 },
+      { start: boundary.start },
+    );
+    expect(result.failureCode).toBe('BOUNDARY_STREAMS_UNAVAILABLE');
+    // A tick for any deferred `error` emission to land where it would throw.
+    await new Promise((done) => setTimeout(done, 20));
+    boundary.finish({ childExitCode: null });
   });
 });

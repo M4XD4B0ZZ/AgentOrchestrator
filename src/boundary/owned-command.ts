@@ -237,6 +237,17 @@ const TERMINATION_FAILURE: Readonly<
 export interface OwnedCommandObservation {
   readonly ending: BoundaryEnding;
   readonly termination: OwnedTermination;
+  /**
+   * Whether the caller cancelled before ownership was ever established.
+   *
+   * Distinct from `termination: 'CALLER'`, which means this side terminated a
+   * boundary it held. Here there was nothing to terminate yet — so the pairing
+   * is not contradictory, and it is the caller's own act that should name the
+   * outcome rather than the refusal that happened to race it.
+   */
+  readonly cancelledBeforeOwnership?: boolean;
+  /** Whether this call's own wall-clock budget had expired by then. */
+  readonly deadlineExpired?: boolean;
 }
 
 /**
@@ -328,14 +339,53 @@ export function classifyOwnedCommand(
     // returned the refusal unchanged here, discarding the caller's own reason
     // with it, and the enumeration test excluded exactly this row.
     if (termination !== 'NONE') return inconsistent();
-    return Object.freeze({
-      outcome: 'LAUNCH_REFUSED' as const,
-      failureCode: 'LAUNCH_REFUSED' as const,
+
+    /**
+     * What the boundary saw is not always what happened, and two things can be
+     * true at the same moment as a refusal. Both rename the *outcome* only:
+     * `boundaryFailureCode` and `targetStarted` still come from the refusal,
+     * because they are what says whether anything may have run.
+     *
+     * This lives inside the classifier deliberately. An earlier version applied
+     * it in the run loop, spread over the classification — which put it outside
+     * the one total function this module's guarantees are stated about, and
+     * promptly proved why: applied to *every* ending on that path, it reported
+     * a `BOUNDARY_LOST` as a deliberate cancellation, complete with a
+     * `boundaryLostReason` hanging off a `TERMINATED_BY_CALLER`.
+     */
+    const refused = {
       exitCode: null,
       boundaryFailureCode: ending.failureCode,
       boundaryLostReason: null,
       targetStarted: ending.targetStarted,
       sideEffectsPossible: ending.targetStarted !== 'NO',
+    };
+    // The caller's own act outranks the clock: a run someone cancelled is
+    // cancelled, whatever else expired while it was being refused.
+    if (observation.cancelledBeforeOwnership === true) {
+      return Object.freeze({
+        ...refused,
+        outcome: 'TERMINATED_BY_CALLER' as const,
+        failureCode: 'TERMINATED_BY_CALLER' as const,
+      });
+    }
+    // And only for the refusal that *means* "the budget ran out". A permanent
+    // installation defect discovered while a small budget happened to expire is
+    // still that defect, not a retryable timeout.
+    if (
+      observation.deadlineExpired === true &&
+      ending.failureCode === 'BOUNDARY_NOT_ESTABLISHED_IN_TIME'
+    ) {
+      return Object.freeze({
+        ...refused,
+        outcome: 'TIMED_OUT' as const,
+        failureCode: 'TIMEOUT' as const,
+      });
+    }
+    return Object.freeze({
+      ...refused,
+      outcome: 'LAUNCH_REFUSED' as const,
+      failureCode: 'LAUNCH_REFUSED' as const,
     });
   }
 
@@ -394,9 +444,17 @@ export function classifyOwnedCommand(
  */
 export type LocalStdinWrite = 'PENDING' | 'COMPLETED' | 'FAILED' | 'NO_CHANNEL';
 
-/** The forwarding states `native/ao-launch/AoLaunch.cs` writes. */
+/**
+ * Every forwarding state `native/ao-launch/AoLaunch.cs` writes.
+ *
+ * Three, and the list is a completeness claim: anything else read out of a
+ * status is a state this build does not know, which
+ * {@link classifyStdinDelivery} answers `UNCONFIRMED`.
+ */
 const STDIN_FORWARD_EOF = 'EOF_FORWARDED';
 const STDIN_FORWARD_BROKEN = 'BROKEN_PIPE';
+/** The helper stopped reading the payload part-way and knows it did. */
+const STDIN_FORWARD_SOURCE_FAILED = 'SOURCE_READ_FAILED';
 
 export interface StdinDeliveryObservation {
   /** Whether a payload was configured at all. */
@@ -452,6 +510,10 @@ export function classifyStdinDelivery(observation: StdinDeliveryObservation): St
   // child closed its read end and the helper said so. That stays true whatever
   // this side did afterwards, including ending the run.
   if (observation.forwarded === STDIN_FORWARD_BROKEN) return 'FAILED';
+  // The helper's other proven non-delivery: it stopped reading the payload
+  // part-way. Stronger evidence than `NO_CHANNEL` below, and it was falling
+  // through to the weakest word the vocabulary has.
+  if (observation.forwarded === STDIN_FORWARD_SOURCE_FAILED) return 'FAILED';
   // No pipe existed, so nothing was handed over. An observation, not an
   // absence of one.
   if (observation.localWrite === 'NO_CHANNEL') return 'FAILED';
@@ -583,10 +645,20 @@ export interface OwnedCommandDependencies {
  */
 function releaseHelper(owned: OwnedProcess): void {
   for (const stream of [owned.helper.stdout, owned.helper.stderr, owned.helper.stdin]) {
+    if (stream === null || stream === undefined) continue;
     try {
-      stream?.destroy();
+      // Listened to before it is destroyed, and that ordering is the point. A
+      // stream destroyed under an in-flight write reports it, and an `error`
+      // with no listener is an uncaught exception in *this* process. One of the
+      // two callers reaches here before the run loop has attached its own stdin
+      // listener — and it is the path that exists for a boundary already known
+      // not to be behaving as constructed.
+      stream.on('error', () => {
+        /* this process has stopped reading and writing this stream */
+      });
+      stream.destroy();
     } catch {
-      /* a stream that cannot be destroyed is one this process no longer reads */
+      /* a stream that cannot be destroyed is one this process no longer uses */
     }
   }
   owned.helper.unref?.();
@@ -608,7 +680,15 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
   readonly startedAt: string;
   readonly finishedAt: string;
   readonly durationMs: number;
-  /** The boundary's own report, or `null` where there was never a launch. */
+  /**
+   * The boundary's own report, or `null` where there is none to give.
+   *
+   * `null` does **not** mean nothing was launched — read {@link established}
+   * for that. It is also `null` on the two paths where a launch demonstrably
+   * happened and this module then gave up on it without an ending:
+   * `BOUNDARY_STREAMS_UNAVAILABLE` and `BOUNDARY_TERMINATION_UNCONFIRMED`,
+   * which are the two most dangerous results this module can return.
+   */
   readonly ending: BoundaryEnding | null;
 }
 
@@ -627,18 +707,31 @@ export async function runOwnedCommand(
   const start = dependencies.start ?? startOwnedProcess;
   const args = options.args ?? [];
   const display = [options.file, ...args].join(' ');
-  const timeoutMs = options.timeoutMs ?? DEFAULT_OWNED_TIMEOUT_MS;
-  // Caller-supplied, and therefore checked. Node turns a delay above the
-  // 32-bit maximum into 1ms, so asking for a *generous* grace produced the
-  // opposite of one: the grace expired before any real boundary could close,
-  // and every timeout, budget cut and cancellation came back as a lost
-  // boundary with its working directory leaked. A negative or non-finite value
-  // is not a grace at all and falls back to the default.
-  const requestedGraceMs = options.terminationGraceMs;
-  const graceMs =
-    requestedGraceMs === undefined || !Number.isFinite(requestedGraceMs) || requestedGraceMs < 0
-      ? DEFAULT_TERMINATION_GRACE_MS
-      : Math.min(requestedGraceMs, MAX_TIMER_MS);
+  /**
+   * A caller-supplied delay or budget, or the default for anything that is not
+   * a usable one.
+   *
+   * Round 2 checked `terminationGraceMs` with the reasoning "caller-supplied,
+   * and therefore checked", and left its two siblings unchecked. `NaN` is the
+   * shape a missing config value takes after `parseInt`, and on `timeoutMs` it
+   * was the worst of the three: the deadline became `NaN`, the establishment
+   * budget with it, and `startOwnedProcess` polled a helper that neither
+   * establishes nor exits — forever, with the abort listener not yet armed to
+   * rescue it. On a byte budget it was milder and still wrong: every stream cut
+   * off at its first byte, so every run reported an output-limit failure over
+   * empty output.
+   */
+  const usable = (value: number | undefined, fallback: number): number =>
+    value === undefined || !Number.isFinite(value) || value < 0
+      ? fallback
+      : Math.min(value, MAX_TIMER_MS);
+
+  const timeoutMs = usable(options.timeoutMs, DEFAULT_OWNED_TIMEOUT_MS);
+  // Node turns a delay above the 32-bit maximum into 1ms, so asking for a
+  // *generous* grace produced the opposite of one: the grace expired before any
+  // real boundary could close, and every timeout, budget cut and cancellation
+  // came back as a lost boundary with its working directory leaked.
+  const graceMs = usable(options.terminationGraceMs, DEFAULT_TERMINATION_GRACE_MS);
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
   const deadline = startedAtMs + timeoutMs;
@@ -751,38 +844,19 @@ export async function runOwnedCommand(
     }
 
     if (!launch.established) {
-      const classification = classifyOwnedCommand({ ending: launch.ending, termination: 'NONE' });
-      /**
-       * A refusal is what the boundary saw. It is not always what happened.
-       *
-       * Two things can be true at the same moment as a refusal, and reporting
-       * only the refusal loses the one the caller acts on:
-       *
-       *   - the caller cancelled while the launch was still being established.
-       *     The first fix watched the signal from before the launch and then
-       *     consulted the flag only on the established path, so a cancellation
-       *     that raced a refusal was delivered to AO as "the command could not
-       *     be started";
-       *   - this call's own wall-clock budget expired. `timeoutMs` is
-       *     documented as the budget for the whole call, and a caller reads its
-       *     expiry as a timeout — but the boundary can only report that
-       *     ownership was not established in time.
-       *
-       * The boundary's own evidence is kept in either case: `boundaryFailureCode`
-       * and `targetStarted` still come from the refusal, because they are what
-       * says whether anything may have run.
-       */
-      const overriddenOutcome: { outcome: OwnedCommandOutcome; failureCode: OwnedCommandFailureCode } | null =
-        abortRequested
-          ? { outcome: 'TERMINATED_BY_CALLER', failureCode: 'TERMINATED_BY_CALLER' }
-          : launch.ending.ending === 'BOUNDARY_REFUSED' &&
-              launch.ending.failureCode === 'BOUNDARY_NOT_ESTABLISHED_IN_TIME' &&
-              Date.now() >= deadline
-            ? { outcome: 'TIMED_OUT', failureCode: 'TIMEOUT' }
-            : null;
+      // Two facts this loop knows and the boundary cannot: whether the caller
+      // cancelled while the launch was still being established, and whether
+      // this call's own wall-clock budget expired doing it. They are handed to
+      // the classifier rather than applied to its answer — see the refusal
+      // branch there for what happened when they were not.
+      const classification = classifyOwnedCommand({
+        ending: launch.ending,
+        termination: 'NONE',
+        cancelledBeforeOwnership: abortRequested,
+        deadlineExpired: Date.now() >= deadline,
+      });
       return finish({
         ...classification,
-        ...(overriddenOutcome ?? {}),
         established: false,
         stdout: '',
         stderr: '',
@@ -802,8 +876,8 @@ export async function runOwnedCommand(
     }
 
     const owned = launch.process;
-    const stdout = new BoundedSink(options.maxStdoutBytes ?? DEFAULT_OWNED_MAX_OUTPUT_BYTES);
-    const stderr = new BoundedSink(options.maxStderrBytes ?? DEFAULT_OWNED_MAX_OUTPUT_BYTES);
+    const stdout = new BoundedSink(usable(options.maxStdoutBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
+    const stderr = new BoundedSink(usable(options.maxStderrBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
 
     /**
      * The grace window, armed by the termination that needs it.

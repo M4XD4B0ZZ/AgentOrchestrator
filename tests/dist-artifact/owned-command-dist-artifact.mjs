@@ -28,30 +28,32 @@
  *
  * ── The instrument, and what it does not claim ─────────────────────────────
  *
- * Every case that starts a tree counts survivors by heartbeat — a file whose
- * number keeps growing — for the reason the spike found: a terminated process
- * whose object is still referenced looks alive in a process walk. Zero
- * survivors is required after each such case, and once more over every
- * heartbeat directory of the whole run at the end, so a process that outlived
- * its own case by a few seconds is still caught.
+ * Survivors are counted by heartbeat — a file whose number keeps growing — for
+ * the reason the spike found: a terminated process whose object is still
+ * referenced looks alive in a process walk.
  *
- * Cases that start no tree have nothing to count, and this file does not
- * pretend otherwise: an earlier version of this header claimed the check ran
- * after *every* case, which was false for seven of them — the loop simply had
- * nothing to iterate.
+ * Two registrations, and the difference is stated because two earlier versions
+ * of this paragraph overstated it. `watch` gives a directory a per-case
+ * observation window *and* the final sweep; `sweepOnly` gives it the final
+ * sweep alone, for cases that start many short runs where a 1.2s window each
+ * would dominate the wall clock. Every directory any case creates is registered
+ * one way or the other, and the sweep at the end of the file covers all of
+ * them — later than the per-case check, and therefore with a better view of
+ * anything that outlived its own run. Cases that start no process at all
+ * register nothing, and have nothing to count.
  *
- * What that does *not* claim is that the containment settings are
- * load-bearing. That claim needs a negative control — a deliberately weakened
- * helper that leaves survivors — and it belongs to slice 1, which has one
- * (`./launch-boundary-dist-artifact.mjs`). Here the survivor count is a
- * hygiene assertion about the adapter's own terminations: whatever policy
- * ended a run, nothing of that run is left executing.
+ * What none of that claims is that the containment settings are load-bearing.
+ * That claim needs a negative control — a deliberately weakened helper that
+ * leaves survivors — and it belongs to slice 1, which has one
+ * (`./launch-boundary-dist-artifact.mjs`). Here the survivor count is a hygiene
+ * assertion about the adapter's own terminations: whatever policy ended a run,
+ * nothing of that run is left executing.
  *
- * ── What is measured ───────────────────────────────────────────────────────
+ * ── What is measured, in the order the cases run ───────────────────────────
  *
  *   1. exit codes — zero, nonzero, and 0xC0000005 — arrive exactly, and agree
  *      with `runCommand`;
- *   2. stdout and stderr stay separate and interleave without merging;
+ *   2. stdout and stderr stay separate;
  *   3. a stdout budget cuts the stream, ends the owned tree, and classifies as
  *      an output-limit failure naming stdout;
  *   4. the same for stderr;
@@ -60,19 +62,21 @@
  *   6. an explicit cancellation is `TERMINATED_BY_CALLER`, not a loss;
  *   7. a helper killed by someone else is always `BOUNDARY_LOST`;
  *   8. a launch whose evidence cannot be trusted never completes;
- *   9. a payload read to end-of-file is `DELIVERED`;
- *  10. a payload fully forwarded to a child that never reads it is `DELIVERED`
- *      too — repeatedly, because that one used to be a coin flip;
- *  11. a child that exits without reading is never reported as `DELIVERED`;
- *  12. a termination during a transfer in flight is `UNCONFIRMED`;
- *  13. no payload is `NOT_REQUESTED`;
- *  14. a budget and a timeout each name their own outcome when they are clearly
- *      ordered, and produce nothing but those two — never a completion, never a
- *      boundary loss — when they are armed to fire together;
- *  15. `targetStarted=UNKNOWN` survives into the result and is conservative.
+ *   9. a missing target is refused, and the refusal proves nothing ran;
+ *  10. a payload read to end-of-file is `DELIVERED`;
+ *  11. a child that exits without reading is never `DELIVERED`, and the
+ *      boundary — not this process's pipe — is what reports it;
+ *  12. a payload fully forwarded to a child that never reads it is `DELIVERED`
+ *      too;
+ *  13. a termination during a transfer in flight is `UNCONFIRMED`;
+ *  14. no payload is `NOT_REQUESTED`, and the child still sees end-of-file;
+ *  15. a budget and a timeout each name their own outcome when clearly ordered,
+ *      and produce nothing but those two when armed to fire together;
+ *  16. a deadline that expires during establishment is a timeout, and it stays
+ *      conservative about whether anything ran.
  *
- * The same-tick case — two policies triggering inside one turn of the loop —
- * is not measurable here, because which of them fires first is the operating
+ * The same-tick case — two policies triggering inside one turn of the loop — is
+ * not measurable here, because which of them fires first is the operating
  * system's decision. It is measured deterministically against an injected
  * boundary in `tests/v3-02-owned-command.test.ts` instead.
  *
@@ -438,7 +442,7 @@ test('a helper killed by someone else is always a boundary loss', async (c) => {
   c.equal(owned.sideEffectsPossible, true, 'side effects are possible');
 });
 
-// ── 8. evidence that cannot be trusted ──────────────────────────────────────
+// ── 8-9. evidence that cannot be trusted ──────────────────────────────────────
 
 test('a launch whose evidence cannot be trusted never completes', async (c) => {
   const workDir = tempDir('ao-owned-work-');
@@ -471,7 +475,7 @@ test('a missing target is refused, and nothing ran', async (c) => {
   c.equal(owned.sideEffectsPossible, false, 'so no side effects are possible');
 });
 
-// ── 9-12. the stdin vocabulary ──────────────────────────────────────────────
+// ── 10-14. the stdin vocabulary ──────────────────────────────────────────────
 
 test('a payload read to end-of-file is DELIVERED', async (c) => {
   const reportDir = tempDir('ao-owned-report-');
@@ -552,10 +556,16 @@ test('a payload fully forwarded to a child that never reads it is DELIVERED', as
   //
   // Repeated anyway: a delivery state that resolved the right way once has not
   // been measured.
+  // The child lingers, and that is not a weakening of the case: what it
+  // measures is a child that never *reads* stdin, not one that wins a race
+  // against the helper's pump thread. With `--sleep-ms=0` the 38-byte forward
+  // had to complete before a freshly booted node process reached its first
+  // timer — losing that race turns the run into a BROKEN_PIPE and fails the
+  // gate, on a loaded machine, for a reason the case is not about.
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const owned = await runOwnedCommand({
       file: process.execPath,
-      args: [fixture, '--stdin=ignore', '--sleep-ms=0', '--exit=0'],
+      args: [fixture, '--stdin=ignore', '--sleep-ms=300', '--exit=0'],
       stdin: 'a payload that fits in one pipe buffer',
       timeoutMs: 15_000,
     });
@@ -593,7 +603,7 @@ test('no payload is NOT_REQUESTED, and the child still sees end-of-file', async 
   c.equal(direct.stdinDelivery, 'NOT_REQUESTED', 'runCommand agrees');
 });
 
-// ── 13. the two policies, ordered and contending ────────────────────────────
+// ── 15. the two policies, ordered and contending ────────────────────────────
 
 test('a budget and a timeout each name their own outcome, and never a third', async (c) => {
   // Three parts, and the first review is the reason they are three.
@@ -641,12 +651,13 @@ test('a budget and a timeout each name their own outcome, and never a third', as
   // The expected codes come from a literal written here, not from the outcome
   // the run reported, so a classifier that returned the wrong pair would fail
   // this rather than agree with itself.
+  // Two answers, and no third. A deadline that expires before ownership used to
+  // arrive here as `LAUNCH_REFUSED`; since it is reported as the timeout it is,
+  // a refusal in this window would mean something else went wrong, and this
+  // case should say so rather than accept it.
   const EXPECTED = {
     TIMED_OUT: 'TIMEOUT',
     OUTPUT_LIMIT_EXCEEDED: 'OUTPUT_LIMIT_STDOUT',
-    // A deadline that expires before ownership is established is a legitimate
-    // third answer, and it is the boundary's, not a policy's.
-    LAUNCH_REFUSED: 'LAUNCH_REFUSED',
   };
 
   // Establishment measured for itself, through the boundary directly. Timing a
@@ -678,7 +689,12 @@ test('a budget and a timeout each name their own outcome, and never a third', as
   // every time — measured, and recorded in the note below — so the negative end
   // is what puts the deadline genuinely before there is any output to bound.
   const seen = new Map();
-  for (const delta of [-90, -70, -50, -30, -15, -5, 0, 5, 15, 40]) {
+  // The upper end is proportional as well as absolute. A fixed +150ms straddles
+  // establishment on this machine and would sit entirely *inside* it on a
+  // runner three times slower, where every run would time out and the guard
+  // below would fail for a reason that is not a defect.
+  const deltas = [-90, -70, -50, -30, -15, -5, 0, 10, Math.round(establishMs / 2), establishMs + 250];
+  for (const delta of deltas) {
     const beats = c.sweepOnly(tempDir('ao-owned-hb-'));
     const owned = await runOwnedCommand({
       file: process.execPath,
@@ -697,18 +713,26 @@ test('a budget and a timeout each name their own outcome, and never a third', as
     }
   }
   c.note(`contention resolved to ${[...seen].map(([k, n]) => `${k}×${n}`).join(', ')}`);
-  // The assertion the previous version lacked. Without it the case reports `ok`
-  // on a run where every single deadline expired before ownership — ten
-  // refusals, zero contention between the two policies it is named for, and no
-  // way to tell that from a real measurement.
+  // Both sides, and this is the second attempt at this assertion. The first
+  // required only that *some* run reach a policy — which the round-2 change
+  // that reports an expired establishment deadline as `TIMED_OUT` silently
+  // satisfied, so ten runs that all expired before ownership passed a guard
+  // written to catch exactly that. Requiring a stdout budget as well is what
+  // makes it say something: the budget can only fire after ownership, with the
+  // child already flooding.
   c.check(
-    (seen.get('OUTPUT_LIMIT_EXCEEDED') ?? 0) + (seen.get('TIMED_OUT') ?? 0) > 0,
-    'the window must straddle establishment: at least one run has to reach a policy, ' +
+    (seen.get('OUTPUT_LIMIT_EXCEEDED') ?? 0) > 0,
+    'the window must reach past establishment: some run has to hit the stdout ' +
+      `budget, got ${JSON.stringify(Object.fromEntries(seen))}`,
+  );
+  c.check(
+    (seen.get('TIMED_OUT') ?? 0) > 0,
+    'the window must reach before the flood: some run has to time out, ' +
       `got ${JSON.stringify(Object.fromEntries(seen))}`,
   );
 });
 
-// ── 14. an unknown launch ───────────────────────────────────────────────────
+// ── 16. a deadline that expires during establishment ───────────────────────────────────────────────────
 
 test('an unknown launch stays conservative about side effects', async (c) => {
   // A wall-clock budget too small for a process to start in. Establishment
