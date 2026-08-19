@@ -2528,12 +2528,13 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // reports `doctor/exec.ts` as an importer of itself, which is exactly why
     // no pin in this file uses one.
     //
-    // It is brittle in one direction, which is the harmless one: the false
-    // positive depends on `exec.ts` having an `export const` whose doc comment
-    // later contains the word `from`, so an unrelated prose edit there can turn
-    // this red. That is a prompt to re-read this paragraph, not a defect — and
-    // a scanner precise enough to break it would be an improvement worth
-    // noticing.
+    // It is brittle in one direction, which is the harmless one. The false
+    // positive comes from `exec.ts` having an `export …` whose doc comment
+    // later contains the word `from`; there are currently two such regions, so
+    // one prose edit is unlikely to be enough, but a scanner precise enough to
+    // stop matching would turn this red. That is a prompt to re-read this
+    // paragraph, not a defect — such a scanner would be an improvement, and
+    // this is where it announces itself.
     expect(modulesImporting(/\brunCommand\b/, { values: false })).toContain(
       join('src', 'doctor', 'exec.ts'),
     );

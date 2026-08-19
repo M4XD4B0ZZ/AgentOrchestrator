@@ -1558,12 +1558,21 @@ export async function runOwnedCommand(
      * two producers, and they differ exactly here. A `close` is emitted only
      * once the process has ended *and* the stdio streams node counts have
      * closed — which, for a stream in flowing mode, is after every `data` it
-     * will ever emit; so `CHILD_EXITED`, `TERMINATED_BY_CALLER` and
-     * `BOUNDARY_LOST` all arrive with the sinks complete. The other producer is
-     * an `'error'` event, which arrives as a `BOUNDARY_REFUSED` after
-     * establishment and can arrive with the helper still running — and that one
-     * is classified as a contradiction whose output is not evidence of
-     * anything, so there is nothing there for a wait to complete.
+     * will ever emit; so anything arriving that way has complete sinks, which
+     * is `CHILD_EXITED`, `TERMINATED_BY_CALLER`, `BOUNDARY_LOST`, and a
+     * `BOUNDARY_REFUSED` whose status turned foreign or failed after this run
+     * was established.
+     *
+     * The other producer is an `'error'` event, which also arrives as a
+     * `BOUNDARY_REFUSED` and can arrive with the helper still running. Nothing
+     * distinguishes the two refusals from here, so neither is waited on — and
+     * the price is bounded: an established run that ends in a refusal is a
+     * contradiction (`classifyOwnedCommand` with `ownershipEstablished: true`
+     * answers `ENDING_INCONSISTENT` for every one of them), so its outcome is
+     * `BOUNDARY_LOST` whatever the sinks hold. They are still *reported* — the
+     * branch below returns `stdout`/`stderr` as collected, and a caller may
+     * want them — but nothing reads them as a verdict, so a chunk that never
+     * arrived changes no answer.
      *
      * An earlier version of this slice awaited the streams as well, on the
      * reasoning that a short-lived child could finish before its listeners were
