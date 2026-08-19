@@ -23,7 +23,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "build": "tsc -p tsconfig.build.json",
+    "//build": "Two artefacts, and the native one is not optional. `build:boundary` compiles the Windows launch boundary (native/ao-launch/AoLaunch.cs) with the in-box .NET Framework compiler into dist/native/ao-launch.exe, and fails the build if that compiler is absent. A dist that silently lacked the boundary would let a later slice ship a runner whose ownership guarantee resolves to nothing.",
+    "build": "tsc -p tsconfig.build.json && npm run build:boundary",
+    "build:boundary": "node scripts/build-native-boundary.mjs",
     "schema:generate": "tsx scripts/generate-schema.ts",
     "test:dist-doctor": "node tests/dist-artifact/run-completion-dist-artifact.mjs",
     "verify:dist-doctor": "npm run build && npm run test:dist-doctor",
@@ -41,6 +43,9 @@
     "//test:dist-notify-egress": "The first network egress this product has, measured against the shipped CLI in a real process. A self-verifying preload points the OS profile at a scratch directory (dying with exit 97 if the substitution did not take, checked through the ESM binding the product actually uses) and arms every socket surface - fetch, net, http, https, dns. Without a notify.yaml the run must complete having opened nothing: removing the opt-in check makes this case die with exit 96 rather than pass, which is the measurement it exists for. With one, exactly one POST reaches a loopback server and its bytes are read. It deliberately does NOT claim to kill the detail form-gate mutant - neither ending reachable here carries free text, so that mutant is killed in tests/v2-10-operator-notification.test.ts instead.",
     "test:dist-notify-egress": "node tests/dist-artifact/notification-egress-dist-artifact.mjs",
     "verify:dist-notify-egress": "npm run build && npm run test:dist-notify-egress",
+    "//test:dist-boundary": "The V3 launch boundary against the shipped artefact, with real processes and real deaths. It exists because every property it measures is about processes that outlive — or fail to outlive — the process making the assertion: the helper is killed in one case and the AO stand-in in another, and the question is what is still running afterwards. Survivors are counted by heartbeat rather than by pid, because the spike found that a terminated process whose object is still referenced looks alive in a process walk. The load-bearing case is the negative control: it builds a deliberately weakened helper (inheritable job handle AND no handle list, the pair the spike measured as the one that breaks containment) into a temporary directory, kills it, and REQUIRES survivors — 7 of them. Without that case, every '0 survivors' here could be an instrument that cannot see anything. Deliberately not measured: byte budgets, stdin vocabulary, timeouts; those stay in AO and belong to the adapter slices.",
+    "test:dist-boundary": "node tests/dist-artifact/launch-boundary-dist-artifact.mjs",
+    "verify:dist-boundary": "npm run build && npm run test:dist-boundary",
     "//test:writer-authority": "The real Claude CLI authority split, measured through the production adapter. NOT part of `verify`: each invocation starts a real agent, takes 4-33s and spends subscription quota. It exists because every other control substitutes the agent seam and therefore cannot see the argv the real CLI receives. Two stages: the writer edits inside the worktree and CANNOT commit (no shell, no MCP, escape blocked, tree left dirty), then the AO production path measures the delta, enforces scope, commits, and leaves HEAD moved and the tree clean. A third, standing control drives the pre-fix vector literally and must keep reproducing the dogfood root cause. Run before any dogfood is called clean.",
   "test:writer-authority": "node tests/opt-in/claude-writer-authority.mjs",
   "verify:writer-authority": "npm run build && npm run test:writer-authority",
@@ -48,7 +53,7 @@
     "test:foundation-safe": "vitest run --exclude tests/windows-tree-kill-tool-release.test.ts",
     "//test:windows-tree-kill-tool-release": "The real-process tool-release probe, in full and unweakened, with no sibling test file running beside it: --no-file-parallelism keeps its process churn from reaching any other suite.",
     "test:windows-tree-kill-tool-release": "vitest run tests/windows-tree-kill-tool-release.test.ts --no-file-parallelism",
-    "verify": "npm run schema:generate && npm run typecheck && npm run build && npm run test:dist-doctor && npm run test:dist-trusted-profile && npm run test:dist-lease-race && npm run test:dist-lease-release && npm run test:dist-runtime-gate && npm run test:dist-notify-egress && npm run test:foundation-safe && npm run test:windows-tree-kill-tool-release"
+    "verify": "npm run schema:generate && npm run typecheck && npm run build && npm run test:dist-doctor && npm run test:dist-trusted-profile && npm run test:dist-lease-race && npm run test:dist-lease-release && npm run test:dist-runtime-gate && npm run test:dist-notify-egress && npm run test:dist-boundary && npm run test:foundation-safe && npm run test:windows-tree-kill-tool-release"
   },
   "keywords": [],
   "author": "",

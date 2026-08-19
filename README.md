@@ -184,12 +184,18 @@ npm run verify
 `verify` is the canonical full Foundation verify command. It runs, in this
 order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
 `test:dist-trusted-profile`, `test:dist-lease-race`, `test:dist-lease-release`,
-`test:dist-runtime-gate`, `test:foundation-safe`,
-`test:windows-tree-kill-tool-release`. `build` runs
-immediately before the five dist artefact checks, so all of them always run
+`test:dist-runtime-gate`, `test:dist-notify-egress`, `test:dist-boundary`,
+`test:foundation-safe`, `test:windows-tree-kill-tool-release`. `build` runs
+immediately before the seven dist artefact checks, so all of them always run
 against a fresh build, never a stale or missing one, and there is only ever one
 build per `verify` run. The two vitest gates run **sequentially**, in that order
 — the real-process harness never runs alongside the foundation set.
+
+`build` itself now produces two artefacts: the TypeScript `dist/`, and
+`dist/native/ao-launch.exe`, the Windows launch boundary compiled from
+`native/ao-launch/AoLaunch.cs` with the in-box .NET Framework compiler. A
+missing compiler fails the build rather than producing a `dist` without the
+boundary in it.
 
 `test:dist-trusted-profile` checks the *built* trusted-profile module
 (`dist/config/internal/trusted-profile.js`): that it resolves the OS user
@@ -285,7 +291,12 @@ npm run test:windows-tree-kill-tool-release
                               # the real-process tool-release harness on its own,
                               # serially (--no-file-parallelism); the gate
                               # `verify` runs last
-npm run build                # emit dist/ (Node-executable CLI)
+npm run build                # emit dist/ (Node-executable CLI) and the native
+                             # launch boundary, dist/native/ao-launch.exe
+npm run build:boundary       # only the native launch boundary
+npm run test:dist-boundary   # only the real-process launch-boundary check
+                             # (tests/dist-artifact/launch-boundary-dist-artifact.mjs),
+                             # against whatever dist/ already exists — no build
 npm run test:dist-lease-race  # only the real-process execution-lease race
 npm run test:dist-lease-release # only the real-process acquire -> release check
                               # (tests/dist-artifact/execution-lease-release-dist-artifact.mjs),
@@ -5666,11 +5677,159 @@ check is cheap and makes the chain authority structural — and it belongs *afte
 the first regular use, not before it. Taking either one now would move the
 finish line again after a passed dogfood and a passed closing audit.
 
+## The Windows launch boundary (V3 slice 1)
+
+**Delivered as an isolated component, and used by no runner.** This is slice 1
+of the sequence the ADR
+([`docs/decisions/2026-08-19-adr-windows-launch-boundary.md`](docs/decisions/2026-08-19-adr-windows-launch-boundary.md))
+sliced: the boundary and its contract exist and are verified; `runCommand`, the
+Claude writer, the verification runner and every other spawn path are
+**unchanged**, and nothing in the product yet obtains a contained process. That
+is the point of the slice, not a gap in it — moving the runners onto the
+boundary is slice 3, and it is its own decision to start.
+
+| Part | Where |
+| --- | --- |
+| The boundary itself | `native/ao-launch/AoLaunch.cs` → `dist/native/ao-launch.exe` |
+| Its build | `scripts/build-native-boundary.mjs` (`npm run build:boundary`) |
+| The contract: request, status, endings | `src/boundary/launch-boundary.ts` |
+| Starting one owned process | `src/boundary/start-owned-process.ts` |
+| The contract's in-process checks | `tests/boundary-contract.test.ts` |
+| The real-process gate | `tests/dist-artifact/launch-boundary-dist-artifact.mjs` |
+
+### What the boundary guarantees
+
+It creates a strict Job Object (`KILL_ON_JOB_CLOSE`, neither breakaway flag),
+arms its coupling to the AO process that asked for the launch, creates the
+target **inside** the job, confirms membership before the target executes,
+forwards stdio, and keeps the only — non-inheritable — job handle. Cancellation
+is helper death: the kernel takes the tree when the last handle to the job
+closes. There is no `taskkill`, no descendant walk, and no list of pids anyone
+has to keep correct.
+
+"Before the target executes" means the default `JOBLIST` placement has the
+kernel put the process in the job *at creation* — there is no instant at which a
+created process is not yet owned — while `SUSPENDED` creates it suspended and
+checks before the resume. Both were measured; the default is the one with no
+window, and `native/README.md` states what the other one's window is.
+
+It owns **nothing else**. Byte budgets, timeouts, the stdin delivery
+vocabulary, result classification, lease and scope authority and task state all
+stay in TypeScript, exactly as the ADR splits them.
+
+It also bounds **process lifetime only**, against a cooperative or crashing
+tree — not against a hostile one running under the same Windows account. What
+that excludes is written down in `native/README.md` ("What it does not defend
+against") rather than left for a later slice to assume away.
+
+### `BOUNDARY_LOST` is modelled here, before any runner consumes it
+
+`classifyBoundaryEnding` reports one of four endings — `CHILD_EXITED`,
+`TERMINATED_BY_CALLER`, `BOUNDARY_LOST`, `BOUNDARY_REFUSED` — and the
+load-bearing rule is that an *unknown* outcome is never a completion. A missing
+or unreadable status, a `boundary=OK` that carries no membership evidence, a
+status belonging to another launch, an exit the helper could not prove, and a
+helper that vanished without reporting a child exit are all endings of their
+own. That is the defect the spike found: when the helper was killed, the tree
+died correctly and the run still looked exactly like a finished one.
+`TERMINATED_BY_CALLER` exists so that a cancellation the caller asked for
+cannot be mistaken for a boundary that was lost.
+
+Two details keep those endings honest, and both came out of the slice's
+adversarial review:
+
+- **a status has to belong to its launch.** Every request carries a nonce the
+  helper echoes back, and the reader also requires the status to name the
+  helper it started. The first read of a launch happens before the helper has
+  written anything, so without that check a status left in a reused working
+  directory would be accepted as this run's evidence — complete with another
+  run's child pid;
+- **a refusal says whether anything ran.** `BOUNDARY_REFUSED` always means
+  ownership was not established and whatever was created has been terminated;
+  it does not always mean nothing executed, because in `JOBLIST` mode the
+  target runs from its first instruction. The ending therefore carries
+  `targetStarted` — `NO`, `YES` or `UNKNOWN` — and `UNKNOWN`, meaning no
+  readable status, is to be treated as `YES`.
+
+### Fail closed, with no bypass to find
+
+Every path that cannot establish or keep verified ownership refuses, and leaves
+nothing it created alive. It does **not** promise that the target never ran —
+in `JOBLIST` mode the target executes from its first instruction — which is
+what `targetStarted` on the refusal is for, and why `UNKNOWN` there has to be
+read as `YES`. The helper refuses an **unknown request key**
+rather than ignoring it, which is what keeps the two switches that weaken
+containment — an inheritable job handle, and passing no handle list — out of
+the shipped binary: they exist only under the `AO_BOUNDARY_TEST_CONTROLS`
+define, which the shipped build never sets. The gate asserts that too, by
+sending the shipped helper each of those keys and requiring a refusal with
+nothing started.
+
+### How the guarantee is measured
+
+`test:dist-boundary` runs sixteen cases against the built artefacts with real
+processes: ownership established and verified; the caller's own termination;
+**helper death → `BOUNDARY_LOST` with zero survivors**; **AO death → helper and
+tree gone, with no cleanup code running, and what it leaves behind unreadable
+as a completion**; processes the child orphaned confirmed as job members **by
+pid** and killed with the job; exit-code fidelity; three real fail-closed
+refusals with a marker file proving nothing ran; the weakening-key refusals,
+with a positive control that the same request minus the key is accepted and
+runs; verify-before-execute; both placement modes; the argument vector, working
+directory and replaced environment arriving exactly; a reused working directory
+being unable to lend its evidence to the next launch; and **an owner that is not
+the parent** — the only case that reaches the helper's own owner watch, because
+every other launch here is owned by the process that spawned it.
+
+The argument-vector cases are **differential**: the same arguments — quotes,
+backslashes, a trailing backslash before a quote, Unicode, an empty argument,
+shell metacharacters — go through the boundary and through
+`child_process.spawn`, and the target reports what arrived. Two more cover the
+verbatim `cmd.exe /d /s /c` route a `.cmd` shim is started through, which is how
+AO starts the Claude CLI — including the one construction where the boundary
+deliberately differs from Node. In verbatim mode libuv passes `argv[0]`
+unquoted, so a target whose path contains a space is split by the child's own C
+runtime; the boundary quotes it, and a case with a compiled target under a
+spaced path holds that behaviour in place. The boundary builds
+its own Win32 command line, so without that case its quoting would be asserted
+only by a comment citing a program this repository does not contain.
+
+Survivors are counted by **heartbeat** — every fixture process rewrites its own
+file ten times a second, and "alive" means the number kept growing — because
+the spike measured that a process walk counts a terminated process whose object
+is still referenced as alive. The instrument is only worth anything if it can
+see a survivor, so the negative control builds a deliberately weakened helper
+and kills it, as a **pair** of runs: with only the job handle inheritable it
+requires **0** survivors, because the handle list holds on its own; with the
+handle list also gone it requires all **7** — the whole fixture tree. That pair
+establishes "two independent lines of defence, and it takes both being wrong"
+inside this repository rather than by citation, and without it every "0
+survivors" above could be an instrument that cannot see anything.
+
+One measured fact runs through two of those cases: **node puts every child it
+spawns into a kill-on-close job of its own.** It explains what the AO-death case
+deliberately does not assert — when AO dies the helper is killed by that job,
+usually before its own owner watch can record anything, so containment holds
+twice over there and the owner watch is what covers an owner that is *not* the
+parent.
+
+It also invalidated an earlier version of the orphan case, which is worth
+stating because a green test hid it. That case launched a tree of Node
+processes, let the root exit, and asserted the job then had six members. A Node
+root takes its whole subtree with it, so nothing was ever orphaned; the six
+members were the descendants' `conhost.exe` processes, and resolving the job's
+member pids against a process snapshot showed that not one of them was a
+fixture process. The case now uses a root that is *not* a Node process — three
+lines of C# compiled for it — so the children it leaves behind are genuinely
+orphaned, and it asserts membership **by pid** rather than by a count that
+cannot tell a descendant from a conhost.
+
 ## Not implemented yet
 
-Still missing, deliberately: unattended operation; owned process containment; and
-any product-side PR/CI/merge automation. `READY_FOR_PR` remains terminal — the
-orchestrator hands a finished task to a human and stops there.
+Still missing, deliberately: unattended operation; owned process containment in
+any productive runner; and any product-side PR/CI/merge automation.
+`READY_FOR_PR` remains terminal — the orchestrator hands a finished task to a
+human and stops there.
 
 Owned containment is still missing, but it is no longer an open *question*. A
 measurement spike on 2026-08-18 settled which mechanism can provide it on
@@ -5691,9 +5850,11 @@ chooses it. Two things in that ADR bind whatever implements it: containment that
 cannot be established or kept is **fail-closed**, and a boundary lost mid-run is
 **`BOUNDARY_LOST`, never `COMPLETED`** — when the boundary was killed under
 measurement the tree died correctly and the run still looked like a normal
-completion, which is the failure that state exists to prevent. Still no `src/`
-change: the ADR chooses a technology and slices the work, and each slice remains
-its own decision to start.
+completion, which is the failure that state exists to prevent. The ADR itself
+changed no `src/` file; **slice 1 has since been built** — see "The Windows
+launch boundary (V3 slice 1)" above — and it is deliberately an isolated
+component: no productive runner obtains a contained process yet, and each
+remaining slice is still its own decision to start.
 
 **The lease came before the block runner, not after it**, and V2-07 is what forced
 that change of order. The ledger's compare-and-swap is advisory, so two concurrent

@@ -2379,9 +2379,30 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // `child_process` itself. It was already true that one module does this;
     // nothing said so, so nothing noticed when a review added a second and
     // started 57 real unfenced processes with the whole suite green.
+    //
+    // The second entry is the V3 launch boundary (slice 1). It spawns the
+    // native helper, so it genuinely can start a process — and it is the one
+    // module here that no fenced path reaches, which the next assertion is
+    // what states. Listing it without that assertion would turn this pin from
+    // "one fenced module starts processes" into "two modules do, one of them
+    // unaccounted for".
     expect(modulesImporting(/node:child_process/, { values: false })).toEqual([
+      join('src', 'boundary', 'start-owned-process.ts'),
       join('src', 'doctor', 'exec.ts'),
     ]);
+  });
+
+  it('keeps the launch boundary unreachable from the product', () => {
+    // Slice 1 delivers the boundary in isolation: no runner, no step and no
+    // command obtains a contained process yet, so nothing it starts can escape
+    // the lease — because nothing starts it.
+    //
+    // When slice 3 moves `runCommand` onto the boundary, this pin fails. That
+    // is its purpose: the question "what fences the boundary?" then has to be
+    // answered deliberately, in the slice that creates the reachability, rather
+    // than discovered afterwards from an unfenced process.
+    expect(modulesImporting(/start-owned-process\.js/)).toEqual([]);
+    expect(modulesImporting(/boundary\/launch-boundary\.js/)).toEqual([]);
   });
 
   it('keeps every import static, which is what the reachability pins assume', () => {
