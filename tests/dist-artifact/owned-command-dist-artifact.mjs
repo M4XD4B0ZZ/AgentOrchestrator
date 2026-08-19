@@ -103,6 +103,9 @@ const contractUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'launch-bou
 const execUrl = pathToFileURL(join(repoRoot, 'dist', 'doctor', 'exec.js')).href;
 
 const { runOwnedCommand } = await import(adapterUrl);
+const { startOwnedProcess } = await import(
+  pathToFileURL(join(repoRoot, 'dist', 'boundary', 'start-owned-process.js')).href
+);
 const { decodeBoundaryStatus } = await import(contractUrl);
 const { runCommand } = await import(execUrl);
 
@@ -329,8 +332,13 @@ test('a stdout budget cuts the stream and ends the owned tree', async (c) => {
   // The differential half, without a tree: `runCommand` would take a tree down
   // with `taskkill`, and a case comparing that would be comparing containment
   // mechanisms rather than budget semantics.
+  // Watched too. These run a `--hang` fixture down *both* runners, so they
+  // start processes as surely as the case above does — and an earlier version
+  // of this file left them out of every survivor check while its header
+  // claimed otherwise.
+  const differentialBeats = c.sweepOnly(tempDir('ao-owned-hb-'));
   const { owned: plain, direct } = await bothPaths(
-    [fixture, '--stdout-bytes=200000', '--hang'],
+    [fixture, `--heartbeat=${differentialBeats}`, '--stdout-bytes=200000', '--hang'],
     { maxStdoutBytes: 1000, timeoutMs: 30_000 },
   );
   c.equal(plain.stdout, direct.stdout, 'the cut output matches runCommand byte for byte');
@@ -352,8 +360,9 @@ test('a stderr budget cuts its own stream and ends the owned tree', async (c) =>
   c.equal(owned.stderrTruncated, true, 'stderr reported truncated');
   c.equal(owned.stdoutTruncated, false, 'stdout not reported truncated');
 
+  const differentialBeats = c.sweepOnly(tempDir('ao-owned-hb-'));
   const { owned: plain, direct } = await bothPaths(
-    [fixture, '--stderr-bytes=200000', '--hang'],
+    [fixture, `--heartbeat=${differentialBeats}`, '--stderr-bytes=200000', '--hang'],
     { maxStderrBytes: 512, timeoutMs: 30_000 },
   );
   c.equal(plain.stderr, direct.stderr, 'the cut output matches runCommand byte for byte');
@@ -375,7 +384,11 @@ test('a timeout ends the owned tree and is a timeout, not a loss', async (c) => 
   c.equal(owned.established, true, 'ownership had been established');
   c.check(owned.childPid !== null, 'the child pid is reported');
 
-  const { direct } = await bothPaths([fixture, '--hang'], { timeoutMs: 1_500 });
+  const differentialBeats = c.sweepOnly(tempDir('ao-owned-hb-'));
+  const { direct } = await bothPaths(
+    [fixture, `--heartbeat=${differentialBeats}`, '--hang'],
+    { timeoutMs: 1_500 },
+  );
   c.equal(direct.outcome, 'TIMED_OUT', 'runCommand agrees on the outcome');
   c.equal(direct.failureCode, 'TIMEOUT', 'runCommand agrees on the failure code');
 });
@@ -504,7 +517,13 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
   // the child exited zero having read nothing at all.
   c.equal(owned.outcome, 'COMPLETED', 'outcome');
   c.equal(owned.exitCode, 0, 'exit code');
-  c.note(`the boundary reported stdinForward=${owned.ending?.status?.stdinForward ?? 'null'}`);
+  // Asserted rather than noted, because it is the mechanism the whole stdin
+  // design rests on: the helper observed the child close its read end, said so,
+  // and stayed alive to report the child's exit. The ADR describes this as
+  // being observed "only because the helper exits and its own pipe breaks in
+  // turn" — a run that completes with the child's own exit code *and* a
+  // broken-pipe report is what shows that description is not the shipped one.
+  c.equal(owned.ending?.status?.stdinForward, 'BROKEN_PIPE', 'the boundary reported the broken pipe');
 
   const direct = await runCommand(process.execPath, [fixture, '--stdin=exit', '--exit=0'], {
     env: process.env,
@@ -630,14 +649,29 @@ test('a budget and a timeout each name their own outcome, and never a third', as
     LAUNCH_REFUSED: 'LAUNCH_REFUSED',
   };
 
-  const warmUp = await runOwnedCommand({
+  // Establishment measured for itself, through the boundary directly. Timing a
+  // whole `runOwnedCommand` instead would fold the child's entire lifetime into
+  // the number, and the window below would then be centred on the wrong moment
+  // — which is how the previous version of this case ended up straddling
+  // nothing.
+  const warmUpBeats = c.sweepOnly(tempDir('ao-owned-hb-'));
+  const startedAt = Date.now();
+  const warmUp = await startOwnedProcess({
     file: process.execPath,
-    args: [fixture, '--exit=0'],
-    timeoutMs: 30_000,
+    args: [fixture, `--heartbeat=${warmUpBeats}`, '--hang'],
+    establishTimeoutMs: 30_000,
   });
-  c.equal(warmUp.outcome, 'COMPLETED', 'the warm-up run establishes and completes');
-  const establishMs = warmUp.durationMs;
-  c.note(`establishment plus a trivial child took ${establishMs}ms`);
+  const establishMs = Date.now() - startedAt;
+  c.check(warmUp.established === true, 'the warm-up launch establishes ownership');
+  if (warmUp.established) {
+    warmUp.process.helper.stdout.resume();
+    warmUp.process.helper.stderr.resume();
+    warmUp.process.helper.stdin.end();
+    warmUp.process.terminate();
+    await warmUp.process.ending;
+    warmUp.process.dispose();
+  }
+  c.note(`establishment alone took ${establishMs}ms`);
 
   // The deltas reach well to both sides of establishment, deliberately. A
   // window that only straddles the moment the flood begins produces the budget
@@ -663,6 +697,15 @@ test('a budget and a timeout each name their own outcome, and never a third', as
     }
   }
   c.note(`contention resolved to ${[...seen].map(([k, n]) => `${k}×${n}`).join(', ')}`);
+  // The assertion the previous version lacked. Without it the case reports `ok`
+  // on a run where every single deadline expired before ownership — ten
+  // refusals, zero contention between the two policies it is named for, and no
+  // way to tell that from a real measurement.
+  c.check(
+    (seen.get('OUTPUT_LIMIT_EXCEEDED') ?? 0) + (seen.get('TIMED_OUT') ?? 0) > 0,
+    'the window must straddle establishment: at least one run has to reach a policy, ' +
+      `got ${JSON.stringify(Object.fromEntries(seen))}`,
+  );
 });
 
 // ── 14. an unknown launch ───────────────────────────────────────────────────
@@ -680,7 +723,12 @@ test('an unknown launch stays conservative about side effects', async (c) => {
     args: [fixture, '--hang'],
     timeoutMs: 1,
   });
-  c.equal(owned.outcome, 'LAUNCH_REFUSED', 'outcome');
+  // A timeout, not a refused launch — this call's own wall clock ran out, and
+  // `timeoutMs` is documented as the budget for the whole call. The boundary
+  // can only report that ownership was not established in time, and that report
+  // is kept: it is what says whether anything may have run.
+  c.equal(owned.outcome, 'TIMED_OUT', 'outcome');
+  c.equal(owned.failureCode, 'TIMEOUT', 'failure code');
   c.equal(owned.established, false, 'ownership was never established');
   c.equal(owned.boundaryFailureCode, 'BOUNDARY_NOT_ESTABLISHED_IN_TIME', 'boundary failure code');
   // Strict, not a disjunction. A 1ms budget expires on the first status poll,

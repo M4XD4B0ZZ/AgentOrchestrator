@@ -2413,7 +2413,15 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // answered deliberately, in the slice that creates the reachability, rather
     // than discovered afterwards from an unfenced process.
     expect(modulesImporting(/owned-command\.js/, { values: false })).toEqual([]);
-    expect(modulesImporting(/boundary\/launch-boundary\.js/)).toEqual([]);
+    // The boundary's *contract* module, matched by the specifier its importers
+    // actually write. The earlier pattern was `boundary/launch-boundary.js`,
+    // which the two siblings — both importing `./launch-boundary.js` — could
+    // never match, so it asserted an empty list vacuously and could not see a
+    // third module appearing beside them.
+    expect(modulesImporting(/launch-boundary\.js/, { values: false })).toEqual([
+      join('src', 'boundary', 'owned-command.ts'),
+      join('src', 'boundary', 'start-owned-process.ts'),
+    ]);
   });
 
   it('keeps every import static, which is what the reachability pins assume', () => {

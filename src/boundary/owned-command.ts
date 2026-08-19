@@ -50,11 +50,22 @@
  * only as the other necessary half: a local write that failed halfway makes
  * the helper see EOF early and report a complete forward of an incomplete
  * payload, so `DELIVERED` requires both.
+ *
+ * One correction to that ADR paragraph, since this module's design rests on
+ * it. It says the caller observes an early close "only because the helper exits
+ * and its own pipe breaks in turn". The shipped helper does not do that:
+ * `PumpStdin` in `native/ao-launch/AoLaunch.cs` records `BROKEN_PIPE`, closes
+ * the child's end and returns from its thread — the helper stays alive and goes
+ * on to report the child's exit. The dist-artifact case "a child that exits
+ * without reading is never DELIVERED" measures exactly that: the run completes
+ * with the child's own exit code *and* a broken-pipe report, which the ADR's
+ * mechanism could not produce.
  */
 
 import {
   DEFAULT_ESTABLISH_TIMEOUT_MS,
   startOwnedProcess,
+  type OwnedProcess,
   type OwnedProcessRequest,
   type OwnedProcessStart,
 } from './start-owned-process.js';
@@ -164,10 +175,21 @@ export type OwnedCommandFailureCode =
   /**
    * The boundary and this side disagree about what happened.
    *
-   * Unreachable by construction — only this module sets the flag the boundary
-   * reads to say "the caller asked" — which is why it is a code rather than an
-   * assumption. An inconsistent pair is classified as a lost boundary, because
-   * "we do not know what happened to the tree" is exactly what it means.
+   * Reported as a lost boundary, because "we do not know what happened to the
+   * tree" is exactly what it means. Four producers, and only the first of them
+   * is unreachable:
+   *
+   *   - a `TERMINATED_BY_CALLER` ending with no policy here having asked — only
+   *     this module sets the flag the boundary reads, so the two cannot really
+   *     disagree;
+   *   - a refusal this side nevertheless terminated. Reachable *after*
+   *     establishment: a status that turns foreign under a shared working
+   *     directory, or a `boundary=FAILED` written after the `boundary=OK` this
+   *     run was established on;
+   *   - a child exit code no process could have exited with, which is why the
+   *     launch nonce exists — a status file is not beyond a third party's
+   *     reach;
+   *   - a termination reason this build does not declare.
    */
   | 'ENDING_INCONSISTENT';
 
@@ -191,6 +213,8 @@ export interface OwnedCommandClassification {
    */
   readonly sideEffectsPossible: boolean;
 }
+
+const KNOWN_TERMINATIONS: ReadonlySet<string> = new Set(OWNED_TERMINATIONS);
 
 const TERMINATION_OUTCOME: Readonly<
   Record<Exclude<OwnedTermination, 'NONE'>, OwnedCommandOutcome>
@@ -320,6 +344,13 @@ export function classifyOwnedCommand(
   // `runCommand`'s behaviour and is kept: a termination once issued is not
   // revised by what turned up afterwards.
   if (termination !== 'NONE') {
+    // A reason this build does not declare. Reachable from anything not type
+    // checked against this build — the `.mjs` dist harness, a JS consumer,
+    // slice 3 across a serialisation boundary — and indexing the two maps with
+    // it produced a frozen result carrying `outcome: undefined`, which is
+    // neither a completion nor a declared failure and threw nothing. That is
+    // fail-*open* in the one function this module exists to make fail-closed.
+    if (!KNOWN_TERMINATIONS.has(termination)) return inconsistent();
     return Object.freeze({
       outcome: TERMINATION_OUTCOME[termination],
       failureCode: TERMINATION_FAILURE[termination],
@@ -375,6 +406,15 @@ export interface StdinDeliveryObservation {
   readonly localWrite: LocalStdinWrite;
   /** {@link BoundaryStatus.stdinForward}, verbatim, or `null`. */
   readonly forwarded: string | null;
+  /**
+   * Whether the boundary reported the child's own exit.
+   *
+   * Evidence about *the helper*, used here to decide what a failed local write
+   * means. An ending carrying the child's exit code proves the helper lived
+   * long enough to observe and publish it, so the pipe this side lost did not
+   * break because the helper was gone.
+   */
+  readonly boundaryObservedChildExit?: boolean;
 }
 
 /**
@@ -390,8 +430,9 @@ export interface StdinDeliveryObservation {
  * Like `runCommand`'s, `DELIVERED` is a statement about handover, not about
  * reading: nothing observable here can prove the child consumed the bytes.
  *
- * A *failed* local write is never a verdict on its own, and that is the
- * correction the first review forced. The pipe this side writes into belongs
+ * A *failed* local write is not a verdict on its own, and that is the
+ * correction the first review forced — with the exception the second one
+ * added, above. The pipe this side writes into belongs
  * to the helper, not to the child: its breaking means the helper died — by
  * this side's hand, or by someone else's — and says nothing about what the
  * child received, since the last byte may have gone through microseconds
@@ -416,6 +457,14 @@ export function classifyStdinDelivery(observation: StdinDeliveryObservation): St
   if (observation.localWrite === 'NO_CHANNEL') return 'FAILED';
   if (observation.forwarded === STDIN_FORWARD_EOF && observation.localWrite === 'COMPLETED') {
     return 'DELIVERED';
+  }
+  // A write that failed while the helper demonstrably lived on to report the
+  // child's exit. The helper's death is then not the explanation, no
+  // end-of-file was ever forwarded, and this side genuinely failed to hand the
+  // payload over — which is what `runCommand` reports for the same physical
+  // event, and slice 3 has to collapse the two.
+  if (observation.localWrite === 'FAILED' && observation.boundaryObservedChildExit === true) {
+    return 'FAILED';
   }
   // No report, or one this build does not know. Both are "it was not observed",
   // and reporting a delivery that was never confirmed is the defect this
@@ -517,6 +566,32 @@ export interface OwnedCommandDependencies {
   readonly start?: (request: OwnedProcessRequest) => Promise<OwnedProcessStart>;
 }
 
+/**
+ * Lets go of a helper this module has given up on.
+ *
+ * `unref()` alone does not do it, and the difference was measured rather than
+ * reasoned about. `ChildProcess.unref()` unrefs the process handle; the three
+ * piped stdio sockets keep their own libuv references, and removing a `data`
+ * listener pauses nothing. Reproduced on the installed runtime with a child
+ * that would not die: a parent that only detached its listeners and called
+ * `unref()` was still alive after 3 seconds, and one that destroyed the streams
+ * exited in 1 millisecond.
+ *
+ * It matters exactly where the fail-closed paths are: they exist for a helper
+ * that ignored its own kill, and without this AO would hang on exit, held open
+ * by the pipes of the process it had just declared unaccounted for.
+ */
+function releaseHelper(owned: OwnedProcess): void {
+  for (const stream of [owned.helper.stdout, owned.helper.stderr, owned.helper.stdin]) {
+    try {
+      stream?.destroy();
+    } catch {
+      /* a stream that cannot be destroyed is one this process no longer reads */
+    }
+  }
+  owned.helper.unref?.();
+}
+
 export interface OwnedCommandResult extends OwnedCommandClassification {
   readonly display: string;
   readonly file: string;
@@ -553,7 +628,17 @@ export async function runOwnedCommand(
   const args = options.args ?? [];
   const display = [options.file, ...args].join(' ');
   const timeoutMs = options.timeoutMs ?? DEFAULT_OWNED_TIMEOUT_MS;
-  const graceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
+  // Caller-supplied, and therefore checked. Node turns a delay above the
+  // 32-bit maximum into 1ms, so asking for a *generous* grace produced the
+  // opposite of one: the grace expired before any real boundary could close,
+  // and every timeout, budget cut and cancellation came back as a lost
+  // boundary with its working directory leaked. A negative or non-finite value
+  // is not a grace at all and falls back to the default.
+  const requestedGraceMs = options.terminationGraceMs;
+  const graceMs =
+    requestedGraceMs === undefined || !Number.isFinite(requestedGraceMs) || requestedGraceMs < 0
+      ? DEFAULT_TERMINATION_GRACE_MS
+      : Math.min(requestedGraceMs, MAX_TIMER_MS);
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
   const deadline = startedAtMs + timeoutMs;
@@ -667,8 +752,37 @@ export async function runOwnedCommand(
 
     if (!launch.established) {
       const classification = classifyOwnedCommand({ ending: launch.ending, termination: 'NONE' });
+      /**
+       * A refusal is what the boundary saw. It is not always what happened.
+       *
+       * Two things can be true at the same moment as a refusal, and reporting
+       * only the refusal loses the one the caller acts on:
+       *
+       *   - the caller cancelled while the launch was still being established.
+       *     The first fix watched the signal from before the launch and then
+       *     consulted the flag only on the established path, so a cancellation
+       *     that raced a refusal was delivered to AO as "the command could not
+       *     be started";
+       *   - this call's own wall-clock budget expired. `timeoutMs` is
+       *     documented as the budget for the whole call, and a caller reads its
+       *     expiry as a timeout — but the boundary can only report that
+       *     ownership was not established in time.
+       *
+       * The boundary's own evidence is kept in either case: `boundaryFailureCode`
+       * and `targetStarted` still come from the refusal, because they are what
+       * says whether anything may have run.
+       */
+      const overriddenOutcome: { outcome: OwnedCommandOutcome; failureCode: OwnedCommandFailureCode } | null =
+        abortRequested
+          ? { outcome: 'TERMINATED_BY_CALLER', failureCode: 'TERMINATED_BY_CALLER' }
+          : launch.ending.ending === 'BOUNDARY_REFUSED' &&
+              launch.ending.failureCode === 'BOUNDARY_NOT_ESTABLISHED_IN_TIME' &&
+              Date.now() >= deadline
+            ? { outcome: 'TIMED_OUT', failureCode: 'TIMEOUT' }
+            : null;
       return finish({
         ...classification,
+        ...(overriddenOutcome ?? {}),
         established: false,
         stdout: '',
         stderr: '',
@@ -735,11 +849,10 @@ export async function runOwnedCommand(
       // Nothing is awaited here. The single situation this path exists for is
       // "the boundary is not behaving as constructed", and waiting for such a
       // boundary to confirm its own death is the one thing that cannot be
-      // relied on. The helper is released from the event loop so a process
-      // that ignores its kill cannot hold this one open, and the working
-      // directory is left alone because that helper may still be writing to it.
+      // relied on. The working directory is left alone, because a helper that
+      // may still be running still owns it.
       owned.terminate();
-      owned.helper.unref?.();
+      releaseHelper(owned);
       void owned.ending.catch(() => undefined);
       return finish({
         established: true,
@@ -754,7 +867,15 @@ export async function runOwnedCommand(
         stderr: '',
         stdoutTruncated: false,
         stderrTruncated: false,
-        stdinDelivery: stdinRequested ? 'UNCONFIRMED' : 'NOT_REQUESTED',
+        // Decided by the classifier rather than by hand, and the answer is
+        // the stronger word: this branch returns before the stdin writer below
+        // exists, so it *knows* not one byte was handed over.
+        stdinDelivery: classifyStdinDelivery({
+          requested: stdinRequested,
+          established: true,
+          localWrite: 'NO_CHANNEL',
+          forwarded: null,
+        }),
         helperPid: owned.helperPid,
         childPid: owned.childPid,
         ending: null,
@@ -823,19 +944,19 @@ export async function runOwnedCommand(
     if (settled === unconfirmed) {
       // The tree may still be alive, and nothing here can prove otherwise.
       //
-      // Three deliberate consequences. The output sinks are detached, so a
-      // chunk arriving later cannot re-terminate a run that has already been
-      // reported. The helper is released from the event loop, so a process
-      // that has already ignored a kill cannot keep this one from exiting. The
-      // working directory is *not* removed, because a helper that is still
-      // running still owns it.
+      // Three deliberate consequences. The output sinks are detached *and
+      // destroyed*, so a chunk arriving later cannot re-terminate a run that
+      // has already been reported and this process is not held open by the
+      // pipes of a helper it has given up on — see {@link releaseHelper}, where
+      // the difference between those two is measured. The working directory is
+      // *not* removed, because a helper that is still running still owns it.
       //
       // And the outcome is not the policy that asked for the termination:
       // reporting `TIMED_OUT` here would claim a tree was taken down that
       // demonstrably was not.
       outStream.off('data', onStdout);
       errStream.off('data', onStderr);
-      owned.helper.unref?.();
+      releaseHelper(owned);
       void owned.ending.catch(() => undefined);
       return finish({
         established: true,
@@ -855,6 +976,7 @@ export async function runOwnedCommand(
           established: true,
           localWrite,
           forwarded: null,
+          boundaryObservedChildExit: false,
         }),
         helperPid: owned.helperPid,
         childPid: owned.childPid,
@@ -878,6 +1000,7 @@ export async function runOwnedCommand(
         // The boundary's own report is the evidence. This side's pipe cannot
         // see a child that stopped reading, because it is not the child's pipe.
         forwarded: ending.status?.stdinForward ?? null,
+        boundaryObservedChildExit: ending.ending === 'CHILD_EXITED',
       }),
       helperPid: owned.helperPid,
       childPid: owned.childPid,

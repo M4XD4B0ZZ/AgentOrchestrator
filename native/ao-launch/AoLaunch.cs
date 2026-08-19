@@ -203,6 +203,10 @@ internal static class Native
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern IntPtr GetStdHandle(int stdHandle);
 
+    /** The end of an anonymous pipe, as Windows reports it: a *failed* read. */
+    internal const int ERROR_BROKEN_PIPE = 109;
+    internal const int ERROR_HANDLE_EOF = 38;
+
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern bool ReadFile(IntPtr handle, byte[] buffer, uint toRead, out uint read, IntPtr overlapped);
 
@@ -786,7 +790,33 @@ internal static class Program
             while (true)
             {
                 uint read;
-                if (!Native.ReadFile(from, buffer, (uint)buffer.Length, out read, IntPtr.Zero) || read == 0) break;
+                // A failed read and an end of file are different facts, and
+                // collapsing them made this thread report EOF_FORWARDED for a
+                // payload it had stopped reading halfway. "The whole stream was
+                // forwarded" is not something this thread knows after a read
+                // error, and it may not say it.
+                //
+                // The distinction costs a last-error check, and skipping that
+                // check is not an option: on Windows the end of an anonymous
+                // pipe is *itself* reported as a failed ReadFile with
+                // ERROR_BROKEN_PIPE, so treating every failure as an error
+                // turns every ordinary end of file into one. That was measured
+                // the direct way — the first attempt at this did exactly that,
+                // and every DELIVERED case in
+                // `tests/dist-artifact/owned-command-dist-artifact.mjs` went
+                // UNCONFIRMED at once. Those cases are what keeps the EOF half
+                // of this honest; the error half is not reachable from any test
+                // here, and is stated rather than claimed as a measured repair.
+                if (!Native.ReadFile(from, buffer, (uint)buffer.Length, out read, IntPtr.Zero))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == Native.ERROR_BROKEN_PIPE || error == Native.ERROR_HANDLE_EOF) break;
+                    Put("stdinForward", "SOURCE_READ_FAILED");
+                    WriteStatus();
+                    Native.CloseHandle(toChild);
+                    return;
+                }
+                if (read == 0) break;
                 if (!WriteAll(toChild, buffer, read))
                 {
                     // The child closed its read end. That is data for the
