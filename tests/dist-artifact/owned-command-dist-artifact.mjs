@@ -32,15 +32,18 @@
  * the reason the spike found: a terminated process whose object is still
  * referenced looks alive in a process walk.
  *
- * Two registrations, and the difference is stated because two earlier versions
- * of this paragraph overstated it. `watch` gives a directory a per-case
- * observation window *and* the final sweep; `sweepOnly` gives it the final
- * sweep alone, for cases that start many short runs where a 1.2s window each
- * would dominate the wall clock. Every directory any case creates is registered
- * one way or the other, and the sweep at the end of the file covers all of
- * them — later than the per-case check, and therefore with a better view of
- * anything that outlived its own run. Cases that start no process at all
- * register nothing, and have nothing to count.
+ * **Every case that starts a process starts it with a `--heartbeat=` directory,
+ * and every such directory is swept at the end of the run.** That is stated as
+ * a property of the file rather than as an intention, because three earlier
+ * versions of this paragraph claimed a coverage the file did not have: first
+ * for cases that started nothing, then for cases that started trees into
+ * unregistered directories, then for cases that started processes with no
+ * heartbeat at all. The only cases that register nothing are the two that start
+ * nothing — a refused foreign status, and a target that does not exist.
+ *
+ * Cases that start one tree additionally get a per-case window, so a leak is
+ * attributed to the case that caused it; cases that start many short runs are
+ * swept only at the end, which is later and therefore sees more.
  *
  * What none of that claims is that the containment settings are load-bearing.
  * That claim needs a negative control — a deliberately weakened helper that
@@ -70,9 +73,14 @@
  *      too;
  *  13. a termination during a transfer in flight is `UNCONFIRMED`;
  *  14. no payload is `NOT_REQUESTED`, and the child still sees end-of-file;
- *  15. a budget and a timeout each name their own outcome when clearly ordered,
+ *  15. the working directory, the replaced environment and the argument vector
+ *      the caller asked for are the ones the target receives, in both placement
+ *      modes;
+ *  16. a byte budget the caller disabled bounds nothing, and `runCommand`
+ *      agrees;
+ *  17. a budget and a timeout each name their own outcome when clearly ordered,
  *      and produce nothing but those two when armed to fire together;
- *  16. a deadline that expires during establishment is a timeout, and it stays
+ *  18. a deadline that expires during establishment is a timeout, and it stays
  *      conservative about whether anything ran.
  *
  * The same-tick case — two policies triggering inside one turn of the loop — is
@@ -101,6 +109,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
 const fixture = join(scriptDir, 'fixtures', 'owned-command-fixture.mjs');
+/** Slice 1's read-back oracle: it reports the argv, cwd and env that arrived. */
+const echoFixture = join(scriptDir, 'fixtures', 'boundary-echo-fixture.mjs');
 
 const adapterUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'owned-command.js')).href;
 const contractUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'launch-boundary.js')).href;
@@ -171,6 +181,26 @@ async function liveCount(dir, windowMs = 1_200) {
   for (const [name, value] of after) {
     if (before.get(name) !== value) live += 1;
   }
+  return live;
+}
+
+/**
+ * The same observation, over many directories at once.
+ *
+ * One window rather than one per directory: the per-directory form costs 1.2s
+ * each, which is what made it expensive enough to leave cases unregistered —
+ * and leaving cases unregistered is what made this file's survivor claim wrong
+ * three times running.
+ */
+async function liveCountAcross(dirs, windowMs = 1_500) {
+  const before = dirs.map((dir) => heartbeats(dir));
+  await sleep(windowMs);
+  let live = 0;
+  dirs.forEach((dir, index) => {
+    for (const [name, value] of heartbeats(dir)) {
+      if (before[index].get(name) !== value) live += 1;
+    }
+  });
   return live;
 }
 
@@ -276,12 +306,49 @@ class Case {
 const cases = [];
 const test = (name, run) => cases.push({ name, run });
 
+/**
+ * What establishing ownership costs on this machine, right now.
+ *
+ * Measured once, through the boundary itself rather than through a whole run,
+ * and taken as the worst of three samples. Several cases below have to choose a
+ * budget relative to it: a fixed number that straddles establishment on a
+ * developer machine can sit entirely inside it on a loaded CI runner, and the
+ * case then fails for a reason that is not a defect.
+ */
+async function measureEstablishment() {
+  let worst = 0;
+  for (let sample = 0; sample < 3; sample += 1) {
+    const beats = tempDir('ao-owned-hb-');
+    heartbeatDirs.push(beats);
+    const startedAt = Date.now();
+    const launch = await startOwnedProcess({
+      file: process.execPath,
+      args: [fixture, `--heartbeat=${beats}`, '--hang'],
+      establishTimeoutMs: 60_000,
+    });
+    worst = Math.max(worst, Date.now() - startedAt);
+    if (!launch.established) throw new Error('the boundary could not be established at all');
+    launch.process.helper.stdout.resume();
+    launch.process.helper.stderr.resume();
+    launch.process.helper.stdin.end();
+    launch.process.terminate();
+    await launch.process.ending;
+    launch.process.dispose();
+  }
+  return worst;
+}
+
+/** Filled in before the cases run. */
+let establishMs = 0;
+
 // ── 1. exit codes ───────────────────────────────────────────────────────────
 
 test('an exit code survives the boundary exactly, and agrees with runCommand', async (c) => {
+  const beats = c.sweepOnly(tempDir('ao-owned-hb-'));
   for (const code of [0, 1, 42, 255, 256, 3221225477]) {
     const { owned, direct } = await bothPaths([
       fixture,
+      `--heartbeat=${beats}`,
       '--stdout-bytes=16',
       `--exit=${code}`,
     ]);
@@ -301,6 +368,7 @@ test('an exit code survives the boundary exactly, and agrees with runCommand', a
 test('stdout and stderr stay separate', async (c) => {
   const { owned, direct } = await bothPaths([
     fixture,
+    `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`,
     '--stdout-mark=OUT-FIRST',
     '--stderr-mark=ERR-FIRST',
     '--stdout-bytes=64',
@@ -380,7 +448,9 @@ test('a timeout ends the owned tree and is a timeout, not a loss', async (c) => 
   const owned = await runOwnedCommand({
     file: process.execPath,
     args: [fixture, `--heartbeat=${beats}`, '--children=3', '--hang'],
-    timeoutMs: 1_500,
+    // Scaled: this budget has to outlast establishment, or the case fails on a
+    // slow runner as an assertion rather than as the timeout it is measuring.
+    timeoutMs: Math.max(1_500, establishMs * 6),
   });
   c.equal(owned.outcome, 'TIMED_OUT', 'outcome');
   c.equal(owned.failureCode, 'TIMEOUT', 'failure code');
@@ -391,7 +461,7 @@ test('a timeout ends the owned tree and is a timeout, not a loss', async (c) => 
   const differentialBeats = c.sweepOnly(tempDir('ao-owned-hb-'));
   const { direct } = await bothPaths(
     [fixture, `--heartbeat=${differentialBeats}`, '--hang'],
-    { timeoutMs: 1_500 },
+    { timeoutMs: Math.max(1_500, establishMs * 6) },
   );
   c.equal(direct.outcome, 'TIMED_OUT', 'runCommand agrees on the outcome');
   c.equal(direct.failureCode, 'TIMEOUT', 'runCommand agrees on the failure code');
@@ -483,7 +553,7 @@ test('a payload read to end-of-file is DELIVERED', async (c) => {
   const payload = 'x'.repeat(300_000);
   const owned = await runOwnedCommand({
     file: process.execPath,
-    args: [fixture, '--stdin=drain', `--report=${report}`],
+    args: [fixture, `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`, '--stdin=drain', `--report=${report}`],
     stdin: payload,
     timeoutMs: 30_000,
   });
@@ -508,7 +578,7 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
   const payload = 'x'.repeat(4_000_000);
   const owned = await runOwnedCommand({
     file: process.execPath,
-    args: [fixture, '--stdin=exit', '--exit=0'],
+    args: [fixture, `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`, '--stdin=exit', '--exit=0'],
     stdin: payload,
     timeoutMs: 30_000,
   });
@@ -541,6 +611,7 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
 });
 
 test('a payload fully forwarded to a child that never reads it is DELIVERED', async (c) => {
+  const beats = c.sweepOnly(tempDir('ao-owned-hb-'));
   // The shape a review argued would be racy: the child never touches stdin and
   // exits on its own, so the payload — small enough for the pipe buffer — is
   // fully forwarded, and the helper's report of that comes from a background
@@ -565,7 +636,7 @@ test('a payload fully forwarded to a child that never reads it is DELIVERED', as
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const owned = await runOwnedCommand({
       file: process.execPath,
-      args: [fixture, '--stdin=ignore', '--sleep-ms=300', '--exit=0'],
+      args: [fixture, `--heartbeat=${beats}`, '--stdin=ignore', '--sleep-ms=300', '--exit=0'],
       stdin: 'a payload that fits in one pipe buffer',
       timeoutMs: 15_000,
     });
@@ -583,7 +654,7 @@ test('a termination during a transfer in flight is UNCONFIRMED', async (c) => {
     file: process.execPath,
     args: [fixture, `--heartbeat=${beats}`, '--stdin=ignore', '--hang'],
     stdin: 'x'.repeat(8_000_000),
-    timeoutMs: 1_500,
+    timeoutMs: Math.max(1_500, establishMs * 6),
   });
   c.equal(owned.outcome, 'TIMED_OUT', 'outcome');
   c.equal(owned.stdinDelivery, 'UNCONFIRMED', 'delivery');
@@ -593,7 +664,7 @@ test('no payload is NOT_REQUESTED, and the child still sees end-of-file', async 
   const reportDir = tempDir('ao-owned-report-');
   const report = join(reportDir, 'stdin.json');
   const { owned, direct } = await bothPaths(
-    [fixture, '--stdin=drain', `--report=${report}`],
+    [fixture, `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`, '--stdin=drain', `--report=${report}`],
     { timeoutMs: 15_000 },
   );
   // A child reading to end-of-file exits only because it saw one. That it
@@ -603,7 +674,70 @@ test('no payload is NOT_REQUESTED, and the child still sees end-of-file', async 
   c.equal(direct.stdinDelivery, 'NOT_REQUESTED', 'runCommand agrees');
 });
 
-// ── 15. the two policies, ordered and contending ────────────────────────────
+// ── 15. what the caller asked for actually reaches the target ─────────────
+
+test('the working directory, the environment and the argument vector arrive', async (c) => {
+  // Nothing measured this. `verbatim`, `cwd`, `env` and `mode` are forwarded to
+  // `startOwnedProcess` and every one of them could be deleted with the whole
+  // gate still green — including `env`, which is the channel a later slice uses
+  // to scope an agent's environment, and `cwd`, which is what puts a writer in
+  // its worktree rather than in AO's own directory.
+  const home = tempDir('ao-owned-cwd-');
+  const argv = ['plain', 'with space', 'quote"inside', 'back\\slash', '', 'a&b|c'];
+
+  for (const mode of ['JOBLIST', 'SUSPENDED']) {
+    const owned = await runOwnedCommand({
+      file: process.execPath,
+      args: [echoFixture, ...argv],
+      cwd: home,
+      env: { AO_BOUNDARY_PROBE: 'forwarded', SystemRoot: process.env['SystemRoot'] ?? '' },
+      mode,
+      timeoutMs: 30_000,
+    });
+    c.equal(owned.outcome, 'COMPLETED', `${mode}: outcome`);
+    let report = null;
+    try {
+      report = JSON.parse(owned.stdout.trim());
+    } catch {
+      c.check(false, `${mode}: the target did not report: ${JSON.stringify(owned.stdout)}`);
+      continue;
+    }
+    c.check(
+      JSON.stringify(report.argv) === JSON.stringify(argv),
+      `${mode}: argv arrived as ${JSON.stringify(report.argv)}`,
+    );
+    c.equal(report.cwd, home, `${mode}: working directory`);
+    c.equal(report.env.AO_BOUNDARY_PROBE, 'forwarded', `${mode}: the caller's variable`);
+    // A replaced environment, not an inherited one: the helper's own PATH must
+    // not be there, because the request named an environment that has none.
+    c.equal(report.env.PATH, null, `${mode}: the environment was replaced, not merged`);
+  }
+});
+
+test('a budget the caller disabled bounds nothing, on both paths', async (c) => {
+  // `Infinity` is a caller saying "no cap". Folding it into the default did not
+  // merely cut the stream short — it reported an output-limit failure and
+  // terminated the job for a limit that had been switched off.
+  const args = [fixture, '--stdout-bytes=2000000', '--exit=0'];
+  const owned = await runOwnedCommand({
+    file: process.execPath,
+    args,
+    maxStdoutBytes: Number.POSITIVE_INFINITY,
+    timeoutMs: 60_000,
+  });
+  const direct = await runCommand(process.execPath, args, {
+    env: process.env,
+    maxStdoutBytes: Number.POSITIVE_INFINITY,
+    timeoutMs: 60_000,
+  });
+  c.equal(owned.outcome, 'COMPLETED', 'outcome');
+  c.equal(owned.stdoutTruncated, false, 'not truncated');
+  c.equal(owned.stdout.length, 2_000_000, 'every byte kept');
+  c.equal(direct.outcome, 'COMPLETED', 'runCommand agrees on the outcome');
+  c.equal(owned.stdout.length, direct.stdout.length, 'and on the byte count');
+});
+
+// ── 17. the two policies, ordered and contending ────────────────────────────
 
 test('a budget and a timeout each name their own outcome, and never a third', async (c) => {
   // Three parts, and the first review is the reason they are three.
@@ -665,23 +799,6 @@ test('a budget and a timeout each name their own outcome, and never a third', as
   // the number, and the window below would then be centred on the wrong moment
   // — which is how the previous version of this case ended up straddling
   // nothing.
-  const warmUpBeats = c.sweepOnly(tempDir('ao-owned-hb-'));
-  const startedAt = Date.now();
-  const warmUp = await startOwnedProcess({
-    file: process.execPath,
-    args: [fixture, `--heartbeat=${warmUpBeats}`, '--hang'],
-    establishTimeoutMs: 30_000,
-  });
-  const establishMs = Date.now() - startedAt;
-  c.check(warmUp.established === true, 'the warm-up launch establishes ownership');
-  if (warmUp.established) {
-    warmUp.process.helper.stdout.resume();
-    warmUp.process.helper.stderr.resume();
-    warmUp.process.helper.stdin.end();
-    warmUp.process.terminate();
-    await warmUp.process.ending;
-    warmUp.process.dispose();
-  }
   c.note(`establishment alone took ${establishMs}ms`);
 
   // The deltas reach well to both sides of establishment, deliberately. A
@@ -689,27 +806,34 @@ test('a budget and a timeout each name their own outcome, and never a third', as
   // every time — measured, and recorded in the note below — so the negative end
   // is what puts the deadline genuinely before there is any output to bound.
   const seen = new Map();
-  // The upper end is proportional as well as absolute. A fixed +150ms straddles
-  // establishment on this machine and would sit entirely *inside* it on a
-  // runner three times slower, where every run would time out and the guard
-  // below would fail for a reason that is not a defect.
-  const deltas = [-90, -70, -50, -30, -15, -5, 0, 10, Math.round(establishMs / 2), establishMs + 250];
-  for (const delta of deltas) {
+  // Two of these are not a straddle at all, and they are here because the two
+  // guards below must not be able to fail for a reason that is not a defect: a
+  // 1ms budget cannot reach ownership on any machine, and a budget four times
+  // measured establishment plus a second cannot fail to. The rest sweep the
+  // window between them, which is where the contention actually is.
+  const budgets = [
+    1,
+    ...[-90, -70, -50, -30, -15, -5, 0, 10, Math.round(establishMs / 2)].map((delta) =>
+      Math.max(1, establishMs + delta),
+    ),
+    establishMs * 4 + 1_000,
+  ];
+  for (const timeoutMs of budgets) {
     const beats = c.sweepOnly(tempDir('ao-owned-hb-'));
     const owned = await runOwnedCommand({
       file: process.execPath,
       args: [fixture, `--heartbeat=${beats}`, '--stdout-bytes=4000000', '--hang'],
       maxStdoutBytes: 64,
-      timeoutMs: Math.max(1, establishMs + delta),
+      timeoutMs,
     });
     seen.set(owned.outcome, (seen.get(owned.outcome) ?? 0) + 1);
     const expected = EXPECTED[owned.outcome];
     c.check(
       expected !== undefined,
-      `delta ${delta}: outcome must be one of the two policies or a refusal, got ${owned.outcome}`,
+      `budget ${timeoutMs}ms: outcome must be one of the two policies, got ${owned.outcome}`,
     );
     if (expected !== undefined) {
-      c.equal(owned.failureCode, expected, `delta ${delta}: failure code`);
+      c.equal(owned.failureCode, expected, `budget ${timeoutMs}ms: failure code`);
     }
   }
   c.note(`contention resolved to ${[...seen].map(([k, n]) => `${k}×${n}`).join(', ')}`);
@@ -732,19 +856,19 @@ test('a budget and a timeout each name their own outcome, and never a third', as
   );
 });
 
-// ── 16. a deadline that expires during establishment ───────────────────────────────────────────────────
+// ── 18. a deadline that expires during establishment ───────────────────────────────────────────────────
 
 test('an unknown launch stays conservative about side effects', async (c) => {
   // A wall-clock budget too small for a process to start in. Establishment
   // cannot finish, so the boundary refuses without ever having reported what it
   // did or did not create.
   //
-  // Deliberately no heartbeat directory: nothing gets far enough to write one,
-  // so watching it would be a survivor check with no power to see a survivor,
-  // which is what the first version of this case did.
   const owned = await runOwnedCommand({
     file: process.execPath,
-    args: [fixture, '--hang'],
+    // A heartbeat directory even here, and especially here: `targetStarted` is
+    // `UNKNOWN`, which means the target *may* have been created — and if it was,
+    // a heartbeat is the only thing that would show it outliving the refusal.
+    args: [fixture, `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`, '--hang'],
     timeoutMs: 1,
   });
   // A timeout, not a refused launch — this call's own wall clock ran out, and
@@ -773,6 +897,8 @@ if (process.platform !== 'win32') {
 }
 
 let failed = 0;
+establishMs = await measureEstablishment();
+console.log(`  note: establishing ownership costs ${establishMs}ms here (worst of three)`);
 for (const { name, run } of cases) {
   const c = new Case(name);
   const startedAt = Date.now();
@@ -802,8 +928,7 @@ for (const { name, run } of cases) {
 // by longer than that case's window is still a survivor, and the per-case check
 // is too close to the event to see it.
 {
-  let stragglers = 0;
-  for (const dir of heartbeatDirs) stragglers += await liveCount(dir, 1_500);
+  const stragglers = await liveCountAcross(heartbeatDirs);
   if (stragglers > 0) {
     failed += 1;
     console.log(`  FAIL final sweep: ${stragglers} fixture process(es) still running`);

@@ -23,12 +23,18 @@
  * an adapter is where it would be lost again, because an adapter is where an
  * unknown ending meets a local reason and the two get combined into one word.
  *
- * So {@link classifyOwnedCommand} is a total function over
- * (ending × termination reason) with exactly one path to `COMPLETED`: the
- * boundary observed the child exit, *and* no policy here terminated it. Every
- * other pairing — including ones unreachable by construction — lands on a
- * non-success. `tests/v3-02-owned-command.test.ts` enumerates the product
- * rather than sampling it.
+ * So {@link classifyOwnedCommand} is a total function over everything it is
+ * told — the boundary's ending, the reason this side terminated, and the three
+ * facts only the run loop knows: whether ownership was established, whether the
+ * caller cancelled before it was, and whether this call's own deadline expired.
+ * It has exactly one path to `COMPLETED`: the boundary observed the child exit,
+ * no policy here terminated it, and nothing said ownership was never
+ * established. Every other combination — including ones unreachable by
+ * construction — lands on a non-success, and
+ * `tests/v3-02-owned-command.test.ts` enumerates that whole product rather than
+ * sampling it. It is enumerated across all of those inputs because the first
+ * version crossed only two of them, and a `COMPLETED` hid in the rest for a
+ * round.
  *
  * ── Termination goes through the boundary, and only through it ─────────────
  *
@@ -248,6 +254,15 @@ export interface OwnedCommandObservation {
   readonly cancelledBeforeOwnership?: boolean;
   /** Whether this call's own wall-clock budget had expired by then. */
   readonly deadlineExpired?: boolean;
+  /**
+   * Whether verified ownership was established at all.
+   *
+   * Stated, rather than inferred from the ending, because it is what makes
+   * several pairs *contradictory* instead of merely unusual — and a
+   * contradiction is the module's cue to fail closed. A caller that omits it
+   * says nothing, and nothing is then decided from it.
+   */
+  readonly ownershipEstablished?: boolean;
 }
 
 /**
@@ -316,6 +331,34 @@ export function classifyOwnedCommand(
       targetStarted: 'UNKNOWN' as const,
       sideEffectsPossible: true,
     });
+
+  /**
+   * The pairs whose two halves cannot both be true, decided before any of them
+   * gets to name an outcome.
+   *
+   * Round 3 added the establishment-time facts and read them inside the
+   * refusal branch only. Paired with any other ending they were ignored — and
+   * "ownership was never established" beside "the boundary owned a child and
+   * saw it exit" fell straight through to `COMPLETED`, on a result whose own
+   * `established: false` and empty output contradicted it. Deciding them here
+   * is what makes the enumeration in `tests/v3-02-owned-command.test.ts` a
+   * statement about the whole product rather than about one row of it.
+   */
+  const provesOwnership = ending.ending === 'CHILD_EXITED' || ending.ending === 'TERMINATED_BY_CALLER';
+  const deniesOwnership =
+    observation.ownershipEstablished === false ||
+    observation.cancelledBeforeOwnership === true ||
+    observation.deadlineExpired === true;
+  if (provesOwnership && deniesOwnership) return inconsistent();
+  // And the mirror. A refusal means ownership was never established, so a
+  // caller that watched it *be* established is describing something the
+  // boundary cannot also be right about. Reachable: node emits `error` on a
+  // child process when a kill fails, not only when a spawn does, and
+  // `startOwnedProcess` reports that as a refused launch — for a run whose
+  // ownership it had already published.
+  if (ending.ending === 'BOUNDARY_REFUSED' && observation.ownershipEstablished === true) {
+    return inconsistent();
+  }
 
   if (ending.ending === 'BOUNDARY_LOST') {
     return Object.freeze({
@@ -606,6 +649,13 @@ export interface OwnedCommandOptions {
    * A helper still alive after this window leaves a tree nothing here can
    * account for, which is reported as a lost boundary rather than as the
    * policy outcome that asked for the termination.
+   *
+   * `0` is accepted and means exactly what it says — the boundary gets no time
+   * at all — so every timeout, budget cut and cancellation will be reported as
+   * `BOUNDARY_TERMINATION_UNCONFIRMED` and leave its working directory behind.
+   * That is almost never what a caller wants; it is not silently corrected,
+   * because a value quietly replaced by a different one is how the opposite
+   * defect got in.
    */
   readonly terminationGraceMs?: number;
   /** Text handed to the child's standard input, which is then closed. */
@@ -708,30 +758,42 @@ export async function runOwnedCommand(
   const args = options.args ?? [];
   const display = [options.file, ...args].join(' ');
   /**
-   * A caller-supplied delay or budget, or the default for anything that is not
-   * a usable one.
+   * A caller-supplied number, or the default for one this module cannot use.
    *
-   * Round 2 checked `terminationGraceMs` with the reasoning "caller-supplied,
-   * and therefore checked", and left its two siblings unchecked. `NaN` is the
-   * shape a missing config value takes after `parseInt`, and on `timeoutMs` it
-   * was the worst of the three: the deadline became `NaN`, the establishment
-   * budget with it, and `startOwnedProcess` polled a helper that neither
-   * establishes nor exits — forever, with the abort listener not yet armed to
-   * rescue it. On a byte budget it was milder and still wrong: every stream cut
-   * off at its first byte, so every run reported an output-limit failure over
-   * empty output.
+   * `NaN` is the shape a missing config value takes after `parseInt`, and on
+   * `timeoutMs` it was the worst place for it: the deadline became `NaN`, the
+   * establishment budget with it, and `startOwnedProcess` polled a helper that
+   * neither establishes nor exits — forever, with the abort listener not yet
+   * armed to rescue it. On a byte budget it was milder and still wrong: every
+   * stream cut off at its first byte, so every run reported an output-limit
+   * failure over empty output.
+   *
+   * `Infinity` is **not** in that class, and the first version of this check
+   * treated it as if it were. It is a caller saying "no bound", which is a
+   * thing both this module and `runCommand` can do — and folding it into the
+   * default did not merely cap the stream, it reported `OUTPUT_LIMIT_EXCEEDED`
+   * and terminated the job for a limit the caller had explicitly disabled.
    */
   const usable = (value: number | undefined, fallback: number): number =>
-    value === undefined || !Number.isFinite(value) || value < 0
-      ? fallback
-      : Math.min(value, MAX_TIMER_MS);
+    value === undefined || Number.isNaN(value) || value < 0 ? fallback : value;
 
-  const timeoutMs = usable(options.timeoutMs, DEFAULT_OWNED_TIMEOUT_MS);
+  /**
+   * The same, for a delay.
+   *
+   * Delays carry one extra bound that budgets must not: node turns a timeout
+   * above the 32-bit maximum into 1ms, so an unbounded delay has to become the
+   * largest one a timer can express. A byte budget has no such limit, and
+   * clamping one with a timer bound would be a category error.
+   */
+  const usableDelay = (value: number | undefined, fallback: number): number =>
+    Math.min(usable(value, fallback), MAX_TIMER_MS);
+
+  const timeoutMs = usableDelay(options.timeoutMs, DEFAULT_OWNED_TIMEOUT_MS);
   // Node turns a delay above the 32-bit maximum into 1ms, so asking for a
   // *generous* grace produced the opposite of one: the grace expired before any
   // real boundary could close, and every timeout, budget cut and cancellation
   // came back as a lost boundary with its working directory leaked.
-  const graceMs = usable(options.terminationGraceMs, DEFAULT_TERMINATION_GRACE_MS);
+  const graceMs = usableDelay(options.terminationGraceMs, DEFAULT_TERMINATION_GRACE_MS);
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
   const deadline = startedAtMs + timeoutMs;
@@ -852,6 +914,7 @@ export async function runOwnedCommand(
       const classification = classifyOwnedCommand({
         ending: launch.ending,
         termination: 'NONE',
+        ownershipEstablished: false,
         cancelledBeforeOwnership: abortRequested,
         deadlineExpired: Date.now() >= deadline,
       });
@@ -1059,7 +1122,7 @@ export async function runOwnedCommand(
     }
 
     const ending = settled;
-    const classification = classifyOwnedCommand({ ending, termination });
+    const classification = classifyOwnedCommand({ ending, termination, ownershipEstablished: true });
     const result = finish({
       ...classification,
       established: true,
@@ -1080,6 +1143,17 @@ export async function runOwnedCommand(
       childPid: owned.childPid,
       ending,
     });
+    if (ending.ending === 'BOUNDARY_REFUSED') {
+      // Contradictory, and already classified as such above — but it also
+      // decides what may be done to the working directory. This ending arrives
+      // from a helper `error` event rather than from its close, so the helper
+      // may still be running and still writing its status into that directory.
+      // Removing it under a live writer is the one cleanup this module must not
+      // perform on a run it cannot account for.
+      releaseHelper(owned);
+      void owned.ending.catch(() => undefined);
+      return result;
+    }
     // Only now: the ending has been read, and the status file it was read from
     // lives in the directory this removes.
     owned.dispose();

@@ -812,8 +812,11 @@ internal static class Program
                     int error = Marshal.GetLastWin32Error();
                     if (error == Native.ERROR_BROKEN_PIPE || error == Native.ERROR_HANDLE_EOF) break;
                     Put("stdinForward", "SOURCE_READ_FAILED");
-                    WriteStatus();
+                    // Closed before the status is published, for the reason the
+                    // end-of-file branch below gives: a child blocked on
+                    // ReadFile must not be made to wait out a file write.
                     Native.CloseHandle(toChild);
+                    WriteStatus();
                     return;
                 }
                 if (read == 0) break;

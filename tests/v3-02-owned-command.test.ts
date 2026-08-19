@@ -1536,3 +1536,116 @@ describe('the defects the third review found', () => {
     boundary.finish({ childExitCode: null });
   });
 });
+
+/**
+ * ── What the fourth adversarial review found ───────────────────────────────
+ *
+ * The round that caught the round-3 fix. Round 3 moved the two
+ * establishment-time facts *into* the classifier, which was right, and put
+ * them in one branch, which was not: paired with any other ending they were
+ * ignored, and the pair that means "never established" plus "the boundary owned
+ * a child and saw it exit" fell through to `COMPLETED`.
+ */
+describe('the defects the fourth review found', () => {
+  it('never completes a launch the caller says never established ownership', () => {
+    // Measured through the shipped artefact by the review: an abort during
+    // establishment paired with a `CHILD_EXITED` ending returned
+    // `outcome: COMPLETED, established: false, stdout: ''` — a completion whose
+    // own result says the launch never happened and whose output is empty
+    // because no sink was ever attached to read it.
+    const exited: BoundaryEnding = { ending: 'CHILD_EXITED', childExitCode: 0, status: status() };
+    for (const stated of [
+      { cancelledBeforeOwnership: true },
+      { deadlineExpired: true },
+      { ownershipEstablished: false },
+    ]) {
+      const result = classifyOwnedCommand({ ending: exited, termination: 'NONE', ...stated });
+      expect(result.outcome, JSON.stringify(stated)).toBe('BOUNDARY_LOST');
+      expect(result.failureCode, JSON.stringify(stated)).toBe('ENDING_INCONSISTENT');
+    }
+  });
+
+  it('never refuses a launch that had already established ownership', () => {
+    // Reachable: node emits `error` on a ChildProcess when a *kill* fails, not
+    // only when a spawn does, and `startOwnedProcess` turns that into
+    // `BOUNDARY_HELPER_SPAWN_FAILED` — for a run whose ownership it had already
+    // reported. The result said `outcome: LAUNCH_REFUSED` beside
+    // `established: true`, and then removed the working directory of a helper
+    // that may still have been writing its status into it.
+    const refused: BoundaryEnding = {
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'BOUNDARY_HELPER_SPAWN_FAILED',
+      win32: null,
+      targetStarted: 'NO',
+      status: null,
+    };
+    const result = classifyOwnedCommand({
+      ending: refused,
+      termination: 'NONE',
+      ownershipEstablished: true,
+    });
+    expect(result.outcome).toBe('BOUNDARY_LOST');
+    expect(result.failureCode).toBe('ENDING_INCONSISTENT');
+    // And the conservative direction on the question that decides cleanup.
+    expect(result.sideEffectsPossible).toBe(true);
+  });
+
+  it('completes exactly one pairing across the whole product', () => {
+    // The enumeration the module header claims. It crosses the two facts the
+    // classifier gained in round 3, which the previous version did not — and
+    // which is how a `COMPLETED` hid in the product for a whole round.
+    const stated = [
+      {},
+      { ownershipEstablished: true },
+      { ownershipEstablished: false },
+      { cancelledBeforeOwnership: true },
+      { deadlineExpired: true },
+      { ownershipEstablished: false, cancelledBeforeOwnership: true },
+      { ownershipEstablished: false, deadlineExpired: true },
+    ];
+    const completed: string[] = [];
+    for (const { name, ending } of ENDINGS) {
+      for (const termination of OWNED_TERMINATIONS) {
+        for (const extra of stated) {
+          const result = classifyOwnedCommand({ ending, termination, ...extra });
+          expect(OWNED_COMMAND_OUTCOMES, `${name} × ${termination}`).toContain(result.outcome);
+          if (result.outcome === 'COMPLETED') {
+            completed.push(`${name} × ${termination} × ${JSON.stringify(extra)}`);
+          }
+        }
+      }
+    }
+    expect(completed).toEqual([
+      'CHILD_EXITED(0) × NONE × {}',
+      'CHILD_EXITED(0) × NONE × {"ownershipEstablished":true}',
+      'CHILD_EXITED(3) × NONE × {}',
+      'CHILD_EXITED(3) × NONE × {"ownershipEstablished":true}',
+    ]);
+  });
+
+  it('keeps an unbounded budget unbounded', async () => {
+    // `Infinity` is a usable byte budget and a usable delay; round 3's single
+    // validator folded both into the default because `Number.isFinite` is false
+    // for it. The consequence on a byte budget was not merely a smaller cap: a
+    // caller that had explicitly disabled the limit got
+    // `OUTPUT_LIMIT_EXCEEDED` — and the job object terminated with it.
+    const boundary = fakeBoundary();
+    const run = runOwnedCommand(
+      {
+        file: 'C:\\fixture.exe',
+        maxStdoutBytes: Number.POSITIVE_INFINITY,
+        timeoutMs: Number.POSITIVE_INFINITY,
+      },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    boundary.stdout('x'.repeat(4_000_000));
+    boundary.finish({ childExitCode: 0 });
+    const result = await run;
+    expect(result.outcome).toBe('COMPLETED');
+    expect(result.stdout.length).toBe(4_000_000);
+    expect(result.stdoutTruncated).toBe(false);
+    expect(boundary.terminations()).toBe(0);
+  });
+
+});
