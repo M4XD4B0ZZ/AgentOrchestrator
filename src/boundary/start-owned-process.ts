@@ -152,11 +152,20 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
 /**
  * Starts one process behind the boundary.
  *
- * Fails closed: every path that cannot establish verified ownership resolves
- * to `established: false` with the boundary's own failure code, and no target
- * has run when it does. There is no ordinary-spawn fallback here, and adding
- * one would turn a guarantee into a feature while every caller kept believing
- * the guarantee held.
+ * Fails closed, and that means exactly two things: verified ownership was not
+ * established, and no unowned process tree is left alive — whatever was
+ * created has been terminated with the job. There is no ordinary-spawn
+ * fallback here, and adding one would turn a guarantee into a feature while
+ * every caller kept believing the guarantee held.
+ *
+ * It does **not** mean the target never executed. In `JOBLIST` mode the target
+ * runs from its first instruction, so a boundary lost between then and the
+ * membership confirmation refuses a launch that had already started. A caller
+ * deciding whether a launch could have had side effects must read
+ * {@link BoundaryEnding} `targetStarted` on the refusal, and must treat
+ * `'UNKNOWN'` — no status this launch could claim — as `'YES'`. Reading
+ * `established: false` as "nothing happened" is the one inference this result
+ * does not support.
  */
 export async function startOwnedProcess(
   request: OwnedProcessRequest,

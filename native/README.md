@@ -42,7 +42,11 @@ vocabulary, no result classification, no task state. Those stay in TypeScript
 less of the system depends on native code being right.
 
 It also has **no fallback**. Every path that cannot establish or keep ownership
-refuses, and an unknown request key is a refusal rather than an ignored option.
+refuses and leaves nothing it created alive — which is not the same as
+promising the target never executed, since a `JOBLIST` target runs from its
+first instruction; the status says which of the two happened in
+`targetStarted`. An unknown request key is a refusal rather than an ignored
+option.
 That last rule is why the two switches that weaken containment — an inheritable
 job handle, and passing no handle list — exist only under the
 `AO_BOUNDARY_TEST_CONTROLS` define. The shipped build does not implement them,

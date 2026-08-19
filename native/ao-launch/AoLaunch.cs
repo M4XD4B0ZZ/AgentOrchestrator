@@ -29,7 +29,10 @@
 //
 // ── Fail closed, everywhere ─────────────────────────────────────────────────
 //
-// Every path that cannot establish or keep ownership refuses. There is no
+// Every path that cannot establish or keep ownership refuses, and leaves
+// nothing it created alive. A refusal does not promise that the target never
+// executed — in JOBLIST mode it runs from its first instruction — which is
+// what `targetStarted` in the status is for. There is no
 // ordinary-spawn fallback, no attach-after-spawn path, no taskkill, and no
 // request key that can weaken containment: an unknown key is a refusal, not an
 // ignored option. The two weakening switches that the negative controls need
@@ -314,7 +317,14 @@ internal static class Program
         catch (BoundaryFailure failure)
         {
             // Fail closed. Every path that could not establish ownership ends
-            // here, and no target process is running when it does.
+            // here, and nothing this boundary created is left running when it
+            // does — the job is terminated on the paths that created anything.
+            //
+            // That is not the same as "the target never ran": in JOBLIST mode
+            // the target executes from its first instruction, so a failure
+            // after creation refuses a launch that had already started. Which
+            // of the two it was is in `targetStarted`, and the caller reads it
+            // there rather than inferring it from the refusal.
             Put("boundary", "FAILED");
             Put("failure", failure.Code);
             Put("win32", failure.Win32.ToString(CultureInfo.InvariantCulture));

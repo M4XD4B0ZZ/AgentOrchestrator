@@ -5753,8 +5753,11 @@ adversarial review:
 
 ### Fail closed, with no bypass to find
 
-Every path that cannot establish or keep verified ownership refuses, and no
-target has run when it does. The helper refuses an **unknown request key**
+Every path that cannot establish or keep verified ownership refuses, and leaves
+nothing it created alive. It does **not** promise that the target never ran —
+in `JOBLIST` mode the target executes from its first instruction — which is
+what `targetStarted` on the refusal is for, and why `UNKNOWN` there has to be
+read as `YES`. The helper refuses an **unknown request key**
 rather than ignoring it, which is what keeps the two switches that weaken
 containment — an inheritable job handle, and passing no handle list — out of
 the shipped binary: they exist only under the `AO_BOUNDARY_TEST_CONTROLS`

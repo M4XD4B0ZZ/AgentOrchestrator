@@ -62,11 +62,19 @@ export const BOUNDARY_HELPER_EXIT = Object.freeze({
   CHILD_OBSERVED: 0,
   /** The helper was invoked with something other than one request path. */
   USAGE: 64,
-  /** A boundary primitive failed. Nothing ran. */
+  /**
+   * A boundary primitive failed, and nothing the helper created is still
+   * running. Whether the target *executed* before that is a separate question,
+   * answered by `targetStarted`: a JOBLIST target runs from its first
+   * instruction, so a failure after creation refuses a launch that had started.
+   */
   BOUNDARY_FAILURE: 90,
-  /** The helper hit an internal error. Nothing ran. */
+  /** The helper hit an internal error. Same reading as above. */
   INTERNAL_ERROR: 91,
-  /** The owner could not be watched at launch time. Nothing ran. */
+  /**
+   * The owner could not be watched at launch time. This one *is* "nothing
+   * ran": the watch is armed before the target is created.
+   */
   OWNER_ALREADY_GONE: 92,
   /** The owner vanished while the child ran; the job was terminated. */
   OWNER_LOST: 93,
@@ -492,8 +500,11 @@ export function classifyBoundaryEnding(observation: BoundaryEndingObservation): 
 
   if (status === null) {
     // No readable report. If the helper's exit code says it refused, that is
-    // still a refusal — the helper's contract is that nothing ran when it
-    // exits that way. Anything else is unknown, and unknown is not success.
+    // still a refusal — the helper's contract is that it left nothing of its
+    // own running when it exits that way. It is *not* a claim that the target
+    // never executed, and with no status to read there is nothing to decide
+    // that from, which is why `targetStarted` below answers `'UNKNOWN'` here.
+    // Anything else is unknown too, and unknown is not success.
     const refusalExits: readonly number[] = [
       BOUNDARY_HELPER_EXIT.USAGE,
       BOUNDARY_HELPER_EXIT.BOUNDARY_FAILURE,
