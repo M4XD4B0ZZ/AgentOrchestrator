@@ -15,11 +15,13 @@
  *
  * Nine of the cases below run the same fixture down two paths — `runCommand`,
  * the contract AO has today, and `runOwnedCommand`, the one this slice adds.
- * Most of them go through `bothPaths`, which hands *one* argument vector to
- * both, so the two halves share a heartbeat directory and a survivor is
- * identified by its own `hb-<pid>` file rather than by which runner left it.
- * Two cases build their halves separately and give each its own directory. The
- * point of the comparison is not attribution, it is agreement —
+ * Six go through `bothPaths`, which hands *one* argument vector to both, so the
+ * two halves share a heartbeat directory and a survivor is identified by its
+ * own `hb-<pid>` file rather than by which runner left it. Two build their
+ * halves separately and give each its own directory. The ninth builds its
+ * halves separately and still shares one directory, because what differs
+ * between them is the budget rather than the arguments. The point of the
+ * comparison is not attribution, it is agreement —
  * and require them to agree about output, budgets, exit codes, timeouts and
  * stdin delivery. This is not an attempt to reproduce `runCommand`'s
  * `taskkill` containment, which the ADR replaces rather than imitates. It is
@@ -39,8 +41,9 @@
  *
  * **Every case that starts a process starts it with a `--heartbeat=` directory,
  * and every such directory is swept at the end of the run.** The only cases
- * that register nothing are the two that start nothing: a refused foreign
- * status, and a target that does not exist.
+ * that register nothing are the three that start nothing: a refused foreign
+ * status, a target that does not exist, and a request this repository refuses
+ * to encode.
  *
  * It is written as a property rather than an intention because six earlier
  * versions of it were wrong, each one class further down: cases that started
@@ -616,7 +619,12 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
       fixture,
       `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`,
       '--stdin=close',
-      '--sleep-ms=400',
+      // Long enough that a loaded runner delaying the child's `destroy()` still
+      // leaves the helper's pump thread time to record the broken pipe before
+      // the child goes. The property under test does not need the key; the
+      // assertion on it does, and a red gate for a scheduling delay is not a
+      // defect.
+      '--sleep-ms=1200',
       '--exit=0',
     ],
     stdin: payload,
@@ -645,7 +653,7 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
       fixture,
       `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`,
       '--stdin=close',
-      '--sleep-ms=400',
+      '--sleep-ms=1200',
       '--exit=0',
     ],
     {
@@ -852,6 +860,12 @@ test('a request that cannot be encoded leaves no temporary directory behind', as
   // either: one refused request, one empty `ao-boundary-*` directory in TEMP
   // for the life of the machine. Slice 3 will pass agent-derived text through
   // `args`.
+  // Diffing the shared temporary directory assumes no other AO process is
+  // starting a boundary at this instant. `verify` runs its steps sequentially,
+  // which is the environment this claim is made in; on a machine running two
+  // orchestrators at once it would be a false red. Stated because the
+  // alternative — pointing the boundary at a directory of this case's own —
+  // is exactly the caller-supplied path that skips the code under test.
   const before = new Set(
     readdirSync(tmpdir()).filter((name) => name.startsWith('ao-boundary-')),
   );
@@ -994,11 +1008,12 @@ test('a budget and a timeout each name their own outcome, and never a third', as
     'the window must reach past establishment: some run has to hit the stdout ' +
       `budget, got ${JSON.stringify(Object.fromEntries(seen))}`,
   );
-  c.check(
-    (seen.get('TIMED_OUT') ?? 0) > 0,
-    'the window must reach before the flood: some run has to time out, ' +
-      `got ${JSON.stringify(Object.fromEntries(seen))}`,
-  );
+  // Its sibling guard is deliberately absent. A `TIMED_OUT >= 1` check would be
+  // satisfied on every machine forever by the 1ms budget above — an expired
+  // establishment deadline is reported as a timeout — which is the same vacuity
+  // the comment above rejects for the previous version of this assertion. That
+  // a timeout is named correctly is measured deterministically by part (b) of
+  // this case instead.
 });
 
 // ── 20. a deadline that expires during establishment ───────────────────────────────────────────────────

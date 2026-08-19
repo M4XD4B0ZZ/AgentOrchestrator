@@ -353,6 +353,21 @@ function reportedExitCode(ending: BoundaryEnding): number | null {
 export function classifyOwnedCommand(
   observation: OwnedCommandObservation,
 ): OwnedCommandClassification {
+  if (observation === null || typeof observation !== 'object') {
+    // The same hole as `classifyStdinDelivery`'s, one level up: an earlier
+    // round guarded the *ending* against being absent and left the observation
+    // carrying it unguarded, so destructuring threw the `TypeError` that guard
+    // was written to prevent.
+    return Object.freeze({
+      outcome: 'BOUNDARY_LOST' as const,
+      failureCode: 'ENDING_INCONSISTENT' as const,
+      exitCode: null,
+      boundaryFailureCode: null,
+      boundaryLostReason: null,
+      targetStarted: 'UNKNOWN' as const,
+      sideEffectsPossible: true,
+    });
+  }
   const { ending, termination } = observation;
 
   /**
@@ -537,11 +552,14 @@ export function classifyOwnedCommand(
 /**
  * How far this side's own handover of the payload got.
  *
- * `NO_CHANNEL` is the only one that is evidence on its own: there was no pipe
- * to write into, so nothing was handed over at all. `FAILED` is deliberately
- * *not* evidence about the payload — see {@link classifyStdinDelivery}.
+ * `NOT_HANDED_OVER` is the only one that is evidence on its own: this module
+ * knows it wrote nothing at all. Two producers — there was no pipe to write
+ * into, or the run was abandoned before the writer ran — and the earlier name,
+ * `NO_CHANNEL`, was asserted on both, which made the second one claim an
+ * absent pipe that was in fact open. `FAILED` is deliberately *not* evidence
+ * about the payload — see {@link classifyStdinDelivery}.
  */
-export type LocalStdinWrite = 'PENDING' | 'COMPLETED' | 'FAILED' | 'NO_CHANNEL';
+export type LocalStdinWrite = 'PENDING' | 'COMPLETED' | 'FAILED' | 'NOT_HANDED_OVER';
 
 /**
  * Every forwarding state `native/ao-launch/AoLaunch.cs` writes.
@@ -563,15 +581,6 @@ export interface StdinDeliveryObservation {
   readonly localWrite: LocalStdinWrite;
   /** {@link BoundaryStatus.stdinForward}, verbatim, or `null`. */
   readonly forwarded: string | null;
-  /**
-   * Whether the boundary reported the child's own exit.
-   *
-   * Evidence about *the helper*, used here to decide what a failed local write
-   * means. An ending carrying the child's exit code proves the helper lived
-   * long enough to observe and publish it, so the pipe this side lost did not
-   * break because the helper was gone.
-   */
-  readonly boundaryObservedChildExit?: boolean;
 }
 
 /**
@@ -587,9 +596,19 @@ export interface StdinDeliveryObservation {
  * Like `runCommand`'s, `DELIVERED` is a statement about handover, not about
  * reading: nothing observable here can prove the child consumed the bytes.
  *
- * A *failed* local write is not a verdict on its own, and that is the
- * correction the first review forced — with the exception the second one
- * added, above. The pipe this side writes into belongs
+ * A *failed* local write is not a verdict on its own, and it has no exception.
+ * An earlier round added one — a failure paired with an ending carrying the
+ * child's exit code was read as proven, on the reasoning that the helper must
+ * therefore have outlived the write — and the reasoning does not hold: the
+ * helper publishes the exit and *then* exits, so a write can fail immediately
+ * afterwards precisely because the helper is gone. The rule is withdrawn rather
+ * than patched.
+ *
+ * One consequence is a real divergence from `runCommand`, and it is recorded
+ * rather than hidden: for a write that fails while the child exits cleanly, the
+ * diagnostics runner reports `FAILED` and this module reports `UNCONFIRMED`.
+ * That is the conservative direction — a verdict nobody observed is not stated
+ * — and it is slice 3's to reconcile. The pipe this side writes into belongs
  * to the helper, not to the child: its breaking means the helper died — by
  * this side's hand, or by someone else's — and says nothing about what the
  * child received, since the last byte may have gone through microseconds
@@ -600,11 +619,22 @@ export interface StdinDeliveryObservation {
  * reported a broken pipe.
  */
 export function classifyStdinDelivery(observation: StdinDeliveryObservation): StdinDelivery {
-  if (!observation.requested) return 'NOT_REQUESTED';
+  // The observation itself, before anything in it. `JSON.stringify` drops a
+  // key whose value is `undefined`, and slice 3 is documented as passing these
+  // across a serialisation boundary — so `requested` arriving absent is the
+  // expected shape of "a payload was configured", not an exotic one. Read as
+  // falsy it answered `NOT_REQUESTED`: *no payload was ever configured*, which
+  // is the strongest false reassurance this vocabulary can give.
+  //
+  // `UNCONFIRMED` is the fail-closed answer here for the same reason it is
+  // everywhere else in this function: it is what "nobody observed this" means.
+  if (observation === null || typeof observation !== 'object') return 'UNCONFIRMED';
+  if (observation.requested === false) return 'NOT_REQUESTED';
+  if (observation.requested !== true) return 'UNCONFIRMED';
   // A refused launch never had a helper to write into, so a configured payload
   // demonstrably did not reach anything. This is what the diagnostics runner
   // reports for a spawn that never happened.
-  if (!observation.established) return 'FAILED';
+  if (observation.established !== true) return 'FAILED';
   // The boundary's own evidence first, and it outranks everything below: the
   // child closed its read end and the helper said so. That stays true whatever
   // this side did afterwards, including ending the run.
@@ -613,19 +643,11 @@ export function classifyStdinDelivery(observation: StdinDeliveryObservation): St
   // part-way. Stronger evidence than `NO_CHANNEL` below, and it was falling
   // through to the weakest word the vocabulary has.
   if (observation.forwarded === STDIN_FORWARD_SOURCE_FAILED) return 'FAILED';
-  // No pipe existed, so nothing was handed over. An observation, not an
+  // Nothing was handed over at all, which is an observation rather than an
   // absence of one.
-  if (observation.localWrite === 'NO_CHANNEL') return 'FAILED';
+  if (observation.localWrite === 'NOT_HANDED_OVER') return 'FAILED';
   if (observation.forwarded === STDIN_FORWARD_EOF && observation.localWrite === 'COMPLETED') {
     return 'DELIVERED';
-  }
-  // A write that failed while the helper demonstrably lived on to report the
-  // child's exit. The helper's death is then not the explanation, no
-  // end-of-file was ever forwarded, and this side genuinely failed to hand the
-  // payload over — which is what `runCommand` reports for the same physical
-  // event, and slice 3 has to collapse the two.
-  if (observation.localWrite === 'FAILED' && observation.boundaryObservedChildExit === true) {
-    return 'FAILED';
   }
   // No report, or one this build does not know. Both are "it was not observed",
   // and reporting a delivery that was never confirmed is the defect this
@@ -803,10 +825,18 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
    * thing with it would have aimed a recursive delete at a freed `mkdtemp` name
    * on every command.
    *
-   * Non-null on exactly the three results that deliberately keep their
+   * Normally non-null on exactly the three results that deliberately keep their
    * directory, because each of them may leave a helper still writing into it:
    * `BOUNDARY_STREAMS_UNAVAILABLE`, `BOUNDARY_TERMINATION_UNCONFIRMED`, and a
-   * refusal reported after ownership had been established.
+   * refusal reported after ownership had been established. It is also non-null
+   * on an ordinary run whose removal did not take.
+   *
+   * One gap, stated rather than papered over: a launch that never established
+   * ownership is refused by `startOwnedProcess`, which removes its own
+   * temporary directory and does not report where it was — so this side never
+   * learns that path and answers `null` even if the removal failed. Closing
+   * that needs the boundary to report the directory on a refusal, which is a
+   * change to slice 1's result shape and not this slice's to make.
    *
    * A `workDir` the *caller* supplied is never reported, whatever happens to
    * it. The caller already knows that path, this module never removes it, and
@@ -1166,7 +1196,9 @@ export async function runOwnedCommand(
         stdinDelivery: classifyStdinDelivery({
           requested: stdinRequested,
           established: true,
-          localWrite: 'NO_CHANNEL',
+          // This branch returns before the writer below exists, so not one byte
+          // was handed over — whatever the stdin pipe's own state happens to be.
+          localWrite: 'NOT_HANDED_OVER',
           forwarded: null,
         }),
         helperPid: owned.helperPid,
@@ -1195,7 +1227,7 @@ export async function runOwnedCommand(
     let localWrite: LocalStdinWrite = 'PENDING';
     const input = owned.helper.stdin;
     if (input === null) {
-      localWrite = 'NO_CHANNEL';
+      localWrite = 'NOT_HANDED_OVER';
     } else {
       const fail = (): void => {
         if (localWrite === 'FAILED') return;
@@ -1238,7 +1270,45 @@ export async function runOwnedCommand(
       timer.unref?.();
     }
 
-    const settled = await Promise.race([owned.ending, graceExpired]);
+    let settled: BoundaryEnding | typeof unconfirmed;
+    try {
+      settled = await Promise.race([owned.ending, graceExpired]);
+    } catch {
+      // "Never throws for a failing command" has to hold after establishment
+      // too. `OwnedProcess.ending` carries no promise that it cannot reject,
+      // and `dependencies.start` is a documented substitution seam — so a
+      // rejection here would have escaped a function whose contract is data,
+      // taking a live helper, three referenced sockets and a temporary
+      // directory with it.
+      outStream.off('data', onStdout);
+      errStream.off('data', onStderr);
+      owned.terminate();
+      releaseHelper(owned);
+      return finish({
+        established: true,
+        outcome: 'BOUNDARY_LOST',
+        failureCode: 'ENDING_INCONSISTENT',
+        exitCode: null,
+        boundaryFailureCode: null,
+        boundaryLostReason: null,
+        targetStarted: 'YES',
+        sideEffectsPossible: true,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
+        stdinDelivery: classifyStdinDelivery({
+          requested: stdinRequested,
+          established: true,
+          localWrite,
+          forwarded: null,
+        }),
+        helperPid: owned.helperPid,
+        childPid: owned.childPid,
+        retainedWorkDir: retained(),
+        ending: null,
+      });
+    }
 
     if (settled === unconfirmed) {
       // The tree may still be alive, and nothing here can prove otherwise.
@@ -1275,7 +1345,6 @@ export async function runOwnedCommand(
           established: true,
           localWrite,
           forwarded: null,
-          boundaryObservedChildExit: false,
         }),
         helperPid: owned.helperPid,
         childPid: owned.childPid,
@@ -1300,11 +1369,12 @@ export async function runOwnedCommand(
         // The boundary's own report is the evidence. This side's pipe cannot
         // see a child that stopped reading, because it is not the child's pipe.
         forwarded: ending.status?.stdinForward ?? null,
-        boundaryObservedChildExit: ending.ending === 'CHILD_EXITED',
       }),
       helperPid: owned.helperPid,
       childPid: owned.childPid,
-      // Filled in below, once it is known whether this run disposed of it.
+      // Answered after the disposal below, because the answer is whether the
+      // directory is still there — and on this path something is about to try
+      // to remove it.
       retainedWorkDir: null,
       ending,
     });
@@ -1346,7 +1416,13 @@ export async function runOwnedCommand(
     // Only now: the ending has been read, and the status file it was read from
     // lives in the directory this removes.
     owned.dispose();
-    return result;
+    // And the report is taken *after* the removal, not instead of it. Every
+    // removal on the boundary's side is an `rmSync` inside a swallowing catch,
+    // so "dispose was called" was never evidence the directory is gone — an
+    // `EBUSY` from a scanner or from the helper's own staging file leaves it,
+    // and the earlier version of this line hard-coded `null` on exactly the
+    // path a caller runs most often.
+    return Object.freeze({ ...result, retainedWorkDir: retained() });
   } finally {
     // Every exit, including a thrown one. A listener left on a signal that
     // outlives the run retains this run's buffers and child process, warns

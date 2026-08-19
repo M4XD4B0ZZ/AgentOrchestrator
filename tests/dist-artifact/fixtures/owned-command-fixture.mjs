@@ -1,11 +1,16 @@
 /**
  * One target program, driven entirely by shell-inert `--key=value` arguments.
  *
- * Shell-inert on purpose: the same invocation has to go through `runCommand`,
- * whose `SAFE_ARG_PATTERN` refuses spaces and quotes, so that every case in
- * `../owned-command-dist-artifact.mjs` can be run down both paths and their
- * results compared. A fixture that needed a space in an argument could only
- * ever be run down one of them, and the differential is the point.
+ * Shell-inert on purpose: the nine differential cases in
+ * `../owned-command-dist-artifact.mjs` send the same invocation through
+ * `runCommand` as well, and its `SAFE_ARG_PATTERN` refuses spaces and quotes.
+ * A fixture whose ordinary options needed a space could not be compared at all,
+ * and the differential is the point.
+ *
+ * The two cases that read an argument vector back deliberately break that rule
+ * — they pass spaces, a quote and shell metacharacters, which is what they are
+ * for — and are owned-path only. Shell-inertness is a property of the options
+ * above, not of everything this fixture can be handed.
  *
  * usage: node owned-command-fixture.mjs [--flag=value ...]
  *
@@ -14,10 +19,14 @@
  *   --stdout-mark=TEXT write TEXT to stdout before anything else
  *   --stderr-mark=TEXT write TEXT to stderr before anything else
  *   --stdin=MODE       drain (read to EOF), ignore (never read), close (close
- *                      the read end and stay alive)
+ *                      the read end; combine with --sleep-ms or --hang to stay
+ *                      alive afterwards, which is what the caller observes)
  *   --report=PATH      write a JSON report — stdin bytes read — to PATH
  *   --heartbeat=DIR    rewrite DIR/hb-<pid>.txt every 100ms, forever
- *   --children=N       spawn N detached copies that only heartbeat
+ *   --children=N       spawn N unref'd copies that only heartbeat. Not
+ *                      `detached`: on Windows they join node's own
+ *                      kill-on-close job and die with this process, so they
+ *                      measure a tree's *shape*, never its survival
  *   --hang             never exit on its own
  *   --sleep-ms=N       stay alive N ms before exiting
  *   --exit=N           exit with code N

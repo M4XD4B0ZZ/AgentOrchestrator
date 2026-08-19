@@ -213,6 +213,12 @@ function fakeBoundary(
     readonly errorOnRelease?: boolean;
     /** The ending this boundary settles with when the case asks it to. */
     readonly endWith?: BoundaryEnding;
+    /** Leaves the output streams open after settling, so a late chunk can arrive. */
+    readonly keepStreamsOpen?: boolean;
+    /** A `dispose` that reports success and removes nothing. */
+    readonly disposeFails?: boolean;
+    /** An ending that rejects rather than resolving. */
+    readonly rejectEnding?: boolean;
     /** How long the boundary takes to end after it is asked to. */
     readonly terminationDelayMs?: number;
   } = {},
@@ -254,9 +260,15 @@ function fakeBoundary(
   let callerTerminated = false;
   let settled = false;
   let settle: (ending: BoundaryEnding) => void = () => {};
-  const ending = new Promise<BoundaryEnding>((done) => {
+  let refuse: (error: Error) => void = () => {};
+  const ending = new Promise<BoundaryEnding>((done, fail) => {
     settle = done;
+    refuse = fail;
   });
+  // Attached here, not in the case: an unobserved rejection on a promise the
+  // adapter may legitimately never await would be an unhandled rejection in the
+  // test worker rather than a result.
+  void ending.catch(() => undefined);
 
   function finish(over: { childExitCode?: number | null; stdinForward?: string | null } = {}): void {
     if (settled) return;
@@ -322,6 +334,9 @@ function fakeBoundary(
         ending,
         dispose: () => {
           disposals += 1;
+          // A removal that silently does nothing, which is what an `rmSync`
+          // inside a swallowing catch looks like from the outside.
+          if (options.disposeFails === true) return;
           try {
             rmSync(workDir, { recursive: true, force: true });
           } catch {
@@ -354,8 +369,15 @@ function fakeBoundary(
       if (settled || options.endWith === undefined) return;
       settled = true;
       settle(options.endWith);
+      if (options.keepStreamsOpen === true) return;
       out.end();
       err.end();
+    },
+    /** Rejects the ending, which nothing in the contract forbids. */
+    reject: () => {
+      if (settled) return;
+      settled = true;
+      refuse(new Error('the boundary could not say how it ended'));
     },
     /** How many output sinks are still attached. */
     dataListeners: () => out.listenerCount('data') + err.listenerCount('data'),
@@ -1124,11 +1146,12 @@ describe('a broken pipe to the boundary proves nothing about the child', () => {
     ).toBe('FAILED');
   });
 
-  it('is FAILED when there was no channel to write into at all', () => {
-    // A helper that opened no stdin pipe. Nothing was handed over, and that is
-    // an observation rather than an absence of one.
+  it('is FAILED when nothing was handed over at all', () => {
+    // A helper that opened no stdin pipe, or a run abandoned before the writer
+    // ran. Nothing reached the boundary, and that is an observation rather than
+    // an absence of one.
     expect(
-      classifyStdinDelivery({ ...requested, localWrite: 'NO_CHANNEL', forwarded: null }),
+      classifyStdinDelivery({ ...requested, localWrite: 'NOT_HANDED_OVER', forwarded: null }),
     ).toBe('FAILED');
   });
 });
@@ -1362,58 +1385,6 @@ describe('the defects the second review found', () => {
   });
 });
 
-describe('a helper that survived to report a child exit was not the reason a write failed', () => {
-  const requested = { requested: true, established: true } as const;
-
-  it('is FAILED when the boundary saw the child exit and this side still could not write', () => {
-    // The correction to the correction. A broken local pipe usually means the
-    // helper died, which says nothing about the child — but an ending that
-    // carries the child's own exit code proves the helper lived long enough to
-    // observe and publish it. The pipe therefore did not break because the
-    // helper was gone: this side genuinely failed to hand the payload over,
-    // and no end-of-file was ever forwarded. `runCommand` reports `FAILED` for
-    // the same physical event, and slice 3 has to collapse the two.
-    expect(
-      classifyStdinDelivery({
-        ...requested,
-        localWrite: 'FAILED',
-        forwarded: null,
-        boundaryObservedChildExit: true,
-      }),
-    ).toBe('FAILED');
-  });
-
-  it('is still UNCONFIRMED when the boundary itself did not survive', () => {
-    expect(
-      classifyStdinDelivery({
-        ...requested,
-        localWrite: 'FAILED',
-        forwarded: null,
-        boundaryObservedChildExit: false,
-      }),
-    ).toBe('UNCONFIRMED');
-  });
-
-  it('never turns a survived boundary into a delivery it did not report', () => {
-    expect(
-      classifyStdinDelivery({
-        ...requested,
-        localWrite: 'FAILED',
-        forwarded: 'EOF_FORWARDED',
-        boundaryObservedChildExit: true,
-      }),
-    ).toBe('FAILED');
-  });
-});
-
-/**
- * ── What the third adversarial review found ────────────────────────────────
- *
- * The round that caught the round-2 fixes. The worst of them is the first:
- * the override written to honour a cancellation during establishment was
- * applied to *every* ending on that path, including the one that means "we do
- * not know what happened to the tree".
- */
 describe('the defects the third review found', () => {
   it('never lets a cancellation overwrite a lost boundary', () => {
     // Measured through the shipped artefact by the review: an abort raised
@@ -1519,12 +1490,16 @@ describe('the defects the third review found', () => {
     expect(result.boundaryLostReason).toBe('STATUS_UNREADABLE');
   });
 
-  it('reads a failed write as failed when the boundary lived to report the exit', async () => {
-    // The wiring of the rule the second review asked for. It was pinned only
-    // as a pure function: no end-to-end situation reached it, because the one
-    // harness case that gets a failed write also gets a `BROKEN_PIPE` report,
-    // which short-circuits three lines earlier. Hardcoding the flag to `false`
-    // survived the whole suite.
+  it('does not read a failed write as proof, even when the child exited cleanly', async () => {
+    // This case pinned the opposite once. An earlier round read a local write
+    // failure paired with a child exit as *proven* non-delivery, reasoning that
+    // the helper must have outlived the write to report the exit at all — and
+    // the reasoning does not hold, because the helper publishes the exit and
+    // then exits, so the write can fail immediately afterwards precisely
+    // because the helper is gone. The rule was withdrawn rather than patched,
+    // and this is the divergence from `runCommand` that leaves behind: it says
+    // FAILED for the same physical event, and this module will not state a
+    // verdict nobody observed.
     const boundary = fakeBoundary({ failStdin: true });
     const run = runOwnedCommand(
       { file: 'C:\\fixture.exe', stdin: 'the instructions' },
@@ -1534,7 +1509,7 @@ describe('the defects the third review found', () => {
     boundary.finish({ childExitCode: 0 });
     const result = await run;
     expect(result.outcome).toBe('COMPLETED');
-    expect(result.stdinDelivery).toBe('FAILED');
+    expect(result.stdinDelivery).toBe('UNCONFIRMED');
   });
 
   it('reads the boundary own proven read failure as a failure', () => {
@@ -1964,4 +1939,110 @@ describe('the defects the eighth review found', () => {
     });
   });
 
+});
+
+/**
+ * ── What the ninth adversarial review found ────────────────────────────────
+ *
+ * A fail-open in the stdin vocabulary, reachable by exactly the serialisation
+ * the module documents slice 3 as using; a rule whose stated proof did not
+ * follow; and two cleanups no test could kill.
+ */
+describe('the defects the ninth review found', () => {
+  it('does not read an absent request as no request', () => {
+    // `JSON.stringify` drops a key whose value is `undefined`, so `requested`
+    // arriving absent is the *expected* shape of a configured payload across a
+    // serialisation boundary — and read as falsy it answered NOT_REQUESTED:
+    // "no payload was ever configured", for a run that configured one.
+    for (const observation of [
+      { established: true, localWrite: 'PENDING', forwarded: null },
+      { established: true, localWrite: 'COMPLETED', forwarded: 'EOF_FORWARDED' },
+    ] as const) {
+      expect(classifyStdinDelivery(observation as never)).toBe('UNCONFIRMED');
+    }
+    // An explicit `false` still means what it says.
+    expect(
+      classifyStdinDelivery({
+        requested: false,
+        established: true,
+        localWrite: 'COMPLETED',
+        forwarded: null,
+      }),
+    ).toBe('NOT_REQUESTED');
+  });
+
+  it('fails closed on an observation that is not one', () => {
+    for (const nothing of [null, undefined, 'CHILD_EXITED', 7]) {
+      expect(classifyStdinDelivery(nothing as never), String(nothing)).toBe('UNCONFIRMED');
+      const result = classifyOwnedCommand(nothing as never);
+      expect(result.outcome, String(nothing)).toBe('BOUNDARY_LOST');
+      expect(result.failureCode, String(nothing)).toBe('ENDING_INCONSISTENT');
+    }
+  });
+
+  it('reports a directory whose removal did not take', () => {
+    // The field's own argument — "every removal is an `rmSync` inside a
+    // swallowing catch, so calling dispose is not evidence" — was applied only
+    // to the paths where dispose is never called, and hard-coded `null` on the
+    // path a caller runs most often.
+    const boundary = fakeBoundary({ disposeFails: true });
+    return (async () => {
+      const run = runOwnedCommand({ file: 'C:\\fixture.exe' }, { start: boundary.start });
+      await boundary.established();
+      boundary.finish({ childExitCode: 0 });
+      const result = await run;
+      expect(result.outcome).toBe('COMPLETED');
+      expect(boundary.disposals()).toBe(1);
+      expect(existsSync(boundary.workDir())).toBe(true);
+      expect(result.retainedWorkDir).toBe(boundary.workDir());
+    })();
+  });
+
+  it('stops reading and lets go of a helper it reports a refusal for', async () => {
+    // The round-7 cleanup on this branch was pinned by one line of four: the
+    // sink detach and the release could both be deleted with the whole gate
+    // green, on a path whose own comment calls a late chunk reachable.
+    const boundary = fakeBoundary({
+      keepStreamsOpen: true,
+      endWith: {
+        ending: 'BOUNDARY_REFUSED',
+        failureCode: 'BOUNDARY_HELPER_SPAWN_FAILED',
+        win32: null,
+        targetStarted: 'NO',
+        status: null,
+      },
+    });
+    const run = runOwnedCommand(
+      { file: 'C:\\fixture.exe', maxStdoutBytes: 2 },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    boundary.settle();
+    const result = await run;
+    expect(result.failureCode).toBe('ENDING_INCONSISTENT');
+    expect(boundary.streamsDestroyed()).toBe(true);
+    expect(boundary.dataListeners()).toBe(0);
+
+    // And a chunk that arrives afterwards changes nothing: it cannot re-enter
+    // `terminate` and arm a grace timer the `finally` has already passed.
+    const terminationsAtReport = boundary.terminations();
+    boundary.stdout('a chunk after the run was reported');
+    await new Promise((done) => setTimeout(done, 20));
+    expect(boundary.terminations()).toBe(terminationsAtReport);
+  });
+
+  it('reports a rejecting boundary as data rather than throwing', async () => {
+    // "Never throws for a failing command" had no catch after establishment.
+    // `OwnedProcess.ending` carries no promise that it cannot reject, and the
+    // starter is a documented substitution seam.
+    const boundary = fakeBoundary({ rejectEnding: true });
+    const run = runOwnedCommand({ file: 'C:\\fixture.exe' }, { start: boundary.start });
+    await boundary.established();
+    boundary.reject();
+    const result = await run;
+    expect(result.outcome).toBe('BOUNDARY_LOST');
+    expect(result.failureCode).toBe('ENDING_INCONSISTENT');
+    expect(boundary.terminations()).toBe(1);
+    expect(boundary.streamsDestroyed()).toBe(true);
+  });
 });

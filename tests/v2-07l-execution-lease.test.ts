@@ -2341,7 +2341,10 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
   /**
    * Every `src/` module that really *imports* something matching `pattern`.
    *
-   * Imports, not mentions, and not type-only imports.
+   * Imports, not mentions. Type-only imports are excluded by default and
+   * included when a caller passes `values: false` — which the launch-boundary
+   * pins below deliberately do, because an erased import cannot spawn but can
+   * still be the first half of a reachability nobody meant to create.
    *
    * The pin this replaced counted occurrences of a name anywhere in a file's
    * text. A review spent one of its allowed "slots" by rewording a comment and
