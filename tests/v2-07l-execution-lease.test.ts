@@ -2393,15 +2393,26 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
   });
 
   it('keeps the launch boundary unreachable from the product', () => {
-    // Slice 1 delivers the boundary in isolation: no runner, no step and no
-    // command obtains a contained process yet, so nothing it starts can escape
-    // the lease — because nothing starts it.
+    // Slices 1 and 2 deliver the boundary and its adapter in isolation: no
+    // runner, no step and no command obtains a contained process yet, so
+    // nothing it starts can escape the lease — because nothing starts it.
+    //
+    // Slice 2 added exactly one edge, and it is named here rather than
+    // absorbed into an empty list: the adapter is what starts an owned
+    // process, and it is the only thing that does. The chain therefore has a
+    // known head and no consumer.
+    expect(modulesImporting(/start-owned-process\.js/)).toEqual([
+      join('src', 'boundary', 'owned-command.ts'),
+    ]);
+    // And the adapter itself is reached by nothing. This is the assertion that
+    // actually states "the product cannot get a contained process": the edge
+    // above only says who *could* hand one out.
     //
     // When slice 3 moves `runCommand` onto the boundary, this pin fails. That
     // is its purpose: the question "what fences the boundary?" then has to be
     // answered deliberately, in the slice that creates the reachability, rather
     // than discovered afterwards from an unfenced process.
-    expect(modulesImporting(/start-owned-process\.js/)).toEqual([]);
+    expect(modulesImporting(/owned-command\.js/, { values: false })).toEqual([]);
     expect(modulesImporting(/boundary\/launch-boundary\.js/)).toEqual([]);
   });
 
