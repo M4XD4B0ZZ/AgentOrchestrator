@@ -230,6 +230,22 @@ export interface OwnedCommandClassification {
 
 const KNOWN_TERMINATIONS: ReadonlySet<string> = new Set(OWNED_TERMINATIONS);
 
+/**
+ * The four endings the boundary contract declares.
+ *
+ * Checked for the same reason `OWNED_TERMINATIONS` is: this module argues that
+ * untyped callers are a real input class, and an ending naming a fifth state
+ * was accepted with a local termination reason and reported as an ordinary
+ * `TIMED_OUT`. No route to `COMPLETED`, so it was an asymmetry rather than a
+ * hole — but an asymmetry in the one function whose job is to fail closed.
+ */
+const KNOWN_ENDINGS: ReadonlySet<string> = new Set([
+  'CHILD_EXITED',
+  'TERMINATED_BY_CALLER',
+  'BOUNDARY_LOST',
+  'BOUNDARY_REFUSED',
+]);
+
 const TERMINATION_OUTCOME: Readonly<
   Record<Exclude<OwnedTermination, 'NONE'>, OwnedCommandOutcome>
 > = Object.freeze({
@@ -362,6 +378,8 @@ export function classifyOwnedCommand(
    * is what makes the enumeration in `tests/v3-02-owned-command.test.ts` a
    * statement about the whole product rather than about one row of it.
    */
+  if (!KNOWN_ENDINGS.has(ending.ending)) return inconsistent();
+
   const provesOwnership = ending.ending === 'CHILD_EXITED' || ending.ending === 'TERMINATED_BY_CALLER';
   // `deadlineExpired` is deliberately *not* here. A clock running out says
   // nothing about whether ownership was established, and folding it in *would*
@@ -764,18 +782,25 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
   readonly finishedAt: string;
   readonly durationMs: number;
   /**
-   * Where this launch's request and status files live, or `null` for a launch
-   * that never got one.
+   * A temporary directory this run created and did **not** remove, or `null`.
    *
-   * Surfaced because three results deliberately do *not* remove it — the two
-   * abandoned paths and a refusal after establishment, each of which may leave
-   * a helper still writing into that directory. Nothing in this repository
-   * reaps them, so a caller that wants them reaped needs to be told where they
-   * are. Reading it is the only thing this module offers for that; deciding
-   * when a leftover is safe to remove is a lease-and-recovery question, and
-   * that is a later slice's.
+   * It is a leftovers report, not a location: `null` is the normal answer, and
+   * it means there is nothing here to reap. The first version of this field
+   * reported the working directory of every run — including the ones it had
+   * just deleted — so a caller doing the obvious thing with it would have aimed
+   * a recursive delete at a freed `mkdtemp` name on every command.
+   *
+   * Non-null on exactly the three results that deliberately keep their
+   * directory, because each of them may leave a helper still writing into it:
+   * `BOUNDARY_STREAMS_UNAVAILABLE`, `BOUNDARY_TERMINATION_UNCONFIRMED`, and a
+   * refusal reported after ownership had been established.
+   *
+   * A `workDir` the *caller* supplied is never reported, whatever happens to
+   * it. The caller already knows that path, this module never removes it, and
+   * saying "here is your own directory back" would put a caller-owned path into
+   * a field whose whole purpose is "this is safe for you to delete".
    */
-  readonly workDir: string | null;
+  readonly retainedWorkDir: string | null;
   /**
    * The boundary's own report, or `null` where there is none to give.
    *
@@ -809,10 +834,23 @@ export async function runOwnedCommand(
    * The type check is not redundant with the compiler. This module argues, at
    * {@link classifyOwnedCommand}'s termination guard, that untyped callers are
    * a real input class — the `.mjs` dist harness, a JS consumer, slice 3 across
-   * a serialisation boundary — and a `timeoutMs` that arrives as the string
-   * `"20000"` makes `deadline` a string, `remaining` a `NaN`, and every run a
-   * one-millisecond timeout with the tree killed. The three validators here
-   * used to disagree about that threat; they no longer do.
+   * a serialisation boundary — and the three validators here used to disagree
+   * about that threat.
+   *
+   * Measured, replaying the predicate this replaced: a *numeric* string was
+   * never the problem, because `Math.min` coerces it and `"20000"` arrived as
+   * 20000. What did get through was a non-numeric string or an object — `NaN`
+   * deadline, a one-millisecond timeout, the tree killed — and `null`, which
+   * coerces to 0 and made every run an instant timeout. `null` is the one worth
+   * naming: it is what a JSON round trip does to an absent value, which is
+   * precisely how slice 3 will pass these.
+   *
+   * The cost of the check is that a numeric string is now refused rather than
+   * coerced, so `maxStdoutBytes: "1000"` falls back to the default megabyte
+   * instead of bounding at a kilobyte. That is the deliberate direction: a
+   * caller that cannot express a number in a number has not stated a budget,
+   * and this module's fallbacks are documented values rather than guesses at
+   * what was meant.
    *
    * `NaN` is the shape a missing config value takes after `parseInt`, and on
    * `timeoutMs` it was the worst place for it: the deadline became `NaN`, the
@@ -918,7 +956,7 @@ export async function runOwnedCommand(
       stdinDelivery: stdinRequested ? 'FAILED' : 'NOT_REQUESTED',
       helperPid: null,
       childPid: null,
-      workDir: null,
+      retainedWorkDir: null,
       ending: null,
     });
 
@@ -1018,12 +1056,24 @@ export async function runOwnedCommand(
         }),
         helperPid: null,
         childPid: null,
-        workDir: null,
+        // Nothing to reap: `startOwnedProcess` removes a temporary directory
+        // it created before it reports a refusal, and a directory the caller
+        // supplied stays the caller's.
+        retainedWorkDir: null,
         ending: launch.ending,
       });
     }
 
     const owned = launch.process;
+    /**
+     * The directory this run leaves behind, from the point of view of a caller
+     * deciding what to clean up.
+     *
+     * Only a temporary directory *this* module caused to be created counts: one
+     * the caller supplied is the caller's, is never removed here, and is not
+     * this field's business.
+     */
+    const retained = (): string | null => (options.workDir === undefined ? owned.workDir : null);
     const stdout = new BoundedSink(usable(options.maxStdoutBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
     const stderr = new BoundedSink(usable(options.maxStderrBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
 
@@ -1100,7 +1150,7 @@ export async function runOwnedCommand(
         }),
         helperPid: owned.helperPid,
         childPid: owned.childPid,
-        workDir: owned.workDir,
+        retainedWorkDir: retained(),
         ending: null,
       });
     }
@@ -1155,10 +1205,11 @@ export async function runOwnedCommand(
     const remaining = deadline - Date.now();
     if (remaining <= 0) terminate('TIMEOUT');
     else {
-      // Clamped: node turns a delay above the 32-bit maximum into 1 ms, which
-      // would make an absurdly large budget fire immediately instead of
-      // effectively never.
-      timer = setTimeout(() => terminate('TIMEOUT'), Math.min(remaining, MAX_TIMER_MS));
+      // Not clamped here: `usableDelay` already bounded `timeoutMs` by
+      // `MAX_TIMER_MS`, and `remaining` is at most that. A second `Math.min`
+      // would be a bound neither test nor mutant could distinguish from its
+      // absence, which is how a check stops being one.
+      timer = setTimeout(() => terminate('TIMEOUT'), remaining);
       timer.unref?.();
     }
 
@@ -1203,7 +1254,7 @@ export async function runOwnedCommand(
         }),
         helperPid: owned.helperPid,
         childPid: owned.childPid,
-        workDir: owned.workDir,
+        retainedWorkDir: retained(),
         ending: null,
       });
     }
@@ -1228,12 +1279,13 @@ export async function runOwnedCommand(
       }),
       helperPid: owned.helperPid,
       childPid: owned.childPid,
-      workDir: owned.workDir,
+      // Filled in below, once it is known whether this run disposed of it.
+      retainedWorkDir: null,
       ending,
     });
     if (ending.ending === 'BOUNDARY_REFUSED') {
       // Contradictory, and already classified as such above — but it also
-      // decides what may be done to the working directory.
+      // decides what happens to the helper and to the working directory.
       //
       // Two ways to get here, and they differ in exactly the thing that
       // matters. A status that turned foreign, or a `boundary=FAILED` written
@@ -1244,11 +1296,22 @@ export async function runOwnedCommand(
       // directory.
       //
       // Nothing here can tell the two apart, so the directory is left alone in
-      // both. `workDir` is on the result for a caller that wants to decide
+      // both, and reported on `retainedWorkDir` for a caller that can decide
       // later with more evidence than this module has.
+      const abandoned = Object.freeze({ ...result, retainedWorkDir: retained() });
+      // And the helper is asked to die first, exactly as the
+      // streams-unavailable branch asks.
+      // Both branches exist for a boundary that is not behaving as constructed,
+      // and this one is reached when node reports a *failed kill* — so the
+      // helper may still be alive, still holding the only handle to a
+      // KILL_ON_JOB_CLOSE job containing the agent tree. Releasing it without
+      // asking it to die once more leaves that tree running for the rest of the
+      // machine's uptime. A termination request to a helper that is already
+      // gone is a no-op, so there is no cost to the symmetry.
+      owned.terminate();
       releaseHelper(owned);
       void owned.ending.catch(() => undefined);
-      return result;
+      return abandoned;
     }
     // Only now: the ending has been read, and the status file it was read from
     // lives in the directory this removes.

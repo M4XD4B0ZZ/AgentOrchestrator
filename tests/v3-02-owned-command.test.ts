@@ -21,8 +21,8 @@
  * has re-created the defect one layer up.
  *
  * The real processes — budgets that actually cut a stream, a timeout that
- * actually kills a tree, survivors counted after each case — are measured
- * against the shipped artefact in
+ * actually kills a tree, and a survivor sweep over every directory any case
+ * started something in — are measured against the shipped artefact in
  * `tests/dist-artifact/owned-command-dist-artifact.mjs`.
  */
 
@@ -41,6 +41,7 @@ import {
 import {
   classifyOwnedCommand,
   classifyStdinDelivery,
+  DEFAULT_OWNED_MAX_OUTPUT_BYTES,
   DEFAULT_TERMINATION_GRACE_MS,
   OWNED_COMMAND_OUTCOMES,
   OWNED_TERMINATIONS,
@@ -49,6 +50,25 @@ import {
 import type { OwnedProcessStart } from '../src/boundary/start-owned-process.js';
 
 const NONCE = 'b3f0f0c8-0000-4000-8000-000000000002';
+/** The working directory the fake boundary reports, so a case can name it. */
+const FAKE_WORK_DIR = 'C:\\fake';
+
+/**
+ * The byte budget a run actually applied, read back from what it kept.
+ *
+ * There is no exported validator to call, and inventing one to test would test
+ * the invention. This drives a real run instead and reports the cut, so a case
+ * can state which budget took effect.
+ */
+async function largestBudgetFor(maxStdoutBytes: number): Promise<number> {
+  const boundary = fakeBoundary();
+  const run = runOwnedCommand({ file: 'C:\\fixture.exe', maxStdoutBytes }, { start: boundary.start });
+  await boundary.established();
+  boundary.stdout('x'.repeat(3_000_000));
+  boundary.finish({ childExitCode: 0 });
+  const result = await run;
+  return result.stdoutTruncated ? result.stdout.length : Number.POSITIVE_INFINITY;
+}
 
 /** A status carrying whatever the case needs, with the rest at its zero value. */
 function status(over: Partial<BoundaryStatus> = {}): BoundaryStatus {
@@ -170,6 +190,8 @@ function fakeBoundary(
     readonly failStdin?: boolean;
     /** Streams that raise when this module lets go of them. */
     readonly errorOnRelease?: boolean;
+    /** The ending this boundary settles with when the case asks it to. */
+    readonly endWith?: BoundaryEnding;
     /** How long the boundary takes to end after it is asked to. */
     readonly terminationDelayMs?: number;
   } = {},
@@ -271,7 +293,7 @@ function fakeBoundary(
         assignedAtCreation: true,
         verifiedInJob: true,
         jobMembersAtStart: 1,
-        workDir: 'C:\\fake',
+        workDir: FAKE_WORK_DIR,
         terminate,
         ending,
         dispose: () => {
@@ -297,6 +319,14 @@ function fakeBoundary(
       if (!err.writableEnded) err.write(text);
     },
     stdinClosed: () => stdinClosedPromise,
+    /** Settles with the ending this fake was built for, as-is. */
+    settle: () => {
+      if (settled || options.endWith === undefined) return;
+      settled = true;
+      settle(options.endWith);
+      out.end();
+      err.end();
+    },
     /** How many output sinks are still attached. */
     dataListeners: () => out.listenerCount('data') + err.listenerCount('data'),
     /** Whether the payload channel was destroyed too. */
@@ -633,8 +663,9 @@ describe('the adapter vocabulary is the one AO already has', () => {
  * What they explicitly cannot see, and do not claim: that a real tree died. A
  * fake helper has no job object, so every containment property is measured
  * against the shipped artefact in
- * `tests/dist-artifact/owned-command-dist-artifact.mjs`, with survivors
- * counted after each case.
+ * `tests/dist-artifact/owned-command-dist-artifact.mjs`, which counts survivors
+ * by heartbeat — once at the end of the run over every directory, and
+ * additionally per case for the cases that start a tree.
  */
 describe('the run loop, driven through an injected boundary', () => {
   it('keeps stdout and stderr separate', async () => {
@@ -1752,4 +1783,111 @@ describe('the defects the fifth review found', () => {
     expect(boundary.terminations()).toBe(0);
   });
 
+});
+
+/**
+ * ── What the seventh adversarial review found ──────────────────────────────
+ *
+ * Two defects in round 6's own additions, and two asymmetries the module's
+ * stated threat model asks for. The first is the one that mattered: a field
+ * added so a caller could reap what this module leaves behind reported a
+ * directory it had just deleted, on almost every run.
+ */
+describe('the defects the seventh review found', () => {
+  it('reports a directory to reap only when there is one', async () => {
+    // The round-6 field named the working directory of every run — including
+    // the ones it had just removed — so the obvious use of it, a recursive
+    // delete, would have been aimed at a freed `mkdtemp` name on every command.
+    const boundary = fakeBoundary();
+    const run = runOwnedCommand({ file: 'C:\\fixture.exe' }, { start: boundary.start });
+    await boundary.established();
+    boundary.finish({ childExitCode: 0 });
+    const completed = await run;
+    expect(completed.outcome).toBe('COMPLETED');
+    expect(boundary.disposals()).toBe(1);
+    expect(completed.retainedWorkDir).toBeNull();
+  });
+
+  it('reports the directory it deliberately kept', async () => {
+    const boundary = fakeBoundary({ ignoreTermination: true });
+    const run = runOwnedCommand(
+      { file: 'C:\\fixture.exe', timeoutMs: 20, terminationGraceMs: 30 },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    const result = await run;
+    expect(result.failureCode).toBe('BOUNDARY_TERMINATION_UNCONFIRMED');
+    expect(boundary.disposals()).toBe(0);
+    expect(result.retainedWorkDir).toBe(FAKE_WORK_DIR);
+    boundary.finish({ childExitCode: null });
+  });
+
+  it('never reports a working directory the caller supplied', async () => {
+    // The caller already knows that path, this module never removes it, and a
+    // field whose whole meaning is "safe for you to delete" may not name a
+    // directory this module does not own.
+    const boundary = fakeBoundary({ ignoreTermination: true });
+    const run = runOwnedCommand(
+      {
+        file: 'C:\\fixture.exe',
+        workDir: 'C:\\callers-own-directory',
+        timeoutMs: 20,
+        terminationGraceMs: 30,
+      },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    const result = await run;
+    expect(result.failureCode).toBe('BOUNDARY_TERMINATION_UNCONFIRMED');
+    expect(result.retainedWorkDir).toBeNull();
+    boundary.finish({ childExitCode: null });
+  });
+
+  it('asks a helper it is abandoning to die, even when it has given up on it', async () => {
+    // The refusal-after-establishment path released the helper's streams and
+    // returned without ever asking it to die. That path exists for a *failed
+    // kill*, so the helper may still be alive — and it holds the only handle to
+    // the job containing the agent tree.
+    const boundary = fakeBoundary({
+      endWith: {
+        ending: 'BOUNDARY_REFUSED',
+        failureCode: 'BOUNDARY_HELPER_SPAWN_FAILED',
+        win32: null,
+        targetStarted: 'NO',
+        status: null,
+      },
+    });
+    const run = runOwnedCommand({ file: 'C:\\fixture.exe' }, { start: boundary.start });
+    await boundary.established();
+    boundary.settle();
+    const result = await run;
+    expect(result.outcome).toBe('BOUNDARY_LOST');
+    expect(result.failureCode).toBe('ENDING_INCONSISTENT');
+    expect(boundary.terminations()).toBe(1);
+    expect(result.retainedWorkDir).toBe(FAKE_WORK_DIR);
+    expect(boundary.disposals()).toBe(0);
+  });
+
+  it('refuses a budget that is not a number rather than coercing it', async () => {
+    // The round-6 type guard had no test: the only budget-validation case
+    // passed `NaN` and `-1`, both of which the predicate it replaced already
+    // caught. A numeric string is the input that tells the two apart.
+    const asNumber = (value: unknown): number => value as number;
+    expect(await largestBudgetFor(asNumber('1000'))).toBe(DEFAULT_OWNED_MAX_OUTPUT_BYTES);
+    expect(await largestBudgetFor(asNumber({}))).toBe(DEFAULT_OWNED_MAX_OUTPUT_BYTES);
+    expect(await largestBudgetFor(asNumber(null))).toBe(DEFAULT_OWNED_MAX_OUTPUT_BYTES);
+    expect(await largestBudgetFor(2_000)).toBe(2_000);
+  });
+
+  it('fails closed on an ending this build does not declare', () => {
+    // The mirror of the termination guard, for the same stated reason: an
+    // ending naming a fifth state used to be accepted alongside a local
+    // termination reason and reported as an ordinary timeout.
+    const alien = { ending: 'SOMETHING_ELSE', status: null } as unknown as BoundaryEnding;
+    for (const termination of OWNED_TERMINATIONS) {
+      const result = classifyOwnedCommand({ ending: alien, termination });
+      expect(result.outcome, termination).toBe('BOUNDARY_LOST');
+      expect(result.failureCode, termination).toBe('ENDING_INCONSISTENT');
+    }
+  });
 });

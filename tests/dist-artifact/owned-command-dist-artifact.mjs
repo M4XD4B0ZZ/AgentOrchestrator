@@ -13,9 +13,11 @@
  *
  * ── The differential, and what it is for ───────────────────────────────────
  *
- * Nine of the cases below run the *same* fixture invocation down two paths —
- * `runCommand`, the contract AO has today, and `runOwnedCommand`, the one this
- * slice adds —
+ * Nine of the cases below run the same fixture down two paths — `runCommand`,
+ * the contract AO has today, and `runOwnedCommand`, the one this slice adds.
+ * The invocations are identical except for the heartbeat directory each half
+ * writes into, which has to differ so that a survivor can be attributed to the
+ * path that left it —
  * and require them to agree about output, budgets, exit codes, timeouts and
  * stdin delivery. This is not an attempt to reproduce `runCommand`'s
  * `taskkill` containment, which the ADR replaces rather than imitates. It is
@@ -38,17 +40,18 @@
  * that register nothing are the two that start nothing: a refused foreign
  * status, and a target that does not exist.
  *
- * It is written as a property rather than an intention because five earlier
+ * It is written as a property rather than an intention because six earlier
  * versions of it were wrong, each one class further down: cases that started
  * nothing, then trees in unregistered directories, then processes with no
  * heartbeat at all, then two cases running a fixture that had no heartbeat
- * support, then a restatement that claimed every single call carried a
- * `--heartbeat=` when a differential's `runCommand` half does not need one. The
- * fourth of those is why the argv read-back below no longer uses slice 1's echo
- * fixture. What is true, and what the claim is: no *target process* starts
- * without a heartbeat directory, and every such directory reaches
- * `heartbeatDirs` — through `watch`, through `sweepOnly`, or directly from the
- * establishment measurement.
+ * support, then a restatement claiming every *call* carried a `--heartbeat=`,
+ * then two `runCommand` halves of a differential that did not. The fourth of
+ * those is why the argv read-back below no longer uses slice 1's echo fixture.
+ *
+ * The claim, exactly: no target process is started by any case in this file
+ * without a `--heartbeat=` directory — on either path of a differential — and
+ * every such directory reaches `heartbeatDirs`, through `watch`, through
+ * `sweepOnly`, or directly from the establishment measurement.
  *
  * Cases that start one tree additionally get a per-case window, so a leak is
  * attributed to the case that caused it; cases that start many short runs are
@@ -353,11 +356,11 @@ let establishMs = 0;
 /**
  * A budget a case can rely on outlasting establishment.
  *
- * Ten times the measured cost plus two seconds. `establishMs` is one
- * measurement taken before any case ran, and a runner that slows down
- * afterwards — a virus scanner waking up, another job landing on the box —
- * would otherwise turn a case that measures a *timeout* into one that fails an
- * assertion about `established`.
+ * Ten times the measured cost, or two seconds, whichever is larger.
+ * `establishMs` is one measurement taken before any case ran, and a runner that
+ * slows down afterwards — a virus scanner waking up, another job landing on the
+ * box — would otherwise turn a case that measures a *timeout* into one that
+ * fails an assertion about `established`.
  */
 const settleBudgetMs = () => Math.max(2_000, establishMs * 10);
 
@@ -589,7 +592,7 @@ test('a payload read to end-of-file is DELIVERED', async (c) => {
   const directReport = join(reportDir, 'stdin-direct.json');
   const direct = await runCommand(
     process.execPath,
-    [fixture, '--stdin=drain', `--report=${directReport}`],
+    [fixture, `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`, '--stdin=drain', `--report=${directReport}`],
     { env: process.env, stdin: payload, timeoutMs: 30_000 },
   );
   c.equal(direct.stdinDelivery, 'DELIVERED', 'runCommand agrees');
@@ -632,7 +635,16 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
   // broken-pipe report is what shows that description is not the shipped one.
   c.equal(owned.ending?.status?.stdinForward, 'BROKEN_PIPE', 'the boundary reported the broken pipe');
 
-  const direct = await runCommand(process.execPath, [fixture, '--stdin=close', '--sleep-ms=400', '--exit=0'], {
+  const direct = await runCommand(
+    process.execPath,
+    [
+      fixture,
+      `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`,
+      '--stdin=close',
+      '--sleep-ms=400',
+      '--exit=0',
+    ],
+    {
     env: process.env,
     stdin: payload,
     timeoutMs: 30_000,
@@ -903,11 +915,19 @@ test('a budget and a timeout each name their own outcome, and never a third', as
     ...[-90, -70, -50, -30, -15, -5, 0, 10, Math.round(establishMs / 2)].map((delta) =>
       Math.max(1, establishMs + delta),
     ),
-    // Generous on purpose, and more generous than establishment alone: this run
-    // must reach the stdout budget, which needs the *child* to boot and start
-    // writing after ownership is established. Establishment ends when the
-    // helper reports membership, before the target has run a line.
+    // Two of them, generous on purpose and more generous than establishment
+    // alone: these runs must reach the stdout budget, which needs the *child*
+    // to boot and start writing after ownership is established. Establishment
+    // ends when the helper reports membership, before the target has run a
+    // line, so the slack has to cover a cold node start as well.
+    //
+    // Two rather than one because the guard below is otherwise carried by a
+    // single budget: measured here, the sweep resolves to nine timeouts and two
+    // limit hits, and losing the one wide budget on a loaded runner would turn
+    // the gate red for a reason that is not a defect. Neither run costs its
+    // budget — a budget that fires ends the run at once.
     establishMs * 8 + 3_000,
+    establishMs * 20 + 10_000,
   ];
   for (const timeoutMs of budgets) {
     const beats = c.sweepOnly(tempDir('ao-owned-hb-'));

@@ -824,6 +824,14 @@ internal static class Program
                 {
                     // The child closed its read end. That is data for the
                     // caller — a delivery state, not a boundary failure.
+                    //
+                    // Published here, and no test kills the publish: the same
+                    // key still reaches the file through the main thread's
+                    // final WriteStatus, because the list is append-only and
+                    // the later writer writes a superset. What publishing here
+                    // buys is that the key is readable before the child exits,
+                    // which is what a caller polling a live run would need. The
+                    // same disclosure applies to the EOF branch below.
                     Put("stdinForward", "BROKEN_PIPE");
                     WriteStatus();
                     Native.CloseHandle(toChild);
