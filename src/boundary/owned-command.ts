@@ -7,13 +7,31 @@
  * other half the ADR keeps in TypeScript — the policy, and the translation of
  * a {@link BoundaryEnding} into a result an AO runner could consume.
  *
- * ── What this module is not ────────────────────────────────────────────────
+ * ── Who reaches this, and what fences it (V3 slice 3) ──────────────────────
  *
- * It is not wired into anything. `runCommand`, the Claude writer and the
- * verification runner are untouched by this slice, exactly as by slice 1, and
- * the reachability pin in `tests/v2-07l-execution-lease.test.ts` states that
- * as an assertion rather than as an intention. Slice 3 is what moves a runner
- * onto this path, and it is the slice that has to answer "what fences it".
+ * Exactly one module: `../doctor/exec.js`. Slice 2 shipped this adapter
+ * reachable from nothing; slice 3 gave it one caller, and the reachability pin
+ * in `tests/v2-07l-execution-lease.test.ts` states that as an assertion rather
+ * than as an intention — a second importer fails it.
+ *
+ * The fence is unchanged by that, and deliberately so. This module carries
+ * process **ownership** and no authority of its own: it contains whatever it is
+ * asked to start, which is exactly why the thing allowed to ask must stay
+ * behind the execution lease. No lease logic lives here or in the native
+ * helper, and putting any there would move authority into the layer that has
+ * none.
+ *
+ * `runCommand` is not a runner — it starts what it is given — and six modules
+ * give it something. Three are fenced, and they are the three that *act*: the
+ * agent and verification runners, reachable only through
+ * `leasedAgent`/`leasedVerify`, and the Git seam, whose mutations are proved
+ * against the lease immediately before the effect. The other three —
+ * `repo/git-query.ts`, `doctor/capabilities.ts`, `auth/auth-preflight.ts` — are
+ * read-only probes and are **not** fenced, exactly as they were not before this
+ * slice. Naming them is the point: the boundary now contains them too, and a
+ * reader who believes the seams cover every caller would look for the wrong
+ * gate. Widening what any of them may do is a lease decision, not this
+ * module's.
  *
  * ── The one guarantee ──────────────────────────────────────────────────────
  *
@@ -90,12 +108,28 @@ import {
  * Type-only, and that is the point: the stdin vocabulary AO already has is
  * *reused*, not re-declared. A second copy of these four words would be free
  * to drift from the runner's, and the drift would show up as a translation
- * table in slice 3 rather than as a failure here. Erased at build time, so
+ * table in the runner rather than as a failure here — and slice 3, which
+ * wired the two together, needed no such table. Erased at build time, so
  * this creates no runtime dependency on the diagnostics module.
  */
 import type { StdinDelivery } from '../doctor/exec.js';
 
 export type { StdinDelivery };
+
+/**
+ * Re-exported so that `../doctor/exec.js` needs one window onto this boundary
+ * and not two.
+ *
+ * It is the one exception `runOwnedCommand` lets out — a request the transport
+ * cannot represent is a programming error here, exactly as an unsafe argument
+ * is on the diagnostics path — and the runner has to catch it in order to keep
+ * its own "the only thrown error is `UnsafeArgumentError`" contract true on
+ * both platforms. Importing `./launch-boundary.js` there for one class would
+ * put a third module on the boundary's contract, which the reachability pin in
+ * `tests/v2-07l-execution-lease.test.ts` states there are exactly two of — and
+ * that pin is worth more than the directness.
+ */
+export { InvalidBoundaryRequestError };
 
 /** Default wall-clock budget for one owned command, establishment included. */
 export const DEFAULT_OWNED_TIMEOUT_MS = 20_000;
@@ -109,8 +143,15 @@ export const DEFAULT_TERMINATION_GRACE_MS = 5_000;
 /**
  * The largest delay node accepts. A larger one is silently turned into 1 ms,
  * which would make an absurd budget fire at once instead of effectively never.
+ *
+ * Exported since V3 slice 3, and for a reason worth stating: `runCommand` now
+ * clamps its own timeout to exactly this value on **both** platforms, so that
+ * an over-large delay means "effectively never" wherever it is passed rather
+ * than meaning "effectively never" here and "one millisecond" there. One
+ * constant, one contract — a second copy of the number would be free to drift
+ * from this one, and the drift would present itself as a platform difference.
  */
-const MAX_TIMER_MS = 2_147_483_647;
+export const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * How a run ended, in the adapter's terms.
@@ -512,8 +553,8 @@ export function classifyOwnedCommand(
   // revised by what turned up afterwards.
   if (termination !== 'NONE') {
     // A reason this build does not declare. Reachable from anything not type
-    // checked against this build — the `.mjs` dist harness, a JS consumer,
-    // slice 3 across a serialisation boundary — and indexing the two maps with
+    // checked against this build — the `.mjs` dist harness, a JS consumer, a
+    // serialisation boundary — and indexing the two maps with
     // it produced a frozen result carrying `outcome: undefined`, which is
     // neither a completion nor a declared failure and threw nothing. That is
     // fail-*open* in the one function this module exists to make fail-closed.
@@ -607,11 +648,15 @@ export interface StdinDeliveryObservation {
  * afterwards precisely because the helper is gone. The rule is withdrawn rather
  * than patched.
  *
- * One consequence is a real divergence from `runCommand`, and it is recorded
- * rather than hidden: for a write that fails while the child exits cleanly, the
- * diagnostics runner reports `FAILED` and this module reports `UNCONFIRMED`.
- * That is the conservative direction — a verdict nobody observed is not stated
- * — and it is slice 3's to reconcile. The pipe this side writes into belongs
+ * One consequence is a real divergence from `runCommand`'s POSIX path, and V3
+ * slice 3 settled it in this module's favour rather than by restoring the older
+ * word: for a write that fails while the child exits cleanly, the POSIX runner
+ * reports `FAILED` and this one reports `UNCONFIRMED`. That is the conservative
+ * direction — a verdict nobody observed is not stated — and it is now the
+ * documented contract on `StdinDelivery` rather than an open item. Every
+ * consumer in this repository folds the two into the same conclusion: the
+ * payload did not demonstrably arrive, so the run's output is not evidence
+ * about the question that was asked. The pipe this side writes into belongs
  * to the helper, not to the child: its breaking means the helper died — by
  * this side's hand, or by someone else's — and says nothing about what the
  * child received, since the last byte may have gone through microseconds
@@ -664,11 +709,11 @@ export function classifyStdinDelivery(observation: StdinDeliveryObservation): St
 /**
  * A stream, bounded by bytes, cut off the moment its budget is gone.
  *
- * A deliberate second implementation of `runCommand`'s private sink rather
- * than a shared one. Slice 2's scope is explicit that the diagnostics runner
- * is not modified, and extracting its sink would modify it; slice 3, which
- * moves that runner onto this path, is where the two collapse into one. Until
- * then the equivalence is asserted rather than assumed:
+ * Still a second implementation of `runCommand`'s private sink rather than a
+ * shared one, and V3 slice 3 kept it that way deliberately. Collapsing the two
+ * would put a sink used by the owned path inside the module that also owns the
+ * POSIX one, for no behavioural gain — the two are byte-for-byte equivalent and
+ * that equivalence is measured rather than assumed:
  * `tests/dist-artifact/owned-command-dist-artifact.mjs` runs the same
  * oversized output through both runners and requires the same cut, byte for
  * byte, and the same failure code.
@@ -893,13 +938,36 @@ export async function runOwnedCommand(
    * where something has. The run loop still guards the write as well: a value
    * that gets past this and still throws is reported as a failed hand-over
    * rather than as an escape.
+   *
+   * The third condition is about *authority* rather than about a throw, and it
+   * is the one the boundary's wire format forces. An environment reaches the
+   * helper as repeated `env=` lines, and `native/ao-launch/AoLaunch.cs` builds
+   * a replacement environment block only when it received at least one — so
+   * "an environment with nothing in it" and "no environment given" are the same
+   * request, and the helper answers the second by letting the child inherit
+   * *its* environment, which is AO's. `child_process.spawn(file, args, { env })`
+   * does the opposite: an empty object hands the child an empty environment.
+   *
+   * That difference is not a cosmetic one. `createProbeEnv` returns `{}` on a
+   * machine where none of the allow-listed names is set, and an agent silently
+   * inheriting AO's whole environment is exactly the widening the env guard
+   * exists to prevent. The launch is refused instead: a request this boundary
+   * cannot express is not a request it may approximate.
    */
+  const inexpressibleEnv =
+    options !== null &&
+    typeof options === 'object' &&
+    options.env !== undefined &&
+    (typeof options.env !== 'object' ||
+      options.env === null ||
+      !Object.values(options.env).some((value) => typeof value === 'string'));
   if (
     options === null ||
     typeof options !== 'object' ||
     typeof options.file !== 'string' ||
     options.file.length === 0 ||
-    (options.stdin !== undefined && typeof options.stdin !== 'string')
+    (options.stdin !== undefined && typeof options.stdin !== 'string') ||
+    inexpressibleEnv
   ) {
     return Object.freeze({
       display: '',
@@ -938,8 +1006,8 @@ export async function runOwnedCommand(
    *
    * The type check is not redundant with the compiler. This module argues, at
    * {@link classifyOwnedCommand}'s termination guard, that untyped callers are
-   * a real input class — the `.mjs` dist harness, a JS consumer, slice 3 across
-   * a serialisation boundary — and the three validators here used to disagree
+   * a real input class — the `.mjs` dist harness, a JS consumer, a
+   * serialisation boundary — and the three validators here used to disagree
    * about that threat.
    *
    * Measured, replaying the predicate this replaced: a *numeric* string was
@@ -947,8 +1015,8 @@ export async function runOwnedCommand(
    * 20000. What did get through was a non-numeric string or an object — `NaN`
    * deadline, a one-millisecond timeout, the tree killed — and `null`, which
    * coerces to 0 and made every run an instant timeout. `null` is the one worth
-   * naming: it is what a JSON round trip does to an absent value, which is
-   * precisely how slice 3 will pass these.
+   * naming: it is what a JSON round trip does to an absent value, and what an
+   * untyped caller of the dist artefact can produce.
    *
    * The cost of the check is that a numeric string is now refused rather than
    * coerced, so `maxStdoutBytes: "1000"` falls back to the default megabyte
@@ -972,14 +1040,13 @@ export async function runOwnedCommand(
    * `OUTPUT_LIMIT_EXCEEDED` and terminated the job for a limit the caller had
    * explicitly disabled.
    *
-   * On a *timeout* the two paths differ, and the difference is recorded rather
-   * than smoothed over: measured, `runCommand` with `timeoutMs: Infinity` fires
-   * at 1ms — node turns an over-large delay into one, and nothing there clamps
-   * it — while this module clamps to the largest expressible timer. This
-   * module's behaviour is the intended one; the divergence is real, it is not
-   * measured by the differential (which passes `Infinity` only for a byte
-   * budget, because a case asserting agreement here would fail), and it is
-   * slice 3's to resolve when it collapses the two runners.
+   * On a *timeout* the two paths used to differ, and V3 slice 3 closed it in
+   * this module's favour: measured, `runCommand` with `timeoutMs: Infinity`
+   * fired at 1 ms — node turns an over-large delay into one, and nothing there
+   * clamped it — while this module clamps to the largest expressible timer.
+   * `runCommand` now applies the same clamp, from the same exported constant,
+   * on both platforms, so an over-large delay means "effectively never"
+   * wherever it is passed. Pinned in `tests/v3-03-owned-runner.test.ts`.
    */
   const usable = (value: number | undefined, fallback: number): number =>
     typeof value !== 'number' || Number.isNaN(value) || value < 0 ? fallback : value;
@@ -1104,6 +1171,48 @@ export async function runOwnedCommand(
   };
   signal?.addEventListener('abort', onAbort);
 
+  /**
+   * The sinks, and the listeners that fill them, exist before the launch does.
+   *
+   * They used to be created after establishment, which is when this function
+   * first *has* a stream — and that was a race a short-lived child wins. See
+   * `OwnedProcessRequest.onHelperSpawned`: the handover happens in the same
+   * tick as the spawn now, so there is no window in which the helper's output
+   * has nowhere to go.
+   *
+   * The consequence is that a budget can be exceeded before there is a boundary
+   * to terminate. That is what `pendingLimit` is for: the reason is remembered
+   * and applied the moment termination becomes possible, rather than being
+   * dropped (an unbounded stream) or acted on through a `terminate` that does
+   * not exist yet (a crash on the one path that must not have one).
+   */
+  const stdout = new BoundedSink(usable(options.maxStdoutBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
+  const stderr = new BoundedSink(usable(options.maxStderrBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
+  let requestTermination: ((reason: Exclude<OwnedTermination, 'NONE'>) => void) | undefined;
+  let pendingLimit: 'LIMIT_STDOUT' | 'LIMIT_STDERR' | undefined;
+  const limitReached = (reason: 'LIMIT_STDOUT' | 'LIMIT_STDERR'): void => {
+    if (requestTermination !== undefined) requestTermination(reason);
+    else if (pendingLimit === undefined) pendingLimit = reason;
+  };
+  const onStdout = (chunk: Buffer): void => {
+    if (stdout.append(chunk)) limitReached('LIMIT_STDOUT');
+  };
+  const onStderr = (chunk: Buffer): void => {
+    if (stderr.append(chunk)) limitReached('LIMIT_STDERR');
+  };
+  let sinksAttached = false;
+  const attachSinks = (helper: { stdout: unknown; stderr: unknown }): void => {
+    const out = helper.stdout as NodeJS.ReadableStream | null | undefined;
+    const err = helper.stderr as NodeJS.ReadableStream | null | undefined;
+    // Nothing is attached to half a pair. A helper without both streams is the
+    // `BOUNDARY_STREAMS_UNAVAILABLE` case, decided after establishment where
+    // there is a boundary to terminate.
+    if (out === null || out === undefined || err === null || err === undefined) return;
+    out.on('data', onStdout);
+    err.on('data', onStderr);
+    sinksAttached = true;
+  };
+
   let timer: NodeJS.Timeout | undefined;
   let graceTimer: NodeJS.Timeout | undefined;
   try {
@@ -1123,6 +1232,7 @@ export async function runOwnedCommand(
         ...(options.mode === undefined ? {} : { mode: options.mode }),
         ...(options.workDir === undefined ? {} : { workDir: options.workDir }),
         establishTimeoutMs: establishBudget,
+        onHelperSpawned: attachSinks,
       });
     } catch (error) {
       // Starting a launch writes files and spawns a process, and both fail for
@@ -1196,8 +1306,6 @@ export async function runOwnedCommand(
      */
     const retained = (): string | null =>
       options.workDir !== undefined || !existsSync(owned.workDir) ? null : owned.workDir;
-    const stdout = new BoundedSink(usable(options.maxStdoutBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
-    const stderr = new BoundedSink(usable(options.maxStderrBytes, DEFAULT_OWNED_MAX_OUTPUT_BYTES));
 
     /**
      * The grace window, armed by the termination that needs it.
@@ -1232,6 +1340,9 @@ export async function runOwnedCommand(
       graceTimer = setTimeout(() => expireGrace?.(), graceMs);
       graceTimer.unref?.();
     };
+    // From here a budget has something to act on. Anything the sinks recorded
+    // before this point kept its reason rather than acting on it.
+    requestTermination = terminate;
 
     const outStream = owned.helper.stdout;
     const errStream = owned.helper.stderr;
@@ -1279,14 +1390,13 @@ export async function runOwnedCommand(
       });
     }
 
-    const onStdout = (chunk: Buffer): void => {
-      if (stdout.append(chunk)) terminate('LIMIT_STDOUT');
-    };
-    const onStderr = (chunk: Buffer): void => {
-      if (stderr.append(chunk)) terminate('LIMIT_STDERR');
-    };
-    outStream.on('data', onStdout);
-    errStream.on('data', onStderr);
+    // Normally already done, in the same tick as the spawn. This covers the one
+    // caller that cannot have been: a substituted `dependencies.start`, which
+    // owes no callback and is how every test drives this function.
+    if (!sinksAttached) attachSinks(owned.helper);
+    // And a budget that was already gone before there was a boundary to
+    // terminate is acted on now, before anything else can name the outcome.
+    if (pendingLimit !== undefined) terminate(pendingLimit);
 
     /**
      * How far this side's own handover got.
@@ -1440,6 +1550,52 @@ export async function runOwnedCommand(
       });
     }
 
+    /**
+     * The boundary has ended, and on every ending that can name a verdict the
+     * streams have too.
+     *
+     * Not an assumption. `owned.ending` settles from `helperClosed`, which has
+     * two producers, and they differ exactly here. A `close` is emitted only
+     * once the process has ended *and* the stdio streams node counts have
+     * closed — which, for a stream in flowing mode, is after every `data` it
+     * will ever emit; so anything arriving that way has complete sinks, which
+     * is `CHILD_EXITED`, `TERMINATED_BY_CALLER`, `BOUNDARY_LOST`, and a
+     * `BOUNDARY_REFUSED` whose status turned foreign or failed after this run
+     * was established.
+     *
+     * The other producer is an `'error'` event, which also arrives as a
+     * `BOUNDARY_REFUSED` and can arrive with the helper still running. Nothing
+     * distinguishes the two refusals from here, so neither is waited on — and
+     * the price is bounded: an established run that ends in a refusal is a
+     * contradiction (`classifyOwnedCommand` with `ownershipEstablished: true`
+     * answers `ENDING_INCONSISTENT` for every one of them), so its outcome is
+     * `BOUNDARY_LOST` whatever the sinks hold. They are still *reported* — the
+     * branch below returns `stdout`/`stderr` as collected, and a caller may
+     * want them — but nothing reads them as a verdict, so a chunk that never
+     * arrived changes no answer.
+     *
+     * An earlier version of this slice awaited the streams as well, on the
+     * reasoning that a short-lived child could finish before its listeners were
+     * attached. That was a real defect and it is fixed one layer up, by handing
+     * the streams over in the same tick as the spawn
+     * (`OwnedProcessRequest.onHelperSpawned`) — so the wait repaired nothing,
+     * and it was withdrawn rather than kept as a second mechanism with a
+     * measurement borrowed from the first.
+     *
+     * Removing it was measured before it was done — 120 of 120 fast `.cmd` runs
+     * kept their output without it — and that measurement is a one-off, not a
+     * gate: it existed to justify a deletion, and there is nothing left to
+     * regress. What is pinned, and pins the defect the wait was mistaken for,
+     * is the short-lived-child case in `tests/v3-03-owned-runner.test.ts`.
+     *
+     * Nothing here waits on a pipe, and that is why the second producer above
+     * costs nothing to reason about. Node emits `'error'` on a child process
+     * when a *kill* fails, not only when a spawn does, so a helper that ignored
+     * its own termination arrives here alive and still holding these handles.
+     * Waiting for a pipe held by the process you have just declared unaccounted
+     * for is exactly how a containment measurement deadlocks on its own
+     * survivors.
+     */
     const ending = settled;
     const classification = classifyOwnedCommand({ ending, termination, ownershipEstablished: true });
     const result = finish({
@@ -1500,6 +1656,18 @@ export async function runOwnedCommand(
       void owned.ending.catch(() => undefined);
       return abandoned;
     }
+    // The sinks come off on this path too, and for the same reason the
+    // `BOUNDARY_REFUSED` branch above gives: a chunk delivered after the result
+    // is built would run `terminate` on a run that has already returned, arming
+    // a grace timer the `finally` below has already been past — an unref'd
+    // five-second timer nothing will clear, holding this run's buffers.
+    //
+    // Defence rather than necessity on this path, and stated as such: the note
+    // above argues the sinks are already complete here, so no chunk should be
+    // in flight. The detach costs nothing, and the argument it is defending
+    // against being wrong is the one thing a comment cannot enforce.
+    outStream.off('data', onStdout);
+    errStream.off('data', onStderr);
     // Only now: the ending has been read, and the status file it was read from
     // lives in the directory this removes.
     owned.dispose();

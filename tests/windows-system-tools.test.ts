@@ -63,6 +63,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 import type { WindowsSystemToolDependencies } from '../src/doctor/internal/windows-system-tools.js';
 
 const { resolveOnPath, runCommand } = await import('../src/doctor/exec.js');
+const { runOwnedCommand } = await import('../src/boundary/owned-command.js');
 const {
   windowsSystemTool,
   createWindowsSystemToolResolverForTests,
@@ -597,23 +598,43 @@ describe.runIf(IS_WINDOWS)('exec.ts uses only the trusted resolver, never PATH o
     // A garbage file at the exact name a naive resolver would try to spawn.
     writeFileSync(join(fakeCmdDir, 'cmd.exe'), 'not a real executable\n', 'utf8');
 
-    const res = await runCommand(script, [], {
-      env: {
-        PATH: `${fakeCmdDir}${process.platform === 'win32' ? ';' : ':'}${process.env['PATH'] ?? ''}`,
-        PATHEXT: process.env['PATHEXT'] ?? '',
-        COMSPEC: join(fakeCmdDir, 'cmd.exe'),
-        ComSpec: join(fakeCmdDir, 'cmd.exe'),
+    const launched: string[] = [];
+    const res = await runCommand(
+      script,
+      [],
+      {
+        env: {
+          PATH: `${fakeCmdDir}${process.platform === 'win32' ? ';' : ':'}${process.env['PATH'] ?? ''}`,
+          PATHEXT: process.env['PATHEXT'] ?? '',
+          COMSPEC: join(fakeCmdDir, 'cmd.exe'),
+          ComSpec: join(fakeCmdDir, 'cmd.exe'),
+        },
+        timeoutMs: 15_000,
       },
-      timeoutMs: 15_000,
-    });
+      {
+        runOwned: async (options) => {
+          launched.push(options.file);
+          return await runOwnedCommand(options);
+        },
+      },
+    );
 
     expect(res.outcome).toBe('COMPLETED');
     expect(res.stdout).toContain('AO_TRUSTED_CMD_RAN');
-    // Every spawn of an interpreter for this run used the real, trusted cmd.exe.
-    const interpreterCalls = recorder.spawnCalls.filter((f) => f.toLowerCase().endsWith('cmd.exe'));
-    expect(interpreterCalls.length).toBeGreaterThan(0);
-    for (const call of interpreterCalls) {
-      expect(call.toLowerCase()).not.toBe(join(fakeCmdDir, 'cmd.exe').toLowerCase());
+    // Which interpreter ran is read from the launch plan, not from the spawn
+    // recorder. Since V3 slice 3 node starts one process per Windows command —
+    // the boundary helper — and the interpreter is named inside the request the
+    // helper is handed, so a recorder watching `spawn` can no longer see it.
+    // The seam here *delegates* to the real adapter, so this is one genuine run
+    // that both produced the output above and disclosed its own target.
+    expect(launched).toHaveLength(1);
+    expect(launched[0]?.toLowerCase()).toBe(windowsSystemTool('cmd.exe').toLowerCase());
+    expect(launched[0]?.toLowerCase()).not.toContain(fakeCmdDir.toLowerCase());
+    // And nothing under the planted directory was started by any mechanism.
+    for (const call of recorder.spawnCalls) {
+      expect(call.toLowerCase()).not.toContain(fakeCmdDir.toLowerCase());
+    }
+    for (const call of recorder.execFileSyncCalls) {
       expect(call.toLowerCase()).not.toContain(fakeCmdDir.toLowerCase());
     }
   });
@@ -646,18 +667,21 @@ describe.runIf(IS_WINDOWS)('exec.ts uses only the trusted resolver, never PATH o
 
     expect(res.outcome).toBe('TIMED_OUT');
     expect(existsSync(sentinel)).toBe(false);
-    // AO-008-S2: the tree kill is supervised asynchronously, so the trusted
-    // taskkill.exe is reached through `spawn` — never again through the
-    // event-loop-blocking `execFileSync`. Both halves are asserted: the
-    // synchronous channel is unused, and whatever *is* executed is still the
-    // resolver's own path rather than the PATH-planted stand-in.
+    // The claim is now stronger than "the planted taskkill was not the one
+    // used", and it is the ADR's: **no** taskkill is used. V3 slice 3 removed
+    // the mechanism from this path entirely, because its success was measured
+    // as no evidence at all — exit code 0 in ten of ten rounds with 38 orphaned
+    // descendants alive. A timed-out Windows command now ends because the
+    // helper dies and the kernel closes the job.
+    //
+    // Asserted as an absence over both channels rather than over the planted
+    // path alone: a re-introduction anywhere, trusted resolver included, fails
+    // this.
     expect(recorder.execFileSyncCalls.some((f) => f.toLowerCase().endsWith('taskkill.exe'))).toBe(
       false,
     );
-    const taskkillCalls = recorder.spawnCalls.filter((f) => f.toLowerCase().endsWith('taskkill.exe'));
-    expect(taskkillCalls.length).toBeGreaterThan(0);
-    for (const call of taskkillCalls) {
-      expect(call.toLowerCase()).toBe(windowsSystemTool('taskkill.exe').toLowerCase());
+    expect(recorder.spawnCalls.filter((f) => f.toLowerCase().endsWith('taskkill.exe'))).toEqual([]);
+    for (const call of [...recorder.spawnCalls, ...recorder.execFileSyncCalls]) {
       expect(call.toLowerCase()).not.toContain(fakePathDir.toLowerCase());
     }
   }, 20_000);

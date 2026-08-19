@@ -13,6 +13,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { PROBE_ENV_POLICIES } from '../src/auth/env-guard.js';
+import type { CommandResult } from '../src/doctor/exec.js';
 import {
   CAPABILITY_PROBES,
   classifyProbe,
@@ -446,10 +447,39 @@ describe('probe classification', () => {
     );
   });
 
-  it.each(['TIMED_OUT', 'SPAWN_FAILED', 'OUTPUT_LIMIT_EXCEEDED'] as const)(
+  it.each(['TIMED_OUT', 'SPAWN_FAILED', 'OUTPUT_LIMIT_EXCEEDED', 'BOUNDARY_LOST'] as const)(
     'treats the %s outcome as a failed probe',
     (outcome) => {
       expect(classifyProbe({ ...base, outcome, exitCode: null })).toBe('PROBE_FAILED');
     },
   );
+
+  it('reads no capability out of a lost boundary, whatever exit code it carries', () => {
+    // V3 slice 3 added `BOUNDARY_LOST` and this function was a list of the
+    // endings that are not completions, so the new one fell through to the
+    // exit-code branches below it — in both directions, and both wrong.
+    //
+    // With `exitCode: null` it answered `UNAVAILABLE_IN_INSTALLED_VERSION`:
+    // *the installed CLI does not understand this sub-command*, recorded in a
+    // durable artefact whose own `facts.outcome` said `BOUNDARY_LOST` on the
+    // next line. And a lost boundary may carry an exit code — the boundary
+    // contract says so in as many words, "an exit code may even be present, it
+    // is still not a completion" — so a zero one with output would have
+    // answered `AVAILABLE`: a positive capability claim, which the auth
+    // preflight then reads, from a run nothing supervised.
+    expect(classifyProbe({ ...base, outcome: 'BOUNDARY_LOST', exitCode: null })).toBe(
+      'PROBE_FAILED',
+    );
+    expect(classifyProbe({ ...base, outcome: 'BOUNDARY_LOST', exitCode: 0 })).toBe('PROBE_FAILED');
+    expect(classifyProbe({ ...base, outcome: 'BOUNDARY_LOST', exitCode: 1 })).toBe('PROBE_FAILED');
+  });
+
+  it('is total over the outcome vocabulary, not over a list of its failures', () => {
+    // The shape of the fix, pinned so that a *sixth* outcome cannot repeat the
+    // defect: everything that is not `COMPLETED` is a failed probe, rather than
+    // the enumerated failures being. A member added to `CommandOutcome` is then
+    // safe by default instead of dangerous by default.
+    const strange = 'A_MEMBER_THIS_BUILD_DOES_NOT_DECLARE' as CommandResult['outcome'];
+    expect(classifyProbe({ ...base, outcome: strange, exitCode: 0 })).toBe('PROBE_FAILED');
+  });
 });

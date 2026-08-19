@@ -21,13 +21,39 @@
  *  - a normal successful command is unaffected;
  *  - `runCapabilityDump` completes every probe even when the first one hits a
  *    synchronous spawn failure.
+ *
+ * ── Two seams since V3 slice 3 ─────────────────────────────────────────────
+ *
+ * `runCommand` no longer spawns a Windows *target*. It hands a resolved launch
+ * plan to the native boundary, and the only process node starts is the helper —
+ * so the injection this file is built on intercepts a different thing on each
+ * platform, and the groups below are split accordingly rather than sharing a
+ * flag. A `throwFor` hook still naming the caller's target would, on Windows,
+ * intercept nothing at all and leave every case in its group passing over an
+ * unexercised path, which is the failure mode this note exists to prevent.
+ *
+ * Two result fields differ on the owned path, and both because there is no
+ * libuv error object in the chain rather than because detail was dropped:
+ * `errnoCode` is `null`, and there is no `ENOENT` split into `NOT_FOUND`. On
+ * Windows `NOT_FOUND` is decided earlier, by PATH/PATHEXT resolution, before
+ * anything is launched.
+ *
+ * Two cases are deliberately duplicated across the split rather than left in
+ * the POSIX group: the caller-path digit-run case, and the gate's own
+ * counter-proof. CI runs `windows-latest` only, so a case scoped to POSIX runs
+ * nowhere — and `expectNoErrorObjectLeak` is the instrument every case here
+ * depends on. Its mutant-kill has to execute on the platform that uses it.
+ *
+ * What is genuinely lost on Windows, and is not duplicated because it cannot
+ * be: the two `child.on('error')` cases. That handler is on the POSIX branch of
+ * `runCommand`, and no Windows path reaches it any more.
  */
 
 import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { CommandResult } from '../src/doctor/exec.js';
 import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
@@ -42,6 +68,15 @@ const IS_WINDOWS = process.platform === 'win32';
 const spawnControl = vi.hoisted(() => ({
   throwFor: null as ((file: string) => Error | null) | null,
   asyncErrorFor: null as ((file: string) => NodeJS.ErrnoException | null) | null,
+  /**
+   * Every file node was asked to start, in order.
+   *
+   * It exists so that "no ordinary-spawn fallback" can be asserted as an
+   * observation rather than inferred from a result code: a fallback would be a
+   * second call naming the caller's own target, and a result alone cannot tell
+   * that apart from a boundary that refused.
+   */
+  calls: [] as string[],
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -49,6 +84,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   return {
     ...actual,
     spawn: (file: string, ...rest: unknown[]) => {
+      spawnControl.calls.push(file);
       const syncError = spawnControl.throwFor?.(file);
       if (syncError) throw syncError;
 
@@ -77,6 +113,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 const { runCommand, UnsafeArgumentError } = await import('../src/doctor/exec.js');
 const { runCapabilityDump, CAPABILITY_PROBES } = await import('../src/doctor/capabilities.js');
+const { resolveBoundaryExecutable } = await import('../src/boundary/start-owned-process.js');
 
 const tempDirs: string[] = [];
 /**
@@ -157,8 +194,17 @@ function serializeWithoutCallerEcho(result: CommandResult): string {
  * Asserts the errno contract where errno actually lives: an allow-listed,
  * screaming-snake token and never a number in any encoding.
  */
-function expectSanitisedErrnoCode(result: CommandResult, expected: string): void {
+function expectSanitisedErrnoCode(result: CommandResult, expected: string | null): void {
   expect(result.errnoCode).toBe(expected);
+  if (expected === null) {
+    // The owned Windows path has no errno to report and says so with `null`
+    // rather than with a translated guess: no `spawn` was made by this process,
+    // so there is no libuv error object anywhere in the chain. Absence is the
+    // strongest form of "nothing leaked", and it is asserted as absence rather
+    // than waved through.
+    expect(result.errnoCode).toBeNull();
+    return;
+  }
   expect(typeof result.errnoCode).toBe('string');
   expect(String(result.errnoCode)).toMatch(SANITISED_ERRNO_TOKEN);
   expect(String(result.errnoCode)).not.toMatch(RAW_LIBUV_ERRNO);
@@ -173,7 +219,7 @@ function expectNoErrorObjectLeak(
   result: CommandResult,
   callerTarget: string,
   callerArgs: readonly string[],
-  errno: string,
+  errno: string | null,
 ): void {
   expectSanitisedErrnoCode(result, errno);
   // All three caller-echo fields are pinned to the caller's own input *before*
@@ -220,7 +266,13 @@ describe.runIf(IS_WINDOWS)('real Windows runtime: synchronous spawn() failure is
     // raw negative libuv errno integer, neither of which the caller supplied.
     // See the gate above for why the errno check reads the errno field rather
     // than the caller's own path characters.
-    expectNoErrorObjectLeak(result, target, NO_ARGS, 'UNKNOWN');
+    //
+    // `null` rather than `UNKNOWN` since V3 slice 3, and it is a different
+    // *source* rather than a lost detail: this process no longer spawns the
+    // target at all. `CreateProcessW` fails inside the boundary, which reports
+    // its own fixed `OWNED_CONTAINMENT_CREATE`, and no libuv error object
+    // exists on this path to sanitise or to leak.
+    expectNoErrorObjectLeak(result, target, NO_ARGS, null);
   });
 
   it('a PATH/PATHEXT-resolved candidate that is not executable resolves to a controlled CommandResult', async () => {
@@ -235,7 +287,8 @@ describe.runIf(IS_WINDOWS)('real Windows runtime: synchronous spawn() failure is
     expect(result.started).toBe(false);
     expect(result.outcome).toBe('SPAWN_FAILED');
     expect(result.failureCode).toBe('SPAWN_FAILED');
-    expect(result.errnoCode).toBe('UNKNOWN');
+    // See above: the boundary refuses, and a refusal carries no errno.
+    expect(result.errnoCode).toBeNull();
   });
 
   it('leaves no process behind and settles well within the timeout budget', async () => {
@@ -254,7 +307,7 @@ describe.runIf(IS_WINDOWS)('real Windows runtime: synchronous spawn() failure is
 
 // ── 10.2: deterministic synchronous throw, via the controllable spawn ─────
 
-describe('deterministic synchronous spawn() throw', () => {
+describe.skipIf(IS_WINDOWS)('deterministic synchronous spawn() throw', () => {
   it('resolves to the canonical SPAWN_FAILED shape, with no foreign error field leaking', async () => {
     const dir = makeTempDir();
     const target = join(dir, 'sentinel.exe');
@@ -380,10 +433,201 @@ describe('deterministic synchronous spawn() throw', () => {
   });
 });
 
+// ── 10.2w: the same containment, at the seam Windows actually has ─────────
+
+/**
+ * The Windows half of 10.2, and the reason it is a separate group rather than
+ * a platform flag inside the one above.
+ *
+ * Since V3 slice 3, `runCommand` does not spawn a Windows target: it hands a
+ * resolved launch plan to the boundary, and the only process node starts is the
+ * helper. So the seam the group above drives — a synchronous throw from
+ * `spawn()` for the *target* — is unreachable on Windows, and a case that
+ * pointed `throwFor` at a target file would have passed while intercepting
+ * nothing. Pointing it at the helper instead keeps the property the group
+ * exists for: a failure to start is contained as data, settles at once, and
+ * carries no foreign detail.
+ *
+ * Two expectations differ from the POSIX group, and both follow from there
+ * being no libuv error object on this path rather than from a weakening:
+ *
+ *  - `errnoCode` is `null`. There is no errno to sanitise;
+ *  - there is no `ENOENT`/other split, so no `NOT_FOUND`. On Windows
+ *    `NOT_FOUND` is decided earlier and better — by PATH/PATHEXT resolution,
+ *    before any launch — and that is pinned in `tests/exec.test.ts` and
+ *    `tests/path-resolution.test.ts`.
+ */
+describe.runIf(IS_WINDOWS)('a boundary helper that cannot be started is contained', () => {
+  /** Matches the native helper, whatever directory the build put it in. */
+  const isBoundaryHelper = (file: string): boolean => /ao-launch\.exe$/i.test(file);
+
+  beforeAll(() => {
+    // Without a built helper `resolveBoundaryExecutable()` answers `{}`, the
+    // launch is refused before anything is spawned, and four of the six cases
+    // here pass while measuring nothing: they assert the same `SPAWN_FAILED`
+    // with a `null` errno, for the wrong reason, with the `throwFor` hook below
+    // intercepting no call at all. The other two would fail — on `started` and
+    // on the spawn count — which is exactly the wrong way round for a diagnosis:
+    // a red run pointing at two unrelated assertions rather than at the missing
+    // artefact.
+    //
+    // `npm run verify` builds before it tests, so this is a guard against a
+    // bare `vitest run` quietly reporting a green group, not an expected
+    // condition.
+    expect(resolveBoundaryExecutable().path).toBeDefined();
+  });
+
+  it('resolves to the canonical SPAWN_FAILED shape and leaks nothing', async () => {
+    const dir = makeTempDir();
+    const target = join(dir, 'sentinel-owned.exe');
+    writeFileSync(target, 'x', 'utf8');
+
+    const SECRET = 'AO_SECRET_BOUNDARY_DETAIL_should_not_leak';
+    spawnControl.throwFor = (file) => {
+      if (!isBoundaryHelper(file)) return null;
+      const err = new Error(`spawn ${SECRET}`) as NodeJS.ErrnoException;
+      err.code = 'UNKNOWN';
+      err.errno = -4094;
+      err.syscall = 'spawn';
+      err.path = SECRET;
+      return err;
+    };
+
+    const result = await runCommand(target, NO_ARGS, { env: {}, timeoutMs: 10_000 });
+
+    expect(result.outcome).toBe('SPAWN_FAILED');
+    expect(result.failureCode).toBe('SPAWN_FAILED');
+    expect(result.exitCode).toBeNull();
+    expect(result.signal).toBeNull();
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+    expect(result.processTreeKilled).toBe(false);
+    // `true`, and deliberately so: a throw while starting the helper is not
+    // evidence that nothing was created, and this field is what a caller reads
+    // to decide whether a run may have had side effects. `UNKNOWN` counts as
+    // `YES` there, which is the direction the ADR requires.
+    expect(result.started).toBe(true);
+    expectNoErrorObjectLeak(result, target, NO_ARGS, null);
+    for (const forbidden of [SECRET, '-4094', 'syscall']) {
+      expect(JSON.stringify(result)).not.toContain(forbidden);
+    }
+  });
+
+  it('is still SPAWN_FAILED when the helper throw carries ENOENT, never NOT_FOUND', async () => {
+    // The distinction the POSIX group draws does not exist here, and inventing
+    // it would be worse than losing it: `NOT_FOUND` means "there is no such
+    // program", and a helper that could not start says nothing whatsoever about
+    // the target the caller asked for. Reporting it would tell a capability
+    // probe that a CLI is not installed because AO's own boundary is broken.
+    const dir = makeTempDir();
+    const target = join(dir, 'sentinel-owned-enoent.exe');
+    writeFileSync(target, 'x', 'utf8');
+    spawnControl.throwFor = (file) => {
+      if (!isBoundaryHelper(file)) return null;
+      const err = new Error('spawn ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      return err;
+    };
+
+    const result = await runCommand(target, [], { env: {}, timeoutMs: 10_000 });
+
+    expect(result.outcome).toBe('SPAWN_FAILED');
+    expect(result.failureCode).toBe('SPAWN_FAILED');
+    expect(result.outcome).not.toBe('NOT_FOUND');
+    expect(result.errnoCode).toBeNull();
+  });
+
+  it('settles immediately rather than waiting for the configured timeout', async () => {
+    const dir = makeTempDir();
+    const target = join(dir, 'sentinel-owned-fast.exe');
+    writeFileSync(target, 'x', 'utf8');
+    spawnControl.throwFor = (file) => (isBoundaryHelper(file) ? syntheticSpawnUnknown() : null);
+
+    const start = Date.now();
+    const result = await runCommand(target, [], { env: {}, timeoutMs: 60_000 });
+    const elapsed = Date.now() - start;
+
+    expect(result.outcome).toBe('SPAWN_FAILED');
+    expect(elapsed).toBeLessThan(5_000);
+  });
+
+  it('a caller path whose own name carries a raw-errno-shaped digit run is not a leak', async () => {
+    // The Windows half of the POSIX case of the same name, restored here
+    // because this is the only platform CI runs: scoping that group to POSIX
+    // retired it everywhere. The path shape is the one mkdtemp produced by
+    // chance during AO-008-S3 (`ao-spawnfail-953HCn`, `ao-spawnfail-601hZz`),
+    // pinned so it is tested every run instead of ~1 run in 200. Both digit
+    // runs are caller-chosen characters that `display`/`executable` must keep
+    // echoing.
+    const dir = makeTempDir('ao-spawnfail-953-valid-');
+    const target = join(dir, 'sentinel-601.exe');
+    writeFileSync(target, 'x', 'utf8');
+    expect(target).toMatch(RAW_LIBUV_ERRNO); // the caller path, not a leak
+    spawnControl.throwFor = (file) => (isBoundaryHelper(file) ? syntheticSpawnUnknown() : null);
+
+    const result = await runCommand(target, NO_ARGS, { env: {}, timeoutMs: 10_000 });
+
+    expect(result.outcome).toBe('SPAWN_FAILED');
+    expect(result.failureCode).toBe('SPAWN_FAILED');
+    expectNoErrorObjectLeak(result, target, NO_ARGS, null);
+    expect(JSON.stringify(result)).not.toContain('-4094');
+    expect(JSON.stringify(result)).not.toContain('syscall');
+  });
+
+  it("a result whose args are not the caller's own fails the gate (AO-008-S3-R1-F1)", async () => {
+    // The gate's own counter-proof, and the reason it is duplicated onto this
+    // platform rather than left in the POSIX group: `expectNoErrorObjectLeak`
+    // is the instrument every case above depends on, and scoping its only
+    // mutant-kill to a platform CI never runs would leave the instrument
+    // asserted by nothing that executes. A counter-proof that does not run is
+    // not a counter-proof.
+    const dir = makeTempDir();
+    const target = join(dir, 'sentinel-owned-args.exe');
+    writeFileSync(target, 'x', 'utf8');
+    spawnControl.throwFor = (file) => (isBoundaryHelper(file) ? syntheticSpawnUnknown() : null);
+
+    const result = await runCommand(target, NO_ARGS, { env: {}, timeoutMs: 10_000 });
+    expectNoErrorObjectLeak(result, target, NO_ARGS, null); // the honest result passes
+
+    // The counterexample the gate used to accept: `errnoCode`, `display` and
+    // `executable` all still correct, only `args` swapped for the raw libuv
+    // errno. Excluding `args` from the raw-errno scan is sound *only* because
+    // the gate first proves it is the caller's own array — so this must fail.
+    const forgedArgs = { ...result, args: ['-4094'] } as CommandResult;
+    expect(forgedArgs.errnoCode).toBeNull();
+    expect(forgedArgs.display).toBe(target);
+    expect(forgedArgs.executable).toBe(target);
+    expect(() => expectNoErrorObjectLeak(forgedArgs, target, NO_ARGS, null)).toThrow();
+
+    // And the exclusion reaches the top level only: a nested property that
+    // merely shares a caller-echo name is still scanned for a raw errno.
+    const nestedEcho = { ...result, args: NO_ARGS, nested: { args: ['-4094'] } } as CommandResult;
+    expect(() => expectNoErrorObjectLeak(nestedEcho, target, NO_ARGS, null)).toThrow();
+  });
+
+  it('starts no target of its own when the boundary cannot be started', async () => {
+    // The fail-closed claim, stated as an absence that is actually observed:
+    // with the helper unstartable, node is asked to start exactly one process —
+    // the helper — and never the target. An ordinary-spawn fallback would show
+    // up here as a second call naming the caller's own file.
+    const dir = makeTempDir();
+    const target = join(dir, 'sentinel-owned-nofallback.exe');
+    writeFileSync(target, 'x', 'utf8');
+    spawnControl.throwFor = (file) => (isBoundaryHelper(file) ? syntheticSpawnUnknown() : null);
+    spawnControl.calls = [];
+
+    await runCommand(target, [], { env: {}, timeoutMs: 10_000 });
+
+    expect(spawnControl.calls.length).toBeGreaterThan(0);
+    for (const file of spawnControl.calls) expect(isBoundaryHelper(file)).toBe(true);
+    expect(spawnControl.calls.map((f) => f.toLowerCase())).not.toContain(target.toLowerCase());
+  });
+});
+
 // ── 10.3: the existing async child.on('error') path stays intact, and shares
 // identical result semantics with the new synchronous path ─────────────────
 
-describe('asynchronous spawn error (child.on("error")) stays intact and matches the synchronous shape', () => {
+describe.skipIf(IS_WINDOWS)('asynchronous spawn error (child.on("error")) stays intact and matches the synchronous shape', () => {
   it('an async ENOENT error produces the same shape as the synchronous ENOENT case', async () => {
     const dir = makeTempDir();
     const target = join(dir, 'async-enoent.exe');
@@ -465,8 +709,12 @@ describe('runCapabilityDump continues past a single synchronous spawn failure', 
     // test itself runs under Node. Failing it synchronously exercises exactly
     // the scenario the review found: the first probe in the loop breaks.
     expect(CAPABILITY_PROBES[0]?.id).toBe('node.version');
-    spawnControl.throwFor = (file) =>
-      /node(\.exe)?$/i.test(file) ? syntheticSpawnUnknown() : null;
+    // The process node is asked to start differs by platform since V3 slice 3:
+    // on Windows it is the boundary helper and never the probe's own target,
+    // so a matcher naming `node` would intercept nothing and the case would
+    // pass while measuring a probe that succeeded.
+    const failing = IS_WINDOWS ? /ao-launch\.exe$/i : /node(\.exe)?$/i;
+    spawnControl.throwFor = (file) => (failing.test(file) ? syntheticSpawnUnknown() : null);
 
     const records = await runCapabilityDump({ env: process.env, timeoutMs: 10_000 });
 
