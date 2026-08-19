@@ -949,6 +949,12 @@ describe('a refusal after establishment does not wait on the helper’s pipes', 
     // Driven against a substituted launch, because a failed kill cannot be
     // provoked from a real one. The streams below never end, so any wait on
     // them shows up here as the full grace window.
+    //
+    // The guard is exactly as wide as its ending: a wait re-introduced *with*
+    // an exclusion for `BOUNDARY_REFUSED` passes this untouched. That is the
+    // narrower half deliberately — the wider claim, that no wait is needed at
+    // all, is carried by the short-lived-child case above, which is what
+    // actually kills the attach-after-establishment mutant.
     const { PassThrough } = await import('node:stream');
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -992,7 +998,7 @@ describe('a refusal after establishment does not wait on the helper’s pipes', 
     // Contradictory, and classified as such — that part is slice 2's.
     expect(result.outcome).toBe('BOUNDARY_LOST');
     // What this case is about: it came back, and it came back promptly. The
-    // grace above is 30s; anything near it means the drain was entered.
+    // grace above is 30s; anything near it means a wait was entered.
     expect(elapsed).toBeLessThan(5_000);
   }, 60_000);
 });
@@ -1023,6 +1029,15 @@ describe.runIf(IS_WINDOWS)('the boundary publishes its final status even under a
 
     let held: number | undefined;
     let released = false;
+    /**
+     * Whether a handle was ever acquired at all.
+     *
+     * Without it this case passes while racing nothing: an `openSync` that
+     * never succeeds leaves the retry loop spinning, the helper publishes
+     * unopposed, and every assertion below holds for a run that was never
+     * contended. A counter-proof has to prove its own instrument ran.
+     */
+    let everHeld = false;
     const release = (): void => {
       if (held !== undefined) closeSync(held);
       held = undefined;
@@ -1034,6 +1049,7 @@ describe.runIf(IS_WINDOWS)('the boundary publishes its final status even under a
       if (held !== undefined || released) return;
       try {
         held = openSync(statusPath, 'r');
+        everHeld = true;
       } catch {
         setTimeout(attempt, 1).unref?.();
         return;
@@ -1067,6 +1083,7 @@ describe.runIf(IS_WINDOWS)('the boundary publishes its final status even under a
     );
 
     release();
+    expect(everHeld).toBe(true);
     expect(result.outcome).toBe('COMPLETED');
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('PUBLISHED');

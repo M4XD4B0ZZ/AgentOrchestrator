@@ -359,20 +359,24 @@ export function classifyProbe(result: CommandResult): ProbeAvailability {
   // the endings that are not — which is what it was, and what let V3 slice 3's
   // new `BOUNDARY_LOST` fall through to the exit-code branches below.
   //
-  // Both readings it fell into were wrong, and in opposite directions. A lost
-  // boundary reports `exitCode: null`, so it answered
-  // `UNAVAILABLE_IN_INSTALLED_VERSION` — *the installed CLI does not understand
-  // this sub-command* — about a run whose supervision AO had lost, in an
+  // Both readings it fell into were wrong, and in opposite directions, and both
+  // are reachable through `runCommand`.
+  //
+  // A lost boundary that reports no exit code — the usual shape — answered
+  // `UNAVAILABLE_IN_INSTALLED_VERSION`: *the installed CLI does not understand
+  // this sub-command*, about a run whose supervision AO had lost, in an
   // artefact whose own `facts.outcome` said `BOUNDARY_LOST` on the next line.
-  // The boundary's own vocabulary can carry an exit code alongside a loss
-  // (`launch-boundary.ts`: "Ownership semantics took the tree down. An exit
-  // code may even be present — it is still not a completion"), and a zero one
-  // with output would have been read here as `AVAILABLE` — a positive
-  // capability claim, feeding the auth preflight, from a run nothing
-  // supervised. That half was not reachable through `runCommand`, which nulls
-  // the exit code on every lost-boundary result; it is guarded anyway, because
-  // this function's job is to be right about the value it is handed rather than
-  // about the one its current caller happens to produce.
+  //
+  // And a loss can carry an exit code. `launch-boundary.ts` says so in as many
+  // words — "Ownership semantics took the tree down. An exit code may even be
+  // present — it is still not a completion" — and it survives the whole chain:
+  // `classifyOwnedCommand`'s `BOUNDARY_LOST` branch reports it, and
+  // `toCommandResultFields` carries it through, because a *declared* loss is
+  // not one of the contradictions that null it. An `OWNER_LOST` on a probe
+  // whose child had already published exit code 0 with output was therefore
+  // read here as `AVAILABLE`: a positive capability claim, feeding the auth
+  // preflight, from a run nothing supervised. That is the more dangerous half
+  // and it was the less obvious one.
   //
   // Inverted deliberately, so that a sixth `CommandOutcome` cannot repeat this.
   // A probe is evidence about an installed CLI only if the process ran to

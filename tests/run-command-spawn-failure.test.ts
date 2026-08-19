@@ -462,11 +462,14 @@ describe.runIf(IS_WINDOWS)('a boundary helper that cannot be started is containe
   const isBoundaryHelper = (file: string): boolean => /ao-launch\.exe$/i.test(file);
 
   beforeAll(() => {
-    // Without a built helper every case in this group passes while measuring
-    // nothing: `resolveBoundaryExecutable()` answers `{}`, the launch is refused
-    // before anything is spawned, and the result is the same `SPAWN_FAILED`
-    // with a `null` errno that these cases assert — for the wrong reason, and
-    // with the `throwFor` hook below intercepting no call at all.
+    // Without a built helper `resolveBoundaryExecutable()` answers `{}`, the
+    // launch is refused before anything is spawned, and four of the six cases
+    // here pass while measuring nothing: they assert the same `SPAWN_FAILED`
+    // with a `null` errno, for the wrong reason, with the `throwFor` hook below
+    // intercepting no call at all. The other two would fail — on `started` and
+    // on the spawn count — which is exactly the wrong way round for a diagnosis:
+    // a red run pointing at two unrelated assertions rather than at the missing
+    // artefact.
     //
     // `npm run verify` builds before it tests, so this is a guard against a
     // bare `vitest run` quietly reporting a green group, not an expected

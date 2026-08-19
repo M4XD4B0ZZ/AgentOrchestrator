@@ -1551,12 +1551,19 @@ export async function runOwnedCommand(
     }
 
     /**
-     * The boundary has ended, and by then the streams have too.
+     * The boundary has ended, and on every ending that can name a verdict the
+     * streams have too.
      *
-     * Not an assumption: `owned.ending` derives from the helper's `close`, and
-     * node emits `close` only once the process has ended *and* its stdio
-     * streams have closed — which, for a stream in flowing mode, is after every
-     * `data` it will ever emit. The sinks are therefore complete here.
+     * Not an assumption. `owned.ending` settles from `helperClosed`, which has
+     * two producers, and they differ exactly here. A `close` is emitted only
+     * once the process has ended *and* the stdio streams node counts have
+     * closed — which, for a stream in flowing mode, is after every `data` it
+     * will ever emit; so `CHILD_EXITED`, `TERMINATED_BY_CALLER` and
+     * `BOUNDARY_LOST` all arrive with the sinks complete. The other producer is
+     * an `'error'` event, which arrives as a `BOUNDARY_REFUSED` after
+     * establishment and can arrive with the helper still running — and that one
+     * is classified as a contradiction whose output is not evidence of
+     * anything, so there is nothing there for a wait to complete.
      *
      * An earlier version of this slice awaited the streams as well, on the
      * reasoning that a short-lived child could finish before its listeners were
@@ -1564,16 +1571,21 @@ export async function runOwnedCommand(
      * the streams over in the same tick as the spawn
      * (`OwnedProcessRequest.onHelperSpawned`) — so the wait repaired nothing,
      * and it was withdrawn rather than kept as a second mechanism with a
-     * measurement borrowed from the first. Measured before removing it: 120 of
-     * 120 fast `.cmd` runs kept their output without it.
+     * measurement borrowed from the first.
      *
-     * Nothing here waits on a pipe, which also settles a question that would
-     * otherwise need answering every time this code is read: one of
-     * `BOUNDARY_REFUSED`'s two producers is a helper `error` event — node emits
-     * one when a *kill* fails, not only when a spawn does — so it can arrive
-     * with the helper still running and still holding these handles. Waiting
-     * for a pipe held by the process you have just declared unaccounted for is
-     * exactly how a containment measurement deadlocks on its own survivors.
+     * Removing it was measured before it was done — 120 of 120 fast `.cmd` runs
+     * kept their output without it — and that measurement is a one-off, not a
+     * gate: it existed to justify a deletion, and there is nothing left to
+     * regress. What is pinned, and pins the defect the wait was mistaken for,
+     * is the short-lived-child case in `tests/v3-03-owned-runner.test.ts`.
+     *
+     * Nothing here waits on a pipe, and that is why the second producer above
+     * costs nothing to reason about. Node emits `'error'` on a child process
+     * when a *kill* fails, not only when a spawn does, so a helper that ignored
+     * its own termination arrives here alive and still holding these handles.
+     * Waiting for a pipe held by the process you have just declared unaccounted
+     * for is exactly how a containment measurement deadlocks on its own
+     * survivors.
      */
     const ending = settled;
     const classification = classifyOwnedCommand({ ending, termination, ownershipEstablished: true });
@@ -1641,9 +1653,10 @@ export async function runOwnedCommand(
     // a grace timer the `finally` below has already been past — an unref'd
     // five-second timer nothing will clear, holding this run's buffers.
     //
-    // It is reachable on the *successful* path only when the drain above hit
-    // its bound, which is exactly the case that reasoning does not cover, so
-    // the detach is not the redundancy it looks like.
+    // Defence rather than necessity on this path, and stated as such: the note
+    // above argues the sinks are already complete here, so no chunk should be
+    // in flight. The detach costs nothing, and the argument it is defending
+    // against being wrong is the one thing a comment cannot enforce.
     outStream.off('data', onStdout);
     errStream.off('data', onStderr);
     // Only now: the ending has been read, and the status file it was read from
