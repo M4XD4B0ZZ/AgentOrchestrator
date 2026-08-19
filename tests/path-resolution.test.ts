@@ -58,6 +58,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 const { resolveOnPath, runCommand } = await import('../src/doctor/exec.js');
+const { runOwnedCommand } = await import('../src/boundary/owned-command.js');
 
 const tempDirs: string[] = [];
 function makeTempDir(prefix = 'ao-path-'): string {
@@ -493,18 +494,41 @@ describe.runIf(IS_WINDOWS)('PATH/PATHEXT priority end-to-end, through runCommand
     writeFileSync(join(dir, 'tool.EXE'), 'not a real executable\n', 'utf8');
     writeFileSync(join(dir, 'tool.CMD'), '@echo off\r\necho FROM_CMD\r\n', 'utf8');
 
-    // A garbage, non-PE .exe can make Node's own `spawn()` throw synchronously
-    // (a pre-existing, unrelated `runCommand` quirk, not part of this fix) —
-    // tolerate either outcome. What matters here is *which* candidate was
-    // actually attempted: the .exe file directly, spawned once, never routed
-    // through cmd.exe at all.
+    // A garbage, non-PE .exe cannot be started — by node's own `spawn()` before
+    // V3 slice 3, by `CreateProcessW` inside the boundary since — so the
+    // outcome is tolerated either way. What matters here is *which* candidate
+    // was attempted: the .exe file directly, once, never routed through
+    // cmd.exe.
+    //
+    // Read from the launch plan rather than from the spawn recorder. On Windows
+    // node now starts one process per command, the boundary helper, and the
+    // candidate is named inside the request it is handed — so the recorder sees
+    // `ao-launch.exe` for every case and could no longer tell the two
+    // candidates apart. The seam delegates to the real adapter, so the launch
+    // is still a real one.
+    const launched: string[] = [];
     try {
-      await runCommand('tool', [], { env: { PATH: dir, PATHEXT: '.EXE;.CMD' }, timeoutMs: 10_000 });
+      await runCommand(
+        'tool',
+        [],
+        { env: { PATH: dir, PATHEXT: '.EXE;.CMD' }, timeoutMs: 10_000 },
+        {
+          runOwned: async (options) => {
+            launched.push(options.file);
+            return await runOwnedCommand(options);
+          },
+        },
+      );
     } catch {
       /* see above */
     }
+    expect(launched).toHaveLength(1);
+    expect(launched[0]?.toLowerCase()).toBe(canon(join(dir, 'tool.EXE')).toLowerCase());
+    // And the interpreter was never involved: a `.cmd` route would have made
+    // the plan name cmd.exe instead.
+    expect(launched[0]?.toLowerCase()).not.toContain('cmd.exe');
+    // One helper, one launch: no second attempt with anything else.
     expect(recorder.spawnCalls).toHaveLength(1);
-    expect(recorder.spawnCalls[0]?.toLowerCase()).toBe(canon(join(dir, 'tool.EXE')).toLowerCase());
   });
 
   it('same directory, PATHEXT .BAT;.COM: the BAT wins', async () => {

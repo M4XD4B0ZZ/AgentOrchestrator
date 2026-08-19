@@ -5,10 +5,11 @@
  * honest: it writes the request, starts the helper, waits for the boundary to
  * report ownership *or* refuse, and reports how the run ended. It owns no
  * timeout, no byte budget, no stdin vocabulary and no task state — those are
- * AO's, they stay in TypeScript, and they belong to the adapter slices that
- * come after this one. Nothing in `src/` calls this module yet, deliberately:
- * `runCommand`, the Claude writer and the verification runner are untouched by
- * slice 1.
+ * AO's, they stay in TypeScript, and they live in `./owned-command.ts`, which
+ * is this module's only caller. Since V3 slice 3 that chain is productive:
+ * `runCommand` reaches the adapter for every Windows command, so what happens
+ * here happens for every agent, verification and Git subprocess on this
+ * platform.
  *
  * ── The streams belong to the caller ───────────────────────────────────────
  *
@@ -71,10 +72,30 @@ const moduleDir = dirname(fileURLToPath(import.meta.url));
  * Resolved from this module's own location, so the answer is about the
  * artefact that is actually running rather than about a working directory: in
  * `dist/boundary/`, the boundary is `dist/native/ao-launch.exe`.
+ *
+ * The second candidate exists because V3 slice 3 made this path productive.
+ * `runCommand` now reaches the boundary for every Windows command, and the test
+ * suite runs the TypeScript in `src/` directly — where `../native/` is nothing
+ * and never will be, because the build script writes the helper to
+ * `dist/native/`. Without this the whole suite would run against a boundary
+ * that is permanently absent, and every case would pass while measuring a
+ * refusal. From `src/boundary/` the second candidate is the repository's own
+ * `dist/native/ao-launch.exe`; from `dist/boundary/` it is `dist/dist/native/`,
+ * which no build produces, so a shipped artefact is decided by the first
+ * candidate alone.
+ *
+ * It is a *location*, not a fallback: neither candidate is an ordinary spawn,
+ * and a run that finds neither is refused rather than downgraded.
  */
 export function resolveBoundaryExecutable(): { path?: string } {
-  const path = resolve(moduleDir, '..', 'native', 'ao-launch.exe');
-  return existsSync(path) ? { path } : {};
+  const candidates = [
+    resolve(moduleDir, '..', 'native', 'ao-launch.exe'),
+    resolve(moduleDir, '..', '..', 'dist', 'native', 'ao-launch.exe'),
+  ];
+  for (const path of candidates) {
+    if (existsSync(path)) return { path };
+  }
+  return {};
 }
 
 export interface OwnedProcessRequest {
@@ -105,6 +126,27 @@ export interface OwnedProcessRequest {
   /** Where request and status files live. A temporary directory by default. */
   readonly workDir?: string;
   readonly establishTimeoutMs?: number;
+  /**
+   * Called with the helper the moment it exists, before this function waits for
+   * anything.
+   *
+   * It exists because "the streams belong to the caller" is only true if the
+   * caller can *have* them in time, and until V3 slice 3 it could not: a caller
+   * receives them when this function returns, and this function returns after
+   * polling for a status. A short-lived child finishes inside that window —
+   * measured at 7 of 60 identical `.cmd` runs — and node, with nothing reading
+   * the pipe, ends and destroys the stream when it sees EOF. The buffered bytes
+   * go with it, and the caller then reports a clean completion with an empty
+   * `stdout`: a result indistinguishable from a command that printed nothing.
+   *
+   * The callback is therefore synchronous and runs in the same tick as the
+   * `spawn`, which is the only place a listener can be attached early enough to
+   * be a guarantee rather than a race. It is not a general extension point: it
+   * hands over the streams and nothing else, and a caller that uses it for
+   * anything more is taking on the lifetime of a helper this function may still
+   * refuse.
+   */
+  readonly onHelperSpawned?: (helper: ChildProcess) => void;
 }
 
 /** A running, owned process. */
@@ -278,6 +320,24 @@ export async function startOwnedProcess(
     // directory.
     removeOwnWorkDir();
     throw error;
+  }
+
+  // Before the first `await` in this function, and that ordering is the whole
+  // point: see `OwnedProcessRequest.onHelperSpawned`. A callback that throws is
+  // the caller's programming error and is left to propagate — but the helper
+  // exists by then, so it is killed first rather than abandoned holding a job.
+  if (request.onHelperSpawned !== undefined) {
+    try {
+      request.onHelperSpawned(helper);
+    } catch (error) {
+      try {
+        helper.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      removeOwnWorkDir();
+      throw error;
+    }
   }
 
   let callerRequestedTermination = false;

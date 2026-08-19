@@ -353,9 +353,20 @@ describe.runIf(IS_WINDOWS)('Windows .cmd shims', () => {
 
     expect(res.outcome).toBe('TIMED_OUT');
     expect(res.failureCode).toBe('TIMEOUT');
-    expect(res.processTreeKilled).toBe(true);
+    // `false`, and not because the tree survived — the assertion below is that
+    // it did not. The field reports whether a *best-effort* mechanism said it
+    // worked, and on Windows no such mechanism runs any more: the helper holds
+    // the only handle to a KILL_ON_JOB_CLOSE job and the kernel takes the tree
+    // when it dies. Re-pointing this boolean at that stronger fact would make
+    // every reader of it — all of whom were written against `taskkill`'s exit
+    // code — start reading a guarantee into a word that never carried one
+    // (V3 slice 3).
+    expect(res.processTreeKilled).toBe(false);
 
-    // Without taskkill /T this grandchild would survive the "timeout" forever.
+    // The property that actually matters, and it is now a kernel guarantee
+    // rather than a best-effort walk: this grandchild is a `node` process the
+    // `.cmd` shim started, two levels below the process AO created, and
+    // nothing here enumerated it or knew its pid.
     expect(await waitUntilDead(grandchildPid)).toBe(true);
   });
 

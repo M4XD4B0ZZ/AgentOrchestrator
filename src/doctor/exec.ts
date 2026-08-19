@@ -1,5 +1,34 @@
 /**
- * Safe, bounded child-process execution for diagnostics.
+ * Safe, bounded child-process execution — the single execution abstraction.
+ *
+ * ── Two platforms, one contract (V3 slice 3) ───────────────────────────────
+ *
+ * On **Windows** a command is created behind the native launch boundary:
+ * `runCommand` resolves and plans the launch exactly as it always did, and then
+ * hands that plan to `../boundary/owned-command.js`, which starts the target
+ * inside a strict `KILL_ON_JOB_CLOSE` Job Object the helper owns. Termination —
+ * for a timeout, for a byte budget, for anything — is a single kill of that
+ * helper, and the kernel takes the tree. There is no `taskkill` on this path,
+ * no descendant walk, no list of pids anyone has to keep correct, and **no
+ * ordinary-spawn fallback**: a boundary that cannot be established or retained
+ * is reported as itself (`SPAWN_FAILED`, `BOUNDARY_LOST`) and nothing runs
+ * unowned. That is the ADR's fail-closed requirement
+ * (`docs/decisions/2026-08-19-adr-windows-launch-boundary.md`), and softening it
+ * would turn a guarantee into a feature while every caller kept believing the
+ * guarantee held.
+ *
+ * On **POSIX** the historical path is unchanged and deliberately so: the ADR
+ * decides Windows containment and explicitly decides nothing about POSIX. The
+ * child is spawned detached, terminated through its process group, and the
+ * bounded confirmation below still applies.
+ *
+ * What is *not* platform-dependent is the observable contract. PATH resolution,
+ * the `.cmd` codec, argument validation, byte budgets, the stdin vocabulary,
+ * timeouts, exit-code fidelity and the fixed failure codes are decided here,
+ * once, before either path is taken — so a caller reads the same
+ * {@link CommandResult} on both. The one member that exists for the owned path
+ * alone is `BOUNDARY_LOST`, and that is because the fact it names cannot happen
+ * on the other one.
  *
  * Guarantees:
  *  - Every argument is validated against a conservative allow-list before a
@@ -20,11 +49,10 @@
  *  - Every process gets a timeout **and** a hard byte budget per stream. Both
  *    are enforced while the output streams, not after the process ends, so a
  *    runaway child can neither hang the doctor nor exhaust its memory.
- *  - Terminating a child attempts to terminate its whole process tree,
- *    best-effort. On Windows a `.cmd` shim runs under `cmd.exe`, and killing
- *    only that shim leaves the real program running forever; `taskkill /T /F`
- *    with a validated numeric PID is used instead, falling back to a direct
- *    kill of the immediate child if that cannot be established or fails.
+ *  - Terminating a child on **POSIX** attempts to terminate its whole process
+ *    tree, best-effort, through the process group the detached child leads.
+ *    (On Windows termination is the boundary's, and the paragraph below
+ *    describes a mechanism that path does not use.)
  *    After that best-effort termination attempt, the module waits — with a
  *    bound — for the immediate child to be observably gone, and reports a
  *    distinct failure code if that is not confirmed in time. "Observably gone"
@@ -33,15 +61,14 @@
  *    stdio handles, so a descendant alone can hold it back indefinitely, while
  *    `exit` is about the one process this module started. The confirmation is
  *    therefore a statement about the immediate child only; it says nothing
- *    about whether any descendant has exited. That narrowness is the final
- *    contract, not a gap: verified, enumerated process-tree termination would
- *    need kernel-enforced ownership (a Windows Job Object), which is a separate
- *    architecture and deliberately not part of this module. Measured on the
- *    installed runtime, a `taskkill /T` pass can miss a descendant created
- *    while it walks its snapshot — the descendant is then orphaned holding the
- *    pipes — so binding the failure code to `close` alone made
- *    PROCESS_TREE_KILL_FAILED report a descendant condition this module
- *    explicitly does not verify.
+ *    about whether any descendant has exited. That narrowness is the POSIX
+ *    contract, not a gap: verified, enumerated process-tree termination needs
+ *    kernel-enforced ownership, which on Windows is now the launch boundary
+ *    above and on POSIX is out of scope of the ADR that built it. A descendant
+ *    that has left the process group is not demonstrably reached by the signal
+ *    and is then orphaned holding the pipes, so binding the failure code to
+ *    `close` alone made PROCESS_TREE_KILL_FAILED report a descendant condition
+ *    this path explicitly does not verify.
  *  - Failures are *data*, never exceptions, and every failure carries a fixed
  *    status code rather than an exception message: a missing program, a spawn
  *    error, a timeout, an exceeded output limit and a failed kill are all
@@ -56,16 +83,18 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { realpathSync, statSync } from 'node:fs';
 import { delimiter as pathDelimiter, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
+import {
+  MAX_TIMER_MS,
+  runOwnedCommand,
+  type OwnedCommandFailureCode,
+  type OwnedCommandOutcome,
+  type OwnedCommandResult,
+} from '../boundary/owned-command.js';
 import { safeErrnoCode } from '../core/safe-error.js';
 import {
   encodeWindowsBatchArgument,
   UnsupportedWindowsBatchArgumentError,
 } from './internal/windows-batch-command.js';
-import {
-  superviseWindowsTreeKill,
-  type WindowsTreeKillDependencies,
-  type WindowsTreeKillSupervisor,
-} from './internal/windows-process-tree-termination.js';
 import { windowsSystemTool } from './internal/windows-system-tools.js';
 
 /** Default per-command wall-clock budget. */
@@ -123,8 +152,39 @@ export type CommandOutcome =
   | 'COMPLETED'
   | 'TIMED_OUT'
   | 'OUTPUT_LIMIT_EXCEEDED'
+  /**
+   * Nothing was found to run.
+   *
+   * Kept, deliberately, although the ADR's five-member list omits it. It is not
+   * a refinement of `SPAWN_FAILED` and never was: "there is no such program on
+   * this machine" is the answer a capability probe exists to get, and every
+   * caller that distinguishes "not installed" from "installed and broken" reads
+   * this. Merging it into `SPAWN_FAILED` to match a shorter list would delete
+   * an answer, not a synonym.
+   */
   | 'NOT_FOUND'
-  | 'SPAWN_FAILED';
+  | 'SPAWN_FAILED'
+  /**
+   * The ownership and supervision boundary was lost before a regular completion
+   * of the managed process could be observed (Windows only).
+   *
+   * The work product is not trustworthy and must not be continued as a success.
+   * It is deliberately **not** any of its neighbours:
+   *
+   *  - not `COMPLETED`, which is the defect it exists to prevent. Spike 2 killed
+   *    the helper mid-run and got a run that looked exactly like a clean
+   *    completion — ownership had been reported, the pipes closed, and no child
+   *    exit code ever arrived;
+   *  - not `SPAWN_FAILED`, which says a launch never happened. Here one did;
+   *  - not `TIMED_OUT`, which says a policy here ended the run and the tree went
+   *    down with it. A termination whose completion was never confirmed is the
+   *    opposite claim;
+   *  - not `PROCESS_TREE_KILL_FAILED` (a failure *code*, not an outcome), which
+   *    is the POSIX path's statement about one immediate child.
+   *
+   * Unreachable on POSIX, where there is no boundary to lose.
+   */
+  | 'BOUNDARY_LOST';
 
 /**
  * Fixed, safe failure codes. These replace the free-text `spawnError` that used
@@ -136,7 +196,17 @@ export type CommandFailureCode =
   | 'TIMEOUT'
   | 'OUTPUT_LIMIT_STDOUT'
   | 'OUTPUT_LIMIT_STDERR'
-  | 'PROCESS_TREE_KILL_FAILED';
+  /**
+   * POSIX only. The immediate child was not observably gone within the grace
+   * window after a best-effort process-group termination.
+   *
+   * Unreachable on the owned Windows path, which has no best-effort mechanism
+   * to report on: an unconfirmed termination there is a lost boundary, and is
+   * reported as {@link CommandOutcome} `BOUNDARY_LOST` with `BOUNDARY_LOST`.
+   */
+  | 'PROCESS_TREE_KILL_FAILED'
+  /** Windows only. Every way the boundary can be lost, collapsed into one code. */
+  | 'BOUNDARY_LOST';
 
 /**
  * What became of the payload on {@link RunOptions.stdin}.
@@ -154,9 +224,24 @@ export type CommandFailureCode =
 export type StdinDelivery =
   /** No payload was configured; the child was given the historical `'ignore'`. */
   | 'NOT_REQUESTED'
-  /** The whole payload was written and the stream closed, with no error. */
+  /**
+   * The whole payload was handed over, with no error.
+   *
+   * On POSIX: written to the child's own stdin and closed. On the owned Windows
+   * path it additionally requires the boundary's own report that it forwarded
+   * the whole stream and let the child see EOF — because there the pipe this
+   * process writes into belongs to the *helper*, not to the child, so this
+   * side's success is only half the evidence.
+   */
   | 'DELIVERED'
-  /** Node reported a failure — `EPIPE`, `EOF`, a destroyed stream — while handing it over. */
+  /**
+   * Non-delivery that was actually observed.
+   *
+   * On POSIX: node reported a failure — `EPIPE`, `EOF`, a destroyed stream —
+   * while handing the payload to the child. On the owned Windows path: the
+   * boundary reported a broken pipe or a part-way read of the payload, or
+   * nothing was handed over at all.
+   */
   | 'FAILED'
   /**
    * A payload was configured and the run settled before its fate was known.
@@ -165,6 +250,19 @@ export type StdinDelivery =
    * distinct from `FAILED` because it is a different fact, and distinct from
    * `DELIVERED` because reporting a delivery that was never confirmed is the
    * defect this vocabulary exists to prevent.
+   *
+   * One case is reported here on the owned Windows path and as `FAILED` on
+   * POSIX, deliberately and with no intention of reconciling it: a *local*
+   * write that fails beside a child that exits cleanly. On POSIX that pipe is
+   * the child's, so its breaking is evidence about the child. Behind the
+   * boundary it is the helper's, so its breaking says the helper died — by this
+   * side's hand or by someone else's — and says nothing about what the child
+   * received, since the last byte may have gone through microseconds earlier.
+   * The two words are not the same claim, and V3 slice 3 resolved this by
+   * keeping the weaker one where the evidence is weaker rather than by
+   * restoring a verdict nobody observed. Both are non-delivery, and every
+   * consumer in this repository treats them identically
+   * (`agent/agent-command.ts` folds both into `UNAVAILABLE`).
    */
   | 'UNCONFIRMED';
 
@@ -173,10 +271,27 @@ export interface CommandResult {
   readonly display: string;
   readonly executable: string;
   readonly args: readonly string[];
-  /** Whether the OS managed to start the process at all. */
+  /**
+   * Whether the OS managed to start the process at all.
+   *
+   * On the owned Windows path this is answered conservatively, because the
+   * boundary can refuse a launch whose target had already begun executing: it
+   * is `false` only where the boundary proved the target never ran, and `true`
+   * for `'YES'` and for `'UNKNOWN'` alike. Reading a refusal as "nothing
+   * happened" is the one inference the boundary's result does not support.
+   */
   readonly started: boolean;
   readonly outcome: CommandOutcome;
   readonly exitCode: number | null;
+  /**
+   * The signal that killed the child, when one did.
+   *
+   * Always `null` on the owned Windows path: Windows has no signals, the
+   * boundary reports a child's own exit code, and every termination there goes
+   * through the job object rather than through a signal delivered to a process
+   * this module holds. It is not "no signal was seen" standing in for "we did
+   * not look" — there is no such channel to look at.
+   */
   readonly signal: NodeJS.Signals | null;
   readonly stdout: string;
   readonly stderr: string;
@@ -185,7 +300,14 @@ export interface CommandResult {
   readonly durationMs: number;
   /** Fixed code for the failure, or `null` when the command completed. */
   readonly failureCode: CommandFailureCode | null;
-  /** Allow-listed `errno` identifier (`ENOENT`, `EACCES`, …), never a message. */
+  /**
+   * Allow-listed `errno` identifier (`ENOENT`, `EACCES`, …), never a message.
+   *
+   * Always `null` on the owned Windows path. There is no `errno` there to
+   * report: a launch is refused by the boundary with a fixed boundary failure
+   * code of its own, not by a libuv error on a `spawn` this module made. The
+   * field stays `null` rather than being filled with a translated guess.
+   */
   readonly errnoCode: string | null;
   /** Whether the stream hit its byte budget and was cut off. */
   readonly stdoutTruncated: boolean;
@@ -198,24 +320,81 @@ export interface CommandResult {
    */
   readonly stdinDelivery: StdinDelivery;
   /**
-   * Whether the best-effort termination attempt reported success — the
-   * supervised `taskkill /T /F` on Windows (see
-   * {@link windowsTreeKillDependencies}), the process group on POSIX (see
-   * {@link killPosixProcessGroup}). Unchanged in meaning: not kernel ownership
-   * of the tree, and not a verified absence of every descendant process.
+   * Whether the **best-effort** termination attempt reported success — the
+   * process group on POSIX (see {@link killPosixProcessGroup}).
+   *
+   * Its meaning is unchanged and stays narrow: a mechanism said it worked. It
+   * is not kernel ownership of the tree, and not a verified absence of every
+   * descendant process.
+   *
+   * **Always `false` on the owned Windows path**, and that is the honest value
+   * rather than a downgrade. The field asks whether a best-effort mechanism
+   * reported success; behind the boundary no such mechanism runs, because the
+   * kernel holds the job and takes the tree when the helper dies. Re-pointing
+   * this boolean at that stronger fact would have been the lie: every caller
+   * and comment that has ever read it — and every one written before V3 — reads
+   * `true` as "the best-effort attempt returned 0", which is a claim about
+   * `taskkill`'s exit code and specifically not a claim that the tree is empty.
+   * Whether owned containment held is reported where it is actually decided:
+   * on `outcome`, as `BOUNDARY_LOST`.
    */
   readonly processTreeKilled: boolean;
 }
 
 export interface RunOptions {
+  /**
+   * The child's whole environment. Nothing is inherited.
+   *
+   * Required, and it must express at least one variable. An environment with
+   * nothing in it is refused on the owned Windows path rather than approximated
+   * — the boundary's wire format cannot distinguish "no variables" from "no
+   * environment given", and the helper answers the second by letting the child
+   * inherit AO's own. See {@link runCommand}.
+   */
   readonly env: NodeJS.ProcessEnv;
+  /**
+   * Wall-clock budget. Defaults to {@link DEFAULT_COMMAND_TIMEOUT_MS}.
+   *
+   * Validated rather than handed to `setTimeout` raw, and identically on both
+   * platforms (V3 slice 3). A value that is not a non-negative number — `NaN`,
+   * a negative, `null`, a string from an untyped caller — is not a budget, so
+   * the documented default is used instead of node's silent coercion of all of
+   * them to one millisecond, which made an absent configuration value present
+   * itself as an instant timeout.
+   *
+   * `Infinity` is the one over-large value a caller can plausibly mean, and it
+   * means "effectively never": it clamps to the largest delay a timer can
+   * express (~24.8 days). Before slice 3 the diagnostics path let node turn it
+   * into **1 ms** while the owned path clamped it — the exact opposite
+   * behaviours from the same argument, decided by which platform ran. The clamp
+   * is now the contract on both.
+   */
   readonly timeoutMs?: number;
   readonly cwd?: string;
-  /** Hard byte budget for stdout. Defaults to {@link DEFAULT_MAX_OUTPUT_BYTES}. */
+  /**
+   * Hard byte budget for stdout. Defaults to {@link DEFAULT_MAX_OUTPUT_BYTES}.
+   *
+   * Validated like {@link timeoutMs}, and for the same reason: `NaN` used to
+   * cut every stream at its first byte and report an output-limit failure over
+   * empty output. `Infinity` is honoured as written — a caller disabling the
+   * bound — and is *not* clamped, because a timer's ceiling has no business
+   * bounding a buffer.
+   */
   readonly maxStdoutBytes?: number;
   /** Hard byte budget for stderr. Defaults to {@link DEFAULT_MAX_OUTPUT_BYTES}. */
   readonly maxStderrBytes?: number;
-  /** How long to wait for the immediate child to be observably gone after a termination attempt. */
+  /**
+   * How long termination gets before it is reported as unconfirmed.
+   *
+   * POSIX: how long to wait for the immediate child to be observably gone after
+   * a best-effort process-group kill. Windows: how long the boundary is given
+   * to end after it has been asked to. Same option, same default, and in both
+   * cases running out is reported rather than waited through.
+   *
+   * Unlike {@link timeoutMs}, `Infinity` falls back to the default here. An
+   * unbounded grace is not a longer grace — it is the absence of the guarantee
+   * the grace exists to give.
+   */
   readonly killGraceMs?: number;
   /**
    * Text written to the child's standard input, which is then closed.
@@ -551,8 +730,14 @@ class BoundedSink {
 }
 
 /**
- * The POSIX best-effort termination attempt. Unchanged by AO-008-S2, which is
- * a Windows slice.
+ * The POSIX best-effort termination attempt — the only one left in this module.
+ *
+ * V3 slice 3 removed the Windows half. It was the supervised `taskkill /T /F`
+ * in `internal/windows-process-tree-termination.ts`, and it is gone from this
+ * path because it may no longer decide a Windows process's lifetime: measured
+ * on 2026-08-18, it returned exit code 0 in ten of ten rounds while leaving 38
+ * orphaned descendants alive. Windows lifetime is the boundary's, and the
+ * supervisor is no longer wired to anything productive.
  *
  * The child is spawned detached, so it leads its own process group.
  * `process.kill(-pid, 'SIGKILL')` is a best-effort attempt to signal that
@@ -580,52 +765,6 @@ function killPosixProcessGroup(child: ChildProcess): boolean {
   }
 }
 
-/**
- * The productive wiring of the Windows tree-kill supervisor
- * (`internal/windows-process-tree-termination.ts`).
- *
- * On Windows, `child.kill()` targets only the immediate process. For a `.cmd`
- * shim that is `cmd.exe`, and the actual tool keeps running — which is exactly
- * how a "timed out" diagnostic can leave a live process behind. `taskkill /T
- * /F` walks the tree instead. The root PID is the immediate child's and is
- * validated as a positive safe integer before it is stringified, and
- * `taskkill.exe` comes from the trusted, environment-independent resolver
- * (AO-FOUNDATION-REM-003B) — never from `PATH`, `SystemRoot` or `windir` — so
- * neither can shadow or redirect it.
- *
- * The meaning of a reported success is unchanged and still narrow: the
- * best-effort mechanism said it worked. It is not kernel ownership of the
- * tree, not a verified absence of descendants, and not an enumerated empty
- * tree — nothing here enumerates anything.
- *
- * Every timer this creates is unref'd, exactly as the rest of `runCommand`'s
- * are: a diagnostic must never hold the process open on its own.
- */
-function windowsTreeKillDependencies(child: ChildProcess): WindowsTreeKillDependencies {
-  return {
-    resolveToolPath: () => windowsSystemTool('taskkill.exe'),
-    spawnTool: (file, args, options) => spawn(file, [...args], options),
-    killImmediateChild: () => {
-      // The one immediate-child fallback. It reaches the immediate child only,
-      // never a descendant, so it is deliberately *not* reported as a
-      // successful tree kill.
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* a failing kill is bounded by the caller's grace window, not reported */
-      }
-    },
-    setTimer: (callback, ms) => {
-      const handle = setTimeout(callback, ms);
-      handle.unref?.();
-      return handle;
-    },
-    clearTimer: (handle) => {
-      clearTimeout(handle as NodeJS.Timeout);
-    },
-  };
-}
-
 type Termination = 'NONE' | 'TIMEOUT' | 'LIMIT_STDOUT' | 'LIMIT_STDERR';
 
 const TERMINATION_OUTCOME: Readonly<Record<Termination, CommandOutcome>> = Object.freeze({
@@ -642,24 +781,288 @@ const TERMINATION_FAILURE: Readonly<Record<Termination, CommandFailureCode | nul
   LIMIT_STDERR: 'OUTPUT_LIMIT_STDERR',
 });
 
+/* ── numeric options, validated once, for both platforms ─────────────────── */
+
+/**
+ * A caller-supplied number, or the documented default for one this module
+ * cannot use.
+ *
+ * The type check is not redundant with the compiler, and this is not a
+ * defensive flourish: `runCommand` is reached from JavaScript through the dist
+ * artefact and its harnesses, and a `NaN` is what a missing configuration value
+ * becomes after `parseInt`. Every branch here was a measured misbehaviour of
+ * the unvalidated version — `NaN` and a negative both reaching `setTimeout` as
+ * one millisecond, `NaN` reaching a byte budget and cutting every stream at
+ * zero while reporting an output-limit failure over empty output.
+ *
+ * `Infinity` is deliberately **not** in that class. On a byte budget it is a
+ * caller saying "no bound", which is a thing this module can do, and folding it
+ * into the default would not merely cap the stream — it would report
+ * `OUTPUT_LIMIT_EXCEEDED` for a limit the caller had explicitly disabled.
+ *
+ * Deliberately the same predicate as `../boundary/owned-command.js` applies to
+ * the same options, so a value that survives here survives there unchanged and
+ * the two paths cannot disagree about what a caller asked for.
+ */
+function usableNumber(value: number | undefined, fallback: number): number {
+  return typeof value !== 'number' || Number.isNaN(value) || value < 0 ? fallback : value;
+}
+
+/**
+ * The same, for a delay.
+ *
+ * Delays carry one bound budgets must not: node turns a timeout above the
+ * 32-bit maximum into 1 ms, so an unbounded delay has to become the largest one
+ * a timer can express, or "effectively never" arrives immediately. A byte
+ * budget has no such limit.
+ */
+function usableDelay(value: number | undefined, fallback: number): number {
+  return Math.min(usableNumber(value, fallback), MAX_TIMER_MS);
+}
+
+/**
+ * And the same again for the one delay that may not be unbounded.
+ *
+ * The grace exists to bound a termination that did not take, so an unbounded
+ * one is not a longer grace — it is the absence of the guarantee. `Infinity` on
+ * a timeout is a caller saying "effectively never", which is legitimate; here
+ * the same value would mean the fail-closed report never arrives at all.
+ */
+function usableGrace(value: number | undefined, fallback: number): number {
+  return value === undefined || !Number.isFinite(value) || value < 0
+    ? fallback
+    : Math.min(value, MAX_TIMER_MS);
+}
+
+/* ── the owned Windows path ──────────────────────────────────────────────── */
+
+/**
+ * The eleven variables libuv puts into every Windows child whatever block is
+ * handed to `spawn`, back-filled out of *this* process's environment.
+ *
+ * They are copied here because the owned path does not go through libuv, and
+ * `runCommand`'s environment contract is not a slice-3 decision. The helper
+ * hands `CreateProcessW` exactly the block it is given, so without this a child
+ * receives literally `PATH` and `PATHEXT` and nothing else — and that is not a
+ * tightening, it is a different contract from the one every caller here was
+ * built and measured against. Measured: `node` itself will not start, exiting
+ * 134 with an empty stdout, which turns every verification command and every
+ * `node`-based probe into an infrastructure failure.
+ *
+ * The list is `src/auth/env-guard.ts`'s, which documents it as measured
+ * (`tests/probe-env-policy.test.ts`) rather than assumed, and states the
+ * consequence this reproduces: "withheld by policy" means "not supplied by us"
+ * rather than "unreachable by the child" for exactly these names. Reproducing
+ * it keeps that sentence true; dropping it would have made the same policy mean
+ * two different things on two paths of one function.
+ *
+ * It is deliberately **not** an opportunity to narrow the set. Doing that is a
+ * change to what an agent's environment contains, which is the env guard's
+ * decision and a separate one — the ADR is explicit that a job object bounds
+ * process lifetime and nothing else, and is "no argument for widening or
+ * narrowing an agent's authority".
+ */
+const WINDOWS_PLATFORM_BACKFILL = Object.freeze([
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'LOGONSERVER',
+  'PATH',
+  'SYSTEMDRIVE',
+  'SYSTEMROOT',
+  'TEMP',
+  'USERDOMAIN',
+  'USERNAME',
+  'USERPROFILE',
+  'WINDIR',
+] as const);
+
+/**
+ * `env`, plus whatever of {@link WINDOWS_PLATFORM_BACKFILL} it does not already
+ * supply.
+ *
+ * A name the caller supplied always wins, and the comparison is
+ * case-insensitive because a Windows environment block is: a caller passing
+ * `Path` must not end up with a second, back-filled `PATH` beside it, which is
+ * a block `CreateProcessW` accepts and whose winner is not this module's to
+ * decide.
+ */
+function withWindowsPlatformBackfill(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const supplied = new Set<string>();
+  for (const [name, value] of Object.entries(env)) {
+    if (typeof value === 'string') supplied.add(name.toUpperCase());
+  }
+
+  const merged: NodeJS.ProcessEnv = { ...env };
+  for (const name of WINDOWS_PLATFORM_BACKFILL) {
+    if (supplied.has(name)) continue;
+    // `process.env` is case-insensitive on Windows, so this finds `SystemRoot`
+    // for `SYSTEMROOT` without this module having to know the OS's spelling.
+    const value = process.env[name];
+    if (typeof value === 'string') merged[name] = value;
+  }
+  return merged;
+}
+
+/**
+ * How a launch obtains an owned process. Substituted only by tests.
+ *
+ * The seam exists because the endings that matter most here cannot be provoked
+ * from a real command: a boundary that dies mid-run, a termination that is
+ * never confirmed, an ending that contradicts itself. It proves the
+ * *classification* and nothing more — that a real Windows command reaches this
+ * path at all, and that its tree really dies, are separate claims, measured by
+ * the real-process cases and by `tests/dist-artifact/`.
+ */
+export interface RunDependencies {
+  readonly runOwned?: typeof runOwnedCommand;
+}
+
+/**
+ * The owned adapter's outcome, in `runCommand`'s vocabulary.
+ *
+ * Total over {@link OwnedCommandOutcome} by construction, so a sixth member
+ * added to that union stops this build rather than falling through to a default.
+ * Completeness is not correctness, though, and this table is exhaustively
+ * asserted value-by-value in `tests/v3-03-owned-runner.test.ts` — a `satisfies`
+ * clause would accept `COMPLETED` in every row.
+ */
+const OWNED_OUTCOME: Readonly<Record<OwnedCommandOutcome, CommandOutcome>> = Object.freeze({
+  COMPLETED: 'COMPLETED',
+  TIMED_OUT: 'TIMED_OUT',
+  OUTPUT_LIMIT_EXCEEDED: 'OUTPUT_LIMIT_EXCEEDED',
+  // Nothing was spawned by this process, and the boundary refused to create
+  // anything owned. `SPAWN_FAILED` is what this module has always called that.
+  LAUNCH_REFUSED: 'SPAWN_FAILED',
+  BOUNDARY_LOST: 'BOUNDARY_LOST',
+  // Unreachable: `runCommand` has no cancellation and passes no `AbortSignal`,
+  // so nothing can ask the adapter to terminate on a caller's behalf. A run
+  // that comes back cancelled anyway is a boundary this side cannot account
+  // for, which is exactly what `BOUNDARY_LOST` means — and is emphatically not
+  // a completion.
+  TERMINATED_BY_CALLER: 'BOUNDARY_LOST',
+});
+
+/**
+ * The owned adapter's failure code, in `runCommand`'s vocabulary.
+ *
+ * Four of the adapter's nine codes are ways of losing the boundary, and they
+ * collapse into one here deliberately. `CommandResult` gains the minimum needed
+ * to state the fact the ADR requires — that the boundary was lost — and not a
+ * second alphabet describing how. The distinction is preserved where it is
+ * decided, on `OwnedCommandResult`.
+ */
+const OWNED_FAILURE: Readonly<Record<OwnedCommandFailureCode, CommandFailureCode>> = Object.freeze({
+  TIMEOUT: 'TIMEOUT',
+  OUTPUT_LIMIT_STDOUT: 'OUTPUT_LIMIT_STDOUT',
+  OUTPUT_LIMIT_STDERR: 'OUTPUT_LIMIT_STDERR',
+  LAUNCH_REFUSED: 'SPAWN_FAILED',
+  BOUNDARY_LOST: 'BOUNDARY_LOST',
+  BOUNDARY_TERMINATION_UNCONFIRMED: 'BOUNDARY_LOST',
+  BOUNDARY_STREAMS_UNAVAILABLE: 'BOUNDARY_LOST',
+  ENDING_INCONSISTENT: 'BOUNDARY_LOST',
+  TERMINATED_BY_CALLER: 'BOUNDARY_LOST',
+});
+
+/**
+ * Translates one owned run into this module's result shape.
+ *
+ * Exported for tests, and total: every input it cannot read as a completion
+ * becomes a lost boundary rather than the nearest plausible success. That last
+ * clause is the whole point of the function — `COMPLETED` is the one value a
+ * caller acts on as evidence, and three independent things must hold before it
+ * is stated here.
+ */
+export function toCommandResultFields(
+  owned: OwnedCommandResult,
+): Omit<CommandResult, 'display' | 'executable' | 'args' | 'startedAt' | 'finishedAt' | 'durationMs'> {
+  const mappedOutcome = OWNED_OUTCOME[owned.outcome];
+  const mappedFailure = owned.failureCode === null ? null : OWNED_FAILURE[owned.failureCode];
+
+  /**
+   * The last gate before a caller reads this as success.
+   *
+   * `runOwnedCommand` already refuses each of these, and that is the argument
+   * for stating them again rather than against it: this is where a completion
+   * crosses out of the module whose enumerated tests cover it and into the one
+   * every agent, verification and Git seam reads. An outcome this build does
+   * not declare indexes the tables above to `undefined`, which is neither a
+   * completion nor a declared failure and throws nothing — fail-*open* in the
+   * one translation that must fail closed.
+   */
+  const completed =
+    mappedOutcome === 'COMPLETED' &&
+    mappedFailure === null &&
+    owned.established === true &&
+    owned.exitCode !== null;
+  const declared = mappedOutcome !== undefined && (owned.failureCode === null || mappedFailure !== undefined);
+
+  if (!declared || (mappedOutcome === 'COMPLETED' && !completed)) {
+    return {
+      // A boundary this side cannot account for may still have run the target.
+      started: true,
+      outcome: 'BOUNDARY_LOST',
+      exitCode: null,
+      signal: null,
+      stdout: owned.stdout,
+      stderr: owned.stderr,
+      failureCode: 'BOUNDARY_LOST',
+      errnoCode: null,
+      stdoutTruncated: owned.stdoutTruncated,
+      stderrTruncated: owned.stderrTruncated,
+      stdinDelivery: owned.stdinDelivery,
+      processTreeKilled: false,
+    };
+  }
+
+  return {
+    // `established` is the strong answer and `targetStarted` the conservative
+    // one. A refusal whose target had already begun executing — possible in
+    // `JOBLIST` mode, where the target runs from its first instruction — is
+    // still a process that started, and `'UNKNOWN'` counts as `'YES'` here
+    // exactly as the ADR requires.
+    started: owned.established || owned.targetStarted !== 'NO',
+    outcome: mappedOutcome,
+    exitCode: owned.exitCode,
+    // Windows has no signals, and the boundary reports the child's own exit
+    // code. There is no channel to read one from.
+    signal: null,
+    stdout: owned.stdout,
+    stderr: owned.stderr,
+    failureCode: mappedFailure,
+    // No `spawn` was made by this process, so there is no libuv errno.
+    errnoCode: null,
+    stdoutTruncated: owned.stdoutTruncated,
+    stderrTruncated: owned.stderrTruncated,
+    stdinDelivery: owned.stdinDelivery,
+    // No best-effort mechanism ran. See `CommandResult.processTreeKilled`.
+    processTreeKilled: false,
+  };
+}
+
 /**
  * Runs one diagnostic command. Never throws for a failing command — a non-zero
  * exit code, a missing binary, a timeout and an oversized output are all
  * *data*. The only thrown error is {@link UnsafeArgumentError}, which is a
  * programming error in this repository, not a runtime condition.
+ *
+ * On Windows the command is created behind the native launch boundary and the
+ * kernel owns its tree; on POSIX it is spawned here. Resolution, planning,
+ * validation and every number above are decided before that fork, so the fork
+ * changes which mechanism runs the command and not what the caller is promised.
  */
 export async function runCommand(
   command: string,
   args: readonly string[],
   options: RunOptions,
+  dependencies: RunDependencies = {},
 ): Promise<CommandResult> {
   assertSafeArgs(args);
 
   const display = [command, ...args].join(' ');
-  const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
-  const maxStdoutBytes = options.maxStdoutBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-  const maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-  const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+  const timeoutMs = usableDelay(options.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS);
+  const maxStdoutBytes = usableNumber(options.maxStdoutBytes, DEFAULT_MAX_OUTPUT_BYTES);
+  const maxStderrBytes = usableNumber(options.maxStderrBytes, DEFAULT_MAX_OUTPUT_BYTES);
+  const killGraceMs = usableGrace(options.killGraceMs, DEFAULT_KILL_GRACE_MS);
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
 
@@ -721,6 +1124,44 @@ export async function runCommand(
     });
   }
 
+  if (process.platform === 'win32') {
+    /**
+     * The Windows target is created behind the boundary, and only there.
+     *
+     * There is no `else` for a boundary that is unavailable and no second
+     * attempt with an ordinary `spawn`: `runOwnedCommand` reports a refusal,
+     * this maps it to `SPAWN_FAILED`, and nothing runs unowned. That is the
+     * ADR's fail-closed requirement and it is the reason this branch returns
+     * unconditionally rather than falling through to the code below.
+     *
+     * Everything the plan decided is carried across verbatim — the canonical
+     * executable, the argument vector, and `verbatim` for the trusted
+     * `cmd.exe /d /s /c` route, whose command line the helper rebuilds with the
+     * same rule node applies for `windowsVerbatimArguments`. Nothing is
+     * re-resolved on the other side: `runOwnedCommand` resolves nothing, by
+     * contract, so the file this validated is the file that runs.
+     */
+    const runOwned = dependencies.runOwned ?? runOwnedCommand;
+    const owned = await runOwned({
+      file: plan.file,
+      args: plan.args,
+      verbatim: plan.verbatim,
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      // The block libuv would have produced for the same call, so that moving
+      // the mechanism does not move the environment. See the note above.
+      env: withWindowsPlatformBackfill(options.env),
+      timeoutMs,
+      maxStdoutBytes,
+      maxStderrBytes,
+      // The same option under the name that layer gives it. Both mean "how long
+      // termination gets before it is reported as unconfirmed".
+      terminationGraceMs: killGraceMs,
+      ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+    });
+    return finish(toCommandResultFields(owned));
+  }
+
+  // POSIX only from here: the Windows branch above returns unconditionally.
   return await new Promise<CommandResult>((resolvePromise) => {
     let child: ChildProcess;
     try {
@@ -728,15 +1169,12 @@ export async function runCommand(
         env: options.env,
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         shell: false,
-        windowsHide: true,
-        windowsVerbatimArguments: plan.verbatim,
-        // On POSIX this starts the child as leader of its own process group;
+        // This starts the child as leader of its own process group;
         // killPosixProcessGroup later makes a best-effort attempt to signal that
         // group via the negative PID. This is not an enumeration of descendants, and
         // processes outside the group or session are not guaranteed to be
         // reached — that is the extent of the guarantee, by design.
-        // Windows uses taskkill /T instead.
-        detached: process.platform !== 'win32',
+        detached: true,
         // A pipe only when there is something to write. With no payload the
         // descriptor stays `'ignore'`, which is what every diagnostic probe
         // has always been given.
@@ -829,12 +1267,6 @@ export async function runCommand(
     let killIssued = false;
     let settled = false;
     let graceTimer: NodeJS.Timeout | undefined;
-    /** The single tree-kill attempt, while its outcome is still open. */
-    let treeKill: WindowsTreeKillSupervisor | undefined;
-    let treeKillPending = false;
-    /** A `close` seen while the tree-kill attempt was still open — held, not yet settled. */
-    let pendingClose: { readonly code: number | null; readonly signal: NodeJS.Signals | null } | null =
-      null;
     /**
      * The immediate child's own `exit`, once observed.
      *
@@ -858,14 +1290,6 @@ export async function runCommand(
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
-      // Abandons the tree-kill attempt under control: one best-effort kill is
-      // requested for the `taskkill.exe` process and its handle is released
-      // from the event loop, so a tool process that survives the request can
-      // neither hold this process open nor delay this settlement. It is not a
-      // guarantee that the tool process ended — see the four-state vocabulary
-      // in `internal/windows-process-tree-termination.ts`. A no-op once the
-      // attempt has already resolved.
-      treeKill?.cancel();
       resolvePromise(result);
     };
 
@@ -886,23 +1310,12 @@ export async function runCommand(
       });
 
     /**
-     * Stage 2 of the termination deadline, entered once the tree-kill attempt
-     * is over. Total bound: the tool's own budget plus `killGraceMs`. There is
-     * no third wait, no retry and no restart of either stage.
+     * Stage 2 of the termination deadline, entered once the process-group kill
+     * has been attempted. Total bound: that attempt plus `killGraceMs`. There
+     * is no third wait, no retry and no restart of either stage.
      */
     const treeKillFinished = (reason: Exclude<Termination, 'NONE'>): void => {
-      treeKillPending = false;
       if (settled) return;
-
-      // The synchronous predecessor blocked the event loop for the whole
-      // `taskkill` call, so a `close` arriving during it could not be processed
-      // until the attempt was over. That ordering is part of the observable
-      // contract, so it is preserved deliberately: a `close` held back below is
-      // released here, with the original termination reason intact.
-      if (pendingClose !== null) {
-        settle(closeResult(pendingClose.code, pendingClose.signal));
-        return;
-      }
 
       graceTimer = setTimeout(() => {
         if (childExit !== null) {
@@ -910,10 +1323,10 @@ export async function runCommand(
           // about: the immediate child — the one process this module started
           // and owns — is observably gone. Its streams are still open, which
           // means some process that inherited the stdio handles outlived the
-          // best-effort tree kill. That is a statement about descendants, and
-          // this module has never claimed to verify them (see the header): the
-          // snapshot `taskkill /T` walks can miss a descendant created during
-          // the pass, which is then orphaned holding the pipes, and `close`
+          // best-effort group kill. That is a statement about descendants, and
+          // this module has never claimed to verify them (see the header): a
+          // descendant that left the process group is not demonstrably reached
+          // by the signal, is then orphaned holding the pipes, and `close`
           // never arrives at all. Reporting a failed *tree kill* for that would
           // be asserting the very thing the contract disclaims — so the
           // original termination reason is what is reported, unchanged.
@@ -962,25 +1375,8 @@ export async function runCommand(
       killIssued = true;
       termination = reason;
 
-      if (process.platform !== 'win32') {
-        treeKilled = killPosixProcessGroup(child);
-        treeKillFinished(reason);
-        return;
-      }
-
-      // Windows: supervised and asynchronous. The event loop stays free for the
-      // whole tool budget, so other timers, probes and microtasks keep running
-      // while this child's tree is being taken down.
-      treeKillPending = true;
-      treeKill = superviseWindowsTreeKill(child.pid, windowsTreeKillDependencies(child));
-      void treeKill.outcome.then((outcome) => {
-        if (settled) {
-          treeKillPending = false;
-          return;
-        }
-        treeKilled = outcome === 'TREE_KILLED';
-        treeKillFinished(reason);
-      });
+      treeKilled = killPosixProcessGroup(child);
+      treeKillFinished(reason);
     };
 
     const timer = setTimeout(() => terminate('TIMEOUT'), timeoutMs);
@@ -1022,14 +1418,6 @@ export async function runCommand(
     });
 
     child.on('close', (code, signal) => {
-      if (treeKillPending) {
-        // Held, not dropped: `processTreeKilled` is not known yet, and the
-        // synchronous predecessor could never have reported a `close` ahead of
-        // the tree-kill outcome. `treeKillFinished` releases this immediately —
-        // no grace window is entered for a child that has already closed.
-        pendingClose = { code, signal };
-        return;
-      }
       settle(closeResult(code, signal));
     });
   });

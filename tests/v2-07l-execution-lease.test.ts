@@ -2395,27 +2395,35 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     ]);
   });
 
-  it('keeps the launch boundary unreachable from the product', () => {
-    // Slices 1 and 2 deliver the boundary and its adapter in isolation: no
-    // runner, no step and no command obtains a contained process yet, so
-    // nothing it starts can escape the lease — because nothing starts it.
+  it('gives the launch boundary exactly one route into the product, and it is runCommand', () => {
+    // The pin this replaces asserted that the adapter was reached by *nothing*,
+    // and said in its own comment that slice 3 would break it deliberately:
+    // "the question 'what fences the boundary?' then has to be answered in the
+    // slice that creates the reachability". Slice 3 created it, so this is the
+    // answer, stated as structure.
     //
-    // Slice 2 added exactly one edge, and it is named here rather than
-    // absorbed into an empty list: the adapter is what starts an owned
-    // process, and it is the only thing that does. The chain therefore has a
-    // known head and no consumer.
+    // The chain, and every link is asserted here or immediately above:
+    //
+    //   leased-spawns.ts          the lease is proved at the call
+    //     → agent-command.ts / verify-command.ts / git-command.ts
+    //       → doctor/exec.ts      the single execution abstraction
+    //         → boundary/owned-command.ts
+    //           → boundary/start-owned-process.ts
+    //             → the native helper, and the job object
+    //
+    // What makes it a fence rather than a diagram is that no module may skip a
+    // link. The boundary carries process *ownership* and no authority of its
+    // own: it will contain whatever it is asked to start, which is precisely
+    // why the thing allowed to ask must stay behind the lease.
     expect(modulesImporting(/start-owned-process\.js/, { values: false })).toEqual([
       join('src', 'boundary', 'owned-command.ts'),
     ]);
-    // And the adapter itself is reached by nothing. This is the assertion that
-    // actually states "the product cannot get a contained process": the edge
-    // above only says who *could* hand one out.
-    //
-    // When slice 3 moves `runCommand` onto the boundary, this pin fails. That
-    // is its purpose: the question "what fences the boundary?" then has to be
-    // answered deliberately, in the slice that creates the reachability, rather
-    // than discovered afterwards from an unfenced process.
-    expect(modulesImporting(/owned-command\.js/, { values: false })).toEqual([]);
+    // One importer, and it is the module every runner already went through. A
+    // second entry here is a second way to obtain a contained process, and it
+    // would be outside everything below.
+    expect(modulesImporting(/owned-command\.js/, { values: false })).toEqual([
+      join('src', 'doctor', 'exec.ts'),
+    ]);
     // The boundary's *contract* module, matched by the specifier its importers
     // actually write. The earlier pattern was `boundary/launch-boundary.js`,
     // which the two siblings — both importing `./launch-boundary.js` — could
@@ -2425,6 +2433,96 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
       join('src', 'boundary', 'owned-command.ts'),
       join('src', 'boundary', 'start-owned-process.ts'),
     ]);
+    // And by name as well as by specifier, because an alias travels: a module
+    // could re-export `runOwnedCommand` under another name from a file whose
+    // path matches none of the patterns above, and the importer would then hold
+    // a launch function while naming nothing this suite watches.
+    //
+    // A bare identifier is a blunter instrument than a specifier here —
+    // `importsOf`'s `^export[\s\S]*?from '…'` arm can run from an `export const`
+    // to the word `from` inside a doc comment, so a file that merely *discusses*
+    // the name can be reported. That direction is safe: it over-reports, which
+    // fails this and is looked at, and never under-reports.
+    expect(modulesImporting(/\brunOwnedCommand\b/, { values: false })).toEqual([
+      join('src', 'doctor', 'exec.ts'),
+    ]);
+    expect(modulesImporting(/\bstartOwnedProcess\b/, { values: false })).toEqual([
+      join('src', 'boundary', 'owned-command.ts'),
+    ]);
+  });
+
+  it('lets no step, writer or reviewer reach the boundary directly', () => {
+    // The narrower half of the pin above, and the one worth having separately:
+    // the danger slice 3 introduces is not a second importer of the adapter in
+    // the abstract, it is a *step* obtaining one. A step that imported the
+    // boundary would start a contained agent tree with no lease proved
+    // anywhere, and the containment would work perfectly — on a process this
+    // run was not authorised to start.
+    // Without the `boundary/` prefix, deliberately: the two siblings import each
+    // other as `'./owned-command.js'` and `'./launch-boundary.js'`, so a pattern
+    // carrying the directory matches only importers outside it — and would have
+    // asserted a three-entry list that could never contain the two entries it
+    // names. The same vacuity the `launch-boundary.js` pin above was written to
+    // remove.
+    const boundaryModules = /(owned-command|start-owned-process|launch-boundary)\.js/;
+    const reaching = modulesImporting(boundaryModules, { values: false });
+    expect(reaching).toEqual([
+      join('src', 'boundary', 'owned-command.ts'),
+      join('src', 'boundary', 'start-owned-process.ts'),
+      join('src', 'doctor', 'exec.ts'),
+    ]);
+    // Which is the same list, restated as the property that matters: nothing
+    // under `src/loop/`, `src/agent/` or `src/verify/` is on it.
+    expect(reaching.filter((file) => /^src.(loop|agent|verify|worktree)./.test(file))).toEqual([]);
+  });
+
+  it('keeps the productive runners behind the lease now that the boundary is reachable', () => {
+    // The question slice 3 has to answer in code: the boundary is reachable, so
+    // what stops a productive agent spawn from bypassing the execution lease?
+    //
+    // Nothing about the boundary changed the answer, and that is the point.
+    // `runCommand` is not a runner — it starts whatever it is given, and it is
+    // given something by exactly three seams. Two of them are reachable only
+    // from the fence (asserted in the sibling case above); the third is the Git
+    // seam, whose mutations are fenced by `verifyExecutionLeaseHeldFor`
+    // immediately before the effect and by `leasedGit` for the commit.
+    //
+    // So a step cannot start an agent without the lease for the same reason as
+    // before: it cannot name a raw runner, and it cannot reach past one to the
+    // execution module either.
+    // Matched on the file name rather than on `doctor/exec.js`: `capabilities.ts`
+    // is that module's sibling and writes `'./exec.js'`, so a pattern carrying
+    // the directory would have silently excluded the one importer inside the
+    // same folder — the easiest place for a new one to appear unnoticed.
+    expect(modulesImporting(/\bexec\.js/, { values: false }).sort()).toEqual(
+      [
+        join('src', 'agent', 'agent-command.ts'),
+        join('src', 'agent', 'claude-writer.ts'),
+        join('src', 'agent', 'codex-reviewer.ts'),
+        join('src', 'auth', 'auth-preflight.ts'),
+        join('src', 'boundary', 'owned-command.ts'),
+        join('src', 'doctor', 'capabilities.ts'),
+        join('src', 'repo', 'git-query.ts'),
+        join('src', 'verify', 'run-verification.ts'),
+        join('src', 'verify', 'verify-command.ts'),
+        join('src', 'worktree', 'commit-task-work.ts'),
+        join('src', 'worktree', 'git-command.ts'),
+        join('src', 'worktree', 'workspace-identity.ts'),
+      ].sort(),
+    );
+    // Of those, six can actually start a process; the rest import
+    // `isShellInertArgument` or a type. The list exists so that a *new*
+    // importer of the execution module has to be classified rather than
+    // appearing silently, and the runner fence itself is asserted in 'lets
+    // exactly one module reach the raw runners' above.
+    //
+    // It is pinned by *specifier* and not by the name `runCommand`, and that is
+    // not a stylistic choice. `importsOf` finds statements with a regex, and
+    // its `^export[\s\S]*?from '…'` arm will happily start at an `export const`
+    // and run on until the word `from` turns up inside a doc comment — so a
+    // pattern matching a bare identifier reports whichever files happen to have
+    // prose between the two. Measured here: matching `\brunCommand\b` listed
+    // `doctor/exec.ts` as an importer of itself.
   });
 
   it('keeps every import static, which is what the reachability pins assume', () => {

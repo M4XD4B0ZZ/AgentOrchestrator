@@ -958,6 +958,40 @@ internal static class Program
     }
 
     /// <summary>
+    /// How many times a publish may lose the rename race before it gives up,
+    /// and how long it waits between attempts.
+    ///
+    /// The race is a reader's, not a writer's, and it is the caller's own: the
+    /// caller polls this file to learn that ownership holds, and a file it has
+    /// open for reading cannot be replaced — Windows answers the rename with a
+    /// sharing violation, because a plain read handle carries no
+    /// FILE_SHARE_DELETE. A single attempt therefore turned "the caller looked
+    /// at the same moment" into "the child's exit code was never published",
+    /// and the caller reads a status frozen at establishment as a lost
+    /// boundary. Measured before this existed: 3 of 320 fast commands under
+    /// eight-way concurrency, every one of them a run that had completed
+    /// normally with exit code 0.
+    ///
+    /// The bound matters as much as the retry. A publish that cannot land is
+    /// still not worth dying for, and the last status write happens just before
+    /// this process exits — so an unbounded wait would hold a caller open on a
+    /// contended directory rather than letting it read the truthful "no exit
+    /// code was published" it had before.
+    ///
+    /// Two seconds, and the size is deliberate rather than a round number. The
+    /// reader this loses to is a *scheduled* one — AO's own poll, or a scanner —
+    /// so the window it holds the file for is decided by a loaded machine's
+    /// scheduler, not by how long a read takes. A budget of a few hundred
+    /// milliseconds is inside the jitter of a busy CI runner, and was: the
+    /// counter-proof for this retry failed once in a parallel gate with the
+    /// budget at 200ms, on the timer that was supposed to release the file.
+    /// The cost of the larger bound is paid only under contention, and only by
+    /// a helper that is about to exit anyway.
+    /// </summary>
+    private const int StatusPublishAttempts = 100;
+    private const int StatusPublishRetryMs = 20;
+
+    /// <summary>
     /// Publishes the status by atomic rename. A caller polls this file to learn
     /// that ownership holds; a torn read of a half-written one could be read as
     /// a boundary that never reported anything.
@@ -973,9 +1007,15 @@ internal static class Program
                 lock (_status) { lines = _status.ToArray(); }
                 string staging = _statusPath + ".writing";
                 File.WriteAllLines(staging, lines, new UTF8Encoding(false));
-                if (!Native.MoveFileExW(staging, _statusPath, Native.MOVEFILE_REPLACE_EXISTING))
+                for (int attempt = 1; ; attempt++)
                 {
-                    File.Delete(staging);
+                    if (Native.MoveFileExW(staging, _statusPath, Native.MOVEFILE_REPLACE_EXISTING)) return;
+                    if (attempt >= StatusPublishAttempts)
+                    {
+                        File.Delete(staging);
+                        return;
+                    }
+                    Thread.Sleep(StatusPublishRetryMs);
                 }
             }
             catch

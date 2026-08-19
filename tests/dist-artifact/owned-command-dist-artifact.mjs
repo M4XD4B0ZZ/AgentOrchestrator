@@ -11,16 +11,24 @@
  * cases also kill the observer's own collaborators and then ask what is still
  * running, which a test-runner worker cannot ask about itself.
  *
- * ── The differential, and what it is for ───────────────────────────────────
+ * ── The differential, and what it stopped being (V3 slice 3) ───────────────
  *
  * Nine of the cases below send the same invocation down two paths —
- * `runCommand`, the contract AO has today, and `runOwnedCommand`, the one this
- * slice adds — and require them to agree about output, budgets, exit codes,
- * timeouts and stdin delivery. This is not an attempt to reproduce
- * `runCommand`'s `taskkill` containment, which the ADR replaces rather than
- * imitates. It is the guard against the adapter quietly inventing a *different*
- * command semantics on the way, which is the failure mode a green suite of its
- * own tests cannot see.
+ * `runCommand` and `runOwnedCommand` — and require them to agree about output,
+ * budgets, exit codes, timeouts and stdin delivery. When they were written,
+ * that was a comparison of two mechanisms: the adapter against the `taskkill`
+ * runner AO had. **It is no longer.** Slice 3 moved `runCommand` onto this same
+ * boundary on Windows, so both halves now run through it, and the comparison
+ * measures the two *policy* layers — resolution, planning, budgets, the stdin
+ * vocabulary — over one mechanism.
+ *
+ * That is still worth running and it is a weaker claim than the one this
+ * paragraph used to make, which is why the change is stated rather than left
+ * for a reader to infer from a green run. The mechanism itself is measured by
+ * the survivor cases, including the productive one added below, and by the
+ * negative control in `test:dist-boundary` — which builds a deliberately
+ * weakened helper and *requires* seven survivors, so that "0 survivors"
+ * anywhere here is known not to be a blind instrument.
  *
  * Six of the nine go through `bothPaths`, which hands one argument vector to
  * both halves, so they share a heartbeat directory and a survivor is identified
@@ -79,6 +87,9 @@
  *   4. the same for stderr;
  *   5. a timeout ends the owned tree and classifies as a timeout — never as a
  *      boundary loss;
+ *   5b. `runCommand` itself — the productive path since V3 slice 3 — takes a
+ *      seven-process tree down on a timeout, with zero survivors, having first
+ *      observed the whole tree alive;
  *   6. an explicit cancellation is `TERMINATED_BY_CALLER`, not a loss;
  *   7. a helper killed by someone else is always `BOUNDARY_LOST`;
  *   8. a launch whose evidence cannot be trusted never completes;
@@ -496,6 +507,44 @@ test('a timeout ends the owned tree and is a timeout, not a loss', async (c) => 
   );
   c.equal(direct.outcome, 'TIMED_OUT', 'runCommand agrees on the outcome');
   c.equal(direct.failureCode, 'TIMEOUT', 'runCommand agrees on the failure code');
+});
+
+// ── 5b. the productive path, V3 slice 3 ────────────────────────────────────
+
+test('runCommand itself takes the whole tree down on a timeout', async (c) => {
+  // The case the ADR's whole sequence exists for, measured where AO actually
+  // runs a command rather than where the adapter does.
+  //
+  // Until V3 slice 3 this was `taskkill /T /F` — which returned exit code 0 in
+  // ten of ten measured rounds while leaving 38 orphaned descendants alive, so
+  // its success was never evidence of an empty tree. Now `runCommand` hands the
+  // launch to the boundary, the timeout kills the helper, and the kernel closes
+  // a `KILL_ON_JOB_CLOSE` job containing the target and everything it made.
+  //
+  // Nothing here enumerates a process, and nothing knows a descendant's pid:
+  // the six children are unref'd copies the fixture starts on its own, and they
+  // are counted by their own heartbeat files. Their absence is the measurement.
+  const beats = c.watch(tempDir('ao-runcmd-hb-'));
+  const args = [fixture, `--heartbeat=${beats}`, '--children=6', '--hang'];
+
+  // Alive first, or "0 survivors" is a statement about an instrument that
+  // cannot see anything. The whole tree — the target plus its six — has to be
+  // observed running before it is asked to stop.
+  const settle = settleBudgetMs();
+  const run = runCommand(process.execPath, args, { env: process.env, timeoutMs: settle });
+  await waitForTree(beats, 7);
+
+  const result = await run;
+  c.equal(result.outcome, 'TIMED_OUT', 'outcome');
+  c.equal(result.failureCode, 'TIMEOUT', 'failure code');
+  // Not a lost boundary: the termination was asked for and confirmed.
+  c.check(result.outcome !== 'BOUNDARY_LOST', 'the boundary was not lost');
+  // And the legacy field keeps its legacy meaning rather than being re-pointed
+  // at the guarantee measured on the next line: no best-effort mechanism ran.
+  c.equal(result.processTreeKilled, false, 'no best-effort tree kill is claimed');
+
+  const survivors = await liveCount(beats);
+  c.equal(survivors, 0, 'survivors of the productive termination');
 });
 
 // ── 6. cancellation ─────────────────────────────────────────────────────────

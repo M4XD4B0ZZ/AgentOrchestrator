@@ -1278,7 +1278,7 @@ describe('the defects the second review found', () => {
     // The half of the establishment window the first fix missed. The abort was
     // recorded, establishment finished — refused — and the refusal branch never
     // consulted the flag, so a cancelled run was reported as a refused launch,
-    // which slice 3 maps to the runner's `SPAWN_FAILED`.
+    // which the runner maps to `SPAWN_FAILED` (V3 slice 3).
     const canceller = new AbortController();
     const boundary = fakeBoundary({
       onStart: () => canceller.abort(),
@@ -1367,7 +1367,7 @@ describe('the defects the second review found', () => {
   it('fails closed on a termination reason this build does not declare', async () => {
     // The one function the module exists to make fail-closed was indexing two
     // maps with an unchecked key. A caller that is not type-checked against
-    // this build — the `.mjs` harness, a JS consumer, slice 3 across a
+    // this build — the `.mjs` harness, a JS consumer, a value crossing a
     // serialisation boundary — got a frozen result with `outcome: undefined`:
     // neither a completion nor a declared failure, and nothing thrown.
     const ending: BoundaryEnding = { ending: 'CHILD_EXITED', childExitCode: 0, status: status() };
@@ -1507,9 +1507,12 @@ describe('the defects the third review found', () => {
     // the reasoning does not hold, because the helper publishes the exit and
     // then exits, so the write can fail immediately afterwards precisely
     // because the helper is gone. The rule was withdrawn rather than patched,
-    // and this is the divergence from `runCommand` that leaves behind: it says
-    // FAILED for the same physical event, and this module will not state a
-    // verdict nobody observed.
+    // and this is the divergence from `runCommand`'s POSIX path that leaves
+    // behind: it says FAILED for the same physical event, and this module will
+    // not state a verdict nobody observed. V3 slice 3 settled that in this
+    // module's favour — the weaker word stands where the evidence is weaker,
+    // and `StdinDelivery` documents both — so this case pins a contract now
+    // rather than an open question.
     const boundary = fakeBoundary({ failStdin: true });
     const run = runOwnedCommand(
       { file: 'C:\\fixture.exe', stdin: 'the instructions' },

@@ -1,6 +1,27 @@
 /**
  * AO-008-S2 — the asynchronous Windows process-tree termination boundary.
  *
+ * ── No production caller since V3 slice 3 ──────────────────────────────────
+ *
+ * State this before anything else, because the rest of this header is written
+ * in the present tense about a wiring that no longer exists. `doctor/exec.ts`
+ * does **not** import this module any more. Windows process lifetime is the
+ * launch boundary's — a strict `KILL_ON_JOB_CLOSE` job the helper creates the
+ * target inside — and this mechanism may not decide it, for the reason measured
+ * on 2026-08-18: `taskkill /T /F` returned exit code 0 in ten of ten rounds
+ * while leaving 38 orphaned descendants alive, so its success is not evidence
+ * of an empty tree.
+ *
+ * It is kept rather than deleted because it is a self-contained, exhaustively
+ * tested component whose *own* contract is unchanged and still true — and
+ * because removing it is a decision about what this repository keeps as a
+ * best-effort mechanism, not a consequence of moving one caller. Nothing here
+ * is a fallback: there is no path, on any platform, that reaches this after the
+ * boundary refuses. Read every "runCommand" below as "runCommand before V3
+ * slice 3".
+ *
+ * ────────────────────────────────────────────────────────────────────────────
+ *
  * `runCommand` used to walk a timed-out child's process tree with a
  * *synchronous* `execFileSync(taskkill.exe, …)` call. That call blocks the
  * whole Node event loop for as long as `taskkill.exe` runs — up to its entire
