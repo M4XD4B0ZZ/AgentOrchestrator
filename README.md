@@ -5764,7 +5764,7 @@ nothing started.
 
 ### How the guarantee is measured
 
-`test:dist-boundary` runs fourteen cases against the built artefacts with real
+`test:dist-boundary` runs fifteen cases against the built artefacts with real
 processes: ownership established and verified; the caller's own termination;
 **helper death → `BOUNDARY_LOST` with zero survivors**; **AO death → helper and
 tree gone, with no cleanup code running, and what it leaves behind unreadable
@@ -5773,13 +5773,17 @@ of them) and killed with the job; exit-code fidelity; three real fail-closed
 refusals with a marker file proving nothing ran; the weakening-key refusals,
 with a positive control that the same request minus the key is accepted and
 runs; verify-before-execute; both placement modes; the argument vector, working
-directory and replaced environment arriving exactly; and a reused working
-directory being unable to lend its evidence to the next launch.
+directory and replaced environment arriving exactly; a reused working directory
+being unable to lend its evidence to the next launch; and **an owner that is not
+the parent** — the only case that reaches the helper's own owner watch, because
+every other launch here is owned by the process that spawned it.
 
-The argument-vector case is **differential**: the same arguments — quotes,
+The argument-vector cases are **differential**: the same arguments — quotes,
 backslashes, a trailing backslash before a quote, Unicode, an empty argument,
 shell metacharacters — go through the boundary and through
-`child_process.spawn`, and the target reports what arrived. The boundary builds
+`child_process.spawn`, and the target reports what arrived. A second one covers
+the verbatim `cmd.exe /d /s /c` route a `.cmd` shim is started through, which is
+how AO starts the Claude CLI. The boundary builds
 its own Win32 command line, so without that case its quoting would be asserted
 only by a comment citing a program this repository does not contain.
 

@@ -196,6 +196,13 @@ export async function startOwnedProcess(
     /* checked immediately below, where it is a refusal rather than a throw */
   }
   if (existsSync(statusPath)) {
+    if (ownWorkDir) {
+      try {
+        rmSync(workDir, { recursive: true, force: true });
+      } catch {
+        /* an empty temporary directory is not worth failing a refusal for */
+      }
+    }
     return {
       established: false,
       ending: {
@@ -308,7 +315,11 @@ export async function startOwnedProcess(
       // checked as well as the nonce, because `OwnedProcess.helperPid` is read
       // from this file and a later adapter will act on it.
       status.nonce === nonce &&
-      status.helperPid === (helper.pid ?? -1) &&
+      // The same rule the classifier applies, and no stricter: a status that
+      // names a different helper is another launch's, one that names none
+      // cannot establish this one. Diverging here would refuse at
+      // establishment what classification then accepts.
+      (status.helperPid === null || status.helperPid === (helper.pid ?? -1)) &&
       status.boundary === 'OK' &&
       status.verifiedInJob &&
       status.childPid !== null
@@ -317,7 +328,10 @@ export async function startOwnedProcess(
         established: true,
         process: {
           helper,
-          helperPid: status.helperPid,
+          // Node's own answer first: it started this process, and that is a
+          // stronger authority about which pid it is than a file the process
+          // wrote about itself. The status's value is checked against it above.
+          helperPid: helper.pid ?? status.helperPid ?? -1,
           childPid: status.childPid,
           mode: status.mode ?? mode,
           assignedAtCreation: status.assignedAtCreation,
@@ -344,7 +358,19 @@ export async function startOwnedProcess(
       // helper this kills.
       terminate();
       await helperClosed;
-      const lastStatus = readStatusFile(statusPath);
+      // Read through the identity check, like every other status read here: a
+      // status this launch cannot claim may not decide `targetStarted` either,
+      // and this is the path on which the caller knows least to begin with.
+      const timedOut = classifyBoundaryEnding({
+        status: readStatusFile(statusPath),
+        helperExitCode: null,
+        helperSignal: null,
+        callerRequestedTermination: false,
+        expect: { nonce, helperPid: helper.pid },
+      });
+      const lastStatus = timedOut.ending === 'BOUNDARY_REFUSED' ? timedOut.status : null;
+      const started =
+        timedOut.ending === 'BOUNDARY_REFUSED' ? timedOut.targetStarted : ('UNKNOWN' as const);
       dispose();
       return {
         established: false,
@@ -355,7 +381,7 @@ export async function startOwnedProcess(
           // The helper never reported ownership, so what it may have started
           // is exactly what this caller cannot know. The kill above took the
           // tree either way.
-          targetStarted: lastStatus === null ? 'UNKNOWN' : lastStatus.targetStarted ? 'YES' : 'NO',
+          targetStarted: started,
           status: lastStatus,
         },
       };

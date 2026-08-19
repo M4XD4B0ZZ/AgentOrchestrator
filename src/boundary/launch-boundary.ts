@@ -460,12 +460,24 @@ export function classifyBoundaryEnding(observation: BoundaryEndingObservation): 
     // previous run in a reused directory, or one a third party wrote — would
     // otherwise be read as this run's evidence, and its `boundary=OK` is
     // exactly the value that decides a run is trustworthy.
-    const foreign =
-      status.nonce !== expect.nonce ||
+    //
+    // The rule is asymmetric on purpose. A status carrying the *wrong* nonce or
+    // naming a *different* helper is foreign, full stop. A status carrying no
+    // nonce at all is a different thing: it is what a helper that refused
+    // before it could name the launch leaves behind, and discarding it would
+    // throw away the refusal's own code and turn a launch in which nothing was
+    // created into one whose side effects are unknown. Such a status may
+    // therefore report a *refusal* — the safe direction — but may never
+    // establish ownership, which is what the second condition enforces.
+    const wrongLaunch =
+      (status.nonce !== null && status.nonce !== expect.nonce) ||
       (expect.helperPid !== undefined &&
         status.helperPid !== null &&
         status.helperPid !== expect.helperPid);
-    if (foreign) return refused('BOUNDARY_STATUS_FOREIGN', null, null);
+    const unidentifiedSuccess = status.nonce === null && status.boundary === 'OK';
+    if (wrongLaunch || unidentifiedSuccess) {
+      return refused('BOUNDARY_STATUS_FOREIGN', null, null);
+    }
   }
 
   if (status === null) {

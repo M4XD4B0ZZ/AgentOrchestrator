@@ -429,6 +429,54 @@ describe('classifyBoundaryEnding', () => {
     });
   });
 
+  it('lets a refusal that never reached the nonce still report itself', () => {
+    // The identity check must not eat the failure it was supposed to protect.
+    // A helper that refuses inside its own request parse has recorded the
+    // launch's nonce by then (it is taken in the request's first pass), but a
+    // status with no nonce at all — an older binary, a helper killed mid-parse
+    // — must still be able to say *why* it refused. Discarding it would report
+    // a launch in which nothing was created as one whose side effects are
+    // unknown, which is the unsafe direction.
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(
+        statusText({ boundary: 'FAILED', failure: 'OWNED_CONTAINMENT_JOB_CREATE', win32: '5' }),
+      ),
+      helperExitCode: BOUNDARY_HELPER_EXIT.BOUNDARY_FAILURE,
+      helperSignal: null,
+      callerRequestedTermination: false,
+      expect: { nonce: NONCE, helperPid: 4242 },
+    });
+    expect(ending).toMatchObject({
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'OWNED_CONTAINMENT_JOB_CREATE',
+      targetStarted: 'NO',
+    });
+  });
+
+  it('never lets an unidentified status establish ownership', () => {
+    // The other half of that asymmetry, and the half that must not be relaxed:
+    // a status may report its own refusal without proving whose it is, but it
+    // may not claim a *successful* run without proving it.
+    const ending = classifyBoundaryEnding({
+      status: decodeBoundaryStatus(
+        statusText({
+          boundary: 'OK',
+          childPid: '1234',
+          verifiedInJob: 'true',
+          childExitCode: '0',
+        }),
+      ),
+      helperExitCode: 0,
+      helperSignal: null,
+      callerRequestedTermination: false,
+      expect: { nonce: NONCE, helperPid: 4242 },
+    });
+    expect(ending).toMatchObject({
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'BOUNDARY_STATUS_FOREIGN',
+    });
+  });
+
   it('accepts the status of the launch it belongs to', () => {
     const ending = classifyBoundaryEnding({
       status: decodeBoundaryStatus(completedStatus('7')),
@@ -475,10 +523,16 @@ describe('classifyBoundaryEnding', () => {
   });
 
   it('reports an exit the boundary could not observe as BOUNDARY_LOST', () => {
-    // The helper writes no `childExitCode` when its wait was not satisfied or
-    // the exit code could not be read: an unprovable exit is not an exit, and
-    // publishing the 259 that `GetExitCodeProcess` answers for a still-running
-    // process would have been a completion the boundary never observed.
+    // What this pins is the *absence* rule, and it is worth being exact about
+    // that: the helper writes no `childExitCode` when its wait was not
+    // satisfied or the exit code could not be read — publishing the 259 that
+    // `GetExitCodeProcess` answers for a still-running process would have been
+    // a completion the boundary never observed — and this asserts that the
+    // absence classifies as a loss even when the status is otherwise complete.
+    // `childExitUnobservable` is the helper's note to a human reading the
+    // status; the classifier deliberately does not consult it, because a
+    // decision that depended on it could be flipped by adding one line to a
+    // file, while the absence of the exit code cannot be argued with.
     const ending = classifyBoundaryEnding({
       status: decodeBoundaryStatus(
         statusText({

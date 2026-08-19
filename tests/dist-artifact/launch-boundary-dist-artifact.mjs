@@ -42,9 +42,13 @@
  *      does;
  *  12. the argument vector the target receives is identical to the one
  *      `child_process.spawn` delivers, across quoting, backslashes, Unicode,
- *      empty and shell-metacharacter arguments;
+ *      empty and shell-metacharacter arguments — and the same holds for the
+ *      verbatim `cmd.exe /d /s /c` route a `.cmd` shim is started through;
  *  13. the working directory and a replaced environment arrive exactly;
- *  14. a reused working directory cannot lend its evidence to the next launch.
+ *  14. a reused working directory cannot lend its evidence to the next launch;
+ *  15. an owner that is *not* the parent is watched, and its loss exits the
+ *      helper with 93 and takes the tree — the only case that reaches the
+ *      owner watch at all.
  *
  * Deliberately **not** measured here: byte budgets, stdin delivery vocabulary,
  * timeouts, result classification. Those are AO's, they stay in TypeScript,
@@ -641,6 +645,112 @@ async function weakenedRun(c, weakening) {
   for (const pid of survivors) killOnly(pid);
   return survivors;
 }
+
+measure('an owner that is not the parent is watched, and its loss takes the tree', async (c) => {
+  // The one path in the boundary that no other case here reaches. Every other
+  // launch is owned by the process that spawned the helper, and node puts its
+  // children in a kill-on-close job of its own — so the helper dies from *that*
+  // before its own owner watch can act, and the watch itself never runs.
+  //
+  // Here the owner is a third, unrelated process: this harness spawns both, the
+  // harness stays alive, and only the owner is killed. That makes the watch the
+  // only mechanism in play, which matters because it is the code the ownership
+  // gate and the exit-inside-the-lock fix live in.
+  const owner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  const heartbeatDir = tempDir('ao-boundary-hb-');
+  const dir = tempDir('ao-boundary-third-party-owner-');
+  const requestPath = writeRawRequest(dir, [
+    ['nonce', 'third-party-owner-case'],
+    ['mode', 'SUSPENDED'],
+    ['file', process.execPath],
+    ['arg', treeFixture],
+    ['arg', heartbeatDir],
+    ['arg', '2'],
+    ['arg', '2'],
+    ['arg', '30000'],
+    ['arg', '30000'],
+    ['verbatim', 'false'],
+    ['ownerPid', String(owner.pid)],
+    ['statusPath', join(dir, 'status.txt')],
+  ]);
+  const helper = spawnHelper(resolveBoundaryExecutable().path, requestPath);
+  const exited = helperExit(helper);
+  c.check(await waitForTree(heartbeatDir, 7, 20_000), 'the 7-process tree never appeared');
+
+  killOnly(owner.pid);
+
+  const closed = await Promise.race([exited, sleep(20_000).then(() => null)]);
+  c.check(closed !== null, 'the helper never exited after its owner was lost');
+  c.check(
+    closed?.code === 93,
+    `expected the owner-lost exit 93, got ${String(closed?.code)}`,
+  );
+  const status = readStatus(dir);
+  c.check(
+    status?.terminatedByOwnerLoss === true,
+    'the helper did not record that it took the tree down for owner loss',
+  );
+  const survivors = await liveCount(heartbeatDir);
+  c.check(survivors === 0, `${survivors} process(es) survived their owner`);
+});
+
+measure('the verbatim route delivers the argument vector a .cmd shim sees', async (c) => {
+  // The `cmd.exe /d /s /c "…"` route, which is how AO starts anything behind a
+  // `.cmd` shim — the Claude CLI among them. It is a second, separate branch of
+  // the boundary's command-line construction, and until this case it was
+  // asserted by a comment rather than measured.
+  const dir = tempDir('ao-boundary-verbatim-');
+  const shim = join(dir, 'shim.cmd');
+  writeFileSync(shim, `@echo off\r\nnode "${echoFixture}" %*\r\n`, 'utf8');
+
+  const args = ['plain', 'two words', 'a&b', '日本'];
+  const report = join(dir, 'through-boundary.json');
+  const cmd = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe');
+  const quoted = [`"${shim}"`, ...args.map((arg) => `"${arg}"`)].join(' ');
+
+  const start = await startOwnedProcess({
+    file: cmd,
+    args: ['/d', '/s', '/c', `"${quoted}"`],
+    verbatim: true,
+    env: { ...process.env, AO_BOUNDARY_REPORT_TO: report },
+  });
+  if (!c.check(start.established, 'boundary refused the verbatim route')) return;
+  start.process.helper.stdout.resume();
+  start.process.helper.stderr.resume();
+  const ending = await start.process.ending;
+  c.check(ending.ending === 'CHILD_EXITED', `the shim ended as ${ending.ending}`);
+
+  // The control: the same line through Node's own verbatim spawn, which is what
+  // `runCommand` does today.
+  const controlReport = join(dir, 'through-spawn.json');
+  const control = spawnSync(cmd, ['/d', '/s', '/c', `"${quoted}"`], {
+    windowsVerbatimArguments: true,
+    windowsHide: true,
+    env: { ...process.env, AO_BOUNDARY_REPORT_TO: controlReport },
+  });
+  c.check(control.status === 0, `the control shim exited ${String(control.status)}`);
+
+  let owned = null;
+  let direct = null;
+  try {
+    owned = JSON.parse(readFileSync(report, 'utf8')).argv;
+    direct = JSON.parse(readFileSync(controlReport, 'utf8')).argv;
+  } catch {
+    /* reported by the assertion below */
+  }
+  c.check(
+    owned !== null && JSON.stringify(owned) === JSON.stringify(direct),
+    `boundary delivered ${JSON.stringify(owned)}, spawn delivered ${JSON.stringify(direct)}`,
+  );
+  c.check(
+    JSON.stringify(direct) === JSON.stringify(args),
+    `the control itself did not deliver the arguments: ${JSON.stringify(direct)}`,
+  );
+  start.process.dispose();
+});
 
 measure('the containment settings are load-bearing (negative control)', async (c) => {
   // The whole suite's credibility rests on this case, and it is run as a pair

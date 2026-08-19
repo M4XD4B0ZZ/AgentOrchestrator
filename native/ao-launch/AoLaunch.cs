@@ -279,6 +279,7 @@ internal static class Program
     private static readonly object _statusLock = new object();
     private static readonly object _ownershipGate = new object();
     private static string _statusPath = "";
+    private static bool _noncePut;
     private static int _terminatedByOwnerLoss;
 
     private static int Main(string[] argv)
@@ -292,19 +293,22 @@ internal static class Program
         Request request = null;
         try
         {
-            request = ReadRequest(argv[0]);
+            try
+            {
+                request = ReadRequest(argv[0]);
+            }
+            finally
+            {
+                // The request carries the environment the caller substituted —
+                // credentials included — and it sits in a directory the
+                // contained process can read. Its lifetime ends here whether it
+                // was accepted or refused: a refused request is not a reason to
+                // leave one on disk until somebody remembers it.
+                try { File.Delete(argv[0]); } catch { /* best effort */ }
+            }
             _statusPath = request.StatusPath;
-            Put("nonce", request.Nonce);
             Put("helperPid", CurrentProcessId.ToString(CultureInfo.InvariantCulture));
             Put("mode", request.Mode);
-
-            // The request has been read, and it carries the environment the
-            // caller substituted — credentials included. It is not needed
-            // again, and it sits in a directory the contained process can
-            // read, so its lifetime ends here rather than whenever a caller
-            // remembers to clean up.
-            try { File.Delete(argv[0]); } catch { /* best effort */ }
-
             return Run(request);
         }
         catch (BoundaryFailure failure)
@@ -393,13 +397,21 @@ internal static class Program
                 throw new BoundaryFailure(BoundaryFailure.OwnerGone, 0);
             }
             CreateTarget(request, pipes, out info, out assignedAtCreation);
-        }
 
-        // In JOBLIST mode the target is a job member from its first
-        // instruction, which also means it is already executing here: the
-        // membership check below confirms what the kernel established, and
-        // cannot precede it.
-        if (assignedAtCreation) Put("targetStarted", "true");
+            // In JOBLIST mode the target is a job member from its first
+            // instruction, which also means it is already executing here: the
+            // membership check below confirms what the kernel established, and
+            // cannot precede it.
+            //
+            // Recorded under the gate, and that is not tidiness. The watcher
+            // writes the status while holding this lock, so a `Put` made after
+            // releasing it can be overtaken: the owner dies, the watcher
+            // publishes a status with no `targetStarted`, and the caller reads
+            // a definite "nothing ran" for a process that is executing. That is
+            // the unsafe direction of exactly the field this exists to make
+            // honest.
+            if (assignedAtCreation) Put("targetStarted", "true");
+        }
 
         // The child's ends of the pipes are closed here: while this process
         // still holds one, EOF never reaches the reader.
@@ -428,21 +440,28 @@ internal static class Program
 
         if (!assignedAtCreation)
         {
-            // Only now may the target execute its first instruction. In
-            // SUSPENDED mode membership is proven before the resume; in JOBLIST
-            // mode the kernel established it at creation and the check above
-            // confirmed it.
-            if (Native.ResumeThread(info.hThread) == 0xFFFFFFFF)
+            // The resume, and the record of it, are both under the gate: the
+            // instant the target may execute must not be separable from the
+            // status that says so. Outside it, an owner lost in between
+            // publishes "nothing ran" over a running process.
+            lock (_ownershipGate)
             {
-                Native.TerminateJobObject(_job, 0xDEAD);
-                throw new BoundaryFailure("OWNED_CONTAINMENT_RESUME");
+                // Only now may the target execute its first instruction. In
+                // SUSPENDED mode membership is proven before the resume; in
+                // JOBLIST mode the kernel established it at creation and the
+                // check above confirmed it.
+                if (Native.ResumeThread(info.hThread) == 0xFFFFFFFF)
+                {
+                    Native.TerminateJobObject(_job, 0xDEAD);
+                    throw new BoundaryFailure("OWNED_CONTAINMENT_RESUME");
+                }
+                // A refusal after this point is still a refusal — the job is
+                // terminated with it — but it is no longer one that can claim
+                // nothing ran, and the caller is told which kind it got rather
+                // than having to assume the safer one.
+                Put("targetStarted", "true");
             }
         }
-        // From here the target is executing in either mode. A refusal after
-        // this point is still a refusal — the job is terminated with it — but
-        // it is no longer one that can claim nothing ran, and the caller is
-        // told which kind it got rather than having to assume the safer one.
-        if (!assignedAtCreation) Put("targetStarted", "true");
         Native.CloseHandle(info.hThread);
         Put("boundary", "OK");
         // An early status: the caller may read the child pid, and may know that
@@ -887,7 +906,19 @@ internal static class Program
             {
                 throw new BoundaryFailure("OWNED_CONTAINMENT_REQUEST_INVALID", 0);
             }
+            // `statusPath` and `nonce` are taken in this first pass, before any
+            // key is validated, because a refusal needs both: somewhere to
+            // report itself, and the launch's own name so the caller can tell
+            // that the report is *this* launch's. Recorded only after
+            // validation, every OWNED_CONTAINMENT_REQUEST_INVALID would arrive
+            // at a caller as a status of unknown provenance, and the real
+            // failure code would be discarded with it.
             if (name == "statusPath" && _statusPath.Length == 0) _statusPath = decoded;
+            if (name == "nonce" && decoded.Length > 0 && !_noncePut)
+            {
+                _noncePut = true;
+                Put("nonce", decoded);
+            }
             pairs.Add(new string[] { name, decoded });
         }
 

@@ -50,27 +50,42 @@ export function locateCsc() {
 export class NativeBoundaryBuildError extends Error {}
 
 /**
- * Clears the way for a fresh binary, including while an old one is running.
+ * Puts a freshly compiled binary in place of the old one.
  *
- * Windows refuses to delete or overwrite the image file of a running process,
- * and a boundary helper outliving the run that started it is ordinary here —
- * an interrupted gate leaves one holding a tree it owns, exactly as designed.
- * A build that failed on that would be a build that fails because containment
- * worked. Windows does allow a running image to be *renamed*, so the old file
- * is moved aside and swept up on the next build instead.
+ * Two Windows facts shape this, and both were measured rather than assumed:
+ * the image file of a *running* process can be neither deleted nor overwritten
+ * — and a boundary helper outliving the run that started it is ordinary here,
+ * since an interrupted gate leaves one holding a tree it owns, exactly as
+ * designed — but it *can* be renamed. A build that failed because containment
+ * worked would be the wrong behaviour, so the old file is moved aside and swept
+ * up on a later build.
+ *
+ * The compile writes to a per-process staging name and only then takes the
+ * output path, rather than clearing the path first. Clearing first opens a
+ * window in which `dist/` has no boundary at all, and a second build entering
+ * that window can carry off the artefact the first one is still writing — which
+ * would let a build report success over a `dist/native/` that another build
+ * then failed to fill.
  */
-function clearOutput(outFile) {
+function stage(outFile) {
+  return `${outFile}.building-${process.pid}`;
+}
+
+function publish(staged, outFile) {
   try {
-    rmSync(outFile, { force: true });
+    renameSync(staged, outFile);
   } catch {
+    // The old binary is running, so it cannot be replaced in place. Rename it
+    // out of the way — which a running image does allow — and take the name.
     renameSync(outFile, `${outFile}.superseded-${process.pid}`);
+    renameSync(staged, outFile);
   }
   for (const name of readdirSync(dirname(outFile))) {
     if (!name.startsWith(`${basename(outFile)}.superseded-`)) continue;
     try {
       rmSync(join(dirname(outFile), name), { force: true });
     } catch {
-      /* still running; the next build tries again */
+      /* still running; a later build tries again */
     }
   }
 }
@@ -95,7 +110,8 @@ export function compileNativeBoundary({ outFile = BOUNDARY_OUTPUT, defines = [] 
   }
 
   mkdirSync(dirname(outFile), { recursive: true });
-  clearOutput(outFile);
+  const staged = stage(outFile);
+  rmSync(staged, { force: true });
 
   const args = [
     '/nologo',
@@ -107,7 +123,7 @@ export function compileNativeBoundary({ outFile = BOUNDARY_OUTPUT, defines = [] 
     // load-bearing for a security property.
     '/warnaserror+',
     '/warn:4',
-    `/out:${outFile}`,
+    `/out:${staged}`,
   ];
   for (const define of defines) args.push(`/define:${define}`);
   args.push(BOUNDARY_SOURCE);
@@ -115,15 +131,20 @@ export function compileNativeBoundary({ outFile = BOUNDARY_OUTPUT, defines = [] 
   try {
     execFileSync(csc, args, { stdio: 'pipe', encoding: 'utf8' });
   } catch (error) {
+    rmSync(staged, { force: true });
     const output = `${error?.stdout ?? ''}${error?.stderr ?? ''}`.trim();
     throw new NativeBoundaryBuildError(`The launch boundary did not compile:\n${output}`);
   }
 
-  if (!existsSync(outFile)) {
+  // Checked on the staged file, before it is published: this is the build's own
+  // artefact, and asking about `outFile` here would be asking whether *some*
+  // binary is at that path.
+  if (!existsSync(staged)) {
     throw new NativeBoundaryBuildError(
-      `The compiler reported success but produced no ${outFile}.`,
+      `The compiler reported success but produced no ${staged}.`,
     );
   }
+  publish(staged, outFile);
   return outFile;
 }
 
