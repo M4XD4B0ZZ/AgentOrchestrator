@@ -14,7 +14,8 @@
  *   --stdout-mark=TEXT write TEXT to stdout before anything else
  *   --stderr-mark=TEXT write TEXT to stderr before anything else
  *   --stdin=MODE       drain (read to EOF), ignore (never read), exit (exit at
- *                      once without reading)
+ *                      once without reading), close (close the read end and
+ *                      stay alive)
  *   --report=PATH      write a JSON report — stdin bytes read — to PATH
  *   --heartbeat=DIR    rewrite DIR/hb-<pid>.txt every 100ms, forever
  *   --children=N       spawn N detached copies that only heartbeat
@@ -149,7 +150,17 @@ function leave() {
 }
 
 const stdinMode = options.get('stdin') ?? 'ignore';
-if (stdinMode === 'exit') {
+if (stdinMode === 'close') {
+  // The read end goes and this process stays. A caller writing into the pipe
+  // sees it break while this process is still running, which is what lets a
+  // case observe the boundary's report of that rather than race the process
+  // teardown that publishes it.
+  try {
+    process.stdin.destroy();
+  } catch {
+    /* a stdin that cannot be destroyed leaves the case to time out and say so */
+  }
+} else if (stdinMode === 'exit') {
   // Never reads a byte and goes at once: the boundary is then forwarding into
   // a pipe whose read end is gone, which is the state `BROKEN_PIPE` reports.
   leave();

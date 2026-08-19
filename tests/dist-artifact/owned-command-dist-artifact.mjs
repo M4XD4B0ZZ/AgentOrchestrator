@@ -38,14 +38,17 @@
  * that register nothing are the two that start nothing: a refused foreign
  * status, and a target that does not exist.
  *
- * That sentence is checkable by grep — every `runOwnedCommand` and `bothPaths`
- * call below carries a `--heartbeat=`, and every one of those directories comes
- * from `watch` or `sweepOnly` — and it is written that way because four earlier
+ * It is written as a property rather than an intention because five earlier
  * versions of it were wrong, each one class further down: cases that started
  * nothing, then trees in unregistered directories, then processes with no
  * heartbeat at all, then two cases running a fixture that had no heartbeat
- * support. The last of those is why the argv read-back below no longer uses
- * slice 1's echo fixture.
+ * support, then a restatement that claimed every single call carried a
+ * `--heartbeat=` when a differential's `runCommand` half does not need one. The
+ * fourth of those is why the argv read-back below no longer uses slice 1's echo
+ * fixture. What is true, and what the claim is: no *target process* starts
+ * without a heartbeat directory, and every such directory reaches
+ * `heartbeatDirs` — through `watch`, through `sweepOnly`, or directly from the
+ * establishment measurement.
  *
  * Cases that start one tree additionally get a per-case window, so a leak is
  * attributed to the case that caused it; cases that start many short runs are
@@ -58,7 +61,7 @@
  * assertion about the adapter's own terminations: whatever policy ended a run,
  * nothing of that run is left executing.
  *
- * ── What is measured, in the order the cases run ───────────────────────────
+ * ── What is measured ───────────────────────────
  *
  *   1. exit codes — zero, nonzero, and 0xC0000005 — arrive exactly, and agree
  *      with `runCommand`;
@@ -117,8 +120,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..', '..');
 const fixture = join(scriptDir, 'fixtures', 'owned-command-fixture.mjs');
-/** Slice 1's read-back oracle: it reports the argv, cwd and env that arrived. */
-const echoFixture = join(scriptDir, 'fixtures', 'boundary-echo-fixture.mjs');
 
 const adapterUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'owned-command.js')).href;
 const contractUrl = pathToFileURL(join(repoRoot, 'dist', 'boundary', 'launch-boundary.js')).href;
@@ -598,7 +599,19 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
   const payload = 'x'.repeat(4_000_000);
   const owned = await runOwnedCommand({
     file: process.execPath,
-    args: [fixture, `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`, '--stdin=exit', '--exit=0'],
+    // `close`, not `exit`: the child closes its read end and stays alive for a
+    // moment. The boundary's `BROKEN_PIPE` is recorded on a background thread
+    // that nothing joins, so with a child that exits in the same instant, the
+    // key reaching the status file is a race against the helper's own teardown.
+    // A child that lingers takes the race out without changing what the case is
+    // about — a payload nothing read.
+    args: [
+      fixture,
+      `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`,
+      '--stdin=close',
+      '--sleep-ms=400',
+      '--exit=0',
+    ],
     stdin: payload,
     timeoutMs: 30_000,
   });
@@ -619,7 +632,7 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
   // broken-pipe report is what shows that description is not the shipped one.
   c.equal(owned.ending?.status?.stdinForward, 'BROKEN_PIPE', 'the boundary reported the broken pipe');
 
-  const direct = await runCommand(process.execPath, [fixture, '--stdin=exit', '--exit=0'], {
+  const direct = await runCommand(process.execPath, [fixture, '--stdin=close', '--sleep-ms=400', '--exit=0'], {
     env: process.env,
     stdin: payload,
     timeoutMs: 30_000,
@@ -694,7 +707,7 @@ test('no payload is NOT_REQUESTED, and the child still sees end-of-file', async 
   c.equal(direct.stdinDelivery, 'NOT_REQUESTED', 'runCommand agrees');
 });
 
-// ── 15 & 17. what the caller asked for actually reaches the target ─────────────
+// ── 15-17. what the caller asked for actually reaches the target ─────────────
 
 test('the working directory, the environment, the argv and the mode arrive', async (c) => {
   // Nothing measured this. `verbatim`, `cwd`, `env` and `mode` are forwarded to
@@ -810,8 +823,6 @@ test('a budget the caller disabled bounds nothing, on both paths', async (c) => 
   c.equal(direct.outcome, 'COMPLETED', 'runCommand agrees on the outcome');
   c.equal(owned.stdout.length, direct.stdout.length, 'and on the byte count');
 });
-
-// ── 16. a budget the caller switched off ──────────────────────────────────
 
 // ── 18. the two policies, ordered and contending ────────────────────────────
 

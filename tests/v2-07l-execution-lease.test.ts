@@ -2401,7 +2401,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // absorbed into an empty list: the adapter is what starts an owned
     // process, and it is the only thing that does. The chain therefore has a
     // known head and no consumer.
-    expect(modulesImporting(/start-owned-process\.js/)).toEqual([
+    expect(modulesImporting(/start-owned-process\.js/, { values: false })).toEqual([
       join('src', 'boundary', 'owned-command.ts'),
     ]);
     // And the adapter itself is reached by nothing. This is the assertion that

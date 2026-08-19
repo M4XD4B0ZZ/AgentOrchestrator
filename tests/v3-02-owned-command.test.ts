@@ -601,20 +601,23 @@ describe('the adapter vocabulary is the one AO already has', () => {
     ]);
   });
 
-  it('spells the shared outcomes exactly as the runner does', async () => {
-    // Differential, not decorative: slice 3 moves `runCommand` onto this
-    // adapter, and a member spelled differently on the two sides would become
-    // a translation table nobody asked for.
-    const exec = await import('../src/doctor/exec.js');
-    const shared = ['COMPLETED', 'TIMED_OUT', 'OUTPUT_LIMIT_EXCEEDED'] as const;
-    for (const member of shared) {
+  it('spells the outcomes it shares with the runner the way the runner spells them', () => {
+    // Pinned here, and NOT differential — a claim this case used to make and
+    // could not keep. `CommandOutcome` is a type union: it has no runtime
+    // representation in `src/doctor/exec.ts`, so nothing here can read the
+    // runner's spelling back, and renaming the runner's `'TIMED_OUT'` would
+    // leave any assertion in this file green. What enforces the agreement is
+    // slice 3's compiler, when it writes the mapping; what this case is for is
+    // stating which members are meant to be shared, so that a *rename on this
+    // side* is a deliberate act rather than a silent divergence.
+    for (const member of ['COMPLETED', 'TIMED_OUT', 'OUTPUT_LIMIT_EXCEEDED'] as const) {
       expect(OWNED_COMMAND_OUTCOMES).toContain(member);
     }
-    // And the ones the adapter adds are genuinely new, rather than a rename of
+    // And the ones this layer adds are genuinely new, rather than a rename of
     // something the runner already says.
     expect(OWNED_COMMAND_OUTCOMES).toContain('BOUNDARY_LOST');
     expect(OWNED_COMMAND_OUTCOMES).toContain('TERMINATED_BY_CALLER');
-    expect(typeof exec.runCommand).toBe('function');
+    expect(OWNED_COMMAND_OUTCOMES).toContain('LAUNCH_REFUSED');
   });
 });
 
@@ -731,9 +734,15 @@ describe('the run loop, driven through an injected boundary', () => {
   });
 
   it('does not rename a budget cut when the timeout lands afterwards', async () => {
-    const boundary = fakeBoundary({ terminationDelayMs: 60 });
+    // The one case in this file that needs its timeout *not* to fire before the
+    // first byte, so it is the one that a loaded machine could turn red — every
+    // other 20ms case here expects a timeout, which slowness only confirms.
+    // 400ms of head-room for a fake establishment that costs 5ms, and a
+    // boundary that then takes 900ms to end, so the timer genuinely fires
+    // during the run and genuinely changes nothing.
+    const boundary = fakeBoundary({ terminationDelayMs: 900 });
     const run = runOwnedCommand(
-      { file: 'C:\\fixture.exe', timeoutMs: 20, maxStdoutBytes: 2 },
+      { file: 'C:\\fixture.exe', timeoutMs: 400, maxStdoutBytes: 2 },
       { start: boundary.start },
     );
     await boundary.established();
@@ -1562,6 +1571,16 @@ describe('the defects the fourth review found', () => {
     }
   });
 
+});
+
+/**
+ * ── What the fifth adversarial review found ────────────────────────────────
+ *
+ * The round that caught the round-4 fix. Both of these are defects in that
+ * fix, not in the original: one grouped a fact with two others it does not
+ * belong with, the other let a value through on a delay that may not have it.
+ */
+describe('the defects the fifth review found', () => {
   it('does not read an expired clock as a statement about ownership', () => {
     // The round-4 fix folded `deadlineExpired` in beside the two facts that do
     // deny ownership. A clock running out says nothing about whether the
@@ -1615,6 +1634,30 @@ describe('the defects the fourth review found', () => {
     // And the conservative direction on the question that decides cleanup.
     expect(result.sideEffectsPossible).toBe(true);
   });
+
+  it(
+    'falls back to a real grace when asked for one that never expires',
+    async () => {
+      // Round 4 split the validators and let `Infinity` through on every delay.
+      // On a timeout that is a caller saying "effectively never", which is
+      // legitimate; on the grace it removes the only bound on a helper that has
+      // already ignored its own kill, and `runOwnedCommand` never resolves.
+      //
+      // Measured rather than asserted about a helper: this case costs the
+      // default grace, because that is the value under test.
+      const boundary = fakeBoundary({ ignoreTermination: true });
+      const startedAt = Date.now();
+      const result = await runOwnedCommand(
+        { file: 'C:\\fixture.exe', timeoutMs: 20, terminationGraceMs: Number.POSITIVE_INFINITY },
+        { start: boundary.start },
+      );
+      expect(result.failureCode).toBe('BOUNDARY_TERMINATION_UNCONFIRMED');
+      // The default, not the largest expressible timer.
+      expect(Date.now() - startedAt).toBeLessThan(DEFAULT_TERMINATION_GRACE_MS * 3);
+      boundary.finish({ childExitCode: null });
+    },
+    20_000,
+  );
 
   it('completes exactly one shape across the whole product of its inputs', () => {
     // The enumeration the module header claims, and this is the second attempt
@@ -1683,30 +1726,6 @@ describe('the defects the fourth review found', () => {
     }
     expect(completed.sort()).toEqual(expected.sort());
   });
-
-  it(
-    'falls back to a real grace when asked for one that never expires',
-    async () => {
-      // Round 4 split the validators and let `Infinity` through on every delay.
-      // On a timeout that is a caller saying "effectively never", which is
-      // legitimate; on the grace it removes the only bound on a helper that has
-      // already ignored its own kill, and `runOwnedCommand` never resolves.
-      //
-      // Measured rather than asserted about a helper: this case costs the
-      // default grace, because that is the value under test.
-      const boundary = fakeBoundary({ ignoreTermination: true });
-      const startedAt = Date.now();
-      const result = await runOwnedCommand(
-        { file: 'C:\\fixture.exe', timeoutMs: 20, terminationGraceMs: Number.POSITIVE_INFINITY },
-        { start: boundary.start },
-      );
-      expect(result.failureCode).toBe('BOUNDARY_TERMINATION_UNCONFIRMED');
-      // The default, not the largest expressible timer.
-      expect(Date.now() - startedAt).toBeLessThan(DEFAULT_TERMINATION_GRACE_MS * 3);
-      boundary.finish({ childExitCode: null });
-    },
-    20_000,
-  );
 
   it('keeps an unbounded budget unbounded', async () => {
     // `Infinity` is a usable byte budget and a usable delay; round 3's single

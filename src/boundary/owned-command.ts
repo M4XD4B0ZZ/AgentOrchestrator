@@ -364,11 +364,16 @@ export function classifyOwnedCommand(
    */
   const provesOwnership = ending.ending === 'CHILD_EXITED' || ending.ending === 'TERMINATED_BY_CALLER';
   // `deadlineExpired` is deliberately *not* here. A clock running out says
-  // nothing about whether ownership was established — and folding it in made
-  // every ordinary timeout on an established run classify as a lost boundary
-  // with no exit code, which is the word reserved for "we do not know what
-  // happened to the tree" being emitted for the one case where it is known
-  // exactly. It is consulted only where it means something: the refusal branch.
+  // nothing about whether ownership was established, and folding it in *would*
+  // have classified every ordinary timeout on an established run as a lost
+  // boundary with no exit code — the words reserved for "we do not know what
+  // happened to the tree", over the one case where it is known exactly.
+  //
+  // Would have, not did: the run loop passes that fact only on the
+  // not-established path, so no run this module could produce ever behaved that
+  // way. It was a latent contradiction in an exported, documented function, and
+  // a test had already pinned the wrong reading of it. It is consulted only
+  // where it means something now: the refusal branch.
   const deniesOwnership =
     observation.ownershipEstablished === false || observation.cancelledBeforeOwnership === true;
   if (provesOwnership && deniesOwnership) return inconsistent();
@@ -759,6 +764,19 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
   readonly finishedAt: string;
   readonly durationMs: number;
   /**
+   * Where this launch's request and status files live, or `null` for a launch
+   * that never got one.
+   *
+   * Surfaced because three results deliberately do *not* remove it — the two
+   * abandoned paths and a refusal after establishment, each of which may leave
+   * a helper still writing into that directory. Nothing in this repository
+   * reaps them, so a caller that wants them reaped needs to be told where they
+   * are. Reading it is the only thing this module offers for that; deciding
+   * when a leftover is safe to remove is a lease-and-recovery question, and
+   * that is a later slice's.
+   */
+  readonly workDir: string | null;
+  /**
    * The boundary's own report, or `null` where there is none to give.
    *
    * `null` does **not** mean nothing was launched — read {@link established}
@@ -788,6 +806,14 @@ export async function runOwnedCommand(
   /**
    * A caller-supplied number, or the default for one this module cannot use.
    *
+   * The type check is not redundant with the compiler. This module argues, at
+   * {@link classifyOwnedCommand}'s termination guard, that untyped callers are
+   * a real input class — the `.mjs` dist harness, a JS consumer, slice 3 across
+   * a serialisation boundary — and a `timeoutMs` that arrives as the string
+   * `"20000"` makes `deadline` a string, `remaining` a `NaN`, and every run a
+   * one-millisecond timeout with the tree killed. The three validators here
+   * used to disagree about that threat; they no longer do.
+   *
    * `NaN` is the shape a missing config value takes after `parseInt`, and on
    * `timeoutMs` it was the worst place for it: the deadline became `NaN`, the
    * establishment budget with it, and `startOwnedProcess` polled a helper that
@@ -813,7 +839,7 @@ export async function runOwnedCommand(
    * slice 3's to resolve when it collapses the two runners.
    */
   const usable = (value: number | undefined, fallback: number): number =>
-    value === undefined || Number.isNaN(value) || value < 0 ? fallback : value;
+    typeof value !== 'number' || Number.isNaN(value) || value < 0 ? fallback : value;
 
   /**
    * The same, for a delay.
@@ -892,6 +918,7 @@ export async function runOwnedCommand(
       stdinDelivery: stdinRequested ? 'FAILED' : 'NOT_REQUESTED',
       helperPid: null,
       childPid: null,
+      workDir: null,
       ending: null,
     });
 
@@ -991,6 +1018,7 @@ export async function runOwnedCommand(
         }),
         helperPid: null,
         childPid: null,
+        workDir: null,
         ending: launch.ending,
       });
     }
@@ -1072,6 +1100,7 @@ export async function runOwnedCommand(
         }),
         helperPid: owned.helperPid,
         childPid: owned.childPid,
+        workDir: owned.workDir,
         ending: null,
       });
     }
@@ -1174,6 +1203,7 @@ export async function runOwnedCommand(
         }),
         helperPid: owned.helperPid,
         childPid: owned.childPid,
+        workDir: owned.workDir,
         ending: null,
       });
     }
@@ -1198,15 +1228,24 @@ export async function runOwnedCommand(
       }),
       helperPid: owned.helperPid,
       childPid: owned.childPid,
+      workDir: owned.workDir,
       ending,
     });
     if (ending.ending === 'BOUNDARY_REFUSED') {
       // Contradictory, and already classified as such above — but it also
-      // decides what may be done to the working directory. This ending arrives
-      // from a helper `error` event rather than from its close, so the helper
-      // may still be running and still writing its status into that directory.
-      // Removing it under a live writer is the one cleanup this module must not
-      // perform on a run it cannot account for.
+      // decides what may be done to the working directory.
+      //
+      // Two ways to get here, and they differ in exactly the thing that
+      // matters. A status that turned foreign, or a `boundary=FAILED` written
+      // after the `boundary=OK` this run was established on, arrive on the
+      // helper's *close*: the helper is gone. A helper `error` event — node
+      // emits one when a kill fails, not only when a spawn does — arrives with
+      // the helper possibly still running and still writing into that
+      // directory.
+      //
+      // Nothing here can tell the two apart, so the directory is left alone in
+      // both. `workDir` is on the result for a caller that wants to decide
+      // later with more evidence than this module has.
       releaseHelper(owned);
       void owned.ending.catch(() => undefined);
       return result;

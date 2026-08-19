@@ -835,10 +835,12 @@ internal static class Program
             // before the status is published, so the child never waits on a
             // file write.
             Native.CloseHandle(toChild);
-            // Published here, as the BROKEN_PIPE branch above also publishes —
-            // in the opposite order, deliberately: that branch has nothing left
-            // to release, this one has the child's handle and releases it first
-            // so a reader is not made to wait out a file write.
+            // Published here, as the BROKEN_PIPE branch above also publishes.
+            // The two order the release and the publish oppositely, and only
+            // this order matters: there the child has already closed its read
+            // end, so nothing is waiting on the handle either way, while here a
+            // reader is still blocked on it and must not be made to wait out a
+            // file write.
             //
             // This is hardening, and it is labelled as such rather than sold as
             // a repair. Without it the key still reached the file, but only
@@ -857,8 +859,9 @@ internal static class Program
             // defect, and the reason no test here kills the mutant.
             //
             // Two WriteStatus calls cannot lose each other's work: each takes
-            // its snapshot of the shared list under the same lock it writes the
-            // file under, so whichever writes last writes a superset.
+            // its snapshot of the append-only list *inside* the lock it also
+            // writes and renames the file under, so the two serialise and
+            // whichever renames last renamed a superset.
             WriteStatus();
         });
         thread.IsBackground = true;
