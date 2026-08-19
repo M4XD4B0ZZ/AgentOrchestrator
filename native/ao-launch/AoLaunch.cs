@@ -835,7 +835,10 @@ internal static class Program
             // before the status is published, so the child never waits on a
             // file write.
             Native.CloseHandle(toChild);
-            // Published here, exactly as the BROKEN_PIPE branch above publishes.
+            // Published here, as the BROKEN_PIPE branch above also publishes —
+            // in the opposite order, deliberately: that branch has nothing left
+            // to release, this one has the child's handle and releases it first
+            // so a reader is not made to wait out a file write.
             //
             // This is hardening, and it is labelled as such rather than sold as
             // a repair. Without it the key still reached the file, but only

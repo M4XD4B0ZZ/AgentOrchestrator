@@ -21,6 +21,8 @@
  *   --hang             never exit on its own
  *   --sleep-ms=N       stay alive N ms before exiting
  *   --exit=N           exit with code N
+ *   --echo             report the argv, cwd and environment that arrived, as
+ *                      one JSON line on stdout
  *
  * The heartbeat is the same instrument the slice 1 harness uses, and for the
  * same reason: "still running" is a question a process table answers badly —
@@ -77,6 +79,24 @@ for (let index = 0; index < children; index += 1) {
     [selfPath, `--heartbeat=${heartbeatDir ?? ''}`, '--hang'],
     { stdio: 'ignore', windowsHide: true },
   ).unref();
+}
+
+if (options.has('echo')) {
+  // The same read-back `boundary-echo-fixture.mjs` gives, in the fixture that
+  // can also heartbeat. Slice 1's echo fixture cannot: it has no heartbeat
+  // support, and adding an argument to it would change the very argv it exists
+  // to report. A case that starts a process the survivor sweep cannot see is
+  // exactly the gap this file's header has now overstated four times.
+  process.stdout.write(
+    `${JSON.stringify({
+      argv: process.argv.slice(2),
+      cwd: process.cwd(),
+      env: {
+        AO_BOUNDARY_PROBE: process.env['AO_BOUNDARY_PROBE'] ?? null,
+        PATH: process.env['PATH'] === undefined ? null : 'present',
+      },
+    })}\n`,
+  );
 }
 
 const stdoutMark = options.get('stdout-mark');

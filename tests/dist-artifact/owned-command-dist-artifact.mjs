@@ -13,8 +13,9 @@
  *
  * ── The differential, and what it is for ───────────────────────────────────
  *
- * Most cases run the *same* fixture invocation down two paths — `runCommand`,
- * the contract AO has today, and `runOwnedCommand`, the one this slice adds —
+ * Nine of the cases below run the *same* fixture invocation down two paths —
+ * `runCommand`, the contract AO has today, and `runOwnedCommand`, the one this
+ * slice adds —
  * and require them to agree about output, budgets, exit codes, timeouts and
  * stdin delivery. This is not an attempt to reproduce `runCommand`'s
  * `taskkill` containment, which the ADR replaces rather than imitates. It is
@@ -33,13 +34,18 @@
  * referenced looks alive in a process walk.
  *
  * **Every case that starts a process starts it with a `--heartbeat=` directory,
- * and every such directory is swept at the end of the run.** That is stated as
- * a property of the file rather than as an intention, because three earlier
- * versions of this paragraph claimed a coverage the file did not have: first
- * for cases that started nothing, then for cases that started trees into
- * unregistered directories, then for cases that started processes with no
- * heartbeat at all. The only cases that register nothing are the two that start
- * nothing — a refused foreign status, and a target that does not exist.
+ * and every such directory is swept at the end of the run.** The only cases
+ * that register nothing are the two that start nothing: a refused foreign
+ * status, and a target that does not exist.
+ *
+ * That sentence is checkable by grep — every `runOwnedCommand` and `bothPaths`
+ * call below carries a `--heartbeat=`, and every one of those directories comes
+ * from `watch` or `sweepOnly` — and it is written that way because four earlier
+ * versions of it were wrong, each one class further down: cases that started
+ * nothing, then trees in unregistered directories, then processes with no
+ * heartbeat at all, then two cases running a fixture that had no heartbeat
+ * support. The last of those is why the argv read-back below no longer uses
+ * slice 1's echo fixture.
  *
  * Cases that start one tree additionally get a per-case window, so a leak is
  * attributed to the case that caused it; cases that start many short runs are
@@ -73,14 +79,16 @@
  *      too;
  *  13. a termination during a transfer in flight is `UNCONFIRMED`;
  *  14. no payload is `NOT_REQUESTED`, and the child still sees end-of-file;
- *  15. the working directory, the replaced environment and the argument vector
- *      the caller asked for are the ones the target receives, in both placement
- *      modes;
+ *  15. the working directory, the replaced environment, the argument vector and
+ *      the placement mode the caller asked for are the ones actually used —
+ *      the mode read back from the boundary's own status;
  *  16. a byte budget the caller disabled bounds nothing, and `runCommand`
  *      agrees;
- *  17. a budget and a timeout each name their own outcome when clearly ordered,
+ *  17. `verbatim` hands the command line over untouched, and not doing so is
+ *      what quotes each argument — told apart by an argument with a space;
+ *  18. a budget and a timeout each name their own outcome when clearly ordered,
  *      and produce nothing but those two when armed to fire together;
- *  18. a deadline that expires during establishment is a timeout, and it stays
+ *  19. a deadline that expires during establishment is a timeout, and it stays
  *      conservative about whether anything ran.
  *
  * The same-tick case — two policies triggering inside one turn of the loop — is
@@ -341,6 +349,17 @@ async function measureEstablishment() {
 /** Filled in before the cases run. */
 let establishMs = 0;
 
+/**
+ * A budget a case can rely on outlasting establishment.
+ *
+ * Ten times the measured cost plus two seconds. `establishMs` is one
+ * measurement taken before any case ran, and a runner that slows down
+ * afterwards — a virus scanner waking up, another job landing on the box —
+ * would otherwise turn a case that measures a *timeout* into one that fails an
+ * assertion about `established`.
+ */
+const settleBudgetMs = () => Math.max(2_000, establishMs * 10);
+
 // ── 1. exit codes ───────────────────────────────────────────────────────────
 
 test('an exit code survives the boundary exactly, and agrees with runCommand', async (c) => {
@@ -448,9 +467,10 @@ test('a timeout ends the owned tree and is a timeout, not a loss', async (c) => 
   const owned = await runOwnedCommand({
     file: process.execPath,
     args: [fixture, `--heartbeat=${beats}`, '--children=3', '--hang'],
-    // Scaled: this budget has to outlast establishment, or the case fails on a
-    // slow runner as an assertion rather than as the timeout it is measuring.
-    timeoutMs: Math.max(1_500, establishMs * 6),
+    // Scaled, and generously: this budget has to outlast establishment on a
+    // runner that slows down *after* the measurement, or the case fails as an
+    // assertion about `established` rather than as the timeout it measures.
+    timeoutMs: settleBudgetMs(),
   });
   c.equal(owned.outcome, 'TIMED_OUT', 'outcome');
   c.equal(owned.failureCode, 'TIMEOUT', 'failure code');
@@ -461,7 +481,7 @@ test('a timeout ends the owned tree and is a timeout, not a loss', async (c) => 
   const differentialBeats = c.sweepOnly(tempDir('ao-owned-hb-'));
   const { direct } = await bothPaths(
     [fixture, `--heartbeat=${differentialBeats}`, '--hang'],
-    { timeoutMs: Math.max(1_500, establishMs * 6) },
+    { timeoutMs: settleBudgetMs() },
   );
   c.equal(direct.outcome, 'TIMED_OUT', 'runCommand agrees on the outcome');
   c.equal(direct.failureCode, 'TIMEOUT', 'runCommand agrees on the failure code');
@@ -654,7 +674,7 @@ test('a termination during a transfer in flight is UNCONFIRMED', async (c) => {
     file: process.execPath,
     args: [fixture, `--heartbeat=${beats}`, '--stdin=ignore', '--hang'],
     stdin: 'x'.repeat(8_000_000),
-    timeoutMs: Math.max(1_500, establishMs * 6),
+    timeoutMs: settleBudgetMs(),
   });
   c.equal(owned.outcome, 'TIMED_OUT', 'outcome');
   c.equal(owned.stdinDelivery, 'UNCONFIRMED', 'delivery');
@@ -674,36 +694,48 @@ test('no payload is NOT_REQUESTED, and the child still sees end-of-file', async 
   c.equal(direct.stdinDelivery, 'NOT_REQUESTED', 'runCommand agrees');
 });
 
-// ── 15. what the caller asked for actually reaches the target ─────────────
+// ── 15 & 17. what the caller asked for actually reaches the target ─────────────
 
-test('the working directory, the environment and the argument vector arrive', async (c) => {
+test('the working directory, the environment, the argv and the mode arrive', async (c) => {
   // Nothing measured this. `verbatim`, `cwd`, `env` and `mode` are forwarded to
   // `startOwnedProcess` and every one of them could be deleted with the whole
   // gate still green — including `env`, which is the channel a later slice uses
   // to scope an agent's environment, and `cwd`, which is what puts a writer in
   // its worktree rather than in AO's own directory.
+  //
+  // The read-back runs through this file's own fixture rather than slice 1's
+  // echo fixture, because this one can also heartbeat: a case that starts a
+  // process no survivor sweep can see is the gap this file's header has
+  // overstated once per round.
   const home = tempDir('ao-owned-cwd-');
-  const argv = ['plain', 'with space', 'quote"inside', 'back\\slash', '', 'a&b|c'];
+  const beats = c.sweepOnly(tempDir('ao-owned-hb-'));
+  const payload = ['plain', 'with space', 'quote"inside', 'back\\slash', '', 'a&b|c'];
+  const args = [fixture, '--echo', `--heartbeat=${beats}`, ...payload];
 
   for (const mode of ['JOBLIST', 'SUSPENDED']) {
     const owned = await runOwnedCommand({
       file: process.execPath,
-      args: [echoFixture, ...argv],
+      args,
       cwd: home,
       env: { AO_BOUNDARY_PROBE: 'forwarded', SystemRoot: process.env['SystemRoot'] ?? '' },
       mode,
       timeoutMs: 30_000,
     });
     c.equal(owned.outcome, 'COMPLETED', `${mode}: outcome`);
+    // The placement mode, read back from the boundary's own status rather than
+    // from the request. Without this the `mode` forwarding could be deleted and
+    // both iterations would silently run JOBLIST.
+    c.equal(owned.ending?.status?.mode, mode, `${mode}: the mode the boundary used`);
     let report = null;
     try {
-      report = JSON.parse(owned.stdout.trim());
+      report = JSON.parse(owned.stdout.trim().split('\n')[0]);
     } catch {
       c.check(false, `${mode}: the target did not report: ${JSON.stringify(owned.stdout)}`);
       continue;
     }
+    const expected = args.slice(1);
     c.check(
-      JSON.stringify(report.argv) === JSON.stringify(argv),
+      JSON.stringify(report.argv) === JSON.stringify(expected),
       `${mode}: argv arrived as ${JSON.stringify(report.argv)}`,
     );
     c.equal(report.cwd, home, `${mode}: working directory`);
@@ -714,11 +746,53 @@ test('the working directory, the environment and the argument vector arrive', as
   }
 });
 
+test('verbatim hands the command line over untouched', async (c) => {
+  // The other half of the forwarding surface, and the one no case exercised at
+  // all: `verbatim: true` joins the arguments behind a quoted file instead of
+  // quoting each of them MSVCRT-style. An argument containing a space is what
+  // tells the two apart — quoted it arrives as one token, verbatim it arrives
+  // as two — so this case cannot pass with the flag ignored in either
+  // direction.
+  const beats = c.sweepOnly(tempDir('ao-owned-hb-'));
+
+  const quoted = await runOwnedCommand({
+    file: process.execPath,
+    args: [fixture, '--echo', `--heartbeat=${beats}`, 'one two'],
+    timeoutMs: 30_000,
+  });
+  c.equal(quoted.outcome, 'COMPLETED', 'quoted: outcome');
+  const quotedArgv = JSON.parse(quoted.stdout.trim().split('\n')[0]).argv;
+  c.check(
+    quotedArgv.includes('one two'),
+    `quoted: the space survived as one token, got ${JSON.stringify(quotedArgv)}`,
+  );
+
+  const raw = await runOwnedCommand({
+    file: process.execPath,
+    verbatim: true,
+    // Verbatim means the caller does its own quoting, and the script path is
+    // part of what it must quote.
+    args: [`"${fixture}"`, '--echo', `--heartbeat=${beats}`, 'one two'],
+    timeoutMs: 30_000,
+  });
+  c.equal(raw.outcome, 'COMPLETED', 'verbatim: outcome');
+  const rawArgv = JSON.parse(raw.stdout.trim().split('\n')[0]).argv;
+  c.check(
+    !rawArgv.includes('one two') && rawArgv.includes('one') && rawArgv.includes('two'),
+    `verbatim: the line was handed over untouched, got ${JSON.stringify(rawArgv)}`,
+  );
+});
+
 test('a budget the caller disabled bounds nothing, on both paths', async (c) => {
   // `Infinity` is a caller saying "no cap". Folding it into the default did not
   // merely cut the stream short — it reported an output-limit failure and
   // terminated the job for a limit that had been switched off.
-  const args = [fixture, '--stdout-bytes=2000000', '--exit=0'];
+  const args = [
+    fixture,
+    `--heartbeat=${c.sweepOnly(tempDir('ao-owned-hb-'))}`,
+    '--stdout-bytes=2000000',
+    '--exit=0',
+  ];
   const owned = await runOwnedCommand({
     file: process.execPath,
     args,
@@ -737,7 +811,9 @@ test('a budget the caller disabled bounds nothing, on both paths', async (c) => 
   c.equal(owned.stdout.length, direct.stdout.length, 'and on the byte count');
 });
 
-// ── 17. the two policies, ordered and contending ────────────────────────────
+// ── 16. a budget the caller switched off ──────────────────────────────────
+
+// ── 18. the two policies, ordered and contending ────────────────────────────
 
 test('a budget and a timeout each name their own outcome, and never a third', async (c) => {
   // Three parts, and the first review is the reason they are three.
@@ -816,7 +892,11 @@ test('a budget and a timeout each name their own outcome, and never a third', as
     ...[-90, -70, -50, -30, -15, -5, 0, 10, Math.round(establishMs / 2)].map((delta) =>
       Math.max(1, establishMs + delta),
     ),
-    establishMs * 4 + 1_000,
+    // Generous on purpose, and more generous than establishment alone: this run
+    // must reach the stdout budget, which needs the *child* to boot and start
+    // writing after ownership is established. Establishment ends when the
+    // helper reports membership, before the target has run a line.
+    establishMs * 8 + 3_000,
   ];
   for (const timeoutMs of budgets) {
     const beats = c.sweepOnly(tempDir('ao-owned-hb-'));
@@ -856,7 +936,7 @@ test('a budget and a timeout each name their own outcome, and never a third', as
   );
 });
 
-// ── 18. a deadline that expires during establishment ───────────────────────────────────────────────────
+// ── 19. a deadline that expires during establishment ───────────────────────────────────────────────────
 
 test('an unknown launch stays conservative about side effects', async (c) => {
   // A wall-clock budget too small for a process to start in. Establishment

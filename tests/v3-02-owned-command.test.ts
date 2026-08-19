@@ -41,6 +41,7 @@ import {
 import {
   classifyOwnedCommand,
   classifyStdinDelivery,
+  DEFAULT_TERMINATION_GRACE_MS,
   OWNED_COMMAND_OUTCOMES,
   OWNED_TERMINATIONS,
   runOwnedCommand,
@@ -1554,15 +1555,40 @@ describe('the defects the fourth review found', () => {
     // own result says the launch never happened and whose output is empty
     // because no sink was ever attached to read it.
     const exited: BoundaryEnding = { ending: 'CHILD_EXITED', childExitCode: 0, status: status() };
-    for (const stated of [
-      { cancelledBeforeOwnership: true },
-      { deadlineExpired: true },
-      { ownershipEstablished: false },
-    ]) {
+    for (const stated of [{ cancelledBeforeOwnership: true }, { ownershipEstablished: false }]) {
       const result = classifyOwnedCommand({ ending: exited, termination: 'NONE', ...stated });
       expect(result.outcome, JSON.stringify(stated)).toBe('BOUNDARY_LOST');
       expect(result.failureCode, JSON.stringify(stated)).toBe('ENDING_INCONSISTENT');
     }
+  });
+
+  it('does not read an expired clock as a statement about ownership', () => {
+    // The round-4 fix folded `deadlineExpired` in beside the two facts that do
+    // deny ownership. A clock running out says nothing about whether the
+    // boundary owned anything — and the pairing it broke is the most common
+    // non-success AO has: an ordinary timeout on an established run came back
+    // as a lost boundary with `ENDING_INCONSISTENT` and no exit code, which is
+    // the word for "we do not know what happened to the tree" over the one case
+    // where it is known exactly.
+    const exited: BoundaryEnding = { ending: 'CHILD_EXITED', childExitCode: 4, status: status() };
+    expect(
+      classifyOwnedCommand({
+        ending: exited,
+        termination: 'NONE',
+        ownershipEstablished: true,
+        deadlineExpired: true,
+      }),
+    ).toMatchObject({ outcome: 'COMPLETED', exitCode: 4 });
+
+    const terminated: BoundaryEnding = { ending: 'TERMINATED_BY_CALLER', status: status() };
+    expect(
+      classifyOwnedCommand({
+        ending: terminated,
+        termination: 'TIMEOUT',
+        ownershipEstablished: true,
+        deadlineExpired: true,
+      }),
+    ).toMatchObject({ outcome: 'TIMED_OUT', failureCode: 'TIMEOUT' });
   });
 
   it('never refuses a launch that had already established ownership', () => {
@@ -1590,38 +1616,97 @@ describe('the defects the fourth review found', () => {
     expect(result.sideEffectsPossible).toBe(true);
   });
 
-  it('completes exactly one pairing across the whole product', () => {
-    // The enumeration the module header claims. It crosses the two facts the
-    // classifier gained in round 3, which the previous version did not — and
-    // which is how a `COMPLETED` hid in the product for a whole round.
-    const stated = [
-      {},
-      { ownershipEstablished: true },
-      { ownershipEstablished: false },
-      { cancelledBeforeOwnership: true },
-      { deadlineExpired: true },
-      { ownershipEstablished: false, cancelledBeforeOwnership: true },
-      { ownershipEstablished: false, deadlineExpired: true },
-    ];
+  it('completes exactly one shape across the whole product of its inputs', () => {
+    // The enumeration the module header claims, and this is the second attempt
+    // at it: the first crossed seven hand-picked combinations of the three
+    // establishment facts out of the twenty-seven that exist, which is how a
+    // `COMPLETED` hid in the rest for a round. Every field now takes every
+    // value it can, including an explicit `false`.
+    const tri = [undefined, true, false];
+    let rows = 0;
     const completed: string[] = [];
     for (const { name, ending } of ENDINGS) {
       for (const termination of OWNED_TERMINATIONS) {
-        for (const extra of stated) {
-          const result = classifyOwnedCommand({ ending, termination, ...extra });
-          expect(OWNED_COMMAND_OUTCOMES, `${name} × ${termination}`).toContain(result.outcome);
-          if (result.outcome === 'COMPLETED') {
-            completed.push(`${name} × ${termination} × ${JSON.stringify(extra)}`);
+        for (const ownershipEstablished of tri) {
+          for (const cancelledBeforeOwnership of tri) {
+            for (const deadlineExpired of tri) {
+              rows += 1;
+              // Spread rather than assigned: under `exactOptionalPropertyTypes`
+              // an explicit `undefined` is a different thing from an absent
+              // property, and "absent" is one of the three states this crosses.
+              const result = classifyOwnedCommand({
+                ending,
+                termination,
+                ...(ownershipEstablished === undefined ? {} : { ownershipEstablished }),
+                ...(cancelledBeforeOwnership === undefined ? {} : { cancelledBeforeOwnership }),
+                ...(deadlineExpired === undefined ? {} : { deadlineExpired }),
+              });
+              const where = `${name} × ${termination} × ${String(ownershipEstablished)}/${String(
+                cancelledBeforeOwnership,
+              )}/${String(deadlineExpired)}`;
+              expect(OWNED_COMMAND_OUTCOMES, where).toContain(result.outcome);
+              // Shape, on every row: a completion carries no failure code, and
+              // only a lost boundary may name a reason it was lost.
+              if (result.outcome === 'COMPLETED') {
+                expect(result.failureCode, where).toBeNull();
+                completed.push(where);
+              }
+              if (result.outcome !== 'BOUNDARY_LOST') {
+                expect(result.boundaryLostReason, where).toBeNull();
+              }
+              expect(result.sideEffectsPossible, where).toBe(result.targetStarted !== 'NO');
+            }
           }
         }
       }
     }
-    expect(completed).toEqual([
-      'CHILD_EXITED(0) × NONE × {}',
-      'CHILD_EXITED(0) × NONE × {"ownershipEstablished":true}',
-      'CHILD_EXITED(3) × NONE × {}',
-      'CHILD_EXITED(3) × NONE × {"ownershipEstablished":true}',
-    ]);
+    expect(rows).toBe(ENDINGS.length * OWNED_TERMINATIONS.length * 27);
+
+    // Every completion, and there is exactly one shape of them: the boundary
+    // observed a child exit, no policy terminated it, and nothing said
+    // ownership was never established. An expired clock does not appear —
+    // deliberately, since it says nothing about ownership.
+    const expected: string[] = [];
+    for (const { name, ending } of ENDINGS) {
+      if (ending.ending !== 'CHILD_EXITED') continue;
+      for (const ownershipEstablished of [undefined, true]) {
+        for (const cancelledBeforeOwnership of [undefined, false]) {
+          for (const deadlineExpired of tri) {
+            expected.push(
+              `${name} × NONE × ${String(ownershipEstablished)}/${String(
+                cancelledBeforeOwnership,
+              )}/${String(deadlineExpired)}`,
+            );
+          }
+        }
+      }
+    }
+    expect(completed.sort()).toEqual(expected.sort());
   });
+
+  it(
+    'falls back to a real grace when asked for one that never expires',
+    async () => {
+      // Round 4 split the validators and let `Infinity` through on every delay.
+      // On a timeout that is a caller saying "effectively never", which is
+      // legitimate; on the grace it removes the only bound on a helper that has
+      // already ignored its own kill, and `runOwnedCommand` never resolves.
+      //
+      // Measured rather than asserted about a helper: this case costs the
+      // default grace, because that is the value under test.
+      const boundary = fakeBoundary({ ignoreTermination: true });
+      const startedAt = Date.now();
+      const result = await runOwnedCommand(
+        { file: 'C:\\fixture.exe', timeoutMs: 20, terminationGraceMs: Number.POSITIVE_INFINITY },
+        { start: boundary.start },
+      );
+      expect(result.failureCode).toBe('BOUNDARY_TERMINATION_UNCONFIRMED');
+      // The default, not the largest expressible timer.
+      expect(Date.now() - startedAt).toBeLessThan(DEFAULT_TERMINATION_GRACE_MS * 3);
+      boundary.finish({ childExitCode: null });
+    },
+    20_000,
+  );
 
   it('keeps an unbounded budget unbounded', async () => {
     // `Infinity` is a usable byte budget and a usable delay; round 3's single
