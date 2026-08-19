@@ -15,20 +15,22 @@
  * and leaves real orphans behind; a fixture that ran forever would leave them
  * on the machine.
  *
- * usage: node boundary-tree-fixture.mjs <heartbeatDir> <generations> <fanout> <lifetimeMs> [rootLifetimeMs]
+ * usage: node boundary-tree-fixture.mjs <heartbeatDir> <generations> <fanout> <lifetimeMs> [rootLifetimeMs] [exitFlagPath]
  *
  * `rootLifetimeMs`, when given and smaller than `lifetimeMs`, makes the root
  * exit early while its descendants keep running: that is how the "orphaned
- * descendants are still job members" case gets its subject.
+ * descendants are still job members" case gets its subject. `exitFlagPath`
+ * makes that exit happen when the caller says so instead of when a clock runs
+ * out — the caller can see the tree is complete, a timer cannot.
  */
 
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const selfPath = fileURLToPath(import.meta.url);
-const [heartbeatDir, generationsText, fanoutText, lifetimeText, rootLifetimeText] =
+const [heartbeatDir, generationsText, fanoutText, lifetimeText, rootLifetimeText, exitFlagPath] =
   process.argv.slice(2);
 
 const generations = Number.parseInt(generationsText ?? '0', 10);
@@ -71,6 +73,23 @@ if (generations > 0) {
 }
 
 const timer = setInterval(beat, 100);
+
+if (exitFlagPath !== undefined) {
+  // The root leaves on demand rather than on a clock. The case that counts how
+  // many descendants the kernel considers job members needs the tree to be
+  // finished before the root exits, and a timer cannot promise that: on a
+  // loaded runner one grandchild is still being spawned when the clock runs
+  // out, and the count comes back one short of a tree that was never complete.
+  // A flag file makes "the tree is up" the caller's observation instead of an
+  // assumption.
+  const watch = setInterval(() => {
+    if (!existsSync(exitFlagPath)) return;
+    clearInterval(watch);
+    clearInterval(timer);
+    process.exit(0);
+  }, 50);
+}
+
 setTimeout(() => {
   clearInterval(timer);
   process.exit(0);

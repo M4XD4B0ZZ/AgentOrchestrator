@@ -284,6 +284,7 @@ async function startTree(options = {}) {
       '2',
       String(options.lifetimeMs ?? 30_000),
       String(options.rootLifetimeMs ?? options.lifetimeMs ?? 30_000),
+      ...(options.rootExitFlag === undefined ? [] : [options.rootExitFlag]),
     ],
   });
   if (start.established) {
@@ -428,14 +429,21 @@ measure('AO death takes the helper and the whole tree, with no cleanup code', as
 });
 
 measure('descendants the child orphaned are job members and die with the job', async (c) => {
-  // The root's lifetime is the robustness knob: every descendant has to exist
-  // before the root exits, or the job would be counting a tree that was never
-  // finished being built. Ten seconds is far more than the fixture needs on
-  // this machine and leaves room for a slow runner.
-  const { start, heartbeatDir } = await startTree({ lifetimeMs: 40_000, rootLifetimeMs: 10_000 });
+  // The root leaves when this case says so, not on a clock. Every descendant
+  // has to exist before the root exits, or the job is counting a tree that was
+  // never finished being built — which is what a timer produced on a loaded CI
+  // runner: 5 members where the tree has 6, and a failure that says nothing
+  // about containment. The flag turns "the tree is up" into an observation.
+  const flag = join(tempDir('ao-boundary-flag-'), 'root-may-exit.txt');
+  const { start, heartbeatDir } = await startTree({
+    lifetimeMs: 40_000,
+    rootLifetimeMs: 40_000,
+    rootExitFlag: flag,
+  });
   if (!c.check(start.established, 'boundary refused')) return;
   const owned = start.process;
-  c.check(await waitForTree(heartbeatDir, 7, 9_000), 'the 7-process tree never appeared in time');
+  c.check(await waitForTree(heartbeatDir, 7, 30_000), 'the 7-process tree never appeared');
+  writeFileSync(flag, 'go', 'utf8');
 
   const ending = await owned.ending;
   c.check(
@@ -444,10 +452,11 @@ measure('descendants the child orphaned are job members and die with the job', a
   );
   const membersAtEnd = ending.status?.jobMembersAtEnd ?? -1;
   c.note(`job members when the root had exited: ${membersAtEnd}`);
-  // The kernel's own answer: the orphans the root left behind were inside the
-  // ownership boundary, not merely reachable from it.
+  // The kernel's own answer, and now an exact one: the tree was complete before
+  // the root was told to leave, so the six orphans it left behind were inside
+  // the ownership boundary, not merely reachable from it.
   c.check(
-    membersAtEnd >= 6,
+    membersAtEnd === 6,
     `expected the 6 orphaned descendants to be job members, job reported ${membersAtEnd}`,
   );
   const survivors = await liveCount(heartbeatDir);
