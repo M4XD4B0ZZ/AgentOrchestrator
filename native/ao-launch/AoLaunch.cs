@@ -203,6 +203,10 @@ internal static class Native
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern IntPtr GetStdHandle(int stdHandle);
 
+    /** The end of an anonymous pipe, as Windows reports it: a *failed* read. */
+    internal const int ERROR_BROKEN_PIPE = 109;
+    internal const int ERROR_HANDLE_EOF = 38;
+
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern bool ReadFile(IntPtr handle, byte[] buffer, uint toRead, out uint read, IntPtr overlapped);
 
@@ -786,11 +790,48 @@ internal static class Program
             while (true)
             {
                 uint read;
-                if (!Native.ReadFile(from, buffer, (uint)buffer.Length, out read, IntPtr.Zero) || read == 0) break;
+                // A failed read and an end of file are different facts, and
+                // collapsing them made this thread report EOF_FORWARDED for a
+                // payload it had stopped reading halfway. "The whole stream was
+                // forwarded" is not something this thread knows after a read
+                // error, and it may not say it.
+                //
+                // The distinction costs a last-error check, and skipping that
+                // check is not an option: on Windows the end of an anonymous
+                // pipe is *itself* reported as a failed ReadFile with
+                // ERROR_BROKEN_PIPE, so treating every failure as an error
+                // turns every ordinary end of file into one. That was measured
+                // the direct way — the first attempt at this did exactly that,
+                // and every DELIVERED case in
+                // `tests/dist-artifact/owned-command-dist-artifact.mjs` went
+                // UNCONFIRMED at once. Those cases are what keeps the EOF half
+                // of this honest; the error half is not reachable from any test
+                // here, and is stated rather than claimed as a measured repair.
+                if (!Native.ReadFile(from, buffer, (uint)buffer.Length, out read, IntPtr.Zero))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == Native.ERROR_BROKEN_PIPE || error == Native.ERROR_HANDLE_EOF) break;
+                    Put("stdinForward", "SOURCE_READ_FAILED");
+                    // Closed before the status is published, for the reason the
+                    // end-of-file branch below gives: a child blocked on
+                    // ReadFile must not be made to wait out a file write.
+                    Native.CloseHandle(toChild);
+                    WriteStatus();
+                    return;
+                }
+                if (read == 0) break;
                 if (!WriteAll(toChild, buffer, read))
                 {
                     // The child closed its read end. That is data for the
                     // caller — a delivery state, not a boundary failure.
+                    //
+                    // Published here, and no test kills the publish: the same
+                    // key still reaches the file through the main thread's
+                    // final WriteStatus, because the list is append-only and
+                    // the later writer writes a superset. What publishing here
+                    // buys is that the key is readable before the child exits,
+                    // which is what a caller polling a live run would need. The
+                    // same disclosure applies to the EOF branch below.
                     Put("stdinForward", "BROKEN_PIPE");
                     WriteStatus();
                     Native.CloseHandle(toChild);
@@ -798,8 +839,38 @@ internal static class Program
                 }
             }
             Put("stdinForward", "EOF_FORWARDED");
-            // EOF must reach the child, or a reader waits forever.
+            // EOF must reach the child, or a reader waits forever. Closed
+            // before the status is published, so the child never waits on a
+            // file write.
             Native.CloseHandle(toChild);
+            // Published here, as the BROKEN_PIPE branch above also publishes.
+            // The two order the release and the publish oppositely, and only
+            // this order matters: there the child has already closed its read
+            // end, so nothing is waiting on the handle either way, while here a
+            // reader is still blocked on it and must not be made to wait out a
+            // file write.
+            //
+            // This is hardening, and it is labelled as such rather than sold as
+            // a repair. Without it the key still reached the file, but only
+            // because of an ordering nothing states: this runs on a background
+            // thread, and the main thread's final WriteStatus happens after the
+            // child exits — which is later, for any child that takes longer to
+            // start than a pipe write takes to finish. The V3 slice 2 adapter's
+            // DELIVERED rests on this key, and an ordering a caller's guarantee
+            // rests on should be in the code rather than in the timing.
+            //
+            // Measured before changing it: with this call removed, a child that
+            // never reads stdin and exits immediately still reported DELIVERED
+            // 12 times out of 12 on the installed runtime. So the ordering was
+            // real, not lucky — and nothing in this repository can currently
+            // make it fail. That is the reason this is not claimed as a fixed
+            // defect, and the reason no test here kills the mutant.
+            //
+            // Two WriteStatus calls cannot lose each other's work: each takes
+            // its snapshot of the append-only list *inside* the lock it also
+            // writes and renames the file under, so the two serialise and
+            // whichever renames last renamed a superset.
+            WriteStatus();
         });
         thread.IsBackground = true;
         thread.Start();

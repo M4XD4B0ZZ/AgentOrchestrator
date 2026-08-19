@@ -224,24 +224,61 @@ export async function startOwnedProcess(
     };
   }
 
-  const encoded = encodeBoundaryRequest({
-    nonce,
-    mode,
-    file: request.file,
-    args: request.args ?? [],
-    verbatim: request.verbatim ?? false,
-    ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
-    ...(request.env === undefined ? {} : { env: request.env }),
-    ownerPid: request.ownerPid ?? process.pid,
-    statusPath,
-  });
-  writeFileSync(requestPath, encoded, 'utf8');
+  /**
+   * From here to the spawn, a throw would leave the directory above behind.
+   *
+   * `encodeBoundaryRequest` throws for a NUL in an argument or an `=` in an
+   * environment name — deliberately, because those are programming errors — and
+   * `writeFileSync` and `spawn` throw for environmental ones. The caller
+   * re-throws all of them, so no result exists to report a leftover on, and
+   * measured before this existed: one refused request left one empty
+   * `ao-boundary-*` directory in `%TEMP%` for the life of the machine. A
+   * long-running orchestrator passing agent-derived text through `args` would
+   * accumulate them silently.
+   */
+  const removeOwnWorkDir = (): void => {
+    if (!ownWorkDir) return;
+    try {
+      rmSync(workDir, { recursive: true, force: true });
+    } catch {
+      /* a leftover temporary directory is not worth failing a throw for */
+    }
+  };
 
-  const helper = spawn(executable.path, [requestPath], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-    shell: false,
-  });
+  let encoded: string;
+  try {
+    encoded = encodeBoundaryRequest({
+      nonce,
+      mode,
+      file: request.file,
+      args: request.args ?? [],
+      verbatim: request.verbatim ?? false,
+      ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+      ...(request.env === undefined ? {} : { env: request.env }),
+      ownerPid: request.ownerPid ?? process.pid,
+      statusPath,
+    });
+    writeFileSync(requestPath, encoded, 'utf8');
+  } catch (error) {
+    removeOwnWorkDir();
+    throw error;
+  }
+
+  let helper: ChildProcess;
+  try {
+    helper = spawn(executable.path, [requestPath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      shell: false,
+    });
+  } catch (error) {
+    // A synchronous spawn throw — measured elsewhere in this repository as
+    // `spawn UNKNOWN` for a file that exists but is not a valid executable for
+    // this platform. Nothing was created, so nothing is left owning the
+    // directory.
+    removeOwnWorkDir();
+    throw error;
+  }
 
   let callerRequestedTermination = false;
   let spawnFailure: Error | null = null;

@@ -5824,6 +5824,69 @@ lines of C# compiled for it — so the children it leaves behind are genuinely
 orphaned, and it asserts membership **by pid** rather than by a count that
 cannot tell a descendant from a conhost.
 
+## The owned-command adapter (V3 slice 2)
+
+**Also isolated, and reachable from nothing.** Slice 2 is the TypeScript half
+the ADR keeps *above* the boundary: byte budgets, a wall-clock timeout,
+cancellation, the stdin delivery vocabulary, and the translation of a boundary
+ending into a result a runner could consume. The boundary owns none of that, and
+still does not.
+
+`runCommand`, the Claude writer and the verification runner remain unchanged.
+The reachability pin in `tests/v2-07l-execution-lease.test.ts` now states the one
+edge this slice added and the absence of any consumer: the adapter is the only
+module that imports `start-owned-process`, and **nothing imports the adapter** —
+type-only imports included, which is why those pins count erased imports too.
+When slice 3 wires a runner onto this path, that pin fails, and answering "what
+fences it?" is that slice's job rather than a discovery afterwards.
+
+| Part | Where |
+| --- | --- |
+| The adapter | `src/boundary/owned-command.ts` |
+| Its in-process contract | `tests/v3-02-owned-command.test.ts` |
+| The real-process gate | `tests/dist-artifact/owned-command-dist-artifact.mjs` (`npm run test:dist-owned-command`, in `verify`) |
+| Its target program | `tests/dist-artifact/fixtures/owned-command-fixture.mjs` |
+
+### The one guarantee, and how it is stated
+
+`classifyOwnedCommand` is a total function over everything it is told — the
+boundary's ending, the reason this side terminated, and three facts only the run
+loop knows — with exactly one path to `COMPLETED`: the boundary observed the
+child exit, no policy here terminated it, and nothing said ownership was never
+established. Everything else, including combinations unreachable by
+construction, lands on a non-success, and the test enumerates that whole product
+rather than sampling it. `BOUNDARY_LOST` cannot be read as a completion down any
+combination, which is the defect the ADR added the state for.
+
+Termination goes through the boundary and only through it: one kill of the
+helper, which holds the only handle to the job. No `taskkill`, no descendant
+walk, no list of pids — for the timeout, for a byte budget, and for an explicit
+cancellation alike.
+
+### What the gate measures, and what it deliberately does not
+
+Nine of the twenty cases run the same invocation through **both** runners —
+`runCommand`, the contract AO has today, and `runOwnedCommand` — and require
+them to agree about
+output, budgets, exit codes, timeouts and stdin delivery. That differential is
+not an attempt to reproduce `taskkill` containment, which the ADR replaces; it
+is the guard against the adapter quietly inventing a different command
+semantics, which a green suite of its own tests cannot see. It caught the first defect this
+slice had: a Windows exit code reported signed on the owned path and unsigned on
+the diagnostics one, for the same process — `0xC0000005`, which is what a
+crashed agent comes back with.
+
+It does **not** claim the containment settings are load-bearing. That claim needs
+a negative control — a deliberately weakened helper that leaves survivors — and
+it belongs to slice 1's gate, which has one. Here the survivor sweep is hygiene:
+whatever policy ended a run, nothing of that run is left executing.
+
+Two divergences from `runCommand` are recorded rather than smoothed over,
+because slice 3 has to reconcile them: `timeoutMs: Infinity` is effectively
+unbounded here and fires at 1ms there, and a stdin write that fails while the
+child exits cleanly is `FAILED` there and `UNCONFIRMED` here — this module does
+not state a verdict nobody observed.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment in
@@ -5851,10 +5914,11 @@ cannot be established or kept is **fail-closed**, and a boundary lost mid-run is
 **`BOUNDARY_LOST`, never `COMPLETED`** — when the boundary was killed under
 measurement the tree died correctly and the run still looked like a normal
 completion, which is the failure that state exists to prevent. The ADR itself
-changed no `src/` file; **slice 1 has since been built** — see "The Windows
-launch boundary (V3 slice 1)" above — and it is deliberately an isolated
-component: no productive runner obtains a contained process yet, and each
-remaining slice is still its own decision to start.
+changed no `src/` file; **slices 1 and 2 have since been built** — see "The
+Windows launch boundary (V3 slice 1)" and "The owned-command adapter (V3 slice
+2)" above — and both are deliberately isolated components: no productive runner
+obtains a contained process yet, nothing in the product even imports the
+adapter, and each remaining slice is still its own decision to start.
 
 **The lease came before the block runner, not after it**, and V2-07 is what forced
 that change of order. The ledger's compare-and-swap is advisory, so two concurrent

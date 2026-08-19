@@ -127,6 +127,21 @@ breaks in turn. The direct and owned paths agreed in every measured case, but a
 production adapter must read the boundary's reported delivery state rather than
 rely on that coincidence.
 
+> **Correction, 2026-08-19 (V3 slice 2).** The conclusion stands and the
+> mechanism does not. The helper that shipped does *not* exit when the child
+> closes its read end: `PumpStdin` in `native/ao-launch/AoLaunch.cs` records
+> `stdinForward=BROKEN_PIPE`, closes the child's handle and returns from its
+> thread, and the helper stays alive to report the child's exit. The
+> dist-artifact case "a child that exits without reading is never DELIVERED"
+> measures exactly that — a run completing with the child's own exit code *and*
+> a broken-pipe report, which the mechanism described above could not produce.
+> The requirement this paragraph exists for is unaffected, and is in fact
+> stronger: for *this* question — did the child close its read end early? — the
+> boundary's report is not merely more reliable than the caller's own pipe, it
+> is the only evidence there is. The caller's own pipe still carries evidence
+> about a different question (whether this side finished handing the payload
+> over), and the adapter uses it for that and only that.
+
 ## Alternatives considered — not selected
 
 **N-API addon.** Not selected, and **not refuted**: it was deliberately not

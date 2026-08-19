@@ -2341,7 +2341,10 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
   /**
    * Every `src/` module that really *imports* something matching `pattern`.
    *
-   * Imports, not mentions, and not type-only imports.
+   * Imports, not mentions. Type-only imports are excluded by default and
+   * included when a caller passes `values: false` — which the launch-boundary
+   * pins below deliberately do, because an erased import cannot spawn but can
+   * still be the first half of a reachability nobody meant to create.
    *
    * The pin this replaced counted occurrences of a name anywhere in a file's
    * text. A review spent one of its allowed "slots" by rewording a comment and
@@ -2393,16 +2396,35 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
   });
 
   it('keeps the launch boundary unreachable from the product', () => {
-    // Slice 1 delivers the boundary in isolation: no runner, no step and no
-    // command obtains a contained process yet, so nothing it starts can escape
-    // the lease — because nothing starts it.
+    // Slices 1 and 2 deliver the boundary and its adapter in isolation: no
+    // runner, no step and no command obtains a contained process yet, so
+    // nothing it starts can escape the lease — because nothing starts it.
+    //
+    // Slice 2 added exactly one edge, and it is named here rather than
+    // absorbed into an empty list: the adapter is what starts an owned
+    // process, and it is the only thing that does. The chain therefore has a
+    // known head and no consumer.
+    expect(modulesImporting(/start-owned-process\.js/, { values: false })).toEqual([
+      join('src', 'boundary', 'owned-command.ts'),
+    ]);
+    // And the adapter itself is reached by nothing. This is the assertion that
+    // actually states "the product cannot get a contained process": the edge
+    // above only says who *could* hand one out.
     //
     // When slice 3 moves `runCommand` onto the boundary, this pin fails. That
     // is its purpose: the question "what fences the boundary?" then has to be
     // answered deliberately, in the slice that creates the reachability, rather
     // than discovered afterwards from an unfenced process.
-    expect(modulesImporting(/start-owned-process\.js/)).toEqual([]);
-    expect(modulesImporting(/boundary\/launch-boundary\.js/)).toEqual([]);
+    expect(modulesImporting(/owned-command\.js/, { values: false })).toEqual([]);
+    // The boundary's *contract* module, matched by the specifier its importers
+    // actually write. The earlier pattern was `boundary/launch-boundary.js`,
+    // which the two siblings — both importing `./launch-boundary.js` — could
+    // never match, so it asserted an empty list vacuously and could not see a
+    // third module appearing beside them.
+    expect(modulesImporting(/launch-boundary\.js/, { values: false })).toEqual([
+      join('src', 'boundary', 'owned-command.ts'),
+      join('src', 'boundary', 'start-owned-process.ts'),
+    ]);
   });
 
   it('keeps every import static, which is what the reachability pins assume', () => {
