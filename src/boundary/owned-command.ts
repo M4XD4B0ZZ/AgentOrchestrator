@@ -58,12 +58,13 @@ import {
   type OwnedProcessRequest,
   type OwnedProcessStart,
 } from './start-owned-process.js';
-import type {
-  BoundaryEnding,
-  BoundaryLaunchMode,
-  BoundaryFailureCode,
-  BoundaryLostReason,
-  BoundaryStatus,
+import {
+  InvalidBoundaryRequestError,
+  type BoundaryEnding,
+  type BoundaryLaunchMode,
+  type BoundaryFailureCode,
+  type BoundaryLostReason,
+  type BoundaryStatus,
 } from './launch-boundary.js';
 /**
  * Type-only, and that is the point: the stdin vocabulary AO already has is
@@ -85,8 +86,11 @@ export const DEFAULT_OWNED_MAX_OUTPUT_BYTES = 1_048_576;
 /** How long the boundary is given to end after it has been asked to. */
 export const DEFAULT_TERMINATION_GRACE_MS = 5_000;
 
-/** How often the run loop looks for a termination it has to start timing. */
-const TERMINATION_POLL_INTERVAL_MS = 5;
+/**
+ * The largest delay node accepts. A larger one is silently turned into 1 ms,
+ * which would make an absurd budget fire at once instead of effectively never.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * How a run ended, in the adapter's terms.
@@ -212,7 +216,8 @@ export interface OwnedCommandObservation {
 }
 
 /**
- * A process exit code, as the rest of AO already reports it.
+ * A process exit code, as the rest of AO already reports it, or `null` for one
+ * that cannot be a Windows exit code at all.
  *
  * A Windows exit code is a `DWORD`, and node reports it unsigned — a child
  * calling `process.exit(3221225477)` is observed as 3221225477 by
@@ -226,9 +231,18 @@ export interface OwnedCommandObservation {
  * crashed agent comes back with, and reporting it as a negative number would
  * make the owned path disagree with the diagnostics path about the same
  * process.
+ *
+ * The range check is not decoration either. `>>> 0` is a `ToUint32`: on its
+ * own it maps 2**32 to 0 and 4294967297 to 1, so a value outside the range
+ * would have become a plausible small exit code. The decoder guarantees only a
+ * *safe* integer, and a status file is not beyond a third party's reach — that
+ * is why the launch nonce exists. Out of range answers `null`, and a
+ * completion whose exit code is `null` is refused rather than reported.
  */
 function unsignedExitCode(code: number | null): number | null {
-  return code === null ? null : code >>> 0;
+  if (code === null || !Number.isInteger(code)) return null;
+  if (code < -2_147_483_648 || code > 4_294_967_295) return null;
+  return code >>> 0;
 }
 
 /** The exit code a non-completing ending can still show, or `null`. */
@@ -242,26 +256,31 @@ function reportedExitCode(ending: BoundaryEnding): number | null {
  *
  * Pure and total: every (ending × termination) pair lands on exactly one
  * declared outcome, and the ones that cannot be proven to be a completion are
- * not one. The order of the branches below is the guarantee — a refusal and a
- * lost boundary are decided *before* any local reason is consulted, so no
- * combination of local state can promote them.
+ * not one. Two pairings are contradictory rather than merely unusual, and both
+ * fail closed instead of being rounded to the nearest plausible answer: a
+ * refusal that this side nevertheless terminated, and a caller termination no
+ * policy here asked for.
  */
 export function classifyOwnedCommand(
   observation: OwnedCommandObservation,
 ): OwnedCommandClassification {
   const { ending, termination } = observation;
 
-  if (ending.ending === 'BOUNDARY_REFUSED') {
-    return Object.freeze({
-      outcome: 'LAUNCH_REFUSED' as const,
-      failureCode: 'LAUNCH_REFUSED' as const,
+  /**
+   * The fail-closed answer for a pair whose two halves contradict each other.
+   * A disagreement about how a process tree ended is a lost boundary: "we do
+   * not know what happened to it" is exactly what it means.
+   */
+  const inconsistent = (): OwnedCommandClassification =>
+    Object.freeze({
+      outcome: 'BOUNDARY_LOST' as const,
+      failureCode: 'ENDING_INCONSISTENT' as const,
       exitCode: null,
-      boundaryFailureCode: ending.failureCode,
+      boundaryFailureCode: null,
       boundaryLostReason: null,
-      targetStarted: ending.targetStarted,
-      sideEffectsPossible: ending.targetStarted !== 'NO',
+      targetStarted: 'UNKNOWN' as const,
+      sideEffectsPossible: true,
     });
-  }
 
   if (ending.ending === 'BOUNDARY_LOST') {
     return Object.freeze({
@@ -274,6 +293,25 @@ export function classifyOwnedCommand(
       // here. `UNKNOWN` is the honest value and the conservative one at once.
       targetStarted: 'UNKNOWN' as const,
       sideEffectsPossible: true,
+    });
+  }
+
+  if (ending.ending === 'BOUNDARY_REFUSED') {
+    // A refusal means no ownership was established; a local termination means
+    // this side had something to terminate. Both cannot be true, and the
+    // dangerous half is the refusal's `targetStarted: 'NO'` — the one value a
+    // caller acts on to conclude a run needs no cleanup. The first version
+    // returned the refusal unchanged here, discarding the caller's own reason
+    // with it, and the enumeration test excluded exactly this row.
+    if (termination !== 'NONE') return inconsistent();
+    return Object.freeze({
+      outcome: 'LAUNCH_REFUSED' as const,
+      failureCode: 'LAUNCH_REFUSED' as const,
+      exitCode: null,
+      boundaryFailureCode: ending.failureCode,
+      boundaryLostReason: null,
+      targetStarted: ending.targetStarted,
+      sideEffectsPossible: ending.targetStarted !== 'NO',
     });
   }
 
@@ -294,10 +332,15 @@ export function classifyOwnedCommand(
   }
 
   if (ending.ending === 'CHILD_EXITED') {
+    const exitCode = unsignedExitCode(ending.childExitCode);
+    // A completion is the one claim this module makes that a caller acts on as
+    // success. A status whose exit code is not one a process could have exited
+    // with does not support it.
+    if (exitCode === null) return inconsistent();
     return Object.freeze({
       outcome: 'COMPLETED' as const,
       failureCode: null,
-      exitCode: unsignedExitCode(ending.childExitCode),
+      exitCode,
       boundaryFailureCode: null,
       boundaryLostReason: null,
       targetStarted: 'YES' as const,
@@ -306,31 +349,19 @@ export function classifyOwnedCommand(
   }
 
   // `TERMINATED_BY_CALLER` with no policy having asked. The boundary only ever
-  // reports that because this module set the flag, so the two disagree — and a
-  // disagreement about how a process tree ended is a lost boundary, not a
-  // completion with a footnote.
-  return Object.freeze({
-    outcome: 'BOUNDARY_LOST' as const,
-    failureCode: 'ENDING_INCONSISTENT' as const,
-    exitCode: reportedExitCode(ending),
-    boundaryFailureCode: null,
-    boundaryLostReason: null,
-    targetStarted: 'UNKNOWN' as const,
-    sideEffectsPossible: true,
-  });
+  // reports that because this module set the flag, so the two disagree.
+  return inconsistent();
 }
+
 
 /**
  * How far this side's own handover of the payload got.
  *
- * `ABANDONED` is the one that is not obvious, and it is there because of a
- * measurement rather than a design preference: terminating the boundary
- * destroys the pipe this side is writing into, so a write still in flight
- * fails — with an error this side caused. Recording that as `FAILED` would
- * report a proven verdict about a payload whose fate nobody observed, since
- * the last byte may have gone through microseconds earlier.
+ * `NO_CHANNEL` is the only one that is evidence on its own: there was no pipe
+ * to write into, so nothing was handed over at all. `FAILED` is deliberately
+ * *not* evidence about the payload — see {@link classifyStdinDelivery}.
  */
-export type LocalStdinWrite = 'PENDING' | 'COMPLETED' | 'FAILED' | 'ABANDONED';
+export type LocalStdinWrite = 'PENDING' | 'COMPLETED' | 'FAILED' | 'NO_CHANNEL';
 
 /** The forwarding states `native/ao-launch/AoLaunch.cs` writes. */
 const STDIN_FORWARD_EOF = 'EOF_FORWARDED';
@@ -358,6 +389,17 @@ export interface StdinDeliveryObservation {
  *
  * Like `runCommand`'s, `DELIVERED` is a statement about handover, not about
  * reading: nothing observable here can prove the child consumed the bytes.
+ *
+ * A *failed* local write is never a verdict on its own, and that is the
+ * correction the first review forced. The pipe this side writes into belongs
+ * to the helper, not to the child: its breaking means the helper died — by
+ * this side's hand, or by someone else's — and says nothing about what the
+ * child received, since the last byte may have gone through microseconds
+ * earlier. The first version reported a proven `FAILED` whenever the error
+ * arrived before a local termination had been recorded, which made the verdict
+ * depend on *who killed the helper* rather than on what was observed. Such a
+ * write is `UNCONFIRMED` now, whoever caused it, unless the boundary itself
+ * reported a broken pipe.
  */
 export function classifyStdinDelivery(observation: StdinDeliveryObservation): StdinDelivery {
   if (!observation.requested) return 'NOT_REQUESTED';
@@ -369,11 +411,9 @@ export function classifyStdinDelivery(observation: StdinDeliveryObservation): St
   // child closed its read end and the helper said so. That stays true whatever
   // this side did afterwards, including ending the run.
   if (observation.forwarded === STDIN_FORWARD_BROKEN) return 'FAILED';
-  // A write that failed on its own — nothing here asked for it to stop.
-  if (observation.localWrite === 'FAILED') return 'FAILED';
-  // A write this side abandoned by terminating the boundary. Never `FAILED`:
-  // see {@link LocalStdinWrite}.
-  if (observation.localWrite === 'ABANDONED') return 'UNCONFIRMED';
+  // No pipe existed, so nothing was handed over. An observation, not an
+  // absence of one.
+  if (observation.localWrite === 'NO_CHANNEL') return 'FAILED';
   if (observation.forwarded === STDIN_FORWARD_EOF && observation.localWrite === 'COMPLETED') {
     return 'DELIVERED';
   }
@@ -497,11 +537,6 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
   readonly ending: BoundaryEnding | null;
 }
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((done) => {
-    setTimeout(done, ms).unref?.();
-  });
-
 /**
  * Runs one command behind the launch boundary.
  *
@@ -523,6 +558,9 @@ export async function runOwnedCommand(
   const startedAt = new Date(startedAtMs).toISOString();
   const deadline = startedAtMs + timeoutMs;
   const stdinRequested = options.stdin !== undefined;
+  const signal = options.signal;
+
+  const base = { display, file: options.file, args, startedAt };
 
   const finish = (
     extra: Omit<OwnedCommandResult, keyof typeof base | 'finishedAt' | 'durationMs'>,
@@ -535,11 +573,11 @@ export async function runOwnedCommand(
       durationMs: finishedAtMs - startedAtMs,
     });
   };
-  const base = { display, file: options.file, args, startedAt };
 
   const nothingRan = (
     outcome: OwnedCommandOutcome,
     failureCode: OwnedCommandFailureCode,
+    targetStarted: TargetStarted,
   ): OwnedCommandResult =>
     finish({
       established: false,
@@ -548,8 +586,8 @@ export async function runOwnedCommand(
       exitCode: null,
       boundaryFailureCode: null,
       boundaryLostReason: null,
-      targetStarted: 'NO',
-      sideEffectsPossible: false,
+      targetStarted,
+      sideEffectsPossible: targetStarted !== 'NO',
       stdout: '',
       stderr: '',
       stdoutTruncated: false,
@@ -564,188 +602,271 @@ export async function runOwnedCommand(
   // can say "nothing ran" without asking the boundary, because it never
   // reached it — so it is answered here rather than by starting a process in
   // order to kill it.
-  if (options.signal?.aborted === true) {
-    return nothingRan('TERMINATED_BY_CALLER', 'TERMINATED_BY_CALLER');
+  if (signal?.aborted === true) {
+    return nothingRan('TERMINATED_BY_CALLER', 'TERMINATED_BY_CALLER', 'NO');
   }
-
-  const establishBudget = Math.min(
-    DEFAULT_ESTABLISH_TIMEOUT_MS,
-    Math.max(1, deadline - Date.now()),
-  );
-  const launch = await start({
-    file: options.file,
-    args,
-    verbatim: options.verbatim ?? false,
-    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-    ...(options.env === undefined ? {} : { env: options.env }),
-    ...(options.mode === undefined ? {} : { mode: options.mode }),
-    ...(options.workDir === undefined ? {} : { workDir: options.workDir }),
-    establishTimeoutMs: establishBudget,
-  });
-
-  if (!launch.established) {
-    const classification = classifyOwnedCommand({ ending: launch.ending, termination: 'NONE' });
-    return finish({
-      ...classification,
-      established: false,
-      stdout: '',
-      stderr: '',
-      stdoutTruncated: false,
-      stderrTruncated: false,
-      // Nothing was ever written into a helper that never existed.
-      stdinDelivery: classifyStdinDelivery({
-        requested: stdinRequested,
-        established: false,
-        localWrite: 'PENDING',
-        forwarded: null,
-      }),
-      helperPid: null,
-      childPid: null,
-      ending: launch.ending,
-    });
-  }
-
-  const owned = launch.process;
-  const stdout = new BoundedSink(options.maxStdoutBytes ?? DEFAULT_OWNED_MAX_OUTPUT_BYTES);
-  const stderr = new BoundedSink(options.maxStderrBytes ?? DEFAULT_OWNED_MAX_OUTPUT_BYTES);
 
   /**
-   * The first trigger wins, for both halves of what it decides: the boundary
-   * is asked to die once, and the reason the run is reported under is frozen
-   * with it. A stderr budget landing in the same tick as the stdout one, or a
-   * timeout landing after either, changes neither.
-   */
-  let termination: OwnedTermination = 'NONE';
-  const terminate = (reason: Exclude<OwnedTermination, 'NONE'>): void => {
-    if (termination !== 'NONE') return;
-    termination = reason;
-    owned.terminate();
-  };
-
-  const outStream = owned.helper.stdout;
-  const errStream = owned.helper.stderr;
-  if (outStream === null || errStream === null) {
-    // Unreachable through `startOwnedProcess`, which always asks for pipes.
-    // Reported rather than assumed away: a stream that cannot be read is a
-    // budget that cannot be enforced, and that is not a run to report on.
-    terminate('CALLER');
-    const ending = await owned.ending.catch(
-      (): BoundaryEnding => ({ ending: 'BOUNDARY_LOST', reason: 'STATUS_UNREADABLE', status: null }),
-    );
-    owned.dispose();
-    return finish({
-      established: true,
-      outcome: 'BOUNDARY_LOST',
-      failureCode: 'BOUNDARY_STREAMS_UNAVAILABLE',
-      exitCode: null,
-      boundaryFailureCode: null,
-      boundaryLostReason: null,
-      targetStarted: 'YES',
-      sideEffectsPossible: true,
-      stdout: '',
-      stderr: '',
-      stdoutTruncated: false,
-      stderrTruncated: false,
-      stdinDelivery: stdinRequested ? 'UNCONFIRMED' : 'NOT_REQUESTED',
-      helperPid: owned.helperPid,
-      childPid: owned.childPid,
-      ending,
-    });
-  }
-
-  outStream.on('data', (chunk: Buffer) => {
-    if (stdout.append(chunk)) terminate('LIMIT_STDOUT');
-  });
-  errStream.on('data', (chunk: Buffer) => {
-    if (stderr.append(chunk)) terminate('LIMIT_STDERR');
-  });
-
-  /**
-   * How far this side's own handover got.
+   * The abort is watched from *before* the launch, and that ordering is the
+   * whole point of it.
    *
-   * Only ever half the answer. The other half — whether the boundary forwarded
-   * the whole stream and let the child see EOF — comes from the status, and
-   * `DELIVERED` needs both. See {@link classifyStdinDelivery}.
+   * The first version of this module read `signal.aborted` once, before
+   * establishment, and attached its listener once, after it. A listener added
+   * to an already-aborted signal is never invoked, so an abort landing in
+   * between — which is most of a launch's wall-clock, a helper spawn plus a
+   * status poll — was dropped, and the run went on to report a completion for
+   * a launch the caller had cancelled.
+   *
+   * `terminateOnAbort` is filled in once there is something to terminate; the
+   * flag covers the window before that, and is re-read below.
    */
-  let localWrite: LocalStdinWrite = 'PENDING';
-  const input = owned.helper.stdin;
-  if (input === null) {
-    localWrite = 'FAILED';
-  } else {
-    /**
-     * A failed handover, attributed to whoever caused it.
-     *
-     * A termination this side asked for destroys the pipe underneath a write
-     * in flight, so the two are told apart by *when* the failure arrived
-     * rather than by the error it carries — the error is the same either way.
-     */
-    const fail = (): void => {
-      if (localWrite === 'FAILED' || localWrite === 'ABANDONED') return;
-      localWrite = termination === 'NONE' ? 'FAILED' : 'ABANDONED';
-    };
-    // Attached, and it must stay attached: without a listener an `EPIPE` on
-    // this stream is an uncaught exception in *this* process. A failure once
-    // seen is never revised, in either direction.
-    input.on('error', fail);
-    const record = (error?: Error | null): void => {
-      if (localWrite === 'FAILED' || localWrite === 'ABANDONED') return;
-      if (error === undefined || error === null) localWrite = 'COMPLETED';
-      else fail();
-    };
-    // Closed either way, payload or not: the boundary forwards this EOF to the
-    // child, and a child that reads to end-of-file waits forever without it.
-    if (options.stdin === undefined) input.end(record);
-    else input.end(options.stdin, record);
-  }
+  let abortRequested = false;
+  let terminateOnAbort: (() => void) | undefined;
+  const onAbort = (): void => {
+    abortRequested = true;
+    terminateOnAbort?.();
+  };
+  signal?.addEventListener('abort', onAbort);
 
-  if (options.signal !== undefined) {
-    options.signal.addEventListener('abort', () => terminate('CALLER'), { once: true });
-  }
-
-  const remaining = deadline - Date.now();
   let timer: NodeJS.Timeout | undefined;
-  if (remaining <= 0) terminate('TIMEOUT');
-  else {
-    timer = setTimeout(() => terminate('TIMEOUT'), remaining);
-    timer.unref?.();
-  }
+  let graceTimer: NodeJS.Timeout | undefined;
+  try {
+    const establishBudget = Math.min(
+      DEFAULT_ESTABLISH_TIMEOUT_MS,
+      Math.max(1, deadline - Date.now()),
+    );
 
-  // A boundary that will not end. Bounded, and only ever entered once a
-  // termination has actually been asked for — a run nobody terminated waits
-  // for its own ending, however long the child legitimately takes.
-  const unconfirmed = Symbol('termination-unconfirmed');
-  const settled = await Promise.race([
-    owned.ending,
-    (async (): Promise<typeof unconfirmed> => {
-      // Polled rather than armed at termination time, because the termination
-      // can be requested from three places and a timer per place is three
-      // chances to forget one.
-      for (;;) {
-        if (termination !== 'NONE') break;
-        await sleep(TERMINATION_POLL_INTERVAL_MS);
-      }
-      await sleep(graceMs);
-      return unconfirmed;
-    })(),
-  ]);
-  if (timer !== undefined) clearTimeout(timer);
+    let launch: OwnedProcessStart;
+    try {
+      launch = await start({
+        file: options.file,
+        args,
+        verbatim: options.verbatim ?? false,
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.mode === undefined ? {} : { mode: options.mode }),
+        ...(options.workDir === undefined ? {} : { workDir: options.workDir }),
+        establishTimeoutMs: establishBudget,
+      });
+    } catch (error) {
+      // Starting a launch writes files and spawns a process, and both fail for
+      // environmental reasons — a full disk, a read-only TMP, a spawn that
+      // throws synchronously rather than emitting. Those are runtime
+      // conditions, and this module reports runtime conditions as data.
+      //
+      // `InvalidBoundaryRequestError` is the exception: a NUL in an argument
+      // or an `=` in an environment name is a programming error in this
+      // repository, exactly as an unsafe argument is on the diagnostics path,
+      // and it keeps propagating.
+      if (error instanceof InvalidBoundaryRequestError) throw error;
+      // Conservative on purpose: a throw is not evidence that nothing was
+      // created, and the message is not carried — it may contain untrusted
+      // text.
+      return nothingRan('LAUNCH_REFUSED', 'LAUNCH_REFUSED', 'UNKNOWN');
+    }
 
-  if (settled === unconfirmed) {
-    // The tree may still be alive, and nothing here can prove otherwise. The
-    // working directory is deliberately *not* removed: a helper that is still
-    // running still owns it. This is the fail-closed answer, and it is not the
-    // policy outcome that asked for the termination — reporting `TIMED_OUT`
-    // here would claim a tree was taken down that demonstrably was not.
-    void owned.ending.catch(() => undefined);
-    return finish({
+    if (!launch.established) {
+      const classification = classifyOwnedCommand({ ending: launch.ending, termination: 'NONE' });
+      return finish({
+        ...classification,
+        established: false,
+        stdout: '',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        // Nothing was ever written into a helper that never established.
+        stdinDelivery: classifyStdinDelivery({
+          requested: stdinRequested,
+          established: false,
+          localWrite: 'PENDING',
+          forwarded: null,
+        }),
+        helperPid: null,
+        childPid: null,
+        ending: launch.ending,
+      });
+    }
+
+    const owned = launch.process;
+    const stdout = new BoundedSink(options.maxStdoutBytes ?? DEFAULT_OWNED_MAX_OUTPUT_BYTES);
+    const stderr = new BoundedSink(options.maxStderrBytes ?? DEFAULT_OWNED_MAX_OUTPUT_BYTES);
+
+    /**
+     * The grace window, armed by the termination that needs it.
+     *
+     * A promise that is never resolved unless a termination was actually
+     * requested — so a run nobody terminated waits for its own ending, however
+     * long the child legitimately takes, and holds no timer while it does.
+     *
+     * The first version polled a flag every 5 ms instead, in a loop with no
+     * exit for a run that ends normally: every completed call left a timer
+     * waking 200 times a second forever, retaining its output buffers and its
+     * child process. Every timer in this module is unref'd, so nothing in the
+     * suite could observe it.
+     */
+    const unconfirmed = Symbol('termination-unconfirmed');
+    let expireGrace: (() => void) | undefined;
+    const graceExpired = new Promise<typeof unconfirmed>((done) => {
+      expireGrace = () => done(unconfirmed);
+    });
+
+    /**
+     * The first trigger wins, for both halves of what it decides: the boundary
+     * is asked to die once, and the reason the run is reported under is frozen
+     * with it. A stderr budget landing in the same tick as the stdout one, or a
+     * timeout landing after either, changes neither.
+     */
+    let termination: OwnedTermination = 'NONE';
+    const terminate = (reason: Exclude<OwnedTermination, 'NONE'>): void => {
+      if (termination !== 'NONE') return;
+      termination = reason;
+      owned.terminate();
+      graceTimer = setTimeout(() => expireGrace?.(), graceMs);
+      graceTimer.unref?.();
+    };
+
+    const outStream = owned.helper.stdout;
+    const errStream = owned.helper.stderr;
+    if (outStream === null || errStream === null) {
+      // Unreachable through `startOwnedProcess`, which always asks for pipes.
+      // Reported rather than assumed away: a stream that cannot be read is a
+      // budget that cannot be enforced, and that is not a run to report on.
+      //
+      // Nothing is awaited here. The single situation this path exists for is
+      // "the boundary is not behaving as constructed", and waiting for such a
+      // boundary to confirm its own death is the one thing that cannot be
+      // relied on. The helper is released from the event loop so a process
+      // that ignores its kill cannot hold this one open, and the working
+      // directory is left alone because that helper may still be writing to it.
+      owned.terminate();
+      owned.helper.unref?.();
+      void owned.ending.catch(() => undefined);
+      return finish({
+        established: true,
+        outcome: 'BOUNDARY_LOST',
+        failureCode: 'BOUNDARY_STREAMS_UNAVAILABLE',
+        exitCode: null,
+        boundaryFailureCode: null,
+        boundaryLostReason: null,
+        targetStarted: 'YES',
+        sideEffectsPossible: true,
+        stdout: '',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        stdinDelivery: stdinRequested ? 'UNCONFIRMED' : 'NOT_REQUESTED',
+        helperPid: owned.helperPid,
+        childPid: owned.childPid,
+        ending: null,
+      });
+    }
+
+    const onStdout = (chunk: Buffer): void => {
+      if (stdout.append(chunk)) terminate('LIMIT_STDOUT');
+    };
+    const onStderr = (chunk: Buffer): void => {
+      if (stderr.append(chunk)) terminate('LIMIT_STDERR');
+    };
+    outStream.on('data', onStdout);
+    errStream.on('data', onStderr);
+
+    /**
+     * How far this side's own handover got.
+     *
+     * Only ever half the answer. The other half — whether the boundary
+     * forwarded the whole stream and let the child see EOF — comes from the
+     * status, and `DELIVERED` needs both. See {@link classifyStdinDelivery}.
+     */
+    let localWrite: LocalStdinWrite = 'PENDING';
+    const input = owned.helper.stdin;
+    if (input === null) {
+      localWrite = 'NO_CHANNEL';
+    } else {
+      const fail = (): void => {
+        if (localWrite === 'FAILED') return;
+        localWrite = 'FAILED';
+      };
+      // Attached, and it must stay attached: without a listener an `EPIPE` on
+      // this stream is an uncaught exception in *this* process. A failure once
+      // seen is never revised.
+      input.on('error', fail);
+      const record = (error?: Error | null): void => {
+        if (localWrite === 'FAILED') return;
+        if (error === undefined || error === null) localWrite = 'COMPLETED';
+        else fail();
+      };
+      // Closed either way, payload or not: the boundary forwards this EOF to
+      // the child, and a child that reads to end-of-file waits forever without
+      // it.
+      if (options.stdin === undefined) input.end(record);
+      else input.end(options.stdin, record);
+    }
+
+    // From here an abort has something to act on — and the flag is re-read,
+    // because an abort that landed during establishment set it before this
+    // function existed.
+    terminateOnAbort = () => terminate('CALLER');
+    if (abortRequested) terminate('CALLER');
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) terminate('TIMEOUT');
+    else {
+      // Clamped: node turns a delay above the 32-bit maximum into 1 ms, which
+      // would make an absurdly large budget fire immediately instead of
+      // effectively never.
+      timer = setTimeout(() => terminate('TIMEOUT'), Math.min(remaining, MAX_TIMER_MS));
+      timer.unref?.();
+    }
+
+    const settled = await Promise.race([owned.ending, graceExpired]);
+
+    if (settled === unconfirmed) {
+      // The tree may still be alive, and nothing here can prove otherwise.
+      //
+      // Three deliberate consequences. The output sinks are detached, so a
+      // chunk arriving later cannot re-terminate a run that has already been
+      // reported. The helper is released from the event loop, so a process
+      // that has already ignored a kill cannot keep this one from exiting. The
+      // working directory is *not* removed, because a helper that is still
+      // running still owns it.
+      //
+      // And the outcome is not the policy that asked for the termination:
+      // reporting `TIMED_OUT` here would claim a tree was taken down that
+      // demonstrably was not.
+      outStream.off('data', onStdout);
+      errStream.off('data', onStderr);
+      owned.helper.unref?.();
+      void owned.ending.catch(() => undefined);
+      return finish({
+        established: true,
+        outcome: 'BOUNDARY_LOST',
+        failureCode: 'BOUNDARY_TERMINATION_UNCONFIRMED',
+        exitCode: null,
+        boundaryFailureCode: null,
+        boundaryLostReason: null,
+        targetStarted: 'YES',
+        sideEffectsPossible: true,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
+        stdinDelivery: classifyStdinDelivery({
+          requested: stdinRequested,
+          established: true,
+          localWrite,
+          forwarded: null,
+        }),
+        helperPid: owned.helperPid,
+        childPid: owned.childPid,
+        ending: null,
+      });
+    }
+
+    const ending = settled;
+    const classification = classifyOwnedCommand({ ending, termination });
+    const result = finish({
+      ...classification,
       established: true,
-      outcome: 'BOUNDARY_LOST',
-      failureCode: 'BOUNDARY_TERMINATION_UNCONFIRMED',
-      exitCode: null,
-      boundaryFailureCode: null,
-      boundaryLostReason: null,
-      targetStarted: 'YES',
-      sideEffectsPossible: true,
       stdout: stdout.text(),
       stderr: stderr.text(),
       stdoutTruncated: stdout.truncated,
@@ -754,37 +875,25 @@ export async function runOwnedCommand(
         requested: stdinRequested,
         established: true,
         localWrite,
-        forwarded: null,
+        // The boundary's own report is the evidence. This side's pipe cannot
+        // see a child that stopped reading, because it is not the child's pipe.
+        forwarded: ending.status?.stdinForward ?? null,
       }),
       helperPid: owned.helperPid,
       childPid: owned.childPid,
-      ending: null,
+      ending,
     });
+    // Only now: the ending has been read, and the status file it was read from
+    // lives in the directory this removes.
+    owned.dispose();
+    return result;
+  } finally {
+    // Every exit, including a thrown one. A listener left on a signal that
+    // outlives the run retains this run's buffers and child process, warns
+    // past ten on a shared controller, and fires `terminate` on a launch that
+    // finished long ago.
+    signal?.removeEventListener('abort', onAbort);
+    if (timer !== undefined) clearTimeout(timer);
+    if (graceTimer !== undefined) clearTimeout(graceTimer);
   }
-
-  const ending = settled;
-  const classification = classifyOwnedCommand({ ending, termination });
-  const result = finish({
-    ...classification,
-    established: true,
-    stdout: stdout.text(),
-    stderr: stderr.text(),
-    stdoutTruncated: stdout.truncated,
-    stderrTruncated: stderr.truncated,
-    stdinDelivery: classifyStdinDelivery({
-      requested: stdinRequested,
-      established: true,
-      localWrite,
-      // The boundary's own report is the evidence. This side's pipe cannot see
-      // a child that stopped reading, because it is not the child's pipe.
-      forwarded: ending.status?.stdinForward ?? null,
-    }),
-    helperPid: owned.helperPid,
-    childPid: owned.childPid,
-    ending,
-  });
-  // Only now: the ending has been read, and the status file it was read from
-  // lives in the directory this removes.
-  owned.dispose();
-  return result;
 }

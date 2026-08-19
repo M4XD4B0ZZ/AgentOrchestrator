@@ -27,12 +27,14 @@
  */
 
 import type { ChildProcess } from 'node:child_process';
+import { getEventListeners } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 
 import { describe, expect, it } from 'vitest';
 
 import {
   classifyBoundaryEnding,
+  InvalidBoundaryRequestError,
   type BoundaryEnding,
   type BoundaryStatus,
 } from '../src/boundary/launch-boundary.js';
@@ -157,6 +159,10 @@ function fakeBoundary(
     readonly ignoreTermination?: boolean;
     /** A helper that accepts no stdin bytes, so a write stays in flight. */
     readonly stallStdin?: boolean;
+    /** A helper whose stdio is not readable at all. */
+    readonly noStreams?: boolean;
+    /** Runs while the launch is being established, before it returns. */
+    readonly onStart?: () => void;
     /** How long the boundary takes to end after it is asked to. */
     readonly terminationDelayMs?: number;
   } = {},
@@ -213,7 +219,10 @@ function fakeBoundary(
     // A real helper's stdin pipe dies with it, and a write still in flight
     // then fails — caused by this side, not by the child. The fake reproduces
     // that, because it is the input to a case below.
-    input.destroy(new Error('helper terminated'));
+    // Destroyed without an error argument: the pending write callback still
+    // reports `ERR_STREAM_DESTROYED`, which is what the adapter reads, and no
+    // `error` event is emitted on a stream a case may not have listened to.
+    input.destroy();
     if (options.ignoreTermination === true) return;
     if (options.terminationDelayMs === undefined) {
       finish({ childExitCode: null });
@@ -224,13 +233,22 @@ function fakeBoundary(
 
   const start = async (): Promise<OwnedProcessStart> => {
     starts += 1;
+    options.onStart?.();
+    // Establishment is not instantaneous for a real boundary — a helper spawn
+    // plus a status poll — and the window it opens is where a case below
+    // raises its abort.
+    await new Promise((done) => setTimeout(done, 5));
     if (options.refuseWith !== undefined) {
       return { established: false, ending: options.refuseWith };
     }
+    const streams =
+      options.noStreams === true
+        ? { stdout: null, stderr: null, stdin: input }
+        : { stdout: out, stderr: err, stdin: input };
     return {
       established: true,
       process: {
-        helper: { stdout: out, stderr: err, stdin: input } as unknown as ChildProcess,
+        helper: streams as unknown as ChildProcess,
         helperPid: 4242,
         childPid: 4243,
         mode: 'JOBLIST',
@@ -263,6 +281,8 @@ function fakeBoundary(
       if (!err.writableEnded) err.write(text);
     },
     stdinClosed: () => stdinClosedPromise,
+    /** How many output sinks are still attached. */
+    dataListeners: () => out.listenerCount('data') + err.listenerCount('data'),
     stdinReceived: () => Buffer.concat(written).toString('utf8'),
     /**
      * Resolves once the adapter is reading both streams.
@@ -407,8 +427,15 @@ describe('the owned-command adapter classifies every ending', () => {
       // refusal reports none at all: no child of this launch was ever observed
       // to exit, so any number there would be another launch's or nobody's.
       const raw = ending.status?.childExitCode ?? null;
+      // A refusal reports none at all. `TERMINATED_BY_CALLER` with no policy
+      // having asked is contradictory and fails closed, which reports none
+      // either — the pairing has its own case further down.
       const expected =
-        ending.ending === 'BOUNDARY_REFUSED' ? null : raw === null ? null : raw >>> 0;
+        ending.ending === 'BOUNDARY_REFUSED' || ending.ending === 'TERMINATED_BY_CALLER'
+          ? null
+          : raw === null
+            ? null
+            : raw >>> 0;
       expect(result.exitCode, name).toBe(expected);
     }
   });
@@ -424,18 +451,6 @@ describe('the owned-command adapter classifies every ending', () => {
     const clean = classifyOwnedCommand({ ending: nothingRan, termination: 'NONE' });
     expect(clean.targetStarted).toBe('NO');
     expect(clean.sideEffectsPossible).toBe(false);
-  });
-
-  it('keeps `sideEffectsPossible` true for every ending that is not a proven refusal', () => {
-    for (const { name, ending } of ENDINGS) {
-      if (ending.ending === 'BOUNDARY_REFUSED' && ending.targetStarted === 'NO') continue;
-      for (const termination of OWNED_TERMINATIONS) {
-        expect(
-          classifyOwnedCommand({ ending, termination }).sideEffectsPossible,
-          `${name} × ${termination}`,
-        ).toBe(true);
-      }
-    }
   });
 
   it('carries the boundary own failure code through a refusal', () => {
@@ -504,7 +519,7 @@ describe('the adapter reads stdin delivery from the boundary', () => {
     // are required, and this is the pairing that shows why.
     expect(
       classifyStdinDelivery({ ...requested, localWrite: 'FAILED', forwarded: 'EOF_FORWARDED' }),
-    ).toBe('FAILED');
+    ).toBe('UNCONFIRMED');
   });
 
   it('is UNCONFIRMED while the boundary has reported nothing', () => {
@@ -516,29 +531,6 @@ describe('the adapter reads stdin delivery from the boundary', () => {
     ).toBe('UNCONFIRMED');
   });
 
-  it('is UNCONFIRMED when this side abandoned its own write to end the run', () => {
-    // Measured, not reasoned: terminating the boundary destroys the pipe this
-    // side is writing into, so the write reports an error that this side
-    // caused. Reading that as a channel failure would report a proven verdict
-    // about a payload whose fate nobody observed — the last byte may have gone
-    // through microseconds earlier.
-    expect(
-      classifyStdinDelivery({ ...requested, localWrite: 'ABANDONED', forwarded: null }),
-    ).toBe('UNCONFIRMED');
-  });
-
-  it('still reports a broken pipe the boundary saw before the run was ended', () => {
-    // The one exception, and it is evidence rather than inference: the child
-    // closed its read end, and the boundary said so. That is true whatever
-    // this side did afterwards.
-    expect(
-      classifyStdinDelivery({
-        ...requested,
-        localWrite: 'ABANDONED',
-        forwarded: 'BROKEN_PIPE',
-      }),
-    ).toBe('FAILED');
-  });
 
   it('is UNCONFIRMED for a forwarding state this build does not know', () => {
     expect(
@@ -563,13 +555,12 @@ describe('the adapter reads stdin delivery from the boundary', () => {
   });
 
   it('never revises a local failure into a delivery', () => {
-    const outcomes = new Set<string>();
     for (const forwarded of [null, 'EOF_FORWARDED', 'BROKEN_PIPE', 'SOMETHING_NEW']) {
-      outcomes.add(
+      expect(
         classifyStdinDelivery({ ...requested, localWrite: 'FAILED', forwarded }),
-      );
+        String(forwarded),
+      ).not.toBe('DELIVERED');
     }
-    expect([...outcomes]).toEqual(['FAILED']);
   });
 });
 
@@ -900,5 +891,227 @@ describe('the run loop, driven through an injected boundary', () => {
     boundary.finish({ childExitCode: 0 });
     await run;
     expect(boundary.disposals()).toBe(1);
+  });
+});
+
+/**
+ * ── What the first adversarial review found ────────────────────────────────
+ *
+ * Every case below reproduces a defect an independent review of the first
+ * implementation identified. They are kept as their own group because that is
+ * what they are: the failures a green suite did not have the power to see, and
+ * the reason each of them was possible is worth reading next to the case.
+ */
+describe('the defects the first review found', () => {
+  it('honours an abort raised while the launch is still being established', async () => {
+    // The window the first implementation dropped. `signal.aborted` was read
+    // once, before establishment, and the listener was attached once, after it
+    // — and a listener added to an already-aborted signal is never invoked. An
+    // abort landing in between was therefore lost, and the run went on to
+    // report `COMPLETED` for a launch the caller had cancelled.
+    const canceller = new AbortController();
+    const boundary = fakeBoundary({ onStart: () => canceller.abort() });
+    const result = await runOwnedCommand(
+      { file: 'C:\\fixture.exe', signal: canceller.signal, timeoutMs: 5_000 },
+      { start: boundary.start },
+    );
+    expect(result.outcome).toBe('TERMINATED_BY_CALLER');
+    expect(result.failureCode).toBe('TERMINATED_BY_CALLER');
+    expect(boundary.terminations()).toBe(1);
+  });
+
+  it('leaves no abort listener behind on a signal that outlives the run', async () => {
+    // A per-task controller shared by the writer, the reviewer and the
+    // verification command is the obvious productive shape. A listener per run
+    // retains that run's sinks and child process, and node warns past ten.
+    const canceller = new AbortController();
+    const boundary = fakeBoundary();
+    const run = runOwnedCommand(
+      { file: 'C:\\fixture.exe', signal: canceller.signal },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    boundary.finish({ childExitCode: 0 });
+    await run;
+    expect(getEventListeners(canceller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('stops reading the streams once it has reported a run it abandoned', async () => {
+    // The fail-closed path returned while its `data` handlers were still live
+    // on a helper that had ignored its own termination, so a later chunk could
+    // re-terminate a run that had already been reported.
+    const boundary = fakeBoundary({ ignoreTermination: true });
+    const run = runOwnedCommand(
+      { file: 'C:\\fixture.exe', timeoutMs: 20, terminationGraceMs: 30, maxStdoutBytes: 2 },
+      { start: boundary.start },
+    );
+    await boundary.established();
+    const result = await run;
+    expect(result.failureCode).toBe('BOUNDARY_TERMINATION_UNCONFIRMED');
+
+    const terminationsAtReport = boundary.terminations();
+    boundary.stdout('this arrives after the run was reported');
+    await new Promise((done) => setTimeout(done, 20));
+    expect(boundary.terminations()).toBe(terminationsAtReport);
+    expect(boundary.dataListeners()).toBe(0);
+    boundary.finish({ childExitCode: null });
+  });
+
+  it('does not wait forever for a boundary whose streams it cannot read', async () => {
+    // Unreachable through `startOwnedProcess`, and previously the one
+    // termination in the module with no bound at all: a bare await on an
+    // ending that a helper ignoring its kill would never produce.
+    const boundary = fakeBoundary({ noStreams: true, ignoreTermination: true });
+    const result = await runOwnedCommand(
+      { file: 'C:\\fixture.exe', terminationGraceMs: 20 },
+      { start: boundary.start },
+    );
+    expect(result.outcome).toBe('BOUNDARY_LOST');
+    expect(result.failureCode).toBe('BOUNDARY_STREAMS_UNAVAILABLE');
+    boundary.finish({ childExitCode: null });
+  });
+
+  it('reports a launch that threw instead of throwing', async () => {
+    // `startOwnedProcess` writes files and spawns, and both can fail for
+    // environmental reasons — a full disk, a read-only TMP, a spawn that
+    // throws synchronously. The module promises data rather than exceptions,
+    // and that promise has to hold for the call that starts everything.
+    const result = await runOwnedCommand(
+      { file: 'C:\\fixture.exe' },
+      {
+        start: () => {
+          throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+        },
+      },
+    );
+    expect(result.outcome).toBe('LAUNCH_REFUSED');
+    expect(result.established).toBe(false);
+    // Conservative: a throw is not proof that nothing was created.
+    expect(result.targetStarted).toBe('UNKNOWN');
+    expect(result.sideEffectsPossible).toBe(true);
+  });
+
+  it('still throws for a request this repository cannot encode', async () => {
+    // A NUL in an argument is a programming error here, exactly as an unsafe
+    // argument is on the diagnostics path, and it keeps propagating.
+    await expect(
+      runOwnedCommand(
+        { file: 'C:\\fixture.exe' },
+        {
+          start: () => {
+            throw new InvalidBoundaryRequestError('a NUL in an argument');
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(InvalidBoundaryRequestError);
+  });
+});
+
+describe('a broken pipe to the boundary proves nothing about the child', () => {
+  const requested = { requested: true, established: true } as const;
+
+  it('is UNCONFIRMED whenever this side lost its own pipe', () => {
+    // The pipe this side writes into belongs to the *helper*, not to the
+    // child. Its breaking says the helper died — by this side's hand or by
+    // someone else's — and says nothing at all about what the child received.
+    // The first implementation reported a proven `FAILED` whenever the failure
+    // arrived before a local termination was recorded, which made the verdict
+    // depend on who killed the helper rather than on what was observed.
+    expect(classifyStdinDelivery({ ...requested, localWrite: 'FAILED', forwarded: null })).toBe(
+      'UNCONFIRMED',
+    );
+  });
+
+  it('still reports the broken pipe the boundary itself saw', () => {
+    expect(
+      classifyStdinDelivery({ ...requested, localWrite: 'FAILED', forwarded: 'BROKEN_PIPE' }),
+    ).toBe('FAILED');
+  });
+
+  it('is FAILED when there was no channel to write into at all', () => {
+    // A helper that opened no stdin pipe. Nothing was handed over, and that is
+    // an observation rather than an absence of one.
+    expect(
+      classifyStdinDelivery({ ...requested, localWrite: 'NO_CHANNEL', forwarded: null }),
+    ).toBe('FAILED');
+  });
+});
+
+describe('a refusal and a local termination cannot both be true', () => {
+  it('fails closed rather than reporting that nothing ran', () => {
+    // Reachable after establishment: a status that turns foreign under a
+    // shared working directory, or a `boundary=FAILED` written after the
+    // `boundary=OK` this run was established on. This side had already
+    // terminated something, so "the launch was refused and nothing ran" is
+    // refuted by its own state.
+    const refused: BoundaryEnding = {
+      ending: 'BOUNDARY_REFUSED',
+      failureCode: 'OWNED_CONTAINMENT_VERIFY',
+      win32: null,
+      targetStarted: 'NO',
+      status: null,
+    };
+    for (const termination of OWNED_TERMINATIONS) {
+      if (termination === 'NONE') continue;
+      const result = classifyOwnedCommand({ ending: refused, termination });
+      expect(result.outcome, termination).toBe('BOUNDARY_LOST');
+      expect(result.failureCode, termination).toBe('ENDING_INCONSISTENT');
+      expect(result.sideEffectsPossible, termination).toBe(true);
+    }
+  });
+
+  it('keeps `sideEffectsPossible` true for every pairing that is not a proven refusal', () => {
+    // The same claim as the earlier enumeration, with the exclusion narrowed
+    // to what it is actually entitled to exclude: a refusal *nobody
+    // terminated*. The first version excluded the whole row, which is where
+    // the defect above lived.
+    for (const { name, ending } of ENDINGS) {
+      for (const termination of OWNED_TERMINATIONS) {
+        if (
+          ending.ending === 'BOUNDARY_REFUSED' &&
+          ending.targetStarted === 'NO' &&
+          termination === 'NONE'
+        ) {
+          continue;
+        }
+        expect(
+          classifyOwnedCommand({ ending, termination }).sideEffectsPossible,
+          `${name} × ${termination}`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+describe('an exit code that cannot be represented is not a completion', () => {
+  it('fails closed on a status carrying an impossible exit code', () => {
+    // `>>> 0` is a `ToUint32`: it maps 2**32 to 0 and 4294967297 to 1, so an
+    // out-of-range value in a status would have become a plausible small exit
+    // code. The decoder only guarantees a *safe* integer, and the nonce exists
+    // precisely because a status file is not beyond a third party's reach.
+    for (const impossible of [2 ** 32, 4294967297, -2147483649, 1.5]) {
+      const ending: BoundaryEnding = {
+        ending: 'CHILD_EXITED',
+        childExitCode: impossible,
+        status: status({ childExitCode: impossible }),
+      };
+      const result = classifyOwnedCommand({ ending, termination: 'NONE' });
+      expect(result.outcome, String(impossible)).toBe('BOUNDARY_LOST');
+      expect(result.failureCode, String(impossible)).toBe('ENDING_INCONSISTENT');
+      expect(result.exitCode, String(impossible)).toBeNull();
+    }
+  });
+
+  it('accepts every code a Windows process can actually exit with', () => {
+    for (const code of [0, 1, 255, 2147483647, -2147483648, -1073741819]) {
+      const ending: BoundaryEnding = {
+        ending: 'CHILD_EXITED',
+        childExitCode: code,
+        status: status({ childExitCode: code }),
+      };
+      const result = classifyOwnedCommand({ ending, termination: 'NONE' });
+      expect(result.outcome, String(code)).toBe('COMPLETED');
+      expect(result.exitCode, String(code)).toBe(code >>> 0);
+    }
   });
 });

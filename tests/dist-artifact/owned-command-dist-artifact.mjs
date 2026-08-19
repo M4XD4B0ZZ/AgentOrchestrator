@@ -31,8 +31,14 @@
  * Every case that starts a tree counts survivors by heartbeat — a file whose
  * number keeps growing — for the reason the spike found: a terminated process
  * whose object is still referenced looks alive in a process walk. Zero
- * survivors is required after **every** case, including the ones that never
- * started a tree.
+ * survivors is required after each such case, and once more over every
+ * heartbeat directory of the whole run at the end, so a process that outlived
+ * its own case by a few seconds is still caught.
+ *
+ * Cases that start no tree have nothing to count, and this file does not
+ * pretend otherwise: an earlier version of this header claimed the check ran
+ * after *every* case, which was false for seven of them — the loop simply had
+ * nothing to iterate.
  *
  * What that does *not* claim is that the containment settings are
  * load-bearing. That claim needs a negative control — a deliberately weakened
@@ -55,19 +61,35 @@
  *   7. a helper killed by someone else is always `BOUNDARY_LOST`;
  *   8. a launch whose evidence cannot be trusted never completes;
  *   9. a payload read to end-of-file is `DELIVERED`;
- *  10. a child that exits without reading is never reported as `DELIVERED`;
- *  11. a termination during a transfer in flight is `UNCONFIRMED`;
- *  12. no payload is `NOT_REQUESTED`;
- *  13. a budget and a timeout that race produce exactly one outcome, and the
- *      first trigger names it;
- *  14. `targetStarted=UNKNOWN` survives into the result and is conservative.
+ *  10. a payload fully forwarded to a child that never reads it is `DELIVERED`
+ *      too — repeatedly, because that one used to be a coin flip;
+ *  11. a child that exits without reading is never reported as `DELIVERED`;
+ *  12. a termination during a transfer in flight is `UNCONFIRMED`;
+ *  13. no payload is `NOT_REQUESTED`;
+ *  14. a budget and a timeout each name their own outcome when they are clearly
+ *      ordered, and produce nothing but those two — never a completion, never a
+ *      boundary loss — when they are armed to fire together;
+ *  15. `targetStarted=UNKNOWN` survives into the result and is conservative.
+ *
+ * The same-tick case — two policies triggering inside one turn of the loop —
+ * is not measurable here, because which of them fires first is the operating
+ * system's decision. It is measured deterministically against an injected
+ * boundary in `tests/v3-02-owned-command.test.ts` instead.
  *
  * Contract: exit code 0 means every case held. Any nonzero exit means at least
  * one did not.
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -87,8 +109,22 @@ const { runCommand } = await import(execUrl);
 const taskkill = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'taskkill.exe');
 
 const temporaryDirs = [];
+/** Every heartbeat directory any case created, for the final sweep. */
+const heartbeatDirs = [];
+
+/**
+ * A temporary directory, canonicalised.
+ *
+ * `realpathSync.native` is not decoration here. These paths are handed to
+ * `runCommand` as `--report=<path>` arguments, and its `SAFE_ARG_PATTERN`
+ * admits no tilde — so on a host whose TEMP is the 8.3 alias (the documented
+ * shape on `windows-latest`, which is where this gate runs) the raw path would
+ * make `assertSafeArgs` throw and the case would fail for a reason that has
+ * nothing to do with what it measures. It passes on a developer machine whose
+ * user name is short, which is exactly how that reaches CI unnoticed.
+ */
 function tempDir(prefix) {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   temporaryDirs.push(dir);
   return dir;
 }
@@ -210,6 +246,19 @@ class Case {
   /** A directory this case's survivors would show up in. */
   watch(dir) {
     this.heartbeatDirs.push(dir);
+    heartbeatDirs.push(dir);
+    return dir;
+  }
+  /**
+   * The same, minus the per-case window.
+   *
+   * For a case that starts many short runs: paying a 1.2s observation window
+   * per run would dominate its wall clock, and the final sweep at the end of
+   * the file covers every registered directory anyway — later, and therefore
+   * with a better view of anything that outlived its own run.
+   */
+  sweepOnly(dir) {
+    heartbeatDirs.push(dir);
     return dir;
   }
   note(text) {
@@ -468,6 +517,34 @@ test('a child that exits without reading is never DELIVERED', async (c) => {
   );
 });
 
+test('a payload fully forwarded to a child that never reads it is DELIVERED', async (c) => {
+  // The shape a review argued would be racy: the child never touches stdin and
+  // exits on its own, so the payload — small enough for the pipe buffer — is
+  // fully forwarded, and the helper's report of that comes from a background
+  // thread rather than from the thread that writes the final status.
+  //
+  // What this case pins is the behaviour: DELIVERED requires both halves, and
+  // both are present here. What it does **not** do is kill the mutant that
+  // removes `WriteStatus()` from that branch of `AoLaunch.cs` — measured, 12
+  // out of 12 still reported DELIVERED with the publish removed, because a node
+  // child takes far longer to start than a pipe write takes to finish. The
+  // publish stays in the helper as hardening, and this comment says so rather
+  // than letting a repeated loop imply a counter-proof it does not provide.
+  //
+  // Repeated anyway: a delivery state that resolved the right way once has not
+  // been measured.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const owned = await runOwnedCommand({
+      file: process.execPath,
+      args: [fixture, '--stdin=ignore', '--sleep-ms=0', '--exit=0'],
+      stdin: 'a payload that fits in one pipe buffer',
+      timeoutMs: 15_000,
+    });
+    c.equal(owned.outcome, 'COMPLETED', `attempt ${attempt}: outcome`);
+    c.equal(owned.stdinDelivery, 'DELIVERED', `attempt ${attempt}: delivery`);
+  }
+});
+
 test('a termination during a transfer in flight is UNCONFIRMED', async (c) => {
   const beats = c.watch(tempDir('ao-owned-hb-'));
   // The child never reads, so the pipe fills and the write is still in flight
@@ -497,57 +574,123 @@ test('no payload is NOT_REQUESTED, and the child still sees end-of-file', async 
   c.equal(direct.stdinDelivery, 'NOT_REQUESTED', 'runCommand agrees');
 });
 
-// ── 13. the budget and the timeout, racing ──────────────────────────────────
+// ── 13. the two policies, ordered and contending ────────────────────────────
 
-test('a budget and a timeout that race produce exactly one outcome', async (c) => {
-  const beats = c.watch(tempDir('ao-owned-hb-'));
-  // Both policies are armed to fire at once: the fixture floods stdout
-  // immediately and the timeout is short enough to land in the same window.
-  const owned = await runOwnedCommand({
+test('a budget and a timeout each name their own outcome, and never a third', async (c) => {
+  // Three parts, and the first review is the reason they are three.
+  //
+  // The original single case set `timeoutMs: 60`, which is less than a helper
+  // spawn: the whole budget was consumed by establishment, so
+  // `runOwnedCommand` terminated synchronously before a byte of output could
+  // arrive. It resolved to `TIMED_OUT` every time, and its assertion derived
+  // the expected failure code *from* the outcome it had just read — so it
+  // measured neither ordering, and could not fail.
+
+  // (a) the budget, clearly first.
+  {
+    const beats = c.watch(tempDir('ao-owned-hb-'));
+    const owned = await runOwnedCommand({
+      file: process.execPath,
+      args: [fixture, `--heartbeat=${beats}`, '--stdout-bytes=4000000', '--hang'],
+      maxStdoutBytes: 64,
+      timeoutMs: 30_000,
+    });
+    c.equal(owned.outcome, 'OUTPUT_LIMIT_EXCEEDED', 'budget-first outcome');
+    c.equal(owned.failureCode, 'OUTPUT_LIMIT_STDOUT', 'budget-first failure code');
+  }
+
+  // (b) the timeout, clearly first: the child produces nothing at all.
+  {
+    const beats = c.watch(tempDir('ao-owned-hb-'));
+    const owned = await runOwnedCommand({
+      file: process.execPath,
+      args: [fixture, `--heartbeat=${beats}`, '--hang'],
+      maxStdoutBytes: 64,
+      timeoutMs: 2_000,
+    });
+    c.equal(owned.outcome, 'TIMED_OUT', 'timeout-first outcome');
+    c.equal(owned.failureCode, 'TIMEOUT', 'timeout-first failure code');
+  }
+
+  // (c) contention. The deadline is placed *around* the moment establishment
+  // finishes, which is when the flood begins — so the two policies are armed
+  // to fire within milliseconds of each other. Which one wins is genuinely not
+  // predictable, and is not what is asserted; what is asserted is that the
+  // result is always one of the two, always carries that outcome's own code,
+  // and is never a completion or a boundary loss.
+  //
+  // The expected codes come from a literal written here, not from the outcome
+  // the run reported, so a classifier that returned the wrong pair would fail
+  // this rather than agree with itself.
+  const EXPECTED = {
+    TIMED_OUT: 'TIMEOUT',
+    OUTPUT_LIMIT_EXCEEDED: 'OUTPUT_LIMIT_STDOUT',
+    // A deadline that expires before ownership is established is a legitimate
+    // third answer, and it is the boundary's, not a policy's.
+    LAUNCH_REFUSED: 'LAUNCH_REFUSED',
+  };
+
+  const warmUp = await runOwnedCommand({
     file: process.execPath,
-    args: [fixture, `--heartbeat=${beats}`, '--children=2', '--stdout-bytes=4000000', '--hang'],
-    maxStdoutBytes: 64,
-    timeoutMs: 60,
+    args: [fixture, '--exit=0'],
+    timeoutMs: 30_000,
   });
-  c.check(
-    owned.outcome === 'OUTPUT_LIMIT_EXCEEDED' || owned.outcome === 'TIMED_OUT',
-    `outcome must be one of the two policies, got ${owned.outcome}`,
-  );
-  const expectedFailure =
-    owned.outcome === 'TIMED_OUT' ? 'TIMEOUT' : 'OUTPUT_LIMIT_STDOUT';
-  c.equal(owned.failureCode, expectedFailure, 'the failure code matches the outcome');
-  c.check(
-    owned.outcome !== 'BOUNDARY_LOST',
-    'a race between two local policies is never a boundary loss',
-  );
-  c.note(`the race resolved to ${owned.outcome}`);
+  c.equal(warmUp.outcome, 'COMPLETED', 'the warm-up run establishes and completes');
+  const establishMs = warmUp.durationMs;
+  c.note(`establishment plus a trivial child took ${establishMs}ms`);
+
+  // The deltas reach well to both sides of establishment, deliberately. A
+  // window that only straddles the moment the flood begins produces the budget
+  // every time — measured, and recorded in the note below — so the negative end
+  // is what puts the deadline genuinely before there is any output to bound.
+  const seen = new Map();
+  for (const delta of [-90, -70, -50, -30, -15, -5, 0, 5, 15, 40]) {
+    const beats = c.sweepOnly(tempDir('ao-owned-hb-'));
+    const owned = await runOwnedCommand({
+      file: process.execPath,
+      args: [fixture, `--heartbeat=${beats}`, '--stdout-bytes=4000000', '--hang'],
+      maxStdoutBytes: 64,
+      timeoutMs: Math.max(1, establishMs + delta),
+    });
+    seen.set(owned.outcome, (seen.get(owned.outcome) ?? 0) + 1);
+    const expected = EXPECTED[owned.outcome];
+    c.check(
+      expected !== undefined,
+      `delta ${delta}: outcome must be one of the two policies or a refusal, got ${owned.outcome}`,
+    );
+    if (expected !== undefined) {
+      c.equal(owned.failureCode, expected, `delta ${delta}: failure code`);
+    }
+  }
+  c.note(`contention resolved to ${[...seen].map(([k, n]) => `${k}×${n}`).join(', ')}`);
 });
 
 // ── 14. an unknown launch ───────────────────────────────────────────────────
 
 test('an unknown launch stays conservative about side effects', async (c) => {
-  const beats = c.watch(tempDir('ao-owned-hb-'));
   // A wall-clock budget too small for a process to start in. Establishment
-  // cannot finish, so the boundary refuses without ever having reported what
-  // it did or did not create.
+  // cannot finish, so the boundary refuses without ever having reported what it
+  // did or did not create.
+  //
+  // Deliberately no heartbeat directory: nothing gets far enough to write one,
+  // so watching it would be a survivor check with no power to see a survivor,
+  // which is what the first version of this case did.
   const owned = await runOwnedCommand({
     file: process.execPath,
-    args: [fixture, `--heartbeat=${beats}`, '--children=2', '--hang'],
+    args: [fixture, '--hang'],
     timeoutMs: 1,
   });
   c.equal(owned.outcome, 'LAUNCH_REFUSED', 'outcome');
   c.equal(owned.established, false, 'ownership was never established');
   c.equal(owned.boundaryFailureCode, 'BOUNDARY_NOT_ESTABLISHED_IN_TIME', 'boundary failure code');
-  c.check(
-    owned.targetStarted === 'UNKNOWN' || owned.targetStarted === 'NO',
-    `targetStarted must be honest, got ${owned.targetStarted}`,
-  );
-  c.equal(
-    owned.sideEffectsPossible,
-    owned.targetStarted !== 'NO',
-    'side-effect possibility follows the evidence',
-  );
-  c.note(`targetStarted=${owned.targetStarted}`);
+  // Strict, not a disjunction. A 1ms budget expires on the first status poll,
+  // long before a .NET helper has written anything, so there is no status this
+  // launch could claim and UNKNOWN is the only honest answer. The earlier
+  // version accepted NO as well — which is the one value that would make this
+  // case worth failing, because it would mean the refusal claimed proof it does
+  // not have.
+  c.equal(owned.targetStarted, 'UNKNOWN', 'targetStarted');
+  c.equal(owned.sideEffectsPossible, true, 'an unknown launch may have had side effects');
 });
 
 // ── run ─────────────────────────────────────────────────────────────────────
@@ -566,8 +709,8 @@ for (const { name, run } of cases) {
   } catch (error) {
     c.failures.push(`threw: ${error?.stack ?? String(error)}`);
   }
-  // Hygiene, after every case and not only the ones that started a tree: a
-  // case that leaves something executing has not measured what it claims to.
+  // Hygiene for the cases that started something: a case that leaves a process
+  // executing has not measured what it claims to.
   for (const dir of c.heartbeatDirs) {
     const live = await liveCount(dir);
     if (live !== 0) c.failures.push(`${live} fixture process(es) still running afterwards`);
@@ -580,6 +723,20 @@ for (const { name, run } of cases) {
     failed += 1;
     console.log(`  FAIL ${name} (${seconds}s)`);
     for (const failure of c.failures) console.log(`         - ${failure}`);
+  }
+}
+
+// One sweep over everything, at the end. A process that outlived its own case
+// by longer than that case's window is still a survivor, and the per-case check
+// is too close to the event to see it.
+{
+  let stragglers = 0;
+  for (const dir of heartbeatDirs) stragglers += await liveCount(dir, 1_500);
+  if (stragglers > 0) {
+    failed += 1;
+    console.log(`  FAIL final sweep: ${stragglers} fixture process(es) still running`);
+  } else {
+    console.log('  ok   final sweep: nothing from any case is still running');
   }
 }
 

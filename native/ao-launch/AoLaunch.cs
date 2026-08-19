@@ -798,8 +798,32 @@ internal static class Program
                 }
             }
             Put("stdinForward", "EOF_FORWARDED");
-            // EOF must reach the child, or a reader waits forever.
+            // EOF must reach the child, or a reader waits forever. Closed
+            // before the status is published, so the child never waits on a
+            // file write.
             Native.CloseHandle(toChild);
+            // Published here, exactly as the BROKEN_PIPE branch above publishes.
+            //
+            // This is hardening, and it is labelled as such rather than sold as
+            // a repair. Without it the key still reached the file, but only
+            // because of an ordering nothing states: this runs on a background
+            // thread, and the main thread's final WriteStatus happens after the
+            // child exits — which is later, for any child that takes longer to
+            // start than a pipe write takes to finish. The V3 slice 2 adapter's
+            // DELIVERED rests on this key, and an ordering a caller's guarantee
+            // rests on should be in the code rather than in the timing.
+            //
+            // Measured before changing it: with this call removed, a child that
+            // never reads stdin and exits immediately still reported DELIVERED
+            // 12 times out of 12 on the installed runtime. So the ordering was
+            // real, not lucky — and nothing in this repository can currently
+            // make it fail. That is the reason this is not claimed as a fixed
+            // defect, and the reason no test here kills the mutant.
+            //
+            // Two WriteStatus calls cannot lose each other's work: each takes
+            // its snapshot of the shared list under the same lock it writes the
+            // file under, so whichever writes last writes a superset.
+            WriteStatus();
         });
         thread.IsBackground = true;
         thread.Start();
