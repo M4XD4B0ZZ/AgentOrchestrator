@@ -355,13 +355,25 @@ export interface CapabilityRecord {
  */
 export function classifyProbe(result: CommandResult): ProbeAvailability {
   if (result.outcome === 'NOT_FOUND') return 'EXECUTABLE_NOT_FOUND';
-  if (
-    result.outcome === 'SPAWN_FAILED' ||
-    result.outcome === 'TIMED_OUT' ||
-    result.outcome === 'OUTPUT_LIMIT_EXCEEDED'
-  ) {
-    return 'PROBE_FAILED';
-  }
+  // Written as "anything that is not a completion", rather than as a list of
+  // the endings that are not — which is what it was, and what let V3 slice 3's
+  // new `BOUNDARY_LOST` fall through to the exit-code branches below.
+  //
+  // Both readings it fell into were wrong, and in opposite directions. A lost
+  // boundary reports `exitCode: null`, so it answered
+  // `UNAVAILABLE_IN_INSTALLED_VERSION` — *the installed CLI does not understand
+  // this sub-command* — about a run whose supervision AO had lost, in an
+  // artefact whose own `facts.outcome` said `BOUNDARY_LOST` on the next line.
+  // And a lost boundary may carry an exit code (`launch-boundary.ts`: "Ownership
+  // semantics took the tree down. An exit code may even be present — it is
+  // still not a completion"), so a zero one with output would have answered
+  // `AVAILABLE`: a positive capability claim, feeding the auth preflight, from
+  // a run nothing supervised.
+  //
+  // Inverted deliberately, so that a sixth `CommandOutcome` cannot repeat this.
+  // A probe is evidence about an installed CLI only if the process ran to
+  // completion under its own control; every other ending is a failed probe.
+  if (result.outcome !== 'COMPLETED') return 'PROBE_FAILED';
 
   if (result.exitCode === 0) {
     // A zero exit with no output at all is not usable evidence of anything.

@@ -17,12 +17,21 @@
  * The fence is unchanged by that, and deliberately so. This module carries
  * process **ownership** and no authority of its own: it contains whatever it is
  * asked to start, which is exactly why the thing allowed to ask must stay
- * behind the execution lease. `runCommand` is not a runner — it starts what it
- * is given — and it is given something by three seams: the agent and
- * verification runners, reachable only through `leasedAgent`/`leasedVerify`,
- * and the Git seam, whose mutations are fenced immediately before the effect.
- * No lease logic lives here or in the native helper, and putting any there
- * would move authority into the layer that has none.
+ * behind the execution lease. No lease logic lives here or in the native
+ * helper, and putting any there would move authority into the layer that has
+ * none.
+ *
+ * `runCommand` is not a runner — it starts what it is given — and six modules
+ * give it something. Three are fenced, and they are the three that *act*: the
+ * agent and verification runners, reachable only through
+ * `leasedAgent`/`leasedVerify`, and the Git seam, whose mutations are proved
+ * against the lease immediately before the effect. The other three —
+ * `repo/git-query.ts`, `doctor/capabilities.ts`, `auth/auth-preflight.ts` — are
+ * read-only probes and are **not** fenced, exactly as they were not before this
+ * slice. Naming them is the point: the boundary now contains them too, and a
+ * reader who believes the seams cover every caller would look for the wrong
+ * gate. Widening what any of them may do is a lease decision, not this
+ * module's.
  *
  * ── The one guarantee ──────────────────────────────────────────────────────
  *
@@ -861,6 +870,7 @@ async function drainStreams(
     (stream): stream is NodeJS.ReadableStream & { readableEnded?: boolean; destroyed?: boolean } =>
       stream !== null && stream !== undefined,
   );
+  const detach: (() => void)[] = [];
   const waits = pending
     .filter((stream) => stream.readableEnded !== true && stream.destroyed !== true)
     .map(
@@ -870,6 +880,14 @@ async function drainStreams(
           stream.once('end', settle);
           stream.once('close', settle);
           stream.once('error', settle);
+          // Removed when the *bound* wins, which is the case these listeners
+          // outlive: a stream that never ends keeps three of them, on a run
+          // that has already been reported, retaining its own closure.
+          detach.push(() => {
+            stream.off?.('end', settle);
+            stream.off?.('close', settle);
+            stream.off?.('error', settle);
+          });
         }),
     );
   if (waits.length === 0) return;
@@ -883,6 +901,7 @@ async function drainStreams(
     await Promise.race([Promise.all(waits), bound]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    for (const remove of detach) remove();
   }
 }
 
@@ -1605,18 +1624,31 @@ export async function runOwnedCommand(
      * microtask, while a stream's buffered chunks are delivered a tick later —
      * so the sinks are read before anything has been put in them.
      *
-     * Waiting for the streams is safe *here*, and the distinction matters
-     * because waiting for a pipe is exactly how a containment measurement
-     * deadlocks on the survivors it is counting. This is not that: `ending` has
-     * already arrived, which means the helper is gone, which means the job it
-     * held is closed and everything in it was taken by `KILL_ON_JOB_CLOSE`.
-     * There is no process left that could hold these handles open. The bound
-     * below is therefore a backstop against a case this reasoning does not
-     * cover rather than a routine wait, and it takes whatever the sinks have if
-     * it fires — losing output is bad, hanging on it is worse.
+     * Waiting for a pipe is exactly how a containment measurement deadlocks on
+     * the survivors it is counting, so *which* endings may be waited on is a
+     * decision rather than a detail — and one of them may not.
+     *
+     * For `CHILD_EXITED`, `TERMINATED_BY_CALLER` and `BOUNDARY_LOST`, `ending`
+     * arrives from the helper's `close`: the helper is gone, so the job it held
+     * is closed and everything in it was taken by `KILL_ON_JOB_CLOSE`. No
+     * process is left that could hold these handles open, and the bound is a
+     * backstop rather than a routine wait.
+     *
+     * `BOUNDARY_REFUSED` is the exception, and it is excluded. One of its two
+     * producers is a helper `error` event — node emits one when a *kill* fails,
+     * not only when a spawn does — which arrives with the helper **possibly
+     * still running and still holding these pipes**. That is the deadlock shape
+     * exactly, and the branch below already says so about the working
+     * directory; waiting for such a helper's streams would have stalled a run
+     * that had just declared it unaccounted for, for the whole grace window —
+     * five seconds by default, and up to whatever a caller passed. There is
+     * nothing to wait for there anyway: that branch reports no output.
+     *
+     * Either way the bound wins over the wait: losing output is bad, hanging on
+     * it is worse.
      */
     const ending = settled;
-    await drainStreams([outStream, errStream], graceMs);
+    if (ending.ending !== 'BOUNDARY_REFUSED') await drainStreams([outStream, errStream], graceMs);
     const classification = classifyOwnedCommand({ ending, termination, ownershipEstablished: true });
     const result = finish({
       ...classification,
@@ -1676,6 +1708,17 @@ export async function runOwnedCommand(
       void owned.ending.catch(() => undefined);
       return abandoned;
     }
+    // The sinks come off on this path too, and for the same reason the
+    // `BOUNDARY_REFUSED` branch above gives: a chunk delivered after the result
+    // is built would run `terminate` on a run that has already returned, arming
+    // a grace timer the `finally` below has already been past — an unref'd
+    // five-second timer nothing will clear, holding this run's buffers.
+    //
+    // It is reachable on the *successful* path only when the drain above hit
+    // its bound, which is exactly the case that reasoning does not cover, so
+    // the detach is not the redundancy it looks like.
+    outStream.off('data', onStdout);
+    errStream.off('data', onStderr);
     // Only now: the ending has been read, and the status file it was read from
     // lives in the directory this removes.
     owned.dispose();

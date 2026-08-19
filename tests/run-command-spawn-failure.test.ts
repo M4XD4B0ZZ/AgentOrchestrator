@@ -37,6 +37,16 @@
  * `errnoCode` is `null`, and there is no `ENOENT` split into `NOT_FOUND`. On
  * Windows `NOT_FOUND` is decided earlier, by PATH/PATHEXT resolution, before
  * anything is launched.
+ *
+ * Two cases are deliberately duplicated across the split rather than left in
+ * the POSIX group: the caller-path digit-run case, and the gate's own
+ * counter-proof. CI runs `windows-latest` only, so a case scoped to POSIX runs
+ * nowhere — and `expectNoErrorObjectLeak` is the instrument every case here
+ * depends on. Its mutant-kill has to execute on the platform that uses it.
+ *
+ * What is genuinely lost on Windows, and is not duplicated because it cannot
+ * be: the two `child.on('error')` cases. That handler is on the POSIX branch of
+ * `runCommand`, and no Windows path reaches it any more.
  */
 
 import { rmSync, writeFileSync } from 'node:fs';
@@ -522,6 +532,60 @@ describe.runIf(IS_WINDOWS)('a boundary helper that cannot be started is containe
 
     expect(result.outcome).toBe('SPAWN_FAILED');
     expect(elapsed).toBeLessThan(5_000);
+  });
+
+  it('a caller path whose own name carries a raw-errno-shaped digit run is not a leak', async () => {
+    // The Windows half of the POSIX case of the same name, restored here
+    // because this is the only platform CI runs: scoping that group to POSIX
+    // retired it everywhere. The path shape is the one mkdtemp produced by
+    // chance during AO-008-S3 (`ao-spawnfail-953HCn`, `ao-spawnfail-601hZz`),
+    // pinned so it is tested every run instead of ~1 run in 200. Both digit
+    // runs are caller-chosen characters that `display`/`executable` must keep
+    // echoing.
+    const dir = makeTempDir('ao-spawnfail-953-valid-');
+    const target = join(dir, 'sentinel-601.exe');
+    writeFileSync(target, 'x', 'utf8');
+    expect(target).toMatch(RAW_LIBUV_ERRNO); // the caller path, not a leak
+    spawnControl.throwFor = (file) => (isBoundaryHelper(file) ? syntheticSpawnUnknown() : null);
+
+    const result = await runCommand(target, NO_ARGS, { env: {}, timeoutMs: 10_000 });
+
+    expect(result.outcome).toBe('SPAWN_FAILED');
+    expect(result.failureCode).toBe('SPAWN_FAILED');
+    expectNoErrorObjectLeak(result, target, NO_ARGS, null);
+    expect(JSON.stringify(result)).not.toContain('-4094');
+    expect(JSON.stringify(result)).not.toContain('syscall');
+  });
+
+  it("a result whose args are not the caller's own fails the gate (AO-008-S3-R1-F1)", async () => {
+    // The gate's own counter-proof, and the reason it is duplicated onto this
+    // platform rather than left in the POSIX group: `expectNoErrorObjectLeak`
+    // is the instrument every case above depends on, and scoping its only
+    // mutant-kill to a platform CI never runs would leave the instrument
+    // asserted by nothing that executes. A counter-proof that does not run is
+    // not a counter-proof.
+    const dir = makeTempDir();
+    const target = join(dir, 'sentinel-owned-args.exe');
+    writeFileSync(target, 'x', 'utf8');
+    spawnControl.throwFor = (file) => (isBoundaryHelper(file) ? syntheticSpawnUnknown() : null);
+
+    const result = await runCommand(target, NO_ARGS, { env: {}, timeoutMs: 10_000 });
+    expectNoErrorObjectLeak(result, target, NO_ARGS, null); // the honest result passes
+
+    // The counterexample the gate used to accept: `errnoCode`, `display` and
+    // `executable` all still correct, only `args` swapped for the raw libuv
+    // errno. Excluding `args` from the raw-errno scan is sound *only* because
+    // the gate first proves it is the caller's own array — so this must fail.
+    const forgedArgs = { ...result, args: ['-4094'] } as CommandResult;
+    expect(forgedArgs.errnoCode).toBeNull();
+    expect(forgedArgs.display).toBe(target);
+    expect(forgedArgs.executable).toBe(target);
+    expect(() => expectNoErrorObjectLeak(forgedArgs, target, NO_ARGS, null)).toThrow();
+
+    // And the exclusion reaches the top level only: a nested property that
+    // merely shares a caller-echo name is still scanned for a raw errno.
+    const nestedEcho = { ...result, args: NO_ARGS, nested: { args: ['-4094'] } } as CommandResult;
+    expect(() => expectNoErrorObjectLeak(nestedEcho, target, NO_ARGS, null)).toThrow();
   });
 
   it('starts no target of its own when the boundary cannot be started', async () => {

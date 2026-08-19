@@ -881,6 +881,121 @@ describe.runIf(IS_WINDOWS)('a short-lived child’s output survives a slow estab
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('QUICK');
   }, 60_000);
+
+  it('honours a budget blown before there was a boundary to terminate', async () => {
+    // The other half of attaching the sinks in the same tick as the spawn: they
+    // can now fill — and overflow — while `startOwnedProcess` is still polling
+    // for a status, which is *before* there is anything to terminate. The
+    // reason is remembered and applied the moment termination becomes possible.
+    //
+    // Without that, the two available answers are both wrong: dropping the
+    // reason leaves a stream nothing bounds, and calling a `terminate` that
+    // does not exist yet throws out of the one path that must not.
+    //
+    // Same delayed establishment as the case above, and the same reason for it:
+    // it makes a window that would otherwise be a race into a certainty.
+    const dir = makeTempDir();
+    const script = join(dir, 'flood-early.cjs');
+    writeFileSync(
+      script,
+      "const l='C'.repeat(4096);for(let i=0;i<64;i++)process.stdout.write(l);setInterval(function(){},1000);" +
+        chr10Escape(),
+      'utf8',
+    );
+
+    const result = await runOwnedCommand(
+      {
+        file: process.execPath,
+        args: [script],
+        env: fullEnv(),
+        maxStdoutBytes: 64,
+        timeoutMs: 60_000,
+      },
+      {
+        start: async (request) => {
+          const started = await startOwnedProcess(request);
+          await new Promise((done) => setTimeout(done, 400));
+          return started;
+        },
+      },
+    );
+
+    expect(result.outcome).toBe('OUTPUT_LIMIT_EXCEEDED');
+    expect(result.failureCode).toBe('OUTPUT_LIMIT_STDOUT');
+    expect(result.stdoutTruncated).toBe(true);
+    expect(Buffer.byteLength(result.stdout, 'utf8')).toBe(64);
+    // And the child really was ended by it rather than left running: this
+    // fixture never exits on its own.
+    expect(result.outcome).not.toBe('BOUNDARY_LOST');
+  }, 90_000);
+});
+
+/* ─────────── 6b. a refusal is not waited on ──────────────────────────────── */
+
+describe('a refusal after establishment does not wait on the helper’s pipes', () => {
+  it('returns at once rather than draining a stream a live helper may hold', async () => {
+    // The drain added above waits for the output streams before reading the
+    // sinks, and *which* endings may be waited on is a decision rather than a
+    // detail. `BOUNDARY_REFUSED` after establishment has two producers, and one
+    // of them — node emitting `error` on the child process when a **kill**
+    // fails, not only when a spawn does — arrives with the helper possibly
+    // still running and still holding these pipes.
+    //
+    // Waiting there is the deadlock shape this repository already has a name
+    // for: the pipe you wait on is held by the survivor you are counting. The
+    // run would have stalled for the whole grace window on a boundary it had
+    // just declared unaccounted for — five seconds by default, and up to
+    // whatever a caller passed.
+    //
+    // Driven against a substituted launch, because a failed kill cannot be
+    // provoked from a real one. The streams below never end, so a drain that is
+    // not excluded here cannot finish before its bound.
+    const { PassThrough } = await import('node:stream');
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdin = new PassThrough();
+    stdin.resume();
+
+    const started = Date.now();
+    const result = await runOwnedCommand(
+      { file: 'C:\\fixture.exe', terminationGraceMs: 30_000, timeoutMs: 60_000 },
+      {
+        start: async () =>
+          ({
+            established: true,
+            process: {
+              helper: { stdout, stderr, stdin, unref: () => undefined, kill: () => true },
+              helperPid: 1,
+              childPid: 2,
+              mode: 'JOBLIST',
+              assignedAtCreation: true,
+              verifiedInJob: true,
+              jobMembersAtStart: 1,
+              workDir: 'C:\\nowhere',
+              terminate: () => undefined,
+              // The failed-kill shape: a refusal, reported for a run whose
+              // ownership had already been established.
+              ending: Promise.resolve({
+                ending: 'BOUNDARY_REFUSED',
+                failureCode: 'BOUNDARY_HELPER_SPAWN_FAILED',
+                win32: null,
+                targetStarted: 'YES',
+                status: null,
+              }),
+              dispose: () => undefined,
+            },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          }) as any,
+      },
+    );
+    const elapsed = Date.now() - started;
+
+    // Contradictory, and classified as such — that part is slice 2's.
+    expect(result.outcome).toBe('BOUNDARY_LOST');
+    // What this case is about: it came back, and it came back promptly. The
+    // grace above is 30s; anything near it means the drain was entered.
+    expect(elapsed).toBeLessThan(5_000);
+  }, 60_000);
 });
 
 /* ─────────── 7. the publish race the productive path exposed ─────────────── */

@@ -17,10 +17,16 @@
  * would turn a guarantee into a feature while every caller kept believing the
  * guarantee held.
  *
- * On **POSIX** the historical path is unchanged and deliberately so: the ADR
- * decides Windows containment and explicitly decides nothing about POSIX. The
- * child is spawned detached, terminated through its process group, and the
- * bounded confirmation below still applies.
+ * On **POSIX** the *mechanism* is unchanged and deliberately so: the ADR decides
+ * Windows containment and explicitly decides nothing about POSIX. The child is
+ * spawned detached, terminated through its process group, and the bounded
+ * confirmation below still applies.
+ *
+ * One thing did change there, and it is not a containment change: the numeric
+ * options are validated now (see {@link RunOptions.timeoutMs}), so `NaN`, a
+ * negative, `null` and `Infinity` no longer reach `setTimeout` to be silently
+ * turned into one millisecond. That is deliberate — the alternative was to keep
+ * one argument meaning two opposite things depending on which platform ran it.
  *
  * What is *not* platform-dependent is the observable contract. PATH resolution,
  * the `.cmd` codec, argument validation, byte budgets, the stdin vocabulary,
@@ -344,13 +350,18 @@ export interface CommandResult {
 
 export interface RunOptions {
   /**
-   * The child's whole environment. Nothing is inherited.
+   * The child's whole environment. Nothing beyond it is inherited, except the
+   * eleven names the platform back-fills into every Windows child anyway.
    *
-   * Required, and it must express at least one variable. An environment with
-   * nothing in it is refused on the owned Windows path rather than approximated
-   * — the boundary's wire format cannot distinguish "no variables" from "no
-   * environment given", and the helper answers the second by letting the child
-   * inherit AO's own. See {@link runCommand}.
+   * An empty object is accepted and means what it says. On Windows it does not
+   * reach the boundary empty — {@link WINDOWS_PLATFORM_BACKFILL} is applied
+   * first, which is what `child_process.spawn` would have done for the same
+   * call — so the refusal `runOwnedCommand` carries for an environment its wire
+   * format cannot express is unreachable from here. That refusal exists for a
+   * caller of the adapter, and it matters because the format cannot distinguish
+   * "no variables" from "no environment given": the helper answers the second
+   * by letting the child inherit AO's own, which is the widening the env guard
+   * exists to prevent.
    */
   readonly env: NodeJS.ProcessEnv;
   /**
@@ -857,6 +868,12 @@ function usableGrace(value: number | undefined, fallback: number): number {
  * it keeps that sentence true; dropping it would have made the same policy mean
  * two different things on two paths of one function.
  *
+ * The reproduction is of the *set*, not of libuv's whole algorithm: that also
+ * sorts the block and collapses keys that differ only in case, and the helper
+ * emits what it is given in order. No caller here can tell — every environment
+ * on this path comes from `createProbeEnv`'s allow-list, so a `Path` beside a
+ * `PATH` is not expressible — but the narrower claim is the true one.
+ *
  * It is deliberately **not** an opportunity to narrow the set. Doing that is a
  * change to what an agent's environment contains, which is the env guard's
  * decision and a separate one — the ADR is explicit that a job object bounds
@@ -996,8 +1013,15 @@ export function toCommandResultFields(
     owned.established === true &&
     owned.exitCode !== null;
   const declared = mappedOutcome !== undefined && (owned.failureCode === null || mappedFailure !== undefined);
+  // And the mirror of the first condition, which an earlier version left open:
+  // an outcome that is *not* a completion, carrying no failure code. Nothing
+  // `classifyOwnedCommand` produces looks like that — but the whole reason this
+  // gate exists is that the value crossing it need not have come from there,
+  // and a caller reading `failureCode === null` as "nothing went wrong" beside
+  // a `TIMED_OUT` is the same confusion in the other direction.
+  const unexplained = mappedOutcome !== 'COMPLETED' && mappedFailure === null;
 
-  if (!declared || (mappedOutcome === 'COMPLETED' && !completed)) {
+  if (!declared || unexplained || (mappedOutcome === 'COMPLETED' && !completed)) {
     return {
       // A boundary this side cannot account for may still have run the target.
       started: true,
