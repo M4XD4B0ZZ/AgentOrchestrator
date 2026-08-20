@@ -122,7 +122,12 @@ const open = (writerId) => {
 
 if (phase === 'CONTAINED') {
   // Two launches, both proved. The history the predicate must accept.
-  for (const _ of [0, 1]) {
+  //
+  // A distinct launch nonce per launch, because that is what a real launch
+  // produces and because \`confirmWriterLaunch\` refuses a digest that has already
+  // proved another generation of this lease. A harness reusing one attestation
+  // would be driving a replay the format rejects.
+  for (const index of [0, 1]) {
     const generation = open('claude');
     const attestation = mintContainmentAttestation({
       ownerPid: process.pid,
@@ -130,7 +135,7 @@ if (phase === 'CONTAINED') {
       childPid: 4343,
       mode: 'JOBLIST',
       assignedAtCreation: true,
-      launchNonce: 'a1b2c3d4e5f60718',
+      launchNonce: 'a1b2c3d4e5f6071' + String(index),
       attestedAt: now(),
       verifiedInJob: true,
     });
@@ -204,10 +209,18 @@ async function waitUntilGone(processAlive, pid) {
   return false;
 }
 
-/** Files in the administrative directory whose names this protocol owns. */
+/**
+ * Quarantine and staging artefacts left in the administrative directory.
+ *
+ * Matched by the two shapes the protocol creates and discards — `.breaking-…`
+ * and `.tmp-…` — rather than by "any sibling of the lease name that is not the
+ * ledger". The exclusion form was one `recordContainmentEvidence` call away from
+ * reporting the legitimate `…containment.json` companion as a leftover, which an
+ * adversarial review pointed out before it could happen.
+ */
 function protocolLeftovers(root) {
-  return readdirSync(join(root, '.git')).filter(
-    (name) => name.startsWith(`${LEASE_FILE_NAME}.`) && !name.endsWith('.launches.json'),
+  return readdirSync(join(root, '.git')).filter((name) =>
+    /\.(?:breaking|tmp)-/.test(name.slice(LEASE_FILE_NAME.length)),
   );
 }
 

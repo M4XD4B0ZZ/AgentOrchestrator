@@ -168,6 +168,7 @@ import {
 } from './lease-document.js';
 import {
   extendableWriterLaunchLedger,
+  MAX_WRITER_LAUNCH_ENTRIES,
   provesEveryLaunchContained,
   readWriterLaunchLedger,
   writerLaunchBinding,
@@ -597,14 +598,19 @@ export interface LeaseInspection {
    * `'ABSENT'` means a lease was read and carries no containment record — a
    * legacy lease, or one whose writer never went behind the boundary.
    *
-   * **Reported, never acted on.** Nothing in this build removes, takes over or
-   * shortens the life of any lease because of what this says, and
-   * `lease-recovery.ts` carries the same value with its classification
-   * deliberately untouched. It exists so the slice that does implement recovery
-   * has a measured input rather than an assumption — see
+   * **Reported, never acted on**, and V3 slice 5 did not change that — it
+   * confirmed it. Nothing in this build removes, takes over or shortens the life
+   * of any lease because of what this says: `assessStaleLeaseRecovery` reads the
+   * writer-launch ledger and never this field, precisely because a `CONTAINED`
+   * reading is a statement about one writer **launch** and a failed publish or a
+   * failed clear can leave an older positive one standing.
+   *
+   * The sentence this replaces predicted the opposite — "it exists so the slice
+   * that does implement recovery has a measured input rather than an assumption".
+   * That slice exists now and deliberately does not take this input. See
    * `lease/containment-evidence.ts` for why containment is lifetime evidence and
-   * not writer authority, and for why a `CONTAINED` reading is a statement about
-   * one writer **launch** rather than about this lease.
+   * not writer authority, and `lease/writer-launch-ledger.ts` for what a recovery
+   * needed instead.
    */
   readonly containment: ContainmentReading | null;
 }
@@ -1404,16 +1410,22 @@ export type VerifiedRemoval =
  *
  * ── Its callers, counted rather than described ─────────────────────────────
  *
- * **Two call sites, both inside this file**: the acquire rollback for a lease
- * whose evidence could not be minted, and `releaseRepositoryExecutionLease`.
+ * **Three call sites, all inside this file**: the acquire rollback for a lease
+ * whose evidence could not be minted, `recoverStaleLease`, and
+ * `releaseRepositoryExecutionLease`.
  *
  * Counted rather than described, because the count has been wrong in every
- * previous form of this paragraph. It said "one of its two users" under a
- * heading saying "to exactly one caller" while there were four; the correction
- * then said "four call sites, all inside this file" and enumerated three, naming
- * the fourth as being in another file. The class it kept omitting was rollback
- * paths — and one of those held the defect that outlived the break. There are
- * two now because the exclusive-create claim's rollback went with the fallback.
+ * previous form of this paragraph — including the one this replaces, which V3
+ * slice 5 falsified on the day it was written by adding the recovery and leaving
+ * "two" in place. It said "one of its two users" under a heading saying "to
+ * exactly one caller" while there were four; the correction then said "four call
+ * sites, all inside this file" and enumerated three, naming the fourth as being
+ * in another file; then it said two, and a review found three.
+ *
+ * The third is the one worth naming rather than counting. `recoverStaleLease` is
+ * the only caller that removes a lease **this process never held**, so it is the
+ * only one whose `matches` predicate is the entire authority for the removal
+ * rather than a second opinion about its own record.
  *
  * This is the only function in the build that may detach or delete a lease.
  * `matches` is the whole of the authority it takes, and a caller passing
@@ -2037,10 +2049,13 @@ function containmentPathFor(location: LeaseLocation): string {
  * token precisely so a caller cannot collapse "somebody else's lease" and "not a
  * lease at all" by accident.
  *
- * It deliberately does **not** check the evidence artefact before its callers
- * do. `recordContainmentEvidence` refuses an unminted attestation before it
- * looks at any file, and moving that check behind this one would change which
- * refusal a caller sees for two simultaneous faults.
+ * It deliberately does **not** check the *containment attestation*.
+ * `recordContainmentEvidence` and `confirmWriterLaunch` both refuse an unminted
+ * one before they look at any file, and moving that check behind this one would
+ * change which refusal a caller sees for two simultaneous faults. (This said
+ * "does not check the evidence artefact", which is the first thing it does —
+ * "evidence" is this module's defined term for the *lease* artefact, so the
+ * sentence read as false about the line directly below it.)
  */
 type HeldLeaseFailure =
   | 'EVIDENCE_INVALID'
@@ -2509,8 +2524,18 @@ function readCompanionRecord(path: string, maxBytes: number): unknown {
  */
 export const WRITER_LAUNCH_LEDGER_FILE_NAME = 'agent-orchestrator-execution-lease.launches.json';
 
-/** Largest ledger this build will read back. Sized for the entry cap. */
-const MAX_WRITER_LAUNCH_LEDGER_BYTES = 1_048_576;
+/**
+ * Largest ledger this build will read back.
+ *
+ * Four mebibytes, which covers {@link MAX_WRITER_LAUNCH_ENTRIES} entries at
+ * roughly 465 bytes each — about 1.9 MB — with room for a future field. It was
+ * 1 MiB and described as "sized for the entry cap", and it was not: an
+ * adversarial review measured the byte cap binding first, at about 2261 entries,
+ * which made the entry cap dead and turned the overflow into a silent permanent
+ * loss of recoverability. The entry cap is the one that binds now, and reaching
+ * it is a reported outcome. See `writer-launch-ledger.ts` for what was measured.
+ */
+const MAX_WRITER_LAUNCH_LEDGER_BYTES = 4_194_304;
 
 /** The ledger's path for a lease location. One derivation, one place. */
 function ledgerPathFor(location: LeaseLocation): string {
@@ -2554,9 +2579,12 @@ export const WRITER_LAUNCH_CODES = [
    * unrecorded writer tree may outlive it. That is the single fail-open state
    * this slice exists to make unreachable, so the launch loses.
    *
-   * Reachable only when the Git common directory refuses both a rename and an
-   * unlink — a read-only or vanished administrative directory — in which case
-   * the run has larger problems than one refused spawn.
+   * Reached when the ledger path can be neither renamed onto nor unlinked. A
+   * read-only or vanished administrative directory does it; so does a
+   * **directory** sitting at the ledger's own name, which is the case an
+   * adversarial review produced in-process with one `mkdir` after this comment
+   * claimed the state needed a broken filesystem. `tests/v3-05-stale-lease-recovery.test.ts`
+   * produces it that way now, rather than leaving the arm unreached.
    */
   'LAUNCH_MUST_NOT_START',
   /** The lease artefact was not minted evidence. Nothing was opened. */
@@ -2582,6 +2610,21 @@ export const WRITER_LAUNCH_CODES = [
    * announced. `detail` carries the reading that produced it.
    */
   'GENERATION_NOT_OPEN',
+  /**
+   * This attestation has already proved another generation of this lease.
+   *
+   * Its own code rather than a shade of {@link GENERATION_NOT_OPEN}, because the
+   * generation *is* open and the fault is in the proof. One kernel-confirmed
+   * launch proves one launch; replaying its attestation across several
+   * generations would produce a history reading `ALL_LAUNCHES_CONTAINED` in
+   * which only one of the launches was ever confirmed.
+   *
+   * Not reachable through `loop/leased-spawns.ts`, where each result carries its
+   * own attestation — which is exactly why it is a check here. "Every launch in
+   * it is proved contained" was guaranteed by the caller and is now guaranteed
+   * by the format, and `confirmWriterLaunch` is exported.
+   */
+  'ATTESTATION_ALREADY_USED',
   /** The ledger this build built is one this build would not accept back. */
   'LEDGER_NOT_READABLE_BACK',
   /**
@@ -2787,6 +2830,19 @@ export function beginWriterLaunch(
   const historyComplete = existing !== null && existing.historyComplete;
   const generation = entries.length + 1;
 
+  // A history that cannot grow may not be *left standing* either: it would be an
+  // affirmative record that stops mentioning launches, which is the one shape
+  // this whole path exists to prevent. So it is discarded, the launch proceeds,
+  // and this lease is never recoverable again — the same trade the publish
+  // failure takes, reached for a different reason and reported with its own.
+  //
+  // Before the fix this arm replaces, the cap was unreachable and the *byte* cap
+  // bound first, which produced no code at all: every later confirmation failed
+  // its read-back in silence.
+  if (entries.length >= MAX_WRITER_LAUNCH_ENTRIES) {
+    return discardWriterLaunchHistory(location, holder, 'HISTORY_FULL');
+  }
+
   const payload: WriterLaunchLedgerPayload = {
     ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION,
     ownerPid: document.ownerPid,
@@ -2823,6 +2879,38 @@ export function beginWriterLaunch(
   // The publish failed and a launch is about to happen. Removing the history is
   // the fallback, and it is the conservative one: an absent ledger asserts
   // nothing, while the affirmative one on disk would assert something false.
+  return discardWriterLaunchHistory(location, holder, published);
+}
+
+/**
+ * Removes this lease's launch history, so that nothing on disk asserts anything
+ * about the launch that is about to happen.
+ *
+ * The fallback {@link HISTORY_DISCARDED} names, and the only destructive step in
+ * the ledger's write path. Two callers: a publish that failed, and a history
+ * that has reached {@link MAX_WRITER_LAUNCH_ENTRIES} and cannot grow.
+ *
+ * ── The ownership re-check is not decoration ───────────────────────────────
+ *
+ * The unlink used to run on the last `stillHeldBy` answer taken *inside*
+ * `publishCompanionRecord`'s loop, one or more syscalls earlier. An adversarial
+ * review pointed out what that costs: a lease that changed hands in that window
+ * has its successor's brand-new complete history deleted by the previous holder,
+ * and the successor then rebuilds at `historyComplete: false` and is
+ * unrecoverable for the rest of its life. Fail-closed, bounded — and an unowned
+ * write at a name somebody else now holds, which is the defect class this module
+ * records against itself repeatedly.
+ *
+ * So it is re-asked here, immediately before the effect. That is a **narrowing
+ * to one syscall and not a closure**, exactly as the publish's own re-check is,
+ * and it is stated the same way rather than claimed to be more.
+ */
+function discardWriterLaunchHistory(
+  location: LeaseLocation,
+  holder: ExecutionLeaseEvidence,
+  reason: string,
+): WriterLaunchResult {
+  if (!stillHeldBy(location, holder)) return launchFailure('NOT_OWNER', 'LOST_BEFORE_DISCARD');
   try {
     unlinkSync(ledgerPathFor(location));
   } catch (error) {
@@ -2830,7 +2918,7 @@ export function beginWriterLaunch(
     // Nothing there is the state this was reaching for, so it counts as reached.
     if (errno !== 'ENOENT') return launchFailure('LAUNCH_MUST_NOT_START', errno);
   }
-  return launchFailure('HISTORY_DISCARDED', published);
+  return launchFailure('HISTORY_DISCARDED', reason);
 }
 
 /**
@@ -2909,6 +2997,16 @@ export function confirmWriterLaunch(
   }
   if (open.writerId !== request.writerId) {
     return launchFailure('GENERATION_NOT_OPEN', 'ANOTHER_WRITER', request.generation);
+  }
+  // One kernel-confirmed launch proves one launch. The digest is the launch's
+  // identity — `core/internal/containment-attestation.ts` derives it per launch —
+  // so a digest already standing in this history is an attestation being replayed.
+  if (
+    existing.entries.some(
+      (entry) => entry.state === 'CONTAINED' && entry.launchDigest === facts.launchDigest,
+    )
+  ) {
+    return launchFailure('ATTESTATION_ALREADY_USED', 'DIGEST_ALREADY_PROVED', request.generation);
   }
 
   let confirmedAt: string;

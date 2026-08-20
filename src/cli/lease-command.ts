@@ -86,7 +86,7 @@
 import type { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
-import { recoverStaleLease } from '../lease/execution-lease.js';
+import { inspectWriterLaunchHistory, recoverStaleLease } from '../lease/execution-lease.js';
 import { assessLeaseRecovery } from '../lease/lease-recovery.js';
 import { resolveRepository } from '../repo/resolve-repository.js';
 import {
@@ -142,7 +142,16 @@ export function registerLeaseCommand(program: Command): void {
 
         const assessment = assessLeaseRecovery(resolution.repository);
         process.stdout.write(renderLeaseStatus(assessment.inspection));
-        process.stdout.write(renderLeaseRecovery(assessment.staleRecovery));
+        // The launch history is read separately, and not taken from the
+        // assessment: that one stops at its first refusal, so a repository with a
+        // living owner carries no reading at all — and "is this run's bookkeeping
+        // intact" is a question about a healthy repository too.
+        process.stdout.write(
+          renderLeaseRecovery(
+            assessment.staleRecovery,
+            inspectWriterLaunchHistory(resolution.repository),
+          ),
+        );
         // Reporting always succeeded, whatever it found. A held lease is not an
         // error condition, and a status command that exited non-zero for one
         // would be unusable in exactly the scripts that need it. The same is

@@ -28,6 +28,7 @@ import type {
   StaleLeaseRecoveryResult,
   StaleRecoveryRefusal,
 } from '../lease/execution-lease.js';
+import type { WriterLaunchReading } from '../lease/writer-launch-ledger.js';
 import { SUPPORTED_NODE_MAJORS } from '../platform/runtime-support.js';
 import { line } from './render-attended-run.js';
 
@@ -230,20 +231,34 @@ export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, str
  * for itself at the moment it runs, so this sentence cannot make a stale fact
  * look like an authorisation.
  */
-export function renderLeaseRecovery(assessment: StaleLeaseRecoveryAssessment): string {
-  const lines =
-    assessment.refusal === null
+export function renderLeaseRecovery(
+  assessment: StaleLeaseRecoveryAssessment,
+  history: WriterLaunchReading | null,
+): string {
+  const lines = [
+    // The reading, on its own line, and read independently of the assessment.
+    // The predicate stops at the first refusal, so a lease with a living owner
+    // carries `launchHistory: null` — and "is this run's bookkeeping intact" is a
+    // question an operator has about a *healthy* repository too.
+    line('Launches', history ?? 'none'),
+    ...(assessment.refusal === null
       ? [
           line('Recovery', 'SAFE_TO_RECOVER'),
+          // "writer", not "agent". The history records the productive writer and
+          // nothing else, and an earlier draft of this sentence said "no agent
+          // process it started can still be running" — which is the wider claim
+          // the ledger's own header refuses to make, printed to the one reader
+          // who cannot check it.
           '  Every writer launch under this lease is proved contained and its owner process is\n' +
-            '  gone, so no agent process it started can still be running. `agent-loop lease\n' +
-            '  recover` removes it. That removes a dead record and grants nothing: the next run\n' +
-            '  takes its own lease through the ordinary path.',
+            '  gone, so no writer process it started can still be running. Remove it with\n' +
+            '  `agent-loop lease recover`. That removes a dead record and grants nothing: the\n' +
+            '  next run takes its own lease through the ordinary path.',
         ]
       : [
           line('Recovery', assessment.refusal),
           `  ${STALE_RECOVERY_SENTENCES[assessment.refusal]}`,
-        ];
+        ]),
+  ];
   return `${lines.join('\n')}\n\n`;
 }
 

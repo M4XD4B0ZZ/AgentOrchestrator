@@ -98,7 +98,28 @@ import { z } from 'zod';
  */
 export const WRITER_LAUNCH_LEDGER_VERSION = 1;
 
-/** Largest history this build will represent. A run cannot reach it. */
+/**
+ * Largest history this build will represent.
+ *
+ * This said "a run cannot reach it", which was wrong twice over and an
+ * adversarial review measured both halves. A `CONTAINED` entry serialises to
+ * about 465 bytes at `JSON.stringify(…, null, 2)`, so 4096 of them are roughly
+ * 1.9 MB — and the companion reader's byte cap was set to 1 MiB and described as
+ * "sized for the entry cap", so the *byte* cap bound first, at about 2261
+ * entries, and this one could never fire at all.
+ *
+ * That was not merely a dead constant. Past the byte cap every confirmation
+ * failed its read-back, so every generation stayed `PENDING` and the lease
+ * became permanently unrecoverable — silently, because the seam discards the
+ * confirmation's result. Fail-closed, and an undisclosed permanent loss of the
+ * whole feature.
+ *
+ * Both are fixed rather than re-described: the byte cap now covers this one with
+ * room to spare, so this cap is what binds, and reaching it is a stated outcome
+ * (`HISTORY_DISCARDED` with `HISTORY_FULL`) rather than a silent state. A run
+ * reaching 4096 writer launches under one lease is not expected; it is no longer
+ * *asserted* to be impossible.
+ */
 export const MAX_WRITER_LAUNCH_ENTRIES = 4096;
 
 const HEX_64 = /^[0-9a-f]{64}$/;

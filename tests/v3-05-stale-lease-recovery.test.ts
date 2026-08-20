@@ -47,17 +47,22 @@
  */
 
 import {
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
+
+import { PACKAGE_ROOT } from '../src/config/paths.js';
 
 import type { AgentCommandResult } from '../src/agent/agent-command.js';
 import {
@@ -88,6 +93,7 @@ import {
 } from '../src/lease/execution-lease.js';
 import { assessLeaseRecovery } from '../src/lease/lease-recovery.js';
 import {
+  MAX_WRITER_LAUNCH_ENTRIES,
   provesEveryLaunchContained,
   readWriterLaunchLedger,
   writerLaunchBinding,
@@ -98,6 +104,12 @@ import {
   type WriterLaunchSubject,
 } from '../src/lease/writer-launch-ledger.js';
 import { leasedAgent } from '../src/loop/leased-spawns.js';
+import {
+  renderLeaseRecovery,
+  renderLeaseRecoveryResult,
+  STALE_RECOVERY_OUTCOMES,
+  STALE_RECOVERY_SENTENCES,
+} from '../src/cli/render-lease.js';
 
 /* ───────────────────────────── fixtures ─────────────────────────────────── */
 
@@ -237,17 +249,26 @@ const dead = (): ProcessLiveness => 'NOT_FOUND';
 const alive = (): ProcessLiveness => 'ALIVE';
 const undetermined = (): ProcessLiveness => 'UNDETERMINED';
 
-/** One full writer launch, opened and confirmed, through the public entry points. */
+/**
+ * One full writer launch, opened and confirmed, through the public entry points.
+ *
+ * Each call mints an attestation with its own launch nonce, because that is what
+ * a real launch produces and because `confirmWriterLaunch` refuses a digest that
+ * already proved another generation of this lease. A fixture that reused one
+ * attestation would be exercising a replay the format now rejects.
+ */
+let launch = 0;
 function containedLaunch(repository: LeaseRepository, evidence: ExecutionLeaseEvidence): void {
   const opened = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
   expect(opened.code).toBe('OPENED');
   const generation = opened.generation;
   if (generation === null) throw new Error('an opened launch carries a generation');
-  const confirmed = confirmWriterLaunch(repository, evidence, attestationFor(process.pid), {
-    generation,
-    writerId: 'claude',
-    now: tick,
-  });
+  const confirmed = confirmWriterLaunch(
+    repository,
+    evidence,
+    attestationFor(process.pid, { launchNonce: (launch++).toString(16).padStart(16, '0') }),
+    { generation, writerId: 'claude', now: tick },
+  );
   expect(confirmed.code).toBe('CONFIRMED');
 }
 
@@ -646,13 +667,168 @@ describe('the launch history is opened before a launch and confirmed after it', 
     releaseRepositoryExecutionLease(evidence);
   });
 
-  it('names every code in the closed set from a reachable state', () => {
-    // Not every member: the three that need a filesystem refusal
-    // (`HISTORY_DISCARDED`, `LAUNCH_MUST_NOT_START`, `LEDGER_WRITE_FAILED`) have
-    // no in-process trigger, and `LEASE_UNREADABLE` needs a directory at the
-    // lease path. Stated rather than left as an implied gap.
+  it('refuses one attestation used to prove a second generation', () => {
+    // One kernel-confirmed launch proves one launch. Replaying an attestation
+    // across generations would build a history reading `ALL_LAUNCHES_CONTAINED`
+    // in which only one launch was ever confirmed. Not reachable through the
+    // seam — each result carries its own attestation — which is exactly why the
+    // format checks it rather than trusting the caller.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const attestation = attestationFor(process.pid);
+
+    const first = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    expect(
+      confirmWriterLaunch(repository, evidence, attestation, {
+        generation: first.generation ?? 0,
+        writerId: 'claude',
+        now: tick,
+      }).code,
+    ).toBe('CONFIRMED');
+
+    const second = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    const replayed = confirmWriterLaunch(repository, evidence, attestation, {
+      generation: second.generation ?? 0,
+      writerId: 'claude',
+      now: tick,
+    });
+    expect(replayed.code).toBe('ATTESTATION_ALREADY_USED');
+    expect(replayed.detail).toBe('DIGEST_ALREADY_PROVED');
+    expect(inspectWriterLaunchHistory(repository)).toBe('LAUNCH_UNPROVEN');
+
+    // A distinct launch confirms normally, so the check refuses the replay and
+    // not the second generation.
+    expect(
+      confirmWriterLaunch(
+        repository,
+        evidence,
+        attestationFor(process.pid, { launchNonce: '0f1e2d3c4b5a6978' }),
+        { generation: second.generation ?? 0, writerId: 'claude', now: tick },
+      ).code,
+    ).toBe('CONFIRMED');
+    expect(inspectWriterLaunchHistory(repository)).toBe('ALL_LAUNCHES_CONTAINED');
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('discards the history rather than leave a full one standing', () => {
+    /**
+     * The entry cap, reached deliberately.
+     *
+     * It used to be unreachable — the companion reader's byte cap was a third of
+     * what this many entries need, so it bound first at about 2261 entries and
+     * this cap could never fire. What that produced was not a refusal: every
+     * later confirmation failed its read-back, so every generation stayed
+     * `PENDING` and the lease became permanently unrecoverable in silence.
+     *
+     * Now the cap binds and says so. The history is discarded — which asserts
+     * nothing — the launch is still allowed, and this lease is never recoverable
+     * again. That is the same trade a failed publish takes.
+     */
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const subject = subjectOf(repository);
+    const full = Array.from({ length: MAX_WRITER_LAUNCH_ENTRIES }, (_unused, index) => ({
+      ...CONTAINED_ENTRY,
+      generation: index + 1,
+    }));
+    // Sealed for this lease's own owner and run, not the format fixture's: the
+    // agreement checks come after the binding and would otherwise refuse it as
+    // `NOT_THIS_RUN` before the cap could be reached.
+    writeLedger(
+      repository,
+      sealed({ entries: full, ownerPid: subject.ownerPid, runId: subject.runId }, subject),
+    );
+    // Readable at the cap: the byte cap no longer binds first, which is the half
+    // of this that was measured wrong.
+    expect(inspectWriterLaunchHistory(repository)).toBe('ALL_LAUNCHES_CONTAINED');
+
+    const opened = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    expect(opened.code).toBe('HISTORY_DISCARDED');
+    expect(opened.detail).toBe('HISTORY_FULL');
+    expect(existsSync(ledgerPathOf(repository))).toBe(false);
+    expect(assessStaleLeaseRecovery(repository, { processAlive: dead }).refusal).toBe(
+      'LAUNCH_HISTORY_ABSENT',
+    );
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('discards the history when the publish is refused, and refuses the launch when it cannot', () => {
+    /**
+     * The two filesystem-refusal arms, produced in process.
+     *
+     * An earlier version of this file said these had "no in-process trigger" and
+     * a follow-up entry repeated it. Both were wrong, and an adversarial review
+     * produced each with plain `node:fs`:
+     *
+     *  - a **held-open handle** blocks a rename onto that name on Windows and
+     *    does not block an unlink of it — which is the same mechanism
+     *    `clearContainmentEvidence`'s own docstring already records as measured;
+     *  - a **directory** at the ledger's name refuses both, which is the state
+     *    `LAUNCH_MUST_NOT_START` exists for.
+     */
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+
+    // The publish is refused; the unlink is not. The history goes, the launch may
+    // proceed, and this lease is no longer recoverable.
+    const handle = openSync(ledgerPathOf(repository), 'r');
+    let opened;
+    try {
+      opened = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    } finally {
+      closeSync(handle);
+    }
+    expect(opened.code).toBe('HISTORY_DISCARDED');
+    expect(assessStaleLeaseRecovery(repository, { processAlive: dead }).refusal).toBe(
+      'LAUNCH_HISTORY_ABSENT',
+    );
+    releaseRepositoryExecutionLease(evidence);
+
+    // Neither is possible: the launch itself loses, which is the one place in
+    // this build where a failure to record stops productive work.
+    const blocked = repositoryFixture();
+    const held = leaseOf(blocked);
+    rmSync(ledgerPathOf(blocked), { force: true });
+    mkdirSync(join(ledgerPathOf(blocked), 'occupied'), { recursive: true });
+    const refused = beginWriterLaunch(blocked, held.evidence, { writerId: 'claude', now: tick });
+    expect(refused.code).toBe('LAUNCH_MUST_NOT_START');
+    expect(refused.detail).not.toBeNull();
+    releaseRepositoryExecutionLease(held.evidence);
+  });
+
+  it('leaves a generation pending when its confirmation cannot be published', () => {
+    // The confirmation has no launch riding on its result, so the conservative
+    // end state is already on disk and nothing is discarded. Produced by the same
+    // held-open handle.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const opened = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+
+    const handle = openSync(ledgerPathOf(repository), 'r');
+    let confirmed;
+    try {
+      confirmed = confirmWriterLaunch(repository, evidence, attestationFor(process.pid), {
+        generation: opened.generation ?? 0,
+        writerId: 'claude',
+        now: tick,
+      });
+    } finally {
+      closeSync(handle);
+    }
+    expect(confirmed.code).toBe('LEDGER_WRITE_FAILED');
+    // Still there, still open. A failed confirmation loses evidence and never
+    // manufactures it.
+    expect(inspectWriterLaunchHistory(repository)).toBe('LAUNCH_UNPROVEN');
+    expect(assessStaleLeaseRecovery(repository, { processAlive: dead }).refusal).toBe(
+      'LAUNCH_HISTORY_UNPROVEN',
+    );
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('names every code in the closed set, and produces all but one', () => {
     expect([...WRITER_LAUNCH_CODES].sort()).toEqual(
       [
+        'ATTESTATION_ALREADY_USED',
         'ATTESTATION_INVALID',
         'CONFIRMED',
         'EVIDENCE_INVALID',
@@ -680,6 +856,13 @@ describe('the launch history is opened before a launch and confirmed after it', 
     expect(beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick }).code).toBe(
       'LEASE_ABSENT',
     );
+
+    // `LEASE_UNREADABLE` is the one member no case above produces: it needs
+    // something unreadable at the *lease* path while this process still holds
+    // minted evidence naming it, which nothing here can arrange. Stated rather
+    // than left as an implied gap — every other member is reached by a case in
+    // this file.
+    expect(WRITER_LAUNCH_CODES).toContain('LEASE_UNREADABLE');
   });
 });
 
@@ -1045,8 +1228,12 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
      * The replacement keeps the nonce, the owner, the run and the key, so the
      * history still binds and the assessment still says `SAFE_TO_RECOVER`. The
      * only thing that differs is the bytes. Replace the removal's predicate with
-     * `() => true` and this case goes green while destroying a record the
-     * assessment was not about.
+     * `() => true` and this case goes **red** — the removal answers `REMOVED`,
+     * the call answers `RECOVERED`, and the assertion below fails — which is what
+     * makes it a counter-proof rather than a description. An earlier version of
+     * this paragraph said "goes green", which reads as a confession that the case
+     * is vacuous and would invite somebody to repair a test that is sound. It was
+     * measured: 1 case red.
      */
     const repository = repositoryFixture();
     const { evidence } = leaseOf(repository);
@@ -1133,7 +1320,111 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
   });
 });
 
-/* ────────────────── 6. the boundaries this slice does not cross ─────────── */
+/* ──────────────────── 6. what an operator is actually told ──────────────── */
+
+describe('the recovery vocabulary says what the code does', () => {
+  it('has a sentence for every refusal and every outcome, and no spare ones', () => {
+    // Total by type is not correct by value — `Readonly<Record<…, string>>`
+    // accepts the empty string in every row and accepts one member's sentence
+    // pasted into another's. Pinned by key here and by content below.
+    expect(Object.keys(STALE_RECOVERY_SENTENCES).sort()).toEqual([...STALE_RECOVERY_REFUSALS].sort());
+    expect(Object.keys(STALE_RECOVERY_OUTCOMES).sort()).toEqual([...STALE_LEASE_RECOVERY_CODES].sort());
+    // No two refusals share a sentence: a duplicated one is how two different
+    // facts start being reported as the same fact.
+    const sentences = Object.values(STALE_RECOVERY_SENTENCES);
+    expect(new Set(sentences).size).toBe(sentences.length);
+  });
+
+  it('keeps the printed vocabulary ASCII', () => {
+    // This repository has twice had text damaged by a re-encoding pass, and an
+    // operator-facing refusal is the worst place for that. The pre-existing pin
+    // in `tests/v2-07l-execution-lease.test.ts` enumerates the three older
+    // tables by name and did not grow to cover these two.
+    for (const text of [
+      ...Object.values(STALE_RECOVERY_SENTENCES),
+      ...Object.values(STALE_RECOVERY_OUTCOMES),
+      renderLeaseRecovery(
+        { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'D:\\r\\.git', ownerPid: 1, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED' },
+        'ALL_LAUNCHES_CONTAINED',
+      ),
+    ]) {
+      // eslint-disable-next-line no-control-regex
+      expect(/^[\x20-\x7e\n]*$/.test(text)).toBe(true);
+    }
+  });
+
+  it('claims only what the launch history proves: the writer, not every agent', () => {
+    // The narrowing the ledger's own header insists on, printed to the one
+    // reader who cannot check it. An earlier draft said "no agent process it
+    // started can still be running", which is the wider claim the format
+    // refuses to make — the reviewer is an agent and is not in the history.
+    const safe = renderLeaseRecovery(
+      { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'D:\\r\\.git', ownerPid: 7, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED' },
+      'ALL_LAUNCHES_CONTAINED',
+    );
+    expect(safe).toContain('no writer process it started can still be running');
+    expect(safe).not.toContain('no agent process');
+    // And it names the command an operator would then run, on one line, so the
+    // pin that checks every named command against the real program can see it.
+    expect(safe).toContain('`agent-loop lease recover`');
+    expect(safe).toContain('Launches     : ALL_LAUNCHES_CONTAINED');
+  });
+
+  it('reports the launch history even when the predicate stopped before reading one', () => {
+    // A living owner refuses at the liveness conjunct, so the assessment carries
+    // no reading. "Is this run's bookkeeping intact" is a question about a
+    // healthy repository too, which is why the report reads it separately.
+    const report = renderLeaseRecovery(
+      { verdict: 'UNSAFE', refusal: 'OWNER_RUNNING', path: 'D:\\r\\.git', ownerPid: 7, runId: 'r', launchHistory: null },
+      'LAUNCH_UNPROVEN',
+    );
+    expect(report).toContain('Launches     : LAUNCH_UNPROVEN');
+    expect(report).toContain('Recovery     : OWNER_RUNNING');
+    expect(report).toContain(STALE_RECOVERY_SENTENCES.OWNER_RUNNING);
+    // And `none` rather than a blank when there is no lease to read one from.
+    expect(
+      renderLeaseRecovery(
+        { verdict: 'UNSAFE', refusal: 'NOTHING_TO_RECOVER', path: '', ownerPid: null, runId: null, launchHistory: null },
+        null,
+      ),
+    ).toContain('Launches     : none');
+  });
+
+  it('reports a refused recovery with the refusal, not with a bare code', () => {
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const rendered = renderLeaseRecoveryResult(recoverStaleLease(repository, { processAlive: alive }));
+    expect(rendered).toContain('Recovery     : RECOVERY_UNSAFE');
+    expect(rendered).toContain('Reason       : OWNER_RUNNING');
+    expect(rendered).toContain(STALE_RECOVERY_OUTCOMES.RECOVERY_UNSAFE);
+    expect(rendered).toContain(STALE_RECOVERY_SENTENCES.OWNER_RUNNING);
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('names no command that the shipped program does not register', async () => {
+    // The same property `tests/v2-07l-execution-lease.test.ts` holds for the
+    // older tables, applied to these two — and applied to the *rendered* text
+    // rather than to the literals, because the sentence that matters here wraps
+    // across a line and a scan of the source would read `lease\n  recover`.
+    const { buildProgram } = await import('../src/cli/index.js');
+    const lease = buildProgram().commands.find((command) => command.name() === 'lease');
+    const registered = new Set((lease?.commands ?? []).map((command) => command.name()));
+
+    const rendered = [
+      ...Object.values(STALE_RECOVERY_SENTENCES),
+      ...Object.values(STALE_RECOVERY_OUTCOMES),
+      renderLeaseRecovery(
+        { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'p', ownerPid: 1, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED' },
+        'ALL_LAUNCHES_CONTAINED',
+      ),
+    ].join('\n');
+    const named = [...rendered.matchAll(/agent-loop lease\s+([a-z][a-z-]*)/g)].map((m) => m[1]);
+    expect(named.length).toBeGreaterThan(0);
+    for (const name of named) expect(registered).toContain(name);
+  });
+});
+
+/* ────────────────── 7. the boundaries this slice does not cross ─────────── */
 
 describe('recovery stays inside the contract it was given', () => {
   it('keeps containment out of writer authority', () => {
@@ -1160,10 +1451,63 @@ describe('recovery stays inside the contract it was given', () => {
     expect(getAllowedTransitions('READY_FOR_PR')).toEqual([]);
   });
 
-  it('adds no reachable importer of the old process-tree termination module', async () => {
-    // Named in the slice's scope limits. The recovery does not kill anything: it
-    // removes a record whose subject the kernel already destroyed.
-    const lease = await import('../src/lease/execution-lease.js');
-    expect(Object.keys(lease).filter((name) => /kill|terminate|taskkill/i.test(name))).toEqual([]);
+  it('adds no importer of the old process-tree termination module', () => {
+    /**
+     * Named in the slice's scope limits: the withdrawn Windows tree-kill cleanup
+     * is not taken on here. The recovery kills nothing — it removes a record
+     * whose subject the kernel already destroyed.
+     *
+     * This used to assert that `execution-lease.ts` exported no name matching
+     * `/kill|terminate|taskkill/`, which measured nothing of the sort: it said
+     * nothing about importers, nothing about reachability, and never named the
+     * module. Deleting the scope limit entirely would have left it green. An
+     * adversarial review called it exactly the vacuous-absence shape this file's
+     * own header disavows, and it was right.
+     *
+     * So it uses the instrument `tests/v2-07lr-lease-recovery.test.ts` already
+     * uses for the same class of claim: walk the shipped source, strip comments —
+     * explaining a module is not importing it — and require the importer set to
+     * be the one that existed before this slice.
+     */
+    // Nothing names it. The scan reads file *contents* with comments stripped —
+    // explaining a module is not importing it — and the module's own definition
+    // does not mention its own name, so an empty answer here is the true one.
+    expect([...namingModule('windows-process-tree-termination')].sort()).toEqual([]);
+
+    // The positive control, without which the assertion above is a scan that
+    // found nothing because it can find nothing. The same instrument, pointed at
+    // a module this slice certainly does reach, must come back non-empty.
+    expect(namingModule('writer-launch-ledger').length).toBeGreaterThan(1);
   });
 });
+
+/**
+ * The shipped source files that name `module`, with comments stripped.
+ *
+ * The same instrument `tests/v2-07lr-lease-recovery.test.ts` uses, and comments
+ * are removed for the reason it gives: explaining a mechanism is not importing
+ * it, and a scan that counted prose would report the file that documents a
+ * module as one of its callers.
+ */
+function namingModule(module: string): readonly string[] {
+  const pattern = new RegExp(module.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const found: string[] = [];
+  for (const file of sourceFiles(join(PACKAGE_ROOT, 'src'))) {
+    const code = readFileSync(file, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^[^\n]*\/\/.*$/gm, '');
+    if (pattern.test(code)) found.push(relative(PACKAGE_ROOT, file));
+  }
+  return found;
+}
+
+/** Every `.ts` under a directory, for the reachability scans above. */
+function sourceFiles(directory: string): readonly string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) found.push(...sourceFiles(path));
+    else if (entry.name.endsWith('.ts')) found.push(path);
+  }
+  return found;
+}

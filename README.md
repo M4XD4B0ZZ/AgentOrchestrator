@@ -3239,15 +3239,16 @@ and because the failure mode it describes — a command that cannot start is
   read. Left open because it is a real narrowing of the sentence an operator will
   hear as "nothing survives". **Scope:** `lease/writer-launch-ledger.ts`,
   `loop/leased-spawns.ts`.
-- **L-V3-05-2** — three members of `WRITER_LAUNCH_CODES` have no in-process
-  trigger: `HISTORY_DISCARDED`, `LAUNCH_MUST_NOT_START` and
-  `LEDGER_WRITE_FAILED` all need the Git administrative directory to refuse a
-  rename or an unlink, which nothing single-threaded can produce. The fail-closed
-  *decision* built on them is pinned — `openWriterGeneration` permits a launch on
-  two codes and refuses on everything else, including codes it does not name — but
-  the codes themselves are unproduced, and a suite that never reaches an arm is
-  not a suite that has checked it. **Scope:**
-  `lease/execution-lease.ts`, `tests/v3-05-stale-lease-recovery.test.ts`.
+- **L-V3-05-2** — **withdrawn, having been false.** It claimed
+  `HISTORY_DISCARDED`, `LAUNCH_MUST_NOT_START` and `LEDGER_WRITE_FAILED` needed a
+  filesystem refusal "which nothing single-threaded can produce". An adversarial
+  review produced all three in process with plain `node:fs`: a held-open handle
+  blocks a rename onto that name on Windows and does not block an unlink of it —
+  the mechanism `clearContainmentEvidence`'s own docstring already records as
+  measured — and a directory at the ledger's name refuses both. The slice had
+  documented the mechanism in one file and called it unreachable in another. All
+  three now have cases. One member remains unproduced, `LEASE_UNREADABLE`, and the
+  test that enumerates the set says so by name rather than leaving it implied.
 - **L-V3-05-3** — the crash-window artefact is still unrecoverable, and always
   will be under this design. A run that dies between claiming the lease name and
   writing the record leaves a zero-byte file with no owner and no nonce, so there
@@ -5616,7 +5617,9 @@ use** and are not to be read as follow-ups.
   left this way is recoverable with `agent-loop lease recover` **when its writer
   launches are all proved contained** — the common case for a run interrupted
   between spawns, and not the case for one interrupted mid-writer, where the open
-  generation is exactly what refuses. The transcript above predates that command. **Attended:** loud, fail-closed and correct — the refusal
+  generation is exactly what refuses. The transcript above predates that command.
+
+  **Attended:** loud, fail-closed and correct — the refusal
   sentence says exactly this, and `lease status` prints the path, so an operator
   who is present pays one manual step. **Unattended:** a single crash makes the
   repository permanently unrunnable, which no scheduler recovers from.
@@ -6099,9 +6102,9 @@ write about was contained", which is a strictly weaker sentence than "this lease
 is safe".
 
 The predicate therefore **never reads that record**. A lease can report
-`CONTAINED` and be refused recovery in the same breath, and two cases in
+`CONTAINED` and be refused recovery in the same breath, and **three cases** in
 `tests/v3-05-stale-lease-recovery.test.ts` assert exactly that pairing. Teaching
-the predicate to accept it kills three of those cases.
+the predicate to accept it kills all three.
 
 ### The writer-launch ledger: poisoned first, confirmed after
 
@@ -6182,17 +6185,32 @@ authority` — so the next run takes its own lease through the ordinary exclusiv
 create, and lease fencing remains the writer authority exactly as before. It
 acquires nothing, restarts nothing and retries nothing.
 
-`lease status` reports the verdict beside the state, and prints no command line
-with a fact filled into it: `recover` has no argument to fill in, which is what
+`lease status` reports the verdict beside the state, and the launch history's own
+reading on its own line — read independently, so it is shown for a healthy
+repository too, where the predicate stops at the living owner and never gets that
+far. It prints no command line with a fact filled into it: `recover` has no argument to fill in, which is what
 stops a report from becoming an authorisation.
 
 ### What it is measured by
 
 `tests/v3-05-stale-lease-recovery.test.ts` covers the format, the lifecycle, the
-seam and the predicate, and four mutants were run against it rather than
-described: removing the pending mark (19 cases red), treating slice 4's record as
-sufficient (3), unbinding the removal (1), and reading an unreadable history as
-contained (3).
+seam, the predicate and the operator vocabulary, and four mutants were run
+against it rather than described: removing the pending mark (22 cases red),
+treating slice 4's record as sufficient (3), unbinding the removal (1), and
+reading an unreadable history as contained (3).
+
+Two limits in the format were caught by review rather than by a test, and are
+recorded because the second was a silent one. The entry cap was **dead**: a
+`CONTAINED` entry is about 465 bytes, so 4096 of them need ~1.9 MB and the
+companion reader's byte cap was 1 MiB, described as "sized for the entry cap".
+Past ~2261 entries every confirmation failed its read-back, so every generation
+stayed `PENDING` and the lease became permanently unrecoverable **with no signal
+at all** — the seam discards the confirmation's result. The byte cap now covers
+the entry cap, and reaching the entry cap discards the history and says so
+(`HISTORY_DISCARDED` / `HISTORY_FULL`) instead of degrading in silence. Separately,
+one attestation could confirm several generations; the digest is now refused if it
+has already proved one, so "every launch is proved contained" is enforced by the
+format rather than by its caller.
 
 Every "dead owner" in that file is a substituted probe, so
 `npm run test:dist-stale-recovery` measures the rest against the shipped
