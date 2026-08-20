@@ -166,6 +166,16 @@ import {
   safeParseExecutionLease,
   type ExecutionLease,
 } from './lease-document.js';
+import {
+  extendableWriterLaunchLedger,
+  provesEveryLaunchContained,
+  readWriterLaunchLedger,
+  writerLaunchBinding,
+  WRITER_LAUNCH_LEDGER_VERSION,
+  type WriterLaunchEntry,
+  type WriterLaunchLedgerPayload,
+  type WriterLaunchReading,
+} from './writer-launch-ledger.js';
 
 /** The single file that is one repository's lease. A plain name, never derived. */
 export const EXECUTION_LEASE_FILE_NAME = 'agent-orchestrator-execution-lease.json';
@@ -1122,6 +1132,14 @@ export function acquireRepositoryExecutionLease(
     return acquireFailure('LEASE_WRITE_FAILED', 'EVIDENCE_NOT_MINTED');
   }
 
+  // The launch history starts here and nowhere else. This is the only instant at
+  // which "no writer has launched under this lease" is a fact — the lease was
+  // created a syscall ago and this process holds it — so it is the only instant
+  // that may mint a history claiming to be complete. It changes nothing about
+  // the acquisition: a failure to publish leaves the lease held and simply
+  // unrecoverable, which is what every lease before this slice was.
+  openWriterLaunchHistory(location, document, evidence);
+
   return Object.freeze({
     ok: true as const,
     code: 'ACQUIRED' as const,
@@ -1969,9 +1987,119 @@ function recordFailure(
   return Object.freeze({ code, detail });
 }
 
+/**
+ * The containment vocabulary's answer to each refusal of the shared lease gate.
+ *
+ * A total function of {@link HeldLeaseFailure} rather than a cast, so a token
+ * added to that union stops the build here. `NOT_OWNER_UNPARSEABLE` is the one
+ * that is not a pass-through, and it is the reason this exists: the two callers
+ * report it as `NOT_OWNER` with a detail, which is a mapping and not a rename.
+ */
+function containmentFailureFor(failure: HeldLeaseFailure): ContainmentRecordResult {
+  switch (failure) {
+    case 'EVIDENCE_INVALID':
+      return recordFailure('EVIDENCE_INVALID');
+    case 'LEASE_FOR_ANOTHER_REPOSITORY':
+      return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
+    case 'LEASE_ABSENT':
+      return recordFailure('LEASE_ABSENT');
+    case 'LEASE_UNREADABLE':
+      return recordFailure('LEASE_UNREADABLE');
+    case 'NOT_OWNER_UNPARSEABLE':
+      return recordFailure('NOT_OWNER', 'UNPARSEABLE');
+    case 'NOT_OWNER':
+      return recordFailure('NOT_OWNER');
+  }
+}
+
 /** The companion record's path for a lease location. One derivation, one place. */
 function containmentPathFor(location: LeaseLocation): string {
   return join(location.key, CONTAINMENT_EVIDENCE_FILE_NAME);
+}
+
+/**
+ * The lease this evidence holds, right now, or why it does not.
+ *
+ * ── One gate, not four copies of one ───────────────────────────────────────
+ *
+ * Every companion-file writer in this module has to establish the same six
+ * things before it may touch anything: the artefact is minted evidence, it names
+ * *this* repository's lease path, something is at that path, it parses, the
+ * document describes the repository the caller handed in, and its nonce is this
+ * evidence's. Slice 4 shipped that chain twice — once in the publish, once in
+ * the removal — and slice 5 needs it twice more.
+ *
+ * Four hand-written copies of an ownership gate is how one of them ends up a
+ * check short, which is the defect class this module records against itself
+ * repeatedly. So it is written once. The failure tokens are returned rather than
+ * mapped here, because the callers have different vocabularies and a shared gate
+ * must not force a shared result type on them — `NOT_OWNER_UNPARSEABLE` is one
+ * token precisely so a caller cannot collapse "somebody else's lease" and "not a
+ * lease at all" by accident.
+ *
+ * It deliberately does **not** check the evidence artefact before its callers
+ * do. `recordContainmentEvidence` refuses an unminted attestation before it
+ * looks at any file, and moving that check behind this one would change which
+ * refusal a caller sees for two simultaneous faults.
+ */
+type HeldLeaseFailure =
+  | 'EVIDENCE_INVALID'
+  | 'LEASE_FOR_ANOTHER_REPOSITORY'
+  | 'LEASE_ABSENT'
+  | 'LEASE_UNREADABLE'
+  | 'NOT_OWNER_UNPARSEABLE'
+  | 'NOT_OWNER';
+
+interface HeldLease {
+  readonly location: LeaseLocation;
+  readonly document: ExecutionLease;
+  /**
+   * The same artefact the caller passed, narrowed.
+   *
+   * Handed back rather than re-tested at each call site: the gate has already
+   * proved it is minted evidence for exactly this lease, and a second brand
+   * check downstream would be a second answer to a question this gate exists to
+   * answer once.
+   */
+  readonly evidence: ExecutionLeaseEvidence;
+}
+
+function heldLeaseFor(repository: LeaseRepository, evidence: unknown): HeldLease | HeldLeaseFailure {
+  if (!isExecutionLeaseEvidence(evidence)) return 'EVIDENCE_INVALID';
+
+  const location = deriveExecutionLeaseLocation(repository);
+  const claimedPath = leasePathOrNull(evidence);
+  if (
+    claimedPath === null ||
+    !location.ok ||
+    comparePathIdentity(claimedPath, location.path) !== 'EQUAL'
+  ) {
+    return 'LEASE_FOR_ANOTHER_REPOSITORY';
+  }
+
+  // Through the same reader every other consumer uses, so one file cannot mean
+  // two things. It applies the size cap, the JSON parse, the schema and the
+  // `leaseKey` binding — the last of which is what refuses a lease document
+  // copied here out of another clone.
+  const read = readLeaseFile(location.path, location.key);
+  if (read.state === 'FREE') return 'LEASE_ABSENT';
+  if (read.state === 'UNREADABLE') return 'LEASE_UNREADABLE';
+  if (read.document === null) return 'NOT_OWNER_UNPARSEABLE';
+
+  // The record being written against must be the one the lease was taken for,
+  // for the reason `verifyExecutionLeaseHeldFor` gives: a mixed record pairs one
+  // repository's key with another's root, and every value in it is genuine.
+  if (comparePathIdentity(read.document.repositoryRoot, repository.root) !== 'EQUAL') {
+    return 'LEASE_FOR_ANOTHER_REPOSITORY';
+  }
+  if (!ExecutionLeaseProof.matchesNonce(evidence, read.document.ownerNonce)) return 'NOT_OWNER';
+
+  return Object.freeze({ location, document: read.document, evidence });
+}
+
+/** Whether the gate answered with a lease rather than with a refusal token. */
+function isHeldLease(result: HeldLease | HeldLeaseFailure): result is HeldLease {
+  return typeof result !== 'string';
 }
 
 /**
@@ -2049,35 +2177,9 @@ export function recordContainmentEvidence(
 
   // One reading of the record, for the gate and the effect alike (LF-2).
   const repository = snapshotRepositoryRecord(given);
-  const location = deriveExecutionLeaseLocation(repository);
-  const claimedPath = leasePathOrNull(evidence);
-  if (
-    claimedPath === null ||
-    !location.ok ||
-    comparePathIdentity(claimedPath, location.path) !== 'EQUAL'
-  ) {
-    return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
-  }
-
-  // Through the same reader every other consumer uses, so one file cannot mean
-  // two things. It applies the size cap, the JSON parse, the schema and the
-  // `leaseKey` binding — the last of which is what refuses a lease document
-  // copied here out of another clone.
-  const read = readLeaseFile(location.path, location.key);
-  if (read.state === 'FREE') return recordFailure('LEASE_ABSENT');
-  if (read.state === 'UNREADABLE') return recordFailure('LEASE_UNREADABLE');
-  if (read.document === null) return recordFailure('NOT_OWNER', 'UNPARSEABLE');
-  const document = read.document;
-
-  // The record being written against must be the one the lease was taken for,
-  // for the reason `verifyExecutionLeaseHeldFor` gives: a mixed record pairs one
-  // repository's key with another's root, and every value in it is genuine.
-  if (comparePathIdentity(document.repositoryRoot, repository.root) !== 'EQUAL') {
-    return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
-  }
-  if (!ExecutionLeaseProof.matchesNonce(evidence, document.ownerNonce)) {
-    return recordFailure('NOT_OWNER');
-  }
+  const held = heldLeaseFor(repository, evidence);
+  if (!isHeldLease(held)) return containmentFailureFor(held);
+  const { location, document } = held;
 
   // A lease with no run names nothing for the evidence to be about, and an
   // unbound proof is the one thing this record may not become.
@@ -2151,7 +2253,7 @@ export function recordContainmentEvidence(
     return recordFailure('RECORD_NOT_READABLE_BACK', 'NOT_RELIABLE');
   }
 
-  const published = publishContainmentRecord(containmentPathFor(location), bytes, () =>
+  const published = publishCompanionRecord(containmentPathFor(location), bytes, () =>
     stillHeldBy(location, evidence),
   );
   if (published === 'NOT_OWNER') return recordFailure('NOT_OWNER', 'LOST_BEFORE_PUBLISH');
@@ -2226,29 +2328,9 @@ export function clearContainmentEvidence(
   given: LeaseRepository,
   evidence: unknown,
 ): ContainmentRecordResult {
-  if (!isExecutionLeaseEvidence(evidence)) return recordFailure('EVIDENCE_INVALID');
-
-  const repository = snapshotRepositoryRecord(given);
-  const location = deriveExecutionLeaseLocation(repository);
-  const claimedPath = leasePathOrNull(evidence);
-  if (
-    claimedPath === null ||
-    !location.ok ||
-    comparePathIdentity(claimedPath, location.path) !== 'EQUAL'
-  ) {
-    return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
-  }
-
-  const read = readLeaseFile(location.path, location.key);
-  if (read.state === 'FREE') return recordFailure('LEASE_ABSENT');
-  if (read.state === 'UNREADABLE') return recordFailure('LEASE_UNREADABLE');
-  if (read.document === null) return recordFailure('NOT_OWNER', 'UNPARSEABLE');
-  if (comparePathIdentity(read.document.repositoryRoot, repository.root) !== 'EQUAL') {
-    return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
-  }
-  if (!ExecutionLeaseProof.matchesNonce(evidence, read.document.ownerNonce)) {
-    return recordFailure('NOT_OWNER');
-  }
+  const held = heldLeaseFor(snapshotRepositoryRecord(given), evidence);
+  if (!isHeldLease(held)) return containmentFailureFor(held);
+  const { location } = held;
 
   try {
     unlinkSync(containmentPathFor(location));
@@ -2271,6 +2353,12 @@ export function clearContainmentEvidence(
  * because what is there is this same holder's earlier record and is authority
  * for nothing. A staged file that cannot be published is removed; nothing reads
  * one by name.
+ *
+ * Named for the class rather than for one member of it: it publishes both
+ * companions this module keeps beside a lease — slice 4's containment record and
+ * slice 5's writer-launch ledger. It was called `publishContainmentRecord` while
+ * it had one caller, and a shared mechanism carrying one caller's name is how the
+ * next author concludes the other caller is doing something different.
  *
  * The retry is not decoration. A rename onto a name a reader currently has open
  * is refused on Windows, and the reader here is this build's own inspection — a
@@ -2296,7 +2384,7 @@ export function clearContainmentEvidence(
  * this slice's to add. The position is kept because it is free and strictly
  * better, not because it is measured.
  */
-function publishContainmentRecord(
+function publishCompanionRecord(
   path: string,
   bytes: Buffer,
   stillHeld: () => boolean,
@@ -2357,7 +2445,18 @@ function spinFor(ms: number): void {
  * "nothing here is proof", and those are different sentences to an operator.
  */
 function readContainmentRecord(location: LeaseLocation): unknown {
-  const path = containmentPathFor(location);
+  return readCompanionRecord(containmentPathFor(location), MAX_CONTAINMENT_EVIDENCE_BYTES);
+}
+
+/**
+ * Whatever is at a companion path, for a reader that judges it. Never throws.
+ *
+ * One reader for both companions, for the reason {@link publishCompanionRecord}
+ * is one publisher: the vocabulary rule below is the same rule for both, and two
+ * copies of it is one copy that can drift into answering `undefined` for a file
+ * it merely failed to read.
+ */
+function readCompanionRecord(path: string, maxBytes: number): unknown {
   let bytes: Buffer;
   try {
     bytes = readFileSync(path);
@@ -2377,11 +2476,917 @@ function readContainmentRecord(location: LeaseLocation): unknown {
     }
     return 'UNREADABLE';
   }
-  if (bytes.byteLength > MAX_CONTAINMENT_EVIDENCE_BYTES) return 'OVERSIZED';
+  if (bytes.byteLength > maxBytes) return 'OVERSIZED';
   try {
     return JSON.parse(bytes.toString('utf8'));
   } catch {
     return 'NOT_JSON';
+  }
+}
+
+/* ─────────────────────── the writer-launch ledger ───────────────────────── */
+
+/**
+ * The ledger's file name. A plain name, never derived, and its own file.
+ *
+ * A third file in the Git common directory rather than a field in either of the
+ * two that exist, and both alternatives were considered and refused for reasons
+ * this repository has already paid for:
+ *
+ *  - **not in the lease document.** The ledger is rewritten before and after
+ *    every writer launch. `lease/containment-evidence.ts` records what an
+ *    in-place rewrite of the lease costs when it is interrupted: a lease with no
+ *    legible owner, which its holder cannot release, which refuses every future
+ *    acquisition, and which nothing in this build can clear. That is the exact
+ *    failure this slice exists to make recoverable, so putting the fix inside
+ *    the thing it fixes is not an option;
+ *  - **not in the containment record.** That record's contract is "the most
+ *    recent launch", it is *removed* when a launch cannot be attested, and the
+ *    recovery predicate must never read it. Two contracts in one file is how one
+ *    of them gets read as the other — which is precisely the confusion between
+ *    `latestLaunchContained` and "this lease is safe" that slice 5 exists to
+ *    stop.
+ */
+export const WRITER_LAUNCH_LEDGER_FILE_NAME = 'agent-orchestrator-execution-lease.launches.json';
+
+/** Largest ledger this build will read back. Sized for the entry cap. */
+const MAX_WRITER_LAUNCH_LEDGER_BYTES = 1_048_576;
+
+/** The ledger's path for a lease location. One derivation, one place. */
+function ledgerPathFor(location: LeaseLocation): string {
+  return join(location.key, WRITER_LAUNCH_LEDGER_FILE_NAME);
+}
+
+/**
+ * What became of an attempt to open or confirm a writer-launch generation.
+ *
+ * A closed set. Two members are successes, one is the deliberate *loss* of a
+ * history, and one is the only condition in this build under which an
+ * enrichment stops productive work — see {@link LAUNCH_MUST_NOT_START}.
+ */
+export const WRITER_LAUNCH_CODES = [
+  /** The generation is on disk as `PENDING`. The launch may proceed. */
+  'OPENED',
+  /** The generation is on disk as `CONTAINED`. */
+  'CONFIRMED',
+  /**
+   * The generation could not be published, so the whole history was **removed**
+   * instead. The launch may proceed; this lease can never be recovered.
+   *
+   * The escape hatch that keeps a failed publish from stopping a run, and it is
+   * fail-closed rather than a compromise. The hazard a publish has is a stale
+   * *affirmative* history — generations 1..N-1 all `CONTAINED`, and generation N
+   * launching unrecorded — which reads as a complete proof and is a lie. Deleting
+   * the file removes the affirmative claim entirely: the next reading is
+   * `ABSENT`, the next rebuild is `historyComplete: false`, and both refuse
+   * recovery. Evidence is lost; nothing is asserted that is not true.
+   */
+  'HISTORY_DISCARDED',
+  /**
+   * The history could neither be extended nor removed. **The launch must not
+   * start.**
+   *
+   * The one place in this build where a failure to record stops productive work,
+   * and it is deliberate. Every other recording failure has a fail-closed
+   * fallback; this one has run out of them. What is on disk is an affirmative
+   * history that does not mention the launch about to happen, and launching
+   * anyway would leave a lease that reads *provably recoverable* while an
+   * unrecorded writer tree may outlive it. That is the single fail-open state
+   * this slice exists to make unreachable, so the launch loses.
+   *
+   * Reachable only when the Git common directory refuses both a rename and an
+   * unlink — a read-only or vanished administrative directory — in which case
+   * the run has larger problems than one refused spawn.
+   */
+  'LAUNCH_MUST_NOT_START',
+  /** The lease artefact was not minted evidence. Nothing was opened. */
+  'EVIDENCE_INVALID',
+  /** The containment artefact was not minted. Nothing was written. */
+  'ATTESTATION_INVALID',
+  /** The evidence names a different repository's lease than the record does. */
+  'LEASE_FOR_ANOTHER_REPOSITORY',
+  /** No lease path can be derived, or nothing is at the one derived. */
+  'LEASE_ABSENT',
+  /** Something is at the lease path and could not be read. */
+  'LEASE_UNREADABLE',
+  /** What is there is not this holder's lease — or is not a lease at all. */
+  'NOT_OWNER',
+  /** The containment was coupled to a process other than the lease's owner. */
+  'OWNER_MISMATCH',
+  /**
+   * The generation being confirmed is not open in the history on disk.
+   *
+   * Its own code, and it is a refusal rather than a repair: a confirmation that
+   * cannot find its own `PENDING` entry must not invent one, because the entry
+   * is the record of a launch and inventing it would confirm a launch nobody
+   * announced. `detail` carries the reading that produced it.
+   */
+  'GENERATION_NOT_OPEN',
+  /** The ledger this build built is one this build would not accept back. */
+  'LEDGER_NOT_READABLE_BACK',
+  /**
+   * The ledger could not be written, and the history on disk is unchanged.
+   *
+   * Answered by the *confirmation*, where leaving the generation `PENDING` is
+   * already the conservative end state. The opening path never answers it: a
+   * failed open has a launch about to happen and therefore must reach
+   * {@link HISTORY_DISCARDED} or {@link LAUNCH_MUST_NOT_START} instead.
+   */
+  'LEDGER_WRITE_FAILED',
+] as const;
+
+export type WriterLaunchCode = (typeof WRITER_LAUNCH_CODES)[number];
+
+export interface WriterLaunchResult {
+  readonly code: WriterLaunchCode;
+  /** An errno token or a short reason, never free text from anywhere else. */
+  readonly detail: string | null;
+  /**
+   * The generation this call is about, or `null` when none was reached.
+   *
+   * Present on `OPENED` so the caller can name it back when confirming, and
+   * deliberately **not** re-derived at confirmation time: "the last generation"
+   * read a second time is a different question from "the generation I opened",
+   * and the difference is a launch that opened generation 4 confirming
+   * generation 5.
+   */
+  readonly generation: number | null;
+}
+
+function launchFailure(
+  code: WriterLaunchCode,
+  detail: string | null = null,
+  generation: number | null = null,
+): WriterLaunchResult {
+  return Object.freeze({ code, detail, generation });
+}
+
+/** The ledger vocabulary's answer to each refusal of the shared lease gate. */
+function launchFailureFor(failure: HeldLeaseFailure): WriterLaunchResult {
+  switch (failure) {
+    case 'EVIDENCE_INVALID':
+      return launchFailure('EVIDENCE_INVALID');
+    case 'LEASE_FOR_ANOTHER_REPOSITORY':
+      return launchFailure('LEASE_FOR_ANOTHER_REPOSITORY');
+    case 'LEASE_ABSENT':
+      return launchFailure('LEASE_ABSENT');
+    case 'LEASE_UNREADABLE':
+      return launchFailure('LEASE_UNREADABLE');
+    case 'NOT_OWNER_UNPARSEABLE':
+      return launchFailure('NOT_OWNER', 'UNPARSEABLE');
+    case 'NOT_OWNER':
+      return launchFailure('NOT_OWNER');
+  }
+}
+
+/** The four lease fields a ledger is bound to and judged against. */
+function subjectOf(document: ExecutionLease): {
+  readonly leaseKey: string;
+  readonly ownerNonce: string;
+  readonly ownerPid: number;
+  readonly runId: string | null;
+} {
+  return {
+    leaseKey: document.leaseKey,
+    ownerNonce: document.ownerNonce,
+    ownerPid: document.ownerPid,
+    runId: document.runId,
+  };
+}
+
+/** The ledger beside this lease, as a value for the format to judge. */
+function readLedgerRecord(location: LeaseLocation): unknown {
+  return readCompanionRecord(ledgerPathFor(location), MAX_WRITER_LAUNCH_LEDGER_BYTES);
+}
+
+/** Seals a payload with its binding and renders the bytes. */
+function ledgerBytesFor(document: ExecutionLease, payload: WriterLaunchLedgerPayload): Buffer {
+  const sealed = { ...payload, binding: writerLaunchBinding(document, payload) };
+  return Buffer.from(`${JSON.stringify(sealed, null, 2)}\n`, 'utf8');
+}
+
+/**
+ * Parses `bytes` back as this build's reader would. `undefined` when they are
+ * not a ledger at all, which is a value the reader refuses rather than accepts.
+ */
+function ledgerReadBack(bytes: Buffer): unknown {
+  if (bytes.byteLength > MAX_WRITER_LAUNCH_LEDGER_BYTES) return 'OVERSIZED';
+  try {
+    return JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return 'NOT_JSON';
+  }
+}
+
+/**
+ * Starts a lease's launch history, at the one moment it can be complete.
+ *
+ * Called by {@link acquireRepositoryExecutionLease} immediately after the lease
+ * is published, and from nowhere else. That placement is the whole of what
+ * `historyComplete: true` means: the lease exists, this process holds it, and no
+ * writer can have launched under it yet, so an empty history is a true and
+ * complete one. A ledger written at any later moment cannot say that, and
+ * `writer-launch-ledger.ts` records why nothing promotes a `false` to a `true`.
+ *
+ * It replaces whatever ledger is at the path, and that is correct rather than
+ * careless: what is there belongs to a lease that no longer exists — the name was
+ * free a moment ago — and it is refused by its own binding for this one anyway.
+ *
+ * **Failure is silent, and the direction is safe.** A lease that could not
+ * publish a history simply has none: every reading of an absent ledger refuses
+ * recovery, and the acquisition itself is untouched. Turning a failed enrichment
+ * into a refused lease would be the wrong severity, and it is the severity slice
+ * 4 already settled for the containment record.
+ */
+function openWriterLaunchHistory(
+  location: LeaseLocation,
+  document: ExecutionLease,
+  evidence: ExecutionLeaseEvidence,
+): void {
+  const bytes = ledgerBytesFor(document, {
+    ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION,
+    ownerPid: document.ownerPid,
+    runId: document.runId,
+    historyComplete: true,
+    entries: [],
+  });
+  // Read back before it is written, through the reader itself, for the reason
+  // the containment record is: a ledger this build would refuse is worse than no
+  // ledger, because it is a file an operator has to explain.
+  if (readWriterLaunchLedger(subjectOf(document), ledgerReadBack(bytes)) !== 'ALL_LAUNCHES_CONTAINED') {
+    return;
+  }
+  publishCompanionRecord(ledgerPathFor(location), bytes, () => stillHeldBy(location, evidence));
+}
+
+/**
+ * Announces a writer launch under this lease, **before** it happens.
+ *
+ * ── Why the order cannot be the other way round ────────────────────────────
+ *
+ * The record that matters for recovery is the one describing a launch that was
+ * killed. A record written after a launch cannot describe one that never got
+ * that far; a mark written before it can. So the generation goes down as
+ * `PENDING` first, the launch happens only once that is on disk, and everything
+ * that can go wrong afterwards — a lost boundary, a killed orchestrator, an
+ * unpublishable confirmation — leaves the mark exactly where it is.
+ *
+ * That is what makes {@link LAUNCH_MUST_NOT_START} necessary rather than
+ * fussy. If this call cannot change what is on disk, the history there is an
+ * affirmative one that does not mention the launch about to happen. It gets one
+ * fallback — delete the history, which asserts nothing — and if that fails too
+ * the launch is refused, because the alternative is the single fail-open state
+ * this slice exists to make unreachable.
+ *
+ * ── What it does with a history it cannot use ──────────────────────────────
+ *
+ * Rebuilds from empty with `historyComplete: false`, permanently. A ledger that
+ * is absent, torn, versioned for another build or bound to another lease might
+ * have described launches this one cannot see, and starting a fresh *complete*
+ * history at generation 1 would hide every one of them. This is the fail-open
+ * shape a review would find, so it is closed by construction: only the
+ * acquisition may mint a complete history.
+ *
+ * Never throws.
+ */
+export function beginWriterLaunch(
+  given: LeaseRepository,
+  evidence: unknown,
+  request: { readonly writerId: string; readonly now: () => string },
+): WriterLaunchResult {
+  const held = heldLeaseFor(snapshotRepositoryRecord(given), evidence);
+  if (!isHeldLease(held)) return launchFailureFor(held);
+  const { location, document, evidence: holder } = held;
+
+  if (
+    request === null ||
+    typeof request !== 'object' ||
+    typeof request.writerId !== 'string' ||
+    request.writerId.length === 0 ||
+    request.writerId.length > 64 ||
+    typeof request.now !== 'function'
+  ) {
+    return launchFailure('LEDGER_NOT_READABLE_BACK', 'WRITER_NOT_NAMED');
+  }
+
+  // The clock is a caller-supplied function, so calling it is calling somebody
+  // else's code, and this module's "never throws" is relied on by not catching.
+  let openedAt: string;
+  try {
+    openedAt = request.now();
+  } catch {
+    return launchFailure('LEDGER_NOT_READABLE_BACK', 'CLOCK_REFUSED');
+  }
+
+  const subject = subjectOf(document);
+  const raw = readLedgerRecord(location);
+  const existing = extendableWriterLaunchLedger(subject, raw);
+  const entries: WriterLaunchEntry[] = existing === null ? [] : [...existing.entries];
+  // `false` when there was nothing usable to extend, and it never becomes `true`
+  // again: see the header, and `writer-launch-ledger.ts` for why.
+  const historyComplete = existing !== null && existing.historyComplete;
+  const generation = entries.length + 1;
+
+  const payload: WriterLaunchLedgerPayload = {
+    ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION,
+    ownerPid: document.ownerPid,
+    runId: document.runId,
+    historyComplete,
+    entries: [...entries, { generation, state: 'PENDING', writerId: request.writerId, openedAt }],
+  };
+  const bytes = ledgerBytesFor(document, payload);
+
+  // Read back before anything is written, and through the reader itself. The
+  // clock is a seam, so a `now` returning something the contract refuses is
+  // enough to build a ledger that would be refused for the rest of this lease's
+  // life; this is what stops it reaching a file. The expected reading is stated
+  // rather than merely "not refused": a freshly opened generation is unproven by
+  // construction, so a build of this payload that read as a *proof* would be the
+  // format failing in the one direction that matters.
+  const expected: WriterLaunchReading = historyComplete ? 'LAUNCH_UNPROVEN' : 'HISTORY_INCOMPLETE';
+  if (readWriterLaunchLedger(subject, ledgerReadBack(bytes)) !== expected) {
+    return launchFailure('LEDGER_NOT_READABLE_BACK', 'NOT_AS_BUILT');
+  }
+
+  const published = publishCompanionRecord(ledgerPathFor(location), bytes, () =>
+    stillHeldBy(location, holder),
+  );
+  if (published === null) return Object.freeze({ code: 'OPENED' as const, detail: null, generation });
+  if (published === 'NOT_OWNER') {
+    // The lease changed hands mid-publish. The history on disk is the **new**
+    // holder's, and this call has no standing to delete it — the discard below
+    // would destroy a successor's evidence, which is the mistake
+    // `removeVerifiedLease` records as its own defect class.
+    return launchFailure('NOT_OWNER', 'LOST_BEFORE_PUBLISH');
+  }
+
+  // The publish failed and a launch is about to happen. Removing the history is
+  // the fallback, and it is the conservative one: an absent ledger asserts
+  // nothing, while the affirmative one on disk would assert something false.
+  try {
+    unlinkSync(ledgerPathFor(location));
+  } catch (error) {
+    const errno = safeErrnoCode(error);
+    // Nothing there is the state this was reaching for, so it counts as reached.
+    if (errno !== 'ENOENT') return launchFailure('LAUNCH_MUST_NOT_START', errno);
+  }
+  return launchFailure('HISTORY_DISCARDED', published);
+}
+
+/**
+ * Confirms that the generation `request.generation` opened was contained.
+ *
+ * Takes the generation as an argument rather than confirming "the latest one",
+ * and that is load-bearing: two questions that look the same — *which generation
+ * did I open* and *which generation is last on disk* — have different answers the
+ * moment anything else has written, and confirming the wrong one would mark an
+ * unproven launch proven. The opener returns the number; this consumes it.
+ *
+ * It refuses rather than repairs. A ledger it cannot extend, a generation that is
+ * not there, one already confirmed, one opened for a different writer — every one
+ * of those answers {@link GENERATION_NOT_OPEN} and writes nothing, because the
+ * `PENDING` entry *is* the record of a launch and a confirmation that invents one
+ * is a confirmation of a launch nobody announced.
+ *
+ * A failure to publish leaves the generation `PENDING`, which is the answer a
+ * killed run leaves and the answer a recovery refuses. Nothing is discarded here:
+ * unlike the opening path there is no launch pending on the result, so the
+ * conservative end state is already on disk.
+ *
+ * Never throws.
+ */
+export function confirmWriterLaunch(
+  given: LeaseRepository,
+  evidence: unknown,
+  attestation: unknown,
+  request: { readonly generation: number; readonly writerId: string; readonly now: () => string },
+): WriterLaunchResult {
+  if (!isExecutionLeaseEvidence(evidence)) return launchFailure('EVIDENCE_INVALID');
+
+  const facts = containmentFactsOf(attestation);
+  if (facts === null) return launchFailure('ATTESTATION_INVALID');
+
+  const held = heldLeaseFor(snapshotRepositoryRecord(given), evidence);
+  if (!isHeldLease(held)) return launchFailureFor(held);
+  const { location, document, evidence: holder } = held;
+
+  // The containment must have been coupled to *this lease's* owner. Anything
+  // else is a job whose destruction says nothing about this lease's owner dying,
+  // which is the entire inference the ledger exists to support.
+  if (facts.ownerPid !== document.ownerPid) return launchFailure('OWNER_MISMATCH');
+
+  if (
+    request === null ||
+    typeof request !== 'object' ||
+    !Number.isSafeInteger(request.generation) ||
+    request.generation < 1 ||
+    typeof request.writerId !== 'string' ||
+    request.writerId.length === 0 ||
+    request.writerId.length > 64 ||
+    typeof request.now !== 'function'
+  ) {
+    return launchFailure('LEDGER_NOT_READABLE_BACK', 'GENERATION_NOT_NAMED');
+  }
+
+  const subject = subjectOf(document);
+  const raw = readLedgerRecord(location);
+  const existing = extendableWriterLaunchLedger(subject, raw);
+  if (existing === null) {
+    return launchFailure(
+      'GENERATION_NOT_OPEN',
+      readWriterLaunchLedger(subject, raw),
+      request.generation,
+    );
+  }
+
+  const index = request.generation - 1;
+  const open = existing.entries[index];
+  if (open === undefined || open.generation !== request.generation) {
+    return launchFailure('GENERATION_NOT_OPEN', 'NOT_PRESENT', request.generation);
+  }
+  if (open.state !== 'PENDING') {
+    return launchFailure('GENERATION_NOT_OPEN', 'ALREADY_CONFIRMED', request.generation);
+  }
+  if (open.writerId !== request.writerId) {
+    return launchFailure('GENERATION_NOT_OPEN', 'ANOTHER_WRITER', request.generation);
+  }
+
+  let confirmedAt: string;
+  try {
+    confirmedAt = request.now();
+  } catch {
+    return launchFailure('LEDGER_NOT_READABLE_BACK', 'CLOCK_REFUSED', request.generation);
+  }
+
+  const entries = [...existing.entries];
+  entries[index] = {
+    generation: open.generation,
+    state: 'CONTAINED',
+    writerId: open.writerId,
+    openedAt: open.openedAt,
+    helperPid: facts.helperPid,
+    childPid: facts.childPid,
+    mode: facts.mode,
+    verifiedInJob: true,
+    assignedAtCreation: facts.assignedAtCreation,
+    launchDigest: facts.launchDigest,
+    attestedAt: facts.attestedAt,
+    confirmedAt,
+  };
+
+  const payload: WriterLaunchLedgerPayload = {
+    ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION,
+    ownerPid: document.ownerPid,
+    runId: document.runId,
+    historyComplete: existing.historyComplete,
+    entries,
+  };
+  const bytes = ledgerBytesFor(document, payload);
+
+  // Read back through the reader, and then check the one entry this call is
+  // about. The reading alone is not enough: a history with an earlier unproven
+  // generation still reads `LAUNCH_UNPROVEN` whether or not *this* generation
+  // was confirmed, so the assertion has to name the entry.
+  const back = ledgerReadBack(bytes);
+  const rebuilt = extendableWriterLaunchLedger(subject, back);
+  if (rebuilt === null || rebuilt.entries[index]?.state !== 'CONTAINED') {
+    return launchFailure('LEDGER_NOT_READABLE_BACK', 'NOT_AS_BUILT', request.generation);
+  }
+
+  const published = publishCompanionRecord(ledgerPathFor(location), bytes, () =>
+    stillHeldBy(location, holder),
+  );
+  if (published === 'NOT_OWNER') {
+    return launchFailure('NOT_OWNER', 'LOST_BEFORE_PUBLISH', request.generation);
+  }
+  return published === null
+    ? Object.freeze({ code: 'CONFIRMED' as const, detail: null, generation: request.generation })
+    : launchFailure('LEDGER_WRITE_FAILED', published, request.generation);
+}
+
+/**
+ * Reads a lease's launch history without changing anything. Never throws.
+ *
+ * Exists for reporting — `lease status` prints it — and it is deliberately not
+ * how {@link recoverStaleLease} obtains its own reading. A recovery reads the
+ * history inside the same call that removes the lease; a report may be minutes
+ * old by the time anybody acts on it, and this module has already paid once for
+ * a judgement made at one moment and carried to a later effect.
+ */
+export function inspectWriterLaunchHistory(given: LeaseRepository): WriterLaunchReading | null {
+  const repository = snapshotRepositoryRecord(given);
+  const location = deriveExecutionLeaseLocation(repository);
+  if (!location.ok) return null;
+  const read = readLeaseFile(location.path, location.key);
+  if (read.document === null) return null;
+  return readWriterLaunchLedger(subjectOf(read.document), readLedgerRecord(location));
+}
+
+/* ─────────────────────── safe stale-lease recovery ──────────────────────── */
+
+/**
+ * Why a stale lease may not be recovered. A closed set, and **every** member is
+ * a refusal: there is no member of this union that means "go ahead".
+ *
+ * That shape is on purpose. `LeaseRecoveryClassification` next door is a
+ * *description* of what is at a path, and one of its members happens to be the
+ * one a removal wants; this is a list of reasons to stop, so a caller cannot
+ * read a description as a permission. The permission is the absence of a member,
+ * which is one value and cannot be spelled two ways.
+ */
+export const STALE_RECOVERY_REFUSALS = [
+  /** Nothing is at the lease path. There is no lease to recover. */
+  'NOTHING_TO_RECOVER',
+  /** A process with the recorded owner's id exists. */
+  'OWNER_RUNNING',
+  /**
+   * Whether the owner exists could not be established.
+   *
+   * Refused rather than retried, and this is the liveness rule this module keeps
+   * everywhere: a probe **may refuse and may never permit**. An unknown answer is
+   * an unknown answer.
+   */
+  'OWNER_LIVENESS_UNDETERMINED',
+  /**
+   * Something is at the lease path and this build cannot parse it as a lease.
+   *
+   * Includes the zero-byte crash artefact, which is exactly the case the twice
+   * withdrawn `lease break` most wanted and could not have. See
+   * {@link recoverStaleLease} for why this slice refuses it rather than trying
+   * again: an unparseable lease has no nonce, so the removal has no identity to
+   * bind to, and it has no launch history to prove anything with either.
+   */
+  'LEASE_UNPARSEABLE',
+  /** Something is there and could not be read at all. */
+  'LEASE_UNREADABLE',
+  /** No lease path can be derived for this repository. */
+  'LOCATION_UNSUITABLE',
+  /** The Git common directory is on a UNC/network path, which V2 does not support. */
+  'LOCATION_NETWORK_UNSUPPORTED',
+  /** The Git common directory is a Windows device path. */
+  'LOCATION_DEVICE_NAMESPACE',
+  /**
+   * There is no launch history beside the lease.
+   *
+   * The reading every lease taken before this slice produces, and the one that
+   * makes "no legacy lease is retroactively safe" true by construction rather
+   * than by a version check somebody has to remember to write.
+   */
+  'LAUNCH_HISTORY_ABSENT',
+  /** The history did not begin with its lease, so it can be missing launches. */
+  'LAUNCH_HISTORY_INCOMPLETE',
+  /** At least one writer launch under this lease is not proven contained. */
+  'LAUNCH_HISTORY_UNPROVEN',
+  /** The history was written by a build this one does not understand. */
+  'LAUNCH_HISTORY_UNSUPPORTED_VERSION',
+  /** Something is there and is not a history this build declares. */
+  'LAUNCH_HISTORY_MALFORMED',
+  /** The history is bound to a different lease. */
+  'LAUNCH_HISTORY_NOT_THIS_LEASE',
+  /** The history describes a different run or a different owner. */
+  'LAUNCH_HISTORY_NOT_THIS_RUN',
+] as const;
+
+export type StaleRecoveryRefusal = (typeof STALE_RECOVERY_REFUSALS)[number];
+
+/**
+ * The refusal to report for a launch history that is not a proof.
+ *
+ * Total over {@link WriterLaunchReading}, including the one reading that *is* a
+ * proof. That arm is unreachable while `provesEveryLaunchContained` is the thing
+ * that decides — which it is, at the one call site below — and it answers the
+ * conservative refusal rather than throwing, so a future loosening of that table
+ * degrades the *reason* an operator is shown and never the *decision*.
+ */
+function refusalForHistory(reading: WriterLaunchReading): StaleRecoveryRefusal {
+  switch (reading) {
+    case 'ALL_LAUNCHES_CONTAINED':
+    case 'LAUNCH_UNPROVEN':
+      return 'LAUNCH_HISTORY_UNPROVEN';
+    case 'HISTORY_INCOMPLETE':
+      return 'LAUNCH_HISTORY_INCOMPLETE';
+    case 'ABSENT':
+      return 'LAUNCH_HISTORY_ABSENT';
+    case 'UNSUPPORTED_VERSION':
+      return 'LAUNCH_HISTORY_UNSUPPORTED_VERSION';
+    case 'MALFORMED':
+      return 'LAUNCH_HISTORY_MALFORMED';
+    case 'NOT_THIS_LEASE':
+      return 'LAUNCH_HISTORY_NOT_THIS_LEASE';
+    case 'NOT_THIS_RUN':
+      return 'LAUNCH_HISTORY_NOT_THIS_RUN';
+  }
+}
+
+export interface StaleLeaseRecoveryAssessment {
+  /** `SAFE_TO_RECOVER` exactly when `refusal` is `null`. Never otherwise. */
+  readonly verdict: 'SAFE_TO_RECOVER' | 'UNSAFE';
+  readonly refusal: StaleRecoveryRefusal | null;
+  /** The path examined, or the empty string when none could be derived. */
+  readonly path: string;
+  /** The owner named by the lease, when one was parsed. */
+  readonly ownerPid: number | null;
+  /** The run the lease was taken for, when one was parsed. */
+  readonly runId: string | null;
+  /** The launch history's reading, or `null` when no lease document was read. */
+  readonly launchHistory: WriterLaunchReading | null;
+}
+
+/** The assessment, plus the two facts that identify the object it is about. */
+interface BoundAssessment extends StaleLeaseRecoveryAssessment {
+  /** Digest of the exact bytes read. `null` unless the verdict is safe. */
+  readonly revision: string | null;
+  /** The nonce inside those bytes. `null` unless the verdict is safe. */
+  readonly ownerNonce: string | null;
+}
+
+function unsafe(
+  refusal: StaleRecoveryRefusal,
+  over: Partial<StaleLeaseRecoveryAssessment> = {},
+): BoundAssessment {
+  return Object.freeze({
+    verdict: 'UNSAFE' as const,
+    refusal,
+    path: '',
+    ownerPid: null,
+    runId: null,
+    launchHistory: null,
+    revision: null,
+    ownerNonce: null,
+    ...over,
+  });
+}
+
+/** One refusal per location failure. Total by type. */
+const RECOVERY_REFUSAL_FOR_LOCATION: Readonly<Record<LeaseLocationFailureCode, StaleRecoveryRefusal>> =
+  Object.freeze({
+    LEASE_LOCATION_UNSUITABLE: 'LOCATION_UNSUITABLE',
+    LEASE_LOCATION_NETWORK_UNSUPPORTED: 'LOCATION_NETWORK_UNSUPPORTED',
+    LEASE_LOCATION_DEVICE_NAMESPACE: 'LOCATION_DEVICE_NAMESPACE',
+  });
+
+/**
+ * The safety predicate, evaluated against what is on disk right now.
+ *
+ * ── The contract, stated once ──────────────────────────────────────────────
+ *
+ *     SAFE_TO_RECOVER
+ *     iff  a lease document is at this repository's lease path
+ *     and  the process it names does not exist
+ *     and  the launch history beside it is complete, bound to this exact lease,
+ *          about this exact owner and run, and every launch in it is proven
+ *          contained
+ *
+ * Anything else — including anything unknown, unreadable, from another build, or
+ * merely undecidable — is a refusal. There is no default arm and no "probably".
+ *
+ * ── What each conjunct is doing, since none of them is redundant ───────────
+ *
+ * The dead owner alone proves nothing, and `execution-lease.ts`'s header records
+ * the measurement: on this platform the agent tree died with the orchestrator
+ * only because everything sat in a Job Object *somebody else* created. That is a
+ * platform observation, not a guarantee, and it is not this build's to assert.
+ *
+ * The launch history alone proves nothing either: a complete, all-contained
+ * history beside a **living** owner describes a run that is working perfectly.
+ *
+ * Together they say the one thing a removal needs: every writer tree that ever
+ * existed under this lease was created inside a Job Object coupled to the owner,
+ * and the kernel destroys that job when the owner dies. Not "probably gone" —
+ * gone, because the kernel says so.
+ *
+ * ── And it still is not authority ──────────────────────────────────────────
+ *
+ * `containment != authority`. What this licenses is removing a **dead object**,
+ * never writing to the repository. The caller that recovers a lease holds
+ * nothing afterwards and must go through {@link acquireRepositoryExecutionLease}
+ * like anybody else.
+ */
+export function assessStaleLeaseRecovery(
+  given: LeaseRepository,
+  deps: { readonly processAlive?: ProcessLivenessProbe } = {},
+): StaleLeaseRecoveryAssessment {
+  const { revision: _revision, ownerNonce: _nonce, ...report } = assessStaleLeaseRecoveryBound(
+    snapshotRepositoryRecord(given),
+    deps,
+  );
+  return Object.freeze(report);
+}
+
+/**
+ * The same predicate, keeping the two facts that identify the object.
+ *
+ * Not exported, and that is the point. `revision` and `ownerNonce` are what the
+ * removal binds to, and an exported reader of exactly the values a destructive
+ * step rests on is the affordance that step leaves behind — the argument
+ * {@link removeVerifiedLease} already makes about the object identity the
+ * withdrawn break used. A caller cannot obtain them, cannot hold them, and
+ * therefore cannot act on a stale pair.
+ */
+function assessStaleLeaseRecoveryBound(
+  repository: LeaseRepository,
+  deps: { readonly processAlive?: ProcessLivenessProbe },
+): BoundAssessment {
+  const location = deriveExecutionLeaseLocation(repository);
+  if (!location.ok) return unsafe(RECOVERY_REFUSAL_FOR_LOCATION[location.code]);
+
+  // One read of the bytes, for the identity and the document alike. The two must
+  // not be two readings of one file — the divergence this module exists to
+  // prevent, and here it would mean removing an object the decision was not
+  // about.
+  const read = readLeaseFile(location.path, location.key);
+  if (read.state === 'FREE') return unsafe('NOTHING_TO_RECOVER', { path: location.path });
+  if (read.state === 'UNREADABLE') return unsafe('LEASE_UNREADABLE', { path: location.path });
+  if (read.document === null || read.bytes === null) {
+    // `UNPARSEABLE`, which includes the zero-byte crash artefact and a lease
+    // document belonging to another clone. Neither has a nonce, so neither can
+    // be named to a removal, and neither has a history to prove anything with.
+    return unsafe('LEASE_UNPARSEABLE', {
+      path: location.path,
+      ownerPid: legibleOwnerPid(read.bytes),
+    });
+  }
+  const document = read.document;
+  const facts = {
+    path: location.path,
+    ownerPid: document.ownerPid,
+    runId: document.runId,
+  };
+
+  const probe = deps.processAlive ?? osProcessLiveness;
+  const liveness = probe(document.ownerPid);
+  if (liveness === 'ALIVE') return unsafe('OWNER_RUNNING', facts);
+  if (liveness === 'UNDETERMINED') return unsafe('OWNER_LIVENESS_UNDETERMINED', facts);
+
+  // The history is read *after* the liveness answer and from the same location,
+  // so a report about a running owner never goes looking for one. The reading is
+  // the whole of the second conjunct.
+  const history = readWriterLaunchLedger(subjectOf(document), readLedgerRecord(location));
+  if (!provesEveryLaunchContained(history)) {
+    return unsafe(refusalForHistory(history), { ...facts, launchHistory: history });
+  }
+
+  return Object.freeze({
+    verdict: 'SAFE_TO_RECOVER' as const,
+    refusal: null,
+    ...facts,
+    launchHistory: history,
+    revision: revisionOfBytes(read.bytes),
+    ownerNonce: document.ownerNonce,
+  });
+}
+
+/** What became of an attempt to recover a stale lease. A closed set of four. */
+export const STALE_LEASE_RECOVERY_CODES = [
+  /** The stale lease is gone. Nothing is held; acquisition is now possible. */
+  'RECOVERED',
+  /** The predicate refused. Nothing was touched. `refusal` says which conjunct. */
+  'RECOVERY_UNSAFE',
+  /**
+   * The lease at the path was not the one the predicate accepted, so nothing of
+   * it was removed.
+   *
+   * The abort this contract requires: a lease that changes hands between the
+   * assessment and the removal takes the recovery with it. It is not an error
+   * anybody has to fix — the repository has a live owner again, which is the
+   * outcome the operator wanted the recovery to make possible.
+   */
+  'LEASE_CHANGED',
+  /**
+   * The removal could not be completed. `detail` names the end state.
+   *
+   * Kept apart from {@link LEASE_CHANGED} because they leave the repository in
+   * different conditions and send an operator to different places — the same
+   * discrimination {@link VerifiedRemoval} draws between its own nine members,
+   * for the same reason.
+   */
+  'RECOVERY_FAILED',
+] as const;
+
+export type StaleLeaseRecoveryCode = (typeof STALE_LEASE_RECOVERY_CODES)[number];
+
+export interface StaleLeaseRecoveryResult {
+  readonly code: StaleLeaseRecoveryCode;
+  /** The refusal, when the predicate refused. `null` for every other code. */
+  readonly refusal: StaleRecoveryRefusal | null;
+  /** A removal end state or a short token. Never free text, never a path. */
+  readonly detail: string | null;
+  /** The assessment this call made, for a report. Never supplied by a caller. */
+  readonly assessment: StaleLeaseRecoveryAssessment;
+}
+
+/**
+ * Removes a stale lease, and only one this call has just proved removable.
+ *
+ * ── Why this can be written when `lease break` could not ───────────────────
+ *
+ * The break was withdrawn twice, and `lease-recovery.ts` gives the reason: for
+ * the artefact that most needed recovering — the zero-byte crash file — every
+ * fact that could name *one object* collapsed at once. Its digest is
+ * `sha256("")`, which every empty file shares; it records no owner, so the
+ * liveness cross-check compared `null` with `null`; and the filesystem's
+ * `(dev,ino)` was the only thing left, on a module that then shipped fallbacks
+ * for filesystems reusing those. A sixth review reproduced the consequence: an
+ * authorisation minted for artefact A removed a **legitimately acquired** lease B
+ * that had taken the same name.
+ *
+ * This is not that operation with a better predicate. It is a different
+ * operation, and two structural differences carry it:
+ *
+ *  - **it can only ever act on a lease it parsed.** The predicate requires a
+ *    readable lease document with a launch history bound to it, so the object is
+ *    named by 32 random bytes of `ownerNonce` inside its own record. The
+ *    zero-byte artefact — the case that defeated the break — is refused as
+ *    {@link LEASE_UNPARSEABLE} and stays refused. This slice recovers the case
+ *    it can prove and declines the case it cannot, rather than trying to cover
+ *    both with one authorisation;
+ *  - **there is no window for an operator to sit in.** The break minted an
+ *    authorisation, showed it to a human, and acted on it later. Here the
+ *    assessment and the removal are one synchronous call: nothing is displayed,
+ *    nothing is typed back, and no caller can supply a verdict — the parameter
+ *    does not exist.
+ *
+ * ── The removal binds to the object, not to the name ───────────────────────
+ *
+ * {@link removeVerifiedLease} detaches whatever is at the name into a private
+ * name and then decides on *that object*, and the predicate handed to it here
+ * requires both the exact bytes and the nonce inside them. A successor that
+ * acquired in the window between the assessment and the detach cannot match
+ * either — its nonce is 32 fresh random bytes — so it is put back and this call
+ * answers {@link LEASE_CHANGED}.
+ *
+ * Both halves are stated because they fail differently. The revision is the
+ * whole-file identity; the nonce is the identity that survives somebody deciding
+ * a whitespace-insensitive comparison would be friendlier. Requiring both means
+ * neither can be relaxed alone.
+ *
+ * ── The companions are deliberately left where they are ────────────────────
+ *
+ * Once the lease name is free this call owns nothing in that directory, and a
+ * successor may already have acquired. Deleting the launch history or the
+ * containment record *after* the removal would therefore be an unowned write
+ * aimed at a name somebody else may now be using — the exact defect class this
+ * module records against its own past. They are safe to leave: the acquisition
+ * that follows replaces the history outright, and every companion belonging to a
+ * dead lease is refused by its own binding for any other.
+ *
+ * ── What this does not do ──────────────────────────────────────────────────
+ *
+ * It does not acquire. It does not retry. It does not restart anything. A caller
+ * that wants the repository back calls
+ * {@link acquireRepositoryExecutionLease} afterwards, through the ordinary path,
+ * and takes its authority from the exclusive create like every other holder —
+ * because containment proves process lifetime and never writer authority.
+ *
+ * Never throws.
+ */
+export function recoverStaleLease(
+  given: LeaseRepository,
+  deps: { readonly processAlive?: ProcessLivenessProbe } = {},
+): StaleLeaseRecoveryResult {
+  const repository = snapshotRepositoryRecord(given);
+
+  // Taken here, immediately before the removal, and taken by this call rather
+  // than accepted from one. An assessment is a statement about one moment; the
+  // whole history of this module is judgements made at one moment and carried to
+  // a later effect, and a `verdict` parameter would be that defect with a type
+  // signature.
+  const assessed = assessStaleLeaseRecoveryBound(repository, deps);
+  const { revision, ownerNonce, ...report } = assessed;
+  const assessment = Object.freeze(report);
+  if (assessed.verdict !== 'SAFE_TO_RECOVER' || revision === null || ownerNonce === null) {
+    return Object.freeze({
+      code: 'RECOVERY_UNSAFE' as const,
+      refusal: assessed.refusal,
+      detail: null,
+      assessment,
+    });
+  }
+
+  const removal = removeVerifiedLease(
+    assessment.path,
+    (bytes) => revisionOfBytes(bytes) === revision && nonceOfBytes(bytes) === ownerNonce,
+  );
+  const outcome = (code: StaleLeaseRecoveryCode, detail: string | null): StaleLeaseRecoveryResult =>
+    Object.freeze({ code, refusal: null, detail, assessment });
+
+  switch (removal) {
+    case 'REMOVED':
+      return outcome('RECOVERED', null);
+    // Somebody else got there first. Nothing of this call's is at the path and
+    // nothing was destroyed — reported as a change of hands rather than as a
+    // success, because "the lease you assessed is gone" and "you removed it" are
+    // different facts and only one of them is this call's doing.
+    case 'ABSENT':
+    case 'CHANGED':
+    case 'CHANGED_QUARANTINED':
+    case 'CHANGED_AND_UNOWNED':
+      return outcome('LEASE_CHANGED', removal);
+    case 'DETACH_FAILED':
+    case 'UNIDENTIFIABLE':
+    case 'UNIDENTIFIABLE_QUARANTINED':
+    case 'UNIDENTIFIABLE_AND_UNOWNED':
+      return outcome('RECOVERY_FAILED', removal);
   }
 }
 

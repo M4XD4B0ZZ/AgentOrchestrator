@@ -558,19 +558,34 @@ describe('classification says what is there and authorises nothing', () => {
     });
 
     expect(assessed.classification).toBe('STALE_OWNER_GONE');
-    // The assessment is a report, and now it is only a report: no field of it is
-    // an argument any removal takes, because there is no removal to take one.
-    // V3 slice 4 added two fields and both are readings — see the containment
-    // case in `tests/v3-04-lease-containment.test.ts`, which pins that the
-    // classification is the same value with and without evidence present.
+    // The assessment is a report, and it stays only a report. V3 slice 5 ships a
+    // removal, so the sentence that used to carry this — "there is no removal to
+    // take one" — is no longer the reason; the reason is now that
+    // `recoverStaleLease` accepts no assessment and makes its own inside the
+    // call that removes. `tests/v3-05-stale-lease-recovery.test.ts` pins that
+    // directly, by changing the world between a caller's assessment and the
+    // recovery and requiring the recovery to refuse.
     expect(Object.keys(assessed).sort()).toEqual([
       'classification',
       'containment',
       'inspection',
       'latestLaunchContained',
+      'staleRecovery',
     ]);
     expect(assessed.containment).toBe('ABSENT');
     expect(assessed.latestLaunchContained).toBe(false);
+    // And the verdict is `SAFE_TO_RECOVER`, which is worth stating here rather
+    // than only in the slice-5 file: this fixture *acquires*, so the lease
+    // carries a complete launch history with no launches in it, and its owner is
+    // gone. A lease that never started a writer has nothing that could have
+    // survived it, so the predicate is satisfied vacuously and correctly.
+    //
+    // The point of this case is what did **not** move: `classification` is
+    // `STALE_OWNER_GONE` either way. The description of what is at the path and
+    // the decision about what may be done with it are two values, and the second
+    // arriving did not change the first.
+    expect(assessed.staleRecovery.verdict).toBe('SAFE_TO_RECOVER');
+    expect(assessed.staleRecovery.launchHistory).toBe('ALL_LAUNCHES_CONTAINED');
   });
 
   it('classifies a running owner as running', async () => {

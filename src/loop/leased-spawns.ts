@@ -79,7 +79,9 @@ import { runAgentCommand, type AgentCommandResult, type AgentRunner } from '../a
 import { isContainmentAttestation } from '../core/containment-attestation.js';
 import type { AgentId } from '../core/states.js';
 import {
+  beginWriterLaunch,
   clearContainmentEvidence,
+  confirmWriterLaunch,
   recordContainmentEvidence,
   verifyExecutionLeaseHeldFor,
   type ContainmentRecordResult,
@@ -135,10 +137,54 @@ function leaseHolds(deps: SpawnAuthority): boolean {
 export function leasedAgent(deps: SpawnAuthority): AgentRunner {
   return async (id, args, cwd, payload) => {
     if (!leaseHolds(deps)) return AGENT_NOT_AUTHORISED;
+    // Announced before it happens, for the reason `beginWriterLaunch` gives: a
+    // record written afterwards cannot describe a launch that was killed, and
+    // that launch is the one a recovery has to know about.
+    const generation = openWriterGeneration(deps, id);
+    if (generation === 'REFUSED') return AGENT_LAUNCH_NOT_RECORDED;
     const result = await (deps.agent ?? runAgentCommand)(id, args, cwd, payload);
-    recordWriterContainment(deps, id, result);
+    recordWriterContainment(deps, id, result, generation);
     return result;
   };
+}
+
+/**
+ * Opens this lease's next writer generation, or refuses the launch.
+ *
+ * Answers a generation number when one is on disk, `null` when there is nothing
+ * to confirm afterwards, and `'REFUSED'` when the launch must not happen.
+ *
+ * ── The one place an enrichment may stop productive work ───────────────────
+ *
+ * Slice 4 settled that a failed containment record must never fail a run, and
+ * that stays true: the *record* is an enrichment. This is not the same thing.
+ * The launch history is the input to a decision that removes somebody's lease,
+ * and the hazard it has is not a missing entry — it is a **stale affirmative
+ * one**. If generations 1..N-1 are on disk as `CONTAINED` and generation N
+ * launches without being written down, that history reads as a complete proof
+ * and is a lie, and a later recovery removes a lease under a writer tree that
+ * may still be running.
+ *
+ * `beginWriterLaunch` has one fallback for that — delete the history, which
+ * asserts nothing — and answers `HISTORY_DISCARDED`, which is `null` here: the
+ * launch proceeds and this lease is simply never recoverable. Only when even
+ * that is impossible does the launch lose.
+ *
+ * Everything that is not one of those two successes refuses, including codes
+ * this function does not name. That default is the point: a code added to
+ * `WRITER_LAUNCH_CODES` without a decision here refuses the launch rather than
+ * being waved through, which is the direction a fail-closed contract has to
+ * fail in.
+ */
+function openWriterGeneration(deps: SpawnAuthority, id: AgentId): number | null | 'REFUSED' {
+  if (id !== CONTAINED_WRITER) return null;
+  const opened = beginWriterLaunch(deps.lease.repository, deps.lease.evidence, {
+    writerId: id,
+    now: deps.containmentNow ?? (() => new Date().toISOString()),
+  });
+  if (opened.code === 'OPENED') return opened.generation;
+  if (opened.code === 'HISTORY_DISCARDED') return null;
+  return 'REFUSED';
 }
 
 /**
@@ -196,6 +242,7 @@ function recordWriterContainment(
   deps: SpawnAuthority,
   id: AgentId,
   result: AgentCommandResult,
+  generation: number | null,
 ): ContainmentRecordResult | null {
   if (id !== CONTAINED_WRITER) return null;
   // The registry gate, not `!== undefined`. A result carrying an explicit
@@ -208,11 +255,28 @@ function recordWriterContainment(
   // launch this build cannot attest must take the previous launch's record with
   // it. See the header.
   if (!isContainmentAttestation(result.containment)) {
+    // The generation opened above is deliberately **left `PENDING`**. That is
+    // not an omission and there is no arm here that closes it: an unattested
+    // launch is exactly the launch a recovery must not step over, and the
+    // pending entry is the only durable trace that it happened. Slice 4's
+    // record is removed for its own reason — it would otherwise keep describing
+    // the launch before this one — and the two are different obligations.
     return clearContainmentEvidence(deps.lease.repository, deps.lease.evidence);
+  }
+  const now = deps.containmentNow ?? (() => new Date().toISOString());
+  if (generation !== null) {
+    // Named back rather than re-derived. `confirmWriterLaunch` refuses a
+    // generation that is not open, so a result discarded here is a generation
+    // that stays unproven — which is the safe direction and needs no handling.
+    confirmWriterLaunch(deps.lease.repository, deps.lease.evidence, result.containment, {
+      generation,
+      writerId: id,
+      now,
+    });
   }
   return recordContainmentEvidence(deps.lease.repository, deps.lease.evidence, result.containment, {
     writerId: id,
-    now: deps.containmentNow ?? (() => new Date().toISOString()),
+    now,
   });
 }
 
@@ -255,6 +319,27 @@ export function leasedVerify(deps: SpawnAuthority): VerificationRunner {
  * stops with `EXECUTION_LEASE_LOST` and no durable trace.
  */
 export const AGENT_NOT_AUTHORISED: AgentCommandResult = Object.freeze({
+  outcome: 'UNAVAILABLE' as const,
+  exitCode: null,
+  signal: null,
+  stdout: '',
+  stderr: '',
+  outputTruncated: false,
+  failureCode: null,
+  errnoCode: null,
+  durationMs: 0,
+});
+
+/**
+ * What the agent seam answers when a writer launch could not be written down.
+ *
+ * The same shape as {@link AGENT_NOT_AUTHORISED} and a **different value**, so a
+ * reader of a transcript can tell the two apart: one says this run is no longer
+ * the repository's writer, the other says it still is and its launch history
+ * could not be kept. `openWriterGeneration` records why the second one stops a
+ * launch at all.
+ */
+export const AGENT_LAUNCH_NOT_RECORDED: AgentCommandResult = Object.freeze({
   outcome: 'UNAVAILABLE' as const,
   exitCode: null,
   signal: null,

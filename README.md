@@ -3229,6 +3229,39 @@ and because the failure mode it describes — a command that cannot start is
   Cosmetic: no safety claim is wrong, and the release outcome sentences answer
   the removal question separately. **Scope:** `cli/render-lease.ts`,
   `cli/release-command.ts`.
+- **L-V3-05-1** — the writer-launch history records the productive writer only.
+  The reviewer and the verification command are contained in fact on Windows —
+  `doctor/exec.ts` routes every spawn through `runOwnedCommand` — and no reading
+  of the history is evidence about them, so `SAFE_TO_RECOVER` means "no *writer*
+  tree can still be running" and not "no process of this run can". Deliberate:
+  the prompt's predicate is about writer launches, slice 4 drew the same
+  boundary, and widening it changes what the record claims rather than how it is
+  read. Left open because it is a real narrowing of the sentence an operator will
+  hear as "nothing survives". **Scope:** `lease/writer-launch-ledger.ts`,
+  `loop/leased-spawns.ts`.
+- **L-V3-05-2** — three members of `WRITER_LAUNCH_CODES` have no in-process
+  trigger: `HISTORY_DISCARDED`, `LAUNCH_MUST_NOT_START` and
+  `LEDGER_WRITE_FAILED` all need the Git administrative directory to refuse a
+  rename or an unlink, which nothing single-threaded can produce. The fail-closed
+  *decision* built on them is pinned — `openWriterGeneration` permits a launch on
+  two codes and refuses on everything else, including codes it does not name — but
+  the codes themselves are unproduced, and a suite that never reaches an arm is
+  not a suite that has checked it. **Scope:**
+  `lease/execution-lease.ts`, `tests/v3-05-stale-lease-recovery.test.ts`.
+- **L-V3-05-3** — the crash-window artefact is still unrecoverable, and always
+  will be under this design. A run that dies between claiming the lease name and
+  writing the record leaves a zero-byte file with no owner and no nonce, so there
+  is nothing for a removal to bind to; `recover` answers `LEASE_UNPARSEABLE` and
+  a human deletes the file. Stated as a permanent limit rather than a follow-up:
+  closing it needs an atomic compare-and-delete on a directory entry, which is
+  the primitive six review rounds established does not exist. **Scope:**
+  `lease/execution-lease.ts`.
+- **L-V3-05-4** — `assessLeaseRecovery` now probes the owner's liveness **twice**
+  per call: once for the inspection and once inside the recovery predicate. That
+  is deliberate — sharing one answer would mean the predicate trusting a liveness
+  result taken by somebody else at some other moment — and it does make one
+  `lease status` two probes. Cosmetic for the CLI; worth knowing for any caller
+  that counts probe invocations. **Scope:** `lease/lease-recovery.ts`.
 
 ### What V1-08 is not
 
@@ -4089,8 +4122,11 @@ agent-loop lease status --repository <abs path>
 ```
 
 Read-only. Reports the state, the owner, the run, the liveness, the revision of
-the exact bytes on disk, and the filesystem object they are in. It prints no
-command to act on any of it, and this build has none.
+the exact bytes on disk, the filesystem object they are in, and — since V3 slice 5
+— whether this build can prove the lease removable, with the missing fact named
+when it cannot. It prints no command line with a fact filled into it: the one
+command that can act on a lease, `lease recover`, takes no such argument, which is
+what keeps a report from becoming an authorisation.
 
 ### The break was withdrawn, brought back, and withdrawn again (V2-07LR-Y)
 
@@ -4156,9 +4192,13 @@ not exist is not repaired by asking harder**, and four consecutive rounds of
 asking harder is the evidence.
 
 So there is no `lease break`, no `--force`, no unattended break, no environment
-variable and no API back door. `status` does not print a manual procedure either:
-a printed procedure is the same destructive operation with the tool's help
-removed. Clearing a dead lease is a decision outside this build.
+variable and no API back door, and `status` does not print a manual procedure
+either: a printed procedure is the same destructive operation with the tool's help
+removed. **None of that was reversed.** V3 slice 5 ships a different operation
+under a different name — see [Safe stale-lease recovery (V3 slice
+5)](#safe-stale-lease-recovery-v3-slice-5) — which refuses the zero-byte artefact
+this section is about, permanently, and removes only a lease it has *just proved*
+dead inside the call that removes it.
 
 **The renderer was not merely a caller of the unsafe operation.** For a
 crash-window record it filled the constant `sha256("")` into a ready-made command
@@ -4170,9 +4210,12 @@ authorisation vacuous and described it as the fact that made it safe. That is wh
 a report here may state what was observed and may not offer a destructive next
 step.
 
-A later recovery is a different design — quarantine-and-report, which never
-unlinks, taking its second confirmation against a quarantine name only that call
-knows — and it is a product decision of its own, not a fifth patch.
+This section predicted the later recovery would be quarantine-and-report, which
+never unlinks. It is not: V3 slice 5 unlinks, and what made that safe was not a
+better protocol but a *new fact* — owned process containment, and a per-launch
+history poisoned before each writer starts, so "no writer of this lease can still
+be running" became provable. The prediction is left here because being wrong about
+the shape while right about the reason is worth being able to read.
 
 ### The acquire fallback is withdrawn, and the lease now needs hard links (V2-07LR-Z)
 
@@ -5569,9 +5612,11 @@ use** and are not to be read as follow-ups.
   `block-runner.ts` installs no signal handling (F-B3), so a console interrupt —
   the ordinary way an operator stops a run — terminates the process without
   unwinding, and the `finally` that returns the lease never runs. The next
-  invocation is refused `STALE_LEASE_RECOVERY_UNSAFE`, and the attended break was
-  shipped twice and withdrawn twice, so clearing it means deleting a file inside
-  `.git` by hand. **Attended:** loud, fail-closed and correct — the refusal
+  invocation is refused `STALE_LEASE_RECOVERY_UNSAFE`. Since V3 slice 5 a lease
+  left this way is recoverable with `agent-loop lease recover` **when its writer
+  launches are all proved contained** — the common case for a run interrupted
+  between spawns, and not the case for one interrupted mid-writer, where the open
+  generation is exactly what refuses. The transcript above predates that command. **Attended:** loud, fail-closed and correct — the refusal
   sentence says exactly this, and `lease status` prints the path, so an operator
   who is present pays one manual step. **Unattended:** a single crash makes the
   repository permanently unrunnable, which no scheduler recovers from.
@@ -6011,12 +6056,174 @@ tree-kill lifecycle, and that lifecycle no longer exists. The supervisor itself
 keeps both of its own suites, including the serial real-process gate in
 `verify`.
 
+## Safe stale-lease recovery (V3 slice 5)
+
+The gap the withdrawn `lease break` left is now closed **for the leases whose
+death can be proved**, and left open — deliberately, permanently — for the one it
+cannot.
+
+Read "The break was withdrawn, brought back, and withdrawn again" above before
+this section. What changed is not that the contract was written more carefully on
+the sixth attempt. It is that V3 slices 1–4 produced a *fact* that did not exist
+in V2, and the fact is what carries the removal.
+
+### The safety predicate, stated exactly
+
+```text
+SAFE_TO_RECOVER
+iff  a lease document is at this repository's lease path
+and  the process it names does not exist
+and  the writer-launch history beside it is complete, bound to this exact lease,
+     about this exact owner and run, and every launch in it is proved contained
+```
+
+Anything else is a refusal, and there is no override: no `--force`, no
+environment variable, no API back door. `unknown => do not recover` is the whole
+of the default arm, and there is no other.
+
+Neither conjunct works alone, which is why both are there. A dead owner proves
+nothing — that is the measurement this repository has been carrying since V2-07L,
+and it has not been repealed. A complete all-contained history beside a *living*
+owner describes a run that is working perfectly. Together they say the one thing a
+removal needs: every writer tree that ever existed under this lease was created
+inside a Job Object coupled to the owner, and the kernel destroys that job when
+the owner dies. Not "probably gone" — gone, because the kernel says so.
+
+### Why slice 4's record could not be the input
+
+Slice 4 records that **one writer launch** was contained, and its own contract
+says so. A run makes several `claude` spawns under one lease; a failed publish
+leaves the previous launch's positive record standing; so does a failed clear.
+So `latestLaunchContained === true` means "the last launch anybody managed to
+write about was contained", which is a strictly weaker sentence than "this lease
+is safe".
+
+The predicate therefore **never reads that record**. A lease can report
+`CONTAINED` and be refused recovery in the same breath, and two cases in
+`tests/v3-05-stale-lease-recovery.test.ts` assert exactly that pairing. Teaching
+the predicate to accept it kills three of those cases.
+
+### The writer-launch ledger: poisoned first, confirmed after
+
+```text
+lease acquired      -> history published, historyComplete: true, no entries
+before each launch  -> generation N appended as PENDING, published
+launch happens      -> only after that publish is known to have landed
+kernel-confirmed    -> generation N replaced by CONTAINED, published
+anything else       -> generation N stays PENDING, for good
+```
+
+The ordering is the safety argument and it only works in one direction: a record
+written after a launch cannot describe a launch that was killed mid-flight, and a
+mark written before it can. `BOUNDARY_LOST`, a refused launch, an unconfirmed
+termination and a killed orchestrator all leave the same visible state — an open
+generation — rather than leaving nothing.
+
+`historyComplete` is what makes a *lost* history safe. A ledger that is missing,
+torn, versioned for another build, or bound to another lease is rebuilt from
+empty with `historyComplete: false`, permanently, because starting a fresh
+*complete* history at generation 1 would hide every launch the lost file
+described. Nothing promotes a `false` back, since nothing can learn what the lost
+file said. It lives in its own file beside the lease and never inside it: the
+lease document is not rewritten at all, for the reason slice 4 already paid for —
+an interrupted rewrite of a lease leaves one with no legible owner, which its own
+holder cannot release and nothing in this build can clear.
+
+The ledger records the **productive writer** and nothing else, exactly as slice
+4's record does. The reviewer and the verification command go through the same
+owned boundary on Windows, so they are contained in fact; they are not recorded,
+so no reading here is evidence about them.
+
+### The one place a failure to record stops productive work
+
+If the pending mark cannot be published, the history on disk is an affirmative
+one that does not mention the launch about to happen — which reads as a complete
+proof and is a lie. There is one fallback: **delete the history**, which asserts
+nothing, and let the launch proceed with this lease permanently unrecoverable.
+Only when even that fails does the launch itself lose, and the agent seam answers
+with its own refusal rather than borrowing the lost-lease one. Every other
+recording failure in this build is an enrichment that may not stop a run; this
+one is not an enrichment, because a stale affirmative history is worse than none.
+
+### Why the removal can be bound, when the break's could not
+
+`break` failed because for the artefact that most needed recovering — the
+zero-byte file a crash leaves between taking the lease name and writing the
+record — every fact that could name one object collapsed at once: no owner pid,
+the constant digest `sha256("")`, and a reused `(dev,ino)`.
+
+`recover` does not stand on any of that:
+
+- **it refuses that artefact.** The predicate requires a lease document it
+  *parsed*, so the object is named by 32 random bytes of `ownerNonce` inside its
+  own record. The crash-window case is reported as `LEASE_UNPARSEABLE` and stays
+  refused. The gap is smaller than it was — a crash *after* the record is written
+  is now recoverable — and it is not closed;
+- **there is no window to carry a fact across.** `break` minted an
+  authorisation, printed it, and acted on what an operator typed back. Here the
+  predicate is evaluated inside the call that removes; `recoverStaleLease` takes
+  a repository and nothing else, so there is no argument position a stale verdict
+  could arrive through;
+- **and the removal binds to the object.** It goes through
+  `removeVerifiedLease`, which detaches into a private name and decides on that
+  object, and the predicate requires the exact bytes the assessment read. A lease
+  that changed hands in the window cannot match, so it is put back and the call
+  answers `LEASE_CHANGED`. Replacing that predicate with `() => true` fails a
+  case that swaps the lease from inside the liveness probe.
+
+### `agent-loop lease recover`
+
+```powershell
+agent-loop lease recover --repository <abs path>
+```
+
+Removes a stale lease and nothing else. It grants no authority — `containment !=
+authority` — so the next run takes its own lease through the ordinary exclusive
+create, and lease fencing remains the writer authority exactly as before. It
+acquires nothing, restarts nothing and retries nothing.
+
+`lease status` reports the verdict beside the state, and prints no command line
+with a fact filled into it: `recover` has no argument to fill in, which is what
+stops a report from becoming an authorisation.
+
+### What it is measured by
+
+`tests/v3-05-stale-lease-recovery.test.ts` covers the format, the lifecycle, the
+seam and the predicate, and four mutants were run against it rather than
+described: removing the pending mark (19 cases red), treating slice 4's record as
+sufficient (3), unbinding the removal (1), and reading an unreadable history as
+contained (3).
+
+Every "dead owner" in that file is a substituted probe, so
+`npm run test:dist-stale-recovery` measures the rest against the shipped
+artefact with a real one: a separate OS process acquires the lease and exits
+still holding it, and the real `osProcessLiveness` is what sees it go. Its
+load-bearing case is the **negative control** — an owner kept alive must be
+refused with `OWNER_RUNNING` — because without it every recovery above could be
+an instrument that cannot tell a living process from a dead one. Disabling the
+liveness gate in the built artefact fails that check four ways per run, measured.
+
+### What this slice deliberately did not do
+
+No unattended retry loop, no automatic restart of anything, no change to the task
+state machine, no POSIX containment, and no product-side PR/CI/merge automation.
+`READY_FOR_PR` is still terminal and `maxReviewRounds` is still not resettable: a
+recovery is not a review round and does not touch that budget. Acquisition does
+**not** recover automatically — that stays an operator decision, taken by running
+one command.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
-POSIX; containment evidence in the lease and the recovery contract; and any
-product-side PR/CI/merge automation. `READY_FOR_PR` remains terminal — the
-orchestrator hands a finished task to a human and stops there.
+POSIX; and any product-side PR/CI/merge automation. `READY_FOR_PR` remains
+terminal — the orchestrator hands a finished task to a human and stops there.
+
+Containment evidence in the lease and the recovery contract are **no longer** on
+that list: V3 slice 4 delivered the per-launch record and V3 slice 5 the writer-
+launch history and the proof-gated removal built on it — see [Safe stale-lease
+recovery (V3 slice 5)](#safe-stale-lease-recovery-v3-slice-5). Recovery is an
+**operator command**, not an automatic step: nothing acquires a lease it recovered
+and no acquisition path recovers one.
 
 Owned process containment in the productive runner is **no longer** on that
 list on Windows: V3 slice 3 delivered it — see "The productive Windows runner
@@ -6077,12 +6284,19 @@ stale lease is refused because a dead owner does not prove that no agent process
 survived it, and that stays true until the orchestrator creates the containment
 itself — a Windows Job Object, a supervised POSIX process group.
 
-Recovering a dead lease does not change that and was never a step towards it: the
-judgement it depends on ("nothing of that run is still alive") is one a scheduled
-job cannot make, which is why every attempt at it was attended. With the break
-withdrawn a second time, the crash window is **open again and stated as open** —
-a repository whose run died between claiming the lease and recording it needs a
-human to clear the file, and this build will not do it or tell them how.
+Recovering a dead lease used to be described here as never a step towards it,
+because the judgement it depends on ("nothing of that run is still alive") was one
+no job could make. **Owned containment is what changed that**, and V3 slice 5 is
+the step: the judgement is now a proof rather than an opinion, which is precisely
+why it can be written down and checked. What has *not* changed is that recovery is
+still an operator command; nothing runs it on a schedule, and unattended operation
+needs its own decision.
+
+The crash window is **narrower and still open, and stated as open**: a repository
+whose run died *between claiming the lease name and writing the record* leaves a
+zero-byte artefact with no owner and no identity, and this build refuses it as
+`LEASE_UNPARSEABLE` rather than guessing. Clearing that one still needs a human to
+delete a file inside `.git`.
 
 Inventing a cross-platform atomic file compare-and-swap inside V2-07 was the
 alternative, and it would have burst the slice for a guarantee the lease has to

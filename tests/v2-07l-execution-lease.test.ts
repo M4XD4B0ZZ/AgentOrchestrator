@@ -1092,31 +1092,52 @@ describe('the owner-only release stays owner-only, and nothing beside it removes
       root: '',
       id: 'absent',
     } as never);
-    // The exact key set, and V3 slice 4 added two of them. Both are *readings*:
-    // `containment` says what the lease's evidence turned out to be and
-    // `latestLaunchContained` whether that reading is the reliable one. Neither is a
-    // permission, and the pin stays exact so that a third field arriving here
-    // has to be justified rather than absorbed.
+    // The exact key set. V3 slice 4 added two readings — `containment` and
+    // `latestLaunchContained` — and V3 slice 5 added a third field that is not a
+    // reading at all: `staleRecovery` carries a verdict. The pin stays exact so
+    // that a fourth has to be justified rather than absorbed.
     expect(Object.keys(assessment).sort()).toEqual([
       'classification',
       'containment',
       'inspection',
       'latestLaunchContained',
+      'staleRecovery',
     ]);
     // And the shape a removal would need is still absent: nothing here names a
     // lease to act on, and no value is a licence to act on one.
     expect(assessment.latestLaunchContained).toBe(false);
+    // `staleRecovery` is the field that could most easily become one, so it is
+    // pinned by what consumes it rather than by what it says. `recoverStaleLease`
+    // declares exactly one required parameter — the repository — so there is no
+    // argument position an assessment could be passed in through, and it makes
+    // its own inside the call that removes. A second required parameter arriving
+    // here is a verdict travelling from a reader to a destructive step, which is
+    // the defect the withdrawn break was built out of.
+    const lease5 = await import('../src/lease/execution-lease.js');
+    expect(lease5.recoverStaleLease.length).toBe(1);
   });
 
-  it('registers the read-only subcommand and nothing else', async () => {
+  it('registers the read-only subcommand and the proof-gated one, and nothing else', async () => {
     const { buildProgram } = await import('../src/cli/index.js');
     const lease = buildProgram()
       .commands.find((command) => command.name() === 'lease');
 
     expect(lease).toBeDefined();
-    // One subcommand. A `break` reappearing here is the single cheapest signal
-    // that the withdrawal has been undone.
-    expect(lease?.commands.map((command) => command.name()).sort()).toEqual(['status']);
+    // Two subcommands. A `break` reappearing here is still the single cheapest
+    // signal that the withdrawal has been undone — and `recover` is not it: it
+    // refuses the artefact `break` existed for, takes no revision, no object id
+    // and no force, and proves its own predicate inside the call that removes.
+    expect(lease?.commands.map((command) => command.name()).sort()).toEqual([
+      'recover',
+      'status',
+    ]);
+    // Stated as its own assertion rather than left to the list above, because
+    // this is the property the list is a proxy for.
+    expect(lease?.commands.map((command) => command.name())).not.toContain('break');
+    const recover = lease?.commands.find((command) => command.name() === 'recover');
+    expect(
+      recover?.options.map((option) => option.long).sort(),
+    ).toEqual(['--repository']);
   });
 
   it('names no command in the shipped source that does not exist', async () => {

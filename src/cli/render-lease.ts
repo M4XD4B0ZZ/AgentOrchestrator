@@ -21,7 +21,13 @@
  * are prose and are not held to it.
  */
 
-import type { LeaseAcquireFailureCode, LeaseInspection } from '../lease/execution-lease.js';
+import type {
+  LeaseAcquireFailureCode,
+  LeaseInspection,
+  StaleLeaseRecoveryAssessment,
+  StaleLeaseRecoveryResult,
+  StaleRecoveryRefusal,
+} from '../lease/execution-lease.js';
 import { SUPPORTED_NODE_MAJORS } from '../platform/runtime-support.js';
 import { line } from './render-attended-run.js';
 
@@ -45,10 +51,11 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
       'A lease is present and this build cannot prove it is safe to take: its owner process\n' +
       '  is not observably running, or the record cannot be read. It is deliberately not\n' +
       '  taken over - a dead owner does not prove that no agent process survived it. Run\n' +
-      '  `agent-loop lease status` to see what is there. This build has no command that\n' +
-      '  removes it: an attended break was shipped twice and withdrawn twice, because for a\n' +
-      '  record left by a crash there is no fact an operator can be shown that still names\n' +
-      '  the same object once the removal runs. Clearing it is a decision outside this tool.',
+      '  `agent-loop lease status` to see what is there, including whether the lease can be\n' +
+      '  proved removable. If it can, `agent-loop lease recover` removes it and nothing else;\n' +
+      '  the next run then takes its own lease normally. If it cannot, that command refuses\n' +
+      '  and says which fact is missing. There is no way to override the refusal: a lease this\n' +
+      '  build cannot prove dead is cleared by a human decision outside this tool.',
     LEASE_LOCATION_UNSUITABLE:
       // Covers two cases it actually serves, not one: a key from which no
       // location could be derived at all, and a path shape this build
@@ -145,6 +152,131 @@ export const LEASE_LIVENESS_SENTENCES: Readonly<Record<LeaseInspection['liveness
     UNDETERMINED: 'whether the owner exists could not be established.',
     UNKNOWABLE: 'no owner is recorded, so nothing can be said about one.',
   });
+
+/**
+ * One static sentence per recovery refusal. Closed, and total by type.
+ *
+ * Every one of them says the same two things in different words: what is
+ * missing, and that nothing was touched. None of them offers a way round
+ * itself, because there is none — the predicate has no override and this
+ * vocabulary must not imply one.
+ */
+export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, string>> =
+  Object.freeze({
+    NOTHING_TO_RECOVER: 'Nothing is at the lease path. There is no lease to remove.',
+    OWNER_RUNNING:
+      'A process with the recorded owner id exists. Nothing is removed while an owner may\n' +
+      '  still be running. Wait for it, and do not stop it on the strength of this: process\n' +
+      '  ids are reused, so the process running now need not be the owner.',
+    OWNER_LIVENESS_UNDETERMINED:
+      'Whether the owner process exists could not be established. An unknown answer is not a\n' +
+      '  dead owner, so nothing is removed.',
+    LEASE_UNPARSEABLE:
+      'Something is at the lease path and is not a lease this build can read - this is what a\n' +
+      '  run that died between claiming the lease and recording it leaves behind. It names no\n' +
+      '  owner and carries no identity, so there is nothing a removal could be bound to and\n' +
+      '  no history to prove anything with. This case is refused permanently, not pending.',
+    LEASE_UNREADABLE:
+      'Something is at the lease path and could not be read at all. Nothing was touched.',
+    LOCATION_UNSUITABLE:
+      "This repository's Git common directory has no usable lease location, so there is no\n" +
+      '  lease path to examine.',
+    LOCATION_NETWORK_UNSUPPORTED:
+      "This repository's Git common directory is on a UNC or network path, which V2 does not\n" +
+      '  support.',
+    LOCATION_DEVICE_NAMESPACE:
+      "This repository's Git common directory is in the Windows device namespace, which is not\n" +
+      '  a place a lease can be kept.',
+    LAUNCH_HISTORY_ABSENT:
+      'This lease keeps no writer launch history, so nothing can be proved about the agent\n' +
+      '  processes it started. Every lease taken by a build older than this one is in this\n' +
+      '  state, and no such lease becomes recoverable in hindsight.',
+    LAUNCH_HISTORY_INCOMPLETE:
+      'This lease has a writer launch history that did not begin with the lease itself, so it\n' +
+      '  can be missing launches. It is a log and not a proof, and it never becomes one.',
+    LAUNCH_HISTORY_UNPROVEN:
+      'At least one writer launch under this lease was announced and never proved contained.\n' +
+      '  That is what a run killed while its agent was working leaves behind, and it is\n' +
+      '  exactly the case where an agent process may have survived the owner. Nothing is\n' +
+      '  removed.',
+    LAUNCH_HISTORY_UNSUPPORTED_VERSION:
+      'The writer launch history beside this lease was written by a build this one does not\n' +
+      '  understand. It is refused rather than guessed at.',
+    LAUNCH_HISTORY_MALFORMED:
+      'The writer launch history beside this lease is not one this build can read. A history\n' +
+      '  that cannot be read is not a history that says nothing happened.',
+    LAUNCH_HISTORY_NOT_THIS_LEASE:
+      'The writer launch history beside this lease belongs to a different lease. It proves\n' +
+      '  nothing about this one.',
+    LAUNCH_HISTORY_NOT_THIS_RUN:
+      'The writer launch history beside this lease describes a different run or a different\n' +
+      '  owner than the lease does. It proves nothing about this one.',
+  });
+
+/**
+ * The removability block, printed under the `lease status` report.
+ *
+ * Its own function rather than two more lines inside {@link renderLeaseStatus},
+ * and the reason is the one that renderer's own docstring gives at length: a
+ * report may state what was observed and may not offer a destructive next step.
+ * Keeping the observation and the removability answer in separate blocks, from
+ * separate inputs, is what stops the second quietly becoming a field of the
+ * first — which is what `breakable` was.
+ *
+ * It names the command in the safe case, and that is a deliberate departure from
+ * the withdrawn renderer, which filled a **constant digest** into a ready-made
+ * `lease break` line and called the result an identity. There is no argument to
+ * fill in here: `lease recover` takes a repository and proves everything else
+ * for itself at the moment it runs, so this sentence cannot make a stale fact
+ * look like an authorisation.
+ */
+export function renderLeaseRecovery(assessment: StaleLeaseRecoveryAssessment): string {
+  const lines =
+    assessment.refusal === null
+      ? [
+          line('Recovery', 'SAFE_TO_RECOVER'),
+          '  Every writer launch under this lease is proved contained and its owner process is\n' +
+            '  gone, so no agent process it started can still be running. `agent-loop lease\n' +
+            '  recover` removes it. That removes a dead record and grants nothing: the next run\n' +
+            '  takes its own lease through the ordinary path.',
+        ]
+      : [
+          line('Recovery', assessment.refusal),
+          `  ${STALE_RECOVERY_SENTENCES[assessment.refusal]}`,
+        ];
+  return `${lines.join('\n')}\n\n`;
+}
+
+/** One static sentence per outcome of `lease recover`. Closed, and total by type. */
+export const STALE_RECOVERY_OUTCOMES: Readonly<Record<StaleLeaseRecoveryResult['code'], string>> =
+  Object.freeze({
+    RECOVERED:
+      'The stale lease was removed. Nothing holds this repository now, and nothing was\n' +
+      '  granted: the next invocation takes its own lease through the ordinary path.',
+    RECOVERY_UNSAFE: 'Nothing was touched. The reason line says which fact is missing.',
+    LEASE_CHANGED:
+      'The lease at the path was not the one that was proved removable, so nothing of it was\n' +
+      '  removed. Somebody released it, removed it, or acquired a new one in the meantime.\n' +
+      '  Run `agent-loop lease status` again: this is usually a repository that has a live\n' +
+      '  owner once more, which is what the recovery was for.',
+    RECOVERY_FAILED:
+      'The removal could not be completed. The reason line names the end state. Run\n' +
+      '  `agent-loop lease status` before anything else runs against this repository.',
+  });
+
+/** The `lease recover` report. */
+export function renderLeaseRecoveryResult(result: StaleLeaseRecoveryResult): string {
+  const reason = result.refusal ?? result.detail;
+  const lines = [
+    '',
+    line('Recovery', result.code),
+    `  ${STALE_RECOVERY_OUTCOMES[result.code]}`,
+    line('Reason', reason ?? 'none'),
+    ...(result.refusal === null ? [] : [`  ${STALE_RECOVERY_SENTENCES[result.refusal]}`]),
+    line('Path', result.assessment.path === '' ? 'no usable location' : result.assessment.path),
+  ];
+  return `${lines.join('\n')}\n\n`;
+}
 
 /**
  * The `Path` field's text, decided from the STATE rather than from `path`
