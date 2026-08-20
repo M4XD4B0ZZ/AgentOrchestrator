@@ -59,6 +59,10 @@
  */
 
 import {
+  isReliableContainment,
+  type ContainmentReading,
+} from './containment-evidence.js';
+import {
   inspectRepositoryExecutionLease,
   snapshotRepositoryRecord,
   type LeaseInspection,
@@ -137,6 +141,27 @@ export type LeaseRecoveryClassification = (typeof LEASE_RECOVERY_CLASSIFICATIONS
 export interface LeaseRecoveryAssessment {
   readonly classification: LeaseRecoveryClassification;
   readonly inspection: LeaseInspection;
+  /**
+   * Whether this lease carries a reliable containment proof.
+   *
+   * Reported beside the classification and deliberately **not** an input to it.
+   * {@link classifyForRecovery} does not read this field, and a test pins that
+   * every classification is the same value with and without evidence present:
+   * this slice teaches the assessment to *see* containment and nothing more.
+   *
+   * The reason for the separation is the one `execution-lease.ts` records at
+   * length. A dead owner does not prove no writer survives it, and containment
+   * is what could change that — but changing it is a decision about removing
+   * somebody else's lease, which is a product-contract change and needs its own
+   * slice. Wiring the field into the answer here would make that decision by
+   * accident, which is exactly how `--permission-mode` was decided in V1.
+   *
+   * `false` for every lease with no reliable reading, including one with none at
+   * all: absence of a proof, never a proof of absence.
+   */
+  readonly containmentProven: boolean;
+  /** The reading itself, for a report. `null` when no document was parsed. */
+  readonly containment: ContainmentReading | null;
 }
 
 /**
@@ -167,6 +192,12 @@ export function assessLeaseRecovery(
   return Object.freeze({
     classification: classifyForRecovery(inspection),
     inspection,
+    // Read from the inspection, and read *here* rather than inside
+    // `classifyForRecovery`, so that the classifier has no access to it at all.
+    // A field a function cannot see is a field it cannot start depending on.
+    containmentProven:
+      inspection.containment !== null && isReliableContainment(inspection.containment),
+    containment: inspection.containment,
   });
 }
 

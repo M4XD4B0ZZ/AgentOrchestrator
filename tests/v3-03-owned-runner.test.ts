@@ -137,6 +137,10 @@ function fullEnv(): NodeJS.ProcessEnv {
  */
 function ownedResult(over: Partial<OwnedCommandResult> = {}): OwnedCommandResult {
   return Object.freeze({
+    // A hand-built result carries no attestation and cannot: the artefact is
+    // opaque and only the boundary's own mint produces one. That is the point —
+    // a fabricated `OwnedCommandResult` must not be able to reach the lease.
+    containment: null,
     display: 'x',
     file: 'x',
     args: [],

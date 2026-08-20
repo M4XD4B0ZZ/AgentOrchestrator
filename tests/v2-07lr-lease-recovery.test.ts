@@ -560,7 +560,17 @@ describe('classification says what is there and authorises nothing', () => {
     expect(assessed.classification).toBe('STALE_OWNER_GONE');
     // The assessment is a report, and now it is only a report: no field of it is
     // an argument any removal takes, because there is no removal to take one.
-    expect(Object.keys(assessed).sort()).toEqual(['classification', 'inspection']);
+    // V3 slice 4 added two fields and both are readings — see the containment
+    // case in `tests/v3-04-lease-containment.test.ts`, which pins that the
+    // classification is the same value with and without evidence present.
+    expect(Object.keys(assessed).sort()).toEqual([
+      'classification',
+      'containment',
+      'containmentProven',
+      'inspection',
+    ]);
+    expect(assessed.containment).toBe('ABSENT');
+    expect(assessed.containmentProven).toBe(false);
   });
 
   it('classifies a running owner as running', async () => {
