@@ -59,6 +59,10 @@
  */
 
 import {
+  isReliableContainment,
+  type ContainmentReading,
+} from './containment-evidence.js';
+import {
   inspectRepositoryExecutionLease,
   snapshotRepositoryRecord,
   type LeaseInspection,
@@ -137,6 +141,42 @@ export type LeaseRecoveryClassification = (typeof LEASE_RECOVERY_CLASSIFICATIONS
 export interface LeaseRecoveryAssessment {
   readonly classification: LeaseRecoveryClassification;
   readonly inspection: LeaseInspection;
+  /**
+   * Whether the **most recent recorded launch** under this lease was contained.
+   *
+   * Named for exactly what is checked, which took two corrections to get right.
+   * It was `containmentProven` — a property of the lease, which this record
+   * cannot claim — and then `latestWriterContained`, which was still one notch
+   * strong: this read path passes no {@link ContainmentExpectation}, so the
+   * record's `writerId` is *recorded and bound but not judged here*, and a
+   * record naming some other agent would have satisfied a field with `Writer` in
+   * its name. Production cannot produce one (`loop/leased-spawns.ts` records for
+   * the writer and nothing else), and a field's name is a contract regardless of
+   * who can reach it.
+   *
+   * The record describes one launch; `lease/containment-evidence.ts` sets out
+   * what that does and does not license, and why an earlier launch under the
+   * same lease may have been uncontained even when this is `true`.
+   *
+   * Reported beside the classification and deliberately **not** an input to it.
+   * {@link classifyForRecovery} takes two fields of the inspection and cannot
+   * see this one, and a test pins that every classification is the same value
+   * with and without a record present: this slice teaches the assessment to
+   * *see* containment and nothing more.
+   *
+   * The reason for the separation is the one `execution-lease.ts` records at
+   * length. A dead owner does not prove no writer survives it, and containment
+   * is what could change that — but changing it is a decision about removing
+   * somebody else's lease, which is a product-contract change and needs its own
+   * slice. Wiring the field into the answer here would make that decision by
+   * accident, which is exactly how `--permission-mode` was decided in V1.
+   *
+   * `false` for every lease with no reliable reading, including one with none at
+   * all: absence of a proof, never a proof of absence.
+   */
+  readonly latestLaunchContained: boolean;
+  /** The reading itself, for a report. `null` when no document was parsed. */
+  readonly containment: ContainmentReading | null;
 }
 
 /**
@@ -167,6 +207,14 @@ export function assessLeaseRecovery(
   return Object.freeze({
     classification: classifyForRecovery(inspection),
     inspection,
+    // Read from the inspection here, and never handed to the classifier — see
+    // the argument it takes, which is two fields rather than the whole
+    // inspection. A field a function cannot see is a field it cannot start
+    // depending on, and an earlier version of this comment claimed that while
+    // passing the classifier the entire `LeaseInspection`, containment included.
+    latestLaunchContained:
+      inspection.containment !== null && isReliableContainment(inspection.containment),
+    containment: inspection.containment,
   });
 }
 
@@ -178,7 +226,9 @@ export function assessLeaseRecovery(
  * it. This classifies a lease inspection and shares nothing with that chain, so
  * it says so instead of joining a list of exceptions.
  */
-function classifyForRecovery(inspection: LeaseInspection): LeaseRecoveryClassification {
+function classifyForRecovery(
+  inspection: Pick<LeaseInspection, 'state' | 'liveness'>,
+): LeaseRecoveryClassification {
   switch (inspection.state) {
     case 'FREE':
       return 'NOTHING_TO_RECOVER';

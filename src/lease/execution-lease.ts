@@ -131,6 +131,7 @@ import {
   closeSync,
   fsyncSync,
   linkSync,
+  lstatSync,
   openSync,
   readFileSync,
   realpathSync,
@@ -142,6 +143,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
+import { containmentFactsOf } from '../core/containment-attestation.js';
 import { comparePathIdentity } from '../core/path-identity.js';
 import {
   ExecutionLeaseProof,
@@ -152,6 +154,13 @@ import {
   type ExecutionLeaseEvidence,
 } from '../core/execution-lease-evidence.js';
 import { safeErrnoCode } from '../core/safe-error.js';
+import {
+  containmentBinding,
+  CONTAINMENT_EVIDENCE_VERSION,
+  readContainmentEvidence,
+  type ContainmentEvidencePayload,
+  type ContainmentReading,
+} from './containment-evidence.js';
 import {
   EXECUTION_LEASE_SCHEMA_VERSION,
   safeParseExecutionLease,
@@ -569,6 +578,25 @@ export interface LeaseInspection {
    * object the removal detaches.
    */
   readonly objectId: string | null;
+  /**
+   * What this lease's containment evidence turned out to be, or `null` when
+   * there was no lease document to read one from.
+   *
+   * `null` and `'ABSENT'` are two different facts and are kept apart on purpose:
+   * `null` means *no document was parsed*, which is every state but `HELD`, and
+   * `'ABSENT'` means a lease was read and carries no containment record — a
+   * legacy lease, or one whose writer never went behind the boundary.
+   *
+   * **Reported, never acted on.** Nothing in this build removes, takes over or
+   * shortens the life of any lease because of what this says, and
+   * `lease-recovery.ts` carries the same value with its classification
+   * deliberately untouched. It exists so the slice that does implement recovery
+   * has a measured input rather than an assumption — see
+   * `lease/containment-evidence.ts` for why containment is lifetime evidence and
+   * not writer authority, and for why a `CONTAINED` reading is a statement about
+   * one writer **launch** rather than about this lease.
+   */
+  readonly containment: ContainmentReading | null;
 }
 
 /** The states that mean "there is no lease path", as opposed to what is at one. */
@@ -679,6 +707,18 @@ export function inspectRepositoryExecutionLease(
     liveness: owner === null ? 'UNKNOWABLE' : probe(owner),
     // Reporting it is never authority; the re-check on the detached object is.
     objectId: object.id,
+    // Only for a lease this build parsed. A containment reading is a statement
+    // *about a lease*, and there is no lease here to make one about — `null` and
+    // `'ABSENT'` are two different facts and collapsing them would claim a
+    // document was read and carried nothing.
+    //
+    // The companion record is read after the lease and not before: an inspection
+    // that found no lease must not go looking for a record beside it, and one
+    // that did should describe the record as it was when the lease was read.
+    containment:
+      read.document === null
+        ? null
+        : readContainmentEvidence({ ...read.document, containment: readContainmentRecord(location) }),
   });
 }
 
@@ -691,6 +731,9 @@ function inspection(from: Partial<LeaseInspection> & { readonly state: LeaseStat
     acquiredAt: null,
     liveness: 'UNKNOWABLE' as const,
     objectId: null,
+    // No document, no reading. Every state but `HELD` lands here, and the
+    // default is the one that claims nothing.
+    containment: null,
     ...from,
   });
 }
@@ -1820,6 +1863,526 @@ export function verifyExecutionLeaseHeldFor(
 export interface ExecutionLeaseAuthority {
   readonly repository: LeaseRepository;
   readonly evidence: ExecutionLeaseEvidence;
+}
+
+/* ─────────────────────── recording containment evidence ─────────────────── */
+
+/**
+ * The companion record's file name. A plain name, never derived, and never the
+ * lease's own — see `lease/containment-evidence.ts` for why the record sits
+ * beside the lease rather than inside it.
+ */
+export const CONTAINMENT_EVIDENCE_FILE_NAME = 'agent-orchestrator-execution-lease.containment.json';
+
+/** Largest companion record this build will read back. */
+const MAX_CONTAINMENT_EVIDENCE_BYTES = 16_384;
+
+/**
+ * What became of an attempt to record or remove containment evidence. A closed
+ * set of fourteen, of which three are successes and each names which one.
+ *
+ * The count was "thirteen" the moment the fourteenth member was added, which is
+ * the defect `VerifiedRemoval` records forty lines up in this same file: a
+ * number describing the code, sitting beside the code, with nothing keeping the
+ * two in step. The array below is the authority; if these disagree again, it is
+ * right and this sentence is wrong.
+ *
+ * `RECORDED`, `CLEARED` and `NOTHING_TO_CLEAR` are three values rather than one
+ * because a caller testing `code === 'RECORDED'` must not read a *removal* as a
+ * publish. The removal used to answer `RECORDED` with `detail: 'CLEARED'`, which
+ * put the difference in a field nothing is obliged to look at and made the
+ * member's own sentence — "the record is beside the lease" — false for half the
+ * calls that produced it.
+ */
+export const CONTAINMENT_RECORD_CODES = [
+  /** The record is beside the lease, and this build read it back as reliable. */
+  'RECORDED',
+  /** A record was there and is gone. */
+  'CLEARED',
+  /** There was no record to remove, which is the state the caller asked for. */
+  'NOTHING_TO_CLEAR',
+  /** The lease artefact was not minted evidence. Nothing was opened. */
+  'EVIDENCE_INVALID',
+  /** The containment artefact was not minted. Nothing was written. */
+  'ATTESTATION_INVALID',
+  /** The evidence names a different repository's lease than the record does. */
+  'LEASE_FOR_ANOTHER_REPOSITORY',
+  /** No lease path can be derived, or nothing is at the one derived. */
+  'LEASE_ABSENT',
+  /** Something is at the lease path and could not be read. */
+  'LEASE_UNREADABLE',
+  /** What is there is not this holder's lease — or is not a lease at all. */
+  'NOT_OWNER',
+  /** The lease names no run, so there is nothing to bind the evidence to. */
+  'RUN_NOT_IDENTIFIED',
+  /** The containment was coupled to a process other than the lease's owner. */
+  'OWNER_MISMATCH',
+  /** The record this build built is one this build would not accept back. */
+  'RECORD_NOT_READABLE_BACK',
+  /**
+   * The record could not be published. Nothing this call built reached a file.
+   *
+   * That is **not** the same as "there is no record", and the first version of
+   * this sentence said it was. A run makes several writer launches under one
+   * lease, so a failed publish leaves whatever the *previous* launch left —
+   * measured: a `RECORDED` launch followed by a `RECORD_WRITE_FAILED` one still
+   * reads `CONTAINED`, describing the older launch. It is conservative only for
+   * the first launch under a lease.
+   */
+  'RECORD_WRITE_FAILED',
+  /**
+   * The record could not be **removed**, and is therefore still on disk.
+   *
+   * Its own code because it says which operation failed, and a caller that has
+   * to decide what to do about the file on disk needs that. It does **not** mean
+   * the two codes point in opposite safety directions — a draft of this comment
+   * claimed exactly that and it was measured false. Both failures can leave the
+   * previous launch's record standing; see {@link RECORD_WRITE_FAILED}. What
+   * separates them is what the caller was *trying* to do, and therefore what it
+   * can try next.
+   *
+   * Nothing in this build consumes it, because nothing in this build reads the
+   * record. The slice that does must.
+   */
+  'RECORD_CLEAR_FAILED',
+] as const;
+
+export type ContainmentRecordCode = (typeof CONTAINMENT_RECORD_CODES)[number];
+
+export interface ContainmentRecordResult {
+  readonly code: ContainmentRecordCode;
+  /** An errno token or a short reason, never free text from anywhere else. */
+  readonly detail: string | null;
+}
+
+export interface ContainmentRecordRequest {
+  /** Which agent was contained. The productive writer is `claude`. */
+  readonly writerId: string;
+  /** The clock, read once for the durable record. */
+  readonly now: () => string;
+}
+
+function recordFailure(
+  code: ContainmentRecordCode,
+  detail: string | null = null,
+): ContainmentRecordResult {
+  return Object.freeze({ code, detail });
+}
+
+/** The companion record's path for a lease location. One derivation, one place. */
+function containmentPathFor(location: LeaseLocation): string {
+  return join(location.key, CONTAINMENT_EVIDENCE_FILE_NAME);
+}
+
+/**
+ * Records, beside this repository's lease, that its writer was started behind
+ * the owned process boundary.
+ *
+ * ── What may produce evidence, and what may not ────────────────────────────
+ *
+ * Two artefacts and no shortcut. The caller must hold **minted lease evidence**,
+ * which is what proves it is the lease's owner rather than a process that
+ * happens to know the path, and a **minted containment attestation**, which can
+ * only exist for a launch whose job membership the kernel confirmed. Neither is
+ * constructible outside its mint — `core/internal/execution-lease-evidence.ts`
+ * and `core/internal/containment-attestation.ts` record why a structural type is
+ * not enough and what was forged against the earlier attempt. A boundary that
+ * was refused, lost, or never established produces no attestation at all, so
+ * there is no arm here that has to detect one: the argument this function cannot
+ * be given is the one it cannot mis-handle.
+ *
+ * ── The lease itself is never written, and that is the whole shape ─────────
+ *
+ * Learned the hard way, in review. The first version wrote the record *into* the
+ * lease document through a single open handle, so that the ownership check and
+ * the write shared one file object and could not be raced onto a successor's
+ * lease. The binding was sound; the effect was not. An in-place rewrite of a
+ * JSON document is not atomic, the record is written once per **writer launch**
+ * rather than once per lease — so later records replace earlier ones and are
+ * routinely shorter, which was measured — and an interrupted rewrite leaves a
+ * lease with no legible owner, which its own holder cannot release, which
+ * refuses every future acquisition as `STALE_LEASE_RECOVERY_UNSAFE`, and which
+ * nothing in this build can clear. A feature whose purpose is to make a killed
+ * orchestrator recoverable must not add a window, once per spawn, in which being
+ * killed makes the repository permanently unrunnable.
+ *
+ * So the lease is **read** here and never written. The record is staged and
+ * published by rename onto its own name, which is not the lease's name and is
+ * authority for nothing.
+ *
+ * ── The window that is left, stated because it is real ─────────────────────
+ *
+ * The ownership check reads the **lease** and the effect writes a **different**
+ * file, so the one-file-object argument the withdrawn design rested on does not
+ * apply here and nothing replaced it. An adversarial review reproduced the
+ * consequence: a process whose lease is released and re-taken *between* its
+ * check and its rename publishes anyway, destroying the new holder's genuine
+ * record and being told `RECORDED`.
+ *
+ * Two things are done about it and neither is a claim that it is closed. The
+ * ownership check is re-taken immediately before the rename, so the window is
+ * one syscall rather than a staged write and an `fsync`; and it is written down
+ * here. What makes the residue tolerable is its **direction**: the loser is the
+ * new holder's *evidence*, never its lease and never its authority, and the next
+ * writer launch under that lease publishes again. A record that is replaced,
+ * removed, or left behind by an earlier lease reads as no reliable proof —
+ * which is what a missing one reads as.
+ *
+ * `RECORDED` therefore means "this build built a reliable record and the rename
+ * reported success", not "that record is the one on disk now". Nothing in this
+ * build reads it as the stronger claim.
+ *
+ * Never throws. A failure to record is not a failure of the run: the caller keeps
+ * its lease and its result, and the repository simply carries no containment
+ * proof for that writer.
+ */
+export function recordContainmentEvidence(
+  given: LeaseRepository,
+  evidence: unknown,
+  attestation: unknown,
+  request: ContainmentRecordRequest,
+): ContainmentRecordResult {
+  if (!isExecutionLeaseEvidence(evidence)) return recordFailure('EVIDENCE_INVALID');
+
+  const facts = containmentFactsOf(attestation);
+  if (facts === null) return recordFailure('ATTESTATION_INVALID');
+
+  // One reading of the record, for the gate and the effect alike (LF-2).
+  const repository = snapshotRepositoryRecord(given);
+  const location = deriveExecutionLeaseLocation(repository);
+  const claimedPath = leasePathOrNull(evidence);
+  if (
+    claimedPath === null ||
+    !location.ok ||
+    comparePathIdentity(claimedPath, location.path) !== 'EQUAL'
+  ) {
+    return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
+  }
+
+  // Through the same reader every other consumer uses, so one file cannot mean
+  // two things. It applies the size cap, the JSON parse, the schema and the
+  // `leaseKey` binding — the last of which is what refuses a lease document
+  // copied here out of another clone.
+  const read = readLeaseFile(location.path, location.key);
+  if (read.state === 'FREE') return recordFailure('LEASE_ABSENT');
+  if (read.state === 'UNREADABLE') return recordFailure('LEASE_UNREADABLE');
+  if (read.document === null) return recordFailure('NOT_OWNER', 'UNPARSEABLE');
+  const document = read.document;
+
+  // The record being written against must be the one the lease was taken for,
+  // for the reason `verifyExecutionLeaseHeldFor` gives: a mixed record pairs one
+  // repository's key with another's root, and every value in it is genuine.
+  if (comparePathIdentity(document.repositoryRoot, repository.root) !== 'EQUAL') {
+    return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
+  }
+  if (!ExecutionLeaseProof.matchesNonce(evidence, document.ownerNonce)) {
+    return recordFailure('NOT_OWNER');
+  }
+
+  // A lease with no run names nothing for the evidence to be about, and an
+  // unbound proof is the one thing this record may not become.
+  if (document.runId === null) return recordFailure('RUN_NOT_IDENTIFIED');
+
+  // The containment must have been coupled to *this lease's* owner. Anything
+  // else is a job whose destruction says nothing about this lease's owner dying,
+  // which is the entire inference the record exists to support.
+  if (facts.ownerPid !== document.ownerPid) return recordFailure('OWNER_MISMATCH');
+
+  if (
+    request === null ||
+    typeof request !== 'object' ||
+    typeof request.writerId !== 'string' ||
+    request.writerId.length === 0 ||
+    request.writerId.length > 64 ||
+    typeof request.now !== 'function'
+  ) {
+    return recordFailure('RECORD_NOT_READABLE_BACK', 'WRITER_NOT_NAMED');
+  }
+
+  // The clock is a caller-supplied function, so calling it is calling somebody
+  // else's code, and "never throws" is a contract this function's only caller
+  // relies on by not catching. A `now` that throws is a failed record, not a
+  // failed agent run — the same guard `classifyOwnedCommand` puts on its own
+  // observation one layer down.
+  let recordedAt: string;
+  try {
+    recordedAt = request.now();
+  } catch {
+    return recordFailure('RECORD_NOT_READABLE_BACK', 'CLOCK_REFUSED');
+  }
+
+  const payload: ContainmentEvidencePayload = {
+    evidenceVersion: CONTAINMENT_EVIDENCE_VERSION,
+    ownerPid: document.ownerPid,
+    runId: document.runId,
+    writerId: request.writerId,
+    helperPid: facts.helperPid,
+    childPid: facts.childPid,
+    mode: facts.mode,
+    verifiedInJob: true,
+    assignedAtCreation: facts.assignedAtCreation,
+    launchDigest: facts.launchDigest,
+    attestedAt: facts.attestedAt,
+    recordedAt,
+  };
+  const record = { ...payload, binding: containmentBinding(document, payload) };
+  const bytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
+
+  // Read back before anything is written, and read back through the reader
+  // itself: the record must be one this build calls reliable for exactly this
+  // lease, run and writer. The clock is a seam, so a `now` returning something
+  // the contract refuses is enough to build a record that would be refused for
+  // the rest of the lease's life; this is what stops it reaching a file.
+  if (bytes.byteLength > MAX_CONTAINMENT_EVIDENCE_BYTES) {
+    return recordFailure('RECORD_NOT_READABLE_BACK', 'OVERSIZED');
+  }
+  let back: unknown;
+  try {
+    back = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return recordFailure('RECORD_NOT_READABLE_BACK', 'NOT_JSON');
+  }
+  if (
+    readContainmentEvidence(
+      { ...document, containment: back },
+      { runId: document.runId, writerId: request.writerId, ownerPid: document.ownerPid },
+    ) !== 'CONTAINED'
+  ) {
+    return recordFailure('RECORD_NOT_READABLE_BACK', 'NOT_RELIABLE');
+  }
+
+  const published = publishContainmentRecord(containmentPathFor(location), bytes, () =>
+    stillHeldBy(location, evidence),
+  );
+  if (published === 'NOT_OWNER') return recordFailure('NOT_OWNER', 'LOST_BEFORE_PUBLISH');
+  return published === null
+    ? Object.freeze({ code: 'RECORDED' as const, detail: null })
+    : recordFailure('RECORD_WRITE_FAILED', published);
+}
+
+/**
+ * Whether the lease at `location` is still this evidence's, right now.
+ *
+ * A fresh read every time it is asked, because the whole point of asking it a
+ * second time is that the first answer may have expired. It cannot make the
+ * publish atomic — see the header — it only makes the window one syscall wide.
+ */
+function stillHeldBy(location: LeaseLocation, evidence: ExecutionLeaseEvidence): boolean {
+  const read = readLeaseFile(location.path, location.key);
+  return (
+    read.document !== null && ExecutionLeaseProof.matchesNonce(evidence, read.document.ownerNonce)
+  );
+}
+
+/**
+ * Removes this lease's containment record, if there is one.
+ *
+ * ── Why a removal exists at all in a slice that removes nothing ────────────
+ *
+ * It removes **evidence**, never a lease, and it exists because the alternative
+ * is a lie. The record describes one writer launch. A launch that cannot be
+ * attested has nothing to publish, so without this it would leave the *previous*
+ * launch's positive record standing and the lease would read `CONTAINED` while
+ * its most recent writer was not contained — reproduced by an adversarial review,
+ * and the fail-open direction in the one place this slice exists to be
+ * conservative.
+ *
+ * Gated on the same ownership proof the publish takes, and for the same reason:
+ * a process that has lost the lease may not touch the holder's record. The same
+ * residual window applies and the same direction bounds it — the worst outcome
+ * is evidence lost, which is the answer a missing record already gives.
+ *
+ * It does **not** require the lease to name a run, and the publish does. The
+ * asymmetry is deliberate: a run id is what a record has to be *bound to*, and a
+ * removal binds to nothing. Refusing to tidy up a lease that names no run would
+ * leave a stale positive standing for the one lease shape that can never replace
+ * it.
+ *
+ * ── One attempt, and the retry that was here is withdrawn ─────────────────
+ *
+ * A previous round gave this the publish's five-attempt budget, reasoning that a
+ * removal failing is worse than a publish failing — true — and that "both fail
+ * for the same reason on Windows, a reader holding the file open". That second
+ * half was measured false: node opens with `FILE_SHARE_DELETE`, so this build's
+ * own reader blocks a *rename* onto the name and does not block an `unlink` of
+ * it. The budget bought nothing against the hazard it named.
+ *
+ * And it cost something real. The ownership proof sat outside the loop, so five
+ * attempts over eight milliseconds ran against a check taken once — and an
+ * adversarial review reproduced a lease changing hands inside that window and a
+ * later attempt destroying the *new* holder's record, with the loser told
+ * `CLEARED`. A retried destructive loop with its gate outside it is the shape
+ * `removeVerifiedLease` already records as a defect class here.
+ *
+ * So it is withdrawn rather than repaired. One attempt, immediately after the
+ * proof, which is the same one-syscall window the publish narrows itself to.
+ * A removal that fails answers {@link RECORD_CLEAR_FAILED} with the errno, and
+ * the caller is then holding the only evidence that the record on disk is stale;
+ * `lease/containment-evidence.ts` states that residue in the format's own terms.
+ *
+ * Never throws.
+ */
+export function clearContainmentEvidence(
+  given: LeaseRepository,
+  evidence: unknown,
+): ContainmentRecordResult {
+  if (!isExecutionLeaseEvidence(evidence)) return recordFailure('EVIDENCE_INVALID');
+
+  const repository = snapshotRepositoryRecord(given);
+  const location = deriveExecutionLeaseLocation(repository);
+  const claimedPath = leasePathOrNull(evidence);
+  if (
+    claimedPath === null ||
+    !location.ok ||
+    comparePathIdentity(claimedPath, location.path) !== 'EQUAL'
+  ) {
+    return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
+  }
+
+  const read = readLeaseFile(location.path, location.key);
+  if (read.state === 'FREE') return recordFailure('LEASE_ABSENT');
+  if (read.state === 'UNREADABLE') return recordFailure('LEASE_UNREADABLE');
+  if (read.document === null) return recordFailure('NOT_OWNER', 'UNPARSEABLE');
+  if (comparePathIdentity(read.document.repositoryRoot, repository.root) !== 'EQUAL') {
+    return recordFailure('LEASE_FOR_ANOTHER_REPOSITORY');
+  }
+  if (!ExecutionLeaseProof.matchesNonce(evidence, read.document.ownerNonce)) {
+    return recordFailure('NOT_OWNER');
+  }
+
+  try {
+    unlinkSync(containmentPathFor(location));
+  } catch (error) {
+    const errno = safeErrnoCode(error);
+    // Nothing to remove is the state this was asked to reach, and it is a
+    // different answer from "a record was there and is gone": a caller that
+    // needs to know whether it destroyed something can tell.
+    if (errno === 'ENOENT') return Object.freeze({ code: 'NOTHING_TO_CLEAR' as const, detail: null });
+    return recordFailure('RECORD_CLEAR_FAILED', errno);
+  }
+  return Object.freeze({ code: 'CLEARED' as const, detail: null });
+}
+
+/**
+ * Stages `bytes` and renames them onto `path`. `null` on success.
+ *
+ * `rename` rather than a write in place, so a reader never sees half a record —
+ * and unlike the lease's own publish this one may *replace* what is there,
+ * because what is there is this same holder's earlier record and is authority
+ * for nothing. A staged file that cannot be published is removed; nothing reads
+ * one by name.
+ *
+ * The retry is not decoration. A rename onto a name a reader currently has open
+ * is refused on Windows, and the reader here is this build's own inspection — a
+ * `lease status` running beside a writer is an ordinary thing to do. A few short
+ * attempts cover a scheduler quantum; failing after them costs a record and
+ * nothing else.
+ *
+ * `stillHeld` is asked immediately before **every** attempt, not once before the
+ * loop. That is the whole of the narrowing described on
+ * {@link recordContainmentEvidence}: the staged write and its `fsync` happen
+ * before the first ask, so the window between the last check and the effect is
+ * one syscall. It is a narrowing and not a closure, and answering `'NOT_OWNER'`
+ * rather than throwing keeps the caller's vocabulary total.
+ *
+ * **What no test pins**, stated because a silent gap reads as coverage: that the
+ * ask happens before *every* attempt rather than once. The test in
+ * `tests/v3-04-lease-containment.test.ts` hands the lease over from the `now`
+ * seam, which runs before this function is entered, so it kills a mutant that
+ * deletes the check and survives one that hoists it out of the loop — an
+ * adversarial review demonstrated exactly that. Nothing single-threaded and
+ * synchronous can take a lease between two iterations of this loop, so pinning
+ * the position needs a second process, which is a dist-artifact harness and not
+ * this slice's to add. The position is kept because it is free and strictly
+ * better, not because it is measured.
+ */
+function publishContainmentRecord(
+  path: string,
+  bytes: Buffer,
+  stillHeld: () => boolean,
+): string | null | 'NOT_OWNER' {
+  const staging = `${path}.tmp-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`;
+  const staged = writeRecord(staging, bytes);
+  if (staged !== null) {
+    discard(staging);
+    return staged;
+  }
+
+  let lastError = 'RENAME_NOT_ATTEMPTED';
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (!stillHeld()) {
+      discard(staging);
+      return 'NOT_OWNER';
+    }
+    try {
+      renameSync(staging, path);
+      return null;
+    } catch (error) {
+      // `safeErrnoCode` answers `'UNKNOWN'` rather than nullish, so a fallback
+      // here would be dead. The initial value below is what a loop that never
+      // reaches this line reports.
+      lastError = safeErrnoCode(error);
+    }
+    // A short synchronous pause, and not after the final attempt — this module
+    // is synchronous by contract, its claim being one uninterrupted sequence of
+    // filesystem calls with no `await` for anything to interleave with, so the
+    // wait cannot be a timer and it blocks the loop while it runs. Measured at
+    // roughly 8 ms of blocking for a rename that can never succeed.
+    //
+    // `hrtime` rather than `Date.now`: a wall clock can step backwards — NTP,
+    // a VM resume — and this loop would then spin until it stepped forward
+    // again. `owned-command.ts` discloses the same hazard for its own clamp.
+    if (attempt < 4) spinFor(2);
+  }
+  discard(staging);
+  return lastError;
+}
+
+/** Blocks for `ms`, measured on a clock that cannot step backwards. */
+function spinFor(ms: number): void {
+  const until = process.hrtime.bigint() + BigInt(ms) * 1_000_000n;
+  while (process.hrtime.bigint() < until) {
+    /* a scheduler quantum is all a transient share violation needs. */
+  }
+}
+
+/**
+ * The containment record beside this lease, or `undefined` when there is none.
+ *
+ * Every failure to read one answers with a value that *cannot* be reliable:
+ * `undefined` only for "there is nothing there", and a plain token for anything
+ * else, which `readContainmentEvidence` refuses as `MALFORMED`. There is
+ * deliberately no arm that turns an unreadable record into a missing one — a
+ * torn companion must not read as "no writer was contained", it must read as
+ * "nothing here is proof", and those are different sentences to an operator.
+ */
+function readContainmentRecord(location: LeaseLocation): unknown {
+  const path = containmentPathFor(location);
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch (error) {
+    if (safeErrnoCode(error) !== 'ENOENT') return 'UNREADABLE';
+    // `ENOENT` from a *read* is not always "there is nothing there": a dangling
+    // junction or symlink is an entry at this path whose target is gone, and
+    // `readFileSync` follows it and reports the target's absence. Reported as
+    // `ABSENT` it would tell an operator no record was ever written, about a
+    // path that visibly has something on it — the exact vocabulary rule this
+    // function is written to keep. `lstat` does not follow, so it separates the
+    // two cases, and a failure to `lstat` at all is not-there.
+    try {
+      lstatSync(path);
+    } catch {
+      return undefined;
+    }
+    return 'UNREADABLE';
+  }
+  if (bytes.byteLength > MAX_CONTAINMENT_EVIDENCE_BYTES) return 'OVERSIZED';
+  try {
+    return JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return 'NOT_JSON';
+  }
 }
 
 export const LEASE_RELEASE_CODES = [

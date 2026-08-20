@@ -96,6 +96,9 @@ import {
 } from './start-owned-process.js';
 import { existsSync } from 'node:fs';
 
+import type { ContainmentAttestation } from '../core/containment-attestation.js';
+import { mintContainmentAttestation } from '../core/internal/containment-attestation.js';
+
 import {
   InvalidBoundaryRequestError,
   type BoundaryEnding,
@@ -180,6 +183,55 @@ export const OWNED_COMMAND_OUTCOMES = [
 ] as const;
 
 export type OwnedCommandOutcome = (typeof OWNED_COMMAND_OUTCOMES)[number];
+
+/**
+ * Which outcomes an established run may attest containment for.
+ *
+ * Total over {@link OwnedCommandOutcome} by construction, so a sixth member
+ * added to that union stops the build here rather than defaulting to `false` —
+ * which would be safe, and would also be a decision nobody made. Completeness is
+ * not correctness, though: a `satisfies` clause would accept `true` in every
+ * row, so every entry is asserted by value through {@link isAttestableOutcome}
+ * in `tests/v3-04-lease-containment.test.ts`.
+ *
+ * The predicate is exported for exactly that. This comment previously claimed
+ * the rows were asserted by value while the table was module-private and only
+ * three of its six rows were reachable from any test — flipping
+ * `TERMINATED_BY_CALLER` to `true` was an undetected mutant of the whole gate,
+ * caught downstream by `doctor/exec.ts`'s second table and by nothing here. A
+ * claim about a table nothing can read is not a claim.
+ *
+ * The three `false` rows are the whole point of the table:
+ *
+ *  - `LAUNCH_REFUSED` — no ownership was ever established. There is nothing to
+ *    attest to, and an attestation for it would be a claim about a process that
+ *    may never have existed;
+ *  - `BOUNDARY_LOST` — the boundary stopped being accountable for the tree. That
+ *    is precisely the case where "the owner's death took the writer with it"
+ *    stops being true, so it is the one an attestation must never survive;
+ *  - `TERMINATED_BY_CALLER` — the run was cancelled, and `doctor/exec.ts` maps it
+ *    to `BOUNDARY_LOST` on the way out because nothing in this build can cancel
+ *    one. Attesting for an outcome the layer above reports as a lost boundary
+ *    would make the two disagree about the same run.
+ *
+ * `TIMED_OUT` and `OUTPUT_LIMIT_EXCEEDED` are `true` because on an established
+ * run they mean this side terminated the tree and the boundary *confirmed* it:
+ * an unconfirmed termination never reaches the classifier at all, it returns
+ * `BOUNDARY_LOST` / `BOUNDARY_TERMINATION_UNCONFIRMED` several branches earlier.
+ */
+const ATTESTABLE_OUTCOME: Readonly<Record<OwnedCommandOutcome, boolean>> = Object.freeze({
+  COMPLETED: true,
+  TIMED_OUT: true,
+  OUTPUT_LIMIT_EXCEEDED: true,
+  TERMINATED_BY_CALLER: false,
+  BOUNDARY_LOST: false,
+  LAUNCH_REFUSED: false,
+});
+
+/** Whether an established run with this outcome may attest containment. */
+export function isAttestableOutcome(outcome: OwnedCommandOutcome): boolean {
+  return ATTESTABLE_OUTCOME[outcome] === true;
+}
 
 /**
  * Why this side ended the run, or `NONE` if it did not.
@@ -907,6 +959,32 @@ export interface OwnedCommandResult extends OwnedCommandClassification {
    * module can return.
    */
   readonly ending: BoundaryEnding | null;
+  /**
+   * Proof that this run's target was created inside a job this process owns, or
+   * `null` — which is every run that cannot show it.
+   *
+   * Opaque, and unconstructable outside its mint: a caller cannot write one
+   * down, and a substituted `dependencies.start` cannot *return* one, because
+   * the mint is reached from this module and the seam's result shape has no
+   * field to put one on. That is what makes the value mean something — a test
+   * that fabricates an `OwnedCommandResult` gets `null` here and therefore no
+   * evidence, which is the correct answer rather than an inconvenience.
+   *
+   * What that does **not** say, and an earlier draft of this comment did: that a
+   * seam cannot cause one to exist. It can — the mint's inputs are the
+   * substituted process's own pids, mode and membership flag, so a substitute
+   * that claims a verified job produces a genuine attestation for a process it
+   * made up. The honest description is the one
+   * `ExecutionLeaseDependencies.link` gives about its own seam: production
+   * injects nothing (the package exports only the CLI), and the guarantee is
+   * "a seam whose contract the caller must keep", not "a seam that cannot be
+   * abused".
+   *
+   * `null` on every refused, lost or unaccountable run. See
+   * {@link ATTESTABLE_OUTCOME} for which outcomes may carry one and why the
+   * three that may not, may not.
+   */
+  readonly containment: ContainmentAttestation | null;
 }
 
 /**
@@ -970,6 +1048,10 @@ export async function runOwnedCommand(
     inexpressibleEnv
   ) {
     return Object.freeze({
+      // Nothing was launched, so there is nothing to attest to. Stated rather
+      // than defaulted: this is the one result in the module that does not go
+      // through `finish`.
+      containment: null,
       display: '',
       file: typeof options?.file === 'string' ? options.file : '',
       args: [],
@@ -1095,13 +1177,22 @@ export async function runOwnedCommand(
 
   const base = { display, file: options.file, args, startedAt };
 
+  /**
+   * `containment` defaults to `null` here rather than being demanded of every
+   * call site, and the default is the fail-closed one: a branch that forgets to
+   * decide attests nothing. Exactly one call below passes a value, and it is the
+   * one that has an established boundary and a classified ending in hand.
+   */
   const finish = (
-    extra: Omit<OwnedCommandResult, keyof typeof base | 'finishedAt' | 'durationMs'>,
+    extra: Omit<OwnedCommandResult, keyof typeof base | 'finishedAt' | 'durationMs' | 'containment'> & {
+      readonly containment?: ContainmentAttestation | null;
+    },
   ): OwnedCommandResult => {
     const finishedAtMs = Date.now();
     return Object.freeze({
       ...base,
       ...extra,
+      containment: extra.containment ?? null,
       finishedAt: new Date(finishedAtMs).toISOString(),
       durationMs: finishedAtMs - startedAtMs,
     });
@@ -1598,8 +1689,41 @@ export async function runOwnedCommand(
      */
     const ending = settled;
     const classification = classifyOwnedCommand({ ending, termination, ownershipEstablished: true });
+    /**
+     * The one place in this build that mints a containment attestation.
+     *
+     * Every input comes from the boundary rather than from this module's own
+     * bookkeeping: the pids and the membership confirmation are the helper's,
+     * and the launch nonce is echoed back in the status the helper wrote — so a
+     * status that is not this launch's carries no nonce to attest with. The mint
+     * re-checks all of it and answers `null` for anything it cannot vouch for,
+     * including a `verifiedInJob` that is not `true`.
+     *
+     * `ownerPid` is `process.pid` because that is what the boundary was coupled
+     * to: `startOwnedProcess` defaults `ownerPid` to its own process and this
+     * module never overrides it — there is no option on `OwnedCommandOptions`
+     * that could. If that ever changes, this line becomes a lie and the lease
+     * recorder's owner check is what catches it.
+     */
+    const containment = ATTESTABLE_OUTCOME[classification.outcome]
+      ? mintContainmentAttestation({
+          ownerPid: process.pid,
+          helperPid: owned.helperPid,
+          childPid: owned.childPid,
+          mode: owned.mode,
+          assignedAtCreation: owned.assignedAtCreation,
+          launchNonce: ending.status?.nonce ?? '',
+          // The moment this run was classified, not the moment the kernel
+          // confirmed the job — the boundary reports the first and not the
+          // second. `ContainmentFacts.attestedAt` says so, and says why the
+          // stronger field is not this slice's to add.
+          attestedAt: new Date().toISOString(),
+          verifiedInJob: owned.verifiedInJob,
+        })
+      : null;
     const result = finish({
       ...classification,
+      containment,
       established: true,
       stdout: stdout.text(),
       stderr: stderr.text(),

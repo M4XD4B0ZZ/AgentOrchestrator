@@ -76,7 +76,15 @@
  */
 
 import { runAgentCommand, type AgentCommandResult, type AgentRunner } from '../agent/agent-command.js';
-import { verifyExecutionLeaseHeldFor, type ExecutionLeaseAuthority } from '../lease/execution-lease.js';
+import { isContainmentAttestation } from '../core/containment-attestation.js';
+import type { AgentId } from '../core/states.js';
+import {
+  clearContainmentEvidence,
+  recordContainmentEvidence,
+  verifyExecutionLeaseHeldFor,
+  type ContainmentRecordResult,
+  type ExecutionLeaseAuthority,
+} from '../lease/execution-lease.js';
 import { runGitCommand, type GitCommandResult, type GitRunner } from '../worktree/git-command.js';
 import {
   runVerificationCommand,
@@ -89,7 +97,30 @@ export interface SpawnAuthority {
   readonly lease: ExecutionLeaseAuthority;
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
+  /**
+   * The clock the containment record is stamped with. A test seam of the same
+   * class as the lease's own `now`, and it can only ever produce a record this
+   * build refuses: the recorder parses what it built back and requires its own
+   * reading of it to be reliable before writing anything.
+   *
+   * Not called `now`: `LoopDependencies` already carries a `now` of its own, and
+   * it is a `string` rather than a function. Every step's dependency object is
+   * passed here whole, so a second `now` with a different type would make those
+   * call sites stop compiling — which is how this name was chosen.
+   */
+  readonly containmentNow?: () => string;
 }
+
+/**
+ * The agent whose containment is recorded against the lease.
+ *
+ * One value, named rather than derived. `claude` is the productive writer — the
+ * process that produces effects in the repository — and it is the only one whose
+ * containment says anything about whether a dead lease owner left a writer
+ * behind. The reviewer is read-only, so recording its containment as this
+ * lease's *writer* evidence would be a record that is simply not true.
+ */
+const CONTAINED_WRITER: AgentId = 'claude';
 
 function leaseHolds(deps: SpawnAuthority): boolean {
   return verifyExecutionLeaseHeldFor(deps.lease.repository, deps.lease.evidence).code === 'HELD';
@@ -104,8 +135,85 @@ function leaseHolds(deps: SpawnAuthority): boolean {
 export function leasedAgent(deps: SpawnAuthority): AgentRunner {
   return async (id, args, cwd, payload) => {
     if (!leaseHolds(deps)) return AGENT_NOT_AUTHORISED;
-    return (deps.agent ?? runAgentCommand)(id, args, cwd, payload);
+    const result = await (deps.agent ?? runAgentCommand)(id, args, cwd, payload);
+    recordWriterContainment(deps, id, result);
+    return result;
   };
+}
+
+/**
+ * Brings this lease's containment record into line with the launch that just
+ * finished: publishes one when the writer was contained, removes the previous
+ * one when it was not.
+ *
+ * ── Why here, and why after the run ────────────────────────────────────────
+ *
+ * This is the one place that holds both halves at once: the lease authority,
+ * which says whose lease it is, and the writer's result, which carries the
+ * attestation. Neither layer below has the other — `doctor/exec.ts` must not
+ * learn about leases, and `execution-lease.ts` must not learn about agents — so
+ * threading the artefact up to the seam is what keeps the two vocabularies
+ * apart.
+ *
+ * After the run rather than before it, because the attestation does not exist
+ * until the boundary has ended and been classified.
+ *
+ * ── Why an unattested launch *removes* the record ──────────────────────────
+ *
+ * Because otherwise it lies, and an adversarial review reproduced the lie. A run
+ * makes several `claude` launches under one lease. Publishing only on success
+ * meant a launch that could not be attested left the *previous* launch's
+ * positive record standing, and the lease then read `CONTAINED` — and
+ * `containmentProven: true` — while its most recent writer was not contained at
+ * all.
+ *
+ * This paragraph used to say the opposite: that such a run "carries no evidence
+ * for that run… a later recovery reading that lease finds `ABSENT` and must
+ * refuse". It found `CONTAINED`. The removal is what makes the sentence true,
+ * and `lease/containment-evidence.ts` states exactly how far that gets — the
+ * record describes the most recent launch and cannot speak for the ones before
+ * it.
+ *
+ * The gap that remains is the one the ordering cannot close: an owner that dies
+ * *during* a writer run leaves whatever the previous launch left. That is why
+ * the record is not, and must not be read as, a statement about the lease.
+ *
+ * ── It cannot fail the run ─────────────────────────────────────────────────
+ *
+ * The result is deliberately discarded. This is an enrichment: a lease with no
+ * record is a lease with no containment proof, which is exactly what the reader
+ * assumes by default. Turning a failed write into a failed agent run would give
+ * an enrichment the power to stop productive work, which is the wrong severity —
+ * and neither entry point throws, so there is nothing here to catch.
+ *
+ * The lease is re-proved *inside* the recorder, against the bytes it opens, so a
+ * run that lost its lease during the agent process writes nothing. This function
+ * does not re-check it beforehand, on purpose: a check here and an effect there
+ * would be two readings of one question, which is the defect this module's
+ * neighbours keep finding.
+ */
+function recordWriterContainment(
+  deps: SpawnAuthority,
+  id: AgentId,
+  result: AgentCommandResult,
+): ContainmentRecordResult | null {
+  if (id !== CONTAINED_WRITER) return null;
+  // The registry gate, not `!== undefined`. A result carrying an explicit
+  // `null`, or anything else a JS consumer or a JSON round trip can produce, is
+  // not an attestation — and asking the mint is the same discipline
+  // `doctor/exec.ts` applies one layer down, rather than a second, weaker test
+  // of the same thing.
+  //
+  // And the negative arm is not a shortcut back to `return null`: a writer
+  // launch this build cannot attest must take the previous launch's record with
+  // it. See the header.
+  if (!isContainmentAttestation(result.containment)) {
+    return clearContainmentEvidence(deps.lease.repository, deps.lease.evidence);
+  }
+  return recordContainmentEvidence(deps.lease.repository, deps.lease.evidence, result.containment, {
+    writerId: id,
+    now: deps.containmentNow ?? (() => new Date().toISOString()),
+  });
 }
 
 /**

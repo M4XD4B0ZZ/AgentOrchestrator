@@ -90,6 +90,10 @@ import { realpathSync, statSync } from 'node:fs';
 import { delimiter as pathDelimiter, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import {
+  isContainmentAttestation,
+  type ContainmentAttestation,
+} from '../core/containment-attestation.js';
+import {
   InvalidBoundaryRequestError,
   MAX_TIMER_MS,
   runOwnedCommand,
@@ -346,6 +350,25 @@ export interface CommandResult {
    * on `outcome`, as `BOUNDARY_LOST`.
    */
   readonly processTreeKilled: boolean;
+  /**
+   * Proof that this command's process was created inside a job this process
+   * owns, or absent — which is every command that cannot show it.
+   *
+   * Optional rather than nullable, and the difference is the point: absence is
+   * the answer for the POSIX path, for every command that never reached the
+   * boundary, and for every result some other module built. A caller that reads
+   * this field gets `undefined` unless a real owned launch put something there,
+   * and `undefined` is the conservative reading. Nothing is defaulted to a
+   * reassuring value anywhere on the way up.
+   *
+   * The artefact is opaque and unconstructable outside its mint — see
+   * `core/containment-attestation.ts` — so this field cannot be spoofed by
+   * substituting the `runOwned` seam or by hand-building a `CommandResult`.
+   *
+   * It is **not** a permission. `lease/containment-evidence.ts` states what a
+   * containment proof does and does not license.
+   */
+  readonly containment?: ContainmentAttestation;
 }
 
 export interface RunOptions {
@@ -961,6 +984,41 @@ const OWNED_OUTCOME: Readonly<Record<OwnedCommandOutcome, CommandOutcome>> = Obj
 });
 
 /**
+ * Which outcomes may carry containment upwards, in *this* module's vocabulary.
+ *
+ * A second, independent refusal. `boundary/owned-command.ts` already withholds
+ * the attestation for every outcome that is not accountable, and this table
+ * says the same thing again in the alphabet the rest of the build reads —
+ * because {@link toCommandResultFields} is exported and total, and the value it
+ * is handed need not have come from the adapter. Without it a hand-built result
+ * pairing a genuine attestation with `outcome: 'BOUNDARY_LOST'` would have been
+ * carried straight through: the fail-closed branch below does not catch that
+ * pair, since a lost boundary carrying its declared failure code is a perfectly
+ * well-formed result.
+ *
+ * Total over {@link CommandOutcome} by construction, and asserted row by row
+ * through {@link carriesContainment} in `tests/v3-04-lease-containment.test.ts`
+ * — `satisfies` would accept `true` everywhere, and a behavioural test can only
+ * reach the rows some owned outcome maps onto, which is five of the six.
+ */
+const CONTAINMENT_CARRYING: Readonly<Record<CommandOutcome, boolean>> = Object.freeze({
+  COMPLETED: true,
+  TIMED_OUT: true,
+  OUTPUT_LIMIT_EXCEEDED: true,
+  // Not reachable through `OWNED_OUTCOME`: nothing owned maps onto it, and a
+  // command that was never found never reached the boundary. Stated anyway,
+  // because a table with an unstated row is a table with a default.
+  NOT_FOUND: false,
+  SPAWN_FAILED: false,
+  BOUNDARY_LOST: false,
+});
+
+/** Whether a result with this outcome may carry a containment attestation. */
+export function carriesContainment(outcome: CommandOutcome): boolean {
+  return CONTAINMENT_CARRYING[outcome] === true;
+}
+
+/**
  * The owned adapter's failure code, in `runCommand`'s vocabulary.
  *
  * Four of the adapter's nine codes are ways of losing the boundary, and they
@@ -1040,6 +1098,30 @@ export function toCommandResultFields(
   }
 
   return {
+    /**
+     * Carried only from here, and deliberately not from the fail-closed branch
+     * above. That branch is reached for an outcome this build does not declare
+     * or a completion it will not state, and a run this module refuses to
+     * describe is not one whose containment it should be passing on — even
+     * though the adapter would already have withheld the attestation for every
+     * such outcome it can produce. Two independent refusals for a value that may
+     * not travel; the same argument the `completed` gate above makes about
+     * success.
+     *
+     * Two gates, and neither is redundant. The registry check is what makes
+     * this safe against a fabricated `OwnedCommandResult` — the `runOwned` seam
+     * is a documented substitution point, and a substitute is free to put any
+     * value on this field, so only the mint's own artefact gets past. The
+     * outcome check is {@link CONTAINMENT_CARRYING}, which refuses the pair
+     * "genuine attestation, unaccountable outcome" that the fail-closed branch
+     * above lets through as a well-formed result.
+     *
+     * Spread conditionally so the field is *absent* rather than `undefined`
+     * when there is nothing to carry.
+     */
+    ...(CONTAINMENT_CARRYING[mappedOutcome] === true && isContainmentAttestation(owned.containment)
+      ? { containment: owned.containment }
+      : {}),
     // `established` is the strong answer and `targetStarted` the conservative
     // one. A refusal whose target had already begun executing — possible in
     // `JOBLIST` mode, where the target runs from its first instruction — is

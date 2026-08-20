@@ -45,6 +45,7 @@
  */
 
 import { createProbeEnv } from '../auth/env-guard.js';
+import type { ContainmentAttestation } from '../core/containment-attestation.js';
 import type { AgentId } from '../core/states.js';
 import {
   runCommand,
@@ -129,6 +130,23 @@ export interface AgentCommandResult {
   readonly failureCode: CommandFailureCode | null;
   readonly errnoCode: string | null;
   readonly durationMs: number;
+  /**
+   * Proof that this agent's process was created inside a job this process owns,
+   * or absent.
+   *
+   * Carried on `UNAVAILABLE` results as well as on `RAN` ones, and that is not
+   * an oversight. Everything else on this shape is about what the run *said*,
+   * and an unusable run says nothing — but containment is about what the run
+   * *was*: a timed-out agent whose tree the boundary took down was contained,
+   * and the record built from it is true. Withholding it on the unavailable
+   * branch would drop the evidence for exactly the runs whose owner is most
+   * likely to be about to die.
+   *
+   * Opaque and unconstructable outside its mint, so a substituted
+   * {@link AgentRunner} cannot fabricate one. It is not authority — see
+   * `lease/containment-evidence.ts`.
+   */
+  readonly containment?: ContainmentAttestation;
 }
 
 /**
@@ -195,8 +213,13 @@ export function toAgentCommandResult(result: CommandResult): AgentCommandResult 
   // said nothing this slice is entitled to read. Truncation is folded in here
   // rather than left for each caller to remember, because forgetting it is the
   // single cheapest way to turn a cut-off stream into a verdict.
+  // Absent stays absent: the spread carries the field only when there is one,
+  // so neither branch below can invent an `undefined` that looks like a decision.
+  const contained = result.containment === undefined ? {} : { containment: result.containment };
+
   if (result.outcome !== 'COMPLETED' || outputTruncated || !payloadDelivered) {
     return unavailable({
+      ...contained,
       exitCode: result.exitCode,
       signal: result.signal,
       outputTruncated,
@@ -207,6 +230,7 @@ export function toAgentCommandResult(result: CommandResult): AgentCommandResult 
   }
 
   return Object.freeze({
+    ...contained,
     outcome: 'RAN' as const,
     exitCode: result.exitCode,
     signal: result.signal,
