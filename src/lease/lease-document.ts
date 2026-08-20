@@ -86,35 +86,6 @@ export const ExecutionLeaseObjectSchema = z
     runId: z.string().min(1).max(128).nullable(),
     /** The block this lease was taken for, when the caller named one. */
     blockId: z.string().min(1).max(128).nullable(),
-    /**
-     * Containment evidence, or absent on a lease whose writer was never started
-     * behind the owned process boundary. `lease/containment-evidence.ts` owns
-     * its shape, its version and every rule for reading one.
-     *
-     * ── Why this is `unknown` here, which looks like a hole and is not ─────
-     *
-     * The obvious spelling is the strict evidence schema, inlined. It was
-     * rejected for one reason, and the reason is a compatibility requirement
-     * rather than a preference: the lease document's schema decides whether a
-     * *lease* can be read at all, and `readLeaseFile` answers `UNPARSEABLE`
-     * — held-and-unsafe, repository locked, owner still reported but no longer
-     * from a parsed document — for anything it refuses. Inlining the strict
-     * schema would make a lease written by a future build, with a containment
-     * record this build does not recognise, unreadable *as a lease*. An
-     * enrichment would then be able to lock a repository, which is a severity
-     * this field has no business having.
-     *
-     * So the document carries the field opaquely and the containment module is
-     * the sole judge of it. That is not a weakening: nothing reads this value
-     * except through `readContainmentEvidence`, which applies the strict schema
-     * and refuses everything that is not exactly one current-version, correctly
-     * bound, agreeing record. A `containment: 42` parses as a lease and reads as
-     * `MALFORMED`, which is the pair of answers that is true.
-     *
-     * The key must still be *declared* — the object is `.strict()` — so a lease
-     * this build writes with evidence can be read back by it.
-     */
-    containment: z.unknown().optional(),
   })
   .strict();
 

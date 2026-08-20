@@ -5,6 +5,12 @@
  * versioned, that its productive writer was started behind the owned process
  * boundary, and every other input to that record is refused.*
  *
+ * The record lives **beside** the lease rather than inside it, and that is a
+ * safety property rather than a filing decision — `lease/containment-evidence.ts`
+ * records what an in-lease rewrite cost and how it was measured. Several cases
+ * below therefore assert the lease's bytes are unchanged, which is the pin that
+ * the withdrawn design does not come back.
+ *
  * Four things are measured here, and they are deliberately separate:
  *
  *  1. **the format**, which is a pure function of a lease document, so every
@@ -13,7 +19,8 @@
  *  2. **the mint**, which is what makes "evidence may only come from an
  *     established containment path" structural rather than conventional;
  *  3. **the recorder**, against real leases in real directories, including the
- *     refusals that matter more than the success;
+ *     refusals that matter more than the success, and including the repeated
+ *     recording a real run does — several `claude` spawns under one lease;
  *  4. **the wiring**, from the adapter's result up through `runCommand` and the
  *     agent seam to the leased spawn that records it.
  *
@@ -31,7 +38,7 @@
  * classification is the same value with and without evidence present.
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,7 +48,11 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 import { toAgentCommandResult, type AgentCommandResult } from '../src/agent/agent-command.js';
 import type { OwnedCommandResult } from '../src/boundary/owned-command.js';
-import { runOwnedCommand } from '../src/boundary/owned-command.js';
+import {
+  isAttestableOutcome,
+  OWNED_COMMAND_OUTCOMES,
+  runOwnedCommand,
+} from '../src/boundary/owned-command.js';
 import {
   containmentFactsOf,
   isContainmentAttestation,
@@ -49,7 +60,7 @@ import {
 } from '../src/core/containment-attestation.js';
 import { mintContainmentAttestation } from '../src/core/internal/containment-attestation.js';
 import type { ExecutionLeaseEvidence } from '../src/core/execution-lease-evidence.js';
-import { toCommandResultFields, type CommandResult } from '../src/doctor/exec.js';
+import { carriesContainment, toCommandResultFields, type CommandResult } from '../src/doctor/exec.js';
 import {
   CONTAINMENT_READINGS,
   containmentBinding,
@@ -62,6 +73,7 @@ import {
 } from '../src/lease/containment-evidence.js';
 import {
   acquireRepositoryExecutionLease,
+  CONTAINMENT_EVIDENCE_FILE_NAME,
   deriveExecutionLeaseLocation,
   inspectRepositoryExecutionLease,
   recordContainmentEvidence,
@@ -121,6 +133,17 @@ function documentAt(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
 }
 
+/** Where the containment record lives: beside the lease, never inside it. */
+function recordPathOf(repository: LeaseRepository): string {
+  return join(repository.gitCommonDir, CONTAINMENT_EVIDENCE_FILE_NAME);
+}
+
+/** The record on disk, or `null` when there is none. */
+function recordOf(repository: LeaseRepository): Record<string, unknown> | null {
+  const path = recordPathOf(repository);
+  return existsSync(path) ? documentAt(path) : null;
+}
+
 /** A minted attestation for `ownerPid`, or a loud failure. Never fabricated. */
 function attestationFor(ownerPid: number, over: Partial<Parameters<typeof mintContainmentAttestation>[0]> = {}): ContainmentAttestation {
   const minted = mintContainmentAttestation({
@@ -130,7 +153,7 @@ function attestationFor(ownerPid: number, over: Partial<Parameters<typeof mintCo
     mode: 'JOBLIST',
     assignedAtCreation: true,
     launchNonce: 'a1b2c3d4e5f60718',
-    observedAt: '2026-08-20T00:00:00.000Z',
+    attestedAt: '2026-08-20T00:00:00.000Z',
     verifiedInJob: true,
     ...over,
   });
@@ -159,7 +182,7 @@ function payload(over: Partial<ContainmentEvidencePayload> = {}): ContainmentEvi
     verifiedInJob: true,
     assignedAtCreation: true,
     launchDigest: 'b'.repeat(64),
-    observedAt: '2026-08-20T00:00:00.000Z',
+    attestedAt: '2026-08-20T00:00:00.000Z',
     recordedAt: '2026-08-20T00:00:01.000Z',
     ...over,
   };
@@ -237,7 +260,7 @@ describe('containment evidence — the format', () => {
       { mode: 'SUSPENDED' },
       { assignedAtCreation: false },
       { launchDigest: 'c'.repeat(64) },
-      { observedAt: '2027-01-01T00:00:00.000Z' },
+      { attestedAt: '2027-01-01T00:00:00.000Z' },
       { recordedAt: '2027-01-01T00:00:00.000Z' },
     ];
     for (const edit of edits) {
@@ -293,6 +316,35 @@ describe('containment evidence — the format', () => {
     expect(reading({ ...bound(), evidenceVersion: 0 })).toBe('MALFORMED');
   });
 
+  it('names exactly three attestable outcomes and three carrying ones, row by row', () => {
+    /**
+     * By value, through the exported predicates. The tables used to be private
+     * and this claim used to be made about them anyway: only three of
+     * `ATTESTABLE_OUTCOME`'s six rows were reachable from any test, so flipping
+     * `TERMINATED_BY_CALLER` to `true` was an undetected mutant of the gate. A
+     * claim about a table nothing can read is not a claim.
+     */
+    expect(isAttestableOutcome('COMPLETED')).toBe(true);
+    expect(isAttestableOutcome('TIMED_OUT')).toBe(true);
+    expect(isAttestableOutcome('OUTPUT_LIMIT_EXCEEDED')).toBe(true);
+    expect(isAttestableOutcome('TERMINATED_BY_CALLER')).toBe(false);
+    expect(isAttestableOutcome('BOUNDARY_LOST')).toBe(false);
+    expect(isAttestableOutcome('LAUNCH_REFUSED')).toBe(false);
+    // Total, so a seventh outcome cannot slip past unjudged.
+    expect(OWNED_COMMAND_OUTCOMES.filter((o) => isAttestableOutcome(o))).toEqual([
+      'COMPLETED',
+      'TIMED_OUT',
+      'OUTPUT_LIMIT_EXCEEDED',
+    ]);
+
+    expect(carriesContainment('COMPLETED')).toBe(true);
+    expect(carriesContainment('TIMED_OUT')).toBe(true);
+    expect(carriesContainment('OUTPUT_LIMIT_EXCEEDED')).toBe(true);
+    expect(carriesContainment('NOT_FOUND')).toBe(false);
+    expect(carriesContainment('SPAWN_FAILED')).toBe(false);
+    expect(carriesContainment('BOUNDARY_LOST')).toBe(false);
+  });
+
   it('calls exactly one reading reliable, asserted row by row', () => {
     // By value rather than by "the table is total": a total table with `true` in
     // every row type-checks. This is the assertion that a later edit to the
@@ -318,7 +370,7 @@ describe('containment attestation — what may produce one', () => {
       mode: 'JOBLIST',
       assignedAtCreation: true,
       launchNonce: 'a1b2c3d4',
-      observedAt: '2026-08-20T00:00:00.000Z',
+      attestedAt: '2026-08-20T00:00:00.000Z',
       verifiedInJob: false,
     })).toBeNull();
   });
@@ -331,7 +383,7 @@ describe('containment attestation — what may produce one', () => {
       mode: 'JOBLIST',
       assignedAtCreation: true,
       launchNonce: 'a1b2c3d4',
-      observedAt: '2026-08-20T00:00:00.000Z',
+      attestedAt: '2026-08-20T00:00:00.000Z',
       verifiedInJob: true,
     };
     expect(mintContainmentAttestation({ ...base, launchNonce: '' })).toBeNull();
@@ -349,7 +401,7 @@ describe('containment attestation — what may produce one', () => {
     expect(mintContainmentAttestation({ ...base, helperPid: -1 })).toBeNull();
     expect(mintContainmentAttestation({ ...base, childPid: 1.5 })).toBeNull();
     expect(mintContainmentAttestation({ ...base, mode: '' })).toBeNull();
-    expect(mintContainmentAttestation({ ...base, observedAt: 'yesterday' })).toBeNull();
+    expect(mintContainmentAttestation({ ...base, attestedAt: 'yesterday' })).toBeNull();
     // And the shape that succeeds, so the refusals above are not all passing for
     // one shared reason.
     expect(mintContainmentAttestation(base)).not.toBeNull();
@@ -395,11 +447,11 @@ describe('containment attestation — what may produce one', () => {
 /* ─────────────────────── 3. the recorder, on real leases ────────────────── */
 
 describe('recording containment evidence into a lease', () => {
-  it('records, and the lease then reads back as CONTAINED', () => {
+  it('records beside the lease, leaves the lease byte-identical, and reads back CONTAINED', () => {
     const repository = repositoryFixture();
     const { evidence, path } = leaseOf(repository, 'run-alpha');
-    const before = documentAt(path);
-    expect(before.containment).toBeUndefined();
+    const leaseBefore = readFileSync(path);
+    expect(recordOf(repository)).toBeNull();
 
     const recorded = recordContainmentEvidence(
       repository,
@@ -409,21 +461,60 @@ describe('recording containment evidence into a lease', () => {
     );
     expect(recorded.code).toBe('RECORDED');
 
-    const after = documentAt(path);
-    // Everything the lease already said is still exactly what it said. A record
-    // that quietly rewrote the owner would be the worst possible outcome here.
-    for (const key of ['schemaVersion', 'leaseKey', 'repositoryRoot', 'repositoryId', 'ownerPid', 'ownerNonce', 'acquiredAt', 'runId', 'blockId']) {
-      expect(after[key], key).toEqual(before[key]);
-    }
-    const containment = after.containment as Record<string, unknown>;
-    expect(containment.evidenceVersion).toBe(CONTAINMENT_EVIDENCE_VERSION);
-    expect(containment.verifiedInJob).toBe(true);
-    expect(containment.runId).toBe('run-alpha');
-    expect(containment.writerId).toBe('claude');
-    expect(containment.ownerPid).toBe(process.pid);
+    /**
+     * The load-bearing assertion of the whole redesign, and it is about bytes
+     * rather than about fields.
+     *
+     * The first version of this slice wrote the record *into* the lease. A
+     * review reproduced the consequence: the record is written once per writer
+     * launch, later records are routinely shorter than earlier ones, and an
+     * interrupted in-place rewrite leaves a lease with no legible owner that its
+     * own holder cannot release and nothing in this build can clear. Nothing
+     * about the lease may change here — not its length, not a key order, not a
+     * whitespace — because the moment it does, that window is back.
+     */
+    expect(readFileSync(path).equals(leaseBefore)).toBe(true);
+
+    const containment = recordOf(repository);
+    expect(containment).not.toBeNull();
+    expect(containment?.evidenceVersion).toBe(CONTAINMENT_EVIDENCE_VERSION);
+    expect(containment?.verifiedInJob).toBe(true);
+    expect(containment?.runId).toBe('run-alpha');
+    expect(containment?.writerId).toBe('claude');
+    expect(containment?.ownerPid).toBe(process.pid);
 
     // And through the reader every consumer uses, not only by looking at keys.
     expect(inspectRepositoryExecutionLease(repository).containment).toBe('CONTAINED');
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('replaces its own earlier record, and still never writes the lease', () => {
+    // A run makes several `claude` spawns under one lease, so this is the
+    // ordinary case rather than an edge one — and it is the case the in-lease
+    // design got wrong, because the second record is not the same length as the
+    // first.
+    const repository = repositoryFixture();
+    const { evidence, path } = leaseOf(repository, 'run-repeat');
+    const leaseBefore = readFileSync(path);
+
+    const first = attestationFor(process.pid, { helperPid: 999_998, childPid: 999_999 });
+    const second = attestationFor(process.pid, { helperPid: 11, childPid: 12 });
+    expect(
+      recordContainmentEvidence(repository, evidence, first, { writerId: 'claude', now: tick }).code,
+    ).toBe('RECORDED');
+    const afterFirst = recordOf(repository);
+    expect(
+      recordContainmentEvidence(repository, evidence, second, { writerId: 'claude', now: tick }).code,
+    ).toBe('RECORDED');
+    const afterSecond = recordOf(repository);
+
+    expect(afterFirst?.childPid).toBe(999_999);
+    expect(afterSecond?.childPid).toBe(12);
+    // The second record really is shorter than the first, which is the fact the
+    // withdrawn design's "never shorter" invariant denied.
+    expect(JSON.stringify(afterSecond).length).toBeLessThan(JSON.stringify(afterFirst).length);
+    expect(inspectRepositoryExecutionLease(repository).containment).toBe('CONTAINED');
+    expect(readFileSync(path).equals(leaseBefore)).toBe(true);
     releaseRepositoryExecutionLease(evidence);
   });
 
@@ -439,6 +530,7 @@ describe('recording containment evidence into a lease', () => {
     });
     expect(result.code).toBe('ATTESTATION_INVALID');
     expect(readFileSync(path).equals(before)).toBe(true);
+    expect(recordOf(repository)).toBeNull();
     expect(inspectRepositoryExecutionLease(repository).containment).toBe('ABSENT');
     releaseRepositoryExecutionLease(evidence);
   });
@@ -453,6 +545,7 @@ describe('recording containment evidence into a lease', () => {
     });
     expect(result.code).toBe('EVIDENCE_INVALID');
     expect(readFileSync(path).equals(before)).toBe(true);
+    expect(recordOf(repository)).toBeNull();
     releaseRepositoryExecutionLease(evidence);
   });
 
@@ -469,6 +562,7 @@ describe('recording containment evidence into a lease', () => {
     });
     expect(result.code).toBe('OWNER_MISMATCH');
     expect(readFileSync(path).equals(before)).toBe(true);
+    expect(recordOf(repository)).toBeNull();
     releaseRepositoryExecutionLease(evidence);
   });
 
@@ -482,6 +576,7 @@ describe('recording containment evidence into a lease', () => {
     });
     expect(result.code).toBe('RUN_NOT_IDENTIFIED');
     expect(readFileSync(path).equals(before)).toBe(true);
+    expect(recordOf(repository)).toBeNull();
     releaseRepositoryExecutionLease(evidence);
   });
 
@@ -504,6 +599,9 @@ describe('recording containment evidence into a lease', () => {
     });
     expect(result.code).toBe('NOT_OWNER');
     expect(readFileSync(path).equals(successorBytes)).toBe(true);
+    // And nothing was written beside it either: a process that has lost the
+    // lease publishes no record for the holder that took it.
+    expect(recordOf(repository)).toBeNull();
     releaseRepositoryExecutionLease(evidence);
   });
 
@@ -545,6 +643,7 @@ describe('recording containment evidence into a lease', () => {
     });
     expect(result.code).toBe('RECORD_NOT_READABLE_BACK');
     expect(readFileSync(path).equals(before)).toBe(true);
+    expect(recordOf(repository)).toBeNull();
     releaseRepositoryExecutionLease(evidence);
   });
 });
@@ -552,27 +651,63 @@ describe('recording containment evidence into a lease', () => {
 /* ────────── 4. legacy compatibility, and what recovery may see ──────────── */
 
 describe('legacy leases and the recovery classification', () => {
-  it('keeps a lease readable whatever its containment field says', () => {
+  it('keeps the lease readable whatever the record beside it says', () => {
     const repository = repositoryFixture();
     const { evidence, path } = leaseOf(repository, 'run-iota');
-    const base = documentAt(path);
+    const leaseBytes = readFileSync(path);
 
-    for (const [label, value, expected] of [
-      ['garbage', 42, 'MALFORMED'],
-      ['a future version', { evidenceVersion: 99, anything: 'goes' }, 'UNSUPPORTED_VERSION'],
-      ['a foreign record', bound({}, { leaseKey: 'X', ownerNonce: 'f'.repeat(64) }), 'NOT_THIS_LEASE'],
-    ] as ReadonlyArray<readonly [string, unknown, ContainmentReading]>) {
-      writeFileSync(path, `${JSON.stringify({ ...base, containment: value }, null, 2)}\n`);
-      // The lease itself still parses: an enrichment may not lock a repository.
-      const parsed = safeParseExecutionLease(documentAt(path));
-      expect(parsed.success, label).toBe(true);
+    for (const [label, contents, expected] of [
+      ['garbage', '42', 'MALFORMED'],
+      ['not JSON at all', '{ half a rec', 'MALFORMED'],
+      ['an empty file', '', 'MALFORMED'],
+      ['a future version', '{"evidenceVersion":99,"anything":"goes"}', 'UNSUPPORTED_VERSION'],
+      [
+        'a foreign record',
+        JSON.stringify(bound({}, { leaseKey: 'X', ownerNonce: 'f'.repeat(64) })),
+        'NOT_THIS_LEASE',
+      ],
+    ] as ReadonlyArray<readonly [string, string, ContainmentReading]>) {
+      writeFileSync(recordPathOf(repository), contents);
       const inspection = inspectRepositoryExecutionLease(repository);
+      // The lease is untouched by any of this. An enrichment may not lock a
+      // repository, and here it cannot even reach the file that would.
+      expect(readFileSync(path).equals(leaseBytes), label).toBe(true);
+      expect(safeParseExecutionLease(documentAt(path)).success, label).toBe(true);
       expect(inspection.state, label).toBe('HELD');
       expect(inspection.ownerPid, label).toBe(process.pid);
       expect(inspection.containment, label).toBe(expected);
     }
-    writeFileSync(path, `${JSON.stringify(base, null, 2)}\n`);
+
+    // A record nobody can read is not a record nobody wrote: an unreadable
+    // companion must refuse rather than answer `ABSENT`.
+    rmSync(recordPathOf(repository));
+    mkdirSync(recordPathOf(repository));
+    expect(inspectRepositoryExecutionLease(repository).containment).toBe('MALFORMED');
+    rmSync(recordPathOf(repository), { recursive: true });
+
+    expect(inspectRepositoryExecutionLease(repository).containment).toBe('ABSENT');
     releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('ignores a record left behind by an earlier lease', () => {
+    // The companion is not removed on release, so the next holder finds it. It
+    // is bound to the lease that wrote it, so it refuses rather than carrying
+    // over — which is the direction that matters, because carrying over would
+    // credit a fresh lease with somebody else's containment.
+    const repository = repositoryFixture();
+    const first = leaseOf(repository, 'run-first');
+    expect(
+      recordContainmentEvidence(repository, first.evidence, attestationFor(process.pid), {
+        writerId: 'claude',
+        now: tick,
+      }).code,
+    ).toBe('RECORDED');
+    releaseRepositoryExecutionLease(first.evidence);
+    expect(recordOf(repository)).not.toBeNull();
+
+    const second = leaseOf(repository, 'run-second');
+    expect(inspectRepositoryExecutionLease(repository).containment).toBe('NOT_THIS_LEASE');
+    releaseRepositoryExecutionLease(second.evidence);
   });
 
   it('reports no reading at all when there is no lease document', () => {

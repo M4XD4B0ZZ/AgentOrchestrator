@@ -54,6 +54,36 @@
  * stealing somebody else's claim. That is the honest bound, and it is the reason
  * this record may never be read as authority.
  *
+ * ── Where the record lives, and why it is not inside the lease ─────────────
+ *
+ * Beside the lease, in the same Git common directory, under its own name. The
+ * first version of this slice put it *inside* the lease document, which reads
+ * better and was wrong, for a reason an adversarial review reproduced rather
+ * than argued:
+ *
+ * The record is written **once per writer launch**, not once per lease — a run
+ * makes several `claude` spawns under one lease — so the second and later
+ * records replace the first. Replacing a JSON document in place cannot be made
+ * atomic, and the alternative, stage-and-rename, is an ABA on the lease *name*
+ * that can silently overwrite a successor's legitimate lease. The in-place
+ * write was chosen for that reason and its cost was stated as "a crash inside
+ * the write leaves an unparseable lease". That cost is much worse than it
+ * sounds: an unparseable lease has no legible owner, cannot be released by its
+ * own holder, refuses every future acquisition as `STALE_LEASE_RECOVERY_UNSAFE`,
+ * and this build ships no way to clear one. The feature exists to make a killed
+ * orchestrator recoverable, and it was adding a window — per writer spawn — in
+ * which being killed makes the repository *permanently* unrunnable.
+ *
+ * A companion file removes the whole class. The lease document is not touched by
+ * this slice at all; the worst a torn or half-written companion can do is read as
+ * `MALFORMED`, which is "no reliable containment proof" — exactly the answer a
+ * missing record gives, and exactly the conservative direction.
+ *
+ * It costs the record nothing, because the record never derived anything from
+ * being inside the lease: it is bound to the lease by the digest below, and a
+ * companion left behind by an earlier lease is refused by that binding rather
+ * than by where it sits.
+ *
  * ── Fail-closed is the whole contract ──────────────────────────────────────
  *
  * Exactly one of the readings below means "there is a reliable containment
@@ -109,7 +139,8 @@ export const ContainmentEvidenceSchema = z
     verifiedInJob: z.literal(true),
     assignedAtCreation: z.boolean().nullable(),
     launchDigest: z.string().regex(HEX_64, 'Must be a launch digest.'),
-    observedAt: z.string().regex(ISO_8601, 'Must be an ISO-8601 instant.'),
+    /** When the attestation was made. See `ContainmentFacts.attestedAt`. */
+    attestedAt: z.string().regex(ISO_8601, 'Must be an ISO-8601 instant.'),
     recordedAt: z.string().regex(ISO_8601, 'Must be an ISO-8601 instant.'),
     binding: z.string().regex(HEX_64, 'Must be a binding digest.'),
   })
@@ -121,11 +152,14 @@ export type ContainmentEvidence = z.infer<typeof ContainmentEvidenceSchema>;
 export type ContainmentEvidencePayload = Omit<ContainmentEvidence, 'binding'>;
 
 /**
- * The lease fields a containment reading is decided against.
+ * The lease a containment reading is decided against, and the record found
+ * beside it.
  *
  * Stated as its own shape rather than as `ExecutionLease`, for the reason
- * `LeaseRepository` is: these are the only five fields read, and it keeps this
- * module free of an import cycle with the document that carries it.
+ * `LeaseRepository` is: these are the only four lease fields read, and it keeps
+ * this module free of an import cycle. `containment` is whatever was in the
+ * companion file — `undefined` when there was none, and any parsed value at all
+ * otherwise, because judging it is this module's job and nobody else's.
  */
 export interface ContainmentSubject {
   readonly leaseKey: string;
@@ -143,9 +177,9 @@ export const CONTAINMENT_READINGS = [
   /** A well-formed, current-version record, bound to this lease and agreeing
    *  with it. The only reading a later recovery may build on. */
   'CONTAINED',
-  /** No containment field at all: a legacy lease, or one whose writer never
-   *  ran behind the boundary. Conservative by construction — absence of a
-   *  proof, never a proof of absence. */
+  /** No record beside the lease at all: a lease taken by an earlier build, or
+   *  one whose writer never ran behind the boundary. Conservative by
+   *  construction — absence of a proof, never a proof of absence. */
   'ABSENT',
   /** A record this build does not know how to read. Refused, and the lease
    *  itself stays readable. */
@@ -219,7 +253,7 @@ export function containmentBinding(
         payload.verifiedInJob,
         payload.assignedAtCreation,
         payload.launchDigest,
-        payload.observedAt,
+        payload.attestedAt,
         payload.recordedAt,
       ]),
     )
@@ -255,10 +289,9 @@ export function readContainmentEvidence(
   expected?: ContainmentExpectation,
 ): ContainmentReading {
   const raw: unknown = lease.containment;
-  // A legacy lease has no key at all. `null` is treated the same way rather
-  // than as a malformed record, because it is what a build that clears the
-  // field would leave, and "nothing is claimed here" is exactly what `ABSENT`
-  // means.
+  // No companion file at all. `null` is treated the same way rather than as a
+  // malformed record, because it is what a build that clears the record would
+  // leave, and "nothing is claimed here" is exactly what `ABSENT` means.
   if (raw === undefined || raw === null) return 'ABSENT';
 
   // The version is read *before* the shape, and from the raw value. A record

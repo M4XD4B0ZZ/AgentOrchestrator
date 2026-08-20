@@ -192,9 +192,11 @@ export function assessLeaseRecovery(
   return Object.freeze({
     classification: classifyForRecovery(inspection),
     inspection,
-    // Read from the inspection, and read *here* rather than inside
-    // `classifyForRecovery`, so that the classifier has no access to it at all.
-    // A field a function cannot see is a field it cannot start depending on.
+    // Read from the inspection here, and never handed to the classifier — see
+    // the argument it takes, which is two fields rather than the whole
+    // inspection. A field a function cannot see is a field it cannot start
+    // depending on, and an earlier version of this comment claimed that while
+    // passing the classifier the entire `LeaseInspection`, containment included.
     containmentProven:
       inspection.containment !== null && isReliableContainment(inspection.containment),
     containment: inspection.containment,
@@ -209,7 +211,9 @@ export function assessLeaseRecovery(
  * it. This classifies a lease inspection and shares nothing with that chain, so
  * it says so instead of joining a list of exceptions.
  */
-function classifyForRecovery(inspection: LeaseInspection): LeaseRecoveryClassification {
+function classifyForRecovery(
+  inspection: Pick<LeaseInspection, 'state' | 'liveness'>,
+): LeaseRecoveryClassification {
   switch (inspection.state) {
     case 'FREE':
       return 'NOTHING_TO_RECOVER';

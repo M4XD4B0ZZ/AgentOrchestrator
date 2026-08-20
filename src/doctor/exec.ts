@@ -1005,18 +1005,27 @@ const OWNED_OUTCOME: Readonly<Record<OwnedCommandOutcome, CommandOutcome>> = Obj
  * pair, since a lost boundary carrying its declared failure code is a perfectly
  * well-formed result.
  *
- * Total over {@link CommandOutcome} by construction, and asserted row by row in
- * `tests/v3-04-lease-containment.test.ts` — `satisfies` would accept `true`
- * everywhere.
+ * Total over {@link CommandOutcome} by construction, and asserted row by row
+ * through {@link carriesContainment} in `tests/v3-04-lease-containment.test.ts`
+ * — `satisfies` would accept `true` everywhere, and a behavioural test can only
+ * reach the rows some owned outcome maps onto, which is five of the six.
  */
 const CONTAINMENT_CARRYING: Readonly<Record<CommandOutcome, boolean>> = Object.freeze({
   COMPLETED: true,
   TIMED_OUT: true,
   OUTPUT_LIMIT_EXCEEDED: true,
+  // Not reachable through `OWNED_OUTCOME`: nothing owned maps onto it, and a
+  // command that was never found never reached the boundary. Stated anyway,
+  // because a table with an unstated row is a table with a default.
   NOT_FOUND: false,
   SPAWN_FAILED: false,
   BOUNDARY_LOST: false,
 });
+
+/** Whether a result with this outcome may carry a containment attestation. */
+export function carriesContainment(outcome: CommandOutcome): boolean {
+  return CONTAINMENT_CARRYING[outcome] === true;
+}
 
 const OWNED_FAILURE: Readonly<Record<OwnedCommandFailureCode, CommandFailureCode>> = Object.freeze({
   TIMEOUT: 'TIMEOUT',

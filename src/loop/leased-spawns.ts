@@ -76,6 +76,7 @@
  */
 
 import { runAgentCommand, type AgentCommandResult, type AgentRunner } from '../agent/agent-command.js';
+import { isContainmentAttestation } from '../core/containment-attestation.js';
 import type { AgentId } from '../core/states.js';
 import {
   recordContainmentEvidence,
@@ -179,7 +180,12 @@ function recordWriterContainment(
   result: AgentCommandResult,
 ): ContainmentRecordResult | null {
   if (id !== CONTAINED_WRITER) return null;
-  if (result.containment === undefined) return null;
+  // The registry gate, not `!== undefined`. A result carrying an explicit
+  // `null`, or anything else a JS consumer or a JSON round trip can produce, is
+  // not an attestation — and asking the mint is the same discipline
+  // `doctor/exec.ts` applies one layer down, rather than a second, weaker test
+  // of the same thing.
+  if (!isContainmentAttestation(result.containment)) return null;
   return recordContainmentEvidence(deps.lease.repository, deps.lease.evidence, result.containment, {
     writerId: id,
     now: deps.containmentNow ?? (() => new Date().toISOString()),

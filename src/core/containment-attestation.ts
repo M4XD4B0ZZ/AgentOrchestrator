@@ -56,9 +56,19 @@ export function isContainmentAttestation(value: unknown): value is ContainmentAt
  * a private field, so it *throws* for a value that passed the registry gate
  * without going through the constructor — which is reachable, as
  * `lease/execution-lease.ts` records: a review captured the registry itself by
- * hooking `WeakSet.prototype.add` before the first mint. No authority came of
- * it, but a check that answers by throwing is not answering, so this one asks
- * safely and reports the refusal as `null`.
+ * hooking `WeakSet.prototype.add` before the first mint. A check that answers by
+ * throwing is not answering, so this one asks safely and reports the refusal as
+ * `null`.
+ *
+ * What that buys, stated exactly, because the reassuring version of this
+ * sentence is wrong. Registry capture alone yields a value that passes
+ * {@link isContainmentAttestation} and reads back `null` here — so it is refused
+ * at the recorder, which is the property that matters. Registry capture
+ * *together with* the internal class produces a fully readable forgery, and an
+ * adversarial review demonstrated it. That is not an escalation: anyone who can
+ * import `internal/containment-attestation.js` can call the mint directly. The
+ * artefact's guarantee is against a caller that does **not** import the mint,
+ * and it should not be read as more.
  */
 export function containmentFactsOf(value: unknown): ContainmentFacts | null {
   if (!isContainmentAttestation(value)) return null;

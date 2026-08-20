@@ -191,7 +191,15 @@ export type OwnedCommandOutcome = (typeof OWNED_COMMAND_OUTCOMES)[number];
  * added to that union stops the build here rather than defaulting to `false` —
  * which would be safe, and would also be a decision nobody made. Completeness is
  * not correctness, though: a `satisfies` clause would accept `true` in every
- * row, so every entry is asserted by value in `tests/v3-04-lease-containment.test.ts`.
+ * row, so every entry is asserted by value through {@link isAttestableOutcome}
+ * in `tests/v3-04-lease-containment.test.ts`.
+ *
+ * The predicate is exported for exactly that. This comment previously claimed
+ * the rows were asserted by value while the table was module-private and only
+ * three of its six rows were reachable from any test — flipping
+ * `TERMINATED_BY_CALLER` to `true` was an undetected mutant of the whole gate,
+ * caught downstream by `doctor/exec.ts`'s second table and by nothing here. A
+ * claim about a table nothing can read is not a claim.
  *
  * The three `false` rows are the whole point of the table:
  *
@@ -219,6 +227,11 @@ const ATTESTABLE_OUTCOME: Readonly<Record<OwnedCommandOutcome, boolean>> = Objec
   BOUNDARY_LOST: false,
   LAUNCH_REFUSED: false,
 });
+
+/** Whether an established run with this outcome may attest containment. */
+export function isAttestableOutcome(outcome: OwnedCommandOutcome): boolean {
+  return ATTESTABLE_OUTCOME[outcome] === true;
+}
 
 /**
  * Why this side ended the run, or `NONE` if it did not.
@@ -1700,7 +1713,11 @@ export async function runOwnedCommand(
           mode: owned.mode,
           assignedAtCreation: owned.assignedAtCreation,
           launchNonce: ending.status?.nonce ?? '',
-          observedAt: new Date().toISOString(),
+          // The moment this run was classified, not the moment the kernel
+          // confirmed the job — the boundary reports the first and not the
+          // second. `ContainmentFacts.attestedAt` says so, and says why the
+          // stronger field is not this slice's to add.
+          attestedAt: new Date().toISOString(),
           verifiedInJob: owned.verifiedInJob,
         })
       : null;

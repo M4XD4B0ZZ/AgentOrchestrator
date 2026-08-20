@@ -108,8 +108,21 @@ export interface ContainmentFacts {
    * it for.
    */
   readonly launchDigest: string;
-  /** When the containment was observed, ISO-8601. */
-  readonly observedAt: string;
+  /**
+   * When this attestation was made, ISO-8601.
+   *
+   * Named for what it is rather than for what a reader would like it to be. The
+   * kernel confirmed job membership back in the boundary's establish loop, and
+   * `startOwnedProcess` does not report when — so this is the moment the run was
+   * classified, which for an agent is minutes later. It was called `observedAt`
+   * and documented as "when the containment was observed", which is a claim the
+   * value does not support and precisely the kind a later recovery slice would
+   * reason about lifetimes from.
+   *
+   * Making it the establishment instant needs the boundary to report one, which
+   * is a change to slice 1's result shape and not this slice's to make.
+   */
+  readonly attestedAt: string;
 }
 
 /**
@@ -127,7 +140,7 @@ export interface ObservedContainment {
   readonly mode: string;
   readonly assignedAtCreation: boolean | null;
   readonly launchNonce: string;
-  readonly observedAt: string;
+  readonly attestedAt: string;
   /** The kernel's membership confirmation. Anything but `true` mints nothing. */
   readonly verifiedInJob: boolean;
 }
@@ -195,7 +208,7 @@ export function mintContainmentAttestation(observed: ObservedContainment): Conta
   if (typeof observed.launchNonce !== 'string' || !LAUNCH_NONCE.test(observed.launchNonce)) {
     return null;
   }
-  if (typeof observed.observedAt !== 'string' || !ISO_8601.test(observed.observedAt)) return null;
+  if (typeof observed.attestedAt !== 'string' || !ISO_8601.test(observed.attestedAt)) return null;
 
   const proof = new ContainmentProof(
     Object.freeze({
@@ -209,7 +222,7 @@ export function mintContainmentAttestation(observed: ObservedContainment): Conta
         .update(' ')
         .update(observed.launchNonce)
         .digest('hex'),
-      observedAt: observed.observedAt,
+      attestedAt: observed.attestedAt,
     }),
   );
   // The only line in the codebase that admits anything to the registry.

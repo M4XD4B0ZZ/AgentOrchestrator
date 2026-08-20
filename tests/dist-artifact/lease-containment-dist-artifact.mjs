@@ -8,7 +8,8 @@
  * rests on:
  *
  * > A real command, run through the productive Windows path, is created inside a
- * > job this process owns, and the lease it holds ends up carrying that fact.
+ * > job this process owns, and the lease it holds ends up with that fact
+ * > recorded beside it — while the lease's own bytes never change.
  *
  * `tests/v3-04-lease-containment.test.ts` drives the substituted `start` seam,
  * because the boundary executable is resolved relative to the compiled adapter
@@ -139,11 +140,9 @@ check(acquired.ok === true, `could not take a lease: ${acquired.ok ? '' : acquir
 
 if (acquired.ok === true) {
   const location = lease.deriveExecutionLeaseLocation(repository);
-  const before = readFileSync(location.path);
-  check(
-    JSON.parse(before.toString('utf8')).containment === undefined,
-    'a freshly acquired lease already carried containment evidence',
-  );
+  const recordPath = join(repository.gitCommonDir, lease.CONTAINMENT_EVIDENCE_FILE_NAME);
+  const leaseBefore = readFileSync(location.path);
+  check(!existsSync(recordPath), 'a freshly acquired lease already had a containment record beside it');
   check(
     lease.inspectRepositoryExecutionLease(repository).containment === 'ABSENT',
     'a freshly acquired lease did not read as ABSENT',
@@ -155,37 +154,64 @@ if (acquired.ok === true) {
   });
   check(recorded.code === 'RECORDED', `recording refused: ${recorded.code} ${recorded.detail ?? ''}`);
 
-  // The bytes on disk, read back with nothing from this process's memory.
-  const after = JSON.parse(readFileSync(location.path, 'utf8'));
-  check(after.ownerNonce === JSON.parse(before.toString('utf8')).ownerNonce, 'the owner nonce changed');
-  check(after.runId === 'dist-run', 'the run id changed');
-  check(after.containment?.evidenceVersion === containment.CONTAINMENT_EVIDENCE_VERSION, 'no versioned record');
-  check(after.containment?.verifiedInJob === true, 'the record does not claim a verified job');
-  check(after.containment?.ownerPid === process.pid, 'the record names another owner');
+  /**
+   * The load-bearing assertion, and it is about bytes.
+   *
+   * The first version of this slice wrote the record into the lease document,
+   * once per writer launch, in place. A review reproduced what an interrupted
+   * rewrite leaves: a lease with no legible owner, which its own holder cannot
+   * release and nothing in this build can clear. The lease must be untouched —
+   * not merely "still parseable", byte-identical — because the moment it is
+   * written at all, that window is back.
+   */
+  check(
+    readFileSync(location.path).equals(leaseBefore),
+    'recording modified the lease document — the in-place rewrite is back',
+  );
+
+  // The record's bytes on disk, read back with nothing from this process's memory.
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  check(record.evidenceVersion === containment.CONTAINMENT_EVIDENCE_VERSION, 'no versioned record');
+  check(record.verifiedInJob === true, 'the record does not claim a verified job');
+  check(record.ownerPid === process.pid, 'the record names another owner');
+  check(record.runId === 'dist-run', 'the record names another run');
+  check(record.writerId === 'claude', 'the record names another writer');
 
   const reading = lease.inspectRepositoryExecutionLease(repository).containment;
   check(reading === 'CONTAINED', `the recorded lease read back as ${reading}`);
+
   /* ─────── case 3: a tampered record is refused, on the same bytes ──────── */
 
-  const tampered = { ...after, containment: { ...after.containment, childPid: after.containment.childPid + 1 } };
-  writeFileSync(location.path, `${JSON.stringify(tampered, null, 2)}\n`);
+  writeFileSync(
+    recordPath,
+    `${JSON.stringify({ ...record, childPid: record.childPid + 1 }, null, 2)}\n`,
+  );
   const tamperedReading = lease.inspectRepositoryExecutionLease(repository).containment;
   check(
     tamperedReading === 'NOT_THIS_LEASE',
     `a one-field edit to the shipped record read as ${tamperedReading}`,
   );
-  // The lease itself is still perfectly readable: an enrichment may not lock a
-  // repository.
+  // And a torn record is not a missing one.
+  writeFileSync(recordPath, '{ half a rec');
+  check(
+    lease.inspectRepositoryExecutionLease(repository).containment === 'MALFORMED',
+    'a torn record did not read as MALFORMED',
+  );
   check(
     lease.inspectRepositoryExecutionLease(repository).state === 'HELD',
-    'a tampered containment record made the lease unreadable',
+    'a broken containment record made the lease unreadable',
+  );
+  check(
+    readFileSync(location.path).equals(leaseBefore),
+    'the lease changed while the record beside it was being abused',
   );
 
-  /* ── case 4: a foreign holder's lease is never overwritten ───────────── */
+  /* ── case 4: a successor's lease is never written, nor recorded against ── */
 
-  const successor = { ...after, ownerNonce: 'e'.repeat(64), runId: 'somebody-else' };
+  const successor = { ...JSON.parse(leaseBefore.toString('utf8')), ownerNonce: 'e'.repeat(64), runId: 'somebody-else' };
   const successorBytes = Buffer.from(`${JSON.stringify(successor, null, 2)}\n`, 'utf8');
   writeFileSync(location.path, successorBytes);
+  rmSync(recordPath, { force: true });
   const refused = lease.recordContainmentEvidence(repository, acquired.evidence, result.containment, {
     writerId: 'claude',
     now,
@@ -195,9 +221,10 @@ if (acquired.ok === true) {
     readFileSync(location.path).equals(successorBytes),
     "recording modified a lease this run does not hold — the successor's bytes changed",
   );
+  check(!existsSync(recordPath), 'a process that has lost the lease still published a record');
 
-  // Put our own record back so the release below has something of ours to give.
-  writeFileSync(location.path, `${JSON.stringify(after, null, 2)}\n`);
+  // Put our own lease back so the release below has something of ours to give.
+  writeFileSync(location.path, leaseBefore);
   lease.releaseRepositoryExecutionLease(acquired.evidence);
 }
 
