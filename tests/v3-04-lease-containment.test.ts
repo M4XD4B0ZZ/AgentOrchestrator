@@ -85,6 +85,7 @@ import {
   acquireRepositoryExecutionLease,
   clearContainmentEvidence,
   CONTAINMENT_EVIDENCE_FILE_NAME,
+  CONTAINMENT_RECORD_CODES,
   deriveExecutionLeaseLocation,
   inspectRepositoryExecutionLease,
   recordContainmentEvidence,
@@ -361,6 +362,17 @@ describe('containment evidence — the format', () => {
     expect(carriesContainment('BOUNDARY_LOST')).toBe(false);
   });
 
+  it('has the number of record codes its own header claims', () => {
+    // The header says "a closed set of fourteen, of which three are successes",
+    // and it said "thirteen" for one commit after the fourteenth member landed.
+    // `VerifiedRemoval` records the same defect forty lines up in that file: a
+    // number describing the code, sitting beside the code, with nothing keeping
+    // the two in step. This is the something.
+    expect(CONTAINMENT_RECORD_CODES).toHaveLength(14);
+    expect(new Set(CONTAINMENT_RECORD_CODES).size).toBe(CONTAINMENT_RECORD_CODES.length);
+    expect(CONTAINMENT_RECORD_CODES.filter((c) => c === 'RECORDED' || c === 'CLEARED' || c === 'NOTHING_TO_CLEAR')).toHaveLength(3);
+  });
+
   it('calls exactly one reading reliable, asserted row by row', () => {
     // By value rather than by "the table is total": a total table with `true` in
     // every row type-checks. This is the assertion that a later edit to the
@@ -530,7 +542,12 @@ describe('containment attestation — what may produce one', () => {
      * evidence, because that artefact's gate was once a private-field probe and
      * `super(…)` installs the field. This artefact's gate is registry membership
      * and nothing else, so a subclass buys nothing — measured, not assumed:
-     * a subclass instance answers `holds() === false` and `factsOf() === null`.
+     * a subclass instance answers `holds() === false`, and therefore the public
+     * `containmentFactsOf` answers `null` for it. Note where that `null` comes
+     * from: the registry gate, not the field. `super(…)` really does install the
+     * private field, so the internal `factsOf` static reads a subclass instance
+     * perfectly well — a draft of this sentence claimed otherwise and was wrong
+     * about which of the two checks does the work.
      *
      * So this pin is not a security boundary; it is a *notification*. It says
      * one module names the class today, and it will fail if a second one starts
@@ -839,12 +856,15 @@ describe('recording containment evidence into a lease', () => {
 
   it('reports a removal it could not perform, rather than claiming success', () => {
     /**
-     * The one failure on this path that is **not** conservative: a clear that
-     * cannot remove the record leaves the previous launch's positive record
-     * standing, so the lease keeps reading `CONTAINED` about a writer that was
-     * not contained. It gets the publish's retry budget for that reason — both
-     * operations fail for the same Windows reason, and this is the one whose
-     * failure fails open.
+     * A failure that is not conservative: a clear that cannot remove the record
+     * leaves the previous launch's positive record standing, so the lease keeps
+     * reading `CONTAINED` about a writer that was not contained.
+     *
+     * It has no retry. One was added for exactly this reason and withdrawn in
+     * the next round: its justification — that a reader holding the file open
+     * refuses the removal — was measured false, and its ownership proof sat
+     * outside its loop, which is how a retried removal reached a successor's
+     * record.
      *
      * A non-empty directory at the record path is the way to make `unlink`
      * refuse. It is also, as far as this build can tell, the *only* way: node

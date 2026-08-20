@@ -1879,7 +1879,13 @@ const MAX_CONTAINMENT_EVIDENCE_BYTES = 16_384;
 
 /**
  * What became of an attempt to record or remove containment evidence. A closed
- * set of thirteen, of which three are successes and each names which one.
+ * set of fourteen, of which three are successes and each names which one.
+ *
+ * The count was "thirteen" the moment the fourteenth member was added, which is
+ * the defect `VerifiedRemoval` records forty lines up in this same file: a
+ * number describing the code, sitting beside the code, with nothing keeping the
+ * two in step. The array below is the authority; if these disagree again, it is
+ * right and this sentence is wrong.
  *
  * `RECORDED`, `CLEARED` and `NOTHING_TO_CLEAR` are three values rather than one
  * because a caller testing `code === 'RECORDED'` must not read a *removal* as a
@@ -1913,22 +1919,27 @@ export const CONTAINMENT_RECORD_CODES = [
   'OWNER_MISMATCH',
   /** The record this build built is one this build would not accept back. */
   'RECORD_NOT_READABLE_BACK',
-  /** The record could not be published. Nothing was written, so there is no
-   *  record — which reads as no reliable proof. Conservative. */
+  /**
+   * The record could not be published. Nothing this call built reached a file.
+   *
+   * That is **not** the same as "there is no record", and the first version of
+   * this sentence said it was. A run makes several writer launches under one
+   * lease, so a failed publish leaves whatever the *previous* launch left —
+   * measured: a `RECORDED` launch followed by a `RECORD_WRITE_FAILED` one still
+   * reads `CONTAINED`, describing the older launch. It is conservative only for
+   * the first launch under a lease.
+   */
   'RECORD_WRITE_FAILED',
   /**
    * The record could not be **removed**, and is therefore still on disk.
    *
-   * Its own code, and the distinction is the whole reason for it. The two
-   * failures point in opposite safety directions: a publish that failed leaves
-   * nothing, and nothing reads as no proof; a removal that failed leaves the
-   * *previous* launch's positive record standing, so the lease keeps reading
-   * `CONTAINED` about a writer that was not contained. They shared
-   * {@link RECORD_WRITE_FAILED} — whose sentence says "the lease is untouched
-   * either way", true of both and reassuring about only one — so a caller could
-   * not tell "nothing happened" from "a stale claim is on disk". That is the
-   * same confusion `CLEARED` was split out of `RECORDED` to remove, and it had
-   * simply moved one code over.
+   * Its own code because it says which operation failed, and a caller that has
+   * to decide what to do about the file on disk needs that. It does **not** mean
+   * the two codes point in opposite safety directions — a draft of this comment
+   * claimed exactly that and it was measured false. Both failures can leave the
+   * previous launch's record standing; see {@link RECORD_WRITE_FAILED}. What
+   * separates them is what the caller was *trying* to do, and therefore what it
+   * can try next.
    *
    * Nothing in this build consumes it, because nothing in this build reads the
    * record. The slice that does must.

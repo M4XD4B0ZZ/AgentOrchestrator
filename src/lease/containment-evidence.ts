@@ -121,7 +121,12 @@
  *    though the latest was. Nothing here counts launches, so "every writer of
  *    this lease was contained" is a claim this record cannot make;
  *  - a removal that fails leaves the previous record in place, and a reader
- *    cannot tell that from a record that was deliberately kept.
+ *    cannot tell that from a record that was deliberately kept;
+ *  - **and so does a publish that fails.** Measured, and it is the half of this
+ *    that is easiest to miss: a launch whose record could not be written leaves
+ *    whatever the launch before it wrote, so the lease keeps reading `CONTAINED`
+ *    about the older launch. Neither failure is announced anywhere a reader of
+ *    the record can see; both are returned to a caller that discards them.
  *
  * A recovery slice that needs the stronger claim needs a stronger record — a
  * launch counter that is poisoned before a launch and confirmed after it — and
