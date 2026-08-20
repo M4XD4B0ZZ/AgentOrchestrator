@@ -858,7 +858,9 @@ describe('recording containment evidence into a lease', () => {
     /**
      * A failure that is not conservative: a clear that cannot remove the record
      * leaves the previous launch's positive record standing, so the lease keeps
-     * reading `CONTAINED` about a writer that was not contained.
+     * reading `CONTAINED` about a writer that was not contained. It is not the
+     * *only* such failure — see the note on the code below — but it is the one
+     * this case can reach.
      *
      * It has no retry. One was added for exactly this reason and withdrawn in
      * the next round: its justification — that a reader holding the file open
@@ -881,10 +883,24 @@ describe('recording containment evidence into a lease', () => {
     writeFileSync(join(path, 'occupied'), 'x');
 
     const result = clearContainmentEvidence(repository, evidence);
-    // Its own code, not the publish's. The two failures point in opposite
-    // safety directions — a publish that failed wrote nothing, a removal that
-    // failed left a stale positive on disk — and they shared one code, whose
-    // sentence was reassuring about only one of them.
+    /**
+     * Its own code, not the publish's — because it says **which operation**
+     * failed, and for no stronger reason than that.
+     *
+     * This comment used to say the two point in opposite safety directions: a
+     * publish that failed wrote nothing, a removal that failed left a stale
+     * positive. That is false under the final design and it is the half worth
+     * being exact about, because Slice 5 derives recovery decisions from this
+     * semantics. A run makes several writer launches under one lease, so a
+     * **failed publish also leaves the previous launch's record standing** — the
+     * lease keeps reading `CONTAINED` about the older launch, exactly as it does
+     * after a failed clear. Measured, and stated on `RECORD_WRITE_FAILED`'s own
+     * member doc and in `containment-evidence.ts`'s residue list.
+     *
+     * So: both failures can leave a stale positive. Neither is announced
+     * anywhere a reader of the record can see it. What the two codes separate is
+     * what the caller was trying to do, and therefore what it may try next.
+     */
     expect(result.code).toBe('RECORD_CLEAR_FAILED');
     expect(result.detail).not.toBeNull();
     // And it is not mistaken for either success, nor for the publish's failure.
