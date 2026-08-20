@@ -1878,12 +1878,23 @@ export const CONTAINMENT_EVIDENCE_FILE_NAME = 'agent-orchestrator-execution-leas
 const MAX_CONTAINMENT_EVIDENCE_BYTES = 16_384;
 
 /**
- * What became of an attempt to record containment evidence. A closed set of
- * eleven, exactly one of which wrote anything.
+ * What became of an attempt to record or remove containment evidence. A closed
+ * set of thirteen, of which three are successes and each names which one.
+ *
+ * `RECORDED`, `CLEARED` and `NOTHING_TO_CLEAR` are three values rather than one
+ * because a caller testing `code === 'RECORDED'` must not read a *removal* as a
+ * publish. The removal used to answer `RECORDED` with `detail: 'CLEARED'`, which
+ * put the difference in a field nothing is obliged to look at and made the
+ * member's own sentence — "the record is beside the lease" — false for half the
+ * calls that produced it.
  */
 export const CONTAINMENT_RECORD_CODES = [
   /** The record is beside the lease, and this build read it back as reliable. */
   'RECORDED',
+  /** A record was there and is gone. */
+  'CLEARED',
+  /** There was no record to remove, which is the state the caller asked for. */
+  'NOTHING_TO_CLEAR',
   /** The lease artefact was not minted evidence. Nothing was opened. */
   'EVIDENCE_INVALID',
   /** The containment artefact was not minted. Nothing was written. */
@@ -2048,11 +2059,26 @@ export function recordContainmentEvidence(
   if (facts.ownerPid !== document.ownerPid) return recordFailure('OWNER_MISMATCH');
 
   if (
+    request === null ||
+    typeof request !== 'object' ||
     typeof request.writerId !== 'string' ||
     request.writerId.length === 0 ||
-    request.writerId.length > 64
+    request.writerId.length > 64 ||
+    typeof request.now !== 'function'
   ) {
     return recordFailure('RECORD_NOT_READABLE_BACK', 'WRITER_NOT_NAMED');
+  }
+
+  // The clock is a caller-supplied function, so calling it is calling somebody
+  // else's code, and "never throws" is a contract this function's only caller
+  // relies on by not catching. A `now` that throws is a failed record, not a
+  // failed agent run — the same guard `classifyOwnedCommand` puts on its own
+  // observation one layer down.
+  let recordedAt: string;
+  try {
+    recordedAt = request.now();
+  } catch {
+    return recordFailure('RECORD_NOT_READABLE_BACK', 'CLOCK_REFUSED');
   }
 
   const payload: ContainmentEvidencePayload = {
@@ -2067,7 +2093,7 @@ export function recordContainmentEvidence(
     assignedAtCreation: facts.assignedAtCreation,
     launchDigest: facts.launchDigest,
     attestedAt: facts.attestedAt,
-    recordedAt: request.now(),
+    recordedAt,
   };
   const record = { ...payload, binding: containmentBinding(document, payload) };
   const bytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`, 'utf8');
@@ -2136,9 +2162,28 @@ function stillHeldBy(location: LeaseLocation, evidence: ExecutionLeaseEvidence):
  * residual window applies and the same direction bounds it — the worst outcome
  * is evidence lost, which is the answer a missing record already gives.
  *
- * A removal that fails leaves the previous record in place, which is the one
- * failure here that is *not* conservative. `lease/containment-evidence.ts` states
- * it in the format's own terms rather than leaving it to be discovered.
+ * It does **not** require the lease to name a run, and the publish does. The
+ * asymmetry is deliberate: a run id is what a record has to be *bound to*, and a
+ * removal binds to nothing. Refusing to tidy up a lease that names no run would
+ * leave a stale positive standing for the one lease shape that can never replace
+ * it.
+ *
+ * ── The retry is here because *this* is the operation that fails open ──────
+ *
+ * The publish retries and the removal used to make one attempt, which is the
+ * budget on the wrong operation and an adversarial review said so. A publish
+ * that fails leaves no record, and no record reads `ABSENT` — conservative. A
+ * removal that fails leaves the *previous* launch's positive record standing,
+ * and the lease then reads `CONTAINED` about a writer that was not contained.
+ * Both fail for the same reason on Windows — a reader holding the file open —
+ * so both get the same short budget.
+ *
+ * It is a budget and not a guarantee. A removal that still fails answers
+ * {@link RECORD_WRITE_FAILED} with the errno, and the caller is then holding the
+ * only evidence that the record on disk is stale. Nothing in this build consumes
+ * that, because nothing in this build reads the record — the slice that does
+ * must, and `lease/containment-evidence.ts` states the residue in the format's
+ * own terms rather than leaving it to be discovered.
  *
  * Never throws.
  */
@@ -2170,14 +2215,23 @@ export function clearContainmentEvidence(
     return recordFailure('NOT_OWNER');
   }
 
-  try {
-    unlinkSync(containmentPathFor(location));
-  } catch (error) {
-    const errno = safeErrnoCode(error);
-    // Nothing to remove is the state this was asked to reach.
-    if (errno !== 'ENOENT') return recordFailure('RECORD_WRITE_FAILED', errno);
+  const path = containmentPathFor(location);
+  let lastError = 'UNKNOWN';
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      unlinkSync(path);
+      return Object.freeze({ code: 'CLEARED' as const, detail: null });
+    } catch (error) {
+      const errno = safeErrnoCode(error);
+      // Nothing to remove is the state this was asked to reach, and it is a
+      // different answer from "a record was there and is gone": a caller that
+      // needs to know whether it destroyed something can tell.
+      if (errno === 'ENOENT') return Object.freeze({ code: 'NOTHING_TO_CLEAR' as const, detail: null });
+      lastError = errno;
+    }
+    if (attempt < 4) spinFor(2);
   }
-  return Object.freeze({ code: 'RECORDED' as const, detail: 'CLEARED' });
+  return recordFailure('RECORD_WRITE_FAILED', lastError);
 }
 
 /**
@@ -2214,7 +2268,7 @@ function publishContainmentRecord(
     return staged;
   }
 
-  let lastError = 'RENAME_REFUSED';
+  let lastError = 'RENAME_NOT_ATTEMPTED';
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if (!stillHeld()) {
       discard(staging);
@@ -2224,7 +2278,10 @@ function publishContainmentRecord(
       renameSync(staging, path);
       return null;
     } catch (error) {
-      lastError = safeErrnoCode(error) ?? 'RENAME_REFUSED';
+      // `safeErrnoCode` answers `'UNKNOWN'` rather than nullish, so a fallback
+      // here would be dead. The initial value below is what a loop that never
+      // reaches this line reports.
+      lastError = safeErrnoCode(error);
     }
     // A short synchronous pause, and not after the final attempt — this module
     // is synchronous by contract, its claim being one uninterrupted sequence of

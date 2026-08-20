@@ -334,10 +334,17 @@ export function readContainmentEvidence(
   expected?: ContainmentExpectation,
 ): ContainmentReading {
   const raw: unknown = lease.containment;
-  // No companion file at all. `null` is treated the same way rather than as a
-  // malformed record, because it is what a build that clears the record would
-  // leave, and "nothing is claimed here" is exactly what `ABSENT` means.
-  if (raw === undefined || raw === null) return 'ABSENT';
+  // `undefined` is "there is no record", and it is the **only** input that reads
+  // as absent. A file whose contents are the JSON value `null` is a file
+  // somebody wrote, and it lands on `MALFORMED` below with every other payload
+  // this build does not recognise.
+  //
+  // It used to read `ABSENT` too, justified as "what a build that clears the
+  // record would leave". No build leaves that — the removal unlinks — and the
+  // justification outlived the design it described. `readContainmentRecord`
+  // states the rule this restores: nothing may turn a record it cannot read into
+  // a record nobody wrote.
+  if (raw === undefined) return 'ABSENT';
 
   // The version is read *before* the shape, and from the raw value. A record
   // written by a future build will not satisfy this build's strict schema — that

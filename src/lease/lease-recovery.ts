@@ -142,15 +142,21 @@ export interface LeaseRecoveryAssessment {
   readonly classification: LeaseRecoveryClassification;
   readonly inspection: LeaseInspection;
   /**
-   * Whether the **most recent writer launch** under this lease was contained.
+   * Whether the **most recent recorded launch** under this lease was contained.
    *
-   * Named for the launch and not for the lease, which is the correction an
-   * adversarial review forced. It was `containmentProven`, and that name reads
-   * as a property of the lease — a reader would take it as "no writer of this
-   * lease can survive its owner", which this record cannot say. The record
-   * describes one launch; `lease/containment-evidence.ts` sets out what that does
-   * and does not license, and why an earlier launch under the same lease may
-   * have been uncontained even when this is `true`.
+   * Named for exactly what is checked, which took two corrections to get right.
+   * It was `containmentProven` — a property of the lease, which this record
+   * cannot claim — and then `latestWriterContained`, which was still one notch
+   * strong: this read path passes no {@link ContainmentExpectation}, so the
+   * record's `writerId` is *recorded and bound but not judged here*, and a
+   * record naming some other agent would have satisfied a field with `Writer` in
+   * its name. Production cannot produce one (`loop/leased-spawns.ts` records for
+   * the writer and nothing else), and a field's name is a contract regardless of
+   * who can reach it.
+   *
+   * The record describes one launch; `lease/containment-evidence.ts` sets out
+   * what that does and does not license, and why an earlier launch under the
+   * same lease may have been uncontained even when this is `true`.
    *
    * Reported beside the classification and deliberately **not** an input to it.
    * {@link classifyForRecovery} takes two fields of the inspection and cannot
@@ -168,7 +174,7 @@ export interface LeaseRecoveryAssessment {
    * `false` for every lease with no reliable reading, including one with none at
    * all: absence of a proof, never a proof of absence.
    */
-  readonly latestWriterContained: boolean;
+  readonly latestLaunchContained: boolean;
   /** The reading itself, for a report. `null` when no document was parsed. */
   readonly containment: ContainmentReading | null;
 }
@@ -206,7 +212,7 @@ export function assessLeaseRecovery(
     // inspection. A field a function cannot see is a field it cannot start
     // depending on, and an earlier version of this comment claimed that while
     // passing the classifier the entire `LeaseInspection`, containment included.
-    latestWriterContained:
+    latestLaunchContained:
       inspection.containment !== null && isReliableContainment(inspection.containment),
     containment: inspection.containment,
   });

@@ -567,10 +567,10 @@ describe('classification says what is there and authorises nothing', () => {
       'classification',
       'containment',
       'inspection',
-      'latestWriterContained',
+      'latestLaunchContained',
     ]);
     expect(assessed.containment).toBe('ABSENT');
-    expect(assessed.latestWriterContained).toBe(false);
+    expect(assessed.latestLaunchContained).toBe(false);
   });
 
   it('classifies a running owner as running', async () => {

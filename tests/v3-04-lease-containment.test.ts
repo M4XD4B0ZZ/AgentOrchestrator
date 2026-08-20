@@ -38,13 +38,23 @@
  * classification is the same value with and without evidence present.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 import { afterAll, describe, expect, it } from 'vitest';
+
+import { PACKAGE_ROOT } from '../src/config/paths.js';
 
 import { toAgentCommandResult, type AgentCommandResult } from '../src/agent/agent-command.js';
 import type { OwnedCommandResult } from '../src/boundary/owned-command.js';
@@ -206,7 +216,12 @@ describe('containment evidence — the format', () => {
   it('reads a legacy lease, which carries no field at all, as ABSENT', () => {
     expect(readContainmentEvidence({ ...SUBJECT })).toBe('ABSENT');
     expect(reading(undefined)).toBe('ABSENT');
-    expect(reading(null)).toBe('ABSENT');
+    // And `undefined` alone. A record file whose contents are the JSON value
+    // `null` is a file somebody wrote, so it is a record this build cannot read
+    // rather than an absent one — the vocabulary rule `readContainmentRecord`
+    // states, applied one level up. It used to read `ABSENT` here, justified by
+    // a build that cleared the field in place; no build does that any more.
+    expect(reading(null)).toBe('MALFORMED');
   });
 
   it('reads a correctly bound, agreeing record as CONTAINED', () => {
@@ -362,6 +377,58 @@ describe('containment evidence — the format', () => {
 
 /* ───────────────────────── 2. the mint, and only it ─────────────────────── */
 
+/* ─────────────────────── 2. the mint, and only it ─────────────────────── */
+
+/** Every `.ts` file under `src`. */
+function sourceFiles(): string[] {
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && full.endsWith('.ts')) files.push(full);
+    }
+  };
+  walk(join(PACKAGE_ROOT, 'src'));
+  return files;
+}
+
+/**
+ * Every production module that can reach `name` from the internal attestation
+ * module, by any static route.
+ *
+ * The same scan `tests/v2-07l-execution-lease.test.ts` runs against the lease
+ * evidence's mint, restated rather than shared — the two documents are different
+ * contracts and a single helper would be one edit that loosens both, which is
+ * the argument `lease-document.ts` makes about its own restated patterns.
+ *
+ * The routes it refuses are the ones a review walked past the lease's first
+ * version of this pin with: a namespace import, an awaited dynamic import, an
+ * `export … from` re-export, and a specifier no static scan can resolve.
+ */
+function reachesInternalAttestation(name: string): string[] {
+  const declaringModule = join(PACKAGE_ROOT, 'src', 'core', 'internal', 'containment-attestation.ts');
+  const importers: string[] = [];
+  for (const file of sourceFiles()) {
+    if (file === declaringModule) continue;
+    const text = readFileSync(file, 'utf8');
+    const namesTheModule = /['"][^'"]*internal\/containment-attestation\.js['"]/.test(text);
+    const named =
+      namesTheModule &&
+      new RegExp(
+        String.raw`import[\s\S]{0,400}?\{[\s\S]{0,400}?${name}[\s\S]{0,400}?\}`,
+      ).test(text);
+    const indirect =
+      namesTheModule &&
+      (/import\s*\*\s*as\s+\w+/.test(text) ||
+        /import\s*\(/.test(text) ||
+        /export\s*(\*|\{[^}]*\})\s*from/.test(text));
+    const unresolvable = /import\s*\(\s*[^'")\s]/.test(text) || /createRequire/.test(text);
+    if (named || indirect || unresolvable) importers.push(relative(PACKAGE_ROOT, file));
+  }
+  return importers.sort();
+}
+
 describe('containment attestation — what may produce one', () => {
   it('refuses to mint for a launch whose job membership was never confirmed', () => {
     expect(mintContainmentAttestation({
@@ -432,6 +499,42 @@ describe('containment attestation — what may produce one', () => {
 
     expect(containmentFactsOf({ ...facts })).toBeNull();
     expect(containmentFactsOf(undefined)).toBeNull();
+  });
+
+  it('has its mint imported by exactly one module in the product', () => {
+    /**
+     * The regression detector this artefact was shipped without, and its sibling
+     * has two of. Anyone who can import the mint can produce a genuine
+     * attestation for a launch that never happened — reproduced by an
+     * adversarial review with `launchNonce: 'never-happened-01'` and pids 1 and
+     * 2, straight through the recorder to `CONTAINED`.
+     *
+     * That is not a hole in the artefact: the mint's whole job is to be the one
+     * place. It is a hole in the *guard*, because a second importer added
+     * tomorrow is exactly the change nobody would notice, and the prose
+     * admission in `core/containment-attestation.ts` names this privilege as the
+     * bound the type is worth.
+     *
+     * The boundary adapter is the only module that has seen an established
+     * containment, so it is the only one that may say so.
+     */
+    expect(reachesInternalAttestation('mintContainmentAttestation')).toEqual([
+      join('src', 'boundary', 'owned-command.ts'),
+    ]);
+  });
+
+  it('has the class itself reachable from only the two modules that need it', () => {
+    // The mint is not the only way to get one: a *subclass* carries the private
+    // field through `super(…)`, so a module that can name `ContainmentProof` can
+    // construct an attestation for anything — and pinning the mint's importers
+    // never sees that, because it never mentions the mint.
+    //
+    // Two modules may name it. The public wrapper, which needs it for the
+    // registry gate and the safe accessor and exports only a type alias; and the
+    // adapter, which mints. Neither exposes a constructor.
+    expect(reachesInternalAttestation('ContainmentProof')).toEqual([
+      join('src', 'core', 'containment-attestation.ts'),
+    ]);
   });
 
   it('exposes a digest of the launch nonce and never the nonce', () => {
@@ -633,13 +736,13 @@ describe('recording containment evidence into a lease', () => {
     releaseRepositoryExecutionLease(evidence);
   });
 
-  it('removes the record when it does hold the lease, and says so when there was none', () => {
+  it('removes the record when it does hold the lease, and says which happened', () => {
     const repository = repositoryFixture();
     const { evidence } = leaseOf(repository, 'run-pi');
-    // Nothing to remove is the state the removal was asked to reach, not a
-    // failure — a launch that could not be attested must not be reported as a
-    // broken enrichment just because the previous one had nothing to leave.
-    expect(clearContainmentEvidence(repository, evidence).code).toBe('RECORDED');
+    // Three distinct successes, not one. A caller testing `code === 'RECORDED'`
+    // must not read a removal as a publish, and a caller that needs to know
+    // whether it destroyed something must be able to tell.
+    expect(clearContainmentEvidence(repository, evidence).code).toBe('NOTHING_TO_CLEAR');
     expect(
       recordContainmentEvidence(repository, evidence, attestationFor(process.pid), {
         writerId: 'claude',
@@ -647,9 +750,111 @@ describe('recording containment evidence into a lease', () => {
       }).code,
     ).toBe('RECORDED');
     expect(recordOf(repository)).not.toBeNull();
-    expect(clearContainmentEvidence(repository, evidence).code).toBe('RECORDED');
+    expect(clearContainmentEvidence(repository, evidence).code).toBe('CLEARED');
     expect(recordOf(repository)).toBeNull();
+    expect(clearContainmentEvidence(repository, evidence).code).toBe('NOTHING_TO_CLEAR');
     expect(inspectRepositoryExecutionLease(repository).containment).toBe('ABSENT');
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('refuses to publish when the lease was taken by somebody else mid-call', () => {
+    /**
+     * The window the publish's re-proof exists to narrow, and nothing pinned it
+     * — deleting `stillHeld()` left the whole suite green while restoring the
+     * exact defect: the loser destroys the winner's genuine record and is told
+     * `RECORDED`.
+     *
+     * The `now` seam is the hook. It is read after the ownership gate and before
+     * the staged write, which is precisely inside the window, so a handover
+     * performed from it is the real sequence rather than a simulation of one.
+     */
+    const repository = repositoryFixture();
+    const first = leaseOf(repository, 'run-rho');
+    let successorEvidence: ExecutionLeaseEvidence | null = null;
+
+    const handOverTheLease = (): string => {
+      if (successorEvidence === null) {
+        releaseRepositoryExecutionLease(first.evidence);
+        const second = leaseOf(repository, 'run-successor');
+        successorEvidence = second.evidence;
+        // The new holder records its own, genuine containment.
+        expect(
+          recordContainmentEvidence(repository, second.evidence, attestationFor(process.pid), {
+            writerId: 'claude',
+            now: tick,
+          }).code,
+        ).toBe('RECORDED');
+      }
+      return tick();
+    };
+
+    const loser = recordContainmentEvidence(repository, first.evidence, attestationFor(process.pid), {
+      writerId: 'claude',
+      now: handOverTheLease,
+    });
+    expect(loser.code).toBe('NOT_OWNER');
+    expect(loser.detail).toBe('LOST_BEFORE_PUBLISH');
+    // The successor's record survived, and is still the one that reads back.
+    expect(recordOf(repository)?.runId).toBe('run-successor');
+    expect(inspectRepositoryExecutionLease(repository).containment).toBe('CONTAINED');
+    if (successorEvidence !== null) releaseRepositoryExecutionLease(successorEvidence);
+  });
+
+  it('does not throw for a clock or a request the caller got wrong', () => {
+    // `leasedAgent` does not catch, on the strength of this function's "never
+    // throws". A caller-supplied function is somebody else's code, so calling it
+    // is the one line here that can throw, and it is guarded rather than trusted.
+    const repository = repositoryFixture();
+    const { evidence, path } = leaseOf(repository, 'run-sigma');
+    const before = readFileSync(path);
+    const hostile = [
+      () => {
+        throw new Error('no clock today');
+      },
+      undefined as unknown as () => string,
+      42 as unknown as () => string,
+    ];
+    for (const now of hostile) {
+      const result = recordContainmentEvidence(repository, evidence, attestationFor(process.pid), {
+        writerId: 'claude',
+        now,
+      });
+      expect(result.code).toBe('RECORD_NOT_READABLE_BACK');
+      expect(recordOf(repository)).toBeNull();
+    }
+    expect(
+      recordContainmentEvidence(repository, evidence, attestationFor(process.pid), null as never).code,
+    ).toBe('RECORD_NOT_READABLE_BACK');
+    expect(readFileSync(path).equals(before)).toBe(true);
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('reports a removal it could not perform, rather than claiming success', () => {
+    /**
+     * The one failure on this path that is **not** conservative: a clear that
+     * cannot remove the record leaves the previous launch's positive record
+     * standing, so the lease keeps reading `CONTAINED` about a writer that was
+     * not contained. It gets the publish's retry budget for that reason — both
+     * operations fail for the same Windows reason, and this is the one whose
+     * failure fails open.
+     *
+     * A non-empty directory at the record path is the deterministic way to make
+     * `unlink` refuse; the real trigger is a reader holding the file open.
+     */
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository, 'run-tau');
+    const path = recordPathOf(repository);
+    mkdirSync(path);
+    writeFileSync(join(path, 'occupied'), 'x');
+
+    const result = clearContainmentEvidence(repository, evidence);
+    expect(result.code).toBe('RECORD_WRITE_FAILED');
+    expect(result.detail).not.toBeNull();
+    // And it is not mistaken for either success.
+    expect(result.code).not.toBe('CLEARED');
+    expect(result.code).not.toBe('NOTHING_TO_CLEAR');
+
+    rmSync(path, { recursive: true, force: true });
     releaseRepositoryExecutionLease(evidence);
   });
 
@@ -706,6 +911,9 @@ describe('legacy leases and the recovery classification', () => {
 
     for (const [label, contents, expected] of [
       ['garbage', '42', 'MALFORMED'],
+      // A file somebody wrote is never `ABSENT`, whatever is in it. This one
+      // used to read absent, justified by a build that no longer exists.
+      ['the JSON value null', 'null', 'MALFORMED'],
       ['not JSON at all', '{ half a rec', 'MALFORMED'],
       ['an empty file', '', 'MALFORMED'],
       ['a future version', '{"evidenceVersion":99,"anything":"goes"}', 'UNSUPPORTED_VERSION'],
@@ -786,7 +994,7 @@ describe('legacy leases and the recovery classification', () => {
     // document must not claim a lease was read and carried nothing.
     expect(inspectRepositoryExecutionLease(repository).containment).toBeNull();
     expect(assessLeaseRecovery(repository).containment).toBeNull();
-    expect(assessLeaseRecovery(repository).latestWriterContained).toBe(false);
+    expect(assessLeaseRecovery(repository).latestLaunchContained).toBe(false);
   });
 
   it('lets recovery see containment and changes no classification because of it', () => {
@@ -797,7 +1005,7 @@ describe('legacy leases and the recovery classification', () => {
     const before = assessLeaseRecovery(repository, { processAlive: gone });
     expect(before.classification).toBe('STALE_OWNER_GONE');
     expect(before.containment).toBe('ABSENT');
-    expect(before.latestWriterContained).toBe(false);
+    expect(before.latestLaunchContained).toBe(false);
 
     expect(
       recordContainmentEvidence(repository, evidence, attestationFor(process.pid), {
@@ -811,14 +1019,14 @@ describe('legacy leases and the recovery classification', () => {
     // scope boundary of this slice: nothing is recovered, removed or taken over
     // because a lease can now prove its writer was contained.
     expect(after.containment).toBe('CONTAINED');
-    expect(after.latestWriterContained).toBe(true);
+    expect(after.latestLaunchContained).toBe(true);
     expect(after.classification).toBe(before.classification);
     expect(after.inspection.state).toBe('HELD');
 
     // And with a live owner, still just a report.
     const alive = assessLeaseRecovery(repository, { processAlive: () => 'ALIVE' as const });
     expect(alive.classification).toBe('OWNER_RUNNING');
-    expect(alive.latestWriterContained).toBe(true);
+    expect(alive.latestLaunchContained).toBe(true);
 
     releaseRepositoryExecutionLease(evidence);
   });
@@ -1102,13 +1310,13 @@ describe('the wiring — what may carry an attestation upwards', () => {
 
     await run('claude', [], repository.root, '');
     expect(inspectRepositoryExecutionLease(repository).containment).toBe('CONTAINED');
-    expect(assessLeaseRecovery(repository).latestWriterContained).toBe(true);
+    expect(assessLeaseRecovery(repository).latestLaunchContained).toBe(true);
 
     // The second launch: the boundary was lost, so there is no attestation.
     next = result(null);
     await run('claude', [], repository.root, '');
     expect(inspectRepositoryExecutionLease(repository).containment).toBe('ABSENT');
-    expect(assessLeaseRecovery(repository).latestWriterContained).toBe(false);
+    expect(assessLeaseRecovery(repository).latestLaunchContained).toBe(false);
     expect(recordOf(repository)).toBeNull();
     // And the lease is still untouched by any of it.
     expect(readFileSync(path).equals(leaseBefore)).toBe(true);
