@@ -1094,18 +1094,18 @@ describe('the owner-only release stays owner-only, and nothing beside it removes
     } as never);
     // The exact key set, and V3 slice 4 added two of them. Both are *readings*:
     // `containment` says what the lease's evidence turned out to be and
-    // `containmentProven` whether that reading is the reliable one. Neither is a
+    // `latestWriterContained` whether that reading is the reliable one. Neither is a
     // permission, and the pin stays exact so that a third field arriving here
     // has to be justified rather than absorbed.
     expect(Object.keys(assessment).sort()).toEqual([
       'classification',
       'containment',
-      'containmentProven',
       'inspection',
+      'latestWriterContained',
     ]);
     // And the shape a removal would need is still absent: nothing here names a
     // lease to act on, and no value is a licence to act on one.
-    expect(assessment.containmentProven).toBe(false);
+    expect(assessment.latestWriterContained).toBe(false);
   });
 
   it('registers the read-only subcommand and nothing else', async () => {

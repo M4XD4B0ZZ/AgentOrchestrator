@@ -142,12 +142,21 @@ export interface LeaseRecoveryAssessment {
   readonly classification: LeaseRecoveryClassification;
   readonly inspection: LeaseInspection;
   /**
-   * Whether this lease carries a reliable containment proof.
+   * Whether the **most recent writer launch** under this lease was contained.
+   *
+   * Named for the launch and not for the lease, which is the correction an
+   * adversarial review forced. It was `containmentProven`, and that name reads
+   * as a property of the lease — a reader would take it as "no writer of this
+   * lease can survive its owner", which this record cannot say. The record
+   * describes one launch; `lease/containment-evidence.ts` sets out what that does
+   * and does not license, and why an earlier launch under the same lease may
+   * have been uncontained even when this is `true`.
    *
    * Reported beside the classification and deliberately **not** an input to it.
-   * {@link classifyForRecovery} does not read this field, and a test pins that
-   * every classification is the same value with and without evidence present:
-   * this slice teaches the assessment to *see* containment and nothing more.
+   * {@link classifyForRecovery} takes two fields of the inspection and cannot
+   * see this one, and a test pins that every classification is the same value
+   * with and without a record present: this slice teaches the assessment to
+   * *see* containment and nothing more.
    *
    * The reason for the separation is the one `execution-lease.ts` records at
    * length. A dead owner does not prove no writer survives it, and containment
@@ -159,7 +168,7 @@ export interface LeaseRecoveryAssessment {
    * `false` for every lease with no reliable reading, including one with none at
    * all: absence of a proof, never a proof of absence.
    */
-  readonly containmentProven: boolean;
+  readonly latestWriterContained: boolean;
   /** The reading itself, for a report. `null` when no document was parsed. */
   readonly containment: ContainmentReading | null;
 }
@@ -197,7 +206,7 @@ export function assessLeaseRecovery(
     // inspection. A field a function cannot see is a field it cannot start
     // depending on, and an earlier version of this comment claimed that while
     // passing the classifier the entire `LeaseInspection`, containment included.
-    containmentProven:
+    latestWriterContained:
       inspection.containment !== null && isReliableContainment(inspection.containment),
     containment: inspection.containment,
   });

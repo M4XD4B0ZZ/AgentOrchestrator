@@ -566,11 +566,11 @@ describe('classification says what is there and authorises nothing', () => {
     expect(Object.keys(assessed).sort()).toEqual([
       'classification',
       'containment',
-      'containmentProven',
       'inspection',
+      'latestWriterContained',
     ]);
     expect(assessed.containment).toBe('ABSENT');
-    expect(assessed.containmentProven).toBe(false);
+    expect(assessed.latestWriterContained).toBe(false);
   });
 
   it('classifies a running owner as running', async () => {

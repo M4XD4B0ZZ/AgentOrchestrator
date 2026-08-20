@@ -101,11 +101,11 @@ export interface ContainmentFacts {
    * A digest of the launch nonce, and deliberately not the nonce.
    *
    * The nonce authenticates the boundary's status file for the duration of one
-   * launch. This value is written into a lease document, which is world-readable
-   * inside the repository's Git directory and outlives the launch — so the
-   * identifier that goes there is a one-way function of the nonce. It still
-   * distinguishes two launches, which is the only thing a durable record needs
-   * it for.
+   * launch. This value is written into a durable record in the repository's Git
+   * directory, which is readable by anyone who can read the repository and
+   * outlives the launch — so the identifier that goes there is a one-way
+   * function of the nonce. It still distinguishes two launches, which is the
+   * only thing a durable record needs it for.
    */
   readonly launchDigest: string;
   /**
@@ -219,7 +219,12 @@ export function mintContainmentAttestation(observed: ObservedContainment): Conta
       assignedAtCreation: observed.assignedAtCreation,
       launchDigest: createHash('sha256')
         .update(LAUNCH_DIGEST_LABEL)
-        .update(' ')
+        // Written as an escape, not as the byte. A literal NUL in the source is
+        // invisible in a diff, makes `grep` call the file binary and skip the
+        // line, and would let an editor or a formatter swap it for a space —
+        // changing every launch digest ever produced, with the whole suite
+        // green. Same byte, and it can now be read.
+        .update('\u0000')
         .update(observed.launchNonce)
         .digest('hex'),
       attestedAt: observed.attestedAt,

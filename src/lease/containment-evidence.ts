@@ -46,13 +46,27 @@
  *  - a record written by a build that disagrees with this one about what the
  *    payload is.
  *
- * And what catches the case it cannot — a fully recomputed forgery — is not this
- * digest but the two agreement checks below, which compare the evidence against
- * the *rest of the lease document*: a forger who wants a reliable reading has to
- * make the evidence agree with the run and the owner the lease already names, at
- * which point they are asserting something about their own lease rather than
- * stealing somebody else's claim. That is the honest bound, and it is the reason
- * this record may never be read as authority.
+ * What it does **not** catch is a fully recomputed forgery, and the bound there
+ * is worth stating without flinching, because an adversarial review measured it
+ * and an earlier version of this paragraph got it comfortably wrong.
+ *
+ * Everything the digest is computed from — the lease key, the owner nonce — is
+ * plaintext in the lease document sitting beside this record. So **anyone who
+ * can read the repository's Git directory and create a file in it can write a
+ * record that reads `CONTAINED`**, having held no lease, minted nothing, and
+ * never gone near a Job Object. That was reproduced with `helperPid: 999999` and
+ * a launch digest of the word "anything". The two agreement checks below narrow
+ * *what* such a forger must claim — the run and the owner the lease already
+ * names — and they do not stop them claiming it.
+ *
+ * The paragraph this replaces said the forger would then be "asserting something
+ * about their own lease rather than stealing somebody else's claim". That was
+ * true of the withdrawn in-lease design, where forging meant rewriting the lease
+ * document; moving the record beside the lease lowered the bar to creating a
+ * file, and the sentence was not moved with it.
+ *
+ * This is exactly why the record may never be read as authority, and why the one
+ * consumer in this build only ever reports it.
  *
  * ── Where the record lives, and why it is not inside the lease ─────────────
  *
@@ -83,6 +97,35 @@
  * being inside the lease: it is bound to the lease by the digest below, and a
  * companion left behind by an earlier lease is refused by that binding rather
  * than by where it sits.
+ *
+ * ── One launch, not one lease. The difference is load-bearing ─────────────
+ *
+ * A reliable reading says: **the writer launch this record names was contained.**
+ * It does not say the lease's writers were all contained, and a later recovery
+ * must not read it that way.
+ *
+ * The distinction is not academic — an adversarial review reproduced the
+ * consequence. A run makes several `claude` launches under one lease. Each
+ * successful one publishes; a launch that cannot be attested — a lost boundary,
+ * an unconfirmed termination — has nothing to publish, and used to leave the
+ * *previous* launch's positive record standing. The lease then read `CONTAINED`
+ * while its most recent writer was not contained at all, which is the fail-open
+ * direction in the one place this slice exists to be conservative.
+ *
+ * `loop/leased-spawns.ts` closes that by removing the record when a writer
+ * launch produces no attestation, so the record always describes the **most
+ * recent** launch. That is as far as this format goes, and the residue is
+ * stated rather than left to be discovered:
+ *
+ *  - an earlier launch under the same lease may have been uncontained even
+ *    though the latest was. Nothing here counts launches, so "every writer of
+ *    this lease was contained" is a claim this record cannot make;
+ *  - a removal that fails leaves the previous record in place, and a reader
+ *    cannot tell that from a record that was deliberately kept.
+ *
+ * A recovery slice that needs the stronger claim needs a stronger record — a
+ * launch counter that is poisoned before a launch and confirmed after it — and
+ * that is a contract change, not a reading of this one.
  *
  * ── Fail-closed is the whole contract ──────────────────────────────────────
  *
@@ -175,7 +218,9 @@ export interface ContainmentSubject {
  */
 export const CONTAINMENT_READINGS = [
   /** A well-formed, current-version record, bound to this lease and agreeing
-   *  with it. The only reading a later recovery may build on. */
+   *  with it: **the launch it names** was contained. The only reading a later
+   *  recovery may build on, and see the header for what it does not say about
+   *  the other launches under the same lease. */
   'CONTAINED',
   /** No record beside the lease at all: a lease taken by an earlier build, or
    *  one whose writer never ran behind the boundary. Conservative by
