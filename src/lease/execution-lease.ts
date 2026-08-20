@@ -1913,8 +1913,27 @@ export const CONTAINMENT_RECORD_CODES = [
   'OWNER_MISMATCH',
   /** The record this build built is one this build would not accept back. */
   'RECORD_NOT_READABLE_BACK',
-  /** The record could not be published. The lease is untouched either way. */
+  /** The record could not be published. Nothing was written, so there is no
+   *  record — which reads as no reliable proof. Conservative. */
   'RECORD_WRITE_FAILED',
+  /**
+   * The record could not be **removed**, and is therefore still on disk.
+   *
+   * Its own code, and the distinction is the whole reason for it. The two
+   * failures point in opposite safety directions: a publish that failed leaves
+   * nothing, and nothing reads as no proof; a removal that failed leaves the
+   * *previous* launch's positive record standing, so the lease keeps reading
+   * `CONTAINED` about a writer that was not contained. They shared
+   * {@link RECORD_WRITE_FAILED} — whose sentence says "the lease is untouched
+   * either way", true of both and reassuring about only one — so a caller could
+   * not tell "nothing happened" from "a stale claim is on disk". That is the
+   * same confusion `CLEARED` was split out of `RECORDED` to remove, and it had
+   * simply moved one code over.
+   *
+   * Nothing in this build consumes it, because nothing in this build reads the
+   * record. The slice that does must.
+   */
+  'RECORD_CLEAR_FAILED',
 ] as const;
 
 export type ContainmentRecordCode = (typeof CONTAINMENT_RECORD_CODES)[number];
@@ -2168,22 +2187,27 @@ function stillHeldBy(location: LeaseLocation, evidence: ExecutionLeaseEvidence):
  * leave a stale positive standing for the one lease shape that can never replace
  * it.
  *
- * ── The retry is here because *this* is the operation that fails open ──────
+ * ── One attempt, and the retry that was here is withdrawn ─────────────────
  *
- * The publish retries and the removal used to make one attempt, which is the
- * budget on the wrong operation and an adversarial review said so. A publish
- * that fails leaves no record, and no record reads `ABSENT` — conservative. A
- * removal that fails leaves the *previous* launch's positive record standing,
- * and the lease then reads `CONTAINED` about a writer that was not contained.
- * Both fail for the same reason on Windows — a reader holding the file open —
- * so both get the same short budget.
+ * A previous round gave this the publish's five-attempt budget, reasoning that a
+ * removal failing is worse than a publish failing — true — and that "both fail
+ * for the same reason on Windows, a reader holding the file open". That second
+ * half was measured false: node opens with `FILE_SHARE_DELETE`, so this build's
+ * own reader blocks a *rename* onto the name and does not block an `unlink` of
+ * it. The budget bought nothing against the hazard it named.
  *
- * It is a budget and not a guarantee. A removal that still fails answers
- * {@link RECORD_WRITE_FAILED} with the errno, and the caller is then holding the
- * only evidence that the record on disk is stale. Nothing in this build consumes
- * that, because nothing in this build reads the record — the slice that does
- * must, and `lease/containment-evidence.ts` states the residue in the format's
- * own terms rather than leaving it to be discovered.
+ * And it cost something real. The ownership proof sat outside the loop, so five
+ * attempts over eight milliseconds ran against a check taken once — and an
+ * adversarial review reproduced a lease changing hands inside that window and a
+ * later attempt destroying the *new* holder's record, with the loser told
+ * `CLEARED`. A retried destructive loop with its gate outside it is the shape
+ * `removeVerifiedLease` already records as a defect class here.
+ *
+ * So it is withdrawn rather than repaired. One attempt, immediately after the
+ * proof, which is the same one-syscall window the publish narrows itself to.
+ * A removal that fails answers {@link RECORD_CLEAR_FAILED} with the errno, and
+ * the caller is then holding the only evidence that the record on disk is stale;
+ * `lease/containment-evidence.ts` states that residue in the format's own terms.
  *
  * Never throws.
  */
@@ -2215,23 +2239,17 @@ export function clearContainmentEvidence(
     return recordFailure('NOT_OWNER');
   }
 
-  const path = containmentPathFor(location);
-  let lastError = 'UNKNOWN';
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    try {
-      unlinkSync(path);
-      return Object.freeze({ code: 'CLEARED' as const, detail: null });
-    } catch (error) {
-      const errno = safeErrnoCode(error);
-      // Nothing to remove is the state this was asked to reach, and it is a
-      // different answer from "a record was there and is gone": a caller that
-      // needs to know whether it destroyed something can tell.
-      if (errno === 'ENOENT') return Object.freeze({ code: 'NOTHING_TO_CLEAR' as const, detail: null });
-      lastError = errno;
-    }
-    if (attempt < 4) spinFor(2);
+  try {
+    unlinkSync(containmentPathFor(location));
+  } catch (error) {
+    const errno = safeErrnoCode(error);
+    // Nothing to remove is the state this was asked to reach, and it is a
+    // different answer from "a record was there and is gone": a caller that
+    // needs to know whether it destroyed something can tell.
+    if (errno === 'ENOENT') return Object.freeze({ code: 'NOTHING_TO_CLEAR' as const, detail: null });
+    return recordFailure('RECORD_CLEAR_FAILED', errno);
   }
-  return recordFailure('RECORD_WRITE_FAILED', lastError);
+  return Object.freeze({ code: 'CLEARED' as const, detail: null });
 }
 
 /**
@@ -2255,6 +2273,17 @@ export function clearContainmentEvidence(
  * before the first ask, so the window between the last check and the effect is
  * one syscall. It is a narrowing and not a closure, and answering `'NOT_OWNER'`
  * rather than throwing keeps the caller's vocabulary total.
+ *
+ * **What no test pins**, stated because a silent gap reads as coverage: that the
+ * ask happens before *every* attempt rather than once. The test in
+ * `tests/v3-04-lease-containment.test.ts` hands the lease over from the `now`
+ * seam, which runs before this function is entered, so it kills a mutant that
+ * deletes the check and survives one that hoists it out of the loop — an
+ * adversarial review demonstrated exactly that. Nothing single-threaded and
+ * synchronous can take a lease between two iterations of this loop, so pinning
+ * the position needs a second process, which is a dist-artifact harness and not
+ * this slice's to add. The position is kept because it is free and strictly
+ * better, not because it is measured.
  */
 function publishContainmentRecord(
   path: string,

@@ -984,15 +984,6 @@ const OWNED_OUTCOME: Readonly<Record<OwnedCommandOutcome, CommandOutcome>> = Obj
 });
 
 /**
- * The owned adapter's failure code, in `runCommand`'s vocabulary.
- *
- * Four of the adapter's nine codes are ways of losing the boundary, and they
- * collapse into one here deliberately. `CommandResult` gains the minimum needed
- * to state the fact the ADR requires — that the boundary was lost — and not a
- * second alphabet describing how. The distinction is preserved where it is
- * decided, on `OwnedCommandResult`.
- */
-/**
  * Which outcomes may carry containment upwards, in *this* module's vocabulary.
  *
  * A second, independent refusal. `boundary/owned-command.ts` already withholds
@@ -1027,6 +1018,15 @@ export function carriesContainment(outcome: CommandOutcome): boolean {
   return CONTAINMENT_CARRYING[outcome] === true;
 }
 
+/**
+ * The owned adapter's failure code, in `runCommand`'s vocabulary.
+ *
+ * Four of the adapter's nine codes are ways of losing the boundary, and they
+ * collapse into one here deliberately. `CommandResult` gains the minimum needed
+ * to state the fact the ADR requires — that the boundary was lost — and not a
+ * second alphabet describing how. The distinction is preserved where it is
+ * decided, on `OwnedCommandResult`.
+ */
 const OWNED_FAILURE: Readonly<Record<OwnedCommandFailureCode, CommandFailureCode>> = Object.freeze({
   TIMEOUT: 'TIMEOUT',
   OUTPUT_LIMIT_STDOUT: 'OUTPUT_LIMIT_STDOUT',

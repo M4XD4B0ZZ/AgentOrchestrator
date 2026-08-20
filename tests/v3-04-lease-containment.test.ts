@@ -377,8 +377,6 @@ describe('containment evidence — the format', () => {
 
 /* ───────────────────────── 2. the mint, and only it ─────────────────────── */
 
-/* ─────────────────────── 2. the mint, and only it ─────────────────────── */
-
 /** Every `.ts` file under `src`. */
 function sourceFiles(): string[] {
   const files: string[] = [];
@@ -523,15 +521,25 @@ describe('containment attestation — what may produce one', () => {
     ]);
   });
 
-  it('has the class itself reachable from only the two modules that need it', () => {
-    // The mint is not the only way to get one: a *subclass* carries the private
-    // field through `super(…)`, so a module that can name `ContainmentProof` can
-    // construct an attestation for anything — and pinning the mint's importers
-    // never sees that, because it never mentions the mint.
-    //
-    // Two modules may name it. The public wrapper, which needs it for the
-    // registry gate and the safe accessor and exports only a type alias; and the
-    // adapter, which mints. Neither exposes a constructor.
+  it('has the class itself reachable from only the module that needs it', () => {
+    /**
+     * A weaker pin than its sibling's, and the difference is worth stating
+     * rather than inheriting the sibling's sentence.
+     *
+     * The lease evidence's version of this test says a *subclass* can construct
+     * evidence, because that artefact's gate was once a private-field probe and
+     * `super(…)` installs the field. This artefact's gate is registry membership
+     * and nothing else, so a subclass buys nothing — measured, not assumed:
+     * a subclass instance answers `holds() === false` and `factsOf() === null`.
+     *
+     * So this pin is not a security boundary; it is a *notification*. It says
+     * one module names the class today, and it will fail if a second one starts
+     * to. It does **not** bound reachability: a value alias re-exported from the
+     * public module lets a third module name the class without ever naming the
+     * internal specifier, and an adversarial review walked past both pins that
+     * way. What actually bounds forgery is that only the mint writes to the
+     * registry, which the sibling test above pins.
+     */
     expect(reachesInternalAttestation('ContainmentProof')).toEqual([
       join('src', 'core', 'containment-attestation.ts'),
     ]);
@@ -838,8 +846,13 @@ describe('recording containment evidence into a lease', () => {
      * operations fail for the same Windows reason, and this is the one whose
      * failure fails open.
      *
-     * A non-empty directory at the record path is the deterministic way to make
-     * `unlink` refuse; the real trigger is a reader holding the file open.
+     * A non-empty directory at the record path is the way to make `unlink`
+     * refuse. It is also, as far as this build can tell, the *only* way: node
+     * opens files with `FILE_SHARE_DELETE`, so a reader holding the record open
+     * blocks a rename onto the name and does not block a removal of it. That
+     * measurement is why the retry a previous round gave this operation was
+     * withdrawn — it named a hazard that does not apply here, and its gate sat
+     * outside its loop.
      */
     const repository = repositoryFixture();
     const { evidence } = leaseOf(repository, 'run-tau');
@@ -848,11 +861,16 @@ describe('recording containment evidence into a lease', () => {
     writeFileSync(join(path, 'occupied'), 'x');
 
     const result = clearContainmentEvidence(repository, evidence);
-    expect(result.code).toBe('RECORD_WRITE_FAILED');
+    // Its own code, not the publish's. The two failures point in opposite
+    // safety directions — a publish that failed wrote nothing, a removal that
+    // failed left a stale positive on disk — and they shared one code, whose
+    // sentence was reassuring about only one of them.
+    expect(result.code).toBe('RECORD_CLEAR_FAILED');
     expect(result.detail).not.toBeNull();
-    // And it is not mistaken for either success.
+    // And it is not mistaken for either success, nor for the publish's failure.
     expect(result.code).not.toBe('CLEARED');
     expect(result.code).not.toBe('NOTHING_TO_CLEAR');
+    expect(result.code).not.toBe('RECORD_WRITE_FAILED');
 
     rmSync(path, { recursive: true, force: true });
     releaseRepositoryExecutionLease(evidence);
