@@ -368,26 +368,32 @@ describe('the release vocabulary is closed, shared and safe', () => {
     }
   });
 
-  it('reports an unreadable lease as unresolved, never as a record that is present', () => {
+  it('reports an unreadable lease as unsettled, never as a record that is present', () => {
     // The producer establishes exactly one thing: `readFileSync` threw and
     // `safeErrnoCode` did not classify the failure as `ENOENT`. It does **not**
-    // establish that a record was there - a refused parent, a path component
-    // that is not a directory, and any errno off the allow-list (which
-    // `safeErrnoCode` answers `UNKNOWN` for) all arrive at this code with
-    // existence unresolved.
+    // establish that a record was there - `safeErrnoCode` answers `UNKNOWN` for
+    // anything off its allow-list, and one producer never reaches the filesystem
+    // at all (`leasePathOf` throwing inside the same `try`).
     //
     // Asserted positively, not as a blacklist: the sentence has to *say* the
-    // state is unresolved. A wording that merely avoided the forbidden phrases
-    // while implying presence would pass a blacklist and fail an operator.
+    // question is unsettled, and has to say it conditionally. A wording that
+    // merely avoided the forbidden phrases while implying presence would pass a
+    // blacklist and mislead an operator.
+    //
+    // The examples it names are measured, not assumed. An earlier version of
+    // this test pinned "a path component that is not a directory" - which on
+    // Windows never reaches this code at all: `readFileSync` answers `ENOENT`
+    // there, which is the branch that produces `LEASE_ABSENT`. A directory at
+    // the lease name really does answer `EISDIR`, and that one is named instead.
     const sentence = LEASE_RELEASE_SENTENCES.LEASE_UNREADABLE.replace(/\s+/g, ' ');
     expect(sentence).toContain('the failure was not classified as its absence');
-    expect(sentence).toContain('whether the record is there is left unresolved');
-    expect(sentence).toContain('none of them answers whether the record exists');
-    // And it names at least one producer where nothing is at the lease name, so
-    // the unresolved half is concrete rather than a disclaimer.
-    expect(sentence).toContain('not a directory');
-    // Never the opposite claim, in any of the shapes this table has used.
-    expect(sentence).not.toMatch(/Something (is|was) at the lease name/);
+    expect(sentence).toContain('does not settle whether a record is there');
+    // Conditional, never a flat claim: a rewrite to "something is at the lease
+    // name" without this framing fails here.
+    expect(sentence).toContain('Some failures here mean');
+    // And it names the class that settles nothing at all.
+    expect(sentence).toContain('never reached the filesystem');
+    // Never the opposite claim, in the shapes this table has actually used.
     expect(sentence).not.toContain('was not the record being absent');
     expect(sentence).not.toContain('present in this repository');
   });

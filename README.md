@@ -3593,9 +3593,10 @@ and because the failure mode it describes — a command that cannot start is
 
   The consequence is small and worth naming: a value that satisfies the brand
   check and cannot yield its path is a defect in this build, and an operator is
-  told the lease record could not be read. V3-07's sentence for that code was
-  written to survive it — it says what stopped this build rather than asserting
-  a record is present — but the classification is still wrong, and correcting it
+  told this build could not get at the lease record. V3-07's sentence for that
+  code is written to survive it — it says what stopped this build, and says the
+  existence question is unsettled, rather than asserting a record is present —
+  but the classification is still wrong, and correcting it
   is a change to `lease/execution-lease.ts`, which this slice does not touch.
   **Scope:** `lease/execution-lease.ts`.
 - **L-V3-06-11 — three sibling dist harnesses hand-build a repository identity,

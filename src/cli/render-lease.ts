@@ -486,12 +486,13 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
     '  removal stopped in; with no token, this report has nothing further to add. Run\n' +
     '  `agent-loop lease status` before the next run.',
   LEASE_UNREADABLE:
-    'The lease record could not be read, and the failure was not classified as its absence.\n' +
-    '  That is the whole of it: whether the record is there is left unresolved. A parent\n' +
-    '  directory that refuses, a path component that is not a directory, and an errno this\n' +
-    '  build does not recognise all arrive here, and none of them answers whether the record\n' +
-    '  exists. Nothing was removed and nothing else was inspected. Run\n' +
-    '  `agent-loop lease status` for what this build can see before the next run.',
+    'This build could not get at the lease record, and the failure was not classified as its\n' +
+    '  absence. That alone does not settle whether a record is there. Some failures here mean\n' +
+    '  something is at the lease name that is not a readable record - a directory in its\n' +
+    '  place is one - and others are failures this build cannot classify at all, including\n' +
+    '  one that never reached the filesystem. Nothing was removed and nothing else was\n' +
+    '  inspected. Run `agent-loop lease status` for what this build can see before the next\n' +
+    '  run.',
   LEASE_REMOVE_FAILED:
     'The removal did not complete. A token follows the code above, and the line under it says\n' +
     '  what state the removal stopped in; every one of them needs a human before the next\n' +
