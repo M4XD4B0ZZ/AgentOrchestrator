@@ -393,7 +393,17 @@ describe('the release vocabulary is closed, shared and safe', () => {
     expect(sentence).toContain('Some failures here mean');
     // And it names the class that settles nothing at all.
     expect(sentence).toContain('never reached the filesystem');
-    // Never the opposite claim, in the shapes this table has actually used.
+    // Never the opposite claim as a flat assertion. The capitalised form is the
+    // one `0ea6572` actually shipped ("Something was at the lease name and this
+    // build could not identify it"), and it is kept case-sensitive on purpose:
+    // the sentence's own lowercase "something is at the lease name" is preceded
+    // by "Some failures here mean", so it is conditional and passes. The two
+    // `toContain` negatives are the other wordings this table has shipped.
+    //
+    // These matter beyond history. The positives above kill a *replacement* that
+    // drops the disjunction; only this one kills an *addition* - a sentence that
+    // keeps every pinned fragment and inserts a flat presence claim beside them.
+    expect(sentence).not.toMatch(/Something (is|was) at the lease name/);
     expect(sentence).not.toContain('was not the record being absent');
     expect(sentence).not.toContain('present in this repository');
   });

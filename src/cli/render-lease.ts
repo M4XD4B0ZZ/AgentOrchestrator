@@ -489,10 +489,10 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
     'This build could not get at the lease record, and the failure was not classified as its\n' +
     '  absence. That alone does not settle whether a record is there. Some failures here mean\n' +
     '  something is at the lease name that is not a readable record - a directory in its\n' +
-    '  place is one - and others are failures this build cannot classify at all, including\n' +
-    '  one that never reached the filesystem. Nothing was removed and nothing else was\n' +
-    '  inspected. Run `agent-loop lease status` for what this build can see before the next\n' +
-    '  run.',
+    '  place is one - and others settle nothing at all, including a machine out of file\n' +
+    '  handles, a failure this build cannot classify, and one that never reached the\n' +
+    '  filesystem. Nothing was removed and nothing else was inspected. Run\n' +
+    '  `agent-loop lease status` for what this build can see before the next run.',
   LEASE_REMOVE_FAILED:
     'The removal did not complete. A token follows the code above, and the line under it says\n' +
     '  what state the removal stopped in; every one of them needs a human before the next\n' +
