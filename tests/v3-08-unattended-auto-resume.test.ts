@@ -1068,6 +1068,17 @@ describe('everything the second attempt acts on is established after the wait', 
     expect(report).not.toContain('lease acquired again');
     expect(report).not.toContain('auth proven again');
     expect(report).not.toContain('the resume decision made again');
+
+    // ── The freshness claim, at the strength the controller actually holds ──
+    //
+    // "It carries nothing over from before the wait" was the next overclaim a
+    // review found: the task id, the grant, the bounds and a counter cross the
+    // sleep by design, and the module's own header says so. The guarantee is
+    // narrower and stronger — nothing from before is reused as *proof* after —
+    // and that is what the sentence must say.
+    expect(report).not.toContain('carries nothing over');
+    expect(report).toContain('No authority or evidence from before the wait is reused as');
+    expect(report).toContain('process-local control data only');
   });
 
   it('resolves the repository again rather than reusing the object it began with', async () => {
@@ -1528,6 +1539,26 @@ describe('the report distinguishes every way this mode can end', () => {
     expect(none).not.toContain(ATTENDED_TRAILER);
     expect(none).not.toContain('--attended was given');
     expect(none).not.toContain(UNATTENDED_AUTO_RESUME_TRAILER);
+
+    // ── And it claims the grant, never the history ──────────────────────────
+    //
+    // Asserted against the sentence itself rather than against this epoch,
+    // deliberately: the `LifecycleResult` above was produced under
+    // `AUTOMATIC_RESUME_ONLY`, so it is evidence about which trailer is chosen
+    // and evidence about nothing else. Using it to show "no effects happened
+    // under NO_CONTINUATION" would be reading one grant's history as another's.
+    //
+    // The first version of this sentence said "any task it reached was left
+    // exactly as it was found". `mayStartTask` permits every grant but
+    // `AUTOMATIC_RESUME_ONLY`, so a caller reaching `driveLifecycle` with
+    // `NO_CONTINUATION` can create a worktree, a branch and a first durable
+    // state through `startTask` before `runTask` refuses. A review caught it.
+    expect(NO_CONTINUATION_TRAILER).not.toContain('left exactly as it was found');
+    expect(NO_CONTINUATION_TRAILER).not.toContain('no agent was started');
+    // Within one rendered line: these sentences are hard-wrapped, so a needle
+    // that spans a break is a needle that can never be found.
+    expect(NO_CONTINUATION_TRAILER).toContain('productive continuation was authorised');
+    expect(NO_CONTINUATION_TRAILER).toContain('the outcome above, not this sentence');
 
     // Three distinct sentences, so the three assertions above cannot all be
     // satisfied by one string that happens to contain the others.

@@ -81,12 +81,22 @@ export const UNATTENDED_AUTO_RESUME_TRAILER =
  * is precisely the absence of that claim. No production path renders it today;
  * it is written because this renderer's job is to be true for every value of a
  * closed type, not only for the values that happen to be reachable this week.
+ *
+ * **It states the grant, never the history**, and a review caught the first
+ * version doing the latter: it claimed "any task it reached was left exactly as
+ * it was found", which `NO_CONTINUATION` does not prove. `mayStartTask` permits
+ * every grant but `AUTOMATIC_RESUME_ONLY`, so a caller reaching `driveLifecycle`
+ * with this one can create a worktree, a branch and a first durable state
+ * through `startTask` before `runTask` refuses the continuation. The refusal is
+ * real and is what this sentence is about; the effects before it belong to the
+ * outcome line, which reports them accurately.
  */
 export const NO_CONTINUATION_TRAILER =
-  'No continuation grant. Neither --attended nor --automatic-resume-only was given, so this\n' +
-  'invocation was not permitted to continue anything: no agent was started, and any task it\n' +
-  'reached was left exactly as it was found. Pass --attended to execute with an operator\n' +
-  'present, or --automatic-resume-only to continue one already-durable task without one.';
+  'No continuation grant. Neither --attended nor --automatic-resume-only was given, so no\n' +
+  'productive continuation was authorised: the run driver refused before any step, and no\n' +
+  'claim of operator presence is made. What the lifecycle did before reaching that refusal is\n' +
+  'the outcome above, not this sentence. Pass --attended to execute with an operator present,\n' +
+  'or --automatic-resume-only to continue one already-durable task without one.';
 
 /** One static sentence per lifecycle outcome. Closed, and pinned by test. */
 export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, string>> =
@@ -389,9 +399,11 @@ export const RESET_WAIT_SENTENCES: Readonly<Record<ResetWaitDisposition, string>
       'The reported reset time was the one check still refusing the resume, so this run slept\n' +
       '  once -- holding no execution lease, having proven the earlier one given back -- then\n' +
       '  resolved the repository again and started a fresh attempt. **How far that attempt got\n' +
-      '  is its own report, above.** It carries nothing over from before the wait: whatever it\n' +
-      '  reached, it reached from evidence gathered after waking. There is no second wait in\n' +
-      '  one invocation.',
+      '  is its own report, above.** No authority or evidence from before the wait is reused as\n' +
+      '  proof after it: not the old lease, not the auth artefact, not the resume decision, not\n' +
+      '  the reconciliation, and not the repository, worktree or commit facts observed then.\n' +
+      '  What does cross the sleep is process-local control data only -- which task, which\n' +
+      '  grant, which bounds, and a counter. There is no second wait in one invocation.',
   });
 
 /**
