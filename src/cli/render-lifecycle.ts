@@ -29,7 +29,11 @@ import {
   renderRunResult,
   renderStartResult,
 } from './render-attended-run.js';
-import { LEASE_ACQUIRE_SENTENCES, STALE_RECOVERY_SENTENCES } from './render-lease.js';
+import {
+  LEASE_ACQUIRE_SENTENCES,
+  STALE_RECOVERY_SENTENCES,
+  leaseReleaseLine,
+} from './render-lease.js';
 
 /**
  * The closing sentence of a run that took more than one invocation.
@@ -195,15 +199,12 @@ export function renderLifecycleRun(
       lines.push(`  ${STALE_RECOVERY_SENTENCES[recovery.refusal]}`);
     }
   }
+  // The same renderer `block --attended` and `release --attended` print, and
+  // deliberately only its line: the per-code sentence those two print below it
+  // is not added here, because this report's sentence already comes from
+  // `LIFECYCLE_OUTCOME_SENTENCES` and a second one would say it twice.
   if (result.release !== null) {
-    lines.push(
-      line(
-        'Release',
-        result.release.detail !== null
-          ? `${result.release.code}  (${result.release.detail})`
-          : result.release.code,
-      ),
-    );
+    lines.push(leaseReleaseLine('Release', result.release));
   }
 
   lines.push(

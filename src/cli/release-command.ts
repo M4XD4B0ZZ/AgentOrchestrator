@@ -32,17 +32,19 @@ import { formatSafeError } from '../core/safe-error.js';
 import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
+  type LeaseReleaseResult,
 } from '../lease/execution-lease.js';
 import { resolveRepository } from '../repo/resolve-repository.js';
 import { releaseTaskWorkspace, type ReleaseResult } from '../run/release-workspace.js';
 import { runGitCommand } from '../worktree/git-command.js';
-import { renderLeaseRefusal } from './render-lease.js';
+import { renderLeaseRefusal, renderLeaseRelease } from './render-lease.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_NEEDS_OPERATOR,
   EXIT_RUN_REFUSED,
   EXIT_RUN_UNEXPECTED,
   exitCodeForReleaseOutcome,
+  exitCodeWithLeaseRelease,
 } from './run-exit-codes.js';
 
 interface ReleaseOptions {
@@ -115,6 +117,30 @@ export function registerReleaseCommand(program: Command): void {
       'Confirm an operator is present for this invocation. Required: this command deletes.',
     )
     .action(async (options: ReleaseOptions) => {
+      // Declared above the `try` so the `catch` can still see it, exactly as
+      // `block-command.ts` does and for the same reason.
+      let leaseRelease: LeaseReleaseResult | null = null;
+      let leaseReleaseAttempted = false;
+      let leaseReleaseReported = false;
+
+      /**
+       * Print the execution-lease release report, at most once.
+       *
+       * Labelled `Lease`, not `Release`. In this command "release" is the task
+       * workspace - it is the command's name, its `Outcome` line and its
+       * `not requested` refusal - and the execution lease is a different thing
+       * being given back. The two are never collapsed into one line and never
+       * into one word.
+       *
+       * The two flags carry the same distinction `block-command.ts` documents at
+       * length: attempted-but-unanswered must print, never-attempted must not.
+       */
+      const reportLeaseRelease = (): void => {
+        if (!leaseReleaseAttempted || leaseReleaseReported) return;
+        process.stdout.write(renderLeaseRelease('Lease', leaseRelease));
+        leaseReleaseReported = true;
+      };
+
       try {
         // Checked before the repository is even resolved: an invocation with no
         // operator behind it should not begin inspecting a repository in order
@@ -162,7 +188,36 @@ export function registerReleaseCommand(program: Command): void {
             lease: acquired.evidence,
           });
         } finally {
-          releaseRepositoryExecutionLease(acquired.evidence);
+          // The result is now kept. Until V3-07 this call stood here as a bare
+          // expression: the workspace could be removed, reported as `RELEASED`
+          // and exited 0 on, while the execution lease this invocation held sat
+          // quarantined or displaced in the repository with nobody told.
+          //
+          // Wrapped for the reason `block-command.ts` states at its own
+          // `finally`: an exception thrown here would replace the one that
+          // entered, and the operator would be handed the wrong failure. The
+          // branch is reached, not theoretical -
+          // `tests/v3-07-lease-release-fault.test.ts` arms it from a task-file
+          // read, which is the only lever this command offers between taking the
+          // lease and giving it back, and refuses the `randomBytes` that names
+          // the quarantine file. Leaving `leaseRelease` null keeps the exit code
+          // non-nominal.
+          try {
+            leaseReleaseAttempted = true;
+            leaseRelease = releaseRepositoryExecutionLease(acquired.evidence);
+          } catch (releaseError: unknown) {
+            // Guarded in turn. This whole `try` exists so that a throw here
+            // cannot replace the exception that entered the `finally`, and a
+            // bare write to a stream that is itself refusing would reintroduce
+            // exactly that. There is nothing left to report it to.
+            try {
+              process.stderr.write(
+                `agent-loop release: giving the execution lease back failed. ${formatSafeError(releaseError)}\n`,
+              );
+            } catch {
+              // Nothing can be said, and saying it is not worth the exception.
+            }
+          }
         }
 
         report([
@@ -177,10 +232,38 @@ export function registerReleaseCommand(program: Command): void {
           '',
           RELEASE_OUTCOME_SENTENCES[released.outcome],
         ]);
-        process.exitCode = exitCodeForReleaseOutcome(released.outcome);
+        // Both facts, in that order and both kept whole. The workspace verdict
+        // above is not rewritten by a failed lease release - the worktree really
+        // was removed - and the exit code below is not left nominal by a
+        // successful one, because writer authority that did not provably come
+        // back is an operator condition whatever the removal achieved.
+        // The exit code first, because nothing after it should be able to decide
+        // it - and note what that does *not* buy, exactly as `block-command.ts`
+        // records at the same point: if the report below throws, the `catch`
+        // overwrites this with 1 regardless, because it assigns unconditionally.
+        // The ordering keeps the code independent of a console write on the
+        // ordinary path, and "never nominal" holds either way, since 1 is not 0.
+        process.exitCode = exitCodeWithLeaseRelease(
+          exitCodeForReleaseOutcome(released.outcome),
+          leaseRelease,
+        );
+        reportLeaseRelease();
       } catch (error) {
+        // As in `block-command.ts`: the original failure keeps the exit code -
+        // diverging from `exitCodeWithLeaseRelease`, which would answer 3 - and
+        // the release report goes out after it rather than in front of it.
         process.stderr.write(`${formatSafeError(error)}\n`);
         process.exitCode = EXIT_RUN_UNEXPECTED;
+        // Guarded, like its sibling inside the `finally`. This is the retry for a
+        // report whose first write failed, so the stream it writes to is the one
+        // that has already refused once; an exception here would escape the
+        // action, reject `parseAsync`, and hand Node the raw error to print -
+        // undoing the safe-error discipline two lines above it.
+        try {
+          reportLeaseRelease();
+        } catch {
+          // The console is gone. The exit code above is the whole report now.
+        }
       }
     });
 }

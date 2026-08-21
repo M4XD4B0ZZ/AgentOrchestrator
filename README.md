@@ -3383,18 +3383,77 @@ and because the failure mode it describes — a command that cannot start is
   is removed, and recovery is still attempted at most once. Only the reported
   condition and exit class are wrong, and narrowing it means a second inspection
   whose answer would be just as stale. **Scope:** `run/lifecycle-driver.ts`.
-- **L-V3-06-7 — the discarded lease-release result is closed for one command of
-  three, and on one path of that one.** The slice's third stated gap was that
-  every call site threw the release result away, leaving a quarantined record
-  inside `.git` that nobody was told about. `run --attended` now reports it.
-  `cli/block-command.ts` and `cli/release-command.ts` still discard it — and
-  `block --attended` is the longer-running of the two, so it is the more likely
-  to meet the condition. So does the lifecycle driver's own `catch`: on a throw
-  the lease is given back but there is no result to attach the report to, and the
-  operator sees only the safe error text and exit 1. The pre-slice condition
-  therefore still exists on three paths, and describing gap 3 as closed would be
-  the overstatement this register exists to prevent. **Scope:**
-  `cli/block-command.ts`, `cli/release-command.ts`, `run/lifecycle-driver.ts`.
+- **L-V3-06-7 — the discarded lease-release result is closed on every controlled
+  path, and open on one exceptional path of one command.** The slice's third
+  stated gap was that every call site threw the release result away, leaving a
+  quarantined record inside `.git` that nobody was told about. `run --attended`
+  closed it first, for its controlled path only. **V3-07 closed the other two.**
+  `cli/block-command.ts` and `cli/release-command.ts` now keep the result, print
+  it through one shared closed renderer in `cli/render-lease.ts`, and cannot exit
+  nominal on any code but `RELEASED` — on every path that acquired a lease,
+  including the refusals that `return` from inside the `try`, and including a
+  thrown operation, whose `catch` prints the release after the safe error text.
+  Both primary results are printed unchanged next to it: a failed release decides
+  the exit code and rewrites no block outcome and no workspace verdict. The rule
+  exempts no primary code, not even `EXIT_RUN_UNEXPECTED`; the two `catch` blocks
+  set code 1 where they catch, and say why there.
+
+  The sentences that report those codes say only what is true of **every**
+  producer of the code they are keyed on, which took four passes to get right and
+  in the end a change of shape. Every pass found the same class one level
+  further in: a sentence true of the removal states and false of the refusals
+  that share the code, then true of those and false of one removal state.
+  `LEASE_ABSENT` claimed "nothing is left behind" about a code reachable three
+  ways, none of which looks past the lease name; `LEASE_REMOVE_FAILED` glossed
+  `UNREADABLE_AFTER_DETACH` as a record left in quarantine when
+  `removeVerifiedLease` puts that record back and deletes the quarantine copy —
+  which is the harm `VerifiedRemoval`'s own docstring records having been
+  reproduced once before, on a different code.
+
+  Rewording stopped being the fix. A code sentence now states only what the code
+  establishes, and everything about the resulting state on disk moved to
+  `LEASE_RELEASE_DETAIL_SENTENCES`, **keyed on the detail token** — a much finer
+  key, and one the fifth review then showed is still not one-per-end-state:
+  `RECORD_QUARANTINED` comes from `Restoration.NAME_TAKEN`, which `putBack`
+  reaches both by proof (`link` refused `EEXIST`) and by `occupancyOf` treating a
+  *failed* `stat` as occupancy — a default that function's own docstring calls
+  proof of nothing. So the token sentence says a copy was kept aside, which every
+  producer shares, and names the uncertainty about who holds the name, which they
+  do not. The rule is the same at both levels: say what every producer of this
+  key shares, and name the uncertainty where they differ. The token table is
+  complete against the producer by test, not against itself, and a second test
+  pins that `LEASE_REMOVE_FAILED` never pairs with a null token — because its
+  sentence promises one without a condition.
+
+  One asymmetry worth knowing when reading two reports side by side: on a failed
+  release `run --attended` replaces its outcome with `LEASE_RELEASE_FAILED` and
+  demotes the reached outcome to a reason code, while `block` and `release` keep
+  their primary verdict and move only the exit code. Both are truthful; they are
+  not the same shape, and V3-07 deliberately did not change the older one. The counter-proof for
+  `LEASE_ABSENT` is in `tests/v3-07-lease-release-observability.test.ts`: a real
+  lease moved aside under a quarantine-shaped name releases `LEASE_ABSENT` with
+  the record still on disk, byte for byte.
+
+  The two commands' `finally` blocks now also *contain* the release, so a release
+  that throws cannot replace the exception that entered — and a release that
+  throws still prints a line, `RELEASE_NOT_REPORTED`, because the one occasion a
+  record is provably still in the repository is the last place an absent line
+  would be readable as "fine". Both halves are produced rather than argued, for
+  both commands, in `tests/v3-07-lease-release-fault.test.ts`: the throwing
+  release is reached with no production edit at all, by refusing the one
+  `randomBytes` call that names the quarantine file.
+
+  An earlier version of this entry said the condition existed "on three paths".
+  Two of the three are now closed. **The third is not, and it is exactly this:**
+  the lifecycle driver's own `catch` gives the lease back and discards the
+  answer, because on a throw there is no `LifecycleResult` to attach it to —
+  `driveUnderLease` rethrows, and `cli/run-command.ts` prints the safe error text
+  and exits 1. The two commands could close their equivalent because a command
+  owns its own stdout; the driver does not, and giving it one would be a change
+  to `LifecycleResult` rather than a report — a contract decision, and not this
+  slice's. So `run --attended` is now the one command whose *exceptional*
+  release result is still invisible. This narrows the item rather than carrying
+  it forward whole. **Scope:** `run/lifecycle-driver.ts`.
 - **L-V3-06-8 — the loop has two floors; one does the work and one cannot fire.**
   The live one is the revision comparison: an invocation that reports
   `STEP_BUDGET_EXHAUSTED` while leaving the state file identical to the one its
@@ -3450,11 +3509,96 @@ and because the failure mode it describes — a command that cannot start is
 - **L-V3-06-10 — the release-ordering guard is unpinned.** `finish` sets its
   "already released" flag *after* the release call returns, so a release that
   threw leaves the flag clear and the outer `catch` tries once more rather than
-  standing down. The mutant that restores the original ordering survives:
-  `releaseRepositoryExecutionLease` is not an injectable seam, and a review that
-  went looking could construct no reachable throw inside it — every filesystem
-  call on that path is already wrapped. The ordering is written the safe way on
-  the argument alone. **Scope:** `run/lifecycle-driver.ts`.
+  standing down. The mutant that restores the original ordering survived, and the
+  stated reason was that no reachable throw could be constructed inside
+  `releaseRepositoryExecutionLease` because every filesystem call on that path is
+  already wrapped.
+
+  **That reason was too strong, and an instrument now exists.** Not every call on
+  that path is a filesystem call, and at least one of the others sits outside
+  every `try`:
+  `removeVerifiedLease` names its quarantine file with `randomBytes(6)` before it
+  opens one, so a `vi.mock('node:crypto')` refusing that one call makes the
+  release throw with production unedited. `tests/v3-07-lease-release-fault.test.ts`
+  does exactly that, and uses it to kill the equivalent mutant in
+  `cli/block-command.ts` and `cli/release-command.ts`.
+
+  Two things this does *not* establish, and the correction is meant to be
+  narrow. It does not show a **production-reachable** throw: `randomBytes(6)`
+  failing in a real process is exactly as unlikely as it was. And the other half
+  of the old reason still stands — `releaseRepositoryExecutionLease` is still not
+  an injectable seam. What has changed is only that the ordering in `finish` is
+  now unpinned for want of a test rather than for want of an instrument, which is
+  a smaller claim and a truer one. **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-07-1 — the operator notification does not know about the lease
+  release.** `notifyBlockRun` builds its payload from `AttendedBlockResult`
+  alone, and `judgeBlockRun` decides `SILENT` from that same value. So a block
+  that ends `COMPLETE` and then fails to give the lease back now exits 3 and says
+  so on the console — and sends **no notification at all**. The one channel an
+  absent operator has is the one that stays quiet about a repository that will
+  refuse its next run. Deliberately not fixed in V3-07: carrying the release
+  result to the wire is a change to `OperatorNotification`'s schema *and* to what
+  counts as an ending worth waking somebody for, which is the planned
+  actionable-notifications redesign rather than a rendering change. What that
+  redesign must not undo is already in place — the notification is sent after the
+  release attempt, never before, so the payload it will one day carry is a fact
+  and not a prediction.
+
+  One narrow behaviour change V3-07 did introduce and did not guard: the release
+  report is written to stdout *between* the exit code and `notifyBlockRun`, so a
+  synchronous throw from that one write now skips the notification, which on
+  `main` nothing could. Deliberately left unguarded, because guarding it would
+  remove the retry the `catch` performs — and that retry is the only thing that
+  reports a stuck lease when the console refuses once. The trade is a rare lost
+  notification against a routinely-useful retry, and it is recorded rather than
+  silently taken. **Scope:** `notify/notification.ts`, `notify/attention.ts`,
+  `cli/block-command.ts`.
+- **L-V3-07-2 — an exception under the lease exits 1, not 3, even when the lease
+  is provably stuck.** `exitCodeWithLeaseRelease` answers
+  `EXIT_RUN_NEEDS_OPERATOR` for every release that is not `RELEASED`, and its own
+  reasoning says code 1 would be the substitution V3-07 exists to prevent. Both
+  commands' `catch` blocks then do exactly that: a thrown operation keeps code 1
+  whatever the release did. That is deliberate, and it is the one place the two
+  rules pull against each other.
+
+  The reason it is written this way: a thrown operation produced no primary
+  result to combine with, and code 1 is the only value that says *this build
+  failed in a way it did not plan for* — which an operator needs told before they
+  are sent to inspect a lease. The stuck lease is not hidden by the choice; the
+  release line is printed on the same console, `RELEASE_NOT_REPORTED` included.
+  What is lost is only the machine-readable half: a script routing 1 to "file a
+  bug" and 3 to "inspect the repository" takes the wrong branch here.
+
+  The same function relabels in a second direction, and that is worth stating
+  too: a controlled refusal that would have exited 2 — a `--tasks` argument the
+  repository does not declare — becomes 3 when the release also fails. That is
+  intended (the argument is gone when the operator retypes it; the record in the
+  repository is not) and it is tested, but a script routing 2 to "fix the
+  arguments" takes the wrong branch there.
+
+  Recorded rather than resolved because resolving either direction is a decision
+  about the exit-code contract, not a fix: code 1 grows a second meaning, or the
+  thrown-operation case gets a code of its own, or a release condition gets one.
+  **Scope:**
+  `cli/block-command.ts`, `cli/release-command.ts`, `cli/run-exit-codes.ts`.
+- **L-V3-07-3 — the release's own `EVIDENCE_INVALID` guard cannot fire, and one
+  build defect is reported as a filesystem condition.** `releaseRepositoryExecutionLease`
+  wraps `ExecutionLeaseProof.leasePathOf` in a `try` and answers
+  `EVIDENCE_INVALID` if it throws. That arm is dead: `verifyExecutionLeaseHeld`
+  runs first, and *its* call to the same function sits inside the `try` around
+  the record read, so a throwing private-field lookup is caught there and
+  classified by `safeErrnoCode` — which answers `UNKNOWN`, not `ENOENT`, and so
+  returns `LEASE_UNREADABLE`. The release then returns on that code before it
+  ever reaches its own guard.
+
+  The consequence is small and worth naming: a value that satisfies the brand
+  check and cannot yield its path is a defect in this build, and an operator is
+  told this build could not get at the lease record. V3-07's sentence for that
+  code is written to survive it — it says what stopped this build, and says the
+  existence question is unsettled, rather than asserting a record is present —
+  but the classification is still wrong, and correcting it
+  is a change to `lease/execution-lease.ts`, which this slice does not touch.
+  **Scope:** `lease/execution-lease.ts`.
 - **L-V3-06-11 — three sibling dist harnesses hand-build a repository identity,
   and are consistent rather than correct.** `test:dist-lifecycle-restart` failed
   both CI jobs because its owner process built
