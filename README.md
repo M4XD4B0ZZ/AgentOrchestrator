@@ -3263,6 +3263,59 @@ and because the failure mode it describes — a command that cannot start is
   result taken by somebody else at some other moment — and it does make one
   `lease status` two probes. Cosmetic for the CLI; worth knowing for any caller
   that counts probe invocations. **Scope:** `lease/lease-recovery.ts`.
+- **L-V3-06-1 — the continuation grant was examined and is unchanged.** The
+  first draft of this entry claimed slice 6 widened it, and that claim was
+  wrong. `attendedContinuation` has never meant "one `runTask` call": it means
+  an operator is present for *this invocation of the command*, and
+  `block --attended` has driven a `for(;;)` loop over many tasks, each its own
+  `runTask`, under a single `--attended` since V2-08 —
+  `block/block-runner.ts:887` passes `attendedContinuation: true` from inside
+  that loop. `driveLifecycle` does the same for one task, in one foreground
+  process the operator started and can stop, and `--max-invocations` defaults to
+  one so the CLI is byte-identical in behaviour unless an operator asks
+  otherwise. No authority was extended. **Scope:** `run/lifecycle-driver.ts`,
+  `cli/run-command.ts`.
+- **L-V3-06-2 — the reset wait was WITHDRAWN from slice 6, and needs a contract
+  decision before it can exist.** The slice was to let an unattended run sleep
+  until `reportedResetAt` and carry on. It cannot be built without extending an
+  authority this product has not granted, and the chain is short:
+  `run/run-driver.ts` refuses **every** continuation when `attendedContinuation`
+  is false — including one `evaluateAutomaticResume` has already allowed,
+  because the grant is checked before the resume write and can only withhold.
+  So AO has no unattended execution path at all today; the automatic-resume
+  machinery decides *eligibility*, and operator presence is still required on
+  top of it.
+
+  That makes the wait unbuildable in both directions. Keeping the grant across a
+  multi-hour sleep spends a claim of operator presence made long before, which
+  is the widening. Dropping the grant after the sleep makes the wait pointless,
+  because the resume it slept for is refused too.
+
+  **The minimal contract change, if it is ever wanted:** a third continuation
+  authority — "may continue with nobody present, but *only* where
+  `classifyResume` already answered `AUTOMATIC_ALLOWED`" — distinct from
+  `attendedContinuation` and never a substitute for it. It would let an
+  unattended run clear a self-clearing quota pause while still refusing ordinary
+  in-flight work, which is the only shape that satisfies *unattended
+  continuation must not increase authority*. That is a product-contract
+  decision, so it is reported here rather than implemented. Until it is made,
+  `BLOCKED_USAGE_LIMIT` stops the lifecycle driver exactly as it stops every
+  other caller. **Scope:** `run/run-driver.ts`, `core/resume-policy.ts`,
+  `run/lifecycle-driver.ts`.
+- **L-V3-06-3 — the real-process harness measures the lease phase, not a driven
+  task.** `tests/dist-artifact/lifecycle-restart-dist-artifact.mjs` names a task
+  the plan does not contain, so every phase stops at `TASK_START_REFUSED`. That
+  is what makes it agent-free, and `startTask` being reached at all is the proof
+  that the recovery was followed by a real acquisition — but it does mean no
+  *durable phase* is continued by a real second process anywhere in the gate.
+  Continuation from durable state is covered in-process only. **Scope:**
+  `tests/dist-artifact/lifecycle-restart-dist-artifact.mjs`.
+- **L-V3-06-4 — the lifecycle driver does not start what it cannot select.** It
+  takes a definite `taskId` and never consults the selector; `run --attended`
+  selects before calling it. An unattended run therefore continues *one* task and
+  stops, exactly as `runTask` does, and nothing here decides that a finished task
+  means "move on to the next". Automatic task selection stays out of scope.
+  **Scope:** `run/lifecycle-driver.ts`.
 
 ### What V1-08 is not
 

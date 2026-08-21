@@ -17,9 +17,19 @@
  * required check produced positive evidence. Missing evidence is a denial, not
  * a neutral value.
  *
- * There is deliberately still **no resume runner**. Gathering the evidence
- * (running `git status`, re-running the auth preflight, canonicalising paths)
- * belongs to the loop that does not exist yet.
+ * Gathering the evidence — running `git status`, re-running the auth preflight,
+ * canonicalising paths — deliberately belongs elsewhere, and since V2-04 that
+ * elsewhere exists. `state/resume-decision.ts` translates an observed runtime
+ * into {@link AutomaticResumeEvidence} and is the only caller of this function;
+ * `run/run-driver.ts` reaches it through `classifyResume` on every iteration,
+ * and `run/lifecycle-driver.ts` re-enters that path with fresh evidence after
+ * waiting out a recorded quota reset.
+ *
+ * (This paragraph read "there is deliberately still **no resume runner**" until
+ * V3-06. That had been false since V2-04, and it was not a harmless leftover:
+ * the slice-6 brief was planned from it, and specified rebuilding a consumer
+ * this module already had. Documentation that outlives its code writes the next
+ * plan.)
  */
 
 import {

@@ -5,32 +5,22 @@ import { runAuthPreflight } from '../auth/auth-preflight.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { formatSafeError } from '../core/safe-error.js';
-import {
-  acquireRepositoryExecutionLease,
-  releaseRepositoryExecutionLease,
-} from '../lease/execution-lease.js';
 import { runCapabilityDump } from '../doctor/capabilities.js';
 import { resolveRepository, type ResolvedRepository } from '../repo/resolve-repository.js';
 import { renderRunPlan, READ_ONLY_TRAILER } from '../run/render-run-plan.js';
 import { planRun } from '../run/run-plan.js';
-import { selectRunTask, runTask } from '../run/run-driver.js';
-import { startTask } from '../run/start-task.js';
+import { driveLifecycle } from '../run/lifecycle-driver.js';
+import { selectRunTask } from '../run/run-driver.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import { runGitCommand } from '../worktree/git-command.js';
-import {
-  GRANT_WITHHELD_SENTENCE,
-  line,
-  renderAttendedRun,
-  START_OUTCOME_SENTENCES,
-} from './render-attended-run.js';
-import { renderLeaseRefusal } from './render-lease.js';
+import { GRANT_WITHHELD_SENTENCE } from './render-attended-run.js';
+import { renderLifecycleRun } from './render-lifecycle.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_REFUSED,
   EXIT_RUN_UNEXPECTED,
+  exitCodeForLifecycleRun,
   exitCodeForPlan,
-  exitCodeForRunOutcome,
-  exitCodeForStartOutcome,
   type CliExitCode,
 } from './run-exit-codes.js';
 
@@ -110,7 +100,19 @@ interface RunOptions {
   readonly task?: string;
   readonly attended?: boolean;
   readonly maxSteps?: string;
+  readonly maxInvocations?: string;
+  readonly recoverStaleLease?: boolean;
 }
+
+/**
+ * How many times one `run --attended` may re-enter the driver.
+ *
+ * One, so that the default behaviour of this command is exactly what it was
+ * before V3-06: a single invocation, and `STEP_BUDGET_EXHAUSTED` reported as
+ * "call again". Raising it hands that decision to the lifecycle driver instead
+ * of to the operator's shell.
+ */
+export const DEFAULT_MAX_INVOCATIONS = 1;
 
 /**
  * The execution seams of the attended path. All optional; all default to the
@@ -195,60 +197,25 @@ async function reportPlan(
 }
 
 /**
- * Start the task if it needs starting, then drive it.
+ * Select the task, then hand the whole lifecycle to the driver.
  *
- * The exit code comes from whichever half stopped first, and the report names
- * that half. A start outcome that is neither `STARTED` nor `ALREADY_STARTED`
- * ends the invocation there: there is nothing to drive, and its own code says
- * why.
+ * Selection happens here and outside the lease deliberately: it only reads the
+ * repository's own task files, and an invocation with nothing to run should not
+ * take a writer lease to find that out. Everything after it — taking the lease,
+ * recovering a provably dead one, starting the task, driving it across as many
+ * invocations as the operator allowed, waiting out a recorded quota reset, and
+ * giving the lease back — belongs to `driveLifecycle`, which is the layer that
+ * can report what happened to the lease instead of discarding it.
  */
 async function executeAttended(
   repository: ResolvedRepository,
   requestedTaskId: string | null,
-  maxSteps: number,
+  lifecycle: {
+    readonly maxSteps: number;
+    readonly maxInvocations: number;
+    readonly recoverStaleLease: boolean;
+  },
   seams: RunCommandSeams,
-): Promise<CliExitCode> {
-  // The lease, before anything at all — and held for the whole of it.
-  //
-  // Taken here rather than around each half because the window between them is
-  // exactly the one an execution lease exists to close: a run that acquired for
-  // `startTask`, released, and acquired again for `runTask` would leave a gap
-  // between preparing a workspace and driving it, into which a second writer
-  // fits perfectly. The same reasoning makes V2-08's lease scope the whole block
-  // run rather than each task in it.
-  const acquired = acquireRepositoryExecutionLease(
-    repository,
-    { runId: null, blockId: null },
-    { now: () => new Date().toISOString() },
-  );
-  if (!acquired.ok) {
-    process.stdout.write(renderLeaseRefusal(acquired.code));
-    return EXIT_RUN_REFUSED;
-  }
-
-  try {
-    return await executeAttendedUnderLease(
-      repository,
-      requestedTaskId,
-      maxSteps,
-      seams,
-      acquired.evidence,
-    );
-  } finally {
-    // Released on every path out, including a throw. A crash that skips this is
-    // the case the recovery contract is about, and it fails closed by design:
-    // the next invocation reports the lease rather than taking it.
-    releaseRepositoryExecutionLease(acquired.evidence);
-  }
-}
-
-/** The attended drive itself, with the lease already established. */
-async function executeAttendedUnderLease(
-  repository: ResolvedRepository,
-  requestedTaskId: string | null,
-  maxSteps: number,
-  seams: RunCommandSeams,
-  lease: ExecutionLeaseEvidence,
 ): Promise<CliExitCode> {
   // Which task, decided before anything is created. `--task` wins; otherwise the
   // repository's own selector chooses, and its refusals are the plan's to
@@ -263,57 +230,34 @@ async function executeAttendedUnderLease(
     taskId = selection.task.id;
   }
 
-  const authPreflight = onceOnlyPreflight(seams.authPreflight);
-  const start = await startTask(
-    { repository, taskId },
-    { git: runGitCommand, now: () => new Date().toISOString(), authPreflight, lease },
-  );
-
-  if (start.outcome !== 'STARTED' && start.outcome !== 'ALREADY_STARTED') {
-    process.stdout.write(renderAttendedRun(repository, taskId, start, null));
-    return exitCodeForStartOutcome(start.outcome);
-  }
-
-  // On `ALREADY_STARTED` the preflight has not run yet, because `startTask`
-  // returned before reaching it. Auth is a requirement of *executing*, not of
-  // starting, so it is proven here on every path that is about to drive.
-  const evidence = await authPreflight();
-  if (evidence === null) {
-    process.stdout.write(
-      renderAttendedRun(repository, taskId, start, null, [
-        line('Auth', 'AUTH_PREFLIGHT_FAILED'),
-        `  ${START_OUTCOME_SENTENCES.AUTH_PREFLIGHT_FAILED}`,
-      ]),
-    );
-    return exitCodeForStartOutcome('AUTH_PREFLIGHT_FAILED');
-  }
-
-  const run = await runTask(
+  const result = await driveLifecycle(
     {
       repository,
       taskId,
-      // The task id, which is all this command legitimately has: it is a value
-      // the id grammar already validated, and it is not prose. The prose the
-      // agents actually receive is read inside the driver, from the worktree it
-      // authorised (`readExecutionBrief`) — so this command authors no prompt
-      // text, which is the property `run-driver.ts` insists on for itself.
       // The grant, and only here. `true` because this function is only reached
-      // when `--attended` was given.
-      attendedContinuation: true,
-      authEvidence: evidence,
-      lease,
-      maxSteps,
+      // when `--attended` was given. With the default invocation budget of one
+      // this is exactly the per-invocation grant it always was; raising
+      // --max-invocations is the operator extending it across the run, which is
+      // what the flag means.
+      continuationGrant: true,
+      recoverStaleLease: lifecycle.recoverStaleLease,
+      maxSteps: lifecycle.maxSteps,
+      maxInvocations: lifecycle.maxInvocations,
     },
     {
       now: () => new Date().toISOString(),
       git: runGitCommand,
+      // One preflight for the whole run: `onceOnlyPreflight` memoises it, so the
+      // subscription CLIs start once however many invocations follow, and a
+      // failure stays a failure.
+      authPreflight: onceOnlyPreflight(seams.authPreflight),
       ...(seams.agent !== undefined ? { agent: seams.agent } : {}),
       ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
     },
   );
 
-  process.stdout.write(renderAttendedRun(repository, taskId, start, run));
-  return exitCodeForRunOutcome(run.outcome);
+  process.stdout.write(renderLifecycleRun(repository, result));
+  return exitCodeForLifecycleRun(result);
 }
 
 export function registerRunCommand(program: Command, seams: RunCommandSeams = {}): void {
@@ -340,6 +284,19 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
     .option(
       '--max-steps <n>',
       `Bound on durable steps for one attended invocation (default ${String(DEFAULT_MAX_STEPS)}).`,
+    )
+    .option(
+      '--max-invocations <n>',
+      'How many times this run may re-enter the driver after durable progress ' +
+        `(default ${String(DEFAULT_MAX_INVOCATIONS)}). One reproduces the pre-V3-06 behaviour: ` +
+        'the run stops at the step budget and reports "call again". Above one, the operator ' +
+        'grant to continue this task covers every invocation the run makes.',
+    )
+    .option(
+      '--recover-stale-lease',
+      'Permit removing an execution lease this build can prove is dead before acquiring. ' +
+        'Never removes one on a guess, has no override, and grants nothing by itself: a ' +
+        'removal is followed by an ordinary acquisition that is allowed to lose.',
     )
     .action(async (options: RunOptions) => {
       try {
@@ -377,7 +334,38 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
           return;
         }
 
-        process.exitCode = await executeAttended(repository, taskId, maxSteps, seams);
+        // Each bound parsed with this command's own vocabulary, and each
+        // refused before anything is resolved further. A separate code per flag
+        // rather than one shared "bad number": an operator who mistyped one is
+        // not helped by being told another is wrong.
+        const maxInvocations =
+          options.maxInvocations === undefined
+            ? DEFAULT_MAX_INVOCATIONS
+            : Number(options.maxInvocations);
+        if (!Number.isSafeInteger(maxInvocations) || maxInvocations < 1) {
+          process.stdout.write(
+            `
+Failure      : MAX_INVOCATIONS_INVALID — --max-invocations must be a positive whole number.
+
+` +
+              `${READ_ONLY_TRAILER}
+
+`,
+          );
+          process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+          return;
+        }
+
+        process.exitCode = await executeAttended(
+          repository,
+          taskId,
+          {
+            maxSteps,
+            maxInvocations,
+            recoverStaleLease: options.recoverStaleLease === true,
+          },
+          seams,
+        );
       } catch (error: unknown) {
         // An unexpected failure must not print an exception message: those
         // routinely quote CLI output and filesystem paths (AO-002). Fail

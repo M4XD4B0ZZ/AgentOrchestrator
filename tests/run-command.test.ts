@@ -127,9 +127,22 @@ describe('agent-loop run — CLI seam', () => {
     expect(run).toBeDefined();
     const flags = (run?.options ?? []).map((option) => option.long);
 
-    // The full option surface, pinned. V2-05 added exactly two flags, and the
-    // list is asserted whole so that a third cannot appear unnoticed.
-    expect(flags).toEqual(['--repository', '--task', '--attended', '--max-steps']);
+    // The full option surface, pinned. V2-05 added two flags and V3-06 added
+    // two more, and the list is asserted whole so that a seventh cannot appear
+    // unnoticed. Neither new flag grants anything on its own: `--max-invocations`
+    // is a bound, and `--recover-stale-lease` permits an attempt whose own proof
+    // still has to pass. There is deliberately no flag that lets a run wait out
+    // a quota reset — see `run/lifecycle-driver.ts` on why that needs an
+    // authority this build does not have.
+    expect(flags).toEqual([
+      '--repository',
+      '--task',
+      '--attended',
+      '--max-steps',
+      '--max-invocations',
+      '--recover-stale-lease',
+    ]);
+    expect(flags).not.toContain('--wait-for-reset');
     // The refusals `WORKSPACE_COLLISION` and `STATE_NOT_RECORDED` are meant to
     // stand, and adoption is a later slice (V2-06A). No flag may talk an
     // invocation past them.
