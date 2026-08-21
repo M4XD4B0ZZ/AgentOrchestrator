@@ -73,8 +73,27 @@
  * The truth about the lease path, stated precisely: what is there, and whether it
  * can be proved removable. {@link assessLeaseRecovery} classifies and reports; it
  * authorises nothing, because a report is not what the removal acts on — see
- * {@link LeaseRecoveryAssessment.staleRecovery}. Liveness keeps the rule it has
- * everywhere else: **it may refuse and it may never permit.**
+ * {@link LeaseRecoveryAssessment.staleRecovery}.
+ *
+ * ── Where liveness may permit, and why that is safe here ───────────────────
+ *
+ * The rule everywhere else in this build is that **liveness may refuse and may
+ * never permit**, and it is worth saying plainly that this module is the
+ * exception rather than leaving the slogan standing. `processAlive` *substitutes*
+ * for the real probe here, so a supplied one can flip
+ * {@link LeaseRecoveryAssessment.staleRecovery} from `UNSAFE` to
+ * `SAFE_TO_RECOVER` for a lease whose owner is running perfectly well.
+ *
+ * That is safe for exactly one reason, and it is a reason about consumers rather
+ * than about this module: **nothing destructive reads this value.**
+ * `recoverStaleLease` makes its own assessment, always consults the real probe,
+ * and accepts only an opinion that can refuse — a review reproduced the version
+ * that did not, removing a living owner's lease in one call. So the worst a
+ * fabricated probe achieves here is a misleading report, to the caller that
+ * fabricated it.
+ *
+ * `tests/v3-05-stale-lease-recovery.test.ts` pins that asymmetry by measuring
+ * both halves in one case rather than asserting it.
  */
 
 import {
@@ -200,7 +219,10 @@ export interface LeaseRecoveryAssessment {
   readonly containment: ContainmentReading | null;
   /**
    * Whether this lease can be proved removable, and if not, which conjunct of
-   * the safety predicate refused.
+   * the safety predicate refused — as judged with **this call's** liveness probe,
+   * which a caller may substitute. See this module's header: a supplied probe can
+   * make this field say `SAFE_TO_RECOVER` about a running owner, and nothing
+   * destructive reads it.
    *
    * ── Why this is beside the classification and not inside it ────────────────
    *

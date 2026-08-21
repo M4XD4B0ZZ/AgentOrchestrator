@@ -6204,8 +6204,8 @@ stops a report from becoming an authorisation.
 ### What it is measured by
 
 `tests/v3-05-stale-lease-recovery.test.ts` covers the format, the lifecycle, the
-seam, the predicate and the operator vocabulary, and six mutants were run against
-it rather than described, each a single edit to `src`:
+seam, the predicate and the operator vocabulary, and seven mutants were run
+against it rather than described, each a single edit to `src`:
 
 ```text
 the pending mark is never written                    24 cases red
@@ -6214,11 +6214,17 @@ the removal stops binding to the object it proved     1
 an unreadable history reads as contained              3
 the seam stops refusing an unrecordable launch        1
 a supplied liveness opinion may permit                3
+a displaced successor is reported as a clean abort    1
 ```
 
-The last two were added after review rounds found them unpinned, and the sixth
-was a live defect rather than a hypothetical: see the paragraph on "no override"
-above.
+The last three were added after review rounds found them unpinned, and two of
+them were live defects rather than hypotheticals: a supplied liveness answer
+could remove a living owner's lease (see "no override" above), and a successor
+displaced into a quarantine file was reported to the operator as a clean abort.
+The seventh is pinned against a **table** rather than against a reachable state:
+two of `VerifiedRemoval`'s nine members need a restore to fail, which no caller
+of `recoverStaleLease` can arrange, so the mapping is asserted by value where the
+arm cannot be produced.
 
 Two limits in the format were caught by review rather than by a test, and are
 recorded because the second was a silent one. The entry cap was **dead**: a
@@ -6233,10 +6239,12 @@ one attestation could confirm several generations; the digest is now refused if 
 has already proved one, so "every launch is proved contained" is enforced by the
 format rather than by its caller.
 
-Every "dead owner" in that file is a substituted probe, so
-`npm run test:dist-stale-recovery` measures the rest against the shipped
-artefact with a real one: a separate OS process acquires the lease and exits
-still holding it, and the real `osProcessLiveness` is what sees it go. Its
+Its stale leases are built by acquiring for real, driving real launches, and then
+rewriting the owner pid to one whose process has exited — genuinely dead, and the
+real `osProcessLiveness` is what confirms it — so what that file never does is
+run a *second* OS process, or run against what is shipped.
+`npm run test:dist-stale-recovery` does both: a separate process acquires the
+lease through the built artefact and exits still holding it. Its
 load-bearing case is the **negative control** — an owner kept alive must be
 refused with `OWNER_RUNNING` — because without it every recovery above could be
 an instrument that cannot tell a living process from a dead one. Disabling the

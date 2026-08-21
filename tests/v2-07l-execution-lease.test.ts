@@ -1107,14 +1107,25 @@ describe('the owner-only release stays owner-only, and nothing beside it removes
     // lease to act on, and no value is a licence to act on one.
     expect(assessment.latestLaunchContained).toBe(false);
     // `staleRecovery` is the field that could most easily become one, so it is
-    // pinned by what consumes it rather than by what it says. `recoverStaleLease`
-    // declares exactly one required parameter — the repository — so there is no
-    // argument position an assessment could be passed in through, and it makes
-    // its own inside the call that removes. A second required parameter arriving
-    // here is a verdict travelling from a reader to a destructive step, which is
-    // the defect the withdrawn break was built out of.
+    // pinned by what consumes it rather than by what it says: `recoverStaleLease`
+    // makes its own assessment inside the call that removes, and the one optional
+    // argument it takes can only ever *refuse*.
+    //
+    // Pinned by the argument's **shape**, not by counting arguments. This
+    // asserted `recoverStaleLease.length === 1`, which `Function.length` satisfies
+    // for any number of *optional* parameters — so it was green for the very seam
+    // it was written to exclude, and stayed green through a round in which that
+    // seam could remove a living owner's lease. A `verdict` or `assessment` key
+    // arriving in this shape is that defect; the type-level `satisfies` makes it a
+    // compile failure and the runtime check makes it a test failure.
     const lease5 = await import('../src/lease/execution-lease.js');
-    expect(lease5.recoverStaleLease.length).toBe(1);
+    const shape = Object.keys(
+      { additionalLiveness: undefined } satisfies Record<
+        keyof NonNullable<Parameters<typeof lease5.recoverStaleLease>[1]>,
+        undefined
+      >,
+    );
+    expect(shape).toEqual(['additionalLiveness']);
   });
 
   it('registers the read-only subcommand and the proof-gated one, and nothing else', async () => {

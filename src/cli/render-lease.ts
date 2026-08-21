@@ -266,15 +266,23 @@ export function renderLeaseRecovery(
 export const STALE_RECOVERY_OUTCOMES: Readonly<Record<StaleLeaseRecoveryResult['code'], string>> =
   Object.freeze({
     RECOVERED:
-      'The stale lease was removed. Nothing holds this repository now, and nothing was\n' +
-      '  granted: the next invocation takes its own lease through the ordinary path.',
+      'The stale lease was removed, and nothing was granted: the next invocation takes its\n' +
+      '  own lease through the ordinary path. Whether anything holds this repository now is\n' +
+      '  not something this command looked at - the name was free from the moment the record\n' +
+      '  was detached, and another invocation may have taken it since.',
     RECOVERY_UNSAFE: 'Nothing was touched. The reason line says which fact is missing.',
     LEASE_CHANGED:
-      'Nothing was removed by this call: what is at the lease path is not what was proved\n' +
-      '  removable. It changed hands, was released, or was already gone. The reason line\n' +
-      '  carries which of those, and it is the only line here that names one - who holds\n' +
-      '  the lease now is not something this call looked at. Run `agent-loop lease status`\n' +
-      '  before anything else runs against this repository.',
+      'Nothing was removed and nothing was moved: what is at the lease path is not what was\n' +
+      '  proved removable, or nothing is there at all. The reason line says which. Run\n' +
+      '  `agent-loop lease status` before anything else runs against this repository.',
+    LEASE_DISPLACED:
+      "A record that was not this call's to remove was detached from the lease name and\n" +
+      '  could not be put back. It was KEPT, not deleted: it is in a file beside the lease\n' +
+      '  whose name begins with the lease name and contains `.breaking-`. An invocation that\n' +
+      '  took the lease in that instant has lost it and will stop at its next checkpoint. The\n' +
+      '  reason line says whether the lease name is free now or has been taken again. Run\n' +
+      '  `agent-loop lease status` and do not start anything against this repository until it\n' +
+      '  reads as you expect.',
     RECOVERY_FAILED:
       'The removal could not be completed. The reason line names the end state. Run\n' +
       '  `agent-loop lease status` before anything else runs against this repository.',

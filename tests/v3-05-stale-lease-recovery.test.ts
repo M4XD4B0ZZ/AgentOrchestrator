@@ -23,12 +23,23 @@
  *
  * ── The shape of the counter-proofs ────────────────────────────────────────
  *
- * Four mutants are named in the slice's report and each is killed here rather
- * than argued about: removing the pending state, treating slice 4's record as
- * sufficient, removing the identity binding on the removal, and treating an
- * unreadable history as a contained one. Each one is a single edit to `src`, and
- * each has a case below whose assertion is the effect rather than the absence of
- * an effect — an absence assertion pins nothing until the mutant dies.
+ * Seven mutants are named in the slice's report and each is killed here rather
+ * than argued about, each a single edit to `src`:
+ *
+ *     the pending mark is never written                    24 cases red
+ *     slice 4's record is treated as sufficient             3
+ *     the removal stops binding to the object it proved     1
+ *     an unreadable history reads as contained              3
+ *     the seam stops refusing an unrecordable launch        1
+ *     a supplied liveness opinion may permit                3
+ *     a displaced successor reads as a clean abort          1
+ *
+ * The last three were added after review rounds found them unpinned, and two were
+ * live defects rather than hypotheticals. Every case behind them asserts an
+ * **effect** rather than the absence of one — an absence assertion pins nothing
+ * until the mutant dies — except the seventh, which is pinned against a table by
+ * value precisely because its state cannot be produced through this entry point.
+ * That is stated where it is asserted, not only here.
  *
  * ── What is deliberately not claimed here ─────────────────────────────────
  *
@@ -88,6 +99,7 @@ import {
   releaseRepositoryExecutionLease,
   STALE_LEASE_RECOVERY_CODES,
   STALE_RECOVERY_REFUSALS,
+  staleRecoveryOutcomeFor,
   WRITER_LAUNCH_CODES,
   WRITER_LAUNCH_LEDGER_FILE_NAME,
   type LeaseRepository,
@@ -1258,7 +1270,13 @@ function staleLease(
     string,
     unknown
   >;
-  const entries = (ledgerOf(repository)?.entries ?? []) as readonly unknown[];
+  const ledger = ledgerOf(repository);
+  const entries = (ledger?.entries ?? []) as readonly unknown[];
+  // Carried across rather than defaulted. `sealed()` forces `historyComplete:
+  // true`, so a fixture that let it default would silently *upgrade* an
+  // incomplete history — and this helper is the one that would then be unable to
+  // produce the `HISTORY_INCOMPLETE` refusal it exists to be able to produce.
+  const historyComplete = ledger?.historyComplete === true;
   releaseRepositoryExecutionLease(evidence);
 
   const ownerPid = deadProcessId();
@@ -1277,7 +1295,12 @@ function staleLease(
   writeLedger(
     repository,
     sealed(
-      { entries: entries as WriterLaunchLedgerPayload['entries'], ownerPid, runId },
+      {
+        entries: entries as WriterLaunchLedgerPayload['entries'],
+        historyComplete,
+        ownerPid,
+        runId,
+      },
       subject,
     ),
   );
@@ -1327,6 +1350,19 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
     expect(insisted.code).toBe('RECOVERY_UNSAFE');
     expect(insisted.refusal).toBe('OWNER_RUNNING');
     expect(readFileSync(leasePathOf(repository)).equals(before)).toBe(true);
+
+    // The asymmetry, measured rather than asserted in a comment. The *reporting*
+    // path still lets a caller substitute the probe outright, so the same
+    // fabricated answer that changes nothing above changes the report here — and
+    // `lease-recovery.ts` states that this is safe precisely because nothing
+    // destructive reads it. Both halves in one case, so neither can drift.
+    expect(assessStaleLeaseRecovery(repository, { processAlive: dead }).verdict).toBe(
+      'SAFE_TO_RECOVER',
+    );
+    expect(assessLeaseRecovery(repository, { processAlive: dead }).staleRecovery.verdict).toBe(
+      'SAFE_TO_RECOVER',
+    );
+    expect(existsSync(leasePathOf(repository))).toBe(true);
 
     // And the direction that *is* allowed: a supplied opinion may refuse a
     // recovery the operating system would have permitted.
@@ -1488,10 +1524,61 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
   it('names every outcome code, and reports nothing as a success that is not one', () => {
     expect([...STALE_LEASE_RECOVERY_CODES].sort()).toEqual([
       'LEASE_CHANGED',
+      'LEASE_DISPLACED',
       'RECOVERED',
       'RECOVERY_FAILED',
       'RECOVERY_UNSAFE',
     ]);
+    // `LEASE_DISPLACED` is its own member rather than a shade of
+    // `LEASE_CHANGED`, and the reason is an end state, not a nuance: a record was
+    // detached, could not be put back, and is being kept in a quarantine file, so
+    // a writer is displaced and there is a file inside `.git`. It was folded into
+    // `LEASE_CHANGED` for one round, under that member's sentence saying nothing
+    // had been moved — which is the "one code for two end states" defect
+    // `VerifiedRemoval` split its own members apart for, reintroduced by the one
+    // caller that acts on a lease it never held.
+    //
+    // No case here reaches it through `recoverStaleLease`: it needs a restore to
+    // fail, which `tests/v2-07lr-remediation.test.ts` produces by squatting the
+    // freed name *from inside the predicate* — and this call's predicate is not a
+    // caller's to hook. So the mapping is pinned instead of the arm, by value,
+    // below. Without that, collapsing the two members back into `LEASE_CHANGED`
+    // leaves every case in this file green — measured, which is why the switch
+    // that used to be there is now a table.
+    expect(
+      Object.fromEntries(
+        (
+          [
+            'REMOVED',
+            'ABSENT',
+            'CHANGED',
+            'CHANGED_QUARANTINED',
+            'CHANGED_AND_UNOWNED',
+            'DETACH_FAILED',
+            'UNIDENTIFIABLE',
+            'UNIDENTIFIABLE_QUARANTINED',
+            'UNIDENTIFIABLE_AND_UNOWNED',
+          ] as const
+        ).map((removal) => [removal, staleRecoveryOutcomeFor(removal)]),
+      ),
+    ).toEqual({
+      REMOVED: 'RECOVERED',
+      ABSENT: 'LEASE_CHANGED',
+      CHANGED: 'LEASE_CHANGED',
+      CHANGED_QUARANTINED: 'LEASE_DISPLACED',
+      CHANGED_AND_UNOWNED: 'LEASE_DISPLACED',
+      DETACH_FAILED: 'RECOVERY_FAILED',
+      UNIDENTIFIABLE: 'RECOVERY_FAILED',
+      UNIDENTIFIABLE_QUARANTINED: 'RECOVERY_FAILED',
+      UNIDENTIFIABLE_AND_UNOWNED: 'RECOVERY_FAILED',
+    });
+    // Exactly one member means this call removed the lease. A second one
+    // arriving in that column is a removal being reported as a recovery.
+    expect(
+      (['REMOVED', 'ABSENT', 'CHANGED', 'CHANGED_QUARANTINED'] as const).filter(
+        (removal) => staleRecoveryOutcomeFor(removal) === 'RECOVERED',
+      ),
+    ).toEqual(['REMOVED']);
     // Exactly one of them means the lease is gone by this call's doing. The
     // discrimination matters: `LEASE_CHANGED` also leaves a repository somebody
     // else may hold, and reporting it as a recovery would tell an operator they

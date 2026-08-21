@@ -277,8 +277,11 @@ export const osProcessLiveness: ProcessLivenessProbe = (pid) => {
  * first conjunct — and a review reproduced a substituted probe removing a living
  * owner's lease. {@link StaleRecoveryDependencies} is what closed that: the
  * destructive path always consults the real probe and combines a supplied
- * opinion by taking the more refusing answer. So the bound holds, by
- * construction rather than by there being nothing to break.
+ * opinion by taking the more refusing answer. So the bound holds **for the
+ * destructive path**, by construction rather than by there being nothing to
+ * break — and it does not hold for this seam, which still substitutes: a
+ * supplied probe changes what `assessStaleLeaseRecovery` *reports*, and
+ * `lease-recovery.ts` states why that is safe and what it is safe because of.
  */
 export interface ExecutionLeaseDependencies {
   /** The clock, read once for the durable record. */
@@ -3348,15 +3351,40 @@ export const STALE_LEASE_RECOVERY_CODES = [
   /** The predicate refused. Nothing was touched. `refusal` says which conjunct. */
   'RECOVERY_UNSAFE',
   /**
-   * The lease at the path was not the one the predicate accepted, so nothing of
-   * it was removed.
+   * The lease at the path was not the one the predicate accepted, and whatever
+   * was there is **still there**. Nothing was removed and nothing was moved.
    *
    * The abort this contract requires: a lease that changes hands between the
    * assessment and the removal takes the recovery with it. It is not an error
-   * anybody has to fix — the repository has a live owner again, which is the
-   * outcome the operator wanted the recovery to make possible.
+   * anybody has to fix — usually the repository has a live owner again, which is
+   * the outcome the operator wanted the recovery to make possible. `detail`
+   * separates "somebody else's lease is there" from "nothing is there".
+   *
+   * It deliberately does **not** cover the two end states in which a record was
+   * detached and could not be put back; see {@link LEASE_DISPLACED}. Those were
+   * folded in here at first, under a sentence saying nothing had been moved and
+   * that this call had not looked at who holds the name — both false for them,
+   * and both false in the direction that leaves an operator unaware of a
+   * displaced writer and a file inside `.git`. That is the same "one code for two
+   * end states" defect {@link VerifiedRemoval} split its own members apart for,
+   * reintroduced by the one caller that acts on a lease it never held.
    */
   'LEASE_CHANGED',
+  /**
+   * Something that was **not** this call's to remove was detached from the lease
+   * name and could not be put back. It is kept, never deleted.
+   *
+   * A writer that acquired inside the window between the assessment and the
+   * detach is *displaced*: its record is in a `.breaking-…` file in the Git
+   * directory, and the lease name is now either free or held by somebody else
+   * again. `detail` says which, because those send an operator to opposite
+   * actions — `removeVerifiedLease` records at length why that distinction is
+   * kept rather than collapsed.
+   *
+   * Nothing was destroyed. The repository nevertheless needs looking at before
+   * anything runs against it, which is why this is not {@link LEASE_CHANGED}.
+   */
+  'LEASE_DISPLACED',
   /**
    * The removal could not be completed. `detail` names the end state.
    *
@@ -3500,7 +3528,12 @@ function opinionOf(probe: ProcessLivenessProbe | undefined, pid: number): Proces
  * requires both the exact bytes and the nonce inside them. A successor that
  * acquired in the window between the assessment and the detach cannot match
  * either — its nonce is 32 fresh random bytes — so it is put back and this call
- * answers {@link LEASE_CHANGED}.
+ * answers {@link LEASE_CHANGED}. When the
+ * put-back itself fails — `link` is not always available on the object being
+ * restored — the successor's record is *kept* in a quarantine file rather than
+ * deleted, and the answer is {@link LEASE_DISPLACED} instead. "Put back" is what
+ * happens; it is not what is guaranteed, and this sentence used to say only the
+ * first half.
  *
  * Both halves are stated because they fail differently. The revision is the
  * whole-file identity; the nonce is the identity that survives somebody deciding
@@ -3556,27 +3589,67 @@ export function recoverStaleLease(
     assessment.path,
     (bytes) => revisionOfBytes(bytes) === revision && nonceOfBytes(bytes) === ownerNonce,
   );
-  const outcome = (code: StaleLeaseRecoveryCode, detail: string | null): StaleLeaseRecoveryResult =>
-    Object.freeze({ code, refusal: null, detail, assessment });
+  // The detail is the removal member itself, always, so the code an operator
+  // reads and the end state it came from can never disagree.
+  return Object.freeze({
+    code: staleRecoveryOutcomeFor(removal),
+    refusal: null,
+    detail: removal,
+    assessment,
+  });
+}
 
-  switch (removal) {
-    case 'REMOVED':
-      return outcome('RECOVERED', null);
-    // Somebody else got there first. Nothing of this call's is at the path and
-    // nothing was destroyed — reported as a change of hands rather than as a
-    // success, because "the lease you assessed is gone" and "you removed it" are
-    // different facts and only one of them is this call's doing.
-    case 'ABSENT':
-    case 'CHANGED':
-    case 'CHANGED_QUARANTINED':
-    case 'CHANGED_AND_UNOWNED':
-      return outcome('LEASE_CHANGED', removal);
-    case 'DETACH_FAILED':
-    case 'UNIDENTIFIABLE':
-    case 'UNIDENTIFIABLE_QUARANTINED':
-    case 'UNIDENTIFIABLE_AND_UNOWNED':
-      return outcome('RECOVERY_FAILED', removal);
-  }
+/**
+ * Which outcome each removal end state is reported as.
+ *
+ * ── Why this is a table and not the `switch` it replaced ───────────────────
+ *
+ * Because the `switch` could not be tested. Two of {@link VerifiedRemoval}'s nine
+ * members — the ones where a record was detached and could not be put back —
+ * need a restore to fail, which needs a filesystem that refuses both `link` and
+ * an exclusive create at the freed name. `tests/v2-07lr-remediation.test.ts`
+ * produces them by squatting the freed name *from inside the predicate*, and
+ * this function's predicate is not a caller's to hook. So no case can reach
+ * those two arms through `recoverStaleLease`, and a review demonstrated the
+ * consequence: collapsing them back into {@link LEASE_CHANGED} left every test
+ * green while an operator was told nothing had been moved about a state in which
+ * a writer is displaced and a file is sitting in `.git`.
+ *
+ * A total table is testable where the arms are not. It is total by type, so a
+ * tenth `VerifiedRemoval` member stops the build here rather than falling into a
+ * default — and completeness is not correctness, so **every row is asserted by
+ * value** in `tests/v3-05-stale-lease-recovery.test.ts`. That is the whole point:
+ * the mapping is pinned even where the state behind it cannot be produced.
+ */
+const RECOVERY_OUTCOME_FOR: Readonly<Record<VerifiedRemoval, StaleLeaseRecoveryCode>> =
+  Object.freeze({
+    /** The one member that means this call removed the lease. */
+    REMOVED: 'RECOVERED',
+    // Nothing of this call's doing, and nothing moved: `CHANGED` was detached and
+    // put back, `ABSENT` was never there.
+    ABSENT: 'LEASE_CHANGED',
+    CHANGED: 'LEASE_CHANGED',
+    // A record was detached, could not be put back, and is kept in a quarantine
+    // file — so a writer is displaced and there is a file inside `.git`. Reported
+    // apart from `LEASE_CHANGED` because its sentence says the opposite of both.
+    CHANGED_QUARANTINED: 'LEASE_DISPLACED',
+    CHANGED_AND_UNOWNED: 'LEASE_DISPLACED',
+    // The removal could not be completed. `detail` names which of the four.
+    DETACH_FAILED: 'RECOVERY_FAILED',
+    UNIDENTIFIABLE: 'RECOVERY_FAILED',
+    UNIDENTIFIABLE_QUARANTINED: 'RECOVERY_FAILED',
+    UNIDENTIFIABLE_AND_UNOWNED: 'RECOVERY_FAILED',
+  });
+
+/**
+ * The outcome one removal end state is reported as.
+ *
+ * Exported for the test that asserts every row by value, and it authorises
+ * nothing: it is a pure translation between two closed vocabularies, takes no
+ * repository and touches no file.
+ */
+export function staleRecoveryOutcomeFor(removal: VerifiedRemoval): StaleLeaseRecoveryCode {
+  return RECOVERY_OUTCOME_FOR[removal];
 }
 
 export const LEASE_RELEASE_CODES = [

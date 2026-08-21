@@ -575,10 +575,19 @@ describe('classification says what is there and authorises nothing', () => {
     expect(assessed.containment).toBe('ABSENT');
     expect(assessed.latestLaunchContained).toBe(false);
     // And the verdict is `SAFE_TO_RECOVER`, which is worth stating here rather
-    // than only in the slice-5 file: this fixture *acquires*, so the lease
-    // carries a complete launch history with no launches in it, and its owner is
-    // gone. A lease that never started a writer has nothing that could have
-    // survived it, so the predicate is satisfied vacuously and correctly.
+    // than only in the slice-5 file — with the reason stated exactly, because the
+    // convenient wording is the belief that produced a defect.
+    //
+    // The owner is **not** gone: it is this vitest worker, and it is running. What
+    // satisfies the first conjunct is the substituted probe above, which this
+    // *reporting* path lets a caller supply outright. What satisfies the second is
+    // real: the fixture acquires, so the lease carries a complete launch history
+    // with no launches in it, and a lease that never started a writer has nothing
+    // that could have survived it.
+    //
+    // `recoverStaleLease` does not accept that probe. A round of this slice
+    // shipped a version that did, and a review removed a living owner's lease
+    // through it in one call.
     //
     // The point of this case is what did **not** move: `classification` is
     // `STALE_OWNER_GONE` either way. The description of what is at the path and

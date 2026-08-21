@@ -5,16 +5,24 @@
  *
  * ── Why the in-process suite cannot establish this ─────────────────────────
  *
- * Every "dead owner" in `tests/v3-05-stale-lease-recovery.test.ts` is a
- * substituted liveness probe. That is the right instrument for the *predicate* —
- * it lets a case name the exact liveness it wants — and it means not one of those
- * cases measures the thing the whole feature rests on: that a lease left behind
- * by a process that really exited is seen as stale by `osProcessLiveness`, and
- * that the recovery really removes a file from a real directory.
+ * This paragraph used to say that every "dead owner" in
+ * `tests/v3-05-stale-lease-recovery.test.ts` was a substituted probe and that a
+ * stub answering `NOT_FOUND` would pass the whole suite. Both were true when it
+ * was written and neither is now: that suite's `staleLease` fixture drives the
+ * **real** `osProcessLiveness`, and a stub would turn several of its cases red.
+ * The justification is restated rather than left standing, because a check
+ * defended by a false reason is a check nobody will keep.
  *
- * A stub that always answers `NOT_FOUND` passes the entire vitest suite. So the
- * owner here is a **separate operating-system process** that acquires the lease
- * and exits still holding it, and the probe is the real one.
+ * What that suite still does not do is run a *second operating-system process*.
+ * Its stale leases are built by acquiring for real, driving real launches, and
+ * then rewriting the owner pid to one whose process has exited — so the pid is
+ * genuinely dead and the probe is genuinely consulted, and the chain from a real
+ * acquisition through a real death to a real removal is never travelled end to
+ * end in one repository. It also runs against `src`, not against what is shipped.
+ *
+ * Both are what this file is for. The owner here is a **separate operating-system
+ * process** that acquires the lease through the built artefact and exits still
+ * holding it.
  *
  * ── The negative control, which is the load-bearing case ───────────────────
  *
