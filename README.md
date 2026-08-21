@@ -3398,6 +3398,17 @@ and because the failure mode it describes — a command that cannot start is
   exempts no primary code, not even `EXIT_RUN_UNEXPECTED`; the two `catch` blocks
   set code 1 where they catch, and say why there.
 
+  The sentences that report those codes say only what is true of **every**
+  producer of the code they are keyed on, which took three passes to get right.
+  Two independent reviews and the merge reviewer each found the same class one
+  level further in: a sentence that held for the removal states and not for the
+  refusals that share the code. `LEASE_ABSENT` was the last of them - it claimed
+  "nothing is left behind" about a code the release path reaches from an `ENOENT`
+  on its verifying read, having inspected nothing else at all. The counter-proof
+  is in `tests/v3-07-lease-release-observability.test.ts`: a real lease moved
+  aside under a quarantine-shaped name releases `LEASE_ABSENT` with the record
+  still on disk.
+
   The two commands' `finally` blocks now also *contain* the release, so a release
   that throws cannot replace the exception that entered — and a release that
   throws still prints a line, `RELEASE_NOT_REPORTED`, because the one occasion a

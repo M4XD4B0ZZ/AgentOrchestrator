@@ -36,7 +36,7 @@
  * vocabulary — and the sibling holds the four cases that need the window.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { Command } from 'commander';
@@ -66,6 +66,7 @@ import {
 import {
   LEASE_RELEASE_CODES,
   acquireRepositoryExecutionLease,
+  deriveExecutionLeaseLocation,
   releaseRepositoryExecutionLease,
   type LeaseReleaseCode,
   type LeaseReleaseResult,
@@ -327,7 +328,7 @@ describe('the release vocabulary is closed, shared and safe', () => {
     const fragments: Readonly<Record<LeaseReleaseCode, string>> = {
       RELEASED: 'was given back. Nothing of this invocation is left holding',
       EVIDENCE_INVALID: 'could not prove which lease it was holding',
-      LEASE_ABSENT: 'the record this invocation took is already gone',
+      LEASE_ABSENT: 'nothing was at the lease name when this invocation',
       NOT_OWNER: 'is not the record this invocation took',
       LEASE_UNREADABLE: 'could not be read at the end',
       LEASE_REMOVE_FAILED: 'The lease was not fully removed.',
@@ -358,6 +359,48 @@ describe('the release vocabulary is closed, shared and safe', () => {
       // hard-wrapped for the console, so a phrase can straddle a newline and two
       // spaces of indent.
       expect(sentence.replace(/\s+/g, ' ')).toContain('token');
+    }
+  });
+
+  it('does not claim an absent lease left nothing behind', async () => {
+    // The counter-proof for the one claim that had to go. `LEASE_ABSENT`
+    // establishes exactly one thing: nothing was at the lease name when the
+    // release looked. It does **not** look anywhere else, so it cannot speak for
+    // what the repository still holds - and the release path reaches this code
+    // from an `ENOENT` on the verifying read, which inspects nothing at all.
+    //
+    // Produced with the real lease and no injection: take a lease, move its
+    // record aside under a quarantine-shaped name, and release with the genuine
+    // evidence. The code is `LEASE_ABSENT` and the record is still on disk.
+    const fixture = await repoWith(['A-001']);
+    const location = deriveExecutionLeaseLocation(fixture.repository);
+    if (!location.ok) throw new Error(`no lease location: ${location.code}`);
+
+    const taken = acquireRepositoryExecutionLease(
+      fixture.repository,
+      { runId: 'run-0002', blockId: BLOCK_ID },
+      { now: () => new Date().toISOString() },
+    );
+    expect(taken.ok).toBe(true);
+    if (!taken.ok) return;
+
+    const movedAside = `${location.path}.breaking-moved-by-this-test`;
+    renameSync(location.path, movedAside);
+    try {
+      const released = releaseRepositoryExecutionLease(taken.evidence);
+
+      expect(released).toEqual({ code: 'LEASE_ABSENT', detail: null });
+      // The record this invocation took is right there, and the release never
+      // looked. Any sentence claiming otherwise is claiming this file away.
+      expect(existsSync(movedAside)).toBe(true);
+      expect(LEASE_RELEASE_SENTENCES.LEASE_ABSENT).not.toContain('Nothing is left behind');
+      expect(LEASE_RELEASE_SENTENCES.LEASE_ABSENT).not.toContain('already gone');
+      // And it says what it does establish instead.
+      expect(LEASE_RELEASE_SENTENCES.LEASE_ABSENT.replace(/\s+/g, ' ')).toContain(
+        'says nothing about what may have been left elsewhere',
+      );
+    } finally {
+      rmSync(movedAside, { force: true });
     }
   });
 

@@ -461,16 +461,21 @@ export function renderLeaseRefusal(code: LeaseAcquireFailureCode): string {
 export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>> = Object.freeze({
   RELEASED:
     'The execution lease was given back. Nothing of this invocation is left holding this\n' +
-    '  repository, and the next run may take its own lease normally.',
+    '  repository. What the next invocation meets is its own question - a successor may have\n' +
+    '  taken the name already - but nothing this one holds stands in its way.',
   EVIDENCE_INVALID:
     'This invocation could not prove which lease it was holding, so it removed nothing. That\n' +
     '  is a defect in this build rather than a condition of the repository, and a lease\n' +
     '  record may still be present. Run `agent-loop lease status` to see what is there.',
   LEASE_ABSENT:
-    'There was no lease left to give back: the record this invocation took is already gone,\n' +
-    '  and something other than this invocation removed it. Nothing is left behind, but this\n' +
-    '  work was not protected for the whole of its life - a second writer could have been\n' +
-    '  admitted while it was still running. Check the repository before trusting the result.',
+    'There was no lease to give back: nothing was at the lease name when this invocation\n' +
+    '  looked, and this invocation did not put it there or take it away. That is all this\n' +
+    '  code establishes - it says nothing about what may have been left elsewhere in the\n' +
+    '  repository, and nothing about what holds the lease name by the time you read this.\n' +
+    '  What it does mean is that this work was not protected for the whole of its life: the\n' +
+    '  name was free while the work was still running, so a second writer could have been\n' +
+    '  admitted. Run `agent-loop lease status` and check the repository before trusting the\n' +
+    '  result.',
   NOT_OWNER:
     'What is at the lease name at the end is not the record this invocation took, so this\n' +
     '  invocation removed nothing of its own. It may be a successor lease, or it may be a\n' +
@@ -479,15 +484,17 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
     '  whether the lease name ended up held by anybody at all; with no token, nothing beyond\n' +
     '  the code was established. Run `agent-loop lease status` before the next run.',
   LEASE_UNREADABLE:
-    'The lease record could not be read at the end, so nothing was removed. Something is\n' +
-    '  present in this repository that this build cannot identify. Resolve what is there by\n' +
-    '  hand before the next run; `agent-loop lease status` reports what this build can see.',
+    'The lease record could not be read at the end, so nothing was removed. Something was at\n' +
+    '  the lease name and this build could not identify it; what else the repository holds was\n' +
+    '  not looked at. Run `agent-loop lease status` for what this build can see, and resolve\n' +
+    '  what is there by hand before the next run.',
   LEASE_REMOVE_FAILED:
     'The lease was not fully removed. The token on the line above says how far the removal\n' +
-    '  got - a quarantined record is a detached copy nothing is reading, and an unowned\n' +
-    '  repository is one no lease is protecting, so what is left may block the next run or\n' +
-    '  may fail to protect it. Run `agent-loop lease status`, and clear what is there by hand\n' +
-    '  before the next run.',
+    '  got: a refused detach means nothing was moved at all, a detached record that could not\n' +
+    '  be read again means the copy is in quarantine, a quarantined record is a detached copy\n' +
+    '  nothing is reading, and an unowned repository is one no lease is protecting. So what is\n' +
+    '  left may block the next run or may fail to protect it. Run `agent-loop lease status`,\n' +
+    '  and clear what is there by hand before the next run.',
 });
 
 /**
