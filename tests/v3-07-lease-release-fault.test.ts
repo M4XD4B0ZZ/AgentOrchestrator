@@ -344,7 +344,12 @@ describe('block --attended cannot exit nominal on a lease it did not give back',
     const text = out();
     // The block really did complete, and the report still says so. A failed
     // release may not rewrite history into "the block failed".
-    expect(text).toContain('COMPLETE');
+    //
+    // The whole outcome line, not the word: `COMPLETE` alone is a substring of
+    // the per-task `TASK_COMPLETED`, and on this path the exit code is 3 whether
+    // the block ended `COMPLETE` or `TASK_BLOCKED` - so a loose match here would
+    // leave the property this case exists for pinned by nothing at all.
+    expect(text).toContain('Outcome      : BLOCK_RUN_ENDED   reason COMPLETE');
     // And the second fact, beside it rather than instead of it.
     expect(text).toContain(`Release      : ${REFUSED_DETACH}`);
     expect(text).toContain(LEASE_RELEASE_SENTENCES.LEASE_REMOVE_FAILED);

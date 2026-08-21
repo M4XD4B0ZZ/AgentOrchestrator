@@ -3478,8 +3478,9 @@ and because the failure mode it describes — a command that cannot start is
   `releaseRepositoryExecutionLease` because every filesystem call on that path is
   already wrapped.
 
-  **That reason was too strong, and an instrument now exists.** The path
-  contains one call that is not a filesystem call and not inside any `try`:
+  **That reason was too strong, and an instrument now exists.** Not every call on
+  that path is a filesystem call, and at least one of the others sits outside
+  every `try`:
   `removeVerifiedLease` names its quarantine file with `randomBytes(6)` before it
   opens one, so a `vi.mock('node:crypto')` refusing that one call makes the
   release throw with production unedited. `tests/v3-07-lease-release-fault.test.ts`
@@ -3507,6 +3508,26 @@ and because the failure mode it describes — a command that cannot start is
   release attempt, never before, so the payload it will one day carry is a fact
   and not a prediction. **Scope:** `notify/notification.ts`,
   `notify/attention.ts`, `cli/block-command.ts`.
+- **L-V3-07-2 — an exception under the lease exits 1, not 3, even when the lease
+  is provably stuck.** `exitCodeWithLeaseRelease` answers
+  `EXIT_RUN_NEEDS_OPERATOR` for every release that is not `RELEASED`, and its own
+  reasoning says code 1 would be the substitution V3-07 exists to prevent. Both
+  commands' `catch` blocks then do exactly that: a thrown operation keeps code 1
+  whatever the release did. That is deliberate, and it is the one place the two
+  rules pull against each other.
+
+  The reason it is written this way: a thrown operation produced no primary
+  result to combine with, and code 1 is the only value that says *this build
+  failed in a way it did not plan for* — which an operator needs told before they
+  are sent to inspect a lease. The stuck lease is not hidden by the choice; the
+  release line is printed on the same console, `RELEASE_NOT_REPORTED` included.
+  What is lost is only the machine-readable half: a script routing 1 to "file a
+  bug" and 3 to "inspect the repository" takes the wrong branch here.
+
+  Recorded rather than resolved because resolving it is a decision about the
+  exit-code contract, not a fix: either code 1 grows a second meaning, or the
+  thrown-operation case gets a code of its own. **Scope:**
+  `cli/block-command.ts`, `cli/release-command.ts`, `cli/run-exit-codes.ts`.
 - **L-V3-06-11 — three sibling dist harnesses hand-build a repository identity,
   and are consistent rather than correct.** `test:dist-lifecycle-restart` failed
   both CI jobs because its owner process built

@@ -225,14 +225,17 @@ export function registerReleaseCommand(program: Command): void {
         // was removed - and the exit code below is not left nominal by a
         // successful one, because writer authority that did not provably come
         // back is an operator condition whatever the removal achieved.
-        reportLeaseRelease();
+        // The exit code first, for the reason `block-command.ts` gives at the
+        // same point: a report that failed to write must not take it with it.
         process.exitCode = exitCodeWithLeaseRelease(
           exitCodeForReleaseOutcome(released.outcome),
           leaseRelease,
         );
+        reportLeaseRelease();
       } catch (error) {
-        // As in `block-command.ts`: the original failure keeps the exit code,
-        // and the release report goes out after it rather than in front of it.
+        // As in `block-command.ts`: the original failure keeps the exit code -
+        // diverging from `exitCodeWithLeaseRelease`, which would answer 3 - and
+        // the release report goes out after it rather than in front of it.
         process.stderr.write(`${formatSafeError(error)}\n`);
         process.exitCode = EXIT_RUN_UNEXPECTED;
         reportLeaseRelease();

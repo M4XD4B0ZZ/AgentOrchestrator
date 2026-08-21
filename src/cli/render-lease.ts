@@ -429,7 +429,6 @@ export function renderLeaseRefusal(code: LeaseAcquireFailureCode): string {
   return `${['', line('Lease', code), `  ${LEASE_ACQUIRE_SENTENCES[code]}`, ''].join('\n')}\n`;
 }
 
-
 /**
  * One static sentence per release code. Closed, total by type, ASCII only.
  *
@@ -475,14 +474,14 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
   NOT_OWNER:
     'What is at the lease name at the end is not the record this invocation took, so this\n' +
     '  invocation removed nothing of its own. It may be a successor lease, or it may be a\n' +
-    '  record too damaged to identify - this build does not tell those apart here. The token\n' +
-    '  on the line above says whether a detached copy was left in quarantine, and whether the\n' +
-    '  lease name ended up held by anybody at all. Run `agent-loop lease status` before the\n' +
-    '  next run.',
+    '  record too damaged to identify - this build does not tell those apart here. If a token\n' +
+    '  follows the code above, it says whether a detached copy was left in quarantine and\n' +
+    '  whether the lease name ended up held by anybody at all; with no token, nothing beyond\n' +
+    '  the code was established. Run `agent-loop lease status` before the next run.',
   LEASE_UNREADABLE:
     'The lease record could not be read at the end, so nothing was removed. Something is\n' +
-    '  present in this repository that this build cannot identify. Run `agent-loop lease\n' +
-    '  status`, and resolve what is there by hand before the next run.',
+    '  present in this repository that this build cannot identify. Resolve what is there by\n' +
+    '  hand before the next run; `agent-loop lease status` reports what this build can see.',
   LEASE_REMOVE_FAILED:
     'The lease was not fully removed. The token on the line above says how far the removal\n' +
     '  got - a quarantined record is a detached copy nothing is reading, and an unowned\n' +
@@ -506,7 +505,16 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
  */
 export const LEASE_RELEASE_UNREPORTED = 'RELEASE_NOT_REPORTED';
 
-const LEASE_RELEASE_UNREPORTED_SENTENCE =
+/**
+ * Its sentence, exported for the same reason the six above are.
+ *
+ * It reaches an operator's console on exactly the same footing as they do, so it
+ * belongs to the same vocabulary tests - the ASCII pin, the distinctness pin and
+ * the pin that forbids the word the notification harness scrapes. A seventh
+ * sentence that no pin could reach would be the one that drifted.
+ */
+
+export const LEASE_RELEASE_UNREPORTED_SENTENCE =
   'Giving the execution lease back failed with an error rather than an answer, so what is in\n' +
   '  this repository now is unknown to this invocation. Assume a lease record is still there.\n' +
   '  Run `agent-loop lease status` before the next run. The error itself is on the standard\n' +

@@ -47,6 +47,8 @@ import { PACKAGE_ROOT } from '../src/config/paths.js';
 import { registerReleaseCommand } from '../src/cli/release-command.js';
 import {
   LEASE_RELEASE_SENTENCES,
+  LEASE_RELEASE_UNREPORTED,
+  LEASE_RELEASE_UNREPORTED_SENTENCE,
   leaseReleaseLine,
   renderLeaseRelease,
 } from '../src/cli/render-lease.js';
@@ -212,19 +214,34 @@ function leaseIsFree(repository: ResolvedRepository): boolean {
 
 /* ───────────────────────── 1. the shared vocabulary ─────────────────────── */
 
+/** Every sentence this vocabulary can put on an operator's console. */
+const printedSentences = (): readonly string[] => [
+  ...LEASE_RELEASE_CODES.map((code) => LEASE_RELEASE_SENTENCES[code]),
+  LEASE_RELEASE_UNREPORTED_SENTENCE,
+];
+
 describe('the release vocabulary is closed, shared and safe', () => {
   it('has one sentence per code and no more', () => {
     expect(Object.keys(LEASE_RELEASE_SENTENCES).sort()).toEqual([...LEASE_RELEASE_CODES].sort());
   });
 
+  it('keeps the unreported state outside the release vocabulary', () => {
+    // It is the state of having no answer from the release, not an answer, so it
+    // may not join the union - a member there would be a value the release could
+    // be believed to have returned.
+    expect(LEASE_RELEASE_UNREPORTED).toBe('RELEASE_NOT_REPORTED');
+    expect([...LEASE_RELEASE_CODES] as string[]).not.toContain(LEASE_RELEASE_UNREPORTED);
+  });
+
   it('says something different about each one', () => {
-    const sentences = LEASE_RELEASE_CODES.map((code) => LEASE_RELEASE_SENTENCES[code]);
-    expect(new Set(sentences).size).toBe(LEASE_RELEASE_CODES.length);
+    // The seventh sentence is included everywhere the six are, here and below:
+    // it reaches the console on the same footing, and a sentence no pin can
+    // reach is the one that drifts.
+    expect(new Set(printedSentences()).size).toBe(printedSentences().length);
   });
 
   it('is ASCII only, so a re-encoding pass cannot damage an operator sentence', () => {
-    for (const code of LEASE_RELEASE_CODES) {
-      const sentence = LEASE_RELEASE_SENTENCES[code];
+    for (const sentence of printedSentences()) {
       expect([...sentence].every((ch) => ch.codePointAt(0)! <= 0x7f)).toBe(true);
     }
   });
@@ -234,9 +251,20 @@ describe('the release vocabulary is closed, shared and safe', () => {
     // stdout with `/reason (\S+)/`. This report is printed after the run report,
     // so a sentence carrying that word would answer that scrape with prose on
     // exactly the runs that carry no reason of their own.
-    for (const code of LEASE_RELEASE_CODES) {
-      expect(LEASE_RELEASE_SENTENCES[code]).not.toContain('reason ');
-      expect(LEASE_RELEASE_SENTENCES[code]).not.toContain('Outcome');
+    for (const sentence of printedSentences()) {
+      expect(sentence).not.toContain('reason ');
+      expect(sentence).not.toContain('Outcome');
+    }
+  });
+
+  it('names no command that does not exist, on one line where a reader can see it', () => {
+    // The repository already scans shipped source for `lease <word>` naming a
+    // subcommand that is not registered. That scan cannot see a name broken
+    // across a string concatenation, and a name broken across one is unreadable
+    // on the console anyway, so it is forbidden here rather than merely unlucky.
+    for (const sentence of printedSentences()) {
+      const opened = sentence.split('`').filter((_, index) => index % 2 === 1);
+      for (const quoted of opened) expect(quoted).not.toContain('\n');
     }
   });
 
@@ -323,10 +351,13 @@ describe('the release vocabulary is closed, shared and safe', () => {
       expect(sentence).not.toContain('Another invocation owns this repository');
       expect(sentence).not.toContain('left exactly as it is');
       expect(sentence).not.toContain('will refuse the next run.');
-      // and each one points at the token that carries the difference. Wrapped
-      // first: these strings are hard-wrapped for the console, so the phrase can
-      // straddle a newline and two spaces of indent.
-      expect(sentence.replace(/\s+/g, ' ')).toContain('token on the line above');
+      // and each one points at the token for the part that varies - `NOT_OWNER`
+      // conditionally, because five of its seven producers carry no token at
+      // all and an unconditional pointer would send an operator to read a thing
+      // that is not printed. Whitespace is flattened first: these strings are
+      // hard-wrapped for the console, so a phrase can straddle a newline and two
+      // spaces of indent.
+      expect(sentence.replace(/\s+/g, ' ')).toContain('token');
     }
   });
 
@@ -537,6 +568,38 @@ describe('block --attended reports the lease it gave back', () => {
   }, 600_000);
 });
 
+describe('block --attended reports no lease it never took', () => {
+  it('stays silent about the lease when the throw is above the lease line', async () => {
+    // The mirror of the `release` case below, on the command whose `catch` also
+    // calls the reporter unconditionally. Refusing the first write throws inside
+    // `renderNotifierState`, which is the last thing this command prints before
+    // it acquires - so if `leaseReleaseAttempted` were ever initialised true,
+    // this run would report a release for a lease that was never taken.
+    const fixture = await repoWith(['A-001']);
+    let writes = 0;
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown): boolean => {
+      writes += 1;
+      if (writes === 1) throw new Error('the console went away');
+      stdout.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+
+    await invokeBlock([
+      '--repository', fixture.root,
+      '--block', BLOCK_ID,
+      '--tasks', 'A-001',
+      '--run', RUN_ID,
+      '--attended',
+    ]);
+
+    expect(writes).toBe(1);
+    expect(out()).toBe('');
+    expect(process.exitCode).toBe(EXIT_RUN_UNEXPECTED);
+    // And nothing was taken, so nothing needed giving back.
+    expect(leaseIsFree(fixture.repository)).toBe(true);
+  }, 600_000);
+});
+
 /* ────────────────────────── 5. `release --attended` ─────────────────────── */
 
 describe('release --attended keeps its two releases apart', () => {
@@ -610,16 +673,30 @@ describe('release --attended keeps its two releases apart', () => {
     expect(leaseIsFree(fixture.repository)).toBe(true);
   }, 900_000);
 
-  it('does not report a lease it never took', async () => {
-    // Above the lease line: no operator, no repository read, and therefore
-    // nothing to give back. A `Lease` line here would be a report about an
-    // authority this invocation never held.
+  it('does not report a lease it never took, even from the catch', async () => {
+    // An absence assertion needs a reachable presence, or it pins nothing. The
+    // presence here is the `catch`: it calls the reporter unconditionally, so
+    // the only thing keeping a `Lease` line off a repository this invocation
+    // never became the writer of is `leaseReleaseAttempted`. A throw is forced
+    // above the lease line by refusing the first write - the withheld-attendance
+    // report - which is the last thing this command does before it would have
+    // gone on to acquire.
     const fixture = await repoWith(['A-001']);
+    let writes = 0;
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown): boolean => {
+      writes += 1;
+      if (writes === 1) throw new Error('the console went away');
+      stdout.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
 
     await invokeRelease(['--repository', fixture.root, '--task', 'A-001']);
 
-    expect(out()).toContain('not requested');
-    expect(out()).not.toContain('Lease        :');
-    expect(process.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
+    // One write attempted and no second one: the `catch` reported the failure to
+    // stderr and reported no lease, because there was none to report.
+    expect(writes).toBe(1);
+    expect(out()).toBe('');
+    expect(process.exitCode).toBe(EXIT_RUN_UNEXPECTED);
   }, 600_000);
+
 });

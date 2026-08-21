@@ -494,10 +494,11 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
         let outcome: AttendedBlockResult | null = null;
 
         // What the block itself came to, kept apart from what the release came
-        // to. The initial value is the unexpected code rather than the nominal
-        // one on purpose: if the call below throws, this variable is never
-        // assigned, and a default of `EXIT_RUN_OK` would be this command
-        // volunteering "nothing went wrong" about a path that never returned.
+        // to. The initial value is never observed - a throw from the call below
+        // skips both statements that read it - so it is the unexpected code for
+        // the reason a floor is chosen rather than for a consequence it has: if
+        // an edit ever does make it reachable, "nothing went wrong" is the wrong
+        // thing for this command to volunteer about a path that never returned.
         let primary: CliExitCode = EXIT_RUN_UNEXPECTED;
 
         try {
@@ -542,8 +543,12 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
           }
         }
 
-        reportLeaseRelease();
+        // The exit code first. It is the fact a script reads and the one that
+        // costs nothing to set, and a report that failed to write must not be
+        // able to take it with it - the `catch` below would then answer 1 for a
+        // block that finished.
         process.exitCode = exitCodeWithLeaseRelease(primary, leaseRelease);
+        reportLeaseRelease();
 
         // After the lease, deliberately. A notification is not a repository
         // effect and needs no authority over one, and holding the repository's
@@ -564,11 +569,16 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
         // routinely quote CLI output and filesystem paths (AO-002). Fail closed
         // through the central safe formatter.
         process.stderr.write(`agent-loop block: ${formatSafeError(error)}\n`);
-        // The original failure keeps the exit code. A release that also failed
-        // is reported above and does not relabel this as a durable-state
-        // condition - `exitCodeWithLeaseRelease` makes the same choice, and this
-        // path states it rather than routing through it, because there is no
-        // primary code here to combine with: the operation never returned one.
+        // The original failure keeps the exit code, and this path **diverges**
+        // from `exitCodeWithLeaseRelease` deliberately rather than agreeing with
+        // it. That function would answer 3 here, because the lease did not
+        // provably come back; it is not called, because a thrown operation
+        // produced no primary code to combine with and because 1 is the only
+        // code that says "this build failed in a way it did not plan for". The
+        // stuck lease is not hidden by that choice: the release line is printed
+        // below on the same console. If this hardcode is ever replaced by a call
+        // to that function, the exit code changes from 1 to 3 - which is a
+        // decision about what an operator is told, not a simplification.
         process.exitCode = EXIT_RUN_UNEXPECTED;
         // The release last, and after the exit code is set. On a throw under the
         // lease the release still happened, and its result is the more
