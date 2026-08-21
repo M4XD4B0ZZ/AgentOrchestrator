@@ -708,7 +708,7 @@ describe('the lifecycle report', () => {
     const scene = await scenario();
     const result = await driveLifecycle(scene.request(), scene.deps());
 
-    const text = renderLifecycleRun(scene.started.repository, result);
+    const text = renderLifecycleRun(scene.started.repository, result, 'ATTENDED');
 
     expect(text).toContain(`Lifecycle    : ${result.outcome}`);
     expect(text).toContain(LIFECYCLE_OUTCOME_SENTENCES[result.outcome]);
@@ -731,7 +731,7 @@ describe('the lifecycle report', () => {
     );
     expect(result.invocations).toBeGreaterThan(1);
 
-    expect(renderLifecycleRun(scene.started.repository, result)).toContain(LIFECYCLE_TRAILER);
+    expect(renderLifecycleRun(scene.started.repository, result, 'ATTENDED')).toContain(LIFECYCLE_TRAILER);
   });
 });
 
@@ -808,7 +808,9 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
       ...base,
       outcome: 'LEASE_ACQUISITION_REFUSED',
       acquire: 'LEASE_LOCATION_NETWORK_UNSUPPORTED',
-    });
+    },
+      'ATTENDED',
+    );
 
     expect(text).toContain('Lease        : LEASE_LOCATION_NETWORK_UNSUPPORTED');
     expect(text).toContain(LEASE_ACQUIRE_SENTENCES.LEASE_LOCATION_NETWORK_UNSUPPORTED);
@@ -819,7 +821,9 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
       ...base,
       outcome: 'LIVE_OWNER_PRESENT',
       acquire: 'LEASE_HELD',
-    });
+    },
+      'ATTENDED',
+    );
 
     // Asserted against the **lifecycle** sentence specifically, not against the
     // report as a whole. The first version checked the whole text for the word
@@ -843,7 +847,9 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
         detail: null,
         assessment: null as never,
       },
-    });
+    },
+      'ATTENDED',
+    );
 
     expect(text).toContain('Recovery     : RECOVERY_UNSAFE  (LAUNCH_HISTORY_UNPROVEN)');
     expect(text).toContain(STALE_RECOVERY_SENTENCES.LAUNCH_HISTORY_UNPROVEN);
@@ -864,7 +870,9 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
         detail: 'UNIDENTIFIABLE_AND_UNOWNED',
         assessment: null as never,
       },
-    });
+    },
+      'ATTENDED',
+    );
 
     expect(text).toContain('Recovery     : RECOVERY_FAILED  (UNIDENTIFIABLE_AND_UNOWNED)');
   });

@@ -361,8 +361,16 @@ function decideWait(
   const maxWaitMs = request.wait.maxWaitMs;
 
   // 3. The canonical verdict, unwrapped and not re-derived.
+  // `allowed` is folded in with `null`, and the two really are one condition
+  // here: both mean there is no *denial* on record about the block this run
+  // stopped on. A decision that allowed a resume cannot have produced a
+  // `BLOCKED_USAGE_LIMIT` stop — the blocking gate excludes it and the resume
+  // arm always returns or continues — so the `allowed` half is a floor. It is
+  // folded in rather than left to fall through because an empty denial list
+  // would otherwise reach `RESUME_DENIED_BY_OTHER_CHECKS`, whose sentence
+  // states that at least one reason is something time does not fix.
   const automatic = run.resume?.automaticResume ?? null;
-  if (automatic === null) return refuse('RESUME_DECISION_ABSENT');
+  if (automatic === null || automatic.allowed) return refuse('RESUME_DECISION_ABSENT');
   const denials = automatic.reasonCodes;
 
   // **The eligibility test, in one expression.** Exactly one denial, and it is

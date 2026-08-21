@@ -1288,7 +1288,7 @@ describe('everything the second attempt acts on is established after the wait', 
     expect(report).not.toContain('Raise the bound, or invoke again after the reset');
   });
 
-  it('names --max-wait-ms in the budget sentence only when that is what failed', async () => {
+  it('answers a too-low budget with the same shared sentence and its own reason', async () => {
     const scene = await scenario();
 
     const budget = await driveUnattendedAutomaticResume(
@@ -1429,11 +1429,54 @@ function deadProcessId(): number {
 /* ══════════════════════════ 7. the operator report ══════════════════════ */
 
 describe('the report distinguishes every way this mode can end', () => {
-  it('has a sentence for every wait disposition, and no extra ones', () => {
+  it('has a sentence for every wait disposition, and no two the same', () => {
     expect(Object.keys(RESET_WAIT_SENTENCES).sort()).toEqual([...RESET_WAIT_DISPOSITIONS].sort());
     for (const disposition of RESET_WAIT_DISPOSITIONS) {
       expect(RESET_WAIT_SENTENCES[disposition].length).toBeGreaterThan(40);
     }
+    // Distinctness, which length alone does not give: a table of fourteen
+    // identical 41-character strings satisfied the check above, and a review
+    // pointed out that the sibling table in `tests/v3-06-lifecycle-driver.test.ts`
+    // has this and this one did not.
+    const sentences = RESET_WAIT_DISPOSITIONS.map((d) => RESET_WAIT_SENTENCES[d]);
+    expect(new Set(sentences).size).toBe(RESET_WAIT_DISPOSITIONS.length);
+  });
+
+  it('does not tell an operator whose login failed that auth was proven', async () => {
+    // Two sentences in one report used to contradict each other: the outcome
+    // said the preflight runs "once per invocation of this command", which a
+    // wait makes false, and the trailer beside it said auth was proven for every
+    // attempt, which is false for an attempt that never got that far. Both were
+    // rewritten, and neither was rendered by any case until now.
+    const scene = await scenario({ failPreflightFromEpoch: 1 });
+
+    const result = await driveUnattendedAutomaticResume(
+      scene.request({ wait: { wait: false } }),
+      scene.deps(),
+    );
+    const report = renderUnattendedResume(scene.started.repository, result);
+
+    expect(result.outcome).toBe('AUTH_PREFLIGHT_FAILED');
+    expect(report).toContain('It runs once per attempt');
+    expect(report).not.toContain('once per invocation of this command');
+    expect(report).not.toContain('Auth evidence was proven separately for every attempt');
+    expectNothingExecuted(scene);
+  });
+
+  it('does not claim every reason needs fixing when one of them is the clock', async () => {
+    const scene = await scenario({ stateOverrides: { worktreeCleanAtCheckpoint: false } });
+
+    const result = await driveUnattendedAutomaticResume(scene.request(), scene.deps());
+    const report = renderUnattendedResume(scene.started.repository, result);
+
+    expect(result.wait.disposition).toBe('RESUME_DENIED_BY_OTHER_CHECKS');
+    // The list contains one reason time *does* fix, so the sentence may not say
+    // every reason needs resolving — it must exclude the reset time by name.
+    expect(report).toContain('RESET_TIME_NOT_REACHED');
+    // Matched within one rendered line: the sentences are hard-wrapped, so a
+    // needle that spans a break is a needle that can never be found.
+    expect(report).toContain('that are not about the reset time have to be resolved');
+    expect(report).not.toContain('each one has to be resolved');
   });
 
   it('never claims an operator was present', async () => {

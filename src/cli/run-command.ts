@@ -94,7 +94,7 @@ import {
  * holds identically for `--automatic-resume-only`: that grant states nobody is
  * present, never that a login is valid.
  *
- * ── The preflight runs at most once, and lazily ─────────────────────────────
+ * ── The preflight runs at most once per attempt, and lazily ────────────────
  *
  * `runAuthPreflight` needs a capability dump first and then starts two real CLIs,
  * so it is expensive and it is not something to do twice. The seam handed to
@@ -102,9 +102,18 @@ import {
  * where it belongs — after the cheap refusals, before any workspace exists — and
  * the drive reuses whatever that produced. On the `ALREADY_STARTED` path
  * `startTask` returns before reaching the preflight, so the command runs it
- * itself before driving. Either way exactly one preflight happens per invocation
- * that gets as far as executing, and none at all on an invocation that refuses
- * for a cheaper reason.
+ * itself before driving. Either way exactly one preflight happens per attempt
+ * that gets as far as executing, and none at all on an attempt that refuses for
+ * a cheaper reason.
+ *
+ * **Attempt, not invocation**, and this heading said "invocation" until a review
+ * caught it. An unattended run that waits out a quota reset makes two attempts
+ * in one invocation and proves auth for each — deliberately, because the
+ * artefact carries no freshness and a login can expire during a six-hour sleep.
+ * `executeUnattendedAutoResume` therefore hands over a *factory*, `() =>
+ * onceOnlyPreflight(...)`, so the memoisation ends at the attempt boundary and
+ * nowhere else. `executeAttended` still passes a single memoised closure, so the
+ * attended path is untouched: one attempt, one preflight.
  *
  * ── Repository targeting ───────────────────────────────────────────────────
  *
@@ -406,7 +415,7 @@ async function executeAttended(
     },
   );
 
-  process.stdout.write(renderLifecycleRun(repository, result));
+  process.stdout.write(renderLifecycleRun(repository, result, 'ATTENDED'));
   return exitCodeForLifecycleRun(result);
 }
 
@@ -533,7 +542,9 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
       '--wait-for-reset',
       'Permit exactly ONE bounded wait for a reported quota reset, holding no execution ' +
         'lease while it waits. Only with --automatic-resume-only, only when the reset time ' +
-        'is the single check still refusing the resume, and only with --max-wait-ms.',
+        'is the single check still refusing the resume, only with --max-wait-ms, and only ' +
+        'with --max-invocations 2 or more -- the first invocation is spent meeting the ' +
+        'block, so the default of 1 leaves none for the attempt after the wait.',
     )
     .option(
       '--max-wait-ms <n>',

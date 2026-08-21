@@ -29,12 +29,19 @@
  * invocation authorised to act is what moves a blocked task.
  *
  * Since V3-08 that second authority has three values rather than two, and one of
- * them — `AUTOMATIC_RESUME_ONLY` — states that nobody is present. It buys
- * strictly less than the attended grant: it passes only where *this* function
- * answered `allowed`, so it cannot continue ordinary in-flight work, and the
- * layers above it refuse to start a task or remove a lease under it. AO
- * therefore has exactly one unattended execution path, and this decision is the
- * gate on it. `run/unattended-resume.ts` may also wait out a reported reset
+ * them — `AUTOMATIC_RESUME_ONLY` — states that nobody is present. It is *entered*
+ * only where this function answered `allowed`: an in-flight task the invocation
+ * did not itself resume classifies `ATTENDED_ONLY` and is refused, and the layers
+ * above refuse to start a task or remove a lease under it. AO therefore has
+ * exactly one unattended execution path, and this decision is the gate on the
+ * way in.
+ *
+ * It is not a gate on every step afterwards, and saying so was a review finding
+ * against this very paragraph. Once the resume this function allowed has been
+ * written, `run-driver.ts` carries the continuation through the rest of that one
+ * call — the ordinary loop, to its step budget — because a resume that could take
+ * a single step would spend the pause and leave the task no better off. The
+ * decision governs entry; the step budget governs how far. `run/unattended-resume.ts` may also wait out a reported reset
  * once, holding no execution lease, and then ask this function again from
  * evidence gathered entirely after the wait — a fresh decision, never a stored
  * one.

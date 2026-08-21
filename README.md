@@ -54,7 +54,9 @@ What *is* implemented:
     resume decision freshly answers `AUTOMATIC_ALLOWED`. Optionally, and only
     when asked for by name, it may wait out a reported quota reset **once**,
     holding no execution lease while it waits. It cannot start a task, cannot
-    continue ordinary in-flight work, and cannot remove a stale lease. See
+    pick up in-flight work it did not itself resume, and cannot remove a stale
+    lease — but once it has made a resume the decision allowed, it drives that
+    task to `--max-steps` like any other run. See
     [Unattended automatic resume](#unattended-automatic-resume-v3-08).
 11. The **block-run ledger** (V2-07): the durable record of one started block
     run, with frozen membership, a successor contract deciding which fields a
@@ -2747,10 +2749,12 @@ healthy in-flight task as `ATTENDED_ONLY`, because the most common thing that
 reconciles is an interrupted task with half-written work in its worktree.
 `RunRequest.continuationGrant` is what the invocation asked for — `ATTENDED` is
 the operator saying they are present for *this run*. It is a second requirement
-on top of the authority module's answer and never a substitute: it can only
-narrow what runs, and it grants nothing for a blocked task, which moves only on
-`AUTOMATIC_ALLOWED` and stops on anything else whatever is set here. Since V3-08
-the field is a closed three-member vocabulary rather than a boolean; see
+on top of the authority module's answer and never a substitute: **no value in it
+can produce `AUTOMATIC_ALLOWED`**, so a blocked task moves on that verdict and on
+nothing else, whatever is set here. Since V3-08 the field is a closed
+three-member vocabulary rather than a boolean, and its third member does widen
+one thing — a run may keep driving a task it *itself* resumed — which is stated
+where it happens rather than denied here; see
 [Unattended automatic resume](#unattended-automatic-resume-v3-08).
 
 **The grant is checked before any durable write, including a resume.** Because
@@ -2760,9 +2764,14 @@ work-loop state it lands in classifies `ATTENDED_ONLY` from then on — so an
 unattended run that wrote the resume and then refused to execute would have
 converted a self-clearing quota pause into a task no unattended run can ever
 pick up, having done no work at all. The gates that decide whether this run may
-act therefore all precede the write, and an unattended `AUTOMATIC_ALLOWED` run
-stops with `CONTINUATION_NOT_AUTHORISED` / `ATTENDED_CONTINUATION_NOT_GRANTED`,
-leaving every field of the block intact for a later one (V1-07-RR-B1).
+act therefore all precede the write, and a run whose grant withholds the
+continuation stops with `CONTINUATION_NOT_AUTHORISED`, leaving every field of the
+block intact for a later one (V1-07-RR-B1). Which code it carries says which
+requirement failed: `ATTENDED_CONTINUATION_NOT_GRANTED` for `NO_CONTINUATION`,
+and `AUTOMATIC_RESUME_ONLY_WITHOUT_AUTOMATIC_ALLOWED` for an unattended run that
+met something the resume decision did not clear. An `AUTOMATIC_ALLOWED` task
+under `--automatic-resume-only` does **not** stop here — that is the whole of
+V3-08, and this paragraph described a two-valued grant until a review caught it.
 
 **A resume into a writing phase withdraws the checkpoint it is about to
 invalidate.** `currentCommit` and `worktreeCleanAtCheckpoint` are exactly the
@@ -3689,9 +3698,13 @@ and because the failure mode it describes — a command that cannot start is
   the loader refuses outright — the run stops at `STATE_UNUSABLE` and the wait is
   never consulted, which is what the suite pins instead.
   `CURRENT_TIME_UNPARSEABLE` needs a clock seam that returns a non-timestamp, and
-  production supplies `() => new Date().toISOString()`. Both are kept as
-  fail-closed arms rather than removed, and neither is claimed as tested
-  behaviour.
+  production supplies `() => new Date().toISOString()`. `WAIT_BOUND_UNUSABLE` is
+  a third: `cli/run-command.ts` refuses an unusable `--max-wait-ms` with the same
+  `isUsableWaitBound` predicate before the controller is entered, so only a
+  direct library caller can produce it — it is listed under "requiring a human"
+  in `L-V3-08-5` because that is what it would mean, not because an operator can
+  reach it through the CLI. All three are kept as fail-closed arms rather than
+  removed, and none is claimed as tested behaviour.
 
   `RESUME_DECISION_ABSENT` was listed here as a third, on the claim that
   `run-driver.ts` cannot produce a quota block without a recorded decision. **That
@@ -3719,6 +3732,36 @@ and because the failure mode it describes — a command that cannot start is
   again after resuming — the task is parked correctly and a later invocation
   judges it), and a post-wake `LIVE_OWNER_PRESENT`. Milestone: a wait that ended
   in `COMPLETED`. **Scope:** `notify/attention.ts`, when the redesign happens.
+
+- **L-V3-08-6 — task *selection* is the one refusal not held at the library
+  boundary.** `runNextTask` forwards `continuationGrant` verbatim, so a library
+  caller may pass `AUTOMATIC_RESUME_ONLY` and let the selector choose the task.
+  No authority is widened by that — it still cannot start one (`runTask` answers
+  `TASK_NOT_STARTED`) and still needs a fresh `AUTOMATIC_ALLOWED` — but it is the
+  same asymmetry the `mayRecoverStaleLease` fix removed for recovery, left in
+  place for selection. `--task` is required by `cli/run-command.ts`, and
+  `runNextTask` has no production caller. Closing it means deciding whether
+  selection is a grant-scoped authority at all, which is a contract question
+  rather than a defect. **Scope:** `run/run-driver.ts`.
+- **L-V3-08-7 — the report shows one repository identity for both attempts.**
+  `renderUnattendedResume` is handed the repository the command resolved before
+  the wait, and prints it above each attempt. The second attempt ran against
+  `deps.resolveRepository()`'s *fresh* answer, so if the identity changed during
+  a multi-hour sleep the post-wake `STATE_UNUSABLE` or `RECONCILIATION_DIVERGED`
+  is printed under the old identity. Nothing decides on it — reconciliation
+  compares against the fresh value, which is the property that matters and is
+  tested — so this is what an operator is *shown*, not what happened. Closing it
+  means carrying the post-wake identity on the result. **Scope:**
+  `cli/render-lifecycle.ts`, `run/unattended-resume.ts`.
+- **L-V3-08-8 — the CLI's per-attempt preflight wiring is asserted by nothing.**
+  `executeUnattendedAutoResume` passes `authPreflight: () => onceOnlyPreflight(...)`
+  — a factory, so each attempt gets its own memoised preflight, which is what
+  makes post-wake auth fresh. Hoisting that closure out of the arrow would reuse
+  one artefact across the sleep and pass the entire suite: the controller-level
+  cases build their own counting factory rather than importing the production
+  one, and `L-V3-08-3` explains why no real-process harness can drive the cycle.
+  The property is held by one line that no test reads. **Scope:**
+  `cli/run-command.ts`, `tests/v3-08-unattended-auto-resume.test.ts`.
 
 ### What V1-08 is not
 
@@ -3791,10 +3834,17 @@ The first — and, deliberately, the only — path on which this product runs
 something with nobody present.
 
 ```
-agent-loop run --repository <abs path> --task <id> --automatic-resume-only
-                                                  [--wait-for-reset --max-wait-ms <n>]
-                                                  [--max-steps <n>] [--max-invocations <n>]
+agent-loop run --repository <abs path> --task <id> --automatic-resume-only [--max-steps <n>]
+
+# with a wait, --max-invocations must be at least 2:
+agent-loop run --repository <abs path> --task <id> --automatic-resume-only                --wait-for-reset --max-wait-ms <n> --max-invocations 2
 ```
+
+The second form's `--max-invocations 2` is not decoration. The budget is one
+bound on the whole command, the first invocation is spent meeting the block, and
+a wait with the default of 1 is refused before any effect. A review found that
+floor stated only in a register item, so both the synopsis and `--wait-for-reset`'s
+own help text now carry it.
 
 The flag is deliberately **not** called `--unattended-…`.
 `tests/v2-07lr-lease-recovery.test.ts` refuses any registered option whose name

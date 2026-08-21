@@ -49,11 +49,18 @@ Das ist **keine** Freigabe für unbeaufsichtigten Betrieb, und U1–U4 bleiben o
 Der Modus kann nicht:
 
 * einen Task starten (kein Worktree, kein Branch, kein State);
-* normale laufende Arbeit fortsetzen (`IMPLEMENTING`, `VERIFYING`, `REVIEWING` …);
+* laufende Arbeit aufnehmen, die er **nicht selbst resumed hat** — ein
+  reconciled `IMPLEMENTING` oder `VERIFYING` wird abgelehnt;
 * eine Stale Lease entfernen;
 * einen Task auswählen — `--task` ist Pflicht;
 * ein Review-Budget auffüllen;
 * mehr als einmal pro Aufruf warten.
+
+Was er nach einem erlaubten Resume **sehr wohl** tut: den Task ganz normal
+weiterfahren — Writer, Verify, Review, Remediation — bis `--max-steps`. Die
+Einschränkung liegt am *Eingang*, nicht auf dem, was danach passiert. (Ein
+Review hat hier ursprünglich "normale laufende Arbeit fortsetzen" gefunden,
+was schlicht falsch war.)
 
 **Und heute kann er ohnehin nicht auslösen.** Keine der beiden Agent-CLIs meldet
 eine Quota-Reset-Zeit, also ist `reportedResetAt` immer `null`, und

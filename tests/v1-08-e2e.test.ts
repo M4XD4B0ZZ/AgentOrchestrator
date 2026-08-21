@@ -1022,7 +1022,7 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
    *
    * So the ownership split is: this case owns the earlier **blocking-gate**
    * behaviour for a block this build can actually produce, and the run-driver
-   * regression owns the **attendedContinuation** behaviour. What this case
+   * regression owns the **continuationGrant** behaviour. What this case
    * genuinely proves is narrower and still worth having: for a block denied by
    * the authority module, the operator's grant changes nothing.
    */

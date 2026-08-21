@@ -69,8 +69,9 @@ export const UNATTENDED_AUTO_RESUME_TRAILER =
   'answered AUTOMATIC_ALLOWED. Having resumed it, the run then drives it like any other --\n' +
   'writer, verification, review, remediation -- up to --max-steps. It could not start a task,\n' +
   'could not pick up in-flight work it had not itself resumed, and could not remove a stale\n' +
-  'lease. Auth evidence was proven separately for every attempt: the grant states that nobody\n' +
-  'is present, never that a login is valid.';
+  'lease. Auth is a separate requirement that this grant says nothing about: every attempt\n' +
+  'that gets as far as driving proves it again, and one that stopped earlier -- on the lease,\n' +
+  'or with nothing to continue -- never asked.';
 
 /** One static sentence per lifecycle outcome. Closed, and pinned by test. */
 export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, string>> =
@@ -195,7 +196,18 @@ function codes(values: readonly string[]): string {
 export function renderLifecycleRun(
   repository: { id: string; root: string },
   result: LifecycleResult,
-  grant: InvocationGrant = 'ATTENDED',
+  /**
+   * The grant this run was made under. **Required, and deliberately not
+   * defaulted.**
+   *
+   * It had a default of `'ATTENDED'` for one round, and a review named the
+   * problem: that is the value which asserts an operator was present, so a
+   * future call site that forgot the argument would print "--attended was
+   * given" about a run where it was not. Everywhere else in this slice the
+   * grant has no default and cannot be inferred (`LifecycleRequest`,
+   * `RunRequest`, the CLI); this is now the same rule, held by the compiler.
+   */
+  grant: InvocationGrant,
 ): string {
   const lines: string[] = [
     '',

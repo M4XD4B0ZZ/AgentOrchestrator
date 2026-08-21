@@ -1016,7 +1016,7 @@ describe('an authorised quota resume', () => {
 /**
  * The cross-product of the two authorities that govern a resume.
  *
- * `AUTOMATIC_ALLOWED` and `attendedContinuation` answer different questions —
+ * `AUTOMATIC_ALLOWED` and `continuationGrant` answer different questions —
  * "may a machine continue *this task*" and "is anyone present for *this run*" —
  * and the driver needs both. What makes the combination worth its own suite is
  * that a blocked task's resume is not a step it can decline to take later: it
@@ -1087,7 +1087,7 @@ describe('a blocked task is never moved by a run that may not continue it', () =
   });
 
   /**
-   * B. The same block, the same evidence, one flag different. `attendedContinuation`
+   * B. The same block, the same evidence, one flag different. `continuationGrant`
    * is not irrelevant to `AUTOMATIC_ALLOWED` — it is a requirement on the
    * *invocation* rather than on the task, so the resume happens exactly when
    * both hold. Asserted as a pair with A so that neither can drift alone.

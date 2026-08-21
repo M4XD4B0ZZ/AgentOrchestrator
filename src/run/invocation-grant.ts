@@ -10,9 +10,18 @@
  * That authority is about the *task*.
  *
  * This module is about the *invocation*: whoever started this process, and what
- * they asked for. The two are conjoined, never substituted — an invocation
- * grant can only ever narrow what the task authority already permitted, and no
- * value here can manufacture `AUTOMATIC_ALLOWED`.
+ * they asked for. The two are conjoined, never substituted, and **no value here
+ * can manufacture `AUTOMATIC_ALLOWED`** — that is the invariant, and it holds
+ * without exception.
+ *
+ * "Can only ever narrow" is the *nearly* true statement people reach for, and it
+ * is what this paragraph used to say. A review pointed out the one place it is
+ * false: `continuingOwnAutomaticResume` lets an `AUTOMATIC_RESUME_ONLY`
+ * invocation continue a task the task authority currently classifies
+ * `ATTENDED_ONLY`. It is not a hole — the invocation reached that state only by
+ * performing a resume this same authority allowed a moment earlier, inside one
+ * `runTask` frame — but it is a widening, and it is documented as one on the
+ * parameter below rather than denied here.
  *
  * ── Why a closed vocabulary and not a second boolean ───────────────────────
  *
