@@ -530,9 +530,10 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
           // Wrapped, because a `finally` that throws **replaces** the exception
           // that entered it - so an exception here would hand the operator the
           // release's failure in place of the one that actually stopped the run.
-          // `releaseRepositoryExecutionLease` refuses rather than throws for
-          // every value this command can give it, which
-          // `tests/v3-07-lease-release-observability.test.ts` pins. It is not
+          // `releaseRepositoryExecutionLease` refuses rather than throws for every
+          // value that is not evidence, which
+          // `tests/v3-07-lease-release-observability.test.ts` pins - and that is
+          // a narrower claim than "for the value this command passes". It is not
           // unreachable, though: `tests/v3-07-lease-release-fault.test.ts` gets
           // in through the one call on that path that is neither a filesystem
           // call nor inside a `try` - the `randomBytes` naming the quarantine

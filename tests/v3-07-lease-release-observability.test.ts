@@ -342,7 +342,7 @@ describe('the release vocabulary is closed, shared and safe', () => {
     const tokens: Readonly<Record<string, string>> = {
       DETACH_REFUSED: 'Nothing was moved at all',
       UNREADABLE_AFTER_DETACH: 'was put back at the lease name',
-      RECORD_QUARANTINED: 'this call did not establish what',
+      RECORD_QUARANTINED: 'Whether anything is at the lease name is not established',
       RECORD_QUARANTINED_LEASE_UNOWNED: 'nothing holds the lease name - which this call established rather than assumed',
     };
     for (const token of LEASE_RELEASE_DETAILS) {
@@ -424,7 +424,9 @@ describe('the release vocabulary is closed, shared and safe', () => {
     const pairs = [
       ...body.matchAll(/code:\s*'([A-Z_]+)'(?:\s*as\s*const)?,\s*detail:\s*(null|'[A-Z_]+')/g),
     ].map((match) => [match[1]!, match[2]!] as const);
-    expect(pairs.length).toBeGreaterThan(4);
+    // Exact. A floor would pass a rewrite that halved the producers, and this
+    // count is the shape the whole token key rests on.
+    expect(pairs.length).toBe(11);
 
     const removeFailed = pairs.filter(([code]) => code === 'LEASE_REMOVE_FAILED');
     expect(removeFailed.length).toBeGreaterThan(0);
@@ -745,6 +747,46 @@ describe('block --attended reports the lease once, not twice', () => {
     // `catch` was refused by the flag rather than by luck.
     expect(out().match(/Release {6}: /g)).toHaveLength(1);
     expect(writes).toBe(stdout.length + 1);
+    expect(process.exitCode).toBe(EXIT_RUN_UNEXPECTED);
+  }, 900_000);
+});
+
+describe('a release report that fails to write is retried, not marked delivered', () => {
+  it('reports the lease after the first attempt to print it is refused', async () => {
+    // `leaseReleaseReported` is set *after* the write for exactly this case, and
+    // nothing pinned it: every other stdout mock in this file stays broken once
+    // armed, so the retry always had nothing to prove. Here the refusal is
+    // one-shot and aimed at the release report itself, which is the only path on
+    // which a stuck lease would otherwise go unreported entirely.
+    const fixture = await repoWith(['A-001']);
+    const seams = drivingSeams();
+    let refused = false;
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown): boolean => {
+      const text = String(chunk);
+      if (!refused && /Release {6}: /.test(text)) {
+        refused = true;
+        throw new Error('the console refused that one');
+      }
+      stdout.push(text);
+      return true;
+    }) as typeof process.stdout.write);
+
+    await invokeBlock(
+      [
+        '--repository', fixture.root,
+        '--block', BLOCK_ID,
+        '--tasks', 'A-001',
+        '--run', RUN_ID,
+        '--attended',
+      ],
+      { authPreflight: authPreflightPasses, agent: seams.agent, verify: seams.verify },
+    );
+
+    // The first write was refused; the retry from the `catch` landed. Marking it
+    // delivered before the write would leave this at zero.
+    expect(refused).toBe(true);
+    expect(out().match(/Release {6}: /g)).toHaveLength(1);
+    expect(out()).toContain('Release      : RELEASED');
     expect(process.exitCode).toBe(EXIT_RUN_UNEXPECTED);
   }, 900_000);
 });

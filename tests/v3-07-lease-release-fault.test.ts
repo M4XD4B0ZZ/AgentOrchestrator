@@ -17,9 +17,10 @@
  *
  * One `renameSync` is refused, once, and only when its **source** is the lease
  * file itself. That is the detach at `execution-lease.ts:1475`, and it is the
- * only rename in the build whose source is that name — acquisition renames a
- * staging file *onto* the lease name, so its source is a different one and this
- * fault cannot fire on it. Production then produces the consequence itself, all
+ * only rename in the build whose source is that name. It cannot fire on
+ * acquisition at all: acquisition does not rename, it `link`s a finished staging
+ * file into place — the rename fallback was withdrawn — so there is no rename to
+ * intercept there, let alone one sourced at the lease name. Production then produces the consequence itself, all
  * the way through: `DETACH_FAILED` -> `LEASE_REMOVE_FAILED` with detail
  * `DETACH_REFUSED`, and a lease record still sitting in the repository.
  *

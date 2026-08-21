@@ -479,12 +479,12 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
   NOT_OWNER:
     'The record this release examined could not be shown to be the one this invocation took,\n' +
     '  so nothing of this invocation was removed. Note what that is not: a record too\n' +
-    '  damaged to identify answers the same way, and a crash part way through a write can\n' +
-    '  leave this run its own record in that state. A successor is one reading of this code\n' +
-    '  and not the only one, and this build does not tell them apart here. If a token\n' +
-    '  follows the code above, the line under it says what state the removal stopped in;\n' +
-    '  with no token, nothing beyond the code was established. Run `agent-loop lease status`\n' +
-    '  before the next run.',
+    '  damaged to identify answers the same way, and a restore that failed part way through\n' +
+    '  writing a copy back can leave a damaged record at the name. A successor is one\n' +
+    '  reading of this code and not the only one, and this build does not tell them apart\n' +
+    '  here. If a token follows the code above, the line under it says what state the\n' +
+    '  removal stopped in; with no token, there is nothing further this build can add. Run\n' +
+    '  `agent-loop lease status` before the next run.',
   LEASE_UNREADABLE:
     'This build could not get at the lease record, and what stopped it was not the record\n' +
     '  being absent. Nothing was removed, and nothing else was inspected - so this says what\n' +
@@ -547,16 +547,20 @@ export const LEASE_RELEASE_DETAIL_SENTENCES: Readonly<Record<LeaseReleaseDetail,
       '    call did not check that the deletion worked. What sits at the lease name is a\n' +
       '    record this build could not identify, and it will refuse the next run.',
     RECORD_QUARANTINED:
-      'The record was detached and could not be put back, and it is kept - deliberately - in\n' +
-      '    a file beside the lease rather than deleted. Something is at the lease name; this\n' +
-      '    call did not establish what. It may be a successor that acquired legitimately, and\n' +
-      '    it may be a partial file this call left there when the restore failed part way.\n' +
-      '    Run `agent-loop lease status` before assuming anybody holds this repository.',
+      'The record was detached and could not be put back, and it is kept - deliberately -\n' +
+      '    beside the lease rather than deleted. Whether anything is at the lease name is not\n' +
+      '    established: the restore refused, and the check that followed may itself have been\n' +
+      '    refused, which this build reads as occupied so that it can never announce a free\n' +
+      '    repository it has not seen. If something is there it may be a successor that\n' +
+      '    acquired legitimately, and it may be a partial record left by a restore that failed\n' +
+      '    part way. Run `agent-loop lease status` before assuming either.',
     RECORD_QUARANTINED_LEASE_UNOWNED:
       'The record was detached, could not be put back, and nothing holds the lease name -\n' +
-      '    which this call established rather than assumed. The record is kept in a file\n' +
-      '    beside it. This repository has no owner, so the next run will acquire normally,\n' +
-      '    which is the case for looking before you let it.',
+      '    which this call established rather than assumed. The record is kept beside the\n' +
+      '    lease. The name being free is not the same as the repository being idle: the\n' +
+      '    record that was detached may belong to a live writer, which loses authority and\n' +
+      '    stops at its next checkpoint rather than immediately. The next run will acquire\n' +
+      '    normally, which is the case for looking before you let it.',
   });
 
 /**
@@ -585,8 +589,9 @@ export const LEASE_RELEASE_UNREPORTED = 'RELEASE_NOT_REPORTED';
 export const LEASE_RELEASE_UNREPORTED_SENTENCE =
   'Giving the execution lease back failed with an error rather than an answer, so what is in\n' +
   '  this repository now is unknown to this invocation. Assume a lease record is still there.\n' +
-  '  Run `agent-loop lease status` before the next run. The error itself is on the standard\n' +
-  '  error stream, in the safe form this build prints exceptions in.';
+  '  Run `agent-loop lease status` before the next run. The error itself should be on the\n' +
+  '  standard error stream, in the safe form this build prints exceptions in - unless that\n' +
+  '  stream refused the write too, which is the one thing that could have hidden it.';
 
 /**
  * The one line every command prints for its execution-lease release.
