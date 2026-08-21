@@ -522,6 +522,14 @@ export async function runTask(
    * lifecycle loop, or a later command — starts with it `false` and is refused
    * the same in-flight task, so the grant never becomes durable and never
    * becomes "run unattended".
+   *
+   * Within the frame it is **not** limited to the phase the resume entered. It
+   * is set once and read on every remaining iteration, so the loop drives the
+   * whole work cycle up to `maxSteps` — writer, verification, review,
+   * remediation — exactly as an attended run would. That is the intended
+   * behaviour and it is stated here because an earlier version of this comment
+   * said "the phase that resume entered", which describes only the first
+   * iteration after the write.
    */
   let continuingOwnAutomaticResume = false;
 
@@ -712,9 +720,9 @@ export async function runTask(
     //
     // With one exception, and it is local: an in-flight task **this call itself
     // just resumed** is the continuation the resume authorised, so the third
-    // argument carries it. See `continuingOwnAutomaticResume` above for why
-    // refusing there would spend a pause and do no work, and why the permission
-    // cannot outlive this frame.
+    // argument carries it — for the rest of this call, not for one phase. See
+    // `continuingOwnAutomaticResume` above for why refusing there would spend a
+    // pause and do no work, and why the permission cannot outlive this frame.
     const granted = permitsContinuation(
       request.continuationGrant,
       resume.continuation,

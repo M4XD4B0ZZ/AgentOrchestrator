@@ -32,12 +32,25 @@
  *    a refusal carries.
  *  - `AUTOMATIC_RESUME_ONLY` — no human presence is claimed. It permits exactly
  *    one thing: continuing a task whose canonical resume decision *freshly*
- *    answered `AUTOMATIC_ALLOWED`, and then driving the phase that resume
- *    entered, in the same call and no other. It is not "run unattended": an
- *    ordinary in-flight task that this call did not itself resume classifies
- *    `ATTENDED_ONLY` and is refused here, and a task with no durable state is
- *    refused a layer up, in `lifecycle-driver.ts`, because starting a task is a
- *    different authority again (see {@link mayStartTask}).
+ *    answered `AUTOMATIC_ALLOWED`.
+ *
+ *    **What follows that resume is the ordinary governed loop, in full.** The
+ *    resume enters a work-loop phase, and the same `runTask` call then drives
+ *    that phase and every phase after it — writer, verification, review,
+ *    remediation — up to its step budget, exactly as an attended run would. A
+ *    review found this file, `run-driver.ts` and the README all describing it as
+ *    "the phase that resume entered", which is what the *first* iteration after
+ *    the write does and not what the loop does; the wording is corrected here
+ *    rather than the behaviour, because a resume that could only take one step
+ *    would leave the task mid-phase and no better off.
+ *
+ *    What it is not is "run unattended": an ordinary in-flight task that **this
+ *    call did not itself resume** classifies `ATTENDED_ONLY` and is refused
+ *    here, so the authority is entered only through a resume the canonical
+ *    decision allowed. A task with no durable state is refused a layer up, in
+ *    `lifecycle-driver.ts`, because starting a task is a different authority
+ *    again (see {@link mayStartTask}), and removing a lease is a third (see
+ *    {@link mayRecoverStaleLease}).
  *
  * The refusal codes are stable and distinct, because "you did not ask to
  * continue" and "you asked to continue automatically and the resume decision
@@ -131,6 +144,12 @@ export function permitsContinuation(
    * caller can assert: a *fresh* invocation meeting the same in-flight task
    * passes `false` and is refused, which is what keeps "may resume a quota
    * pause" from becoming "may run unattended".
+   *
+   * It is **not** scoped to the one phase the resume entered. Once set it holds
+   * for the rest of that call, so the loop runs the whole work cycle. That is
+   * deliberate — see the vocabulary note above — and it is why the operator
+   * report may not say this mode "cannot continue in-flight work" without the
+   * qualifier "it did not itself resume".
    */
   continuingOwnAutomaticResume: boolean,
 ): GrantVerdict {
@@ -160,5 +179,26 @@ export function permitsContinuation(
  * relying on the CLI to keep the two apart.
  */
 export function mayStartTask(grant: InvocationGrant): boolean {
+  return grant !== 'AUTOMATIC_RESUME_ONLY';
+}
+
+/**
+ * Whether this invocation may remove an execution lease it did not create.
+ *
+ * A third authority, kept apart from the other two because it is destructive
+ * rather than merely productive: `recoverStaleLease` deletes another run's
+ * object, and it is permitted only by an operator who asked for it *now*.
+ * `AUTOMATIC_RESUME_ONLY` says nobody is present, so it answers `false`.
+ *
+ * The refusal lives at the same boundary as {@link mayStartTask}'s, and for the
+ * same reason. `unattended-resume.ts` already fixes `recoverStaleLease: false`
+ * and the CLI already refuses the flag combination twice over — but a review
+ * pointed out the asymmetry those two leave: `driveLifecycle` could still be
+ * called directly with this grant *and* a recovery permission, so the property
+ * was argued from its callers rather than held by the layer that acts on it.
+ * Nothing observable changes; a hole that needed a new caller to open is
+ * closed before one exists.
+ */
+export function mayRecoverStaleLease(grant: InvocationGrant): boolean {
   return grant !== 'AUTOMATIC_RESUME_ONLY';
 }

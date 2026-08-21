@@ -64,12 +64,13 @@ export const LIFECYCLE_TRAILER =
  * once-only auth preflight per lifecycle epoch.
  */
 export const UNATTENDED_AUTO_RESUME_TRAILER =
-  'Unattended automatic resume. --automatic-resume-only was given, so this invocation was\n' +
-  'permitted to continue ONE task that already had durable state, and only where the resume\n' +
-  'decision freshly answered AUTOMATIC_ALLOWED. It could not start a task, could not continue\n' +
-  'ordinary in-flight work, and could not remove a stale lease. Auth evidence was proven\n' +
-  'separately and again for every attempt: the grant states that nobody is present, never\n' +
-  'that a login is valid.';
+  'Unattended automatic resume. --automatic-resume-only was given, so this invocation could\n' +
+  'enter ONE task that already had durable state, and only where the resume decision freshly\n' +
+  'answered AUTOMATIC_ALLOWED. Having resumed it, the run then drives it like any other --\n' +
+  'writer, verification, review, remediation -- up to --max-steps. It could not start a task,\n' +
+  'could not pick up in-flight work it had not itself resumed, and could not remove a stale\n' +
+  'lease. Auth evidence was proven separately for every attempt: the grant states that nobody\n' +
+  'is present, never that a login is valid.';
 
 /** One static sentence per lifecycle outcome. Closed, and pinned by test. */
 export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, string>> =
@@ -110,8 +111,9 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       '  outcome above says why.',
     AUTH_PREFLIGHT_FAILED:
       'The auth preflight produced no evidence, so no agent could have run. Nothing was driven.\n' +
-      '  It runs once per invocation of this command and a failure is not retried inside one, so\n' +
-      '  log the agent CLIs in and invoke again.',
+      '  It runs once per attempt -- an ordinary run makes one, and a run that waited for a quota\n' +
+      '  reset proves auth again afterwards rather than trusting the artefact it minted before --\n' +
+      '  and a failure is never retried inside an attempt. Log the agent CLIs in and invoke again.',
     COMPLETED:
       'The task reached READY_FOR_PR. Terminal: a human opens the pull request from here.',
     TASK_ABORTED: 'The task was already ABORTED. Nothing was run.',
@@ -160,11 +162,11 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       'An invocation reported durable progress and the state file did not move, or the task is\n' +
       '  in a state this build does not drive. Repeating would do the same thing, so it stopped.',
     INVOCATION_BUDGET_INVALID:
-      'The --max-invocations bound cannot be used as given, so nothing was taken and nothing\n' +
-      '  ran. Either it is not a positive whole number, or a wait was requested and the bound\n' +
-      '  leaves no invocation for the attempt after it -- one wait needs at least 2, because the\n' +
-      '  first is spent meeting the block. Invoking again with the same value repeats this\n' +
-      '  exactly; the reasons below say which of the two it was.',
+      'A bound this run was given cannot be used, so nothing was taken and nothing ran. The\n' +
+      '  reasons below name which: --max-invocations is not a positive whole number, or a wait\n' +
+      '  was requested and --max-invocations leaves no invocation for the attempt after it (one\n' +
+      '  wait needs at least 2, because the first is spent meeting the block), or --max-wait-ms\n' +
+      '  is not a usable number of milliseconds. Invoking again unchanged repeats this exactly.',
     INVOCATION_BUDGET_EXHAUSTED:
       'Durable progress was still being made when this run\'s invocation budget ran out.\n' +
       '  Everything is on disk; invoke again to continue, or raise --max-invocations.',
@@ -293,12 +295,15 @@ export const RESET_WAIT_SENTENCES: Readonly<Record<ResetWaitDisposition, string>
       'The task is parked on a quota block and no wait was requested, so nothing slept. Waiting\n' +
       '  is opt-in: add --wait-for-reset with --max-wait-ms to permit exactly one bounded wait.',
     RESUME_DECISION_ABSENT:
-      'The run stopped on a quota block without a recorded resume decision, so there was no\n' +
-      '  verdict to read and nothing slept. A defect floor rather than an operator condition.',
+      'The quota block this run stopped on is one it met after its last resume decision --\n' +
+      '  typically one its own work ran into -- so nothing has judged that block yet and nothing\n' +
+      '  slept. The task is durably parked and correct. Invoke again once the quota has\n' +
+      '  returned, and the resume decision will be made about this block.',
     RESUME_DENIED_BY_OTHER_CHECKS:
-      'The automatic resume was refused by something the passage of time does not fix, so\n' +
-      '  nothing slept. The reasons below name the checks that denied it; each one has to be\n' +
-      '  resolved before any resume, attended or not, will proceed.',
+      'The automatic resume was refused, and at least one of the reasons is something the\n' +
+      '  passage of time does not fix, so nothing slept -- waiting would have delayed a refusal\n' +
+      '  rather than cleared one. The reasons below name every check that denied it; the ones\n' +
+      '  that are not about the reset time have to be resolved before any resume proceeds.',
     RESET_TIME_MISSING:
       'The durable state records no reported quota reset time, so there is nothing to wait for\n' +
       '  and nothing slept. A reset time is only ever recorded when an agent CLI reported one;\n' +
@@ -312,6 +317,11 @@ export const RESET_WAIT_SENTENCES: Readonly<Record<ResetWaitDisposition, string>
     BOUND_EXCEEDED:
       'The wait this reset would need is longer than --max-wait-ms allowed, so nothing slept and\n' +
       '  the task stays parked. Raise the bound, or invoke again after the reset.',
+    WAIT_BOUND_UNUSABLE:
+      'The --max-wait-ms value is not a bound this build will sleep on, so no wait was possible\n' +
+      '  and nothing ran -- not even a lease was taken. It must be a whole number of\n' +
+      '  milliseconds between 1 and 86400000 (24 hours), and there is no default. Raising it is\n' +
+      '  not the fix unless the value was simply too large.',
     LEASE_RELEASE_UNPROVEN:
       'The execution lease was not provably given back before the wait, so nothing slept. A\n' +
       '  waiter that cannot prove it released may still be this repository\'s writer, and it was\n' +

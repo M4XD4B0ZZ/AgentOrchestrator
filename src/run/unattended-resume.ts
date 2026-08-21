@@ -142,9 +142,17 @@ export const RESET_WAIT_DISPOSITIONS = [
   /** A quota block, and `--wait-for-reset` was not given. Waiting is opt-in. */
   'NOT_REQUESTED',
   /**
-   * The automatic-resume decision was never reached, so there is no canonical
-   * verdict to read. A fail-closed floor: the run stopped on a quota block
-   * whose resume was not judged, which this module refuses to interpret.
+   * The run stopped on a quota block that carries no automatic-resume verdict,
+   * so there is nothing canonical to read and nothing is interpreted.
+   *
+   * **Ordinary, not a defect**, and an earlier version of this comment and of
+   * `L-V3-08-4` both called it unreachable. It is the shape of "this run
+   * resumed the task, did some work, and hit the quota again": `RunResult.resume`
+   * is the decision taken at the *top* of the last iteration, which was about
+   * the in-flight state the step then blocked from — and `classifyResume`
+   * returns `automaticResume: null` for every non-blocking state. The new block
+   * is durable and correct; nobody has judged it yet, and the next invocation
+   * will.
    */
   'RESUME_DECISION_ABSENT',
   /** The reset time has passed and something *else* refused the resume. */
@@ -157,6 +165,16 @@ export const RESET_WAIT_DISPOSITIONS = [
   'CURRENT_TIME_UNPARSEABLE',
   /** The reset is further away than `--max-wait-ms` permitted. */
   'BOUND_EXCEEDED',
+  /**
+   * `--max-wait-ms` is not a bound this build will sleep on at all.
+   *
+   * Its own member rather than {@link BOUND_EXCEEDED}, because the two are
+   * opposite instructions: that one means "the reset is far away, raise the
+   * bound or come back later", and this one means "the number you gave is not
+   * usable, and raising it is not the fix". A review found both reported under
+   * one name, with a sentence telling an operator to raise a bound of `NaN`.
+   */
+  'WAIT_BOUND_UNUSABLE',
   /**
    * The lease was not provably given back before the sleep. Nothing slept: a
    * waiter that cannot prove it released may still be holding the repository.
@@ -462,7 +480,7 @@ export async function driveUnattendedAutomaticResume(
       taskId,
       [],
       Object.freeze({
-        disposition: 'BOUND_EXCEEDED' as const,
+        disposition: 'WAIT_BOUND_UNUSABLE' as const,
         waitedMs: null,
         reasonCodes: Object.freeze(['MAX_WAIT_MS_INVALID']),
       }),
@@ -491,6 +509,13 @@ export async function driveUnattendedAutomaticResume(
       continuationGrant: 'AUTOMATIC_RESUME_ONLY',
       // Fixed, never forwarded. Removing a lease is a destructive operator
       // permission, and this mode exists to run when no operator is there.
+      //
+      // Belt and braces since a review: `driveLifecycle` now refuses a recovery
+      // under this grant whatever is passed here (`mayRecoverStaleLease`), so
+      // this line is no longer what enforces the property — it states the intent
+      // at the call site, and the mutant that flips it to `true` is now
+      // equivalent for exactly that reason. The gate that dies is the one at the
+      // boundary.
       recoverStaleLease: false,
       maxSteps: request.maxSteps,
       maxInvocations: request.maxInvocations,

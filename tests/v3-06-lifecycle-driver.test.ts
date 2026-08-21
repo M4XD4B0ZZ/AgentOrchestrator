@@ -426,15 +426,21 @@ describe('an invocation is repeated only while the durable state moves', () => {
 /* ═══ 3. a quota pause stops the run, and this is an authority question ═══ */
 
 /**
- * The wait was withdrawn from this slice, and these cases pin the refusal.
+ * A quota pause stops **this driver**, and these cases pin that it still does.
  *
- * `run-driver.ts` refuses every continuation when `attendedContinuation` is
- * false — including one `evaluateAutomaticResume` has already allowed, because
- * the grant is checked before the resume write and can only withhold. So a run
- * that slept for hours and carried on would be spending a claim of operator
- * presence made before the sleep, and a run that dropped the grant instead
- * could not resume at all. Either way a wait needs an authority this build does
- * not have, so there is none.
+ * The wait was withdrawn from slice 6 because it needed an authority the build
+ * did not have. V3-08 added that authority, and built the wait *above* this
+ * layer, in `run/unattended-resume.ts` — precisely so that no execution lease is
+ * held across a sleep that can last hours. So the property these cases measure
+ * did not change and is not obsolete: `driveLifecycle` returns on
+ * `BLOCKED_USAGE_LIMIT`, gives the lease back, and waits for nothing. What may
+ * try again later is the controller one layer up, under
+ * `AUTOMATIC_RESUME_ONLY`, and `tests/v3-08-unattended-auto-resume.test.ts`
+ * owns that.
+ *
+ * (This comment used to end "a wait needs an authority this build does not
+ * have, so there is none". Both halves are now false, and an independent review
+ * of V3-08 found it still standing.)
  */
 describe('a quota pause stops the run rather than being waited out', () => {
   const usageLimit = {

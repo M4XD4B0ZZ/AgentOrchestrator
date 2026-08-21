@@ -155,7 +155,11 @@ import {
 import type { VerificationRunner } from '../verify/verify-command.js';
 import type { CompletionObserver } from '../loop/loop-step.js';
 import type { GitRunner } from '../worktree/git-command.js';
-import { mayStartTask, type InvocationGrant } from './invocation-grant.js';
+import {
+  mayRecoverStaleLease,
+  mayStartTask,
+  type InvocationGrant,
+} from './invocation-grant.js';
 import { startTask, type StartTaskResult } from './start-task.js';
 import { runTask, type RunOutcome, type RunResult } from './run-driver.js';
 
@@ -519,7 +523,15 @@ function takeLease(
     };
   }
 
-  if (!request.recoverStaleLease) {
+  // The grant decides this as well as the flag, and both must say yes.
+  //
+  // Removing a lease is destructive and belongs to an operator who asked for it
+  // now; `AUTOMATIC_RESUME_ONLY` states nobody is there. `unattended-resume.ts`
+  // passes `false` and the CLI refuses the combination, so no caller reaches
+  // this with both set today — which is exactly why the check belongs here
+  // rather than only in them: the property was argued from callers instead of
+  // held by the layer that performs the removal.
+  if (!request.recoverStaleLease || !mayRecoverStaleLease(request.continuationGrant)) {
     return {
       held: false,
       outcome: 'STALE_LEASE_PRESENT',

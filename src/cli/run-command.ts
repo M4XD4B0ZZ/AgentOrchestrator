@@ -43,9 +43,14 @@ import {
  * It is a separate grant from `--attended`, not a variant of it, and the two are
  * refused together. `--attended` states that a human is present; this one states
  * that nobody is, and the whole point of the slice is that the second claim buys
- * strictly *less*: it cannot start a task, cannot continue ordinary in-flight
- * work, and cannot remove a stale lease. `run/invocation-grant.ts` holds the
- * vocabulary and `run/run-driver.ts` holds the gate.
+ * strictly *less*: it cannot start a task, cannot pick up in-flight work it did
+ * not itself resume, and cannot remove a stale lease. `run/invocation-grant.ts`
+ * holds the vocabulary and `run/run-driver.ts` holds the gate.
+ *
+ * What it does *not* buy less of is the work that follows a resume it was
+ * allowed to make: from there the ordinary loop runs to `--max-steps`, exactly
+ * as an attended run would. The narrowing is on the way **in**, not on what
+ * happens afterwards, and saying otherwise was a review finding.
  *
  * `--wait-for-reset` is a further, separate opt-in on top of it: permission to
  * sleep **once**, bounded by a mandatory `--max-wait-ms`, holding no execution
@@ -517,11 +522,12 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
     // capability this deliberately is not.
     .option(
       '--automatic-resume-only',
-      'Continue ONE named task with nobody present, and only where the resume decision ' +
+      'Continue ONE named task with nobody present, entered only where the resume decision ' +
         'answers AUTOMATIC_ALLOWED -- today, a quota block whose reported reset has passed ' +
-        'and whose worktree, commits, repository and login all still check out. Requires ' +
-        '--task. Cannot start a task, cannot continue ordinary in-flight work, cannot ' +
-        'recover a stale lease, and is mutually exclusive with --attended.',
+        'and whose worktree, commits, repository and login all still check out. Having ' +
+        'resumed it, the run drives it to --max-steps like any other. Requires --task. ' +
+        'Cannot start a task, cannot pick up in-flight work it did not itself resume, ' +
+        'cannot recover a stale lease, and is mutually exclusive with --attended.',
     )
     .option(
       '--wait-for-reset',

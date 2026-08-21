@@ -3682,18 +3682,27 @@ and because the failure mode it describes — a command that cannot start is
   waiter holds nothing, and it is not a cross-process measurement. **Scope:**
   `tests/dist-artifact/unattended-auto-resume-dist-artifact.mjs`,
   `tests/v3-08-unattended-auto-resume.test.ts`.
-- **L-V3-08-4 — three wait dispositions are floors that production cannot
-  reach.** `RESET_TIME_UNPARSEABLE` cannot arise through the durable path at all:
-  the state schema accepts a strict subset of what `Date.parse` accepts, so a
-  timestamp the wait arithmetic could not read is one the loader refuses
-  outright — the run stops at `STATE_UNUSABLE` and the wait is never consulted,
-  which is what the suite pins instead. `RESUME_DECISION_ABSENT` requires a run
-  that stopped on a quota block without recording the decision it stopped on,
-  which `run-driver.ts` cannot produce. `CURRENT_TIME_UNPARSEABLE` needs a clock
-  seam that returns a non-timestamp, and production supplies
-  `() => new Date().toISOString()`. All three are kept as fail-closed arms rather
-  than removed, and none is claimed as tested behaviour. **Scope:**
-  `run/unattended-resume.ts`.
+- **L-V3-08-4 — two wait dispositions are floors that production cannot reach,
+  and a third is not a floor at all.** `RESET_TIME_UNPARSEABLE` cannot arise
+  through the durable path: the state schema accepts a strict subset of what
+  `Date.parse` accepts, so a timestamp the wait arithmetic could not read is one
+  the loader refuses outright — the run stops at `STATE_UNUSABLE` and the wait is
+  never consulted, which is what the suite pins instead.
+  `CURRENT_TIME_UNPARSEABLE` needs a clock seam that returns a non-timestamp, and
+  production supplies `() => new Date().toISOString()`. Both are kept as
+  fail-closed arms rather than removed, and neither is claimed as tested
+  behaviour.
+
+  `RESUME_DECISION_ABSENT` was listed here as a third, on the claim that
+  `run-driver.ts` cannot produce a quota block without a recorded decision. **That
+  was false, and an independent review of this slice found it.** `RunResult.resume`
+  is the decision taken at the *top* of the last iteration, so when the block is
+  created by the step itself the decision on record is about the in-flight state
+  the step blocked from — and `classifyResume` returns `automaticResume: null`
+  for every non-blocking state. The reachable shape is the ordinary one: this run
+  resumed the task, did some work, and met the quota again. It is now covered by
+  a test, its sentence no longer calls it a defect, and it is classified in
+  `L-V3-08-5`. **Scope:** `run/unattended-resume.ts`.
 
 - **L-V3-08-5 — the operator-visible conditions this slice adds, recorded for the
   ntfy redesign.** No notification behaviour changed here, deliberately: the
@@ -3701,13 +3710,15 @@ and because the failure mode it describes — a command that cannot start is
   noise ("waiting started", "woke up") is exactly what its rule excludes. What
   this slice *does* add is a set of endings a later classifier will have to
   place. Requiring a human: `BOUND_EXCEEDED` (the reset is further away than
-  allowed), `LEASE_RELEASE_UNPROVEN`, `REPOSITORY_UNRESOLVED_AFTER_WAIT`, and a
-  post-wake epoch ending `AUTH_PREFLIGHT_FAILED`, `RECONCILIATION_DIVERGED`,
-  `STATE_UNUSABLE` or `CONTINUATION_NOT_AUTHORISED`. Self-clearing, and therefore
-  **not** attention-worthy: `NOT_A_QUOTA_BLOCK`, `NOT_REQUESTED`,
-  `RESET_TIME_MISSING` on a run nobody asked to wait, and a post-wake
-  `LIVE_OWNER_PRESENT`. Milestone: a wait that ended in `COMPLETED`. **Scope:**
-  `notify/attention.ts`, when the redesign happens.
+  allowed), `WAIT_BOUND_UNUSABLE`, `LEASE_RELEASE_UNPROVEN`,
+  `REPOSITORY_UNRESOLVED_AFTER_WAIT`, and a post-wake epoch ending
+  `AUTH_PREFLIGHT_FAILED`, `RECONCILIATION_DIVERGED`, `STATE_UNUSABLE` or
+  `CONTINUATION_NOT_AUTHORISED`. Self-clearing, and therefore **not**
+  attention-worthy: `NOT_A_QUOTA_BLOCK`, `NOT_REQUESTED`, `RESET_TIME_MISSING` on
+  a run nobody asked to wait, `RESUME_DECISION_ABSENT` (the run met the quota
+  again after resuming — the task is parked correctly and a later invocation
+  judges it), and a post-wake `LIVE_OWNER_PRESENT`. Milestone: a wait that ended
+  in `COMPLETED`. **Scope:** `notify/attention.ts`, when the redesign happens.
 
 ### What V1-08 is not
 
@@ -3826,9 +3837,9 @@ scripts read it.
 
 | It may not | Enforced by |
 | --- | --- |
-| continue ordinary in-flight work | `run/run-driver.ts` — a reconciled `IMPLEMENTING` classifies `ATTENDED_ONLY` |
+| pick up in-flight work it did not itself resume | `run/run-driver.ts` — a reconciled `IMPLEMENTING` classifies `ATTENDED_ONLY` |
 | start a task | `run/lifecycle-driver.ts` — `startTask` is not reached under the grant, and the presence check runs before the auth preflight |
-| remove a stale lease | `run/unattended-resume.ts` — `recoverStaleLease` is fixed `false`; the CLI refuses the flag combination outright |
+| remove a stale lease | `run/lifecycle-driver.ts` — `mayRecoverStaleLease` refuses under the grant whatever is passed; `run/unattended-resume.ts` also fixes it `false`, and the CLI refuses the flag combination outright |
 | select a task | `cli/run-command.ts` — `--task` is required |
 | resume `BLOCKED_VERIFY`, `BLOCKED_AUTH`, `HUMAN_DECISION_REQUIRED`, `SCOPE_VIOLATION` or `RESUME_STATE_DIVERGED` | `core/resume-policy.ts` — `automaticResumeEligible` is false for all five |
 | refill a review budget | unchanged: an exhausted `maxReviewRounds` is `HUMAN_DECISION_REQUIRED`, which is not eligible |
@@ -3836,15 +3847,24 @@ scripts read it.
 The start refusal is at the **library boundary**, not in the CLI, so a caller
 holding the grant cannot bypass the command and start a task with it.
 
-**One narrow permission does travel with a resume**, and it is worth stating
-plainly. Once a run has performed the automatic resume itself, it continues
-driving the phase that resume entered — inside that one `runTask` call and no
-other. Without it the run would refuse the continuation its own resume just
+**The narrowing is on the way in, not on what happens afterwards.** Once a run
+has performed the automatic resume itself, it drives that task like any other
+run would: writer, verification, review, remediation, up to `--max-steps`. It is
+one `runTask` call and no other — the permission is a local variable that dies
+with the frame, and a *later* invocation meeting the same in-flight task is
+refused — but within that call it is not limited to the one phase the resume
+entered.
+
+Without that carry the run would refuse the continuation its own resume just
 authorised, having already spent `resumeFrom` and `reportedResetAt`: a
 self-clearing pause converted into an attended-only task with no work done,
-which is `V1-07-RR-B1`'s failure arriving one iteration later. The permission is
-a local variable that dies with the frame; a *later* invocation meeting the same
-in-flight task is refused.
+which is `V1-07-RR-B1`'s failure arriving one iteration later.
+
+An independent review of this slice found the trailer, this paragraph and two
+module comments all saying "the phase that resume entered", which describes only
+the first iteration after the write. The behaviour is the intended one; the
+wording was wrong, and is corrected here and in the operator report rather than
+the loop being cut short.
 
 ### The wait: a separate permission, above the lease
 

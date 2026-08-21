@@ -418,6 +418,32 @@ describe('the invocation grant is a closed vocabulary conjoined with the resume 
     }
   });
 
+  /**
+   * The `continuingOwnAutomaticResume` axis, which nothing asserted.
+   *
+   * A review pointed out that every cell above passes `false`, so the property
+   * "the carry belongs to one grant only" was an argument rather than a measured
+   * fact: hoisting `if (continuingOwnAutomaticResume) return PERMITTED;` above
+   * the switch survived the whole suite. It cannot be *observed* through the
+   * driver — a `NO_CONTINUATION` run is refused before any resume write can set
+   * the flag — which is exactly why it has to be pinned here instead.
+   */
+  it('lets only the automatic grant be carried by its own resume', () => {
+    for (const continuation of CONTINUATION_AUTHORITIES) {
+      // The carry is the automatic grant's alone.
+      expect(permitsContinuation('AUTOMATIC_RESUME_ONLY', continuation, true)).toEqual({
+        permitted: true,
+      });
+      // It grants nothing to an invocation that asked for no continuation.
+      expect(permitsContinuation('NO_CONTINUATION', continuation, true)).toEqual({
+        permitted: false,
+        refusal: 'ATTENDED_CONTINUATION_NOT_GRANTED',
+      });
+      // And it changes nothing for the attended grant, which was already through.
+      expect(permitsContinuation('ATTENDED', continuation, true)).toEqual({ permitted: true });
+    }
+  });
+
   it('keeps the attended refusal code it had before the type grew a member', () => {
     // Scripts read this code. `NO_CONTINUATION` is precisely what
     // `attendedContinuation: false` meant, so the wording must not have moved.
@@ -1198,6 +1224,85 @@ describe('everything the second attempt acts on is established after the wait', 
 
     expect(scene.preflight.checks()).toBe(scene.preflight.epochs());
   });
+
+  it('reports a quota block it created itself as parked, not as a defect', async () => {
+    // The shape a scheduled invocation actually meets: the reset had passed, the
+    // run resumed, it worked, and the writer hit the quota again. The block on
+    // record is one *this run* created, so `RunResult.resume` — taken at the top
+    // of that iteration — is a decision about the in-flight state the step
+    // blocked from, and carries no automatic-resume verdict.
+    //
+    // A review found this listed in the README as unreachable and reported to
+    // the operator as "a defect floor rather than an operator condition". It is
+    // neither. Nothing slept, the task is parked correctly, and a later
+    // invocation judges the new block.
+    const scene = await scenario({
+      resetAheadMs: -60_000,
+      agent: {
+        claude: () => usageLimitResult(),
+        codex: () => reviewResult(passingReview()),
+      },
+    });
+    const sleep = recordedSleep(scene.clock);
+
+    const result = await driveUnattendedAutomaticResume(scene.request(), scene.deps(sleep));
+
+    expect(result.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    expect(result.wait.disposition).toBe('RESUME_DECISION_ABSENT');
+    expect(sleep.calls).toEqual([]);
+    // The resume really happened: the writer ran, and a durable step landed.
+    expect(scene.agent.countFor('claude')).toBe(1);
+    expect(result.epochs[0]?.steps).toBeGreaterThan(0);
+    // And the report does not call an ordinary condition a defect.
+    const report = renderUnattendedResume(scene.started.repository, result);
+    expect(report).toContain('Wait         : RESUME_DECISION_ABSENT');
+    expect(report).not.toContain('defect');
+    expect(report).toContain('durably parked');
+  });
+
+  it('tells an unusable wait bound apart from a reset that is too far away', async () => {
+    // Two opposite instructions that shared one name until a review separated
+    // them: "raise the bound or come back later" and "that number is not usable
+    // at all". The report is rendered here, which is what the earlier
+    // codes-only assertions could not catch.
+    const scene = await scenario();
+
+    const unusable = await driveUnattendedAutomaticResume(
+      scene.request({ wait: { wait: true, maxWaitMs: Number.NaN } }),
+      scene.deps(),
+    );
+    const report = renderUnattendedResume(scene.started.repository, unusable);
+
+    expect(unusable.wait.disposition).toBe('WAIT_BOUND_UNUSABLE');
+    expect(report).toContain('Wait         : WAIT_BOUND_UNUSABLE');
+    // What names the actual cause is the reasons line, not the outcome
+    // sentence: one outcome has three producers, so its sentence lists all
+    // three and could not truthfully accuse any one of them. This assertion was
+    // first written as "the report does not mention --max-invocations", which
+    // would have been satisfied only by a sentence that lies to the other two
+    // producers.
+    expect(report).toContain('Wait reasons : MAX_WAIT_MS_INVALID');
+    // The disambiguating advice is the wait sentence, and it is about the right
+    // flag and does not tell the operator to raise a bound of NaN.
+    expect(report).toContain('The --max-wait-ms value is not a bound this build will sleep on');
+    expect(report).not.toContain('Raise the bound, or invoke again after the reset');
+  });
+
+  it('names --max-wait-ms in the budget sentence only when that is what failed', async () => {
+    const scene = await scenario();
+
+    const budget = await driveUnattendedAutomaticResume(
+      scene.request({ maxInvocations: 1 }),
+      scene.deps(),
+    );
+    const report = renderUnattendedResume(scene.started.repository, budget);
+
+    expect(budget.wait.disposition).toBe('INVOCATION_BUDGET_SPENT');
+    expect(report).toContain('MAX_INVOCATIONS_TOO_LOW_FOR_WAIT');
+    // One shared outcome, two producers, and the sentence has to hold for both:
+    // it names all three possibilities and the reasons line says which.
+    expect(report).toContain('A bound this run was given cannot be used');
+  });
 });
 
 /* ═══════════════ 6. stale recovery is not part of this grant ════════════ */
@@ -1230,6 +1335,82 @@ describe('the automatic grant carries no destructive lease permission', () => {
     expect(readFileSync(path, 'utf8')).toBe(before);
     expect(sleep.calls).toEqual([]);
     expectNothingExecuted(scene);
+  });
+
+  it('refuses a recovery permission at the driver boundary, not only in its callers', async () => {
+    // `driveUnattendedAutomaticResume` passes `recoverStaleLease: false` and the
+    // CLI refuses the flag combination, so no caller reaches this with both set.
+    // A review pointed out that made the property an argument about callers
+    // rather than one the layer that performs the removal holds — so it is asked
+    // of `driveLifecycle` directly, with the permission explicitly on.
+    const scene = await scenario();
+    const path = leasePathOf(scene.started.repository);
+    const evidence = leaseFor(scene.started.repository);
+    const document = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    releaseTestLeases();
+    releaseRepositoryExecutionLease(evidence);
+    writeFileSync(
+      path,
+      `${JSON.stringify({ ...document, ownerPid: deadProcessId() }, null, 2)}
+`,
+      'utf8',
+    );
+    const before = readFileSync(path, 'utf8');
+
+    const result = await driveLifecycle(
+      {
+        repository: scene.started.repository,
+        taskId: TASK_ID,
+        continuationGrant: 'AUTOMATIC_RESUME_ONLY',
+        // Explicitly granted, and it must still be refused.
+        recoverStaleLease: true,
+        maxSteps: 8,
+        maxInvocations: 1,
+      },
+      scene.lifecycleDeps(),
+    );
+
+    expect(result.outcome).toBe('STALE_LEASE_PRESENT');
+    expect(result.recovery).toBeNull();
+    expect(result.reasonCodes).toContain('STALE_RECOVERY_NOT_PERMITTED');
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expectNothingExecuted(scene);
+  });
+
+  it('still lets the attended grant recover, so the refusal above is the grant', async () => {
+    // The control. Without it, "nothing was removed" could be a fixture whose
+    // lease no recovery would ever have accepted — which is in fact true here
+    // (no writer-launch ledger, so the predicate refuses) — and the difference
+    // that matters is *where* the two runs stop. Under the automatic grant the
+    // recovery is never attempted at all (`recovery === null`); under the
+    // attended one it is attempted and refuses on its own proof.
+    const scene = await scenario();
+    const path = leasePathOf(scene.started.repository);
+    const evidence = leaseFor(scene.started.repository);
+    const document = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    releaseTestLeases();
+    releaseRepositoryExecutionLease(evidence);
+    writeFileSync(
+      path,
+      `${JSON.stringify({ ...document, ownerPid: deadProcessId() }, null, 2)}
+`,
+      'utf8',
+    );
+
+    const result = await driveLifecycle(
+      {
+        repository: scene.started.repository,
+        taskId: TASK_ID,
+        continuationGrant: 'ATTENDED',
+        recoverStaleLease: true,
+        maxSteps: 8,
+        maxInvocations: 1,
+      },
+      scene.lifecycleDeps(),
+    );
+
+    expect(result.recovery).not.toBeNull();
+    expect(result.outcome).toBe('RECOVERY_UNSAFE');
   });
 });
 
