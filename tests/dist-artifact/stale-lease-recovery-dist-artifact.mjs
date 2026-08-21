@@ -15,9 +15,9 @@
  *
  * What that suite still does not do is let a second operating-system process
  * ever **hold** the lease. It starts one — `deadProcessId()` spawns a child and
- * waits for it, which is where the genuinely dead pid comes from — but the owner
- * named in every fixture is the vitest worker with the pid overwritten
- * afterwards. So the chain from a real acquisition, through the death of the
+ * waits for it, which is where the genuinely dead pid comes from — but that child
+ * never touches the lease, and the owner named in every *stale* fixture is the
+ * vitest worker with the pid overwritten afterwards. So the chain from a real acquisition, through the death of the
  * process that made it, to a real removal is never travelled end to end by one
  * owner. It also runs against `src`, not against what is shipped.
  *

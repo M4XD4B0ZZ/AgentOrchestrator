@@ -289,7 +289,11 @@ export const STALE_RECOVERY_OUTCOMES: Readonly<Record<StaleLeaseRecoveryResult['
       '  `.breaking-` - detached, unreadable, and deliberately not deleted - and one of\n' +
       '  those two also leaves the lease name free. Nothing was destroyed. Run\n' +
       '  `agent-loop lease status` before anything else runs against this repository, and\n' +
-      '  look inside the Git directory if the end state names a quarantine.',
+      '  look inside the Git directory unless the end state is DETACH_FAILED or\n' +
+      '  UNIDENTIFIABLE - those two are the ones that left no file behind. (This said\n' +
+      '  "if the end state names a quarantine", which is a rule an operator can follow\n' +
+      '  literally and be wrong: UNIDENTIFIABLE_AND_UNOWNED does not contain the word and\n' +
+      '  is one of the two with a file to inspect.)',
   });
 
 /** The `lease recover` report. */

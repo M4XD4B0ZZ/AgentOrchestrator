@@ -6211,24 +6211,32 @@ seam, the predicate and the operator vocabulary, and eight mutants were run
 against it rather than described, each a single edit to `src`:
 
 ```text
-the pending mark is never written                    24 cases red
+the pending mark is never written                    27 cases red
 slice 4's record is treated as sufficient             3
 the removal stops binding to the object it proved     1
-an unreadable history reads as contained              3
+an unreadable history reads as contained              4
 the seam stops refusing an unrecordable launch        1
 a supplied liveness opinion may permit                3
 a displaced successor is reported as a clean abort    1
 an incomplete history is reported as an absent one    1
 ```
 
+Re-measured against the file as it stands, not carried forward. Two of those
+numbers had drifted: adding a case that feeds the reader a malformed ledger also
+kills a mutant three rows above it, and a count beside code with nothing keeping
+the two in step is the defect `VerifiedRemoval`'s own docstring polices. They are
+a property of one commit's test file, and any case added to it can move them.
+
 The last three were added after review rounds found them unpinned, and two of
 them were live defects rather than hypotheticals: a supplied liveness answer
 could remove a living owner's lease (see "no override" above), and a successor
 displaced into a quarantine file was reported to the operator as a clean abort.
 The seventh is pinned against a **table** rather than against a reachable state:
-two of `VerifiedRemoval`'s nine members need a restore to fail, which no caller
-of `recoverStaleLease` can arrange, so the mapping is asserted by value where the
-arm cannot be produced.
+the two members that report `LEASE_DISPLACED` need a failed restore, which no
+caller of `recoverStaleLease` can arrange, so the mapping is asserted by value
+where the arm cannot be produced. (Four of the nine need a failed restore, not
+two — this sentence carried the count that was corrected in the source and not
+here.)
 
 Two limits in the format were caught by review rather than by a test, and are
 recorded because the second was a silent one. The entry cap was **dead**: a
@@ -6246,8 +6254,9 @@ format rather than by its caller.
 Its stale leases are built by acquiring for real, driving real launches, and then
 rewriting the owner pid to one whose process has exited — genuinely dead, and the
 real `osProcessLiveness` is what confirms it. What that file never does is let a
-second OS process **hold** the lease (it starts one, which is where the dead pid
-comes from), or run against what is shipped.
+second OS process **hold** the lease — it starts one, which is where the dead pid
+comes from, and that child never touches the lease — or run against what is
+shipped.
 `npm run test:dist-stale-recovery` does both: a separate process acquires the
 lease through the built artefact and exits still holding it. Its
 load-bearing case is the **negative control** — an owner kept alive must be

@@ -3610,15 +3610,23 @@ export function recoverStaleLease(
  * ── Why this is a table and not the `switch` it replaced ───────────────────
  *
  * Because the `switch` could not be tested. The two members this table sends to
- * {@link LEASE_DISPLACED} — a *readable* record detached and not put back — need a
- * restore to fail, which needs a filesystem that refuses both `link` and an
- * exclusive create at the freed name. (Four of the nine need that, not two; the
- * other pair are the `UNIDENTIFIABLE_*` ones, where the detached bytes could not
- * be read either, and they answer {@link RECOVERY_FAILED} because the removal
- * genuinely did not complete. This sentence said "two … the ones where a record
- * was detached and could not be put back", which is a count and a description
- * that disagree — the defect this file records against itself three paragraphs
- * up.) `tests/v2-07lr-remediation.test.ts`
+ * {@link LEASE_DISPLACED} — a *readable* record detached and not put back — need
+ * a **failed restore**, which `putBack` reaches either from an `EEXIST` on the
+ * restoring `link` (somebody squatted the freed name) or from the exclusive
+ * create it falls back to failing as well.
+ *
+ * Four of the nine need a failed restore, not two: the other pair are the
+ * `UNIDENTIFIABLE_*` ones, where the detached bytes could not be read either — so
+ * `putBack` never reaches its fallback at all, because it returns
+ * `occupancyOf(leasePath)` while `bytes` is `null` — and they answer
+ * {@link RECOVERY_FAILED}, because there the removal genuinely did not complete.
+ *
+ * (This paragraph said "two … the ones where a record was detached and could not
+ * be put back", which is a count and a description that disagree — the defect
+ * {@link VerifiedRemoval}'s own docstring records against this file. Correcting
+ * the count then left the mechanism clause claiming both a refused `link` *and* a
+ * refused exclusive create were needed, which is false for two of the four and
+ * contradicted the very test this paragraph cites.) `tests/v2-07lr-remediation.test.ts`
  * produces them by squatting the freed name *from inside the predicate*, and
  * this function's predicate is not a caller's to hook. So no case can reach
  * those two arms through `recoverStaleLease`, and a review demonstrated the

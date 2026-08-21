@@ -26,14 +26,20 @@
  * Eight mutants are named in the slice's report and each is killed here rather
  * than argued about, each a single edit to `src`:
  *
- *     the pending mark is never written                    24 cases red
+ *     the pending mark is never written                    27 cases red
  *     slice 4's record is treated as sufficient             3
  *     the removal stops binding to the object it proved     1
- *     an unreadable history reads as contained              3
+ *     an unreadable history reads as contained              4
  *     the seam stops refusing an unrecordable launch        1
  *     a supplied liveness opinion may permit                3
  *     a displaced successor reads as a clean abort          1
  *     an incomplete history reads as an absent one          1
+ *
+ * Re-measured against this file as it stands rather than carried forward: two of
+ * them had already drifted, because a case added for one mutant kills others. A
+ * count sitting beside the code with nothing keeping the two in step is the
+ * defect this repository polices elsewhere, so these are a property of one
+ * commit and any case added below can move them.
  *
  * The last three were added after review rounds found them unpinned, and two were
  * live defects rather than hypotheticals. Every case behind them asserts an
@@ -1593,11 +1599,6 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
     // on it later. This takes a repository and proves everything itself, inside
     // the call that removes.
     //
-    // Pinned by what the parameter *can* do rather than by counting parameters:
-    // an earlier version asserted `recoverStaleLease.length === 1`, which
-    // `Function.length` satisfies for any number of optional parameters — so it
-    // was green for the very seam it was written to exclude, and stayed green
-    // while that seam could remove a living owner's lease.
     // Two pins, and they are pinned by two different gates. Saying which is
     // which is the point: an earlier version asserted `recoverStaleLease.length
     // === 1`, which `Function.length` satisfies for any number of *optional*
@@ -1797,6 +1798,16 @@ describe('the recovery vocabulary says what the code does', () => {
     expect(rendered).toContain(STALE_RECOVERY_OUTCOMES.RECOVERY_UNSAFE);
     expect(rendered).toContain(STALE_RECOVERY_SENTENCES.OWNER_RUNNING);
     releaseRepositoryExecutionLease(evidence);
+
+    // And the other label. `detail` is unconditional, so a success would read
+    // `Reason : REMOVED` - a fault's word over a success - which is why the line
+    // switches. Deleting the ternary left this branch rendered by nothing.
+    const recovered = repositoryFixture();
+    staleLease(recovered, (owner) => containedLaunch(recovered, owner));
+    const success = renderLeaseRecoveryResult(recoverStaleLease(recovered));
+    expect(success).toContain('Recovery     : RECOVERED');
+    expect(success).toContain('End state    : REMOVED');
+    expect(success).not.toContain('Reason');
   });
 
   it('names no command that the shipped program does not register', async () => {
