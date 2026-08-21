@@ -69,6 +69,8 @@ import { formatSafeError } from '../core/safe-error.js';
 import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
+  type LeaseAcquireSuccess,
+  type LeaseReleaseResult,
 } from '../lease/execution-lease.js';
 import {
   createOperatorNotifier,
@@ -90,7 +92,7 @@ import {
   renderNotifierState,
 } from './render-block-run.js';
 import { line } from './render-attended-run.js';
-import { renderLeaseRefusal } from './render-lease.js';
+import { renderLeaseRefusal, renderLeaseRelease } from './render-lease.js';
 import { DEFAULT_MAX_STEPS, onceOnlyPreflight } from './run-command.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
@@ -98,6 +100,7 @@ import {
   EXIT_RUN_REFUSED,
   EXIT_RUN_UNEXPECTED,
   exitCodeForBlockRun,
+  exitCodeWithLeaseRelease,
   type CliExitCode,
 } from './run-exit-codes.js';
 
@@ -258,6 +261,105 @@ function reportFrozenPlan(repository: ResolvedRepository, options: BlockOptions)
   return EXIT_RUN_OK;
 }
 
+/**
+ * Everything `block --attended` does while it is the repository's writer.
+ *
+ * Extracted from the command's `try` for one reason, and it is not tidiness: a
+ * `return` inside a `try` runs the `finally` and then leaves the *function*, so
+ * while the five refusals below lived there, nothing could run after the lease
+ * was given back. That is precisely why the release result was discarded —
+ * there was no code left to hand it to. Here every path ends in a value, the
+ * caller releases, and the caller then still has both facts in its hands.
+ *
+ * It reports the block run itself, including its own exit code, and knows
+ * nothing about the lease it is running under: giving the lease back is the
+ * caller's job, on every path, and a function that could both refuse and release
+ * would be a second place for that to be forgotten.
+ */
+async function runBlockUnderLease(
+  repository: ResolvedRepository,
+  options: BlockOptions,
+  maxSteps: number,
+  lease: LeaseAcquireSuccess['evidence'],
+  seams: BlockCommandSeams,
+): Promise<{ readonly exitCode: CliExitCode; readonly outcome: AttendedBlockResult | null }> {
+  // Everything below is under the lease, including the input refusals. A
+  // plan frozen before this line could be edited by a legitimate writer
+  // between the reading and the acquisition, and this invocation would
+  // then run a block frozen on a roadmap it was never the writer of.
+  const planned = planNextTask(repository);
+  if (!planned.ok) {
+    report([line('Failure', `${planned.code} - ${planned.detail}`)]);
+    return { exitCode: EXIT_RUN_INPUT_UNUSABLE, outcome: null };
+  }
+
+  const projected = projectBlockDependencies(planned.graph, options.tasks);
+  if (!projected.ok) {
+    report([line('Failure', `${projected.code} - ${projected.taskId}`)]);
+    return { exitCode: EXIT_RUN_INPUT_UNUSABLE, outcome: null };
+  }
+
+  const defined = defineBlock(options.block, options.tasks, projected.dependencies);
+  if (!defined.ok) {
+    report([line('Failure', defined.code)]);
+    return { exitCode: EXIT_RUN_INPUT_UNUSABLE, outcome: null };
+  }
+
+  // Whether every member has a base to be built on, asked before the run
+  // opens. A member with two unordered predecessors cannot be given one,
+  // and refusing the *whole block* here rather than skipping that member
+  // later is the difference between unsupported input and a run that
+  // improvised an ordering.
+  const shape = chainShapeOf(defined.definition.dependencies);
+  if (!shape.ok) {
+    report([line('Failure', `${shape.code} (${shape.taskId})`), `  ${CHAIN_SHAPE_SENTENCE}`]);
+    return { exitCode: EXIT_RUN_INPUT_UNUSABLE, outcome: null };
+  }
+
+  // The block base, read once, under the lease, from the same instant as
+  // the plan. Not re-read per task: a default branch that moves mid-run
+  // would otherwise give two roots two different bases, and "the commit
+  // this block was frozen on" would stop having one answer — which is
+  // exactly what the chain's ancestry proof and the scope authority both
+  // rest on.
+  const base = await runGitCommand(repository.root, [
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    '--end-of-options',
+    localBranchRef(repository.defaultBranch),
+  ]);
+  if (base.outcome !== 'OK' || !GIT_OBJECT_NAME_PATTERN.test(base.stdout)) {
+    report([line('Failure', 'BLOCK_BASE_UNRESOLVED'), `  ${BLOCK_BASE_UNRESOLVED_SENTENCE}`]);
+    return { exitCode: EXIT_RUN_REFUSED, outcome: null };
+  }
+
+  const outcome = await runAttendedBlock(
+    {
+      repository,
+      definition: defined.definition,
+      runId: options.run,
+      lease,
+      maxStepsPerTask: maxSteps,
+      // The same `planned` the projection came from - handed on whole, so
+      // the frozen relation, the eligibility filter and every task's
+      // start gate are one reading of the roadmap at one instant, taken
+      // under this lease.
+      planning: planned,
+      blockBaseCommit: base.stdout,
+    },
+    {
+      now: () => new Date().toISOString(),
+      git: runGitCommand,
+      authPreflight: onceOnlyPreflight(seams.authPreflight),
+      ...(seams.agent !== undefined ? { agent: seams.agent } : {}),
+      ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
+    },
+  );
+  process.stdout.write(renderBlockRun(repository, outcome));
+  return { exitCode: exitCodeForBlockRun(outcome), outcome };
+}
+
 export function registerBlockCommand(program: Command, seams: BlockCommandSeams = {}): void {
   program
     .command('block')
@@ -292,6 +394,36 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
       `Bound on durable steps for one task's driver call (default ${String(DEFAULT_MAX_STEPS)}).`,
     )
     .action(async (options: BlockOptions) => {
+      // Declared above the `try` so the `catch` can still see it. A thrown
+      // operation and a lease that did not come back are two separate facts, and
+      // an operator handed only the safe error text would be told the first and
+      // left to discover the second from the next run's refusal.
+      let leaseRelease: LeaseReleaseResult | null = null;
+      let leaseReleaseAttempted = false;
+      let leaseReleaseReported = false;
+
+      /**
+       * Print the release report, at most once, and only once one is owed.
+       *
+       * Two flags rather than a null check, because `null` has two meanings here
+       * and only one of them is reportable: no lease was ever taken - every
+       * refusal above the lease line - versus a release that was attempted and
+       * threw instead of answering. The first must print nothing, because a
+       * report about an authority this invocation never held is a fiction; the
+       * second must print, because it is the one case where a record is provably
+       * still in the repository.
+       *
+       * `leaseReleaseAttempted` is set *before* the call for that reason: it
+       * records the attempt, not the answer. `leaseReleaseReported` is set
+       * *after* the write, so a write that failed can still be retried from the
+       * `catch` rather than being marked delivered.
+       */
+      const reportLeaseRelease = (): void => {
+        if (!leaseReleaseAttempted || leaseReleaseReported) return;
+        process.stdout.write(renderLeaseRelease('Release', leaseRelease));
+        leaseReleaseReported = true;
+      };
+
       try {
         const resolution = await resolveRepository({ repositoryPath: options.repository });
         if (!resolution.ok) {
@@ -357,98 +489,61 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
 
         // Held outside the `try` so the notification can be sent after the lease
         // has been given back. `null` means no run happened — every refusal
-        // below produces no result, and there is nothing to report about a run
-        // that never opened.
+        // inside `runBlockUnderLease` produces no result, and there is nothing to
+        // report about a run that never opened.
         let outcome: AttendedBlockResult | null = null;
 
+        // What the block itself came to, kept apart from what the release came
+        // to. The initial value is the unexpected code rather than the nominal
+        // one on purpose: if the call below throws, this variable is never
+        // assigned, and a default of `EXIT_RUN_OK` would be this command
+        // volunteering "nothing went wrong" about a path that never returned.
+        let primary: CliExitCode = EXIT_RUN_UNEXPECTED;
+
         try {
-          // Everything below is under the lease, including the input refusals. A
-          // plan frozen before this line could be edited by a legitimate writer
-          // between the reading and the acquisition, and this invocation would
-          // then run a block frozen on a roadmap it was never the writer of.
-          const planned = planNextTask(repository);
-          if (!planned.ok) {
-            report([line('Failure', `${planned.code} - ${planned.detail}`)]);
-            process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
-            return;
-          }
-
-          const projected = projectBlockDependencies(planned.graph, options.tasks);
-          if (!projected.ok) {
-            report([line('Failure', `${projected.code} - ${projected.taskId}`)]);
-            process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
-            return;
-          }
-
-          const defined = defineBlock(options.block, options.tasks, projected.dependencies);
-          if (!defined.ok) {
-            report([line('Failure', defined.code)]);
-            process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
-            return;
-          }
-
-          // Whether every member has a base to be built on, asked before the run
-          // opens. A member with two unordered predecessors cannot be given one,
-          // and refusing the *whole block* here rather than skipping that member
-          // later is the difference between unsupported input and a run that
-          // improvised an ordering.
-          const shape = chainShapeOf(defined.definition.dependencies);
-          if (!shape.ok) {
-            report([line('Failure', `${shape.code} (${shape.taskId})`), `  ${CHAIN_SHAPE_SENTENCE}`]);
-            process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
-            return;
-          }
-
-          // The block base, read once, under the lease, from the same instant as
-          // the plan. Not re-read per task: a default branch that moves mid-run
-          // would otherwise give two roots two different bases, and "the commit
-          // this block was frozen on" would stop having one answer — which is
-          // exactly what the chain's ancestry proof and the scope authority both
-          // rest on.
-          const base = await runGitCommand(repository.root, [
-            'rev-parse',
-            '--verify',
-            '--quiet',
-            '--end-of-options',
-            localBranchRef(repository.defaultBranch),
-          ]);
-          if (base.outcome !== 'OK' || !GIT_OBJECT_NAME_PATTERN.test(base.stdout)) {
-            report([line('Failure', 'BLOCK_BASE_UNRESOLVED'), `  ${BLOCK_BASE_UNRESOLVED_SENTENCE}`]);
-            process.exitCode = EXIT_RUN_REFUSED;
-            return;
-          }
-
-          outcome = await runAttendedBlock(
-            {
-              repository,
-              definition: defined.definition,
-              runId: options.run,
-              lease: acquired.evidence,
-              maxStepsPerTask: maxSteps,
-              // The same `planned` the projection came from - handed on whole, so
-              // the frozen relation, the eligibility filter and every task's
-              // start gate are one reading of the roadmap at one instant, taken
-              // under this lease.
-              planning: planned,
-              blockBaseCommit: base.stdout,
-            },
-            {
-              now: () => new Date().toISOString(),
-              git: runGitCommand,
-              authPreflight: onceOnlyPreflight(seams.authPreflight),
-              ...(seams.agent !== undefined ? { agent: seams.agent } : {}),
-              ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
-            },
+          const under = await runBlockUnderLease(
+            repository,
+            options,
+            maxSteps,
+            acquired.evidence,
+            seams,
           );
-          process.stdout.write(renderBlockRun(repository, outcome));
-          process.exitCode = exitCodeForBlockRun(outcome);
+          outcome = under.outcome;
+          primary = under.exitCode;
         } finally {
-          // Released on every path out, including a throw and including the
-          // input refusals above. The lease is taken once for the whole block
+          // Released on every path out, including a throw and including the five
+          // refusals inside - four about the input, one about the repository's own
+          // base commit. The lease is taken once for the whole block
           // run and given back once - never per task, which would leave a window
           // between tasks that a second writer fits into perfectly.
-          releaseRepositoryExecutionLease(acquired.evidence);
+          //
+          // The result is now kept. Until V3-07 this call stood here as a bare
+          // expression: the lease could come back quarantined, displaced or not
+          // at all, and the command reported the block's own verdict and exited
+          // on it as though the repository had been handed back cleanly.
+          //
+          // Wrapped, because a `finally` that throws **replaces** the exception
+          // that entered it - so an exception here would hand the operator the
+          // release's failure in place of the one that actually stopped the run.
+          // `releaseRepositoryExecutionLease` refuses rather than throws for
+          // every value this command can give it, which `tests/v3-07-lease-
+          // release-observability.test.ts` pins; this branch is therefore
+          // unreached, and it is here so that the guarantee is enforced where it
+          // is depended on rather than only stated where it is produced. Leaving
+          // `leaseRelease` null keeps the outcome closed: nothing is reported as
+          // released, and the exit code below cannot be nominal.
+          try {
+            leaseReleaseAttempted = true;
+            leaseRelease = releaseRepositoryExecutionLease(acquired.evidence);
+          } catch (releaseError: unknown) {
+            process.stderr.write(
+              `agent-loop block: giving the execution lease back failed. ${formatSafeError(releaseError)}\n`,
+            );
+          }
         }
+
+        reportLeaseRelease();
+        process.exitCode = exitCodeWithLeaseRelease(primary, leaseRelease);
 
         // After the lease, deliberately. A notification is not a repository
         // effect and needs no authority over one, and holding the repository's
@@ -469,7 +564,18 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
         // routinely quote CLI output and filesystem paths (AO-002). Fail closed
         // through the central safe formatter.
         process.stderr.write(`agent-loop block: ${formatSafeError(error)}\n`);
+        // The original failure keeps the exit code. A release that also failed
+        // is reported above and does not relabel this as a durable-state
+        // condition - `exitCodeWithLeaseRelease` makes the same choice, and this
+        // path states it rather than routing through it, because there is no
+        // primary code here to combine with: the operation never returned one.
         process.exitCode = EXIT_RUN_UNEXPECTED;
+        // The release last, and after the exit code is set. On a throw under the
+        // lease the release still happened, and its result is the more
+        // actionable of the two facts - but it is the one written to the stream
+        // that has already refused once on the path that gets here through a
+        // failed write, so nothing the primary failure needs may sit behind it.
+        reportLeaseRelease();
       }
     });
 }

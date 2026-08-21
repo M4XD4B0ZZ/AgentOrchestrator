@@ -31,6 +31,7 @@
 import type { BlockStopReason } from '../block/block-ledger.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
+import type { LeaseReleaseResult } from '../lease/execution-lease.js';
 import type { LifecycleOutcome } from '../run/lifecycle-driver.js';
 import type { RunOutcome } from '../run/run-driver.js';
 import type { RunPlanConclusion } from '../run/run-plan.js';
@@ -423,4 +424,40 @@ export function exitCodeForLifecycleRun(result: {
     return exitCodeForStartOutcome(result.start.outcome);
   }
   return LIFECYCLE_EXIT_CODES[result.outcome];
+}
+
+/**
+ * The exit code a command may keep once it has tried to give the lease back.
+ *
+ * The precedence rule, and it is a rule about *authority*, not about severity:
+ * an invocation that took this repository's only writer slot and cannot prove it
+ * gave the slot back has left something behind, and it may not exit nominal
+ * however well its own work went. `RELEASED` is the only proof there is - not an
+ * absent lease file, not a successful primary operation, not the command having
+ * reached its `finally`, and not another process apparently owning the
+ * repository. `null` means the release was attempted and produced nothing to
+ * read, which proves the same amount as a failure: nothing.
+ *
+ * The primary result is **not** rewritten. This function decides one number, and
+ * every caller prints the primary outcome and the release code as two separate
+ * facts beside it, because "the block completed and the lease is stuck" and "the
+ * block failed" are two different things to be told.
+ *
+ * **No primary code is exempt**, including `EXIT_RUN_UNEXPECTED`. An earlier
+ * version of this function let a primary 1 through on the argument that an
+ * unexpected failure is the more serious fact - which is true of a *thrown*
+ * operation, and a thrown operation never reaches this function: both commands'
+ * `catch` blocks set code 1 directly, and say so where they set it. The only
+ * caller that can hand this function a 1 is `exitCodeForBlockRun`, for a block
+ * that ended without a stop reason - a defect floor in that module. In that
+ * state the block really ran, the lease really is stuck, and answering 1
+ * ("something is wrong inside the tool") instead of 3 ("go and look at `lease
+ * status`") is precisely the substitution this slice exists to prevent, on the
+ * one code the exemption covered.
+ */
+export function exitCodeWithLeaseRelease(
+  primary: CliExitCode,
+  release: LeaseReleaseResult | null,
+): CliExitCode {
+  return release !== null && release.code === 'RELEASED' ? primary : EXIT_RUN_NEEDS_OPERATOR;
 }

@@ -24,6 +24,8 @@
 import type {
   LeaseAcquireFailureCode,
   LeaseInspection,
+  LeaseReleaseCode,
+  LeaseReleaseResult,
   StaleLeaseRecoveryAssessment,
   StaleLeaseRecoveryResult,
   StaleRecoveryRefusal,
@@ -427,3 +429,116 @@ export function renderLeaseRefusal(code: LeaseAcquireFailureCode): string {
   return `${['', line('Lease', code), `  ${LEASE_ACQUIRE_SENTENCES[code]}`, ''].join('\n')}\n`;
 }
 
+
+/**
+ * One static sentence per release code. Closed, total by type, ASCII only.
+ *
+ * Written once because three commands report the same fact — `run --attended`,
+ * `block --attended` and `release --attended` all take the repository's one
+ * writer slot and all have to give it back — and an operator reading two of
+ * them should not have to work out whether two different sentences describe two
+ * different conditions. They do not: there is one release contract, and this is
+ * its vocabulary.
+ *
+ * Keyed on the **code**, not on the code-and-detail pair — which constrains what
+ * a sentence may say. `NOT_OWNER` is produced from three different removal end
+ * states and `LEASE_REMOVE_FAILED` from four, and those states differ in the two
+ * facts an operator most wants: whether a record was left in quarantine, and
+ * whether anything holds the lease name afterwards. `execution-lease.ts` records
+ * a review that reproduced the harm of collapsing exactly those: an operator was
+ * told nothing had been moved about a state in which a writer is displaced and a
+ * file is sitting in `.git`.
+ *
+ * So the sentences below say only what is true of **every** producer of their
+ * code, and point at the token on the line above for the part that varies. A
+ * sentence naming the on-disk outcome would be right for one producer and wrong
+ * for the others, which is worse than saying less.
+ *
+ * The word "reason" appears in none of them on purpose: the dist harness in
+ * `tests/dist-artifact/notification-egress-dist-artifact.mjs` scrapes block's
+ * stdout with `/reason (\S+)/`, and a sentence printed after the run report that
+ * happened to contain it would answer that scrape with prose.
+ */
+export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>> = Object.freeze({
+  RELEASED:
+    'The execution lease was given back. Nothing of this invocation is left holding this\n' +
+    '  repository, and the next run may take its own lease normally.',
+  EVIDENCE_INVALID:
+    'This invocation could not prove which lease it was holding, so it removed nothing. That\n' +
+    '  is a defect in this build rather than a condition of the repository, and a lease\n' +
+    '  record may still be present. Run `agent-loop lease status` to see what is there.',
+  LEASE_ABSENT:
+    'There was no lease left to give back: the record this invocation took is already gone,\n' +
+    '  and something other than this invocation removed it. Nothing is left behind, but this\n' +
+    '  work was not protected for the whole of its life - a second writer could have been\n' +
+    '  admitted while it was still running. Check the repository before trusting the result.',
+  NOT_OWNER:
+    'What is at the lease name at the end is not the record this invocation took, so this\n' +
+    '  invocation removed nothing of its own. It may be a successor lease, or it may be a\n' +
+    '  record too damaged to identify - this build does not tell those apart here. The token\n' +
+    '  on the line above says whether a detached copy was left in quarantine, and whether the\n' +
+    '  lease name ended up held by anybody at all. Run `agent-loop lease status` before the\n' +
+    '  next run.',
+  LEASE_UNREADABLE:
+    'The lease record could not be read at the end, so nothing was removed. Something is\n' +
+    '  present in this repository that this build cannot identify. Run `agent-loop lease\n' +
+    '  status`, and resolve what is there by hand before the next run.',
+  LEASE_REMOVE_FAILED:
+    'The lease was not fully removed. The token on the line above says how far the removal\n' +
+    '  got - a quarantined record is a detached copy nothing is reading, and an unowned\n' +
+    '  repository is one no lease is protecting, so what is left may block the next run or\n' +
+    '  may fail to protect it. Run `agent-loop lease status`, and clear what is there by hand\n' +
+    '  before the next run.',
+});
+
+/**
+ * The code printed when the release produced no answer at all.
+ *
+ * Not a member of `LeaseReleaseCode`, and it may not be: that union is the
+ * codomain of `releaseRepositoryExecutionLease`, and this is the state of having
+ * no value from it — the release threw, and both commands' `finally` contains
+ * the throw rather than letting it replace the exception that entered.
+ *
+ * It exists because the alternative is printing nothing, and an absent line is
+ * the one thing this report may never be: "the release was not reported" and
+ * "the release was fine" would then look identical from the console, which is
+ * the confusion this whole slice removes.
+ */
+export const LEASE_RELEASE_UNREPORTED = 'RELEASE_NOT_REPORTED';
+
+const LEASE_RELEASE_UNREPORTED_SENTENCE =
+  'Giving the execution lease back failed with an error rather than an answer, so what is in\n' +
+  '  this repository now is unknown to this invocation. Assume a lease record is still there.\n' +
+  '  Run `agent-loop lease status` before the next run. The error itself is on the standard\n' +
+  '  error stream, in the safe form this build prints exceptions in.';
+
+/**
+ * The one line every command prints for its execution-lease release.
+ *
+ * The label is a parameter and the rest is not. `run --attended` has printed
+ * `Release` since V3-06 and keeps it; `block --attended` uses the same word,
+ * because a block has no other release; `release --attended` uses `Lease`,
+ * because in *that* report `Release` already means the task workspace and
+ * `Outcome` already carries its verdict. What may not differ between the three
+ * is the code, the detail and their spelling, which is why they are here and the
+ * label is not.
+ */
+export function leaseReleaseLine(label: string, result: LeaseReleaseResult): string {
+  return line(label, result.detail !== null ? `${result.code}  (${result.detail})` : result.code);
+}
+
+/**
+ * The report a command prints about giving the lease back.
+ *
+ * Printed on **every** attended path that acquired a lease: the successful one,
+ * the refusals, and the one where the release itself threw and produced nothing
+ * — which is what `null` renders, and which is the case that would otherwise
+ * print no line at all on the one occasion the lease is provably still there.
+ */
+export function renderLeaseRelease(label: string, result: LeaseReleaseResult | null): string {
+  const body =
+    result === null
+      ? [line(label, LEASE_RELEASE_UNREPORTED), `  ${LEASE_RELEASE_UNREPORTED_SENTENCE}`]
+      : [leaseReleaseLine(label, result), `  ${LEASE_RELEASE_SENTENCES[result.code]}`];
+  return `${['', ...body, ''].join('\n')}\n`;
+}
