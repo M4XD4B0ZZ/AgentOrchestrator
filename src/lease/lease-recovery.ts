@@ -43,19 +43,57 @@
  * round on the same surface. A contract that requires a primitive which does not
  * exist is not repaired by asking harder.
  *
- * So: **no break, no `--force`, no environment variable, no API back door.** A
- * later recovery is a different design — quarantine-and-report, which never
- * unlinks and takes its second confirmation against a quarantine name only that
- * call knows — and it is a product decision of its own, not a fifth patch
- * wearing this one's name.
+ * So: **no break, no `--force`, no environment variable, no API back door.** The
+ * operation described above does not exist in this build and is not coming back.
  *
- * ── What an operator gets instead ──────────────────────────────────────────
+ * ── V3 slice 5 ships a recovery, and it is not that operation ──────────────
  *
- * The truth about the lease path, stated precisely, and the fact that clearing it
- * is outside what this build will do for them. {@link assessLeaseRecovery}
- * classifies; it authorises nothing, because there is now nothing to authorise.
- * Liveness keeps the rule it has everywhere else: **it may refuse and it may
- * never permit.**
+ * `recoverStaleLease`, in `execution-lease.ts`, removes a stale lease. Read the
+ * paragraph above before concluding the withdrawal was reversed, because the two
+ * differ where the withdrawal happened rather than in how carefully they are
+ * written:
+ *
+ *  - **the break's hardest case is still refused.** The zero-byte crash artefact
+ *    has no nonce, so there is nothing to bind a removal to; the new predicate
+ *    requires a *parsed* lease document and refuses that artefact as
+ *    `LEASE_UNPARSEABLE`, permanently. Slice 5 recovers the case it can prove and
+ *    declines the case that defeated six reviews, rather than covering both with
+ *    one authorisation;
+ *  - **nothing is minted, shown, and acted on later.** The break's authority was
+ *    a token an operator carried across a window. The new one has no window: the
+ *    predicate is evaluated inside the call that removes, and no caller can
+ *    supply a verdict — there is no parameter for one;
+ *  - **and there is a fact the break never had.** Owned process containment,
+ *    plus a per-launch history that is poisoned before each writer starts, makes
+ *    "no writer of this lease can still be running" provable instead of hoped
+ *    for. That is what was missing in V2, and it is why the answer changed.
+ *
+ * ── What this module does ──────────────────────────────────────────────────
+ *
+ * The truth about the lease path, stated precisely: what is there, and whether it
+ * can be proved removable. {@link assessLeaseRecovery} classifies and reports; it
+ * authorises nothing, because a report is not what the removal acts on — see
+ * {@link LeaseRecoveryAssessment.staleRecovery}.
+ *
+ * ── Where liveness may permit, and why that is safe here ───────────────────
+ *
+ * The rule everywhere else in this build is that **liveness may refuse and may
+ * never permit**, and it is worth saying plainly that this module is the
+ * exception rather than leaving the slogan standing. `processAlive` *substitutes*
+ * for the real probe here, so a supplied one can flip
+ * {@link LeaseRecoveryAssessment.staleRecovery} from `UNSAFE` to
+ * `SAFE_TO_RECOVER` for a lease whose owner is running perfectly well.
+ *
+ * That is safe for exactly one reason, and it is a reason about consumers rather
+ * than about this module: **nothing destructive reads this value.**
+ * `recoverStaleLease` makes its own assessment, always consults the real probe,
+ * and accepts only an opinion that can refuse — a review reproduced the version
+ * that did not, removing a living owner's lease in one call. So the worst a
+ * fabricated probe achieves here is a misleading report, to the caller that
+ * fabricated it.
+ *
+ * `tests/v3-05-stale-lease-recovery.test.ts` pins that asymmetry by measuring
+ * both halves in one case rather than asserting it.
  */
 
 import {
@@ -63,11 +101,13 @@ import {
   type ContainmentReading,
 } from './containment-evidence.js';
 import {
+  assessStaleLeaseRecovery,
   inspectRepositoryExecutionLease,
   snapshotRepositoryRecord,
   type LeaseInspection,
   type LeaseRepository,
   type ProcessLivenessProbe,
+  type StaleLeaseRecoveryAssessment,
 } from './execution-lease.js';
 
 /**
@@ -177,6 +217,38 @@ export interface LeaseRecoveryAssessment {
   readonly latestLaunchContained: boolean;
   /** The reading itself, for a report. `null` when no document was parsed. */
   readonly containment: ContainmentReading | null;
+  /**
+   * Whether this lease can be proved removable, and if not, which conjunct of
+   * the safety predicate refused — as judged with **this call's** liveness probe,
+   * which a caller may substitute. See this module's header: a supplied probe can
+   * make this field say `SAFE_TO_RECOVER` about a running owner, and nothing
+   * destructive reads it.
+   *
+   * ── Why this is beside the classification and not inside it ────────────────
+   *
+   * {@link classification} describes *what is at the path*; this decides *what
+   * may be done about it*. Folding the second into the first would give one
+   * value two jobs, and the job it would silently acquire is authorising a
+   * removal — which is exactly how `latestLaunchContained` was kept out of the
+   * classifier one field up, and for the same reason.
+   *
+   * ── It is a report, and a report is not what a removal acts on ────────────
+   *
+   * `recoverStaleLease` takes no assessment. It makes its own, inside the same
+   * call that removes the lease, because this one can be minutes old by the time
+   * an operator reads it and this module has already paid once for a judgement
+   * carried to a later effect. What is here answers "is there something to do";
+   * what the removal acts on is what is on disk at the instant it runs.
+   *
+   * ── And it costs a second liveness probe ──────────────────────────────────
+   *
+   * Stated rather than hidden: {@link assessLeaseRecovery} now probes the owner
+   * twice — once for the inspection above, once inside the predicate. The two
+   * are separate readings on purpose. Sharing one answer would mean the
+   * predicate trusted a liveness result taken by somebody else at some other
+   * moment, which is the shape it exists to refuse.
+   */
+  readonly staleRecovery: StaleLeaseRecoveryAssessment;
 }
 
 /**
@@ -203,10 +275,12 @@ export function assessLeaseRecovery(
   repository: LeaseRepository,
   deps: LeaseRecoveryDependencies = {},
 ): LeaseRecoveryAssessment {
-  const inspection = inspectRepositoryExecutionLease(snapshotRepositoryRecord(repository), deps);
+  const record = snapshotRepositoryRecord(repository);
+  const inspection = inspectRepositoryExecutionLease(record, deps);
   return Object.freeze({
     classification: classifyForRecovery(inspection),
     inspection,
+    staleRecovery: assessStaleLeaseRecovery(record, deps),
     // Read from the inspection here, and never handed to the classifier — see
     // the argument it takes, which is two fields rather than the whole
     // inspection. A field a function cannot see is a field it cannot start

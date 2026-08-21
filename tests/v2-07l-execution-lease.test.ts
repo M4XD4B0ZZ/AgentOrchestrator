@@ -1092,31 +1092,63 @@ describe('the owner-only release stays owner-only, and nothing beside it removes
       root: '',
       id: 'absent',
     } as never);
-    // The exact key set, and V3 slice 4 added two of them. Both are *readings*:
-    // `containment` says what the lease's evidence turned out to be and
-    // `latestLaunchContained` whether that reading is the reliable one. Neither is a
-    // permission, and the pin stays exact so that a third field arriving here
-    // has to be justified rather than absorbed.
+    // The exact key set. V3 slice 4 added two readings — `containment` and
+    // `latestLaunchContained` — and V3 slice 5 added a third field that is not a
+    // reading at all: `staleRecovery` carries a verdict. The pin stays exact so
+    // that a fourth has to be justified rather than absorbed.
     expect(Object.keys(assessment).sort()).toEqual([
       'classification',
       'containment',
       'inspection',
       'latestLaunchContained',
+      'staleRecovery',
     ]);
     // And the shape a removal would need is still absent: nothing here names a
     // lease to act on, and no value is a licence to act on one.
     expect(assessment.latestLaunchContained).toBe(false);
+    // `staleRecovery` is the field that could most easily become one, so it is
+    // pinned by what consumes it rather than by what it says: `recoverStaleLease`
+    // makes its own assessment inside the call that removes, and the one optional
+    // argument it takes can only ever *refuse*.
+    //
+    // Pinned by the argument's **shape**, not by counting arguments. This
+    // asserted `recoverStaleLease.length === 1`, which `Function.length` satisfies
+    // for any number of *optional* parameters — so it was green for the very seam
+    // it was written to exclude, and stayed green through a round in which that
+    // seam could remove a living owner's lease. A `verdict` or `assessment` key
+    // arriving in this shape is that defect; the type-level `satisfies` makes it a
+    // compile failure and the runtime check makes it a test failure.
+    const lease5 = await import('../src/lease/execution-lease.js');
+    const shape = Object.keys(
+      { additionalLiveness: undefined } satisfies Record<
+        keyof NonNullable<Parameters<typeof lease5.recoverStaleLease>[1]>,
+        undefined
+      >,
+    );
+    expect(shape).toEqual(['additionalLiveness']);
   });
 
-  it('registers the read-only subcommand and nothing else', async () => {
+  it('registers the read-only subcommand and the proof-gated one, and nothing else', async () => {
     const { buildProgram } = await import('../src/cli/index.js');
     const lease = buildProgram()
       .commands.find((command) => command.name() === 'lease');
 
     expect(lease).toBeDefined();
-    // One subcommand. A `break` reappearing here is the single cheapest signal
-    // that the withdrawal has been undone.
-    expect(lease?.commands.map((command) => command.name()).sort()).toEqual(['status']);
+    // Two subcommands. A `break` reappearing here is still the single cheapest
+    // signal that the withdrawal has been undone — and `recover` is not it: it
+    // refuses the artefact `break` existed for, takes no revision, no object id
+    // and no force, and proves its own predicate inside the call that removes.
+    expect(lease?.commands.map((command) => command.name()).sort()).toEqual([
+      'recover',
+      'status',
+    ]);
+    // Stated as its own assertion rather than left to the list above, because
+    // this is the property the list is a proxy for.
+    expect(lease?.commands.map((command) => command.name())).not.toContain('break');
+    const recover = lease?.commands.find((command) => command.name() === 'recover');
+    expect(
+      recover?.options.map((option) => option.long).sort(),
+    ).toEqual(['--repository']);
   });
 
   it('names no command in the shipped source that does not exist', async () => {
