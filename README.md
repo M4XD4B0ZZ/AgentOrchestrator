@@ -3399,15 +3399,25 @@ and because the failure mode it describes — a command that cannot start is
   set code 1 where they catch, and say why there.
 
   The sentences that report those codes say only what is true of **every**
-  producer of the code they are keyed on, which took three passes to get right.
-  Two independent reviews and the merge reviewer each found the same class one
-  level further in: a sentence that held for the removal states and not for the
-  refusals that share the code. `LEASE_ABSENT` was the last of them - it claimed
-  "nothing is left behind" about a code the release path reaches from an `ENOENT`
-  on its verifying read, having inspected nothing else at all. The counter-proof
-  is in `tests/v3-07-lease-release-observability.test.ts`: a real lease moved
-  aside under a quarantine-shaped name releases `LEASE_ABSENT` with the record
-  still on disk.
+  producer of the code they are keyed on, which took four passes to get right and
+  in the end a change of shape. Every pass found the same class one level
+  further in: a sentence true of the removal states and false of the refusals
+  that share the code, then true of those and false of one removal state.
+  `LEASE_ABSENT` claimed "nothing is left behind" about a code reachable three
+  ways, none of which looks past the lease name; `LEASE_REMOVE_FAILED` glossed
+  `UNREADABLE_AFTER_DETACH` as a record left in quarantine when
+  `removeVerifiedLease` puts that record back and deletes the quarantine copy —
+  which is the harm `VerifiedRemoval`'s own docstring records having been
+  reproduced once before, on a different code.
+
+  Rewording stopped being the fix. A code sentence now states only what the code
+  establishes, and everything about the resulting state on disk moved to
+  `LEASE_RELEASE_DETAIL_SENTENCES`, **keyed on the detail token** — because the
+  token *is* the end state and the code is not. The token table is complete
+  against the producer by test, not against itself. The counter-proof for
+  `LEASE_ABSENT` is in `tests/v3-07-lease-release-observability.test.ts`: a real
+  lease moved aside under a quarantine-shaped name releases `LEASE_ABSENT` with
+  the record still on disk, byte for byte.
 
   The two commands' `finally` blocks now also *contain* the release, so a release
   that throws cannot replace the exception that entered — and a release that
@@ -3535,9 +3545,17 @@ and because the failure mode it describes — a command that cannot start is
   What is lost is only the machine-readable half: a script routing 1 to "file a
   bug" and 3 to "inspect the repository" takes the wrong branch here.
 
-  Recorded rather than resolved because resolving it is a decision about the
-  exit-code contract, not a fix: either code 1 grows a second meaning, or the
-  thrown-operation case gets a code of its own. **Scope:**
+  The same function relabels in a second direction, and that is worth stating
+  too: a controlled refusal that would have exited 2 — a `--tasks` argument the
+  repository does not declare — becomes 3 when the release also fails. That is
+  intended (the argument is gone when the operator retypes it; the record in the
+  repository is not) and it is tested, but a script routing 2 to "fix the
+  arguments" takes the wrong branch there.
+
+  Recorded rather than resolved because resolving either direction is a decision
+  about the exit-code contract, not a fix: code 1 grows a second meaning, or the
+  thrown-operation case gets a code of its own, or a release condition gets one.
+  **Scope:**
   `cli/block-command.ts`, `cli/release-command.ts`, `cli/run-exit-codes.ts`.
 - **L-V3-06-11 — three sibling dist harnesses hand-build a repository identity,
   and are consistent rather than correct.** `test:dist-lifecycle-restart` failed

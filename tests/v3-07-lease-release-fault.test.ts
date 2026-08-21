@@ -111,9 +111,8 @@ vi.mock('node:fs', async (importOriginal) => {
 const { Command } = await import('commander');
 const { registerBlockCommand } = await import('../src/cli/block-command.js');
 const { registerReleaseCommand } = await import('../src/cli/release-command.js');
-const { LEASE_RELEASE_SENTENCES, LEASE_RELEASE_UNREPORTED } = await import(
-  '../src/cli/render-lease.js'
-);
+const { LEASE_RELEASE_DETAIL_SENTENCES, LEASE_RELEASE_SENTENCES, LEASE_RELEASE_UNREPORTED } =
+  await import('../src/cli/render-lease.js');
 const { EXIT_RUN_NEEDS_OPERATOR, EXIT_RUN_UNEXPECTED } = await import(
   '../src/cli/run-exit-codes.js'
 );
@@ -357,7 +356,12 @@ describe('block --attended cannot exit nominal on a lease it did not give back',
     // line above compares the output with the same constant the output was
     // built from, so exchanging two sentences in the table would satisfy it
     // while telling the operator the wrong thing about their repository.
-    expect(text).toContain('The lease was not fully removed');
+    expect(text).toContain('The removal did not complete.');
+    // And the token's own line, under it. The code sentence deliberately says
+    // nothing about what is on disk, so without this line the report would name
+    // a state and never say what it is.
+    expect(text).toContain(LEASE_RELEASE_DETAIL_SENTENCES.DETACH_REFUSED);
+    expect(text).toContain('Nothing was moved at all');
     // The one a script reads. Before V3-07 this was 0.
     expect(process.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
   }, 900_000);

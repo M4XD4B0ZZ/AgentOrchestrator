@@ -434,24 +434,24 @@ export function renderLeaseRefusal(code: LeaseAcquireFailureCode): string {
  *
  * Written once because three commands report the same fact — `run --attended`,
  * `block --attended` and `release --attended` all take the repository's one
- * writer slot and all have to give it back — and an operator reading two of
- * them should not have to work out whether two different sentences describe two
- * different conditions. They do not: there is one release contract, and this is
- * its vocabulary.
+ * writer slot and all have to give it back — and an operator reading two of them
+ * should not have to work out whether two different sentences describe two
+ * different conditions.
  *
- * Keyed on the **code**, not on the code-and-detail pair — which constrains what
- * a sentence may say. `NOT_OWNER` is produced from three different removal end
- * states and `LEASE_REMOVE_FAILED` from four, and those states differ in the two
- * facts an operator most wants: whether a record was left in quarantine, and
- * whether anything holds the lease name afterwards. `execution-lease.ts` records
- * a review that reproduced the harm of collapsing exactly those: an operator was
- * told nothing had been moved about a state in which a writer is displaced and a
- * file is sitting in `.git`.
+ * ── The rule these obey, and what it cost to find ──────────────────────────
  *
- * So the sentences below say only what is true of **every** producer of their
- * code, and point at the token on the line above for the part that varies. A
- * sentence naming the on-disk outcome would be right for one producer and wrong
- * for the others, which is worse than saying less.
+ * A sentence keyed on a code may state only what is true of **every** producer
+ * of that code. Three consecutive reviews caught this table breaking that rule,
+ * each one level further in, so it is worth saying why it kept happening:
+ * `releaseRepositoryExecutionLease` maps twelve returns onto six codes, and the
+ * producers of one code routinely disagree about the two facts an operator acts
+ * on — what is at the lease name afterwards, and whether a detached copy was
+ * kept. `NOT_OWNER` alone comes from four refusals that inspected only the name
+ * and three removal states that inspected the object.
+ *
+ * So the sentences below say what the code establishes, and stop. Everything
+ * about the resulting state on disk lives in {@link LEASE_RELEASE_DETAIL_SENTENCES},
+ * keyed on the token — because the token *is* the end state, and the code is not.
  *
  * The word "reason" appears in none of them on purpose: the dist harness in
  * `tests/dist-artifact/notification-egress-dist-artifact.mjs` scrapes block's
@@ -464,38 +464,85 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
     '  repository. What the next invocation meets is its own question - a successor may have\n' +
     '  taken the name already - but nothing this one holds stands in its way.',
   EVIDENCE_INVALID:
-    'This invocation could not prove which lease it was holding, so it removed nothing. That\n' +
-    '  is a defect in this build rather than a condition of the repository, and a lease\n' +
-    '  record may still be present. Run `agent-loop lease status` to see what is there.',
+    'This invocation could not prove which lease it was holding, so it looked at nothing and\n' +
+    '  removed nothing. That is a defect in this build rather than a condition of the\n' +
+    '  repository, and a lease record may still be present. Run `agent-loop lease status` to\n' +
+    '  see what is there.',
   LEASE_ABSENT:
-    'There was no lease to give back: nothing was at the lease name when this invocation\n' +
-    '  looked, and this invocation did not put it there or take it away. That is all this\n' +
-    '  code establishes - it says nothing about what may have been left elsewhere in the\n' +
-    '  repository, and nothing about what holds the lease name by the time you read this.\n' +
-    '  What it does mean is that this work was not protected for the whole of its life: the\n' +
-    '  name was free while the work was still running, so a second writer could have been\n' +
-    '  admitted. Run `agent-loop lease status` and check the repository before trusting the\n' +
-    '  result.',
+    'There was nothing to give back: when the removal ran, no record was there to remove, and\n' +
+    '  this call kept nothing aside. That is all it establishes. It does not say what is at\n' +
+    '  the lease name now, and it did not look anywhere else in the repository. Nor does it\n' +
+    '  say when the record went: if it went while the work was still running, the name was\n' +
+    '  free and a second writer could have been admitted, and this build cannot tell you\n' +
+    '  which happened. Run `agent-loop lease status` and check the repository before trusting\n' +
+    '  the result.',
   NOT_OWNER:
-    'What is at the lease name at the end is not the record this invocation took, so this\n' +
-    '  invocation removed nothing of its own. It may be a successor lease, or it may be a\n' +
-    '  record too damaged to identify - this build does not tell those apart here. If a token\n' +
-    '  follows the code above, it says whether a detached copy was left in quarantine and\n' +
-    '  whether the lease name ended up held by anybody at all; with no token, nothing beyond\n' +
-    '  the code was established. Run `agent-loop lease status` before the next run.',
+    'The record this release examined is not the one this invocation took, so nothing of this\n' +
+    '  invocation was removed. It may be a successor lease, or a record too damaged to\n' +
+    '  identify - this build does not tell those apart here. If a token follows the code\n' +
+    '  above, the line under it says what state the removal stopped in; with no token,\n' +
+    '  nothing beyond the code was established. Run `agent-loop lease status` before the\n' +
+    '  next run.',
   LEASE_UNREADABLE:
-    'The lease record could not be read at the end, so nothing was removed. Something was at\n' +
-    '  the lease name and this build could not identify it; what else the repository holds was\n' +
-    '  not looked at. Run `agent-loop lease status` for what this build can see, and resolve\n' +
-    '  what is there by hand before the next run.',
+    'The lease record could not be opened, and what refused the read was not its absence.\n' +
+    '  Nothing was removed, and nothing else was inspected - so this says what the read\n' +
+    '  refused with, not what is at the lease name. Run `agent-loop lease status` for what\n' +
+    '  this build can see, and resolve what is there by hand before the next run.',
   LEASE_REMOVE_FAILED:
-    'The lease was not fully removed. The token on the line above says how far the removal\n' +
-    '  got: a refused detach means nothing was moved at all, a detached record that could not\n' +
-    '  be read again means the copy is in quarantine, a quarantined record is a detached copy\n' +
-    '  nothing is reading, and an unowned repository is one no lease is protecting. So what is\n' +
-    '  left may block the next run or may fail to protect it. Run `agent-loop lease status`,\n' +
-    '  and clear what is there by hand before the next run.',
+    'The removal did not complete. A token follows the code above, and the line under it says\n' +
+    '  what state the removal stopped in; every one of them needs a human before the next\n' +
+    '  run. Run `agent-loop lease status`, and clear what is there by hand.',
 });
+
+/** The tokens a release result can carry, one per removal end state. */
+export const LEASE_RELEASE_DETAILS = [
+  'DETACH_REFUSED',
+  'UNREADABLE_AFTER_DETACH',
+  'RECORD_QUARANTINED',
+  'RECORD_QUARANTINED_LEASE_UNOWNED',
+] as const;
+
+export type LeaseReleaseDetail = (typeof LEASE_RELEASE_DETAILS)[number];
+
+/**
+ * What the removal left behind, keyed on the token rather than on the code.
+ *
+ * This table exists because the code is not enough, and three reviews proved it.
+ * The token is the right key because each one *is* an end state: the mapping in
+ * `execution-lease.ts` is many-to-one only where the states agree on both facts,
+ * so `RECORD_QUARANTINED` covers the changed record and the unidentifiable one
+ * alike, and both mean a copy kept aside with the lease name held. Nothing here
+ * has to generalise over states that disagree.
+ *
+ * The one that had to be written from the source rather than from its name is
+ * `UNREADABLE_AFTER_DETACH`. It reads as a record left in quarantine and is the
+ * opposite: `removeVerifiedLease` restores it to the lease name and then
+ * discards the quarantine copy. An earlier version of this file glossed it as a
+ * quarantined record, which would have sent an operator into the administrative
+ * directory after a file the same call had deleted — the harm `VerifiedRemoval`'s
+ * own docstring records having been reproduced once already, on a different
+ * code, and the reason that vocabulary was split apart in the first place.
+ */
+export const LEASE_RELEASE_DETAIL_SENTENCES: Readonly<Record<LeaseReleaseDetail, string>> =
+  Object.freeze({
+    DETACH_REFUSED:
+      'Nothing was moved at all: the record could not be detached from the lease name, so it\n' +
+      "    is still there and it is still this run's. Nothing was kept aside. Releasing again\n" +
+      '    is the ordinary next step; if it keeps refusing, something outside this build is\n' +
+      '    holding the file.',
+    UNREADABLE_AFTER_DETACH:
+      'The record was detached, could not be read, and was put back at the lease name. Nothing\n' +
+      '    was kept aside - there is no quarantined copy to go and find. What sits at the lease\n' +
+      '    name is a record this build could not identify, and it will refuse the next run.',
+    RECORD_QUARANTINED:
+      'The record was detached and could not be put back, because the lease name had been\n' +
+      '    taken in the meantime. It is kept, deliberately, in a file beside the lease rather\n' +
+      '    than deleted. Somebody holds this repository now; that claim is real and stands.',
+    RECORD_QUARANTINED_LEASE_UNOWNED:
+      'The record was detached, could not be put back, and nothing holds the lease name now.\n' +
+      '    The record is kept in a file beside it. This repository has no owner, so the next\n' +
+      '    run will acquire normally - which is the case for looking before you let it.',
+  });
 
 /**
  * The code printed when the release produced no answer at all.
@@ -513,14 +560,13 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
 export const LEASE_RELEASE_UNREPORTED = 'RELEASE_NOT_REPORTED';
 
 /**
- * Its sentence, exported for the same reason the six above are.
+ * Its sentence, exported for the same reason the others are.
  *
- * It reaches an operator's console on exactly the same footing as they do, so it
- * belongs to the same vocabulary tests - the ASCII pin, the distinctness pin and
- * the pin that forbids the word the notification harness scrapes. A seventh
- * sentence that no pin could reach would be the one that drifted.
+ * It reaches an operator's console on exactly the same footing, so it belongs to
+ * the same vocabulary tests — the ASCII pin, the distinctness pin and the pin
+ * that forbids the word the notification harness scrapes. A sentence no pin
+ * could reach would be the one that drifted.
  */
-
 export const LEASE_RELEASE_UNREPORTED_SENTENCE =
   'Giving the execution lease back failed with an error rather than an answer, so what is in\n' +
   '  this repository now is unknown to this invocation. Assume a lease record is still there.\n' +
@@ -549,11 +595,24 @@ export function leaseReleaseLine(label: string, result: LeaseReleaseResult): str
  * the refusals, and the one where the release itself threw and produced nothing
  * — which is what `null` renders, and which is the case that would otherwise
  * print no line at all on the one occasion the lease is provably still there.
+ *
+ * Up to three lines. The code's sentence says what every producer of that code
+ * shares; the token's, indented under it, says what *this* removal left on disk.
+ * A token this build does not recognise prints no third line rather than a wrong
+ * one — `execution-lease.ts` cannot produce one today, and a missing lookup
+ * interpolated into a template would print the word "undefined" at an operator
+ * on the one report they are reading because something already went wrong.
  */
 export function renderLeaseRelease(label: string, result: LeaseReleaseResult | null): string {
   const body =
     result === null
       ? [line(label, LEASE_RELEASE_UNREPORTED), `  ${LEASE_RELEASE_UNREPORTED_SENTENCE}`]
-      : [leaseReleaseLine(label, result), `  ${LEASE_RELEASE_SENTENCES[result.code]}`];
+      : [
+          leaseReleaseLine(label, result),
+          `  ${LEASE_RELEASE_SENTENCES[result.code]}`,
+          ...(result.detail !== null && result.detail in LEASE_RELEASE_DETAIL_SENTENCES
+            ? [`    ${LEASE_RELEASE_DETAIL_SENTENCES[result.detail as LeaseReleaseDetail]}`]
+            : []),
+        ];
   return `${['', ...body, ''].join('\n')}\n`;
 }

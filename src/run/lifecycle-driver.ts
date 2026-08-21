@@ -40,10 +40,12 @@
  *     with a quarantined record, or a `LEASE_REMOVE_FAILED`, left a file inside
  *     `.git` that no operator was ever told about.
  *
- *     Closed here for `run --attended`, and **not** for the other two.
- *     `cli/block-command.ts` and `cli/release-command.ts` still discard it, and
- *     so does this module's own `catch`, which has no result to attach one to.
- *     Recorded as `L-V3-06-7` rather than described as finished.
+ *     Closed here for `run --attended`, and closed for the other two commands
+ *     by V3-07 — `cli/block-command.ts` and `cli/release-command.ts` both keep
+ *     and report the result now. What is still open is **this module's own
+ *     `catch`**, which gives the lease back and has no result to attach one to,
+ *     because on a throw there is no `LifecycleResult` to carry it. That is the
+ *     whole of what `L-V3-06-7` still records.
  *
  * A fourth gap — waiting out a recorded quota reset — was **withdrawn from this
  * slice**, and the reason is in the authority model rather than in the

@@ -46,6 +46,8 @@ import { registerBlockCommand, type BlockCommandSeams } from '../src/cli/block-c
 import { PACKAGE_ROOT } from '../src/config/paths.js';
 import { registerReleaseCommand } from '../src/cli/release-command.js';
 import {
+  LEASE_RELEASE_DETAILS,
+  LEASE_RELEASE_DETAIL_SENTENCES,
   LEASE_RELEASE_SENTENCES,
   LEASE_RELEASE_UNREPORTED,
   LEASE_RELEASE_UNREPORTED_SENTENCE,
@@ -218,6 +220,7 @@ function leaseIsFree(repository: ResolvedRepository): boolean {
 /** Every sentence this vocabulary can put on an operator's console. */
 const printedSentences = (): readonly string[] => [
   ...LEASE_RELEASE_CODES.map((code) => LEASE_RELEASE_SENTENCES[code]),
+  ...LEASE_RELEASE_DETAILS.map((token) => LEASE_RELEASE_DETAIL_SENTENCES[token]),
   LEASE_RELEASE_UNREPORTED_SENTENCE,
 ];
 
@@ -328,38 +331,84 @@ describe('the release vocabulary is closed, shared and safe', () => {
     const fragments: Readonly<Record<LeaseReleaseCode, string>> = {
       RELEASED: 'was given back. Nothing of this invocation is left holding',
       EVIDENCE_INVALID: 'could not prove which lease it was holding',
-      LEASE_ABSENT: 'nothing was at the lease name when this invocation',
-      NOT_OWNER: 'is not the record this invocation took',
-      LEASE_UNREADABLE: 'could not be read at the end',
-      LEASE_REMOVE_FAILED: 'The lease was not fully removed.',
+      LEASE_ABSENT: 'no record was there to remove',
+      NOT_OWNER: 'is not the one this invocation took',
+      LEASE_UNREADABLE: 'what refused the read was not its absence',
+      LEASE_REMOVE_FAILED: 'The removal did not complete.',
     };
     for (const code of LEASE_RELEASE_CODES) {
-      expect(LEASE_RELEASE_SENTENCES[code]).toContain(fragments[code]);
+      expect(LEASE_RELEASE_SENTENCES[code].replace(/\s+/g, ' ')).toContain(fragments[code]);
+    }
+    const tokens: Readonly<Record<string, string>> = {
+      DETACH_REFUSED: 'Nothing was moved at all',
+      UNREADABLE_AFTER_DETACH: 'was put back at the lease name',
+      RECORD_QUARANTINED: 'the lease name had been taken',
+      RECORD_QUARANTINED_LEASE_UNOWNED: 'nothing holds the lease name now',
+    };
+    for (const token of LEASE_RELEASE_DETAILS) {
+      expect(LEASE_RELEASE_DETAIL_SENTENCES[token].replace(/\s+/g, ' ')).toContain(tokens[token]!);
     }
   });
 
-  it('claims nothing about a code that its producers do not all share', () => {
-    // `NOT_OWNER` comes from three removal end states and `LEASE_REMOVE_FAILED`
-    // from four, and they differ on the two facts that decide what an operator
-    // does: whether a detached copy was left in quarantine, and whether anything
-    // holds the lease name afterwards. `RECORD_QUARANTINED_LEASE_UNOWNED` is the
-    // one that inverts both - the repository ends up with no owner at all - so a
-    // sentence asserting a successor, or asserting that nothing was moved, is
-    // false exactly when it matters most. `execution-lease.ts` records a review
-    // that reproduced that harm once already.
+  it('leaves the on-disk state to the token, because the code cannot carry it', () => {
+    // The rule three reviews in a row caught this file breaking: a sentence keyed
+    // on a code may say only what every producer of that code shares. `NOT_OWNER`
+    // has seven producers and `LEASE_REMOVE_FAILED` four, and they disagree on
+    // both facts an operator acts on - what is at the lease name, and whether a
+    // copy was kept aside. So neither code sentence may state either fact.
+    //
+    // A phrase blacklist would not pin this: the previous version of this test
+    // forbade three historical wordings and passed a sentence that asserted
+    // quarantine for a removal that had deleted the quarantine file.
     for (const code of ['NOT_OWNER', 'LEASE_REMOVE_FAILED'] as const) {
-      const sentence = LEASE_RELEASE_SENTENCES[code];
-      expect(sentence).not.toContain('Another invocation owns this repository');
-      expect(sentence).not.toContain('left exactly as it is');
-      expect(sentence).not.toContain('will refuse the next run.');
-      // and each one points at the token for the part that varies - `NOT_OWNER`
-      // conditionally, because five of its seven producers carry no token at
-      // all and an unconditional pointer would send an operator to read a thing
-      // that is not printed. Whitespace is flattened first: these strings are
-      // hard-wrapped for the console, so a phrase can straddle a newline and two
-      // spaces of indent.
-      expect(sentence.replace(/\s+/g, ' ')).toContain('token');
+      const sentence = LEASE_RELEASE_SENTENCES[code].replace(/\s+/g, ' ');
+      // no claim about a kept copy...
+      expect(sentence).not.toMatch(/quarantin/i);
+      expect(sentence).not.toContain('kept aside');
+      // ...and no claim about who holds the name.
+      expect(sentence).not.toMatch(/nothing holds/i);
+      expect(sentence).not.toMatch(/somebody holds/i);
+      // It points at the token instead, which is keyed on the end state itself.
+      expect(sentence).toContain('the line under it says what state the removal stopped in');
     }
+  });
+
+  it('does not say a copy was kept where the removal put the record back', () => {
+    // `UNREADABLE_AFTER_DETACH` reads like a record left in quarantine and is the
+    // opposite: `removeVerifiedLease` restores it to the lease name and discards
+    // the quarantine copy. `tests/v2-07lr-release-window.test.ts` asserts that by
+    // value - the lease file holds the original bytes afterwards and nothing sits
+    // beside it. A sentence claiming quarantine here sends an operator into the
+    // administrative directory after a file the same call deleted.
+    const restored = LEASE_RELEASE_DETAIL_SENTENCES.UNREADABLE_AFTER_DETACH.replace(/\s+/g, ' ');
+    // It may not *claim* a kept copy. It may - and must - deny one, which is why
+    // the assertion is on the claim rather than on the word.
+    expect(restored).not.toContain('is kept');
+    expect(restored).not.toContain('could not be put back');
+    expect(restored).toContain('put back at the lease name');
+    expect(restored).toContain('there is no quarantined copy to go and find');
+
+    // And the two that really do keep one say so.
+    for (const token of ['RECORD_QUARANTINED', 'RECORD_QUARANTINED_LEASE_UNOWNED'] as const) {
+      expect(LEASE_RELEASE_DETAIL_SENTENCES[token].replace(/\s+/g, ' ')).toContain(
+        'could not be put back',
+      );
+    }
+    // The refused detach moved nothing, so it may not claim one either.
+    expect(LEASE_RELEASE_DETAIL_SENTENCES.DETACH_REFUSED).not.toMatch(/quarantin/i);
+  });
+
+  it('carries a sentence for every token the release can actually produce', () => {
+    // Completeness against the producer, not against itself. A new `detail:` in
+    // `execution-lease.ts` with no sentence here would print a bare token under a
+    // code sentence that deliberately says nothing about the on-disk state.
+    const source = readFileSync(join(PACKAGE_ROOT, 'src', 'lease', 'execution-lease.ts'), 'utf8');
+    const opens = source.indexOf('export function releaseRepositoryExecutionLease(');
+    const body = source.slice(opens, source.indexOf('\n}', opens));
+    const produced = new Set(
+      [...body.matchAll(/\bdetail:\s*'([A-Z][A-Z0-9_]*)'/g)].map((match) => match[1]!),
+    );
+    expect([...produced].sort()).toEqual([...LEASE_RELEASE_DETAILS].sort());
   });
 
   it('does not claim an absent lease left nothing behind', async () => {
@@ -384,6 +433,7 @@ describe('the release vocabulary is closed, shared and safe', () => {
     expect(taken.ok).toBe(true);
     if (!taken.ok) return;
 
+    const recordBefore = readFileSync(location.path);
     const movedAside = `${location.path}.breaking-moved-by-this-test`;
     renameSync(location.path, movedAside);
     try {
@@ -392,13 +442,20 @@ describe('the release vocabulary is closed, shared and safe', () => {
       expect(released).toEqual({ code: 'LEASE_ABSENT', detail: null });
       // The record this invocation took is right there, and the release never
       // looked. Any sentence claiming otherwise is claiming this file away.
+      // The record itself, byte for byte - not merely a path that exists.
       expect(existsSync(movedAside)).toBe(true);
-      expect(LEASE_RELEASE_SENTENCES.LEASE_ABSENT).not.toContain('Nothing is left behind');
-      expect(LEASE_RELEASE_SENTENCES.LEASE_ABSENT).not.toContain('already gone');
-      // And it says what it does establish instead.
-      expect(LEASE_RELEASE_SENTENCES.LEASE_ABSENT.replace(/\s+/g, ' ')).toContain(
-        'says nothing about what may have been left elsewhere',
-      );
+      expect(readFileSync(movedAside)).toEqual(recordBefore);
+      // So the sentence may not write it off. Two historical wordings and the
+      // general claim they were instances of.
+      const absent = LEASE_RELEASE_SENTENCES.LEASE_ABSENT.replace(/\s+/g, ' ');
+      expect(absent).not.toContain('Nothing is left behind');
+      expect(absent).not.toContain('already gone');
+      expect(absent).toContain('it did not look anywhere else in the repository');
+      // This case reaches one of the three producers - the verifying read's
+      // `ENOENT`. The other two, a refused detach and a detach that moved
+      // nothing, are produced by `tests/v2-07lr-release-window.test.ts`; the
+      // sentence has to hold for all three, which is why it names none of them.
+      expect(absent).not.toContain('when this invocation looked');
     } finally {
       rmSync(movedAside, { force: true });
     }
@@ -609,6 +666,48 @@ describe('block --attended reports the lease it gave back', () => {
     // And the claim about the string is a claim about the world.
     expect(leaseIsFree(fixture.repository)).toBe(true);
   }, 600_000);
+});
+
+describe('block --attended reports the lease once, not twice', () => {
+  it('does not print a second report when the step after it throws', async () => {
+    // The one path where the once-only flag is load-bearing: the normal report
+    // succeeds, something after it throws, and the `catch` calls the reporter
+    // again. Without `leaseReleaseReported` the operator gets two release
+    // reports for one release, which reads as two releases.
+    //
+    // Reached by refusing the write that follows the release report - in a
+    // driven block that is the notification result, the last thing this command
+    // prints.
+    const fixture = await repoWith(['A-001']);
+    const seams = drivingSeams();
+    let armed = false;
+    let writes = 0;
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown): boolean => {
+      writes += 1;
+      const text = String(chunk);
+      if (armed) throw new Error('the console went away');
+      if (text.includes('Release      :')) armed = true;
+      stdout.push(text);
+      return true;
+    }) as typeof process.stdout.write);
+
+    await invokeBlock(
+      [
+        '--repository', fixture.root,
+        '--block', BLOCK_ID,
+        '--tasks', 'A-001',
+        '--run', RUN_ID,
+        '--attended',
+      ],
+      { authPreflight: authPreflightPasses, agent: seams.agent, verify: seams.verify },
+    );
+
+    // Exactly one release report reached the console, and the retry from the
+    // `catch` was refused by the flag rather than by luck.
+    expect(out().match(/Release {6}: /g)).toHaveLength(1);
+    expect(writes).toBe(stdout.length + 1);
+    expect(process.exitCode).toBe(EXIT_RUN_UNEXPECTED);
+  }, 900_000);
 });
 
 describe('block --attended reports no lease it never took', () => {

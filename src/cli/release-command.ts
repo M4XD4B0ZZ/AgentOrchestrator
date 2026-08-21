@@ -202,9 +202,17 @@ export function registerReleaseCommand(program: Command): void {
             leaseReleaseAttempted = true;
             leaseRelease = releaseRepositoryExecutionLease(acquired.evidence);
           } catch (releaseError: unknown) {
-            process.stderr.write(
-              `agent-loop release: giving the execution lease back failed. ${formatSafeError(releaseError)}\n`,
-            );
+            // Guarded in turn. This whole `try` exists so that a throw here
+            // cannot replace the exception that entered the `finally`, and a
+            // bare write to a stream that is itself refusing would reintroduce
+            // exactly that. There is nothing left to report it to.
+            try {
+              process.stderr.write(
+                `agent-loop release: giving the execution lease back failed. ${formatSafeError(releaseError)}\n`,
+              );
+            } catch {
+              // Nothing can be said, and saying it is not worth the exception.
+            }
           }
         }
 

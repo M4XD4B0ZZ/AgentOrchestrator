@@ -267,9 +267,12 @@ function reportFrozenPlan(repository: ResolvedRepository, options: BlockOptions)
  * Extracted from the command's `try` for one reason, and it is not tidiness: a
  * `return` inside a `try` runs the `finally` and then leaves the *function*, so
  * while the five refusals below lived there, nothing could run after the lease
- * was given back. That is precisely why the release result was discarded —
- * there was no code left to hand it to. Here every path ends in a value, the
- * caller releases, and the caller then still has both facts in its hands.
+ * was given back — for those five paths there was no code left to hand a release
+ * result to. (The success path had somewhere to put one all along: the
+ * notification block sits after the `finally`. It threw the result away anyway,
+ * which is the part that was an oversight rather than a shape.) Here every path
+ * ends in a value, the caller releases, and the caller still has both facts in
+ * its hands.
  *
  * It reports the block run itself, including its own exit code, and knows
  * nothing about the lease it is running under: giving the lease back is the
@@ -527,26 +530,38 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
           // that entered it - so an exception here would hand the operator the
           // release's failure in place of the one that actually stopped the run.
           // `releaseRepositoryExecutionLease` refuses rather than throws for
-          // every value this command can give it, which `tests/v3-07-lease-
-          // release-observability.test.ts` pins; this branch is therefore
-          // unreached, and it is here so that the guarantee is enforced where it
-          // is depended on rather than only stated where it is produced. Leaving
+          // every value this command can give it, which
+          // `tests/v3-07-lease-release-observability.test.ts` pins. It is not
+          // unreachable, though: `tests/v3-07-lease-release-fault.test.ts` gets
+          // in through the one call on that path that is neither a filesystem
+          // call nor inside a `try` - the `randomBytes` naming the quarantine
+          // file - and drives this arm with production unedited. Leaving
           // `leaseRelease` null keeps the outcome closed: nothing is reported as
           // released, and the exit code below cannot be nominal.
           try {
             leaseReleaseAttempted = true;
             leaseRelease = releaseRepositoryExecutionLease(acquired.evidence);
           } catch (releaseError: unknown) {
-            process.stderr.write(
-              `agent-loop block: giving the execution lease back failed. ${formatSafeError(releaseError)}\n`,
-            );
+            // Guarded in turn. This whole `try` exists so that a throw here
+            // cannot replace the exception that entered the `finally`, and a
+            // bare write to a stream that is itself refusing would reintroduce
+            // exactly that. There is nothing left to report it to.
+            try {
+              process.stderr.write(
+                `agent-loop block: giving the execution lease back failed. ${formatSafeError(releaseError)}\n`,
+              );
+            } catch {
+              // Nothing can be said, and saying it is not worth the exception.
+            }
           }
         }
 
-        // The exit code first. It is the fact a script reads and the one that
-        // costs nothing to set, and a report that failed to write must not be
-        // able to take it with it - the `catch` below would then answer 1 for a
-        // block that finished.
+        // The exit code first, because nothing after it should be able to
+        // decide it. Note what this does *not* buy: if the write below throws,
+        // the `catch` overwrites this with 1 regardless - it assigns
+        // unconditionally. The ordering keeps the code independent of a console
+        // write on the ordinary path, and the "never nominal" invariant holds
+        // either way, since 1 is not 0.
         process.exitCode = exitCodeWithLeaseRelease(primary, leaseRelease);
         reportLeaseRelease();
 
