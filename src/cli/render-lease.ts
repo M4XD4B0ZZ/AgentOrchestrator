@@ -262,7 +262,27 @@ export function renderLeaseRecovery(
   return `${lines.join('\n')}\n\n`;
 }
 
-/** One static sentence per outcome of `lease recover`. Closed, and total by type. */
+/**
+ * One static sentence per outcome of `lease recover`. Closed, and total by type.
+ *
+ * ── Two corrections that belong here rather than in the printed text ───────
+ *
+ * `RECOVERY_FAILED` used to end "look inside the Git directory **if the end
+ * state names a quarantine**". That is a rule an operator can follow literally
+ * and be wrong: `detail` prints the {@link VerifiedRemoval} member verbatim, and
+ * `UNIDENTIFIABLE_AND_UNOWNED` does not contain the word while being one of the
+ * two that leave a file. It now names the two that do not.
+ *
+ * And it says of `UNIDENTIFIABLE` that it "tried to delete" its quarantine
+ * rather than that it left no file: that path reaches `discard`, which swallows a
+ * failed unlink, so "no file behind" is the design and not a guarantee. A printed
+ * never/always resting on a best-effort call is exactly the shape this renderer's
+ * own header was written about — the withdrawn break's report asserted a
+ * guarantee an operator could not audit.
+ *
+ * Both of those are recorded here because a printed refusal is read by somebody
+ * acting on it. The history of the sentence belongs to whoever maintains it.
+ */
 export const STALE_RECOVERY_OUTCOMES: Readonly<Record<StaleLeaseRecoveryResult['code'], string>> =
   Object.freeze({
     RECOVERED:
@@ -289,11 +309,8 @@ export const STALE_RECOVERY_OUTCOMES: Readonly<Record<StaleLeaseRecoveryResult['
       '  `.breaking-` - detached, unreadable, and deliberately not deleted - and one of\n' +
       '  those two also leaves the lease name free. Nothing was destroyed. Run\n' +
       '  `agent-loop lease status` before anything else runs against this repository, and\n' +
-      '  look inside the Git directory unless the end state is DETACH_FAILED or\n' +
-      '  UNIDENTIFIABLE - those two are the ones that left no file behind. (This said\n' +
-      '  "if the end state names a quarantine", which is a rule an operator can follow\n' +
-      '  literally and be wrong: UNIDENTIFIABLE_AND_UNOWNED does not contain the word and\n' +
-      '  is one of the two with a file to inspect.)',
+      '  look inside the Git directory unless the end state is DETACH_FAILED, which never\n' +
+      '  created a file, or UNIDENTIFIABLE, which tried to delete the one it made.',
   });
 
 /** The `lease recover` report. */

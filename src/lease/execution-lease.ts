@@ -3615,11 +3615,18 @@ export function recoverStaleLease(
  * restoring `link` (somebody squatted the freed name) or from the exclusive
  * create it falls back to failing as well.
  *
- * Four of the nine need a failed restore, not two: the other pair are the
- * `UNIDENTIFIABLE_*` ones, where the detached bytes could not be read either — so
- * `putBack` never reaches its fallback at all, because it returns
- * `occupancyOf(leasePath)` while `bytes` is `null` — and they answer
- * {@link RECOVERY_FAILED}, because there the removal genuinely did not complete.
+ * Four of the nine need a failed restore, not two: the other pair are
+ * `UNIDENTIFIABLE_QUARANTINED` and `UNIDENTIFIABLE_AND_UNOWNED`, where the
+ * detached bytes could not be read either. Named rather than written
+ * `UNIDENTIFIABLE_*`, because the glob reads as "the UNIDENTIFIABLE ones" and
+ * plain `UNIDENTIFIABLE` is *not* one of them — it restores successfully — which
+ * would make the count three and falsify the sentence it sits in, in a paragraph
+ * whose whole subject is a count disagreeing with its description.
+ *
+ * For that pair `putBack` never reaches its fallback: with `bytes` null it
+ * returns from the `link`'s own `EEXIST`, or from `occupancyOf(leasePath)`, before
+ * the exclusive create is attempted. They answer {@link RECOVERY_FAILED}, because
+ * there the removal genuinely did not complete.
  *
  * (This paragraph said "two … the ones where a record was detached and could not
  * be put back", which is a count and a description that disagree — the defect

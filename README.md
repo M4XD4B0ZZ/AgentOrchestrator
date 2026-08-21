@@ -6222,10 +6222,13 @@ an incomplete history is reported as an absent one    1
 ```
 
 Re-measured against the file as it stands, not carried forward. Two of those
-numbers had drifted: adding a case that feeds the reader a malformed ledger also
-kills a mutant three rows above it, and a count beside code with nothing keeping
-the two in step is the defect `VerifiedRemoval`'s own docstring polices. They are
-a property of one commit's test file, and any case added to it can move them.
+numbers had drifted, and the coupling is not one-to-one: the case that feeds the
+reader a malformed ledger accounts for the fourth row entirely and for one third
+of the first, whose other two increments come from a hostile-deps block added to
+a different case and from an assertion added for the report's `End state` label.
+A count beside code with nothing keeping the two in step is the defect
+`VerifiedRemoval`'s own docstring polices. These are a property of one commit's
+test file, and any case added to it can move any of them.
 
 The last three were added after review rounds found them unpinned, and two of
 them were live defects rather than hypotheticals: a supplied liveness answer

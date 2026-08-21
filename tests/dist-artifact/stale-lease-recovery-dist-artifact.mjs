@@ -17,9 +17,10 @@
  * ever **hold** the lease. It starts one — `deadProcessId()` spawns a child and
  * waits for it, which is where the genuinely dead pid comes from — but that child
  * never touches the lease, and the owner named in every *stale* fixture is the
- * vitest worker with the pid overwritten afterwards. So the chain from a real acquisition, through the death of the
- * process that made it, to a real removal is never travelled end to end by one
- * owner. It also runs against `src`, not against what is shipped.
+ * vitest worker with the pid overwritten afterwards. So the chain from a real
+ * acquisition, through the death of the process that made it, to a real removal
+ * is never travelled end to end by one owner. It also runs against `src`, not
+ * against what is shipped.
  *
  * (This paragraph said "never runs a second operating-system process", which the
  * very next clause contradicted: a dead pid has to come from a process that
