@@ -701,15 +701,21 @@ export async function runTask(
     // unattended run can ever pick up, having executed nothing. The grant is
     // therefore checked before the write, never after it.
     //
-    // This narrows and never widens, and V3-08 did not change that. The grant
-    // is now three-valued, and the new member is a **conjunct**: the verdict is
-    // computed from the grant *and* `resume.continuation`, so
-    // `AUTOMATIC_RESUME_ONLY` passes only where the one authority that produces
-    // `AUTOMATIC_ALLOWED` already did. It reads that value and nothing else —
-    // not the state name, not the reconciliation verdict — because a blocked
-    // task can be `BLOCKED_USAGE_LIMIT` and reconcile perfectly while the
-    // resume is refused, and a grant that consulted either would be a second,
-    // weaker copy of the decision it is supposed to depend on.
+    // The invariant, stated as the one that actually holds: **no invocation
+    // grant can manufacture `AUTOMATIC_ALLOWED`.** The verdict is computed from
+    // the grant *and* `resume.continuation`, so `AUTOMATIC_RESUME_ONLY` is
+    // *entered* only where the one authority that produces `AUTOMATIC_ALLOWED`
+    // already did. It reads that value and nothing else — not the state name,
+    // not the reconciliation verdict — because a blocked task can be
+    // `BLOCKED_USAGE_LIMIT` and reconcile perfectly while the resume is refused,
+    // and a grant that consulted either would be a second, weaker copy of the
+    // decision it is supposed to depend on.
+    //
+    // This paragraph said "narrows and never widens, and V3-08 did not change
+    // that" while the widening was described nine lines below it. There is
+    // exactly one, it is named `continuingOwnAutomaticResume`, and it extends
+    // nothing except the resume **this same frame** already performed under an
+    // authorisation this gate granted.
     //
     // The blocking gate above already stopped a blocked task without
     // `AUTOMATIC_ALLOWED`, so what this arm actually refuses under

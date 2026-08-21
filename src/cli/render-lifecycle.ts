@@ -73,6 +73,21 @@ export const UNATTENDED_AUTO_RESUME_TRAILER =
   'that gets as far as driving proves it again, and one that stopped earlier -- on the lease,\n' +
   'or with nothing to continue -- never asked.';
 
+/**
+ * The closing sentence of a run made under no continuation grant at all.
+ *
+ * The third member existed from the start and had no sentence of its own, so it
+ * printed `ATTENDED_TRAILER` — "--attended was given" — about a run whose grant
+ * is precisely the absence of that claim. No production path renders it today;
+ * it is written because this renderer's job is to be true for every value of a
+ * closed type, not only for the values that happen to be reachable this week.
+ */
+export const NO_CONTINUATION_TRAILER =
+  'No continuation grant. Neither --attended nor --automatic-resume-only was given, so this\n' +
+  'invocation was not permitted to continue anything: no agent was started, and any task it\n' +
+  'reached was left exactly as it was found. Pass --attended to execute with an operator\n' +
+  'present, or --automatic-resume-only to continue one already-durable task without one.';
+
 /** One static sentence per lifecycle outcome. Closed, and pinned by test. */
 export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, string>> =
   Object.freeze({
@@ -284,15 +299,40 @@ export function renderLifecycleRun(
   // decides which sentence is true, rather than one sentence being printed on
   // every path and being false on one of them.
   //
-  // The repeated-run sentence is attended-only for the same reason: it describes
-  // the scope `block --attended` has, which is not the scope an unattended
-  // automatic resume runs under. The unattended trailer states its own scope in
-  // full, so nothing is lost.
-  const attended = grant !== 'AUTOMATIC_RESUME_ONLY';
-  lines.push('', attended ? ATTENDED_TRAILER : UNATTENDED_AUTO_RESUME_TRAILER);
-  if (attended && result.invocations > 1) lines.push('', LIFECYCLE_TRAILER);
+  // **Chosen by an exhaustive switch, not by `!== 'AUTOMATIC_RESUME_ONLY'`.**
+  // That test was here for one round and it was wrong in the same way this
+  // parameter's old default was: it folded `NO_CONTINUATION` in with `ATTENDED`
+  // and printed an operator-presence claim for a run whose grant is precisely
+  // the absence of one. Making the parameter required stopped a caller
+  // *forgetting* the grant; it did nothing about a three-member value handled
+  // two ways.
+  //
+  // The repeated-run sentence stays attended-only: it describes the scope
+  // `block --attended` has, which is neither of the other two. The unattended
+  // trailer states its own scope in full, and a run granted no continuation made
+  // no invocations to describe.
+  lines.push('', trailerFor(grant));
+  if (grant === 'ATTENDED' && result.invocations > 1) lines.push('', LIFECYCLE_TRAILER);
   lines.push('');
   return lines.join('\n');
+}
+
+/**
+ * The contract sentence for one grant. Total over {@link InvocationGrant}.
+ *
+ * No `default` clause, deliberately: a new grant member must be given a sentence
+ * here rather than silently inheriting whichever one a boolean happened to fall
+ * through to. That is the whole reason this is a switch.
+ */
+function trailerFor(grant: InvocationGrant): string {
+  switch (grant) {
+    case 'ATTENDED':
+      return ATTENDED_TRAILER;
+    case 'AUTOMATIC_RESUME_ONLY':
+      return UNATTENDED_AUTO_RESUME_TRAILER;
+    case 'NO_CONTINUATION':
+      return NO_CONTINUATION_TRAILER;
+  }
 }
 
 /* ────────────────────── the unattended automatic resume ─────────────────── */
@@ -347,10 +387,11 @@ export const RESET_WAIT_SENTENCES: Readonly<Record<ResetWaitDisposition, string>
       '  repository is still there.',
     WAITED:
       'The reported reset time was the one check still refusing the resume, so this run slept\n' +
-      '  once -- holding no execution lease -- and then started a completely new attempt:\n' +
-      '  repository resolved again, lease acquired again, auth proven again, state and worktree\n' +
-      '  observed again, and the resume decision made again. Its result is below. There is no\n' +
-      '  second wait in one invocation.',
+      '  once -- holding no execution lease, having proven the earlier one given back -- then\n' +
+      '  resolved the repository again and started a fresh attempt. **How far that attempt got\n' +
+      '  is its own report, above.** It carries nothing over from before the wait: whatever it\n' +
+      '  reached, it reached from evidence gathered after waking. There is no second wait in\n' +
+      '  one invocation.',
   });
 
 /**

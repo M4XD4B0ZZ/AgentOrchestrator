@@ -79,8 +79,10 @@ import {
   type UnattendedResumeRequest,
 } from '../src/run/unattended-resume.js';
 import {
+  NO_CONTINUATION_TRAILER,
   RESET_WAIT_SENTENCES,
   UNATTENDED_AUTO_RESUME_TRAILER,
+  renderLifecycleRun,
   renderUnattendedResume,
 } from '../src/cli/render-lifecycle.js';
 import { ATTENDED_TRAILER } from '../src/cli/render-attended-run.js';
@@ -1052,6 +1054,20 @@ describe('everything the second attempt acts on is established after the wait', 
     expect(result.epochs[1]?.invocations).toBe(0);
     expectNothingExecuted(scene);
     expect(exitCodeForUnattendedResume(result)).toBe(EXIT_RUN_REFUSED);
+
+    // ── The `WAITED` sentence, against the case that falsifies the easy one ──
+    //
+    // The disposition is still `WAITED` — the run really did sleep and really
+    // did start a fresh attempt — but that attempt stopped at the lease. No
+    // lease was acquired, no auth was proven, no state or worktree was observed
+    // and no resume decision was made. An external review found the sentence
+    // claiming all four, which is exactly the report an operator would get here.
+    expect(result.wait.disposition).toBe('WAITED');
+    const report = renderUnattendedResume(scene.started.repository, result);
+    expect(report).toContain('resolved the repository again and started a fresh attempt');
+    expect(report).not.toContain('lease acquired again');
+    expect(report).not.toContain('auth proven again');
+    expect(report).not.toContain('the resume decision made again');
   });
 
   it('resolves the repository again rather than reusing the object it began with', async () => {
@@ -1477,6 +1493,46 @@ describe('the report distinguishes every way this mode can end', () => {
     // needle that spans a break is a needle that can never be found.
     expect(report).toContain('that are not about the reset time have to be resolved');
     expect(report).not.toContain('each one has to be resolved');
+  });
+
+  it('prints one true contract sentence for each of the three grants', async () => {
+    // The renderer chose its trailer with `grant !== 'AUTOMATIC_RESUME_ONLY'`,
+    // so `NO_CONTINUATION` — a run granted no continuation at all — printed
+    // "--attended was given". Making the parameter required stopped a caller
+    // forgetting it; it did nothing about a three-member value handled two ways.
+    // Each member is asserted on its own here, so a future boolean cannot pass.
+    const scene = await scenario();
+    const sleep = recordedSleep(scene.clock);
+    const result = await driveUnattendedAutomaticResume(scene.request(), scene.deps(sleep));
+    const epoch = result.epochs[0];
+    if (epoch === undefined) throw new Error('the fixture produced no lifecycle epoch');
+
+    const attended = renderLifecycleRun(scene.started.repository, epoch, 'ATTENDED');
+    expect(attended).toContain(ATTENDED_TRAILER);
+    expect(attended).not.toContain(UNATTENDED_AUTO_RESUME_TRAILER);
+    expect(attended).not.toContain(NO_CONTINUATION_TRAILER);
+
+    const automatic = renderLifecycleRun(
+      scene.started.repository,
+      epoch,
+      'AUTOMATIC_RESUME_ONLY',
+    );
+    expect(automatic).toContain(UNATTENDED_AUTO_RESUME_TRAILER);
+    expect(automatic).not.toContain(ATTENDED_TRAILER);
+    expect(automatic).not.toContain(NO_CONTINUATION_TRAILER);
+
+    const none = renderLifecycleRun(scene.started.repository, epoch, 'NO_CONTINUATION');
+    expect(none).toContain(NO_CONTINUATION_TRAILER);
+    // The load-bearing assertion: no attendance is invented for the grant that
+    // is the absence of it.
+    expect(none).not.toContain(ATTENDED_TRAILER);
+    expect(none).not.toContain('--attended was given');
+    expect(none).not.toContain(UNATTENDED_AUTO_RESUME_TRAILER);
+
+    // Three distinct sentences, so the three assertions above cannot all be
+    // satisfied by one string that happens to contain the others.
+    expect(new Set([ATTENDED_TRAILER, UNATTENDED_AUTO_RESUME_TRAILER, NO_CONTINUATION_TRAILER]).size)
+      .toBe(3);
   });
 
   it('never claims an operator was present', async () => {
