@@ -196,8 +196,12 @@ export function registerReleaseCommand(program: Command): void {
           // Wrapped for the reason `block-command.ts` states at its own
           // `finally`: an exception thrown here would replace the one that
           // entered, and the operator would be handed the wrong failure. The
-          // branch is unreached - the release refuses rather than throws - and
-          // leaving `leaseRelease` null keeps the exit code non-nominal.
+          // branch is reached, not theoretical -
+          // `tests/v3-07-lease-release-fault.test.ts` arms it from a task-file
+          // read, which is the only lever this command offers between taking the
+          // lease and giving it back, and refuses the `randomBytes` that names
+          // the quarantine file. Leaving `leaseRelease` null keeps the exit code
+          // non-nominal.
           try {
             leaseReleaseAttempted = true;
             leaseRelease = releaseRepositoryExecutionLease(acquired.evidence);
@@ -233,8 +237,12 @@ export function registerReleaseCommand(program: Command): void {
         // was removed - and the exit code below is not left nominal by a
         // successful one, because writer authority that did not provably come
         // back is an operator condition whatever the removal achieved.
-        // The exit code first, for the reason `block-command.ts` gives at the
-        // same point: a report that failed to write must not take it with it.
+        // The exit code first, because nothing after it should be able to decide
+        // it - and note what that does *not* buy, exactly as `block-command.ts`
+        // records at the same point: if the report below throws, the `catch`
+        // overwrites this with 1 regardless, because it assigns unconditionally.
+        // The ordering keeps the code independent of a console write on the
+        // ordinary path, and "never nominal" holds either way, since 1 is not 0.
         process.exitCode = exitCodeWithLeaseRelease(
           exitCodeForReleaseOutcome(released.outcome),
           leaseRelease,

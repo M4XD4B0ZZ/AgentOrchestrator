@@ -3542,8 +3542,17 @@ and because the failure mode it describes — a command that cannot start is
   actionable-notifications redesign rather than a rendering change. What that
   redesign must not undo is already in place — the notification is sent after the
   release attempt, never before, so the payload it will one day carry is a fact
-  and not a prediction. **Scope:** `notify/notification.ts`,
-  `notify/attention.ts`, `cli/block-command.ts`.
+  and not a prediction.
+
+  One narrow behaviour change V3-07 did introduce and did not guard: the release
+  report is written to stdout *between* the exit code and `notifyBlockRun`, so a
+  synchronous throw from that one write now skips the notification, which on
+  `main` nothing could. Deliberately left unguarded, because guarding it would
+  remove the retry the `catch` performs — and that retry is the only thing that
+  reports a stuck lease when the console refuses once. The trade is a rare lost
+  notification against a routinely-useful retry, and it is recorded rather than
+  silently taken. **Scope:** `notify/notification.ts`, `notify/attention.ts`,
+  `cli/block-command.ts`.
 - **L-V3-07-2 — an exception under the lease exits 1, not 3, even when the lease
   is provably stuck.** `exitCodeWithLeaseRelease` answers
   `EXIT_RUN_NEEDS_OPERATOR` for every release that is not `RELEASED`, and its own

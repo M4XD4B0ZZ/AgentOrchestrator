@@ -499,7 +499,7 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
 
         // What the block itself came to, kept apart from what the release came
         // to. The initial value is never observed - a throw from the call below
-        // skips both statements that read it - so it is the unexpected code for
+        // skips the one statement that reads it - so it is the unexpected code for
         // the reason a floor is chosen rather than for a consequence it has: if
         // an edit ever does make it reachable, "nothing went wrong" is the wrong
         // thing for this command to volunteer about a path that never returned.

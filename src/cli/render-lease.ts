@@ -543,9 +543,9 @@ export const LEASE_RELEASE_DETAIL_SENTENCES: Readonly<Record<LeaseReleaseDetail,
       '    what is there now.',
     UNREADABLE_AFTER_DETACH:
       'The record was detached, could not be read, and was put back at the lease name. It was\n' +
-      '    not kept aside on purpose - the detached copy was deleted, best effort, and this\n' +
-      '    call did not check that the deletion worked. What sits at the lease name is a\n' +
-      '    record this build could not identify, and it will refuse the next run.',
+      '    not kept aside on purpose - the quarantine name was unlinked, best effort, and this\n' +
+      '    call did not check that the unlink worked. What sits at the lease name is a record\n' +
+      '    this call could not read, and it will refuse the next run.',
     RECORD_QUARANTINED:
       'The record was detached and could not be put back, and it is kept - deliberately -\n' +
       '    beside the lease rather than deleted. Whether anything is at the lease name is not\n' +
@@ -559,8 +559,9 @@ export const LEASE_RELEASE_DETAIL_SENTENCES: Readonly<Record<LeaseReleaseDetail,
       '    which this call established rather than assumed. The record is kept beside the\n' +
       '    lease. The name being free is not the same as the repository being idle: the\n' +
       '    record that was detached may belong to a live writer, which loses authority and\n' +
-      '    stops at its next checkpoint rather than immediately. The next run will acquire\n' +
-      '    normally, which is the case for looking before you let it.',
+      '    stops at its next checkpoint rather than immediately. Nothing this call left at\n' +
+      '    the lease name stands in the way of a next run; what that run meets is its own\n' +
+      '    question, and this is the case for looking before you let it.',
   });
 
 /**

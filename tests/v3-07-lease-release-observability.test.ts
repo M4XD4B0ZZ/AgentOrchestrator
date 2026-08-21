@@ -261,7 +261,7 @@ describe('the release vocabulary is closed, shared and safe', () => {
     }
   });
 
-  it('names no command that does not exist, on one line where a reader can see it', () => {
+  it('never breaks a backquoted command across a line, where no scan could see it', () => {
     // The repository already scans shipped source for `lease <word>` naming a
     // subcommand that is not registered. That scan cannot see a name broken
     // across a string concatenation, and a name broken across one is unreadable
@@ -289,6 +289,24 @@ describe('the release vocabulary is closed, shared and safe', () => {
       const rendered = renderLeaseRelease('Release', { code, detail: null });
       expect(rendered).toContain(`Release      : ${code}`);
       expect(rendered).toContain(LEASE_RELEASE_SENTENCES[code]);
+      // No token, so no token line. The four-space indent is its signature.
+      expect(rendered.split('\n').some((each) => /^ {4}\S/.test(each))).toBe(false);
+    }
+  });
+
+  it('adds the token line under the code, indented, for every token', () => {
+    for (const token of LEASE_RELEASE_DETAILS) {
+      const rendered = renderLeaseRelease('Release', {
+        code: 'LEASE_REMOVE_FAILED',
+        detail: token,
+      });
+      expect(rendered).toContain(`Release      : LEASE_REMOVE_FAILED  (${token})`);
+      expect(rendered).toContain(LEASE_RELEASE_DETAIL_SENTENCES[token]);
+      // The indent written out. `toContain` on the constant alone matches at any
+      // prefix - the sentence's own first line carries no leading space - so a
+      // mutant indenting this line by two would survive it, and the two levels
+      // are what tell an operator which line qualifies which.
+      expect(rendered).toContain(`\n    ${LEASE_RELEASE_DETAIL_SENTENCES[token].split('\n')[0]!}`);
     }
   });
 
@@ -386,7 +404,7 @@ describe('the release vocabulary is closed, shared and safe', () => {
     expect(restored).not.toContain('is kept');
     expect(restored).not.toContain('could not be put back');
     expect(restored).toContain('put back at the lease name');
-    expect(restored).toContain('the detached copy was deleted, best effort');
+    expect(restored).toContain('the quarantine name was unlinked, best effort');
 
     // And the two that really do keep one say so.
     for (const token of ['RECORD_QUARANTINED', 'RECORD_QUARANTINED_LEASE_UNOWNED'] as const) {
@@ -626,8 +644,9 @@ describe('block --attended reports the lease it gave back', () => {
       { authPreflight: authPreflightPasses, agent: seams.agent, verify: seams.verify },
     );
 
-    // Both facts, and the block's own one first.
-    expect(out()).toContain('COMPLETE');
+    // Both facts, and the block's own one first. The whole outcome line, because
+    // `COMPLETE` alone is a substring of the per-task `TASK_COMPLETED`.
+    expect(out()).toContain('Outcome      : BLOCK_RUN_ENDED   reason COMPLETE');
     expect(out()).toContain('Release      : RELEASED');
     expect(out()).toContain(LEASE_RELEASE_SENTENCES.RELEASED);
     expect(process.exitCode).toBe(EXIT_RUN_OK);
