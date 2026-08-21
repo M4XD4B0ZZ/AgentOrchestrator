@@ -351,7 +351,7 @@ describe('the release vocabulary is closed, shared and safe', () => {
       EVIDENCE_INVALID: 'could not prove which lease it was holding',
       LEASE_ABSENT: 'no record was at the lease name when this release reached it',
       NOT_OWNER: 'could not be shown to be the one this invocation took',
-      LEASE_UNREADABLE: 'what stopped it was not the record being absent',
+      LEASE_UNREADABLE: 'the failure was not classified as its absence',
       LEASE_REMOVE_FAILED: 'The removal did not complete.',
     };
     for (const code of LEASE_RELEASE_CODES) {
@@ -366,6 +366,30 @@ describe('the release vocabulary is closed, shared and safe', () => {
     for (const token of LEASE_RELEASE_DETAILS) {
       expect(LEASE_RELEASE_DETAIL_SENTENCES[token].replace(/\s+/g, ' ')).toContain(tokens[token]!);
     }
+  });
+
+  it('reports an unreadable lease as unresolved, never as a record that is present', () => {
+    // The producer establishes exactly one thing: `readFileSync` threw and
+    // `safeErrnoCode` did not classify the failure as `ENOENT`. It does **not**
+    // establish that a record was there - a refused parent, a path component
+    // that is not a directory, and any errno off the allow-list (which
+    // `safeErrnoCode` answers `UNKNOWN` for) all arrive at this code with
+    // existence unresolved.
+    //
+    // Asserted positively, not as a blacklist: the sentence has to *say* the
+    // state is unresolved. A wording that merely avoided the forbidden phrases
+    // while implying presence would pass a blacklist and fail an operator.
+    const sentence = LEASE_RELEASE_SENTENCES.LEASE_UNREADABLE.replace(/\s+/g, ' ');
+    expect(sentence).toContain('the failure was not classified as its absence');
+    expect(sentence).toContain('whether the record is there is left unresolved');
+    expect(sentence).toContain('none of them answers whether the record exists');
+    // And it names at least one producer where nothing is at the lease name, so
+    // the unresolved half is concrete rather than a disclaimer.
+    expect(sentence).toContain('not a directory');
+    // Never the opposite claim, in any of the shapes this table has used.
+    expect(sentence).not.toMatch(/Something (is|was) at the lease name/);
+    expect(sentence).not.toContain('was not the record being absent');
+    expect(sentence).not.toContain('present in this repository');
   });
 
   it('leaves the on-disk state to the token, because the code cannot carry it', () => {
