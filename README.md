@@ -3263,6 +3263,217 @@ and because the failure mode it describes — a command that cannot start is
   result taken by somebody else at some other moment — and it does make one
   `lease status` two probes. Cosmetic for the CLI; worth knowing for any caller
   that counts probe invocations. **Scope:** `lease/lease-recovery.ts`.
+- **L-V3-06-1 — the continuation grant was examined and is unchanged.** The
+  first draft of this entry claimed slice 6 widened it, and that claim was
+  wrong. `attendedContinuation` has never meant "one `runTask` call": it means
+  an operator is present for *this invocation of the command*, and
+  `block --attended` has driven a `for(;;)` loop over many tasks, each its own
+  `runTask`, under a single `--attended` since V2-08 —
+  `block/block-runner.ts:887` passes `attendedContinuation: true` from inside
+  that loop. `driveLifecycle` does the same for one task, in one foreground
+  process the operator started and can stop, and `--max-invocations` defaults to
+  one so the command drives a task exactly as far as it did before unless an
+  operator asks otherwise. No authority was extended.
+
+  **Not byte-identical output, though, and an earlier draft of this entry said
+  it was.** Routing `run --attended` through the driver changed three visible
+  things on purpose, and **five** rather than the three an earlier draft of this
+  entry listed:
+
+  1. the step-budget stop is spelled `INVOCATION_BUDGET_EXHAUSTED` — same exit
+     code 5, same meaning;
+  2. the report comes from `renderLifecycleRun`, which adds the lease and release
+     lines this slice exists to produce;
+  3. **seven** of the eight acquire refusals moved from exit 4 to exit 3. Only
+     `LEASE_HELD` keeps 4, because another run working here clears itself; an
+     unusable lease location, an incoherent repository record and a filesystem
+     that cannot support the claim do not, and code 4 promises that re-invoking
+     under other conditions can differ. `STALE_LEASE_RECOVERY_UNSAFE` is the
+     seventh — it is what a crashed repository answers, so it is the one a
+     scheduler actually meets — and it lands on exit 3 through whichever of
+     `STALE_LEASE_PRESENT`, `RECOVERY_UNSAFE`, `LEASE_CHANGED`,
+     `LEASE_DISPLACED`, `RECOVERY_FAILED` or `LEASE_ACQUISITION_REFUSED`
+     applies. One ending is the exception: a recovery that succeeds and is then
+     beaten to the acquisition reports `LIVE_OWNER_PRESENT`, exit 4, correctly.
+     This narrows `L-V2-07L-1` rather than carrying it forward. (This paragraph
+     said "six" while also saying "only `LEASE_HELD` keeps 4", which cannot both
+     be true of an eight-member vocabulary. The code was corrected in review
+     round 2 and this entry was not — the same sibling-site miss that round was
+     convened to fix.);
+  4. each acquire refusal keeps its own sentence in the report, printed beneath
+     the outcome sentence, which is what the command did before the rewiring;
+  5. task selection now happens **outside** the lease. It only reads the
+     repository's own task files, and an invocation with nothing to run should
+     not take a writer lease to discover that. The visible consequence: when a
+     lease is held *and* the selector finds nothing, the report is now the
+     read-only plan rather than a lease refusal, so the exit code is the plan's
+     rather than 4.
+
+  **Scope:** `run/lifecycle-driver.ts`, `cli/run-command.ts`,
+  `cli/run-exit-codes.ts`.
+- **L-V3-06-2 — the reset wait was WITHDRAWN from slice 6, and needs a contract
+  decision before it can exist.** The slice was to let an unattended run sleep
+  until `reportedResetAt` and carry on. It cannot be built without extending an
+  authority this product has not granted, and the chain is short:
+  `run/run-driver.ts` refuses **every** continuation when `attendedContinuation`
+  is false — including one `evaluateAutomaticResume` has already allowed,
+  because the grant is checked before the resume write and can only withhold.
+  So AO has no unattended execution path at all today; the automatic-resume
+  machinery decides *eligibility*, and operator presence is still required on
+  top of it.
+
+  That makes the wait unbuildable in both directions. Keeping the grant across a
+  multi-hour sleep spends a claim of operator presence made long before, which
+  is the widening. Dropping the grant after the sleep makes the wait pointless,
+  because the resume it slept for is refused too.
+
+  **The minimal contract change, if it is ever wanted:** a third continuation
+  authority — "may continue with nobody present, but *only* where
+  `classifyResume` already answered `AUTOMATIC_ALLOWED`" — distinct from
+  `attendedContinuation` and never a substitute for it. It would let an
+  unattended run clear a self-clearing quota pause while still refusing ordinary
+  in-flight work, which is the only shape that satisfies *unattended
+  continuation must not increase authority*. That is a product-contract
+  decision, so it is reported here rather than implemented. Until it is made,
+  `BLOCKED_USAGE_LIMIT` stops the lifecycle driver exactly as it stops every
+  other caller. **Scope:** `run/run-driver.ts`, `core/resume-policy.ts`,
+  `run/lifecycle-driver.ts`.
+- **L-V3-06-3 — the real-process harness measures the lease phase, not a driven
+  task.** `tests/dist-artifact/lifecycle-restart-dist-artifact.mjs` names a task
+  the plan does not contain, so the one phase that reaches `startTask` stops at
+  `TASK_START_REFUSED`; the other three stop in the lease phase and assert
+  `start === null`. (An earlier version of this entry said "every phase" reaches
+  it, which is wrong in three cases out of four.) That is what makes the harness
+  agent-free, and `startTask` being reached *at all* in phase A is the proof that
+  the recovery was followed by a real acquisition — but it does mean no *durable
+  phase* is continued by a real second process anywhere in the gate. Continuation
+  from durable state is covered in-process only. **Scope:**
+  `tests/dist-artifact/lifecycle-restart-dist-artifact.mjs`.
+- **L-V3-06-4 — the lifecycle driver does not start what it cannot select.** It
+  takes a definite `taskId` and never consults the selector; `run --attended`
+  selects before calling it. An unattended run therefore continues *one* task and
+  stops, exactly as `runTask` does, and nothing here decides that a finished task
+  means "move on to the next". Automatic task selection stays out of scope.
+  **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-5 — the post-recovery lost race is produced by no test.** The path
+  where a stale lease is recovered and the *ordinary* acquisition that follows
+  then loses to a successor — `run/lifecycle-driver.ts`'s second `acquireOnce`,
+  and the `ACQUISITION_AFTER_RECOVERY_LOST` reason code — is unexercised, in
+  process and against the artefact alike. Reaching it needs a lease recovery
+  *accepts* (a real proved launch history) plus a competitor arriving inside the
+  window between the removal and the second acquire, which no harness here can
+  stage deterministically. `LEASE_CHANGED`, `LEASE_DISPLACED` and
+  `RECOVERY_FAILED` are likewise produced by no test. The property they carry —
+  recovery grants nothing, and the acquisition after it is allowed to lose — is
+  therefore argued from the code rather than measured. A review found the case
+  named for this path did not reach it; the case was renamed to what it does
+  measure rather than left claiming more.
+
+  Two further outcomes are asserted by no case at runtime and are named here so
+  the list is complete: `AUTH_PREFLIGHT_FAILED` and `LEASE_ACQUISITION_REFUSED`.
+  Both are reachable; neither is exercised. **Scope:**
+  `run/lifecycle-driver.ts`, `tests/v3-06-lifecycle-driver.test.ts`.
+- **L-V3-06-6 — a lease that clears itself between the refused acquire and the
+  recovery is reported as an operator condition.** The first acquire refuses
+  `STALE_LEASE_RECOVERY_UNSAFE`; another invocation legitimately recovers and
+  acquires in the window; `recoverStaleLease` then re-probes — correctly, it
+  binds to bytes and takes its own liveness reading — and refuses. The run
+  reports `RECOVERY_UNSAFE`, exit 3, "an operator must act", when the truth is
+  `LIVE_OWNER_PRESENT`, exit 4, and it clears itself. No wrong *effect*: nothing
+  is removed, and recovery is still attempted at most once. Only the reported
+  condition and exit class are wrong, and narrowing it means a second inspection
+  whose answer would be just as stale. **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-7 — the discarded lease-release result is closed for one command of
+  three, and on one path of that one.** The slice's third stated gap was that
+  every call site threw the release result away, leaving a quarantined record
+  inside `.git` that nobody was told about. `run --attended` now reports it.
+  `cli/block-command.ts` and `cli/release-command.ts` still discard it — and
+  `block --attended` is the longer-running of the two, so it is the more likely
+  to meet the condition. So does the lifecycle driver's own `catch`: on a throw
+  the lease is given back but there is no result to attach the report to, and the
+  operator sees only the safe error text and exit 1. The pre-slice condition
+  therefore still exists on three paths, and describing gap 3 as closed would be
+  the overstatement this register exists to prevent. **Scope:**
+  `cli/block-command.ts`, `cli/release-command.ts`, `run/lifecycle-driver.ts`.
+- **L-V3-06-8 — the loop has two floors; one does the work and one cannot fire.**
+  The live one is the revision comparison: an invocation that reports
+  `STEP_BUDGET_EXHAUSTED` while leaving the state file identical to the one its
+  predecessor left does not get to run again.
+
+  The other, `steps === 0`, is **unreachable**, and the mutant that deletes it
+  survives the suite. `run-driver.ts` refuses a step budget below one before its
+  loop, so any run reaching the budget stop completed at least one iteration and
+  every iteration that does not stop early performs a durable write — so
+  `STEP_BUDGET_EXHAUSTED` implies `steps >= 1`. It is kept for parity with
+  `block-runner.ts`, which carries the identical guard on the identical loop, and
+  because a change to that budget check one module over would otherwise turn a
+  nothing-invocation into a spin in silence. A round of review claimed this floor
+  "covers the first invocation, which the revision comparison cannot"; there is
+  nothing there to cover, because the first invocation provably wrote. What is
+  pinned instead is the refusal the argument rests on.
+
+  The live floor compares **one** invocation back. A durable two-cycle — state A
+  to B to A to B, each step a real write — never equals its immediate predecessor
+  and runs to `--max-invocations`. Bounded rather than a spin, and no such cycle
+  is reachable through the current transition table, so widening it to a set of
+  seen revisions would defend against a shape the state machine does not have.
+  **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-9 — two lifecycle outcomes are unreachable through the CLI, and one
+  exported accessor has no production caller.**
+
+  `CONTINUATION_NOT_AUTHORISED` is the second one, and it was missed when this
+  entry was first written. `cli/run-command.ts` hardcodes
+  `continuationGrant: true` — the function is only reached under `--attended` —
+  and the sole producer of the underlying run outcome is gated on that grant
+  being false. So the member, its exit-code entry and its operator sentence are
+  dead through the shipped command, exactly as below. Both are kept for the same
+  reason: `driveLifecycle` is an exported API with a second consumer.
+
+  `exitCodeForLifecycle` likewise has no `src/` caller — `exitCodeForLifecycleRun`
+  indexes the table directly. It is kept because it is what
+  `tests/run-exit-codes.test.ts` pins the table through, and a table reachable
+  only via the function that also delegates would be pinned less directly.
+  `exitCodeForRunOutcome` lost its last production caller to this slice's
+  rewiring and is now in the same position; its own doc comment already said "not
+  consumed by any command yet", which became false in V2-05 and is true again.
+
+  And the original subject of this entry:
+  `cli/run-command.ts` validates `--max-invocations` and refuses before
+  `driveLifecycle` is called, so in the shipped product the outcome, its
+  exit-code entry and its operator sentence are all dead. They are kept because
+  the driver is an exported API with a second consumer — the dist harness — and
+  because a guard that answers only when its caller forgot to guard is the kind
+  that must not silently return something wrong. The two checks are now the same
+  check (`Number.isSafeInteger`); they were not, and the driver's was the weaker,
+  which is the defect a defence-in-depth layer is supposed to make impossible.
+  **Scope:** `run/lifecycle-driver.ts`, `cli/run-command.ts`.
+- **L-V3-06-10 — the release-ordering guard is unpinned.** `finish` sets its
+  "already released" flag *after* the release call returns, so a release that
+  threw leaves the flag clear and the outer `catch` tries once more rather than
+  standing down. The mutant that restores the original ordering survives:
+  `releaseRepositoryExecutionLease` is not an injectable seam, and a review that
+  went looking could construct no reachable throw inside it — every filesystem
+  call on that path is already wrapped. The ordering is written the safe way on
+  the argument alone. **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-11 — three sibling dist harnesses hand-build a repository identity,
+  and are consistent rather than correct.** `test:dist-lifecycle-restart` failed
+  both CI jobs because its owner process built
+  `{ gitCommonDir: join(root, '.git'), root, id }` from a raw `tmpdir()` while
+  the parent used `resolveRepository`. On a GitHub Windows runner `tmpdir()` is
+  the 8.3 short form; the resolver returns the long form; and
+  `lease/execution-lease.ts` reads a lease whose recorded `leaseKey` is not
+  path-identical to the reader's derived key as `UNPARSEABLE`. One physical file,
+  two identities. Reproduced and measured locally before it was fixed: for a
+  single directory, `KEYS EQUAL: false`.
+
+  That harness now resolves on both sides and requires them to agree. The same
+  construct survives in `tests/dist-artifact/stale-lease-recovery-dist-artifact.mjs`,
+  `execution-lease-race-dist-artifact.mjs` and `lease-containment-dist-artifact.mjs`,
+  which pass only because *both* of their sides hand-build from the same raw
+  string. They are not broken and are not fixed here — the moment either side of
+  any of them adopts the resolver, this reproduces. `runtime-gate-dist-artifact.mjs`
+  already does the right thing. **Scope:** the three harnesses named.
+  **Not a production defect:** nothing in `src/` hand-builds a repository record.
 
 ### What V1-08 is not
 

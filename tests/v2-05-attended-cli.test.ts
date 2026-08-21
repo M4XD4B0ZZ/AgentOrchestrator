@@ -21,7 +21,7 @@
  * (see `helpers/auth-evidence.ts`).
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -34,7 +34,15 @@ import {
 } from '../src/cli/render-attended-run.js';
 import { registerRunCommand, type RunCommandSeams } from '../src/cli/run-command.js';
 import {
+  deriveExecutionLeaseLocation,
+  releaseRepositoryExecutionLease,
+  type LeaseRepository,
+} from '../src/lease/execution-lease.js';
+import { resolveRepository } from '../src/repo/resolve-repository.js';
+import { leaseFor, releaseTestLeases } from './helpers/lease.js';
+import {
   EXIT_RUN_CALL_AGAIN,
+  EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_NEEDS_OPERATOR,
   EXIT_RUN_OK,
 } from '../src/cli/run-exit-codes.js';
@@ -326,5 +334,123 @@ describe('a start refusal ends the invocation with its own code', () => {
 
     expect(stdout.join('')).toContain('Start        : TASK_UNKNOWN');
     expect(git(root, ['branch', '--list', 'ao/task/*']).trim()).toBe('');
+  });
+});
+
+/* ═════════ V3-06: the two new flags reach the driver, or they are nothing ══ */
+
+/**
+ * Both flags are wired through commander and observed in the report.
+ *
+ * They were pinned by nothing until round 3 of review said so, and one of them
+ * carries a **destructive permission**: `--recover-stale-lease` is what lets an
+ * invocation remove a lease it can prove is dead. A mutant turning
+ * `options.recoverStaleLease === true` into `!== false` hands that permission to
+ * every attended run, and the whole gate stayed green — the driver's own suite
+ * builds `LifecycleRequest` objects directly and never travels through
+ * commander, and the dist harness passes an explicit boolean.
+ *
+ * So these drive the real registered command and read the report, which is the
+ * only place the wiring is observable from outside.
+ */
+describe('the lifecycle flags are wired, not merely accepted', () => {
+  /**
+   * A lease whose recorded owner is a process id nothing is running under.
+   *
+   * The same construction `tests/v3-06-lifecycle-driver.test.ts` uses: take the
+   * real lease, keep its bytes, give it back, write them again with a dead
+   * owner. No writer-launch ledger is created, so recovery **refuses** it — and
+   * that refusal is the point. The two flag states produce two different
+   * refusals, which is what makes the wiring visible without ever removing a
+   * lease from a test repository.
+   */
+  function staleLeaseAt(repository: LeaseRepository): void {
+    const location = deriveExecutionLeaseLocation(repository);
+    if (!location.ok) throw new Error(`no lease location: ${location.code}`);
+    const evidence = leaseFor(repository);
+    const document = JSON.parse(readFileSync(location.path, 'utf8')) as Record<string, unknown>;
+    releaseTestLeases();
+    releaseRepositoryExecutionLease(evidence);
+    let dead = 0;
+    for (let candidate = 60_000; candidate < 65_000; candidate += 7) {
+      try {
+        process.kill(candidate, 0);
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+          dead = candidate;
+          break;
+        }
+      }
+    }
+    if (dead === 0) throw new Error('no dead process id could be established');
+    writeFileSync(
+      location.path,
+      `${JSON.stringify({ ...document, ownerPid: dead }, null, 2)}\n`,
+      'utf8',
+    );
+  }
+
+  it('leaves a stale lease alone without --recover-stale-lease', async () => {
+    const root = attendableRepo();
+    const resolution = await resolveRepository({ repositoryPath: root });
+    if (!resolution.ok) throw new Error(`fixture did not resolve: ${resolution.code}`);
+    staleLeaseAt(resolution.repository);
+
+    await invoke(['--repository', root, '--attended', '--task', TASK_ID], drivingSeams());
+
+    const text = stdout.join('');
+    expect(text).toContain('Lifecycle    : STALE_LEASE_PRESENT');
+    // No recovery was attempted at all, which is the half a mutant that always
+    // grants the permission would break.
+    expect(text).not.toContain('Recovery     :');
+  });
+
+  it('attempts recovery — and still refuses — with --recover-stale-lease', async () => {
+    const root = attendableRepo();
+    const resolution = await resolveRepository({ repositoryPath: root });
+    if (!resolution.ok) throw new Error(`fixture did not resolve: ${resolution.code}`);
+    staleLeaseAt(resolution.repository);
+
+    await invoke(
+      ['--repository', root, '--attended', '--task', TASK_ID, '--recover-stale-lease'],
+      drivingSeams(),
+    );
+
+    const text = stdout.join('');
+    // The flag reached the driver: a recovery was made, and refused on its own
+    // proof rather than on the absence of permission.
+    expect(text).toContain('Lifecycle    : RECOVERY_UNSAFE');
+    expect(text).toContain('Recovery     : RECOVERY_UNSAFE');
+    expect(text).not.toContain('STALE_LEASE_PRESENT');
+  });
+
+  it('re-enters the driver only as many times as --max-invocations allows', async () => {
+    const root = attendableRepo();
+
+    // One durable step per invocation, three invocations permitted. Without the
+    // flag reaching the driver this reports one.
+    await invoke(
+      [
+        '--repository', root, '--attended', '--task', TASK_ID,
+        '--max-steps', '1', '--max-invocations', '3',
+      ],
+      drivingSeams(),
+    );
+
+    const text = stdout.join('');
+    expect(text).toContain('Invocations  : 3');
+    // And the sentence that only a repeated run prints.
+    expect(text).toContain('This run continued past its first invocation');
+  });
+
+  it('refuses an unusable --max-invocations before taking anything', async () => {
+    const root = attendableRepo();
+
+    await invoke(['--repository', root, '--attended', '--task', TASK_ID, '--max-invocations', '0']);
+
+    expect(stdout.join('')).toContain('MAX_INVOCATIONS_INVALID');
+    expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    // Nothing was started: the refusal happens before the repository is touched.
+    expect(existsSync(stateFile(root))).toBe(false);
   });
 });

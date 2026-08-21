@@ -10,7 +10,11 @@
  *   5. whether a human decision is required first.
  *
  * There is deliberately **no resume runner here** — this module only describes
- * and validates. Executing a resume is out of scope for the foundation.
+ * and validates. Executing a resume belongs to `run/run-driver.ts`, which since
+ * V2-04 performs the one transition an unattended resume authorises, and only
+ * ever on `evaluateAutomaticResume`'s permission. What is out of scope here is
+ * the running, not the existence of a runner: eligibility declared in this file
+ * is never permission to act. See `core/automatic-resume.ts`.
  *
  * ── Single source of truth for resume phases (AO-004) ──────────────────────
  *

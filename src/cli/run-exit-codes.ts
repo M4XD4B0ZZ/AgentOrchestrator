@@ -31,6 +31,7 @@
 import type { BlockStopReason } from '../block/block-ledger.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
+import type { LifecycleOutcome } from '../run/lifecycle-driver.js';
 import type { RunOutcome } from '../run/run-driver.js';
 import type { RunPlanConclusion } from '../run/run-plan.js';
 import type { StartTaskOutcome } from '../run/start-task.js';
@@ -323,3 +324,103 @@ export function exitCodeForBlockRun(result: AttendedBlockResult): CliExitCode {
  * written — so the outcomes it graded no longer exist. `lease status` exits 0
  * whatever it finds, because a held lease is a condition and not an error.
  */
+
+/**
+ * Exit code for every lifecycle outcome. Total; pinned by test.
+ *
+ * The lifecycle driver's vocabulary is mostly the run driver's passed through,
+ * and where a member appears in both tables it is given the same code here — a
+ * task that ended `BLOCKED_VERIFY` did not end differently because an outer
+ * loop was watching. What is new is the lease phase, which happens *before* any
+ * run, and the two stops the outer loop owns.
+ */
+const LIFECYCLE_EXIT_CODES = Object.freeze({
+  // The task finished.
+  COMPLETED: EXIT_RUN_OK,
+
+  // Durably parked, or a record an operator has to look at. Same codes as the
+  // run table, deliberately.
+  TASK_ABORTED: EXIT_RUN_NEEDS_OPERATOR,
+  BLOCKED_USAGE_LIMIT: EXIT_RUN_NEEDS_OPERATOR,
+  BLOCKED_VERIFY: EXIT_RUN_NEEDS_OPERATOR,
+  BLOCKED_AUTH: EXIT_RUN_NEEDS_OPERATOR,
+  SCOPE_VIOLATION: EXIT_RUN_NEEDS_OPERATOR,
+  RESUME_STATE_DIVERGED: EXIT_RUN_NEEDS_OPERATOR,
+  HUMAN_DECISION_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
+  RECONCILIATION_DIVERGED: EXIT_RUN_NEEDS_OPERATOR,
+  RECONCILIATION_UNOBSERVABLE: EXIT_RUN_NEEDS_OPERATOR,
+  STATE_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
+
+  // The lease phase, split across two codes, and the split is the point.
+  // `LIVE_OWNER_PRESENT` is somebody else working: a refusal, code 4, and it
+  // clears itself. Every other lease condition is an operator condition, code 3,
+  // because a failed recovery, a displaced lease and an unproven release each
+  // leave something in `.git` that only a human resolves. (This comment read
+  // "every one of these is an operator condition rather than a refusal" directly
+  // above the one member that is a refusal.)
+  LIVE_OWNER_PRESENT: EXIT_RUN_REFUSED,
+  STALE_LEASE_PRESENT: EXIT_RUN_NEEDS_OPERATOR,
+  RECOVERY_UNSAFE: EXIT_RUN_NEEDS_OPERATOR,
+  LEASE_CHANGED: EXIT_RUN_NEEDS_OPERATOR,
+  LEASE_DISPLACED: EXIT_RUN_NEEDS_OPERATOR,
+  RECOVERY_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  LEASE_ACQUISITION_REFUSED: EXIT_RUN_NEEDS_OPERATOR,
+  LEASE_RELEASE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+
+  // Nothing to continue.
+  TASK_NOT_STARTED: EXIT_RUN_INPUT_UNUSABLE,
+  // A floor, and normally unreachable: `exitCodeForLifecycleRun` delegates a
+  // refused start to `START_TASK_EXIT_CODES`, because those refusals are not one
+  // condition. `TASK_ID_INVALID` is a typo, `AUTH_PREFLIGHT_FAILED` is a login,
+  // and `STATE_NOT_RECORDED` is a worktree nothing accounts for; answering all
+  // three with "your input was unusable" is the collapse this vocabulary exists
+  // to prevent. Reached only if a result carried the outcome without the start.
+  TASK_START_REFUSED: EXIT_RUN_INPUT_UNUSABLE,
+
+  // A human must log the agent CLIs in. Code 3 rather than 4, and taken from
+  // `START_TASK_EXIT_CODES` rather than chosen again here: this is the same
+  // condition `run --attended` has always reported, and an operator's answer to
+  // it did not change because an outer loop asked the question.
+  AUTH_PREFLIGHT_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+
+  // This run was refused or achieved nothing; nothing durable is wrong.
+  STATE_CONFLICT: EXIT_RUN_REFUSED,
+  STATE_NOT_RECORDED: EXIT_RUN_REFUSED,
+  CONTINUATION_NOT_AUTHORISED: EXIT_RUN_REFUSED,
+  EXECUTION_UNAUTHORISED: EXIT_RUN_REFUSED,
+  EXECUTION_LEASE_NOT_HELD: EXIT_RUN_REFUSED,
+  EXECUTION_LEASE_LOST: EXIT_RUN_REFUSED,
+  NO_PROGRESS: EXIT_RUN_REFUSED,
+
+  // Progress was still being made and this run's budget ran out. The lifecycle
+  // spelling of "call again", and the only member that carries code 5.
+  INVOCATION_BUDGET_EXHAUSTED: EXIT_RUN_CALL_AGAIN,
+
+  // The bound itself was unusable, so nothing was taken and nothing ran. Code 2
+  // rather than 5: re-invoking with the same argument repeats forever, which is
+  // the opposite of what "call again" tells a scheduler.
+  INVOCATION_BUDGET_INVALID: EXIT_RUN_INPUT_UNUSABLE,
+}) satisfies Record<LifecycleOutcome, CliExitCode>;
+
+export function exitCodeForLifecycle(outcome: LifecycleOutcome): CliExitCode {
+  return LIFECYCLE_EXIT_CODES[outcome];
+}
+
+/**
+ * Exit code for a whole lifecycle result.
+ *
+ * The one place a lifecycle outcome is *not* enough on its own. A run stopped by
+ * `startTask` keeps that half's exit code, taken from the table that already
+ * owns it, so wrapping the attended path in an outer loop did not quietly
+ * relabel a failed login as bad input. Everything else is the outcome's own
+ * code.
+ */
+export function exitCodeForLifecycleRun(result: {
+  readonly outcome: LifecycleOutcome;
+  readonly start: { readonly outcome: StartTaskOutcome } | null;
+}): CliExitCode {
+  if (result.outcome === 'TASK_START_REFUSED' && result.start !== null) {
+    return exitCodeForStartOutcome(result.start.outcome);
+  }
+  return LIFECYCLE_EXIT_CODES[result.outcome];
+}
