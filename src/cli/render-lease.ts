@@ -251,8 +251,8 @@ export function renderLeaseRecovery(
           // who cannot check it.
           '  Every writer launch under this lease is proved contained and its owner process is\n' +
             '  gone, so no writer process it started can still be running. Remove it with\n' +
-            '  `agent-loop lease recover`. That removes a dead record and grants nothing: the\n' +
-            '  next run takes its own lease through the ordinary path.',
+            '  `agent-loop lease recover --repository <path>`. That removes a dead record and\n' +
+            '  grants nothing: the next run takes its own lease through the ordinary path.',
         ]
       : [
           line('Recovery', assessment.refusal),
@@ -270,10 +270,11 @@ export const STALE_RECOVERY_OUTCOMES: Readonly<Record<StaleLeaseRecoveryResult['
       '  granted: the next invocation takes its own lease through the ordinary path.',
     RECOVERY_UNSAFE: 'Nothing was touched. The reason line says which fact is missing.',
     LEASE_CHANGED:
-      'The lease at the path was not the one that was proved removable, so nothing of it was\n' +
-      '  removed. Somebody released it, removed it, or acquired a new one in the meantime.\n' +
-      '  Run `agent-loop lease status` again: this is usually a repository that has a live\n' +
-      '  owner once more, which is what the recovery was for.',
+      'Nothing was removed by this call: what is at the lease path is not what was proved\n' +
+      '  removable. It changed hands, was released, or was already gone. The reason line\n' +
+      '  carries which of those, and it is the only line here that names one - who holds\n' +
+      '  the lease now is not something this call looked at. Run `agent-loop lease status`\n' +
+      '  before anything else runs against this repository.',
     RECOVERY_FAILED:
       'The removal could not be completed. The reason line names the end state. Run\n' +
       '  `agent-loop lease status` before anything else runs against this repository.',

@@ -6084,6 +6084,16 @@ Anything else is a refusal, and there is no override: no `--force`, no
 environment variable, no API back door. `unknown => do not recover` is the whole
 of the default arm, and there is no other.
 
+"No override" is a claim about an argument list, so it is worth being exact. The
+first version of `recoverStaleLease` took a liveness *probe* — the same test seam
+the reporting paths take — and a review removed a demonstrably living process's
+lease through it in a single call, because that probe **is** the first conjunct.
+What it takes now is an additional liveness *opinion*, combined with the
+operating system's by taking the more refusing of the two: it can stop a recovery
+and cannot cause one. The rule that fixed it is the one this module states
+everywhere else and had broken in the one place it could least afford to — **a
+probe may refuse and may never permit**.
+
 Neither conjunct works alone, which is why both are there. A dead owner proves
 nothing — that is the measurement this repository has been carrying since V2-07L,
 and it has not been repealed. A complete all-contained history beside a *living*
@@ -6164,9 +6174,9 @@ the constant digest `sha256("")`, and a reused `(dev,ino)`.
   is now recoverable — and it is not closed;
 - **there is no window to carry a fact across.** `break` minted an
   authorisation, printed it, and acted on what an operator typed back. Here the
-  predicate is evaluated inside the call that removes; `recoverStaleLease` takes
-  a repository and nothing else, so there is no argument position a stale verdict
-  could arrive through;
+  predicate is evaluated inside the call that removes, and the one argument
+  besides the repository can only ever *refuse*, so no verdict and no permission
+  can arrive from a caller at all;
 - **and the removal binds to the object.** It goes through
   `removeVerifiedLease`, which detaches into a private name and decides on that
   object, and the predicate requires the exact bytes the assessment read. A lease
@@ -6194,10 +6204,21 @@ stops a report from becoming an authorisation.
 ### What it is measured by
 
 `tests/v3-05-stale-lease-recovery.test.ts` covers the format, the lifecycle, the
-seam, the predicate and the operator vocabulary, and four mutants were run
-against it rather than described: removing the pending mark (22 cases red),
-treating slice 4's record as sufficient (3), unbinding the removal (1), and
-reading an unreadable history as contained (3).
+seam, the predicate and the operator vocabulary, and six mutants were run against
+it rather than described, each a single edit to `src`:
+
+```text
+the pending mark is never written                    24 cases red
+slice 4's record is treated as sufficient             3
+the removal stops binding to the object it proved     1
+an unreadable history reads as contained              3
+the seam stops refusing an unrecordable launch        1
+a supplied liveness opinion may permit                3
+```
+
+The last two were added after review rounds found them unpinned, and the sixth
+was a live defect rather than a hypothetical: see the paragraph on "no override"
+above.
 
 Two limits in the format were caught by review rather than by a test, and are
 recorded because the second was a silent one. The entry cap was **dead**: a

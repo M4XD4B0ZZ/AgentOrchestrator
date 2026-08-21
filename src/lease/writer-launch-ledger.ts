@@ -297,8 +297,15 @@ const BINDING_LABEL = 'agent-orchestrator/writer-launch-ledger/v1';
  * reason `containmentBinding` gives: `JSON.stringify` would make the digest
  * depend on key order and would silently start or stop covering a field
  * somebody added. That applies to the entries too, so each entry is flattened
- * here field by field, and a per-field mutation of every one of them is
- * asserted to be detected in the test file.
+ * here field by field.
+ *
+ * The test file asserts a detected per-field mutation for nine of a contained
+ * entry's twelve, and the three it does not are the three that cannot be mutated
+ * independently — stated rather than left to look like coverage. `state` is
+ * covered by its own case; `verifiedInJob` is a `z.literal(true)`, so there is no
+ * other value to try; and `generation` is determined *positionally* by the 1..N
+ * check in {@link readWriterLaunchLedger}, which refuses any edit to it as
+ * `MALFORMED` before this digest is consulted at all.
  *
  * `state` is fed in explicitly and first among an entry's fields. A digest that
  * covered only the value fields would let `PENDING` be relabelled `CONTAINED`

@@ -57,6 +57,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 
@@ -81,6 +82,7 @@ import {
   deriveExecutionLeaseLocation,
   inspectRepositoryExecutionLease,
   inspectWriterLaunchHistory,
+  osProcessLiveness,
   recordContainmentEvidence,
   recoverStaleLease,
   releaseRepositoryExecutionLease,
@@ -103,7 +105,7 @@ import {
   type WriterLaunchReading,
   type WriterLaunchSubject,
 } from '../src/lease/writer-launch-ledger.js';
-import { leasedAgent } from '../src/loop/leased-spawns.js';
+import { AGENT_LAUNCH_NOT_RECORDED, leasedAgent } from '../src/loop/leased-spawns.js';
 import {
   renderLeaseRecovery,
   renderLeaseRecoveryResult,
@@ -381,7 +383,7 @@ describe('the launch history format refuses everything it cannot read', () => {
     expect(readWriterLaunchLedger(SUBJECT, contiguous)).toBe('ALL_LAUNCHES_CONTAINED');
   });
 
-  it('detects a one-field edit of the ledger and of every entry field', () => {
+  it('detects a one-field edit of the ledger and of every mutable entry field', () => {
     const base = sealed({ entries: [CONTAINED_ENTRY] });
     const edits: readonly Record<string, unknown>[] = [
       { ownerPid: SUBJECT.ownerPid + 1 },
@@ -395,8 +397,13 @@ describe('the launch history format refuses everything it cannot read', () => {
       expect(readWriterLaunchLedger(SUBJECT, { ...base, ...edit })).toBe('NOT_THIS_LEASE');
     }
 
-    // Every field of a contained entry, one at a time. The pin that the binding
-    // covers the entries field by field rather than as an opaque blob.
+    // Nine of a contained entry's twelve fields, one at a time: the pin that the
+    // binding covers the entries field by field rather than as an opaque blob.
+    // The other three cannot be mutated independently and are not silently
+    // omitted — `state` has its own case below, `verifiedInJob` is a literal with
+    // no other value, and `generation` is determined positionally by the 1..N
+    // check, which refuses any edit to it as `MALFORMED` before the binding is
+    // consulted. The case above this one measures exactly that.
     const perField: readonly Record<string, unknown>[] = [
       { writerId: 'codex' },
       { openedAt: '2026-08-21T00:00:09.000Z' },
@@ -912,6 +919,49 @@ describe('the leased writer seam announces its launch before it happens', () => 
     releaseRepositoryExecutionLease(evidence);
   });
 
+  it('refuses to start a writer whose launch could not be written down', async () => {
+    /**
+     * The single line the whole ordering rests on, and it had no pin at all: a
+     * launch whose poison cannot reach disk **does not happen**.
+     *
+     * A review named the surviving mutant — treat `'REFUSED'` as `null` in
+     * `leasedAgent` and every case stayed green — because all three seam cases
+     * used a healthy repository, so `beginWriterLaunch` never answered anything
+     * but `OPENED`. The instrument for producing the refusal was already in this
+     * file, one describe block up: a directory at the ledger's name refuses both
+     * the rename and the unlink.
+     *
+     * The assertion is that the runner was **never invoked**, which is the effect
+     * — a result value alone would not distinguish "refused before the launch"
+     * from "launched and then reported a refusal".
+     */
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    rmSync(ledgerPathOf(repository), { force: true });
+    mkdirSync(join(ledgerPathOf(repository), 'occupied'), { recursive: true });
+
+    let invocations = 0;
+    const run = leasedAgent({
+      lease: { repository, evidence },
+      agent: async () => {
+        invocations += 1;
+        return agentResult(attestationFor(process.pid));
+      },
+      containmentNow: tick,
+    });
+
+    const result = await run('claude', [], repository.root, '');
+    expect(invocations).toBe(0);
+    expect(result).toBe(AGENT_LAUNCH_NOT_RECORDED);
+    expect(result.outcome).toBe('UNAVAILABLE');
+
+    // And the refusal is specific to the writer: an agent this history does not
+    // record is not stopped by a history it never touches.
+    expect((await run('codex', [], repository.root, '')).outcome).toBe('RAN');
+    expect(invocations).toBe(1);
+    releaseRepositoryExecutionLease(evidence);
+  });
+
   it('keeps an unattested launch visible behind a later contained one', async () => {
     // The residue slice 4 could not close, closed here: the containment record
     // describes the latest launch, so a contained launch *after* an unattested
@@ -1155,15 +1205,95 @@ describe('the safety predicate refuses everything it cannot prove', () => {
 
 /* ──────────────────────── 5. the recovery itself ────────────────────────── */
 
+/**
+ * A pid whose process has really exited.
+ *
+ * Not a large number nobody is using, and not a substituted probe: a real child
+ * is started and waited for, and the **real** `osProcessLiveness` is then asked
+ * whether it is gone. If the answer is anything else the fixture fails loudly
+ * rather than running — a pid reused inside that window would silently turn
+ * every case below into a test of the refusal path.
+ */
+function deadProcessId(): number {
+  const finished = spawnSync(process.execPath, ['-e', '0']);
+  if (typeof finished.pid !== 'number') throw new Error('fixture could not start a process to end');
+  if (osProcessLiveness(finished.pid) !== 'NOT_FOUND') {
+    throw new Error('fixture pid was reused before it could be used');
+  }
+  return finished.pid;
+}
+
+/**
+ * The lease a run that really died leaves behind, with a history to match.
+ *
+ * ── Why the cases below cannot use a substituted probe ─────────────────────
+ *
+ * They used to. `recoverStaleLease` took the same `processAlive` seam the
+ * reporting paths take, and a review reproduced what that cost: one call with
+ * `() => 'NOT_FOUND'` removed the lease of a demonstrably living process — the
+ * caller's own. The liveness answer *is* the first conjunct of the predicate, so
+ * a destructive function accepting it accepted the predicate. It no longer does:
+ * the real probe is always consulted, and a supplied opinion can only refuse.
+ *
+ * So a case that wants a removal has to produce a genuinely ownerless lease. It
+ * is built the only honest way: a real lease is acquired and real launches are
+ * driven under it, the document and the entries it produced are read back, the
+ * lease is released, and the record is rewritten naming a process that has
+ * exited. Only two facts are fabricated — the owner pid and the digest binding
+ * the history to it — and both are the facts a crashed run leaves genuinely
+ * stale. The lease bytes are otherwise exactly what `acquire` wrote.
+ *
+ * What that does *not* measure is the chain end to end: a real acquire, real
+ * launches, a real death and a real recovery all in one repository.
+ * `tests/dist-artifact/stale-lease-recovery-dist-artifact.mjs` measures that,
+ * against the shipped artefact and with an owner process that really exits.
+ */
+function staleLease(
+  repository: LeaseRepository,
+  underLease: (evidence: ExecutionLeaseEvidence) => void = () => {},
+): number {
+  const { evidence } = leaseOf(repository, 'run-stale');
+  underLease(evidence);
+  const document = JSON.parse(readFileSync(leasePathOf(repository), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  const entries = (ledgerOf(repository)?.entries ?? []) as readonly unknown[];
+  releaseRepositoryExecutionLease(evidence);
+
+  const ownerPid = deadProcessId();
+  writeFileSync(
+    leasePathOf(repository),
+    `${JSON.stringify({ ...document, ownerPid }, null, 2)}\n`,
+    'utf8',
+  );
+  const runId = (document.runId ?? null) as string | null;
+  const subject: WriterLaunchSubject = {
+    leaseKey: document.leaseKey as string,
+    ownerNonce: document.ownerNonce as string,
+    ownerPid,
+    runId,
+  };
+  writeLedger(
+    repository,
+    sealed(
+      { entries: entries as WriterLaunchLedgerPayload['entries'], ownerPid, runId },
+      subject,
+    ),
+  );
+  return ownerPid;
+}
+
 describe('recovery removes exactly the lease it has just proved dead', () => {
   it('removes the stale lease, and nothing else in the directory', () => {
     const repository = repositoryFixture();
-    const { evidence } = leaseOf(repository);
-    containedLaunch(repository, evidence);
+    staleLease(repository, (evidence) => containedLaunch(repository, evidence));
     const bystander = join(repository.gitCommonDir, 'HEAD');
     writeFileSync(bystander, 'ref: refs/heads/main\n');
+    // The real probe, and nothing supplied. This is a genuinely ownerless lease.
+    expect(assessStaleLeaseRecovery(repository).verdict).toBe('SAFE_TO_RECOVER');
 
-    const result = recoverStaleLease(repository, { processAlive: dead });
+    const result = recoverStaleLease(repository);
     expect(result.code).toBe('RECOVERED');
     expect(result.refusal).toBeNull();
     expect(existsSync(leasePathOf(repository))).toBe(false);
@@ -1176,11 +1306,51 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
     expect(inspectRepositoryExecutionLease(repository).state).toBe('FREE');
   });
 
+  it('cannot be told a living owner is gone', () => {
+    /**
+     * The counter-proof for the seam that shipped and was withdrawn inside this
+     * slice. `recoverStaleLease(repository, { processAlive: () => 'NOT_FOUND' })`
+     * removed a living owner's lease, measured; the parameter that allowed it no
+     * longer exists, and the one that replaced it is combined with the operating
+     * system's answer by taking the **more refusing** of the two.
+     *
+     * The owner here is this very process, so `ALIVE` is not an opinion. Delete
+     * the combination and use the supplied answer directly and this case goes
+     * red with the lease destroyed under a running writer.
+     */
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    containedLaunch(repository, evidence);
+    const before = readFileSync(leasePathOf(repository));
+
+    const insisted = recoverStaleLease(repository, { additionalLiveness: () => 'NOT_FOUND' });
+    expect(insisted.code).toBe('RECOVERY_UNSAFE');
+    expect(insisted.refusal).toBe('OWNER_RUNNING');
+    expect(readFileSync(leasePathOf(repository)).equals(before)).toBe(true);
+
+    // And the direction that *is* allowed: a supplied opinion may refuse a
+    // recovery the operating system would have permitted.
+    const other = repositoryFixture();
+    staleLease(other, (owner) => containedLaunch(other, owner));
+    expect(recoverStaleLease(other, { additionalLiveness: () => 'ALIVE' }).refusal).toBe(
+      'OWNER_RUNNING',
+    );
+    expect(
+      recoverStaleLease(other, {
+        additionalLiveness: () => {
+          throw new Error('a probe that misbehaves');
+        },
+      }).refusal,
+    ).toBe('OWNER_LIVENESS_UNDETERMINED');
+    // Still there. Both refusals left the lease exactly as they found it.
+    expect(existsSync(leasePathOf(other))).toBe(true);
+    releaseRepositoryExecutionLease(evidence);
+  });
+
   it('lets the next invocation acquire normally, and grants it nothing', () => {
     const repository = repositoryFixture();
-    const first = leaseOf(repository, 'run-old');
-    containedLaunch(repository, first.evidence);
-    expect(recoverStaleLease(repository, { processAlive: dead }).code).toBe('RECOVERED');
+    staleLease(repository, (evidence) => containedLaunch(repository, evidence));
+    expect(recoverStaleLease(repository).code).toBe('RECOVERED');
 
     // Prompt case 17. The recovery removed a dead record and authorised nothing:
     // this acquisition takes its authority from the exclusive create like every
@@ -1203,41 +1373,41 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
 
   it('refuses without touching anything when the predicate refuses', () => {
     const repository = repositoryFixture();
-    const { evidence } = leaseOf(repository);
-    beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    staleLease(repository, (evidence) => {
+      beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    });
     const before = readFileSync(leasePathOf(repository));
 
-    const result = recoverStaleLease(repository, { processAlive: dead });
+    const result = recoverStaleLease(repository);
     expect(result.code).toBe('RECOVERY_UNSAFE');
     expect(result.refusal).toBe('LAUNCH_HISTORY_UNPROVEN');
     expect(readFileSync(leasePathOf(repository)).equals(before)).toBe(true);
     expect(inspectRepositoryExecutionLease(repository).state).toBe('HELD');
-    releaseRepositoryExecutionLease(evidence);
   });
 
   it('aborts when the lease changes between the assessment and the removal', () => {
     /**
      * Prompt case 15, and the counter-proof for the removal's identity binding.
      *
-     * The liveness probe is the seam: `assessStaleLeaseRecoveryBound` reads the
-     * lease's bytes, then asks the probe, then reads the history. Changing the
-     * lease document from inside the probe therefore lands in exactly the window
-     * the removal has to survive — the assessment holds the *old* bytes and the
-     * name now holds different ones.
+     * The supplied liveness opinion is the injection point:
+     * `assessStaleLeaseRecoveryBound` reads the lease's bytes, then asks for
+     * liveness, then reads the history — so changing the lease document from
+     * inside that call lands in exactly the window the removal has to survive.
+     * The assessment holds the *old* bytes and the name now holds different ones.
+     *
+     * The opinion itself decides nothing: the owner is genuinely gone, so the
+     * real probe already answers `NOT_FOUND` and `NOT_FOUND` is the neutral
+     * element of the combination. It is used for its timing, not its answer.
      *
      * The replacement keeps the nonce, the owner, the run and the key, so the
      * history still binds and the assessment still says `SAFE_TO_RECOVER`. The
      * only thing that differs is the bytes. Replace the removal's predicate with
      * `() => true` and this case goes **red** — the removal answers `REMOVED`,
      * the call answers `RECOVERED`, and the assertion below fails — which is what
-     * makes it a counter-proof rather than a description. An earlier version of
-     * this paragraph said "goes green", which reads as a confession that the case
-     * is vacuous and would invite somebody to repair a test that is sound. It was
-     * measured: 1 case red.
+     * makes it a counter-proof rather than a description. Measured: 1 case red.
      */
     const repository = repositoryFixture();
-    const { evidence } = leaseOf(repository);
-    containedLaunch(repository, evidence);
+    staleLease(repository, (evidence) => containedLaunch(repository, evidence));
     const leasePath = leasePathOf(repository);
 
     let swapped = false;
@@ -1250,7 +1420,7 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
       return 'NOT_FOUND';
     };
 
-    const result = recoverStaleLease(repository, { processAlive: swapDuringAssessment });
+    const result = recoverStaleLease(repository, { additionalLiveness: swapDuringAssessment });
     expect(swapped).toBe(true);
     expect(result.code).toBe('LEASE_CHANGED');
     expect(result.detail).toBe('CHANGED');
@@ -1260,7 +1430,6 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
     expect(
       (JSON.parse(readFileSync(leasePath, 'utf8')) as Record<string, unknown>).blockId,
     ).toBe('later');
-    releaseRepositoryExecutionLease(evidence);
   });
 
   it('aborts when another owner takes the lease before the history is read', () => {
@@ -1268,20 +1437,19 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
     // genuine successor has a different nonce, so the history beside the lease no
     // longer binds to the lease the assessment started reading.
     const repository = repositoryFixture();
-    const first = leaseOf(repository, 'run-first');
-    containedLaunch(repository, first.evidence);
+    staleLease(repository, (evidence) => containedLaunch(repository, evidence));
 
     let taken = false;
     const takeOverDuringAssessment = (): ProcessLiveness => {
       if (!taken) {
         taken = true;
-        releaseRepositoryExecutionLease(first.evidence);
+        rmSync(leasePathOf(repository));
         leaseOf(repository, 'run-successor');
       }
       return 'NOT_FOUND';
     };
 
-    const result = recoverStaleLease(repository, { processAlive: takeOverDuringAssessment });
+    const result = recoverStaleLease(repository, { additionalLiveness: takeOverDuringAssessment });
     expect(taken).toBe(true);
     expect(result.code).toBe('RECOVERY_UNSAFE');
     expect(result.refusal).toBe('LAUNCH_HISTORY_NOT_THIS_LEASE');
@@ -1290,15 +1458,28 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
   });
 
   it('takes no verdict from a caller, so a stale one cannot be acted on', () => {
-    // The structural half of the same property. The withdrawn `lease break` took
-    // an authorisation minted earlier and acted on it later; this takes a
-    // repository and proves everything itself, inside the call that removes.
-    expect(recoverStaleLease.length).toBe(1);
+    // The withdrawn `lease break` took an authorisation minted earlier and acted
+    // on it later. This takes a repository and proves everything itself, inside
+    // the call that removes.
+    //
+    // Pinned by what the parameter *can* do rather than by counting parameters:
+    // an earlier version asserted `recoverStaleLease.length === 1`, which
+    // `Function.length` satisfies for any number of optional parameters — so it
+    // was green for the very seam it was written to exclude, and stayed green
+    // while that seam could remove a living owner's lease.
+    const shape = Object.keys(
+      { additionalLiveness: undefined } satisfies Record<
+        keyof NonNullable<Parameters<typeof recoverStaleLease>[1]>,
+        undefined
+      >,
+    );
+    expect(shape).toEqual(['additionalLiveness']);
+
     // And the reported assessment is the one this call made, not one handed in:
     // a refusal carries the refusal that produced it.
     const repository = repositoryFixture();
     const { evidence } = leaseOf(repository);
-    const refused = recoverStaleLease(repository, { processAlive: alive });
+    const refused = recoverStaleLease(repository);
     expect(refused.assessment.refusal).toBe('OWNER_RUNNING');
     expect(refused.refusal).toBe('OWNER_RUNNING');
     releaseRepositoryExecutionLease(evidence);
@@ -1316,7 +1497,7 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
     // else may hold, and reporting it as a recovery would tell an operator they
     // had cleared something they had not touched.
     const repository = repositoryFixture();
-    expect(recoverStaleLease(repository, { processAlive: dead }).code).toBe('RECOVERY_UNSAFE');
+    expect(recoverStaleLease(repository).code).toBe('RECOVERY_UNSAFE');
   });
 });
 
@@ -1366,7 +1547,7 @@ describe('the recovery vocabulary says what the code does', () => {
     expect(safe).not.toContain('no agent process');
     // And it names the command an operator would then run, on one line, so the
     // pin that checks every named command against the real program can see it.
-    expect(safe).toContain('`agent-loop lease recover`');
+    expect(safe).toContain('`agent-loop lease recover --repository <path>`');
     expect(safe).toContain('Launches     : ALL_LAUNCHES_CONTAINED');
   });
 
@@ -1393,7 +1574,9 @@ describe('the recovery vocabulary says what the code does', () => {
   it('reports a refused recovery with the refusal, not with a bare code', () => {
     const repository = repositoryFixture();
     const { evidence } = leaseOf(repository);
-    const rendered = renderLeaseRecoveryResult(recoverStaleLease(repository, { processAlive: alive }));
+    // The owner is this process, so the real probe answers `ALIVE` and no
+    // opinion has to be supplied to reach the refusal being rendered.
+    const rendered = renderLeaseRecoveryResult(recoverStaleLease(repository));
     expect(rendered).toContain('Recovery     : RECOVERY_UNSAFE');
     expect(rendered).toContain('Reason       : OWNER_RUNNING');
     expect(rendered).toContain(STALE_RECOVERY_OUTCOMES.RECOVERY_UNSAFE);
@@ -1432,9 +1615,8 @@ describe('recovery stays inside the contract it was given', () => {
     // evidence handed back by `recoverStaleLease` and no field of its result that
     // could be mistaken for one.
     const repository = repositoryFixture();
-    const { evidence } = leaseOf(repository);
-    containedLaunch(repository, evidence);
-    const result = recoverStaleLease(repository, { processAlive: dead });
+    staleLease(repository, (evidence) => containedLaunch(repository, evidence));
+    const result = recoverStaleLease(repository);
 
     expect(result.code).toBe('RECOVERED');
     expect(Object.keys(result).sort()).toEqual(['assessment', 'code', 'detail', 'refusal']);

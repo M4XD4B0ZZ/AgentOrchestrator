@@ -268,9 +268,17 @@ export const osProcessLiveness: ProcessLivenessProbe = (pid) => {
  * `processAlive` is a test seam of the same class as `ReplaceFn` in
  * `state/atomic-file.ts`: it exists because a dead owner cannot be produced on
  * demand against a real host without racing a real process. It is documented as
- * a test seam rather than quietly available — and note what it cannot do:
- * because liveness only ever adds refusals to `acquire`, no substitute can make
- * this module hand out a lease it would otherwise withhold.
+ * a test seam rather than quietly available — and note what it cannot do, and
+ * that this slice had to *make* the sentence true again. It read "because
+ * liveness only ever adds refusals to `acquire`, no substitute can make this
+ * module hand out a lease it would otherwise withhold",
+ * which was true while `acquire` and the inspection were the only consumers. V3
+ * slice 5 added one for which a liveness answer is *permissive* — the recovery's
+ * first conjunct — and a review reproduced a substituted probe removing a living
+ * owner's lease. {@link StaleRecoveryDependencies} is what closed that: the
+ * destructive path always consults the real probe and combines a supplied
+ * opinion by taking the more refusing answer. So the bound holds, by
+ * construction rather than by there being nothing to break.
  */
 export interface ExecutionLeaseDependencies {
   /** The clock, read once for the durable record. */
@@ -3266,7 +3274,7 @@ export function assessStaleLeaseRecovery(
 ): StaleLeaseRecoveryAssessment {
   const { revision: _revision, ownerNonce: _nonce, ...report } = assessStaleLeaseRecoveryBound(
     snapshotRepositoryRecord(given),
-    deps,
+    deps.processAlive ?? osProcessLiveness,
   );
   return Object.freeze(report);
 }
@@ -3283,7 +3291,7 @@ export function assessStaleLeaseRecovery(
  */
 function assessStaleLeaseRecoveryBound(
   repository: LeaseRepository,
-  deps: { readonly processAlive?: ProcessLivenessProbe },
+  liveness: ProcessLivenessProbe,
 ): BoundAssessment {
   const location = deriveExecutionLeaseLocation(repository);
   if (!location.ok) return unsafe(RECOVERY_REFUSAL_FOR_LOCATION[location.code]);
@@ -3311,10 +3319,9 @@ function assessStaleLeaseRecoveryBound(
     runId: document.runId,
   };
 
-  const probe = deps.processAlive ?? osProcessLiveness;
-  const liveness = probe(document.ownerPid);
-  if (liveness === 'ALIVE') return unsafe('OWNER_RUNNING', facts);
-  if (liveness === 'UNDETERMINED') return unsafe('OWNER_LIVENESS_UNDETERMINED', facts);
+  const observed = liveness(document.ownerPid);
+  if (observed === 'ALIVE') return unsafe('OWNER_RUNNING', facts);
+  if (observed === 'UNDETERMINED') return unsafe('OWNER_LIVENESS_UNDETERMINED', facts);
 
   // The history is read *after* the liveness answer and from the same location,
   // so a report about a running owner never goes looking for one. The reading is
@@ -3374,6 +3381,86 @@ export interface StaleLeaseRecoveryResult {
 }
 
 /**
+ * What {@link recoverStaleLease} accepts, which is deliberately not a probe.
+ *
+ * ── The hole this shape closes, which was shipped and measured ─────────────
+ *
+ * The first version of this took `{ processAlive?: ProcessLivenessProbe }`, the
+ * same seam the *reporting* paths take, and a review reproduced the consequence
+ * in one call: `recoverStaleLease(repository, { processAlive: () => 'NOT_FOUND' })`
+ * removed the lease of a process that was demonstrably alive — the caller's own —
+ * leaving the repository free for a competing acquirer while its writer ran. The
+ * liveness answer *is* the first conjunct of the safety predicate, so handing it
+ * to the caller of a destructive function handed them the predicate.
+ *
+ * It was also the exact rule this module states everywhere else, broken by the
+ * one function that could least afford it: **a probe may refuse and may never
+ * permit**. On `acquire` and on the reporting paths a substituted probe can only
+ * ever add a refusal, so the seam is safe there and stays. Here it could permit.
+ *
+ * ── So the answer is combined, not replaced ────────────────────────────────
+ *
+ * `osProcessLiveness` is always consulted and cannot be substituted.
+ * {@link additionalLiveness} is asked as well, and the **more refusing** of the
+ * two answers wins — `ALIVE` beats `UNDETERMINED` beats `NOT_FOUND`. So a
+ * supplied opinion can stop a recovery and can never cause one, which is the
+ * rule made structural rather than restated.
+ *
+ * That is what "there is no override" means for this command: no argument here,
+ * and no argument anywhere, can make a lease removable that the operating system
+ * does not agree is ownerless.
+ */
+export interface StaleRecoveryDependencies {
+  /**
+   * A second liveness opinion, which may only ever **refuse**.
+   *
+   * Its answer is combined with the operating system's, not substituted for it,
+   * and the refusing answer wins. A caller that answers `NOT_FOUND` for a
+   * running process changes nothing; one that answers `ALIVE` for a dead one
+   * stops the recovery.
+   *
+   * It exists so a caller with a stronger source of "this run is still going" —
+   * a job-object handle, a supervisor's own record — can contribute it without
+   * being handed the predicate. Nothing in this build supplies one.
+   */
+  readonly additionalLiveness?: ProcessLivenessProbe;
+}
+
+/** How refusing each answer is. Higher wins when two opinions are combined. */
+const LIVENESS_REFUSAL: Readonly<Record<ProcessLiveness, number>> = Object.freeze({
+  ALIVE: 2,
+  UNDETERMINED: 1,
+  NOT_FOUND: 0,
+});
+
+/** The more refusing of two liveness answers. Total by type. */
+function mostRefusing(observed: ProcessLiveness, claimed: ProcessLiveness): ProcessLiveness {
+  return LIVENESS_REFUSAL[claimed] > LIVENESS_REFUSAL[observed] ? claimed : observed;
+}
+
+/**
+ * A supplied opinion, or the answer that contributes nothing.
+ *
+ * `NOT_FOUND` is the neutral element of {@link mostRefusing}, so an absent seam
+ * and a seam that agrees are the same thing. A probe that throws, or that returns
+ * something outside the union, answers `UNDETERMINED` — a refusal, because
+ * calling somebody else's code is the one line here that can misbehave and the
+ * safe direction for a misbehaving one is to stop.
+ */
+function opinionOf(probe: ProcessLivenessProbe | undefined, pid: number): ProcessLiveness {
+  if (probe === undefined) return 'NOT_FOUND';
+  let answer: unknown;
+  try {
+    answer = probe(pid);
+  } catch {
+    return 'UNDETERMINED';
+  }
+  return answer === 'ALIVE' || answer === 'UNDETERMINED' || answer === 'NOT_FOUND'
+    ? answer
+    : 'UNDETERMINED';
+}
+
+/**
  * Removes a stale lease, and only one this call has just proved removable.
  *
  * ── Why this can be written when `lease break` could not ───────────────────
@@ -3402,7 +3489,9 @@ export interface StaleLeaseRecoveryResult {
  *    authorisation, showed it to a human, and acted on it later. Here the
  *    assessment and the removal are one synchronous call: nothing is displayed,
  *    nothing is typed back, and no caller can supply a verdict — the parameter
- *    does not exist.
+ *    does not exist. The one parameter that does exist,
+ *    {@link StaleRecoveryDependencies.additionalLiveness}, may only *refuse*;
+ *    it took a review to notice that its predecessor could permit.
  *
  * ── The removal binds to the object, not to the name ───────────────────────
  *
@@ -3440,7 +3529,7 @@ export interface StaleLeaseRecoveryResult {
  */
 export function recoverStaleLease(
   given: LeaseRepository,
-  deps: { readonly processAlive?: ProcessLivenessProbe } = {},
+  deps: StaleRecoveryDependencies = {},
 ): StaleLeaseRecoveryResult {
   const repository = snapshotRepositoryRecord(given);
 
@@ -3449,7 +3538,9 @@ export function recoverStaleLease(
   // whole history of this module is judgements made at one moment and carried to
   // a later effect, and a `verdict` parameter would be that defect with a type
   // signature.
-  const assessed = assessStaleLeaseRecoveryBound(repository, deps);
+  const assessed = assessStaleLeaseRecoveryBound(repository, (pid) =>
+    mostRefusing(osProcessLiveness(pid), opinionOf(deps.additionalLiveness, pid)),
+  );
   const { revision, ownerNonce, ...report } = assessed;
   const assessment = Object.freeze(report);
   if (assessed.verdict !== 'SAFE_TO_RECOVER' || revision === null || ownerNonce === null) {

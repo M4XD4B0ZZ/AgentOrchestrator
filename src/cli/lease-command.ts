@@ -18,10 +18,18 @@
  * history that is missing, torn, foreign or has one unproved entry — is refused,
  * and the refusal says which fact is missing.
  *
- * It takes a repository and nothing else. There is no `--force`, no expected
- * revision to type back, and no environment variable. Read the next section for
- * why the *absence* of those arguments is the safety property rather than a
- * convenience.
+ * The command takes a repository and nothing else. There is no `--force`, no
+ * expected revision to type back, and no environment variable. Read the next
+ * section for why the *absence* of those arguments is the safety property rather
+ * than a convenience.
+ *
+ * The function underneath it takes one more thing, and it is worth stating
+ * precisely because the first version of it was wrong. `recoverStaleLease` accepts
+ * an **additional liveness opinion**, which is combined with the operating
+ * system's answer by taking the more refusing of the two: it can stop a recovery
+ * and can never cause one. Its predecessor was a plain probe seam, and a review
+ * removed a living owner's lease through it in one call. Nothing in this build
+ * supplies one, and this command does not offer a way to.
  *
  * And it removes a lease. It does not acquire one, restart anything, or grant
  * any authority: `containment != authority`, so the run that follows takes its
@@ -80,7 +88,8 @@
  *    why the answer there was no.
  *
  * **No `--force`, no environment variable, no API back door.** Nothing in this
- * build removes a lease it cannot prove is dead.
+ * build removes a lease the operating system does not agree is ownerless — not
+ * this command, and not the function under it.
  */
 
 import type { Command } from 'commander';

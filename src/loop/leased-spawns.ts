@@ -333,11 +333,18 @@ export const AGENT_NOT_AUTHORISED: AgentCommandResult = Object.freeze({
 /**
  * What the agent seam answers when a writer launch could not be written down.
  *
- * The same shape as {@link AGENT_NOT_AUTHORISED} and a **different value**, so a
- * reader of a transcript can tell the two apart: one says this run is no longer
- * the repository's writer, the other says it still is and its launch history
- * could not be kept. `openWriterGeneration` records why the second one stops a
- * launch at all.
+ * A **distinct object** with the same fields as {@link AGENT_NOT_AUTHORISED},
+ * and the difference is reference identity only: once serialised the two are
+ * indistinguishable, so a reader of a transcript cannot tell them apart. An
+ * earlier version of this paragraph claimed they could, which a review measured
+ * as false field by field.
+ *
+ * What the distinct object buys is that the *seam's own* callers and tests can
+ * name which refusal happened, and that a future author adding a field to one
+ * does not silently add it to the other. It is deliberately **not** given a
+ * `failureCode`: that union is `doctor/exec.ts`'s vocabulary about what became of
+ * a *command*, and a lease-shaped member in it would push the lease down into
+ * the layer this module exists to keep it out of.
  */
 export const AGENT_LAUNCH_NOT_RECORDED: AgentCommandResult = Object.freeze({
   outcome: 'UNAVAILABLE' as const,
