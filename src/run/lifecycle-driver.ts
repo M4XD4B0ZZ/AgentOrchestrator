@@ -13,7 +13,7 @@
  * `core/automatic-resume.ts` claiming there was "deliberately still no resume
  * runner". There is one, and it has been the only caller of `runLoopStep` since
  * V2-04. That sentence has been corrected; this module closes what was actually
- * missing, which is four things and no more:
+ * missing, which is three things and no more:
  *
  *  1. **Nothing acted on `STEP_BUDGET_EXHAUSTED`.** It is documented as the one
  *     outcome meaning "call again", and no caller ever called again.
@@ -35,9 +35,18 @@
  * previous invocation ended in, and it never branches on `RunResult.state`.
  * Every invocation re-enters `runTask`, which loads the state from disk,
  * re-proves the lease against the file, reconciles against Git and decides
- * again. The only things carried across an invocation boundary are the lease
- * evidence — which is re-proved at every use anyway — and one state *revision*
- * string, used solely to refuse to continue when nothing moved.
+ * again. Three things cross an invocation boundary, and no more: the lease
+ * evidence, which is re-proved against the file at every use; one state
+ * *revision* string, used solely to refuse to continue when nothing moved; and
+ * the auth preflight's artefact.
+ *
+ * That third one is a verdict carried forward, and it is named rather than
+ * hidden. `evaluateAutomaticResume` brand-checks the evidence and applies no
+ * freshness test, so a login proven at the first invocation still authorises the
+ * last. It is the same lifetime `block --attended` has given it since V2-08 —
+ * one preflight, one `--attended`, many `runTask` — so this widens nothing. An
+ * earlier version of this paragraph said only two things crossed, which was
+ * false.
  *
  * That last guard is this layer's own, and it exists because
  * `STEP_BUDGET_EXHAUSTED` is a *claim* of durable progress. `runTask` measures
@@ -201,6 +210,14 @@ export const LIFECYCLE_OUTCOMES = [
    * out. Everything is on disk; another lifecycle run continues.
    */
   'INVOCATION_BUDGET_EXHAUSTED',
+  /**
+   * The invocation bound itself is unusable. Nothing was taken and nothing ran.
+   *
+   * Its own member rather than the one above, because that one means "call
+   * again" and this one means "calling again with the same argument repeats
+   * forever". They are opposite instructions to a scheduler.
+   */
+  'INVOCATION_BUDGET_INVALID',
   /* --- the exit ---------------------------------------------------------- */
   /**
    * Everything above finished and the lease could not be given back provably.
@@ -220,10 +237,14 @@ export type LifecycleOutcome = (typeof LIFECYCLE_OUTCOMES)[number];
  * be added without choosing one here.
  *
  * `satisfies` proves this map is complete and proves nothing at all about
- * whether any entry is *right*; `tests/v3-06-lifecycle-driver.test.ts` asserts
- * the meanings one by one.
+ * whether any entry is *right*. **Exported for that reason**:
+ * `tests/v3-06-lifecycle-driver.test.ts` compares it entry by entry against an
+ * independently written table, which is the only thing that can catch a complete
+ * map whose entries are wrong. The first version of that test built its own
+ * table and never read this one, so every entry here could have been permuted
+ * with the suite still green.
  */
-const LIFECYCLE_FOR_RUN = {
+export const LIFECYCLE_FOR_RUN = {
   TASK_COMPLETED: 'COMPLETED',
   TASK_ABORTED: 'TASK_ABORTED',
   BLOCKED_USAGE_LIMIT: 'BLOCKED_USAGE_LIMIT',
@@ -243,8 +264,11 @@ const LIFECYCLE_FOR_RUN = {
   EXECUTION_LEASE_NOT_HELD: 'EXECUTION_LEASE_NOT_HELD',
   EXECUTION_LEASE_LOST: 'EXECUTION_LEASE_LOST',
   NO_PROGRESS: 'NO_PROGRESS',
-  // Reached only when the invocation budget is what stopped the loop: the
-  // continue path consumes this outcome and never returns it.
+  // Never reached *through this map*. The loop consumes `STEP_BUDGET_EXHAUSTED`
+  // itself — it continues, or stops on the revision guard — and the budget stop
+  // names its outcome literally. The entry keeps the map total and names the
+  // outcome the loop does produce, so the two agree rather than sending a reader
+  // looking for a difference.
   STEP_BUDGET_EXHAUSTED: 'INVOCATION_BUDGET_EXHAUSTED',
 } as const satisfies Record<RunOutcome, LifecycleOutcome>;
 
@@ -252,21 +276,25 @@ const LIFECYCLE_FOR_RUN = {
  * The acquisition refusals, spelled for an operator. Total over the acquire
  * vocabulary for the same reason.
  *
- * `STALE_LEASE_RECOVERY_UNSAFE` is absent on purpose: it is the one code this
- * module does not translate directly, because whether it becomes
- * `STALE_LEASE_PRESENT`, a recovery outcome, or a lost race depends on what
- * happens next.
+ * `STALE_LEASE_RECOVERY_UNSAFE` is **excluded from the key type**, not merely
+ * omitted: whether it becomes `STALE_LEASE_PRESENT`, a recovery outcome or a
+ * lost race depends on what happens next, and `takeLease` handles it before
+ * reaching here. An earlier version called it "absent on purpose" while listing
+ * it one line below — an unreachable entry under a comment denying it existed.
+ * Excluding it from the type is the form of that statement the compiler keeps.
  */
 const LIFECYCLE_FOR_ACQUIRE_FAILURE = {
   LEASE_HELD: 'LIVE_OWNER_PRESENT',
-  STALE_LEASE_RECOVERY_UNSAFE: 'STALE_LEASE_PRESENT',
   LEASE_LOCATION_UNSUITABLE: 'LEASE_ACQUISITION_REFUSED',
   LEASE_LOCATION_NETWORK_UNSUPPORTED: 'LEASE_ACQUISITION_REFUSED',
   LEASE_LOCATION_DEVICE_NAMESPACE: 'LEASE_ACQUISITION_REFUSED',
   REPOSITORY_RECORD_INCOHERENT: 'LEASE_ACQUISITION_REFUSED',
   LEASE_WRITE_FAILED: 'LEASE_ACQUISITION_REFUSED',
   LEASE_FILESYSTEM_UNSUPPORTED: 'LEASE_ACQUISITION_REFUSED',
-} as const satisfies Record<LeaseAcquireFailureCode, LifecycleOutcome>;
+} as const satisfies Record<
+  Exclude<LeaseAcquireFailureCode, 'STALE_LEASE_RECOVERY_UNSAFE'>,
+  LifecycleOutcome
+>;
 
 /**
  * What each stale-recovery code means for a lifecycle run. Total.
@@ -291,8 +319,12 @@ export interface LifecycleResult {
   readonly outcome: LifecycleOutcome;
   readonly taskId: string;
   /**
-   * How the lease was obtained, or why it was not. `null` when acquisition was
-   * never reached, which cannot currently happen — the lease phase is first.
+   * The refusal the lease phase stopped on, or `null` when there was none.
+   *
+   * `null` is the *successful* case — the run took the lease — and every result
+   * produced under a lease carries it. An earlier version of this sentence read
+   * "null when acquisition was never reached", the exact opposite of what the
+   * field means.
    */
   readonly acquire: LeaseAcquireFailureCode | null;
   /** The recovery this run attempted, or `null` when it attempted none. */
@@ -374,7 +406,7 @@ export interface LifecycleRequest {
 }
 
 export interface LifecycleDependencies {
-  /** The clock. Read per write and per wait decision, never frozen for the run. */
+  /** The clock. Read per durable write, never frozen for the run. */
   readonly now: () => string;
   /** Git. Required and never defaulted, so a test never reaches a real repository. */
   readonly git: GitRunner;
@@ -534,7 +566,7 @@ export async function driveLifecycle(
 
   if (!Number.isInteger(request.maxInvocations) || request.maxInvocations < 1) {
     return lifecycleResult({
-      outcome: 'INVOCATION_BUDGET_EXHAUSTED',
+      outcome: 'INVOCATION_BUDGET_INVALID',
       taskId,
       reasonCodes: ['MAX_INVOCATIONS_INVALID'],
     });
@@ -551,22 +583,31 @@ export async function driveLifecycle(
     });
   }
 
-  // Deliberately not wrapped in a `finally` that releases and discards: the
-  // release result is part of the answer, and that discard is the pre-existing
-  // defect this slice closes. `driveUnderLease` releases on every controlled
-  // exit and reports what happened. An unexpected throw leaves the lease behind
-  // for stale recovery, which is the case V3-05 exists for.
   return await driveUnderLease(request, deps, lease.evidence, lease.recovery);
 }
 
 /**
  * The drive itself, with the lease established, plus the release that ends it.
  *
- * The release is here rather than in a `finally` above because its outcome has
- * to reach the caller. A `finally` that released and discarded is precisely the
- * pre-existing defect this slice closes. Every path out of the loop below is a
- * *controlled* exit and passes through `finish`; an unexpected throw is a
- * different case, and Slice 1-5 containment and stale recovery own it.
+ * ── Two releases, and both are needed ──────────────────────────────────────
+ *
+ * A controlled exit releases through `finish`, which keeps the result: that is
+ * the whole point of the slice, because every pre-existing call site called
+ * `releaseRepositoryExecutionLease` inside a `finally` and threw the answer
+ * away, leaving a quarantined record invisible.
+ *
+ * A `finally` alone cannot do that — it cannot contribute to the value it wraps
+ * — but removing it is not the answer either, and an earlier version of this
+ * module did remove it. That was a regression against `run --attended` as it
+ * shipped: its `finally` released "on every path out, including a throw", and
+ * dropping it meant an exception from `startTask`, the preflight or `runTask`
+ * left this process holding the lease **while still alive**. A live holder is
+ * refused by acquisition and refused by stale recovery, so the repository would
+ * be locked out until the process exited — worse than the crash case, which at
+ * least leaves a dead owner something can prove.
+ *
+ * So both exist and they cannot double-release: `finish` records that it ran,
+ * and the `catch` releases only when it did not, then rethrows unchanged.
  */
 async function driveUnderLease(
   request: LifecycleRequest,
@@ -577,25 +618,30 @@ async function driveUnderLease(
   const { repository, taskId } = request;
 
   const runs: RunResult[] = [];
-  const reasonCodes: string[] = [];
   let permissionDenials = NO_PERMISSION_DENIALS;
   let invocations = 0;
   let steps = 0;
   let start: StartTaskResult | null = null;
+  // Whether the lease has already been given back. Read only by the `catch`
+  // below, so that the safety net cannot release a second time.
+  let releaseAttempted = false;
 
   /**
    * Ends the run: gives the lease back, and lets a failure to do so replace the
    * outcome rather than sit beside it.
    */
   const finish = (outcome: LifecycleOutcome, extra: readonly string[] = []): LifecycleResult => {
+    releaseAttempted = true;
     const release = releaseRepositoryExecutionLease(evidence);
-    const codes = [...reasonCodes, ...extra];
     const released = release.code === 'RELEASED';
-    if (!released) {
-      // The reached outcome is kept, demoted to a reason code. An operator needs
-      // both facts and the leftover is the one that will not resolve itself.
-      codes.push(outcome, release.code, ...(release.detail !== null ? [release.detail] : []));
-    }
+    // The reached outcome is kept, demoted to a reason code, and put **first**
+    // — the operator sentence for `LEASE_RELEASE_FAILED` says the first code is
+    // the outcome the run actually reached, and it has to be true. Appending it
+    // instead left the run's own reasons in front of it on every path that had
+    // any, which is every path but two.
+    const codes = released
+      ? [...extra]
+      : [outcome, release.code, ...(release.detail !== null ? [release.detail] : []), ...extra];
     return lifecycleResult({
       outcome: released ? outcome : 'LEASE_RELEASE_FAILED',
       taskId,
@@ -611,69 +657,101 @@ async function driveUnderLease(
     });
   };
 
-  start = await startTask(
-    { repository, taskId },
-    { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease: evidence },
-  );
-  // Exactly the pair `run --attended` accepts today. `ADOPTED` is not among them
-  // there and is not here either; widening it would be a separate decision.
-  if (start.outcome !== 'STARTED' && start.outcome !== 'ALREADY_STARTED') {
-    return finish('TASK_START_REFUSED', [start.outcome]);
-  }
-
-  // The revision the previous invocation left behind, used only to refuse to
-  // continue when an invocation claimed progress and the file did not move.
-  let previousRevision: string | null = null;
-
-  for (;;) {
-    if (invocations >= request.maxInvocations) return finish('INVOCATION_BUDGET_EXHAUSTED');
-
-    // On `ALREADY_STARTED` the preflight has not run yet, because `startTask`
-    // returned before reaching it. Auth is a requirement of *executing* rather
-    // than of starting, so it is proven here, on every path that is about to
-    // drive. Memoised, so later invocations pay nothing.
-    const authEvidence = await deps.authPreflight();
-    if (authEvidence === null) return finish('AUTH_PREFLIGHT_FAILED');
-
-    invocations += 1;
-    const run = await runTask(
-      {
-        repository,
-        taskId,
-        attendedContinuation: request.continuationGrant,
-        authEvidence,
-        lease: evidence,
-        maxSteps: request.maxSteps,
-      },
-      {
-        now: deps.now,
-        git: deps.git,
-        ...(deps.exists !== undefined ? { exists: deps.exists } : {}),
-        ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
-        ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
-        ...(deps.observe !== undefined ? { observe: deps.observe } : {}),
-        ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
-        ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
-      },
+  try {
+    start = await startTask(
+      { repository, taskId },
+      { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease: evidence },
     );
-    runs.push(run);
-    steps += run.steps;
-    permissionDenials = mergePermissionDenials(permissionDenials, run.permissionDenials);
-
-    if (run.outcome === 'STEP_BUDGET_EXHAUSTED') {
-      // The outcome claims durable progress. Check the file rather than believe
-      // it: an invocation that moved nothing would be repeated forever.
-      const revision = revisionOf(repository.root, taskId);
-      if (revision === null) {
-        return finish('STATE_UNUSABLE', [...run.reasonCodes, 'DURABLE_STATE_UNREADABLE']);
-      }
-      if (previousRevision !== null && revision === previousRevision) {
-        return finish('NO_PROGRESS', [...run.reasonCodes, 'DURABLE_STATE_UNCHANGED']);
-      }
-      previousRevision = revision;
-      continue;
+    // The three outcomes that leave a durable state to drive.
+    //
+    // `ADOPTED` is among them, and `run --attended` refusing it was an anomaly
+    // rather than a policy: `startTask` returns it only after proving a pristine
+    // orphan worktree is this task's own and writing the first durable state, so
+    // by then the task *is* started. `block --attended` has driven it since
+    // V2-06A — `tests/v2-08-attended-block-runner.test.ts` maps `ADOPTED` to
+    // `DRIVE`. Refusing it here produced the worst possible report for the exact
+    // case this slice exists for: a crash-restart that adopted a workspace, wrote
+    // state, drove nothing, printed "the task could not be started or adopted",
+    // and exited 0.
+    if (
+      start.outcome !== 'STARTED' &&
+      start.outcome !== 'ALREADY_STARTED' &&
+      start.outcome !== 'ADOPTED'
+    ) {
+      return finish('TASK_START_REFUSED', [start.outcome]);
     }
 
-    return finish(LIFECYCLE_FOR_RUN[run.outcome], run.reasonCodes);
+    // The revision the previous invocation left behind, used only to refuse to
+    // continue when an invocation claimed progress and the file did not move.
+    let previousRevision: string | null = null;
+
+    for (;;) {
+      if (invocations >= request.maxInvocations) {
+      // No reason codes, and there are none to be had. The loop continues only
+      // on `STEP_BUDGET_EXHAUSTED`, and `run-driver.ts:905-908` returns that
+      // outcome with the default empty `reasonCodes` — so every invocation this
+      // stop could inherit from carries nothing. Threading `runs.at(-1)`
+      // through here reads as recovering information and recovers none; it was
+      // written that way for one round and measured to be a no-op.
+      return finish('INVOCATION_BUDGET_EXHAUSTED');
+    }
+
+      // On `ALREADY_STARTED` the preflight has not run yet, because `startTask`
+      // returned before reaching it. Auth is a requirement of *executing* rather
+      // than of starting, so it is proven here, on every path that is about to
+      // drive. Memoised, so later invocations pay nothing.
+      const authEvidence = await deps.authPreflight();
+      if (authEvidence === null) return finish('AUTH_PREFLIGHT_FAILED');
+
+      invocations += 1;
+      const run = await runTask(
+        {
+          repository,
+          taskId,
+          attendedContinuation: request.continuationGrant,
+          authEvidence,
+          lease: evidence,
+          maxSteps: request.maxSteps,
+        },
+        {
+          now: deps.now,
+          git: deps.git,
+          ...(deps.exists !== undefined ? { exists: deps.exists } : {}),
+          ...(deps.agent !== undefined ? { agent: deps.agent } : {}),
+          ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
+          ...(deps.observe !== undefined ? { observe: deps.observe } : {}),
+          ...(deps.replace !== undefined ? { replace: deps.replace } : {}),
+          ...(deps.tempSuffix !== undefined ? { tempSuffix: deps.tempSuffix } : {}),
+        },
+      );
+      runs.push(run);
+      steps += run.steps;
+      permissionDenials = mergePermissionDenials(permissionDenials, run.permissionDenials);
+
+      if (run.outcome === 'STEP_BUDGET_EXHAUSTED') {
+        // The outcome claims durable progress. Check the file rather than believe
+        // it: an invocation that moved nothing would be repeated forever.
+        const revision = revisionOf(repository.root, taskId);
+        if (revision === null) {
+          return finish('STATE_UNUSABLE', [...run.reasonCodes, 'DURABLE_STATE_UNREADABLE']);
+        }
+        if (previousRevision !== null && revision === previousRevision) {
+          return finish('NO_PROGRESS', [...run.reasonCodes, 'DURABLE_STATE_UNCHANGED']);
+        }
+        previousRevision = revision;
+        continue;
+      }
+
+      return finish(LIFECYCLE_FOR_RUN[run.outcome], run.reasonCodes);
+    }
+  } catch (error: unknown) {
+    // The safety net `run --attended` had before V3-06, restored. `finish` is the
+    // only controlled way out and it sets the flag, so reaching here means the
+    // lease is still held and nothing has reported on it. Released without a
+    // result — there is no result to attach it to — and the error is rethrown
+    // exactly as it arrived, because swallowing it here would turn a crash into
+    // a silent success.
+    if (!releaseAttempted) releaseRepositoryExecutionLease(evidence);
+    throw error;
   }
 }

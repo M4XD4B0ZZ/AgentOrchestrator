@@ -393,6 +393,11 @@ const LIFECYCLE_EXIT_CODES = Object.freeze({
   // Progress was still being made and this run's budget ran out. The lifecycle
   // spelling of "call again", and the only member that carries code 5.
   INVOCATION_BUDGET_EXHAUSTED: EXIT_RUN_CALL_AGAIN,
+
+  // The bound itself was unusable, so nothing was taken and nothing ran. Code 2
+  // rather than 5: re-invoking with the same argument repeats forever, which is
+  // the opposite of what "call again" tells a scheduler.
+  INVOCATION_BUDGET_INVALID: EXIT_RUN_INPUT_UNUSABLE,
 }) satisfies Record<LifecycleOutcome, CliExitCode>;
 
 export function exitCodeForLifecycle(outcome: LifecycleOutcome): CliExitCode {

@@ -21,15 +21,22 @@
  * canonicalising paths — deliberately belongs elsewhere, and since V2-04 that
  * elsewhere exists. `state/resume-decision.ts` translates an observed runtime
  * into {@link AutomaticResumeEvidence} and is the only caller of this function;
- * `run/run-driver.ts` reaches it through `classifyResume` on every iteration,
- * and `run/lifecycle-driver.ts` re-enters that path with fresh evidence after
- * waiting out a recorded quota reset.
+ * `run/run-driver.ts` reaches it through `classifyResume` on every iteration.
+ *
+ * A resume this function allows is still not a resume that happens:
+ * `run-driver.ts` checks the operator's continuation grant *before* the resume
+ * write, and that check can only withhold. So eligibility decided here plus a
+ * present operator is what moves a blocked task, and nothing in this build waits
+ * for a quota reset on its own — see `run/lifecycle-driver.ts` on why a wait
+ * would need an authority that does not exist yet.
  *
  * (This paragraph read "there is deliberately still **no resume runner**" until
  * V3-06. That had been false since V2-04, and it was not a harmless leftover:
  * the slice-6 brief was planned from it, and specified rebuilding a consumer
- * this module already had. Documentation that outlives its code writes the next
- * plan.)
+ * this module already had. Its replacement then claimed the lifecycle driver
+ * re-entered this path "after waiting out a recorded quota reset" — describing a
+ * wait that was withdrawn from the same commit. Documentation that outlives its
+ * code writes the next plan, and a correction can do it too.)
  */
 
 import {

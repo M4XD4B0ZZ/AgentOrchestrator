@@ -13,19 +13,23 @@
  * through this layer would not make them safer; it would make two suites that
  * can disagree about whose behaviour it is.
  *
- * So this file tests the four things that genuinely did not exist, plus the
+ * So this file tests the three things that genuinely did not exist, plus the
  * minimum needed to prove the thin layer *delegates* rather than reimplements:
  *
  *  1. the lease phase — acquire, and on the one refusal that can mean "the
  *     holder is gone", recover once and then acquire *again*, ordinarily;
  *  2. the loop across invocations, and its refusal to spin;
- *  3. the wait for a recorded quota reset, and every refusal to take one;
- *  4. the release, whose result every pre-existing call site discarded.
+ *  3. the release, whose result every pre-existing call site discarded.
+ *
+ * A fourth — waiting out a recorded quota reset — was withdrawn from the slice
+ * because it cannot be built without an authority this product has not granted.
+ * What is tested about it is the refusal: a quota block stops the run. See
+ * `run/lifecycle-driver.ts` and `README.md` `L-V3-06-2`.
  *
  * ── The shape every case here is written against ───────────────────────────
  *
  * An outer loop is where the layers below it get used without being asked
- * again. The four ways that happens, and the cases that attack each:
+ * again. The three ways that happens, and the cases that attack each:
  *
  *  A. **Believing an invocation's account of itself.** `STEP_BUDGET_EXHAUSTED`
  *     is a *claim* of durable progress. A loop that re-enters on the claim
@@ -33,11 +37,10 @@
  *  B. **Treating a removal as a grant.** Recovering a dead lease removes an
  *     object. It does not make this process the writer, and the acquisition
  *     that follows is allowed to lose.
- *  C. **Carrying a verdict across a wait.** Evidence gathered before a
- *     multi-hour sleep describes a world that is gone.
- *  D. **Reporting a clean shutdown over an unexplained lease.** A release whose
+ *  C. **Reporting a clean shutdown over an unexplained lease.** A release whose
  *     result nobody reads is a release nobody performed, as far as an operator
- *     can tell.
+ *     can tell — and a release skipped on a throw leaves this *live* process
+ *     holding it, which no recovery can clear.
  *
  * Real repositories, real worktrees, real Git and a real execution lease. The
  * agent and verification seams are recorded stand-ins, because the real ones
@@ -49,13 +52,19 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
 import {
+  LIFECYCLE_FOR_RUN,
   LIFECYCLE_OUTCOMES,
   driveLifecycle,
+  type LifecycleOutcome,
   type LifecycleDependencies,
   type LifecycleRequest,
 } from '../src/run/lifecycle-driver.js';
 import { RUN_OUTCOMES } from '../src/run/run-driver.js';
-import { LIFECYCLE_OUTCOME_SENTENCES } from '../src/cli/render-lifecycle.js';
+import {
+  LIFECYCLE_OUTCOME_SENTENCES,
+  LIFECYCLE_TRAILER,
+  renderLifecycleRun,
+} from '../src/cli/render-lifecycle.js';
 import {
   acquireRepositoryExecutionLease,
   deriveExecutionLeaseLocation,
@@ -465,7 +474,39 @@ describe('a controlled exit reports what happened to the lease', () => {
   });
 
   /**
-   * D. The combination this member exists to make impossible.
+   * The safety net, and the regression that made it necessary.
+   *
+   * `run --attended` released inside a `finally` — "on every path out, including
+   * a throw" — and this slice replaced that with a release whose result reaches
+   * the caller. The first version of the replacement dropped the throw path with
+   * it, which is strictly worse than the crash it was reasoned about as: the
+   * process is still **alive** holding the lease, so acquisition refuses it as a
+   * live owner and stale recovery refuses it as a running one. The repository
+   * would be locked out until the process exited.
+   *
+   * A throw must therefore still give the lease back, and must still be a throw.
+   */
+  it('gives the lease back when a seam throws, and does not swallow the error', async () => {
+    const scene = await scenario();
+    const deps = scene.deps();
+    const boom = new Error('seam exploded');
+
+    await expect(
+      driveLifecycle(scene.request(), {
+        ...deps,
+        authPreflight: async () => {
+          throw boom;
+        },
+      }),
+    ).rejects.toBe(boom);
+
+    // The lease is gone from disk, so a later invocation is not locked out.
+    expect(() => readFileSync(leasePathOf(scene.started.repository), 'utf8')).toThrow();
+    expectNothingExecuted(scene);
+  });
+
+  /**
+   * C. The combination this member exists to make impossible.
    *
    * The lease is removed underneath the run, so the release cannot prove it gave
    * back what it held. The run itself succeeded — and the reported outcome is
@@ -497,8 +538,20 @@ describe('a controlled exit reports what happened to the lease', () => {
 
     expect(result.release?.code).not.toBe('RELEASED');
     expect(result.outcome).toBe('LEASE_RELEASE_FAILED');
-    // The outcome the run had actually reached is kept, not lost to the override.
-    expect(result.reasonCodes.length).toBeGreaterThan(0);
+
+    // The outcome the run had actually reached is kept, and kept **first** —
+    // `LIFECYCLE_OUTCOME_SENTENCES.LEASE_RELEASE_FAILED` tells the operator the
+    // first reason code is that outcome, so the ordering is a contract rather
+    // than a detail. The first version asserted only `length > 0`, which a
+    // driver that dropped the outcome entirely would also satisfy.
+    const reached = result.runs.at(-1)?.outcome;
+    expect(reached).toBeDefined();
+    expect(result.reasonCodes[0]).toBe(LIFECYCLE_FOR_RUN[reached!]);
+    // The release code travels with it, so the operator learns what was found.
+    expect(result.reasonCodes[1]).toBe(result.release?.code);
+    expect(LIFECYCLE_OUTCOME_SENTENCES.LEASE_RELEASE_FAILED).toContain(
+      'first reason code',
+    );
   });
 });
 
@@ -512,7 +565,13 @@ describe('the layer delegates rather than re-implements', () => {
    * arrive unclassified.
    */
   it('gives every run outcome the lifecycle spelling an operator expects', () => {
-    const expected: Record<(typeof RUN_OUTCOMES)[number], string> = {
+    // Written out independently and then compared against the shipped map. The
+    // first version of this case built this table and never read
+    // `LIFECYCLE_FOR_RUN` at all, so any entry there could have been permuted —
+    // `BLOCKED_VERIFY` reported as `SCOPE_VIOLATION`, `TASK_ABORTED` as
+    // `COMPLETED` — with the suite still green. `satisfies` proves the map is
+    // complete; only this comparison says it is right.
+    const expected: Record<(typeof RUN_OUTCOMES)[number], LifecycleOutcome> = {
       TASK_COMPLETED: 'COMPLETED',
       TASK_ABORTED: 'TASK_ABORTED',
       BLOCKED_USAGE_LIMIT: 'BLOCKED_USAGE_LIMIT',
@@ -534,12 +593,10 @@ describe('the layer delegates rather than re-implements', () => {
       NO_PROGRESS: 'NO_PROGRESS',
       STEP_BUDGET_EXHAUSTED: 'INVOCATION_BUDGET_EXHAUSTED',
     };
+    // The shipped map, entry by entry. This is the assertion that bites.
+    expect(LIFECYCLE_FOR_RUN).toEqual(expected);
     // No run outcome may be missing, and none may be invented.
     expect(Object.keys(expected).sort()).toEqual([...RUN_OUTCOMES].sort());
-    // Every lifecycle spelling used above must be a real member.
-    for (const spelling of Object.values(expected)) {
-      expect(LIFECYCLE_OUTCOMES).toContain(spelling);
-    }
     // And an operator sentence exists for every member, including the ones no
     // run outcome maps to — the lease phase's own.
     for (const outcome of LIFECYCLE_OUTCOMES) {
@@ -581,14 +638,122 @@ describe('the layer delegates rather than re-implements', () => {
         // Remove the lease before the write lands, so `advanceTaskState`
         // re-proves it and refuses — the run driver's own mechanism, reached
         // through this layer rather than reimplemented in it.
+        //
+        // The real rename still happens. `scenario().deps()` supplies no
+        // `replace`, so the first version's `deps.replace?.(…)` short-circuited
+        // and no write ever landed: every publish failed for the wrong reason
+        // and the two-member disjunction below passed regardless.
         writeFileSync(path, '', 'utf8');
-        deps.replace?.(source, destination);
+        renameSync(source, destination);
       },
     };
 
     const result = await driveLifecycle(scene.request(), losing);
 
+    // The write is refused by `advanceTaskState`'s re-proof, not by this layer:
+    // the lease it was told to use is no longer at the path. Whichever of the
+    // two the run surfaces, the durable write must not have landed and no
+    // further invocation may follow it.
     expect(['EXECUTION_LEASE_LOST', 'LEASE_RELEASE_FAILED']).toContain(result.outcome);
+    expect(result.invocations).toBe(1);
+    expect(result.runs[0]?.outcome).toBe('EXECUTION_LEASE_LOST');
+  });
+});
+
+/* ═══════════════ the report an operator actually reads ═══════════════════ */
+
+describe('the lifecycle report', () => {
+  /**
+   * `renderLifecycleRun` had no test at all until this one, while the renderer
+   * it replaced — `renderAttendedRun`, since deleted — kept several. The product
+   * shipped the untested one.
+   */
+  it('names the outcome, the release and the invocation count', async () => {
+    const scene = await scenario();
+    const result = await driveLifecycle(scene.request(), scene.deps());
+
+    const text = renderLifecycleRun(scene.started.repository, result);
+
+    expect(text).toContain(`Lifecycle    : ${result.outcome}`);
+    expect(text).toContain(LIFECYCLE_OUTCOME_SENTENCES[result.outcome]);
+    // The line that did not exist anywhere before this slice, printed on every
+    // run that held a lease rather than only on failures — a line that appeared
+    // only when something went wrong is a line nobody learns to look for.
+    expect(text).toContain('Release      : RELEASED');
+    expect(text).toContain('Invocations  : 1');
+    // One invocation, so the repeated-run sentence must be absent.
+    expect(text).not.toContain(LIFECYCLE_TRAILER);
+    // And the attended contract sentence is still there, unchanged.
+    expect(text).toContain('Attended run.');
+  });
+
+  it('adds the repeated-run sentence only once the run repeats', async () => {
+    const scene = await scenario();
+    const result = await driveLifecycle(
+      scene.request({ maxSteps: 1, maxInvocations: 4 }),
+      scene.deps(),
+    );
+    expect(result.invocations).toBeGreaterThan(1);
+
+    expect(renderLifecycleRun(scene.started.repository, result)).toContain(LIFECYCLE_TRAILER);
+  });
+});
+
+/* ═════════════ an adopted workspace is driven, not refused ═══════════════ */
+
+/**
+ * The case this slice exists for, and the one the first version got wrong.
+ *
+ * `startTask` returns `ADOPTED` when a pristine orphan worktree left by an
+ * earlier crashed start is proven to be this task's own and reused — *after* the
+ * first durable state has been written. So the task is started. Refusing it
+ * produced the worst possible report for a crash-restart: a workspace adopted,
+ * state written, nothing driven, the sentence "the task could not be started or
+ * adopted", and exit 0.
+ */
+describe('a workspace left by a crashed start is adopted and then driven', () => {
+  it('drives an adopted task instead of refusing it', async () => {
+    // A real prepared worktree with no durable state — exactly what a start that
+    // died between preparing and writing leaves behind. Nothing is seeded.
+    // The runtime directory must be ignored, or `startTask` refuses with
+    // `RUNTIME_NOT_IGNORED` before it ever reaches adoption. Every other case in
+    // this file seeds a state first, so `ALREADY_STARTED` returns ahead of that
+    // check and the fixture never needed it.
+    const started = await startTask({
+      taskId: TASK_ID,
+      files: { '.gitignore': '.agent-orchestrator/runtime/\n' },
+    });
+    releaseTestLeases();
+    const agent = recordedAgent({
+      claude: () => writerSuccess(),
+      codex: () => reviewResult(passingReview()),
+    });
+    const verify = recordedVerify();
+
+    const result = await driveLifecycle(
+      {
+        repository: started.repository,
+        taskId: TASK_ID,
+        continuationGrant: true,
+        recoverStaleLease: false,
+        maxSteps: 2,
+        maxInvocations: 2,
+      },
+      {
+        now: tickingClock(),
+        git: runGitCommand,
+        authPreflight: async () => provenAuthEvidence(),
+        agent: agent.runner,
+        verify: verify.runner,
+      },
+    );
+
+    expect(result.start?.outcome).toBe('ADOPTED');
+    // The property: adoption did not end the run.
+    expect(result.outcome).not.toBe('TASK_START_REFUSED');
+    expect(result.invocations).toBeGreaterThan(0);
+    // And durable state exists for it afterwards, which is what "started" means.
+    expect(reload(started.root, TASK_ID).state.taskId).toBe(TASK_ID);
   });
 });
 
@@ -600,6 +765,11 @@ describe('the invocation bound is validated before anything is taken', () => {
 
     const result = await driveLifecycle(scene.request({ maxInvocations: 0 }), scene.deps());
 
+    // The outcome, not only the reason code. The first version asserted the code
+    // alone, which let an unusable argument be reported as
+    // `INVOCATION_BUDGET_EXHAUSTED` — exit 5, "call again to continue" — for an
+    // argument that repeats forever.
+    expect(result.outcome).toBe('INVOCATION_BUDGET_INVALID');
     expect(result.reasonCodes).toContain('MAX_INVOCATIONS_INVALID');
     expect(result.release).toBeNull();
     expectNothingExecuted(scene);
@@ -610,12 +780,20 @@ describe('the invocation bound is validated before anything is taken', () => {
 
 /* ─────────── a real acquisition really is exclusive, here too ──────────── */
 
-describe('the acquisition after a recovery is the ordinary one', () => {
-  it('loses to a successor that appeared first, and executes nothing', async () => {
+/**
+ * What this does **not** cover, stated so the title cannot mislead.
+ *
+ * The post-recovery lost race — recover a dead lease, then lose the ordinary
+ * acquisition to a successor that appeared in between — is produced by no test
+ * here and by no phase of the dist harness. Reaching it needs a lease that
+ * recovery *accepts* (a real proved launch history) and a competitor arriving
+ * inside the window between the removal and the second acquire. It is recorded
+ * as `L-V3-06-5` rather than covered. The case below is the neighbouring one:
+ * a live owner is refused before any recovery is attempted at all.
+ */
+describe('a live owner is refused before recovery is even attempted', () => {
+  it('refuses without calling the recovery, and executes nothing', async () => {
     const scene = await scenario();
-    // Stands in for the successor: the lease is simply already held, live, when
-    // the driver arrives. What is asserted is the *shape* of the loss — nothing
-    // ran, nothing was released, and the acquire code is reported.
     const held = acquireRepositoryExecutionLease(
       scene.started.repository,
       { runId: null, blockId: null },
@@ -630,6 +808,10 @@ describe('the acquisition after a recovery is the ordinary one', () => {
 
     expect(result.outcome).toBe('LIVE_OWNER_PRESENT');
     expect(result.acquire).toBe('LEASE_HELD');
+    // The assertion the first version of this case lacked, and the reason its
+    // title was wrong: the recovery was never called, so nothing here can say
+    // anything about what happens after one.
+    expect(result.recovery).toBeNull();
     expectNothingExecuted(scene);
     if (held.ok) releaseRepositoryExecutionLease(held.evidence);
   });

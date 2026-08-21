@@ -53,8 +53,9 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       '  The refusal code says which proof failed. Nothing was removed, and there is no\n' +
       '  override - a lease is never removed on a guess.',
     LEASE_CHANGED:
-      'The lease changed while the removal was being proven, so nothing was removed. Another\n' +
-      '  invocation is active here.',
+      'The lease changed while the removal was being proven, so nothing was removed. Something\n' +
+      '  else acted on it in between - another invocation took it, or it went away entirely.\n' +
+      '  Read `agent-loop lease status` rather than assuming which.',
     LEASE_DISPLACED:
       'The removal displaced something: a successor lease, or a record detached and quarantined\n' +
       '  inside .git. An operator condition, never a retry - look before invoking again.',
@@ -116,13 +117,19 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
     NO_PROGRESS:
       'An invocation reported durable progress and the state file did not move, or the task is\n' +
       '  in a state this build does not drive. Repeating would do the same thing, so it stopped.',
+    INVOCATION_BUDGET_INVALID:
+      'The --max-invocations bound is not a positive whole number, so nothing was taken and\n' +
+      '  nothing ran. Invoking again with the same value repeats this exactly.',
     INVOCATION_BUDGET_EXHAUSTED:
       'Durable progress was still being made when this run\'s invocation budget ran out.\n' +
       '  Everything is on disk; invoke again to continue, or raise --max-invocations.',
     LEASE_RELEASE_FAILED:
-      'The run finished and the execution lease could not be given back provably. Something is\n' +
-      '  still at the lease path inside .git, and the next invocation will report it rather than\n' +
-      '  take it. The outcome this run had actually reached is the first reason code below.',
+      'The run finished and the execution lease could not be given back provably. The release\n' +
+      '  code below says what was found: the lease may still be held at its path, or it may have\n' +
+      '  gone while this run was working - only RELEASED proves this run gave back what it took,\n' +
+      '  so anything else is reported rather than called a clean shutdown. A quarantined record\n' +
+      '  can be left inside .git even when the lease name itself is free. The outcome this run\n' +
+      '  had actually reached is the first reason code below.',
   });
 
 function codes(values: readonly string[]): string {

@@ -23,10 +23,13 @@ import {
   EXIT_RUN_OK,
   EXIT_RUN_REFUSED,
   EXIT_RUN_UNEXPECTED,
+  exitCodeForLifecycle,
+  exitCodeForLifecycleRun,
   exitCodeForPlan,
   exitCodeForRunOutcome,
   exitCodeForStartOutcome,
 } from '../src/cli/run-exit-codes.js';
+import { LIFECYCLE_OUTCOMES } from '../src/run/lifecycle-driver.js';
 import { RUN_OUTCOMES } from '../src/run/run-driver.js';
 import { RUN_PLAN_CONCLUSIONS } from '../src/run/run-plan.js';
 import { START_TASK_OUTCOMES } from '../src/run/start-task.js';
@@ -305,5 +308,133 @@ describe('the start exit-code expectations are load-bearing', () => {
     expect(actual()).toEqual({ ...EXPECTED_START_EXIT_CODES });
     // … and disagrees with the mutated one. So this entry is checked.
     expect(actual()).not.toEqual(mutated);
+  });
+});
+
+/* ═════════════ V3-06: the lifecycle table, written out, not derived ════════ */
+
+/**
+ * The fourth exit-code table, pinned the same way as the other three.
+ *
+ * It was added beside them and left unpinned — no test referenced
+ * `exitCodeForLifecycle`, `exitCodeForLifecycleRun` or `LIFECYCLE_EXIT_CODES` at
+ * all, so thirty operator-facing assignments and the start-outcome delegation
+ * were covered by nothing. Written out by hand rather than generated from the
+ * vocabulary, for the reason the start-table comment above gives: a table that
+ * generates its own expectation passes for every possible mapping.
+ */
+const EXPECTED_LIFECYCLE_EXIT_CODES: Readonly<Record<string, number>> = Object.freeze({
+  // The task finished.
+  COMPLETED: 0,
+
+  // Durably parked, or a record an operator has to look at. Identical to the run
+  // table: a task did not end differently because an outer loop was watching.
+  TASK_ABORTED: 3,
+  BLOCKED_USAGE_LIMIT: 3,
+  BLOCKED_VERIFY: 3,
+  BLOCKED_AUTH: 3,
+  SCOPE_VIOLATION: 3,
+  RESUME_STATE_DIVERGED: 3,
+  HUMAN_DECISION_REQUIRED: 3,
+  RECONCILIATION_DIVERGED: 3,
+  RECONCILIATION_UNOBSERVABLE: 3,
+  STATE_UNUSABLE: 3,
+
+  // Another run is working here, and it clears itself: a refusal, not an
+  // operator condition. The only lease state that keeps code 4.
+  LIVE_OWNER_PRESENT: 4,
+
+  // Every other lease condition leaves something a human has to look at: a lease
+  // nothing here may remove, a refused or failed removal, a displaced record, or
+  // a release that could not be proven.
+  STALE_LEASE_PRESENT: 3,
+  RECOVERY_UNSAFE: 3,
+  LEASE_CHANGED: 3,
+  LEASE_DISPLACED: 3,
+  RECOVERY_FAILED: 3,
+  LEASE_ACQUISITION_REFUSED: 3,
+  LEASE_RELEASE_FAILED: 3,
+
+  // Nothing to continue, or an argument that cannot be used.
+  TASK_NOT_STARTED: 2,
+  TASK_START_REFUSED: 2,
+  INVOCATION_BUDGET_INVALID: 2,
+
+  // This run was refused or achieved nothing; nothing durable is wrong.
+  AUTH_PREFLIGHT_FAILED: 3,
+  STATE_CONFLICT: 4,
+  STATE_NOT_RECORDED: 4,
+  CONTINUATION_NOT_AUTHORISED: 4,
+  EXECUTION_UNAUTHORISED: 4,
+  EXECUTION_LEASE_NOT_HELD: 4,
+  EXECUTION_LEASE_LOST: 4,
+  NO_PROGRESS: 4,
+
+  // The only lifecycle outcome that means "call again".
+  INVOCATION_BUDGET_EXHAUSTED: 5,
+});
+
+describe('the lifecycle exit-code table', () => {
+  it('maps every outcome to the code written out above, and no other', () => {
+    expect(Object.keys(EXPECTED_LIFECYCLE_EXIT_CODES).sort()).toEqual(
+      [...LIFECYCLE_OUTCOMES].sort(),
+    );
+    for (const outcome of LIFECYCLE_OUTCOMES) {
+      expect(exitCodeForLifecycle(outcome)).toBe(EXPECTED_LIFECYCLE_EXIT_CODES[outcome]);
+    }
+  });
+
+  it('gives exactly one outcome the "call again" code', () => {
+    const callAgain = LIFECYCLE_OUTCOMES.filter(
+      (outcome) => exitCodeForLifecycle(outcome) === EXIT_RUN_CALL_AGAIN,
+    );
+    expect(callAgain).toEqual(['INVOCATION_BUDGET_EXHAUSTED']);
+  });
+
+  it('never reports a lifecycle outcome as an internal error', () => {
+    // Code 1 is for an exception nobody classified. Every member of a closed
+    // vocabulary has been classified by definition, so none may carry it.
+    for (const outcome of LIFECYCLE_OUTCOMES) {
+      expect(exitCodeForLifecycle(outcome)).not.toBe(EXIT_RUN_UNEXPECTED);
+    }
+  });
+
+  it('hands a refused start back to the start table rather than flattening it', () => {
+    // The delegation, and the reason it exists: `TASK_ID_INVALID` is a typo,
+    // `AUTH_PREFLIGHT_FAILED` is a login and `STATE_NOT_RECORDED` is a worktree
+    // nothing accounts for. Answering all three with "your input was unusable"
+    // is the collapse the vocabulary exists to prevent.
+    expect(
+      exitCodeForLifecycleRun({
+        outcome: 'TASK_START_REFUSED',
+        start: { outcome: 'AUTH_PREFLIGHT_FAILED' },
+      }),
+    ).toBe(EXIT_RUN_NEEDS_OPERATOR);
+    expect(
+      exitCodeForLifecycleRun({
+        outcome: 'TASK_START_REFUSED',
+        start: { outcome: 'TASK_ID_INVALID' },
+      }),
+    ).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    expect(
+      exitCodeForLifecycleRun({
+        outcome: 'TASK_START_REFUSED',
+        start: { outcome: 'STATE_NOT_RECORDED' },
+      }),
+    ).toBe(EXIT_RUN_NEEDS_OPERATOR);
+    // Without a start result there is nothing to delegate to, and the floor in
+    // the lifecycle table answers instead.
+    expect(exitCodeForLifecycleRun({ outcome: 'TASK_START_REFUSED', start: null })).toBe(
+      EXIT_RUN_INPUT_UNUSABLE,
+    );
+  });
+
+  it('leaves every other outcome to the lifecycle table', () => {
+    for (const outcome of LIFECYCLE_OUTCOMES) {
+      if (outcome === 'TASK_START_REFUSED') continue;
+      expect(
+        exitCodeForLifecycleRun({ outcome, start: { outcome: 'AUTH_PREFLIGHT_FAILED' } }),
+      ).toBe(exitCodeForLifecycle(outcome));
+    }
   });
 });

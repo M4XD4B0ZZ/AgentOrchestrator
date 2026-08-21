@@ -159,32 +159,12 @@ export function renderRunResult(result: RunResult): string {
   return lines.join('\n');
 }
 
-/**
- * The whole report for one attended invocation.
- *
- * `run` is `null` when the start did not reach a drivable task, which is not an
- * error in itself — the exit code comes from whichever half stopped first, and
- * this report names that half rather than leaving the operator to infer it.
+/*
+ * `renderAttendedRun` — the whole-report function — lived here until V3-06 and
+ * was removed with the rewiring that orphaned it. `cli/run-command.ts` now goes
+ * through `driveLifecycle` and reports with `renderLifecycleRun`, which composes
+ * the three pieces above rather than replacing them. Keeping a second
+ * whole-report function that nothing shipped would have meant its tests — the
+ * secret- and path-discipline ones included — pinning a renderer the product no
+ * longer used, while the one it does use had none.
  */
-export function renderAttendedRun(
-  repository: { id: string; root: string },
-  taskId: string,
-  start: StartTaskResult,
-  run: RunResult | null,
-  notes: readonly string[] = [],
-): string {
-  const lines: string[] = [
-    '',
-    line('Repository', `${repository.id}  (${repository.root})`),
-    line('Target', taskId),
-    renderStartResult(start),
-  ];
-  if (run !== null) lines.push(renderRunResult(run));
-  // Notes rather than a relabelled start outcome. A task that really did start
-  // and then could not be driven must be reported as having started: rewriting
-  // its outcome to name the later refusal would tell an operator that nothing
-  // was created, while a worktree and a state file sat in their repository.
-  for (const note of notes) lines.push(note);
-  lines.push('', ATTENDED_TRAILER, '');
-  return lines.join('\n');
-}

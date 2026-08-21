@@ -332,6 +332,16 @@ async function drive(repository, options) {
 
 const ROUNDS = 2;
 
+/**
+ * Cleanup runs in a `finally`, not straight-line at the end.
+ *
+ * Every phase below can throw before reaching it — a fixture that does not
+ * resolve, an owner that never says `ready`, an owner that never dies — and a
+ * straight-line sweep leaks up to eight real git repositories per run into the
+ * temp directory. Phase C's live owner is killed in its own `finally` already;
+ * this covers the directories.
+ */
+try {
 for (let round = 0; round < ROUNDS; round += 1) {
   /* ── A. a dead owner whose launches were proved: recovered, then acquired ── */
   {
@@ -473,8 +483,10 @@ for (let round = 0; round < ROUNDS; round += 1) {
   }
 }
 
-for (const root of created) {
-  rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+} finally {
+  for (const root of created) {
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
 }
 
 if (failures.length > 0) {

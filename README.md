@@ -3272,9 +3272,21 @@ and because the failure mode it describes — a command that cannot start is
   `block/block-runner.ts:887` passes `attendedContinuation: true` from inside
   that loop. `driveLifecycle` does the same for one task, in one foreground
   process the operator started and can stop, and `--max-invocations` defaults to
-  one so the CLI is byte-identical in behaviour unless an operator asks
-  otherwise. No authority was extended. **Scope:** `run/lifecycle-driver.ts`,
-  `cli/run-command.ts`.
+  one so the command drives a task exactly as far as it did before unless an
+  operator asks otherwise. No authority was extended.
+
+  **Not byte-identical output, though, and an earlier draft of this entry said
+  it was.** Routing `run --attended` through the driver changed three visible
+  things on purpose: the step-budget stop is spelled
+  `INVOCATION_BUDGET_EXHAUSTED` (same exit code 5, same meaning); the report
+  comes from `renderLifecycleRun`, which adds the lease and release lines this
+  slice exists to produce; and six acquire refusals moved from exit 4 to exit 3.
+  Only `LEASE_HELD` keeps 4, because another run working here clears itself — an
+  unusable lease location, an incoherent repository record and a filesystem that
+  cannot support the claim do not, and code 4 promises that re-invoking under
+  other conditions can differ. That narrows `L-V2-07L-1` rather than carrying it
+  forward. **Scope:** `run/lifecycle-driver.ts`, `cli/run-command.ts`,
+  `cli/run-exit-codes.ts`.
 - **L-V3-06-2 — the reset wait was WITHDRAWN from slice 6, and needs a contract
   decision before it can exist.** The slice was to let an unattended run sleep
   until `reportedResetAt` and carry on. It cannot be built without extending an
@@ -3316,6 +3328,30 @@ and because the failure mode it describes — a command that cannot start is
   stops, exactly as `runTask` does, and nothing here decides that a finished task
   means "move on to the next". Automatic task selection stays out of scope.
   **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-5 — the post-recovery lost race is produced by no test.** The path
+  where a stale lease is recovered and the *ordinary* acquisition that follows
+  then loses to a successor — `run/lifecycle-driver.ts`'s second `acquireOnce`,
+  and the `ACQUISITION_AFTER_RECOVERY_LOST` reason code — is unexercised, in
+  process and against the artefact alike. Reaching it needs a lease recovery
+  *accepts* (a real proved launch history) plus a competitor arriving inside the
+  window between the removal and the second acquire, which no harness here can
+  stage deterministically. `LEASE_CHANGED`, `LEASE_DISPLACED` and
+  `RECOVERY_FAILED` are likewise produced by no test. The property they carry —
+  recovery grants nothing, and the acquisition after it is allowed to lose — is
+  therefore argued from the code rather than measured. A review found the case
+  named for this path did not reach it; the case was renamed to what it does
+  measure rather than left claiming more. **Scope:**
+  `run/lifecycle-driver.ts`, `tests/v3-06-lifecycle-driver.test.ts`.
+- **L-V3-06-6 — a lease that clears itself between the refused acquire and the
+  recovery is reported as an operator condition.** The first acquire refuses
+  `STALE_LEASE_RECOVERY_UNSAFE`; another invocation legitimately recovers and
+  acquires in the window; `recoverStaleLease` then re-probes — correctly, it
+  binds to bytes and takes its own liveness reading — and refuses. The run
+  reports `RECOVERY_UNSAFE`, exit 3, "an operator must act", when the truth is
+  `LIVE_OWNER_PRESENT`, exit 4, and it clears itself. No wrong *effect*: nothing
+  is removed, and recovery is still attempted at most once. Only the reported
+  condition and exit class are wrong, and narrowing it means a second inspection
+  whose answer would be just as stale. **Scope:** `run/lifecycle-driver.ts`.
 
 ### What V1-08 is not
 

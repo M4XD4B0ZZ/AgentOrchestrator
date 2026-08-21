@@ -107,10 +107,25 @@ interface RunOptions {
 /**
  * How many times one `run --attended` may re-enter the driver.
  *
- * One, so that the default behaviour of this command is exactly what it was
- * before V3-06: a single invocation, and `STEP_BUDGET_EXHAUSTED` reported as
- * "call again". Raising it hands that decision to the lifecycle driver instead
- * of to the operator's shell.
+ * One, so that the default drives the task exactly as far as it did before
+ * V3-06: a single invocation, stopping at the step budget and telling the
+ * operator to call again. Raising it hands that decision to the lifecycle driver
+ * instead of to the operator's shell.
+ *
+ * "Exactly as far", not "exactly the same report". Routing this command through
+ * the driver changed three visible things, deliberately, and an earlier version
+ * of this comment claimed it changed nothing:
+ *
+ *  - the step-budget stop is now spelled `INVOCATION_BUDGET_EXHAUSTED` (same
+ *    exit code 5, same meaning: everything is on disk, call again);
+ *  - the report comes from `renderLifecycleRun`, which adds the lease lines and
+ *    the release line this slice exists to produce;
+ *  - six acquire refusals moved from exit 4 to exit 3. `LEASE_HELD` — another
+ *    run is working — keeps 4, because it clears itself. An unusable lease
+ *    location, an incoherent repository record and a filesystem that cannot
+ *    support the claim do not clear themselves, and code 4's contract says
+ *    re-invoking under other conditions can differ. That is the confusion
+ *    `L-V2-07L-1` records, narrowed here rather than carried forward.
  */
 export const DEFAULT_MAX_INVOCATIONS = 1;
 
@@ -203,9 +218,9 @@ async function reportPlan(
  * repository's own task files, and an invocation with nothing to run should not
  * take a writer lease to find that out. Everything after it — taking the lease,
  * recovering a provably dead one, starting the task, driving it across as many
- * invocations as the operator allowed, waiting out a recorded quota reset, and
- * giving the lease back — belongs to `driveLifecycle`, which is the layer that
- * can report what happened to the lease instead of discarding it.
+ * invocations as the operator allowed, and giving the lease back — belongs to
+ * `driveLifecycle`, which is the layer that can report what happened to the
+ * lease instead of discarding it.
  */
 async function executeAttended(
   repository: ResolvedRepository,
