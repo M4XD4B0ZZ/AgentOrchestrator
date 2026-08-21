@@ -57,6 +57,47 @@
  *
  * Phase B is the second control: a dead owner whose launch history was left open
  * must still be refused, and the lease must come out byte-identical.
+ *
+ * -- Both processes resolve; neither hand-builds an identity ----------------
+ *
+ * The child obtains its repository through `resolveRepository`, the same call
+ * the parent makes, and both are required to derive the *same* lease path before
+ * any phase is judged. That requirement is not decoration - it is this file's
+ * own regression.
+ *
+ * The first version had the child build `{ gitCommonDir: join(root, '.git'),
+ * root, id }` from the raw `tmpdir()` while the parent resolved the same
+ * directory. It passed on every developer machine and failed both CI jobs,
+ * because a GitHub Windows runner's `tmpdir()` is the 8.3 short form
+ * (`C:\Users\RUNNER~1\...`) whose long form the resolver returns. The two then
+ * derive different `leaseKey` values for the *same file*, and
+ * `execution-lease.ts` reads a lease whose recorded key is not path-identical to
+ * the reader's as `UNPARSEABLE`.
+ *
+ * The failure was maximally misleading. Phases A, B and C each broke in their
+ * own vocabulary - a refused recovery, a wrong refusal code, a live owner seen
+ * as stale - and only one of the nine per-round messages contained the word
+ * `UNPARSEABLE` at all, because that is the recovery *refusal* and only phase B
+ * reads one. Nine failures per round, eighteen per job, which is what CI
+ * reported.
+ *
+ * Phase D passed, and not because it skips the parse - it asserts
+ * `STALE_LEASE_PRESENT`, which requires one. It passed because an unparseable
+ * lease and a genuinely stale one leave `refusalForExistingLease` under the same
+ * acquire code, and the no-grant branch stops on that code without asking why. D
+ * was blind to the parse having failed, which is a weaker thing than being
+ * exempt from it and worth having written down accurately: it is the reason the
+ * one green phase pointed away from the common cause.
+ *
+ * `checkSameLeasePath` names the cause directly and reports before any phase
+ * result does. It does not short-circuit - `check` records and continues - so a
+ * recurrence would surface as eight identity failures *alongside* the downstream
+ * ones rather than instead of them. Eight messages that name the cause beats
+ * eighteen that describe symptoms.
+ *
+ * None of this was production code: nothing in `src/` hand-builds a repository
+ * record. Three sibling dist harnesses still do, and pass only because both of
+ * their sides hand-build identically - see `L-V3-06-11`.
  */
 
 import { execFileSync, spawn } from 'node:child_process';
@@ -65,6 +106,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -114,17 +156,33 @@ const { deriveExecutionLeaseLocation } = await import(pathToFileURL(distLease).h
  * the opaque type exists to close.
  */
 const OWNER_SOURCE = `
-import { join } from 'node:path';
 import {
   acquireRepositoryExecutionLease,
   beginWriterLaunch,
   confirmWriterLaunch,
+  deriveExecutionLeaseLocation,
 } from ${JSON.stringify(pathToFileURL(distLease).href)};
 import { mintContainmentAttestation } from ${JSON.stringify(pathToFileURL(distMint).href)};
+import { resolveRepository } from ${JSON.stringify(pathToFileURL(distRepo).href)};
 
 const root = process.env.AO_LIFECYCLE_DIR;
 const phase = process.env.AO_LIFECYCLE_PHASE;
-const repository = { gitCommonDir: join(root, '.git'), root, id: 'lifecycle-fixture' };
+
+// Through the shipped resolver, exactly as the parent does - never
+// hand-constructed from the raw path.
+//
+// This is what CI failed on, and the long form of the reasoning is in the
+// header comment of this file. In short: a hand-built record derived its lease
+// key from the raw tmpdir path, the parent derived one from the resolved path,
+// GitHub Windows hands back an 8.3 short tmpdir, and a lease whose recorded key
+// is not path-identical to the reader's reads as UNPARSEABLE. Same file, two
+// identities. Production never hand-builds a repository record; the harness did.
+const resolution = await resolveRepository({ repositoryPath: root });
+if (!resolution.ok) {
+  process.stderr.write('owner could not resolve the repository: ' + resolution.code);
+  process.exit(6);
+}
+const repository = resolution.repository;
 const now = () => new Date().toISOString();
 
 const acquired = acquireRepositoryExecutionLease(
@@ -178,6 +236,16 @@ if (phase === 'CONTAINED' || phase === 'LIVE') {
   open('claude');
 }
 
+// Printed so the parent can require both sides to have derived the *same* lease
+// path. A permanent assertion rather than a debug line: it is the direct pin on
+// the identity agreement whose absence produced this whole failure, and it fails
+// loudly instead of surfacing three phases later as UNPARSEABLE.
+const location = deriveExecutionLeaseLocation(repository);
+if (!location.ok) {
+  process.stderr.write('owner could not derive a lease location: ' + location.code);
+  process.exit(7);
+}
+process.stdout.write('leasepath ' + location.path + '\\n');
 process.stdout.write('pid ' + process.pid + '\\n');
 process.stdout.write('ready\\n');
 
@@ -194,6 +262,15 @@ if (phase === 'LIVE') {
  * Bounded. A child that neither prints `ready` nor exits would otherwise hang
  * the canonical gate with no timeout above it, and `npm run verify` has no
  * per-script bound of its own.
+ *
+ * Two minutes rather than one, because the child's pre-`ready` work grew. It now
+ * calls `resolveRepository`, which issues up to four sequential `gitQuery` calls
+ * bounded at 15s each — so a worst case of 45-60s of git alone, against what used
+ * to be a child that did none. At 60s the bound and the worst case were the same
+ * number, and a contended runner would have reported "never became ready" for a
+ * stalled `git rev-parse`, which is the message least likely to lead anyone to it.
+ * The whole harness adds roughly 32 git invocations to the dist gate on this
+ * account (four per owner, eight owners).
  */
 function startOwner(root, phase) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -204,16 +281,31 @@ function startOwner(root, phase) {
     const timer = setTimeout(() => {
       child.kill();
       rejectPromise(new Error(`owner (${phase}) never became ready`));
-    }, 60_000);
+    }, 120_000);
     timer.unref();
     let out = '';
     let err = '';
+    // Whole lines, anchored — never substrings of the accumulated buffer.
+    //
+    // The buffer now carries an absolute filesystem path, and a path is not this
+    // harness's text. A machine whose user is named `already` produces
+    // `C:\\Users\\already\\AppData\\Local\\Temp\\...`, which satisfies a bare
+    // `out.includes('ready')`; a directory containing `rapid 42` satisfies a bare
+    // `/pid (\d+)/` and hands `42` to `process.kill`. Neither is reachable in
+    // today's ordering, and both became possible the moment the child started
+    // printing `leasepath`. Anchoring costs nothing and closes the class.
     child.stdout.on('data', (chunk) => {
       out += String(chunk);
-      const match = /pid (\d+)/.exec(out);
-      if (match !== null && out.includes('ready')) {
+      const pidLine = /^pid (\d+)$/m.exec(out);
+      const leaseLine = /^leasepath (.+)$/m.exec(out);
+      const ready = out.split('\n').some((row) => row.trimEnd() === 'ready');
+      if (pidLine !== null && ready) {
         clearTimeout(timer);
-        resolvePromise({ pid: Number(match[1]), child });
+        resolvePromise({
+          pid: Number(pidLine[1]),
+          child,
+          leasePath: leaseLine === null ? null : leaseLine[1].trimEnd(),
+        });
       }
     });
     child.stderr.on('data', (chunk) => {
@@ -221,7 +313,12 @@ function startOwner(root, phase) {
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
-      if (!out.includes('ready')) {
+      // Same anchoring. A child that exits before saying `ready` must reject, and
+      // that decision must not turn on whether a temp path happened to contain
+      // the word — an exit handler that clears the timer and then declines to
+      // reject leaves the promise unsettled and the gate hanging, which is the
+      // one outcome the timeout above exists to make impossible.
+      if (!out.split('\n').some((row) => row.trimEnd() === 'ready')) {
         rejectPromise(new Error(`owner (${phase}) exited ${String(code)}: ${err || out}`));
       }
     });
@@ -281,7 +378,16 @@ const created = [];
 
 /** A real Git repository with a real profile and an empty task directory. */
 function repositoryFixture() {
-  const root = mkdtempSync(join(tmpdir(), 'ao-lifecycle-dist-'));
+  // Canonicalised, exactly as `tests/helpers/canonical-temp-dir.ts` does it and
+  // for the reason its docblock already gives: `tmpdir()` can be an 8.3 alias,
+  // and a fixture that keeps one hands a different identity to whoever resolves
+  // it. That helper is `.ts` and this harness is `.mjs`, so the expression is
+  // duplicated rather than imported.
+  //
+  // It is not what fixes the identity split — `resolveRepository` on both sides
+  // is. This keeps the fixture's own `join(root, …)` writes and the `git` cwd on
+  // the same spelling the resolver will return.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'ao-lifecycle-dist-')));
   created.push(root);
   const git = (args) =>
     execFileSync('git', args, {
@@ -321,6 +427,31 @@ function repositoryFixture() {
 function leaseBytes(repository) {
   const path = leasePathOf(repository);
   return existsSync(path) ? readFileSync(path, 'utf8') : null;
+}
+
+/**
+ * Requires both processes to have derived the same lease path.
+ *
+ * The one assertion that names this failure directly. Without it a mismatch
+ * presents as three phases each failing in their own vocabulary, and the
+ * downstream messages describe symptoms rather than the cause — which is exactly
+ * how it reached CI while passing on every developer machine here.
+ *
+ * "Here" rather than "only on a GitHub runner": `tests/helpers/canonical-temp-dir.ts`
+ * already records that the 8.3 alias is something real Windows machines produce
+ * and that a test layer which only works when it is absent is the defect. A
+ * developer machine whose `tmpdir()` is already canonical is lucky, not immune.
+ */
+function checkSameLeasePath(owner, repository, label) {
+  check(
+    owner.leasePath !== null,
+    `${label}: the owner did not report the lease path it derived`,
+  );
+  check(
+    owner.leasePath === leasePathOf(repository),
+    `${label}: the two processes derived different lease paths - ` +
+      `owner ${String(owner.leasePath)} vs parent ${leasePathOf(repository)}`,
+  );
 }
 
 function leasePathOf(repository) {
@@ -378,6 +509,7 @@ for (let round = 0; round < ROUNDS; round += 1) {
     const repository = resolution.repository;
 
     const owner = await startOwner(root, 'CONTAINED');
+    checkSameLeasePath(owner, repository, `A${round}`);
     await awaitDeath(owner.pid, owner.child);
     check(
       existsSync(leasePathOf(repository)),
@@ -421,6 +553,7 @@ for (let round = 0; round < ROUNDS; round += 1) {
     const repository = resolution.repository;
 
     const owner = await startOwner(root, 'PENDING');
+    checkSameLeasePath(owner, repository, `B${round}`);
     await awaitDeath(owner.pid, owner.child);
     const before = leaseBytes(repository);
 
@@ -452,8 +585,13 @@ for (let round = 0; round < ROUNDS; round += 1) {
     const repository = resolution.repository;
 
     const owner = await startOwner(root, 'LIVE');
-    const before = leaseBytes(repository);
+    // Inside the `try`, because `checkSameLeasePath` reaches `leasePathOf`, which
+    // throws when a location cannot be derived. Outside it, that throw would
+    // abandon a child parked on `setInterval` for the rest of the gate — the
+    // outer `finally` sweeps directories, not processes.
     try {
+      checkSameLeasePath(owner, repository, `C${round}`);
+      const before = leaseBytes(repository);
       // Its launch history is complete and proved — exactly the history phase A
       // was permitted on. The only difference is that this process is running,
       // and that difference alone must refuse the removal.
@@ -490,6 +628,7 @@ for (let round = 0; round < ROUNDS; round += 1) {
     const repository = resolution.repository;
 
     const owner = await startOwner(root, 'CONTAINED');
+    checkSameLeasePath(owner, repository, `D${round}`);
     await awaitDeath(owner.pid, owner.child);
     const before = leaseBytes(repository);
 

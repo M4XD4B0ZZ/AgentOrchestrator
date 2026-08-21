@@ -3455,6 +3455,25 @@ and because the failure mode it describes — a command that cannot start is
   went looking could construct no reachable throw inside it — every filesystem
   call on that path is already wrapped. The ordering is written the safe way on
   the argument alone. **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-11 — three sibling dist harnesses hand-build a repository identity,
+  and are consistent rather than correct.** `test:dist-lifecycle-restart` failed
+  both CI jobs because its owner process built
+  `{ gitCommonDir: join(root, '.git'), root, id }` from a raw `tmpdir()` while
+  the parent used `resolveRepository`. On a GitHub Windows runner `tmpdir()` is
+  the 8.3 short form; the resolver returns the long form; and
+  `lease/execution-lease.ts` reads a lease whose recorded `leaseKey` is not
+  path-identical to the reader's derived key as `UNPARSEABLE`. One physical file,
+  two identities. Reproduced and measured locally before it was fixed: for a
+  single directory, `KEYS EQUAL: false`.
+
+  That harness now resolves on both sides and requires them to agree. The same
+  construct survives in `tests/dist-artifact/stale-lease-recovery-dist-artifact.mjs`,
+  `execution-lease-race-dist-artifact.mjs` and `lease-containment-dist-artifact.mjs`,
+  which pass only because *both* of their sides hand-build from the same raw
+  string. They are not broken and are not fixed here — the moment either side of
+  any of them adopts the resolver, this reproduces. `runtime-gate-dist-artifact.mjs`
+  already does the right thing. **Scope:** the three harnesses named.
+  **Not a production defect:** nothing in `src/` hand-builds a repository record.
 
 ### What V1-08 is not
 
