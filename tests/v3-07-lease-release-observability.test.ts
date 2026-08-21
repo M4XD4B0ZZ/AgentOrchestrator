@@ -331,9 +331,9 @@ describe('the release vocabulary is closed, shared and safe', () => {
     const fragments: Readonly<Record<LeaseReleaseCode, string>> = {
       RELEASED: 'was given back. Nothing of this invocation is left holding',
       EVIDENCE_INVALID: 'could not prove which lease it was holding',
-      LEASE_ABSENT: 'no record was there to remove',
-      NOT_OWNER: 'is not the one this invocation took',
-      LEASE_UNREADABLE: 'what refused the read was not its absence',
+      LEASE_ABSENT: 'no record was at the lease name when this release reached it',
+      NOT_OWNER: 'could not be shown to be the one this invocation took',
+      LEASE_UNREADABLE: 'what stopped it was not the record being absent',
       LEASE_REMOVE_FAILED: 'The removal did not complete.',
     };
     for (const code of LEASE_RELEASE_CODES) {
@@ -342,8 +342,8 @@ describe('the release vocabulary is closed, shared and safe', () => {
     const tokens: Readonly<Record<string, string>> = {
       DETACH_REFUSED: 'Nothing was moved at all',
       UNREADABLE_AFTER_DETACH: 'was put back at the lease name',
-      RECORD_QUARANTINED: 'the lease name had been taken',
-      RECORD_QUARANTINED_LEASE_UNOWNED: 'nothing holds the lease name now',
+      RECORD_QUARANTINED: 'this call did not establish what',
+      RECORD_QUARANTINED_LEASE_UNOWNED: 'nothing holds the lease name - which this call established rather than assumed',
     };
     for (const token of LEASE_RELEASE_DETAILS) {
       expect(LEASE_RELEASE_DETAIL_SENTENCES[token].replace(/\s+/g, ' ')).toContain(tokens[token]!);
@@ -386,7 +386,7 @@ describe('the release vocabulary is closed, shared and safe', () => {
     expect(restored).not.toContain('is kept');
     expect(restored).not.toContain('could not be put back');
     expect(restored).toContain('put back at the lease name');
-    expect(restored).toContain('there is no quarantined copy to go and find');
+    expect(restored).toContain('the detached copy was deleted, best effort');
 
     // And the two that really do keep one say so.
     for (const token of ['RECORD_QUARANTINED', 'RECORD_QUARANTINED_LEASE_UNOWNED'] as const) {
@@ -409,6 +409,45 @@ describe('the release vocabulary is closed, shared and safe', () => {
       [...body.matchAll(/\bdetail:\s*'([A-Z][A-Z0-9_]*)'/g)].map((match) => match[1]!),
     );
     expect([...produced].sort()).toEqual([...LEASE_RELEASE_DETAILS].sort());
+  });
+
+  it('pairs each code with the tokens its sentence assumes it has', () => {
+    // The invariant the whole shape rests on, and the one a rewrite would break
+    // silently. `LEASE_REMOVE_FAILED` says "a token follows the code above" with
+    // no condition attached, so a producer of it carrying `detail: null` would
+    // point an operator at a line that is not printed - which is precisely the
+    // defect an earlier round of this slice shipped and had to take back.
+    // `NOT_OWNER` hedges ("if a token follows"), and is allowed both.
+    const source = readFileSync(join(PACKAGE_ROOT, 'src', 'lease', 'execution-lease.ts'), 'utf8');
+    const opens = source.indexOf('export function releaseRepositoryExecutionLease(');
+    const body = source.slice(opens, source.indexOf('\n}', opens));
+    const pairs = [
+      ...body.matchAll(/code:\s*'([A-Z_]+)'(?:\s*as\s*const)?,\s*detail:\s*(null|'[A-Z_]+')/g),
+    ].map((match) => [match[1]!, match[2]!] as const);
+    expect(pairs.length).toBeGreaterThan(4);
+
+    const removeFailed = pairs.filter(([code]) => code === 'LEASE_REMOVE_FAILED');
+    expect(removeFailed.length).toBeGreaterThan(0);
+    expect(removeFailed.every(([, detail]) => detail !== 'null')).toBe(true);
+  });
+
+  it('prints no third line for a token it does not know, and never a prototype key', () => {
+    // The guard is written for tokens today's producers cannot make, so it is
+    // pinned with one they cannot make either. `constructor` is the case a
+    // membership test written with `in` would have let through: it is on every
+    // object's prototype chain, freezing does not change that, and the sentence
+    // interpolated would be the source of `Object` rather than the `undefined`
+    // the guard was added to prevent.
+    for (const token of ['constructor', 'toString', 'NOT_A_REAL_TOKEN']) {
+      const text = renderLeaseRelease('Release', { code: 'LEASE_REMOVE_FAILED', detail: token });
+      expect(text).toContain(`Release      : LEASE_REMOVE_FAILED  (${token})`);
+      expect(text).toContain(LEASE_RELEASE_SENTENCES.LEASE_REMOVE_FAILED);
+      expect(text).not.toContain('native code');
+      expect(text).not.toContain('undefined');
+      // The code's sentence and nothing under it. The token line is the only one
+      // indented four spaces; the code sentence wraps at two.
+      expect(text.split('\n').some((each) => /^ {4}\S/.test(each))).toBe(false);
+    }
   });
 
   it('does not claim an absent lease left nothing behind', async () => {

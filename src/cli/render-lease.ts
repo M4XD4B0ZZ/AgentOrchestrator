@@ -469,25 +469,27 @@ export const LEASE_RELEASE_SENTENCES: Readonly<Record<LeaseReleaseCode, string>>
     '  repository, and a lease record may still be present. Run `agent-loop lease status` to\n' +
     '  see what is there.',
   LEASE_ABSENT:
-    'There was nothing to give back: when the removal ran, no record was there to remove, and\n' +
-    '  this call kept nothing aside. That is all it establishes. It does not say what is at\n' +
-    '  the lease name now, and it did not look anywhere else in the repository. Nor does it\n' +
-    '  say when the record went: if it went while the work was still running, the name was\n' +
-    '  free and a second writer could have been admitted, and this build cannot tell you\n' +
-    '  which happened. Run `agent-loop lease status` and check the repository before trusting\n' +
-    '  the result.',
+    'There was nothing to give back: no record was at the lease name when this release\n' +
+    '  reached it, and this call kept nothing aside. That is all it establishes. It does not\n' +
+    '  say what is at the lease name now, and it did not look anywhere else in the\n' +
+    '  repository. Nor does it say when the record went: if it went while the work was still\n' +
+    '  running, the name was free and a second writer could have been admitted, and this\n' +
+    '  build cannot tell you which happened. Run `agent-loop lease status` and check the\n' +
+    '  repository before trusting the result.',
   NOT_OWNER:
-    'The record this release examined is not the one this invocation took, so nothing of this\n' +
-    '  invocation was removed. It may be a successor lease, or a record too damaged to\n' +
-    '  identify - this build does not tell those apart here. If a token follows the code\n' +
-    '  above, the line under it says what state the removal stopped in; with no token,\n' +
-    '  nothing beyond the code was established. Run `agent-loop lease status` before the\n' +
-    '  next run.',
+    'The record this release examined could not be shown to be the one this invocation took,\n' +
+    '  so nothing of this invocation was removed. Note what that is not: a record too\n' +
+    '  damaged to identify answers the same way, and a crash part way through a write can\n' +
+    '  leave this run its own record in that state. A successor is one reading of this code\n' +
+    '  and not the only one, and this build does not tell them apart here. If a token\n' +
+    '  follows the code above, the line under it says what state the removal stopped in;\n' +
+    '  with no token, nothing beyond the code was established. Run `agent-loop lease status`\n' +
+    '  before the next run.',
   LEASE_UNREADABLE:
-    'The lease record could not be opened, and what refused the read was not its absence.\n' +
-    '  Nothing was removed, and nothing else was inspected - so this says what the read\n' +
-    '  refused with, not what is at the lease name. Run `agent-loop lease status` for what\n' +
-    '  this build can see, and resolve what is there by hand before the next run.',
+    'This build could not get at the lease record, and what stopped it was not the record\n' +
+    '  being absent. Nothing was removed, and nothing else was inspected - so this says what\n' +
+    '  refused, not what is at the lease name. Run `agent-loop lease status` for what this\n' +
+    '  build can see, and resolve what is there by hand before the next run.',
   LEASE_REMOVE_FAILED:
     'The removal did not complete. A token follows the code above, and the line under it says\n' +
     '  what state the removal stopped in; every one of them needs a human before the next\n' +
@@ -507,12 +509,20 @@ export type LeaseReleaseDetail = (typeof LEASE_RELEASE_DETAILS)[number];
 /**
  * What the removal left behind, keyed on the token rather than on the code.
  *
- * This table exists because the code is not enough, and three reviews proved it.
- * The token is the right key because each one *is* an end state: the mapping in
- * `execution-lease.ts` is many-to-one only where the states agree on both facts,
- * so `RECORD_QUARANTINED` covers the changed record and the unidentifiable one
- * alike, and both mean a copy kept aside with the lease name held. Nothing here
- * has to generalise over states that disagree.
+ * This table exists because the code is not enough, and four reviews proved it.
+ * The token is a much better key — it distinguishes what the code cannot — but
+ * it is **not** one token per end state, and the fifth review found the sentence
+ * that assumed it was. `RECORD_QUARANTINED` comes from `Restoration.NAME_TAKEN`,
+ * and `putBack` reaches that both by proof (`link` refused with `EEXIST`) and by
+ * `occupancyOf` treating a *failed* `stat` as occupancy — which that function's
+ * own docstring calls proof of nothing, chosen so it can never announce a free
+ * repository it has not established. So the token says a copy was kept aside,
+ * which is true of every producer, and says nothing certain about who holds the
+ * name, which is not.
+ *
+ * The rule survives the correction, and it is the same rule the code table
+ * obeys: say what every producer of this key shares, and name the uncertainty
+ * where the producers differ.
  *
  * The one that had to be written from the source rather than from its name is
  * `UNREADABLE_AFTER_DETACH`. It reads as a record left in quarantine and is the
@@ -526,22 +536,27 @@ export type LeaseReleaseDetail = (typeof LEASE_RELEASE_DETAILS)[number];
 export const LEASE_RELEASE_DETAIL_SENTENCES: Readonly<Record<LeaseReleaseDetail, string>> =
   Object.freeze({
     DETACH_REFUSED:
-      'Nothing was moved at all: the record could not be detached from the lease name, so it\n' +
-      "    is still there and it is still this run's. Nothing was kept aside. Releasing again\n" +
-      '    is the ordinary next step; if it keeps refusing, something outside this build is\n' +
-      '    holding the file.',
+      'Nothing was moved at all: the record could not be detached from the lease name, so\n' +
+      '    whatever is there is still there and nothing was kept aside. It was the record\n' +
+      '    this run took, as of the check a few calls earlier; this call did not look again,\n' +
+      '    and the name can change hands in that window. Run `agent-loop lease status` to see\n' +
+      '    what is there now.',
     UNREADABLE_AFTER_DETACH:
-      'The record was detached, could not be read, and was put back at the lease name. Nothing\n' +
-      '    was kept aside - there is no quarantined copy to go and find. What sits at the lease\n' +
-      '    name is a record this build could not identify, and it will refuse the next run.',
+      'The record was detached, could not be read, and was put back at the lease name. It was\n' +
+      '    not kept aside on purpose - the detached copy was deleted, best effort, and this\n' +
+      '    call did not check that the deletion worked. What sits at the lease name is a\n' +
+      '    record this build could not identify, and it will refuse the next run.',
     RECORD_QUARANTINED:
-      'The record was detached and could not be put back, because the lease name had been\n' +
-      '    taken in the meantime. It is kept, deliberately, in a file beside the lease rather\n' +
-      '    than deleted. Somebody holds this repository now; that claim is real and stands.',
+      'The record was detached and could not be put back, and it is kept - deliberately - in\n' +
+      '    a file beside the lease rather than deleted. Something is at the lease name; this\n' +
+      '    call did not establish what. It may be a successor that acquired legitimately, and\n' +
+      '    it may be a partial file this call left there when the restore failed part way.\n' +
+      '    Run `agent-loop lease status` before assuming anybody holds this repository.',
     RECORD_QUARANTINED_LEASE_UNOWNED:
-      'The record was detached, could not be put back, and nothing holds the lease name now.\n' +
-      '    The record is kept in a file beside it. This repository has no owner, so the next\n' +
-      '    run will acquire normally - which is the case for looking before you let it.',
+      'The record was detached, could not be put back, and nothing holds the lease name -\n' +
+      '    which this call established rather than assumed. The record is kept in a file\n' +
+      '    beside it. This repository has no owner, so the next run will acquire normally,\n' +
+      '    which is the case for looking before you let it.',
   });
 
 /**
@@ -610,7 +625,7 @@ export function renderLeaseRelease(label: string, result: LeaseReleaseResult | n
       : [
           leaseReleaseLine(label, result),
           `  ${LEASE_RELEASE_SENTENCES[result.code]}`,
-          ...(result.detail !== null && result.detail in LEASE_RELEASE_DETAIL_SENTENCES
+          ...(result.detail !== null && Object.hasOwn(LEASE_RELEASE_DETAIL_SENTENCES, result.detail)
             ? [`    ${LEASE_RELEASE_DETAIL_SENTENCES[result.detail as LeaseReleaseDetail]}`]
             : []),
         ];

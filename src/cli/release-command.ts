@@ -246,7 +246,16 @@ export function registerReleaseCommand(program: Command): void {
         // the release report goes out after it rather than in front of it.
         process.stderr.write(`${formatSafeError(error)}\n`);
         process.exitCode = EXIT_RUN_UNEXPECTED;
-        reportLeaseRelease();
+        // Guarded, like its sibling inside the `finally`. This is the retry for a
+        // report whose first write failed, so the stream it writes to is the one
+        // that has already refused once; an exception here would escape the
+        // action, reject `parseAsync`, and hand Node the raw error to print -
+        // undoing the safe-error discipline two lines above it.
+        try {
+          reportLeaseRelease();
+        } catch {
+          // The console is gone. The exit code above is the whole report now.
+        }
       }
     });
 }

@@ -274,8 +274,9 @@ function reportFrozenPlan(repository: ResolvedRepository, options: BlockOptions)
  * ends in a value, the caller releases, and the caller still has both facts in
  * its hands.
  *
- * It reports the block run itself, including its own exit code, and knows
- * nothing about the lease it is running under: giving the lease back is the
+ * It reports the block run itself, including its own exit code, and does
+ * nothing about the lease it is running under - it is handed the evidence and
+ * passes it on, and that is all. Giving the lease back is the
  * caller's job, on every path, and a function that could both refuse and release
  * would be a second place for that to be forgotten.
  */
@@ -597,10 +598,18 @@ export function registerBlockCommand(program: Command, seams: BlockCommandSeams 
         process.exitCode = EXIT_RUN_UNEXPECTED;
         // The release last, and after the exit code is set. On a throw under the
         // lease the release still happened, and its result is the more
-        // actionable of the two facts - but it is the one written to the stream
-        // that has already refused once on the path that gets here through a
-        // failed write, so nothing the primary failure needs may sit behind it.
-        reportLeaseRelease();
+        // actionable of the two facts - but nothing the primary failure needs
+        // may sit behind it.
+        // Guarded, like its sibling inside the `finally`. This is the retry for a
+        // report whose first write failed, so the stream it writes to is the one
+        // that has already refused once; an exception here would escape the
+        // action, reject `parseAsync`, and hand Node the raw error to print -
+        // undoing the safe-error discipline two lines above it.
+        try {
+          reportLeaseRelease();
+        } catch {
+          // The console is gone. The exit code above is the whole report now.
+        }
       }
     });
 }

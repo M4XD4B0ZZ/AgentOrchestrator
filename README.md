@@ -3412,9 +3412,24 @@ and because the failure mode it describes — a command that cannot start is
 
   Rewording stopped being the fix. A code sentence now states only what the code
   establishes, and everything about the resulting state on disk moved to
-  `LEASE_RELEASE_DETAIL_SENTENCES`, **keyed on the detail token** — because the
-  token *is* the end state and the code is not. The token table is complete
-  against the producer by test, not against itself. The counter-proof for
+  `LEASE_RELEASE_DETAIL_SENTENCES`, **keyed on the detail token** — a much finer
+  key, and one the fifth review then showed is still not one-per-end-state:
+  `RECORD_QUARANTINED` comes from `Restoration.NAME_TAKEN`, which `putBack`
+  reaches both by proof (`link` refused `EEXIST`) and by `occupancyOf` treating a
+  *failed* `stat` as occupancy — a default that function's own docstring calls
+  proof of nothing. So the token sentence says a copy was kept aside, which every
+  producer shares, and names the uncertainty about who holds the name, which they
+  do not. The rule is the same at both levels: say what every producer of this
+  key shares, and name the uncertainty where they differ. The token table is
+  complete against the producer by test, not against itself, and a second test
+  pins that `LEASE_REMOVE_FAILED` never pairs with a null token — because its
+  sentence promises one without a condition.
+
+  One asymmetry worth knowing when reading two reports side by side: on a failed
+  release `run --attended` replaces its outcome with `LEASE_RELEASE_FAILED` and
+  demotes the reached outcome to a reason code, while `block` and `release` keep
+  their primary verdict and move only the exit code. Both are truthful; they are
+  not the same shape, and V3-07 deliberately did not change the older one. The counter-proof for
   `LEASE_ABSENT` is in `tests/v3-07-lease-release-observability.test.ts`: a real
   lease moved aside under a quarantine-shaped name releases `LEASE_ABSENT` with
   the record still on disk, byte for byte.
@@ -3557,6 +3572,23 @@ and because the failure mode it describes — a command that cannot start is
   thrown-operation case gets a code of its own, or a release condition gets one.
   **Scope:**
   `cli/block-command.ts`, `cli/release-command.ts`, `cli/run-exit-codes.ts`.
+- **L-V3-07-3 — the release's own `EVIDENCE_INVALID` guard cannot fire, and one
+  build defect is reported as a filesystem condition.** `releaseRepositoryExecutionLease`
+  wraps `ExecutionLeaseProof.leasePathOf` in a `try` and answers
+  `EVIDENCE_INVALID` if it throws. That arm is dead: `verifyExecutionLeaseHeld`
+  runs first, and *its* call to the same function sits inside the `try` around
+  the record read, so a throwing private-field lookup is caught there and
+  classified by `safeErrnoCode` — which answers `UNKNOWN`, not `ENOENT`, and so
+  returns `LEASE_UNREADABLE`. The release then returns on that code before it
+  ever reaches its own guard.
+
+  The consequence is small and worth naming: a value that satisfies the brand
+  check and cannot yield its path is a defect in this build, and an operator is
+  told the lease record could not be read. V3-07's sentence for that code was
+  written to survive it — it says what stopped this build rather than asserting
+  a record is present — but the classification is still wrong, and correcting it
+  is a change to `lease/execution-lease.ts`, which this slice does not touch.
+  **Scope:** `lease/execution-lease.ts`.
 - **L-V3-06-11 — three sibling dist harnesses hand-build a repository identity,
   and are consistent rather than correct.** `test:dist-lifecycle-restart` failed
   both CI jobs because its owner process built
