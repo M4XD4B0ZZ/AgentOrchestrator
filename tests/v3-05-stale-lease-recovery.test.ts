@@ -23,7 +23,7 @@
  *
  * ── The shape of the counter-proofs ────────────────────────────────────────
  *
- * Seven mutants are named in the slice's report and each is killed here rather
+ * Eight mutants are named in the slice's report and each is killed here rather
  * than argued about, each a single edit to `src`:
  *
  *     the pending mark is never written                    24 cases red
@@ -33,6 +33,7 @@
  *     the seam stops refusing an unrecordable launch        1
  *     a supplied liveness opinion may permit                3
  *     a displaced successor reads as a clean abort          1
+ *     an incomplete history reads as an absent one          1
  *
  * The last three were added after review rounds found them unpinned, and two were
  * live defects rather than hypotheticals. Every case behind them asserts an
@@ -104,6 +105,7 @@ import {
   WRITER_LAUNCH_LEDGER_FILE_NAME,
   type LeaseRepository,
   type ProcessLiveness,
+  type StaleRecoveryRefusal,
 } from '../src/lease/execution-lease.js';
 import { assessLeaseRecovery } from '../src/lease/lease-recovery.js';
 import {
@@ -1198,6 +1200,99 @@ describe('the safety predicate refuses everything it cannot prove', () => {
     ).toBe('LOCATION_UNSUITABLE');
   });
 
+  it('produces every refusal in the closed set from a real input', () => {
+    /**
+     * The counterpart of the readings case above, and it was missing — which a
+     * review noticed by mutating `refusalForHistory` so that
+     * `HISTORY_INCOMPLETE` reported `LAUNCH_HISTORY_ABSENT`, and finding every
+     * case green. Three members had no producer at all, and the sharpest of them
+     * is `LAUNCH_HISTORY_INCOMPLETE`: it is the state the whole `historyComplete`
+     * mechanism exists to create, so a rebuild after a lost ledger is the one
+     * refusal an operator most needs named correctly.
+     *
+     * The *decision* was already pinned by value — `provesEveryLaunchContained`
+     * answers `false` for that reading — so what was unpinned is the reason. This
+     * pins every member of the union to an input that produces it.
+     */
+    const stale = repositoryFixture();
+    staleLease(stale, (evidence) => containedLaunch(stale, evidence));
+    const subject = subjectOf(stale);
+    const ledgerSays = (raw: unknown): StaleRecoveryRefusal | null => {
+      writeLedger(stale, raw);
+      return assessStaleLeaseRecovery(stale).refusal;
+    };
+
+    // A history rebuilt after its file was lost: `historyComplete: false`,
+    // permanently, which is what stops a lost ledger reading as a fresh proof.
+    const incomplete = repositoryFixture();
+    staleLease(incomplete, (evidence) => {
+      containedLaunch(incomplete, evidence);
+      rmSync(ledgerPathOf(incomplete));
+      containedLaunch(incomplete, evidence);
+    });
+
+    const unparseable = repositoryFixture();
+    writeFileSync(leasePathOf(unparseable), '');
+    const unreadable = repositoryFixture();
+    mkdirSync(leasePathOf(unreadable), { recursive: true });
+    const pending = repositoryFixture();
+    staleLease(pending, (evidence) => {
+      beginWriterLaunch(pending, evidence, { writerId: 'claude', now: tick });
+    });
+    const legacy = repositoryFixture();
+    staleLease(legacy);
+    rmSync(ledgerPathOf(legacy));
+    const live = repositoryFixture();
+    const held = leaseOf(live);
+
+    const produced: Readonly<Record<StaleRecoveryRefusal, StaleRecoveryRefusal | null>> = {
+      NOTHING_TO_RECOVER: assessStaleLeaseRecovery(repositoryFixture()).refusal,
+      OWNER_RUNNING: assessStaleLeaseRecovery(live).refusal,
+      // The reporting path lets a probe substitute outright; the destructive one
+      // does not. Both halves of that asymmetry are measured elsewhere in this
+      // file — here it is simply the only way to name this liveness.
+      OWNER_LIVENESS_UNDETERMINED: assessStaleLeaseRecovery(live, { processAlive: undetermined })
+        .refusal,
+      LEASE_UNPARSEABLE: assessStaleLeaseRecovery(unparseable).refusal,
+      LEASE_UNREADABLE: assessStaleLeaseRecovery(unreadable).refusal,
+      LOCATION_UNSUITABLE: assessStaleLeaseRecovery({ gitCommonDir: '', root: '', id: 'none' })
+        .refusal,
+      LOCATION_NETWORK_UNSUPPORTED: assessStaleLeaseRecovery({
+        gitCommonDir: '\\\\server\\share\\repo\\.git',
+        root: '\\\\server\\share\\repo',
+        id: 'unc',
+      }).refusal,
+      LOCATION_DEVICE_NAMESPACE: assessStaleLeaseRecovery({
+        gitCommonDir: '\\\\.\\PhysicalDrive0',
+        root: '\\\\.\\PhysicalDrive0',
+        id: 'device',
+      }).refusal,
+      LAUNCH_HISTORY_ABSENT: assessStaleLeaseRecovery(legacy).refusal,
+      LAUNCH_HISTORY_INCOMPLETE: assessStaleLeaseRecovery(incomplete).refusal,
+      LAUNCH_HISTORY_UNPROVEN: assessStaleLeaseRecovery(pending).refusal,
+      LAUNCH_HISTORY_UNSUPPORTED_VERSION: ledgerSays({
+        ...sealed({ entries: [] }, subject),
+        ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION + 1,
+      }),
+      LAUNCH_HISTORY_MALFORMED: ledgerSays('{"ledgerVersion": 1, "entr'),
+      LAUNCH_HISTORY_NOT_THIS_LEASE: ledgerSays(
+        sealed({ entries: [] }, { ...subject, ownerNonce: 'f'.repeat(64) }),
+      ),
+      LAUNCH_HISTORY_NOT_THIS_RUN: ledgerSays(
+        sealed({ entries: [], ownerPid: subject.ownerPid, runId: 'somebody-elses' }, subject),
+      ),
+    };
+
+    // Every member of the union is produced by something, so no refusal is a name
+    // with no input behind it — and each is produced by *its own* input, which is
+    // what the mutant that reported one member as another walked through.
+    expect(Object.keys(produced).sort()).toEqual([...STALE_RECOVERY_REFUSALS].sort());
+    for (const [refusal, observed] of Object.entries(produced)) {
+      expect(observed).toBe(refusal);
+    }
+    releaseRepositoryExecutionLease(held.evidence);
+  });
+
   it('answers a verdict of SAFE exactly when it answers no refusal', () => {
     // The union is refusals only, so "permitted" has one spelling and cannot be
     // reached by a value somebody added. Pinned by value across every refusal
@@ -1503,6 +1598,18 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
     // `Function.length` satisfies for any number of optional parameters — so it
     // was green for the very seam it was written to exclude, and stayed green
     // while that seam could remove a living owner's lease.
+    // Two pins, and they are pinned by two different gates. Saying which is
+    // which is the point: an earlier version asserted `recoverStaleLease.length
+    // === 1`, which `Function.length` satisfies for any number of *optional*
+    // parameters — so it read as runtime coverage, was green for the very seam it
+    // excluded, and stayed green through a round in which that seam could remove
+    // a living owner's lease.
+    //
+    // (1) The **shape**, which `npm run typecheck` holds and this suite does not:
+    // the object below is written here, so `Object.keys` on it can only ever
+    // answer what it was given. What refuses a `verdict` key is `satisfies`, at
+    // compile time. A review measured that too — adding a field to
+    // `StaleRecoveryDependencies` leaves all cases green and fails `tsc`.
     const shape = Object.keys(
       { additionalLiveness: undefined } satisfies Record<
         keyof NonNullable<Parameters<typeof recoverStaleLease>[1]>,
@@ -1510,6 +1617,27 @@ describe('recovery removes exactly the lease it has just proved dead', () => {
       >,
     );
     expect(shape).toEqual(['additionalLiveness']);
+
+    // (2) The **behaviour**, which this suite does hold: a key nobody declared is
+    // not honoured. A hostile deps object carrying every shape a smuggled verdict
+    // could take changes nothing about a lease whose owner is alive.
+    const smuggled = repositoryFixture();
+    const held = leaseOf(smuggled);
+    containedLaunch(smuggled, held.evidence);
+    const untouched = readFileSync(leasePathOf(smuggled));
+    for (const hostile of [
+      { verdict: 'SAFE_TO_RECOVER' },
+      { assessment: { verdict: 'SAFE_TO_RECOVER', refusal: null } },
+      { processAlive: () => 'NOT_FOUND' as const },
+      { force: true },
+      { additionalLiveness: () => 'NOT_FOUND' as const, verdict: 'SAFE_TO_RECOVER' },
+    ]) {
+      const result = recoverStaleLease(smuggled, hostile as never);
+      expect(result.code).toBe('RECOVERY_UNSAFE');
+      expect(result.refusal).toBe('OWNER_RUNNING');
+    }
+    expect(readFileSync(leasePathOf(smuggled)).equals(untouched)).toBe(true);
+    releaseRepositoryExecutionLease(held.evidence);
 
     // And the reported assessment is the one this call made, not one handed in:
     // a refusal carries the refusal that produced it.

@@ -595,9 +595,14 @@ export interface LeaseInspection {
    * Reported beside the revision because the revision is not identity for every
    * lease this build can meet: the crash-window artefact is empty, and every
    * empty object has the same digest. See {@link readObject}, which produces
-   * this value. An
-   * operator authorises a break with both, and both are re-established on the
-   * object the removal detaches.
+   * this value.
+   *
+   * It authorises nothing and never did in this build: the sentence here used to
+   * read "an operator authorises a break with both, and both are re-established
+   * on the object the removal detaches", which described the twice-withdrawn
+   * `lease break` in the present tense long after it was gone. Reported so an
+   * operator can tell two records apart by eye; the recovery that does remove a
+   * lease binds to the record's bytes and nonce, never to this.
    */
   readonly objectId: string | null;
   /**
@@ -3604,10 +3609,16 @@ export function recoverStaleLease(
  *
  * ── Why this is a table and not the `switch` it replaced ───────────────────
  *
- * Because the `switch` could not be tested. Two of {@link VerifiedRemoval}'s nine
- * members — the ones where a record was detached and could not be put back —
- * need a restore to fail, which needs a filesystem that refuses both `link` and
- * an exclusive create at the freed name. `tests/v2-07lr-remediation.test.ts`
+ * Because the `switch` could not be tested. The two members this table sends to
+ * {@link LEASE_DISPLACED} — a *readable* record detached and not put back — need a
+ * restore to fail, which needs a filesystem that refuses both `link` and an
+ * exclusive create at the freed name. (Four of the nine need that, not two; the
+ * other pair are the `UNIDENTIFIABLE_*` ones, where the detached bytes could not
+ * be read either, and they answer {@link RECOVERY_FAILED} because the removal
+ * genuinely did not complete. This sentence said "two … the ones where a record
+ * was detached and could not be put back", which is a count and a description
+ * that disagree — the defect this file records against itself three paragraphs
+ * up.) `tests/v2-07lr-remediation.test.ts`
  * produces them by squatting the freed name *from inside the predicate*, and
  * this function's predicate is not a caller's to hook. So no case can reach
  * those two arms through `recoverStaleLease`, and a review demonstrated the

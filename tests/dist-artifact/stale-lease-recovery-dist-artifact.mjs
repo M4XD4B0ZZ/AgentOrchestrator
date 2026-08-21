@@ -13,12 +13,17 @@
  * The justification is restated rather than left standing, because a check
  * defended by a false reason is a check nobody will keep.
  *
- * What that suite still does not do is run a *second operating-system process*.
- * Its stale leases are built by acquiring for real, driving real launches, and
- * then rewriting the owner pid to one whose process has exited — so the pid is
- * genuinely dead and the probe is genuinely consulted, and the chain from a real
- * acquisition through a real death to a real removal is never travelled end to
- * end in one repository. It also runs against `src`, not against what is shipped.
+ * What that suite still does not do is let a second operating-system process
+ * ever **hold** the lease. It starts one — `deadProcessId()` spawns a child and
+ * waits for it, which is where the genuinely dead pid comes from — but the owner
+ * named in every fixture is the vitest worker with the pid overwritten
+ * afterwards. So the chain from a real acquisition, through the death of the
+ * process that made it, to a real removal is never travelled end to end by one
+ * owner. It also runs against `src`, not against what is shipped.
+ *
+ * (This paragraph said "never runs a second operating-system process", which the
+ * very next clause contradicted: a dead pid has to come from a process that
+ * genuinely started.)
  *
  * Both are what this file is for. The owner here is a **separate operating-system
  * process** that acquires the lease through the built artefact and exits still

@@ -6181,8 +6181,11 @@ the constant digest `sha256("")`, and a reused `(dev,ino)`.
   `removeVerifiedLease`, which detaches into a private name and decides on that
   object, and the predicate requires the exact bytes the assessment read. A lease
   that changed hands in the window cannot match, so it is put back and the call
-  answers `LEASE_CHANGED`. Replacing that predicate with `() => true` fails a
-  case that swaps the lease from inside the liveness probe.
+  answers `LEASE_CHANGED` — or, when the put-back itself fails, the record is
+  *kept* in a quarantine file and the call answers `LEASE_DISPLACED`, because a
+  displaced writer and a file left inside `.git` are not a clean abort. Replacing
+  that predicate with `() => true` fails a case that swaps the lease from inside
+  the liveness probe.
 
 ### `agent-loop lease recover`
 
@@ -6204,7 +6207,7 @@ stops a report from becoming an authorisation.
 ### What it is measured by
 
 `tests/v3-05-stale-lease-recovery.test.ts` covers the format, the lifecycle, the
-seam, the predicate and the operator vocabulary, and seven mutants were run
+seam, the predicate and the operator vocabulary, and eight mutants were run
 against it rather than described, each a single edit to `src`:
 
 ```text
@@ -6215,6 +6218,7 @@ an unreadable history reads as contained              3
 the seam stops refusing an unrecordable launch        1
 a supplied liveness opinion may permit                3
 a displaced successor is reported as a clean abort    1
+an incomplete history is reported as an absent one    1
 ```
 
 The last three were added after review rounds found them unpinned, and two of
@@ -6241,8 +6245,9 @@ format rather than by its caller.
 
 Its stale leases are built by acquiring for real, driving real launches, and then
 rewriting the owner pid to one whose process has exited — genuinely dead, and the
-real `osProcessLiveness` is what confirms it — so what that file never does is
-run a *second* OS process, or run against what is shipped.
+real `osProcessLiveness` is what confirms it. What that file never does is let a
+second OS process **hold** the lease (it starts one, which is where the dead pid
+comes from), or run against what is shipped.
 `npm run test:dist-stale-recovery` does both: a separate process acquires the
 lease through the built artefact and exits still holding it. Its
 load-bearing case is the **negative control** — an owner kept alive must be

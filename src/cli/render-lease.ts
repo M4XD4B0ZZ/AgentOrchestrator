@@ -284,18 +284,27 @@ export const STALE_RECOVERY_OUTCOMES: Readonly<Record<StaleLeaseRecoveryResult['
       '  `agent-loop lease status` and do not start anything against this repository until it\n' +
       '  reads as you expect.',
     RECOVERY_FAILED:
-      'The removal could not be completed. The reason line names the end state. Run\n' +
-      '  `agent-loop lease status` before anything else runs against this repository.',
+      'The removal could not be completed, and the end-state line names which way. Two of\n' +
+      '  the four ways leave a record KEPT in a file beside the lease whose name contains\n' +
+      '  `.breaking-` - detached, unreadable, and deliberately not deleted - and one of\n' +
+      '  those two also leaves the lease name free. Nothing was destroyed. Run\n' +
+      '  `agent-loop lease status` before anything else runs against this repository, and\n' +
+      '  look inside the Git directory if the end state names a quarantine.',
   });
 
 /** The `lease recover` report. */
 export function renderLeaseRecoveryResult(result: StaleLeaseRecoveryResult): string {
+  // "Reason" for a refusal, "End state" for everything else. Making `detail`
+  // unconditional gave a successful recovery the line `Reason : REMOVED`, which
+  // labels a success as though something had gone wrong; the invariant worth
+  // keeping is that the code and the state it came from are always both printed,
+  // not that they share one label.
   const reason = result.refusal ?? result.detail;
   const lines = [
     '',
     line('Recovery', result.code),
     `  ${STALE_RECOVERY_OUTCOMES[result.code]}`,
-    line('Reason', reason ?? 'none'),
+    line(result.refusal === null ? 'End state' : 'Reason', reason ?? 'none'),
     ...(result.refusal === null ? [] : [`  ${STALE_RECOVERY_SENTENCES[result.refusal]}`]),
     line('Path', result.assessment.path === '' ? 'no usable location' : result.assessment.path),
   ];
