@@ -163,8 +163,13 @@ export function renderRunResult(result: RunResult): string {
  * `renderAttendedRun` — the whole-report function — lived here until V3-06 and
  * was removed with the rewiring that orphaned it. `cli/run-command.ts` now goes
  * through `driveLifecycle` and reports with `renderLifecycleRun`, which composes
- * the three pieces above rather than replacing them. Keeping a second
- * whole-report function that nothing shipped would have meant its tests — the
- * secret- and path-discipline ones included — pinning a renderer the product no
- * longer used, while the one it does use had none.
+ * the three pieces above rather than replacing them.
+ *
+ * It had no tests of its own to lose. What covered it was, and still is,
+ * `tests/v2-05-attended-cli.test.ts`, which drives the real command and asserts
+ * on stdout — so it covered whichever renderer the command used, and it covers
+ * the new one unchanged. (A note here briefly claimed the deletion would
+ * otherwise have stranded "its tests, the secret- and path-discipline ones
+ * included". `git grep renderAttendedRun` at the base commit returns four hits,
+ * all in `src/`.)
  */

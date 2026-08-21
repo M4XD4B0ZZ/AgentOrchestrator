@@ -3,9 +3,15 @@
  *
  * Same discipline as `render-attended-run.ts`, which it builds on: only values
  * that have already passed a validating boundary may appear — closed vocabulary
- * codes, the canonical repository identity, task ids, counts. A
- * `LifecycleResult` cannot carry agent output, verifier output or exception
- * text, so none can be printed.
+ * codes, counts, task ids, the canonical repository identity, and the workspace
+ * paths and commits a `TaskWorkspace` receipt carries. Paths belong on that list
+ * and an earlier version of this sentence left them off: `repository.root` is
+ * printed here, and `renderStartResult` prints the worktree path, work branch
+ * and base commit.
+ *
+ * What is excluded is what a caller does not control: a `LifecycleResult` cannot
+ * carry agent output, verifier output or exception text, so none can be printed.
+ * `permissionDenials` carries a count and tool names, never `tool_input`.
  *
  * What this renderer adds over the attended one is the *shape of a run that
  * repeated*: how many invocations it took, how the lease was obtained, and —
@@ -23,6 +29,7 @@ import {
   renderRunResult,
   renderStartResult,
 } from './render-attended-run.js';
+import { LEASE_ACQUIRE_SENTENCES, STALE_RECOVERY_SENTENCES } from './render-lease.js';
 
 /**
  * The closing sentence of a run that took more than one invocation.
@@ -43,15 +50,17 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
     LIVE_OWNER_PRESENT:
       'Another invocation holds this repository\'s execution lease and its process is alive.\n' +
       '  Nothing was run, nothing was recovered and nothing waited for it. This clears itself\n' +
-      '  when the other run finishes.',
+      '  when the other run finishes. Do not stop that process on the strength of this: process\n' +
+      '  ids are reused, so the one running now need not be the owner that took the lease.',
     STALE_LEASE_PRESENT:
       'A lease is present, its holder did not answer as alive, and this run was not permitted\n' +
       '  to remove it. The lease is untouched. `agent-loop lease status` reports what is there;\n' +
       '  --recover-stale-lease permits removing one that can be proven dead.',
     RECOVERY_UNSAFE:
       'Removal was refused: this build could not prove the lease dead and safely removable.\n' +
-      '  The refusal code says which proof failed. Nothing was removed, and there is no\n' +
-      '  override - a lease is never removed on a guess.',
+      '  The refusal code below names which proof failed, and `agent-loop lease recover` prints\n' +
+      '  a sentence for it. Nothing was removed, and there is no override - a lease is never\n' +
+      '  removed on a guess.',
     LEASE_CHANGED:
       'The lease changed while the removal was being proven, so nothing was removed. Something\n' +
       '  else acted on it in between - another invocation took it, or it went away entirely.\n' +
@@ -60,8 +69,11 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       'The removal displaced something: a successor lease, or a record detached and quarantined\n' +
       '  inside .git. An operator condition, never a retry - look before invoking again.',
     RECOVERY_FAILED:
-      'Removal was permitted, was attempted and did not complete. Something is still at the\n' +
-      '  lease path. An operator condition.',
+      'Removal was permitted, was attempted and did not complete. The detail below says how it\n' +
+      '  ended: the lease may still be at its path, or the name may be free with a detached,\n' +
+      '  unreadable record left inside .git - which means this repository currently has no\n' +
+      '  owner. Those send you to different places, so read it rather than assuming. An\n' +
+      '  operator condition either way.',
     LEASE_ACQUISITION_REFUSED:
       'The lease could not be claimed, and not because a live owner holds it: the location is\n' +
       '  unusable, the repository record is incoherent, the filesystem cannot support the claim,\n' +
@@ -70,8 +82,9 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       'The task could not be started or adopted, so there was nothing to drive. The start\n' +
       '  outcome above says why.',
     AUTH_PREFLIGHT_FAILED:
-      'A fresh auth preflight produced no evidence, so no agent could have run. Nothing was\n' +
-      '  driven. Log the agent CLIs in and invoke again.',
+      'The auth preflight produced no evidence, so no agent could have run. Nothing was driven.\n' +
+      '  It runs once per invocation of this command and a failure is not retried inside one, so\n' +
+      '  log the agent CLIs in and invoke again.',
     COMPLETED:
       'The task reached READY_FOR_PR. Terminal: a human opens the pull request from here.',
     TASK_ABORTED: 'The task was already ABORTED. Nothing was run.',
@@ -157,16 +170,30 @@ export function renderLifecycleRun(
     `  ${LIFECYCLE_OUTCOME_SENTENCES[result.outcome]}`,
   ];
 
-  if (result.acquire !== null) lines.push(line('Lease', result.acquire));
+  if (result.acquire !== null) {
+    // The code *and* the acquire vocabulary's own sentence for it. Six of the
+    // eight acquire refusals share one lifecycle outcome, so the outcome
+    // sentence above can only hedge across them — "the location is unusable, the
+    // record is incoherent, or the filesystem cannot support the claim" is four
+    // different errands. `run --attended` printed these sentences before this
+    // slice and briefly stopped; `lease status` and `block --attended` never
+    // did stop, so two commands were answering one condition differently.
+    lines.push(line('Lease', result.acquire), `  ${LEASE_ACQUIRE_SENTENCES[result.acquire]}`);
+  }
   if (result.recovery !== null) {
+    // `refusal` when the predicate refused, `detail` when it did not: those are
+    // exclusive by contract, and `detail` is the only thing that separates a
+    // `RECOVERY_FAILED` that left the lease in place from one that left the name
+    // free and an unreadable record behind. Printing the bare code, which is
+    // what this did first, tells an operator neither.
+    const recovery = result.recovery;
+    const qualifier = recovery.refusal ?? recovery.detail;
     lines.push(
-      line(
-        'Recovery',
-        result.recovery.refusal !== null
-          ? `${result.recovery.code}  (${result.recovery.refusal})`
-          : result.recovery.code,
-      ),
+      line('Recovery', qualifier !== null ? `${recovery.code}  (${qualifier})` : recovery.code),
     );
+    if (recovery.refusal !== null) {
+      lines.push(`  ${STALE_RECOVERY_SENTENCES[recovery.refusal]}`);
+    }
   }
   if (result.release !== null) {
     lines.push(

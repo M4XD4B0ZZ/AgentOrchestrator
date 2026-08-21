@@ -3,7 +3,6 @@ import type { Command } from 'commander';
 import type { AgentRunner } from '../agent/agent-command.js';
 import { runAuthPreflight } from '../auth/auth-preflight.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
-import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { formatSafeError } from '../core/safe-error.js';
 import { runCapabilityDump } from '../doctor/capabilities.js';
 import { resolveRepository, type ResolvedRepository } from '../repo/resolve-repository.js';
@@ -120,12 +119,23 @@ interface RunOptions {
  *    exit code 5, same meaning: everything is on disk, call again);
  *  - the report comes from `renderLifecycleRun`, which adds the lease lines and
  *    the release line this slice exists to produce;
- *  - six acquire refusals moved from exit 4 to exit 3. `LEASE_HELD` — another
- *    run is working — keeps 4, because it clears itself. An unusable lease
- *    location, an incoherent repository record and a filesystem that cannot
- *    support the claim do not clear themselves, and code 4's contract says
- *    re-invoking under other conditions can differ. That is the confusion
- *    `L-V2-07L-1` records, narrowed here rather than carried forward.
+ *  - **seven** of the eight acquire refusals moved from exit 4 to exit 3. Only
+ *    `LEASE_HELD` — another run is working — keeps 4, because it clears itself.
+ *    An unusable lease location, an incoherent repository record and a
+ *    filesystem that cannot support the claim do not, and code 4's contract says
+ *    re-invoking under other conditions can differ. `STALE_LEASE_RECOVERY_UNSAFE`
+ *    is the seventh and the one most schedulers will actually meet — it is what
+ *    a crashed repository answers — and it moves through whichever of
+ *    `STALE_LEASE_PRESENT`, `RECOVERY_UNSAFE`, `LEASE_CHANGED`,
+ *    `LEASE_DISPLACED` or `RECOVERY_FAILED` applies, all of them exit 3. An
+ *    earlier version of this list said six and then said "only `LEASE_HELD`
+ *    keeps 4", which cannot both be true of an eight-member vocabulary.
+ *    This narrows `L-V2-07L-1` rather than carrying it forward;
+ *  - each acquire refusal keeps its own sentence in the report. Six of them
+ *    share one lifecycle outcome, so the outcome sentence can only hedge across
+ *    them; `renderLifecycleRun` prints `LEASE_ACQUIRE_SENTENCES[code]` beneath
+ *    it, which is what this command printed before the rewiring and briefly
+ *    stopped printing after it.
  */
 export const DEFAULT_MAX_INVOCATIONS = 1;
 

@@ -91,6 +91,10 @@ import {
   type RecordedVerify,
   type StartedTask,
 } from './helpers/e2e-fixtures.js';
+import {
+  LEASE_ACQUIRE_SENTENCES,
+  STALE_RECOVERY_SENTENCES,
+} from '../src/cli/render-lease.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import { passingReview } from './fixtures.js';
 
@@ -238,6 +242,10 @@ describe('the lease is taken before anything runs, and given back after', () => 
 
     const result = await driveLifecycle(scene.request(), scene.deps());
 
+    // The outcome, which nothing asserted before: `TASK_COMPLETED → COMPLETED →
+    // exit 0` was pinned only by the static map comparison, so no case anywhere
+    // showed the driver actually producing a completed task.
+    expect(result.outcome).toBe('COMPLETED');
     expect(result.acquire).toBeNull();
     expect(result.recovery).toBeNull();
     expect(result.release?.code).toBe('RELEASED');
@@ -443,10 +451,14 @@ describe('a quota pause stops the run rather than being waited out', () => {
   });
 
   it('offers no way to ask for a wait', () => {
-    // A structural pin, and the cheapest honest one: the request type carries no
-    // waiting concept at all, so no caller can express one and no default can
-    // quietly acquire one. A future slice that adds waiting has to change this
-    // shape, which is exactly the decision that should not happen by accident.
+    // A **typecheck** pin, not a runtime one, and worth saying so: the two
+    // `not.toContain` assertions below are against a literal this test wrote, so
+    // they prove nothing on their own. What bites is the `satisfies
+    // Record<keyof LifecycleRequest, null>` — adding a waiting field to the
+    // request makes this object incomplete and fails `npm run typecheck`, which
+    // is in the canonical gate. It catches the two spellings the withdrawn
+    // implementation used and would not catch a differently named one; a future
+    // slice that adds waiting is expected to change this file deliberately.
     const keys = Object.keys({
       repository: null,
       taskId: null,
@@ -598,10 +610,20 @@ describe('the layer delegates rather than re-implements', () => {
     // No run outcome may be missing, and none may be invented.
     expect(Object.keys(expected).sort()).toEqual([...RUN_OUTCOMES].sort());
     // And an operator sentence exists for every member, including the ones no
-    // run outcome maps to — the lease phase's own.
-    for (const outcome of LIFECYCLE_OUTCOMES) {
-      expect(LIFECYCLE_OUTCOME_SENTENCES[outcome].length).toBeGreaterThan(0);
-    }
+    // run outcome maps to — the lease phase's own. Held to the same discipline
+    // as `START_OUTCOME_SENTENCES` in `tests/v2-05-attended-cli.test.ts`: a
+    // sentence long enough to say something, distinct from every other, and
+    // ASCII, because these are written to a console whose encoding this build
+    // does not control. `length > 0` was the only assertion here first, which a
+    // table of thirty-one single characters would have satisfied.
+    const sentences = LIFECYCLE_OUTCOMES.map((outcome) => {
+      const sentence = LIFECYCLE_OUTCOME_SENTENCES[outcome];
+      expect(sentence.length).toBeGreaterThan(20);
+      // eslint-disable-next-line no-control-regex
+      expect(/^[\x20-\x7e\n]*$/.test(sentence)).toBe(true);
+      return sentence;
+    });
+    expect(new Set(sentences).size).toBe(LIFECYCLE_OUTCOMES.length);
   });
 
   it('stops on a human-decision block instead of starting another review', async () => {
@@ -664,9 +686,13 @@ describe('the layer delegates rather than re-implements', () => {
 
 describe('the lifecycle report', () => {
   /**
-   * `renderLifecycleRun` had no test at all until this one, while the renderer
-   * it replaced — `renderAttendedRun`, since deleted — kept several. The product
-   * shipped the untested one.
+   * Direct cases for the renderer the product actually ships.
+   *
+   * Not "it had no test at all until this one", which an earlier version of this
+   * comment said: `tests/v2-05-attended-cli.test.ts` drives the real command and
+   * asserts on stdout, so it has covered whichever renderer the command used
+   * since V2-05, this one included. What it cannot reach is a result shape the
+   * CLI does not produce on demand, which is what these cases are for.
    */
   it('names the outcome, the release and the invocation count', async () => {
     const scene = await scenario();
@@ -696,6 +722,127 @@ describe('the lifecycle report', () => {
     expect(result.invocations).toBeGreaterThan(1);
 
     expect(renderLifecycleRun(scene.started.repository, result)).toContain(LIFECYCLE_TRAILER);
+  });
+});
+
+/* ══════ the floors that stop the loop, and why one of them cannot fire ═════ */
+
+/**
+ * The `steps === 0` floor is unreachable, and this is the reason.
+ *
+ * `run-driver.ts` refuses a step budget below one before its loop, so a run that
+ * reaches `STEP_BUDGET_EXHAUSTED` completed at least one iteration, and every
+ * iteration that does not stop early performs a durable write. The floor is kept
+ * for parity with `block-runner.ts`, which carries the identical guard, and the
+ * mutant that deletes it survives — recorded rather than papered over.
+ *
+ * What is pinned instead is the refusal the argument rests on. If `runTask` ever
+ * accepted a zero budget, the floor would become live and this case would fail,
+ * which is the alarm worth having.
+ */
+describe('a step budget below one is refused before any loop runs', () => {
+  it('never yields a budget stop that landed no durable step', async () => {
+    const scene = await scenario();
+
+    const result = await driveLifecycle(
+      scene.request({ maxSteps: 0, maxInvocations: 5 }),
+      scene.deps(),
+    );
+
+    // Not `STEP_BUDGET_EXHAUSTED`: the run driver refuses the budget itself, so
+    // the shape the floor guards against never leaves `runTask`.
+    expect(result.runs[0]?.outcome).toBe('NO_PROGRESS');
+    expect(result.runs[0]?.steps).toBe(0);
+    expect(result.invocations).toBe(1);
+    expect(result.outcome).toBe('NO_PROGRESS');
+    expectNothingExecuted(scene);
+  });
+});
+
+/**
+ * The report lines that carry the lease vocabulary's own sentences.
+ *
+ * Built as plain result objects rather than driven, because the qualifiers that
+ * matter — a `detail` on a recovery that did not refuse, an acquire code six
+ * outcomes share — are states a real run cannot be asked to produce on demand.
+ * The renderer takes a result and nothing else, so a result is the honest input.
+ */
+describe('the report carries the lease vocabulary, not only its codes', () => {
+  const repository = { id: 'fixture', root: 'C:\\repos\\fixture' };
+  const base = {
+    taskId: TASK_ID,
+    acquire: null,
+    recovery: null,
+    release: null,
+    start: null,
+    runs: [],
+    invocations: 0,
+    steps: 0,
+    reasonCodes: [],
+    permissionDenials: { count: 0, tools: [] },
+  } as const;
+
+  it('prints the acquire vocabulary sentence beside the code', () => {
+    // Six acquire refusals share `LEASE_ACQUISITION_REFUSED`, so the outcome
+    // sentence can only hedge across them; this line is what tells an operator
+    // which one happened. `run --attended` printed it before this slice.
+    const text = renderLifecycleRun(repository, {
+      ...base,
+      outcome: 'LEASE_ACQUISITION_REFUSED',
+      acquire: 'LEASE_LOCATION_NETWORK_UNSUPPORTED',
+    });
+
+    expect(text).toContain('Lease        : LEASE_LOCATION_NETWORK_UNSUPPORTED');
+    expect(text).toContain(LEASE_ACQUIRE_SENTENCES.LEASE_LOCATION_NETWORK_UNSUPPORTED);
+  });
+
+  it('keeps the pid-reuse warning on a live owner', () => {
+    const text = renderLifecycleRun(repository, {
+      ...base,
+      outcome: 'LIVE_OWNER_PRESENT',
+      acquire: 'LEASE_HELD',
+    });
+
+    // The sentence an operator most needs before reaching for a kill command.
+    expect(text).toContain('process');
+    expect(text).toContain(LEASE_ACQUIRE_SENTENCES.LEASE_HELD);
+  });
+
+  it('prints a recovery refusal with its own sentence', () => {
+    const text = renderLifecycleRun(repository, {
+      ...base,
+      outcome: 'RECOVERY_UNSAFE',
+      acquire: 'STALE_LEASE_RECOVERY_UNSAFE',
+      recovery: {
+        code: 'RECOVERY_UNSAFE',
+        refusal: 'LAUNCH_HISTORY_UNPROVEN',
+        detail: null,
+        assessment: null as never,
+      },
+    });
+
+    expect(text).toContain('Recovery     : RECOVERY_UNSAFE  (LAUNCH_HISTORY_UNPROVEN)');
+    expect(text).toContain(STALE_RECOVERY_SENTENCES.LAUNCH_HISTORY_UNPROVEN);
+  });
+
+  it('prints the removal end state when the recovery did not refuse', () => {
+    // `refusal` is null by contract for these codes, and `detail` is the only
+    // thing separating a `RECOVERY_FAILED` that left the lease in place from one
+    // that left the name free and an unreadable record behind. Dropping it
+    // printed a bare token and nothing else.
+    const text = renderLifecycleRun(repository, {
+      ...base,
+      outcome: 'RECOVERY_FAILED',
+      acquire: 'STALE_LEASE_RECOVERY_UNSAFE',
+      recovery: {
+        code: 'RECOVERY_FAILED',
+        refusal: null,
+        detail: 'UNIDENTIFIABLE_AND_UNOWNED',
+        assessment: null as never,
+      },
+    });
+
+    expect(text).toContain('Recovery     : RECOVERY_FAILED  (UNIDENTIFIABLE_AND_UNOWNED)');
   });
 });
 

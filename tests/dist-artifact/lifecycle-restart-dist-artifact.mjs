@@ -41,11 +41,22 @@
  *
  * ── The load-bearing case is the third ─────────────────────────────────────
  *
- * Phase C keeps the owner **alive**. Without it every `RECOVERED` above could be
- * an instrument that cannot tell a living process from a dead one, and the whole
- * file would prove nothing. Phase B is the second control: a dead owner whose
- * launch history was left open must still be refused, and the lease must come
- * out byte-identical.
+ * Phase C keeps the owner **alive**, with the same proved launch history phase A
+ * was permitted on, so the only difference between them is that this process is
+ * running. What it establishes is that **this driver never hands a live owner's
+ * lease to a recovery at all** — the first acquire refuses `LEASE_HELD` and
+ * `takeLease` returns before `recoverStaleLease` is reached, which the phase
+ * asserts directly (`result.recovery === null`).
+ *
+ * It is deliberately *not* the control for the recovery predicate's own
+ * liveness discrimination. That one lives in `test:dist-stale-recovery`, whose
+ * fourth phase drives `recoverStaleLease` against a live owner and requires
+ * `OWNER_RUNNING`. An earlier version of this header claimed phase C was what
+ * stopped every `RECOVERED` above being an instrument that cannot tell a living
+ * process from a dead one; it measures the layer above that.
+ *
+ * Phase B is the second control: a dead owner whose launch history was left open
+ * must still be refused, and the lease must come out byte-identical.
  */
 
 import { spawn } from 'node:child_process';
@@ -178,19 +189,31 @@ if (phase === 'LIVE') {
 }
 `;
 
-/** Runs one owner process and resolves with its pid once it says `ready`. */
+/**
+ * Runs one owner process and resolves with its pid once it says `ready`.
+ *
+ * Bounded. A child that neither prints `ready` nor exits would otherwise hang
+ * the canonical gate with no timeout above it, and `npm run verify` has no
+ * per-script bound of its own.
+ */
 function startOwner(root, phase) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', OWNER_SOURCE], {
       env: { ...process.env, AO_LIFECYCLE_DIR: root, AO_LIFECYCLE_PHASE: phase },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectPromise(new Error(`owner (${phase}) never became ready`));
+    }, 60_000);
+    timer.unref();
     let out = '';
     let err = '';
     child.stdout.on('data', (chunk) => {
       out += String(chunk);
       const match = /pid (\d+)/.exec(out);
       if (match !== null && out.includes('ready')) {
+        clearTimeout(timer);
         resolvePromise({ pid: Number(match[1]), child });
       }
     });
@@ -198,6 +221,7 @@ function startOwner(root, phase) {
       err += String(chunk);
     });
     child.on('exit', (code) => {
+      clearTimeout(timer);
       if (!out.includes('ready')) {
         rejectPromise(new Error(`owner (${phase}) exited ${String(code)}: ${err || out}`));
       }
@@ -219,6 +243,10 @@ async function awaitDeath(pid, child) {
     }
     await new Promise((r) => setTimeout(r, 25));
   }
+  // Killed before throwing. The `finally` below sweeps the repositories but has
+  // no handle on a child this function was still waiting for, so giving up here
+  // without killing leaves a real process behind for the rest of the gate.
+  child.kill();
   throw new Error(`owner ${String(pid)} never died`);
 }
 

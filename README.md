@@ -3340,7 +3340,11 @@ and because the failure mode it describes — a command that cannot start is
   recovery grants nothing, and the acquisition after it is allowed to lose — is
   therefore argued from the code rather than measured. A review found the case
   named for this path did not reach it; the case was renamed to what it does
-  measure rather than left claiming more. **Scope:**
+  measure rather than left claiming more.
+
+  Two further outcomes are asserted by no case at runtime and are named here so
+  the list is complete: `AUTH_PREFLIGHT_FAILED` and `LEASE_ACQUISITION_REFUSED`.
+  Both are reachable; neither is exercised. **Scope:**
   `run/lifecycle-driver.ts`, `tests/v3-06-lifecycle-driver.test.ts`.
 - **L-V3-06-6 — a lease that clears itself between the refused acquire and the
   recovery is reported as an operator condition.** The first acquire refuses
@@ -3352,6 +3356,59 @@ and because the failure mode it describes — a command that cannot start is
   is removed, and recovery is still attempted at most once. Only the reported
   condition and exit class are wrong, and narrowing it means a second inspection
   whose answer would be just as stale. **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-7 — the discarded lease-release result is closed for one command of
+  three, and on one path of that one.** The slice's third stated gap was that
+  every call site threw the release result away, leaving a quarantined record
+  inside `.git` that nobody was told about. `run --attended` now reports it.
+  `cli/block-command.ts` and `cli/release-command.ts` still discard it — and
+  `block --attended` is the longer-running of the two, so it is the more likely
+  to meet the condition. So does the lifecycle driver's own `catch`: on a throw
+  the lease is given back but there is no result to attach the report to, and the
+  operator sees only the safe error text and exit 1. The pre-slice condition
+  therefore still exists on three paths, and describing gap 3 as closed would be
+  the overstatement this register exists to prevent. **Scope:**
+  `cli/block-command.ts`, `cli/release-command.ts`, `run/lifecycle-driver.ts`.
+- **L-V3-06-8 — the loop has two floors; one does the work and one cannot fire.**
+  The live one is the revision comparison: an invocation that reports
+  `STEP_BUDGET_EXHAUSTED` while leaving the state file identical to the one its
+  predecessor left does not get to run again.
+
+  The other, `steps === 0`, is **unreachable**, and the mutant that deletes it
+  survives the suite. `run-driver.ts` refuses a step budget below one before its
+  loop, so any run reaching the budget stop completed at least one iteration and
+  every iteration that does not stop early performs a durable write — so
+  `STEP_BUDGET_EXHAUSTED` implies `steps >= 1`. It is kept for parity with
+  `block-runner.ts`, which carries the identical guard on the identical loop, and
+  because a change to that budget check one module over would otherwise turn a
+  nothing-invocation into a spin in silence. A round of review claimed this floor
+  "covers the first invocation, which the revision comparison cannot"; there is
+  nothing there to cover, because the first invocation provably wrote. What is
+  pinned instead is the refusal the argument rests on.
+
+  The live floor compares **one** invocation back. A durable two-cycle — state A
+  to B to A to B, each step a real write — never equals its immediate predecessor
+  and runs to `--max-invocations`. Bounded rather than a spin, and no such cycle
+  is reachable through the current transition table, so widening it to a set of
+  seen revisions would defend against a shape the state machine does not have.
+  **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-10 — the release-ordering guard is unpinned.** `finish` sets its
+  "already released" flag *after* the release call returns, so a release that
+  threw leaves the flag clear and the outer `catch` tries once more rather than
+  standing down. The mutant that restores the original ordering survives:
+  `releaseRepositoryExecutionLease` is not an injectable seam, and a review that
+  went looking could construct no reachable throw inside it — every filesystem
+  call on that path is already wrapped. The ordering is written the safe way on
+  the argument alone. **Scope:** `run/lifecycle-driver.ts`.
+- **L-V3-06-9 — `INVOCATION_BUDGET_INVALID` is unreachable through the CLI.**
+  `cli/run-command.ts` validates `--max-invocations` and refuses before
+  `driveLifecycle` is called, so in the shipped product the outcome, its
+  exit-code entry and its operator sentence are all dead. They are kept because
+  the driver is an exported API with a second consumer — the dist harness — and
+  because a guard that answers only when its caller forgot to guard is the kind
+  that must not silently return something wrong. The two checks are now the same
+  check (`Number.isSafeInteger`); they were not, and the driver's was the weaker,
+  which is the defect a defence-in-depth layer is supposed to make impossible.
+  **Scope:** `run/lifecycle-driver.ts`, `cli/run-command.ts`.
 
 ### What V1-08 is not
 

@@ -15,8 +15,23 @@
  * V2-04. That sentence has been corrected; this module closes what was actually
  * missing, which is three things and no more:
  *
- *  1. **Nothing acted on `STEP_BUDGET_EXHAUSTED`.** It is documented as the one
- *     outcome meaning "call again", and no caller ever called again.
+ *  1. **`run --attended` never acted on `STEP_BUDGET_EXHAUSTED`.** It is the one
+ *     outcome documented to mean "call again", and that command stopped on it
+ *     and told the operator to invoke again by hand.
+ *
+ *     Not "no caller ever called again", which an earlier version of this line
+ *     claimed and which is false: `block --attended` has re-entered `runTask` on
+ *     it since V2-08 — `block/block-conclusion.ts` maps it to `CONTINUE` and
+ *     `block/block-runner.ts` loops while that holds. Being wrong about a
+ *     neighbouring module is how this slice was mis-scoped to begin with, so it
+ *     is worth being exact: the mechanism existed on one of the two commands,
+ *     and this brings the other level with it.
+ *
+ *     The two loops terminate differently, and they now agree. `block-runner`
+ *     stops a continuation that landed `steps === 0`; this one carries that
+ *     floor too — unreachable, and marked so where it sits — and adds the check
+ *     that does the work here: it refuses to continue when the durable revision
+ *     did not move, which catches an invocation whose writes cancelled out.
  *  2. **Nothing recovered a stale lease before acquiring one.** `run --attended`
  *     acquires directly; V3-05's `recoverStaleLease` existed only as a separate
  *     operator command, so a restart after a crash reported the dead run's lease
@@ -24,6 +39,11 @@
  *  3. **The release result was discarded at every call site.** A `NOT_OWNER`
  *     with a quarantined record, or a `LEASE_REMOVE_FAILED`, left a file inside
  *     `.git` that no operator was ever told about.
+ *
+ *     Closed here for `run --attended`, and **not** for the other two.
+ *     `cli/block-command.ts` and `cli/release-command.ts` still discard it, and
+ *     so does this module's own `catch`, which has no result to attach one to.
+ *     Recorded as `L-V3-06-7` rather than described as finished.
  *
  * A fourth gap — waiting out a recorded quota reset — was **withdrawn from this
  * slice**, and the reason is in the authority model rather than in the
@@ -80,8 +100,9 @@
  * `attendedContinuation: true` from inside that loop. This layer does the same
  * for one task, inside one foreground process the operator started and can stop.
  * So the loop below extends no authority; it reuses a scope the product already
- * has, and `--max-invocations` defaults to one so the CLI's behaviour is
- * unchanged unless an operator asks otherwise.
+ * has, and `--max-invocations` defaults to one, so the command drives a task
+ * exactly as far as it did before. **Its report did change** — `cli/run-command.ts`
+ * lists the four differences, none of which is a change to what runs.
  *
  * ── What is deliberately absent: the wait ─────────────────────────────────
  *
@@ -376,14 +397,16 @@ export interface LifecycleRequest {
    * for unattended execution, forwarded verbatim to
    * `RunRequest.attendedContinuation`.
    *
-   * **This is the one contract widening in this slice, and it is deliberate.**
-   * Until now the grant was per *invocation* of `run --attended`. Here one
-   * human act — launching this lifecycle run — covers every invocation it
-   * makes, which is what "continue this task without me until it stops" has to
-   * mean if it is to mean anything. It is still a human grant, it still cannot
-   * be inferred, it has no default, and it still only ever narrows what runs:
-   * a *blocked* task moves on `AUTOMATIC_ALLOWED` and on nothing else, whatever
-   * is set here.
+   * **Not a widening**, though an earlier version of this doc called it "the one
+   * contract widening in this slice". `attendedContinuation` has never meant
+   * "one `runTask` call": it means an operator is present for this invocation of
+   * the *command*, and `block --attended` has passed one grant to many `runTask`
+   * calls since V2-08. This forwards it the same way, inside one foreground
+   * process the operator started and can stop.
+   *
+   * It is still a human grant, it still cannot be inferred, it has no default,
+   * and it still only ever narrows what runs: a *blocked* task moves on
+   * `AUTOMATIC_ALLOWED` and on nothing else, whatever is set here.
    */
   readonly continuationGrant: boolean;
   /**
@@ -423,7 +446,13 @@ export interface LifecycleDependencies {
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
   readonly observe?: CompletionObserver;
-  /** Filesystem and state-store seams, forwarded down. */
+  /**
+   * Filesystem and state-store seams, forwarded to `runTask` — and to nothing
+   * else. `startTask` performs a durable write of its own and does not receive
+   * them, so no injected `replace` reaches the first state a task ever gets.
+   * Production supplies neither, so this bounds what a test can reach rather
+   * than what the product does.
+   */
   readonly exists?: (path: string) => boolean;
   readonly replace?: ReplaceFn;
   readonly tempSuffix?: TempSuffixFn;
@@ -564,7 +593,7 @@ export async function driveLifecycle(
 ): Promise<LifecycleResult> {
   const { taskId } = request;
 
-  if (!Number.isInteger(request.maxInvocations) || request.maxInvocations < 1) {
+  if (!Number.isSafeInteger(request.maxInvocations) || request.maxInvocations < 1) {
     return lifecycleResult({
       outcome: 'INVOCATION_BUDGET_INVALID',
       taskId,
@@ -631,8 +660,13 @@ async function driveUnderLease(
    * outcome rather than sit beside it.
    */
   const finish = (outcome: LifecycleOutcome, extra: readonly string[] = []): LifecycleResult => {
-    releaseAttempted = true;
+    // The flag is set **after** the call returns, never before. Setting it first
+    // meant a release that threw disarmed the safety net below: the `catch`
+    // would read "already attempted", skip its own release, and rethrow —
+    // leaving this live process holding the lease, which is the exact condition
+    // that net exists to prevent.
     const release = releaseRepositoryExecutionLease(evidence);
+    releaseAttempted = true;
     const released = release.code === 'RELEASED';
     // The reached outcome is kept, demoted to a reason code, and put **first**
     // — the operator sentence for `LEASE_RELEASE_FAILED` says the first code is
@@ -729,8 +763,28 @@ async function driveUnderLease(
       permissionDenials = mergePermissionDenials(permissionDenials, run.permissionDenials);
 
       if (run.outcome === 'STEP_BUDGET_EXHAUSTED') {
-        // The outcome claims durable progress. Check the file rather than believe
-        // it: an invocation that moved nothing would be repeated forever.
+        // A fail-closed floor, and **unreachable today** — which is stated here
+        // rather than left for a reader to assume it is load-bearing.
+        //
+        // `run-driver.ts:472` refuses a `maxSteps` below one, so any run that
+        // reaches the budget stop completed at least one iteration, and every
+        // iteration that does not stop early performs a durable write. So
+        // `STEP_BUDGET_EXHAUSTED` implies `steps >= 1`, the mutant that deletes
+        // this branch survives the suite, and the test below pins the refusal
+        // that makes it unreachable instead of pretending to reach it.
+        //
+        // It is kept because `block-runner.ts` carries the identical floor for
+        // the identical loop, and because a change to the budget guard one
+        // module over would otherwise turn a nothing-invocation into a spin
+        // silently. An earlier version of this comment claimed it "covers the
+        // first invocation, which the revision comparison cannot" — there is
+        // nothing to cover there: the first invocation provably wrote.
+        if (run.steps === 0) {
+          return finish('NO_PROGRESS', [...run.reasonCodes, 'NO_DURABLE_STEP']);
+        }
+        // The second is this layer's own. The outcome claims durable progress, so
+        // check the file rather than believe it: an invocation whose writes
+        // cancelled out reports steps and moves nothing.
         const revision = revisionOf(repository.root, taskId);
         if (revision === null) {
           return finish('STATE_UNUSABLE', [...run.reasonCodes, 'DURABLE_STATE_UNREADABLE']);
@@ -745,13 +799,24 @@ async function driveUnderLease(
       return finish(LIFECYCLE_FOR_RUN[run.outcome], run.reasonCodes);
     }
   } catch (error: unknown) {
-    // The safety net `run --attended` had before V3-06, restored. `finish` is the
-    // only controlled way out and it sets the flag, so reaching here means the
-    // lease is still held and nothing has reported on it. Released without a
-    // result — there is no result to attach it to — and the error is rethrown
-    // exactly as it arrived, because swallowing it here would turn a crash into
-    // a silent success.
-    if (!releaseAttempted) releaseRepositoryExecutionLease(evidence);
+    // The safety net `run --attended` had before V3-06, restored. Reaching here
+    // means either that no controlled exit ran, or that the release inside one
+    // threw before it could set the flag. Both leave this **live** process
+    // holding the lease, and a live holder is refused by acquisition and by
+    // stale recovery alike.
+    //
+    // The retry is wrapped, because it can be the thing that threw. A second
+    // failure is swallowed rather than allowed to replace `error`: the original
+    // is what an operator needs, and there is nowhere to report a release result
+    // on this path anyway (`L-V3-06-7`). The error is rethrown exactly as it
+    // arrived, because swallowing it would turn a crash into a silent success.
+    if (!releaseAttempted) {
+      try {
+        releaseRepositoryExecutionLease(evidence);
+      } catch {
+        // Nothing further to try, and nothing to report it through.
+      }
+    }
     throw error;
   }
 }
