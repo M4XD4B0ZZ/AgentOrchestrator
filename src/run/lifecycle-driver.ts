@@ -721,14 +721,14 @@ async function driveUnderLease(
 
     for (;;) {
       if (invocations >= request.maxInvocations) {
-      // No reason codes, and there are none to be had. The loop continues only
-      // on `STEP_BUDGET_EXHAUSTED`, and `run-driver.ts:905-908` returns that
-      // outcome with the default empty `reasonCodes` — so every invocation this
-      // stop could inherit from carries nothing. Threading `runs.at(-1)`
-      // through here reads as recovering information and recovers none; it was
-      // written that way for one round and measured to be a no-op.
-      return finish('INVOCATION_BUDGET_EXHAUSTED');
-    }
+        // No reason codes, and there are none to be had. The loop continues only
+        // on `STEP_BUDGET_EXHAUSTED`, and `run-driver.ts` returns that outcome
+        // with the default empty `reasonCodes` — so every invocation this stop
+        // could inherit from carries nothing. Threading `runs.at(-1)` through
+        // here reads as recovering information and recovers none; it was written
+        // that way for one round and measured to be a no-op.
+        return finish('INVOCATION_BUDGET_EXHAUSTED');
+      }
 
       // On `ALREADY_STARTED` the preflight has not run yet, because `startTask`
       // returned before reaching it. Auth is a requirement of *executing* rather

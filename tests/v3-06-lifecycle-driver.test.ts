@@ -316,7 +316,11 @@ describe('the lease is taken before anything runs, and given back after', () => 
    * by design (V3-05), and the danger for an *outer loop* is not that it fails
    * — it is that a loop retries it forever. One attempt, then a stop.
    */
-  it('refuses the crash-window artefact once rather than looping on it', async () => {
+  // "Once" is a property of `takeLease`'s straight-line shape — one call, no
+  // retry edge — and is argued rather than measured: `recoverStaleLease` is not
+  // an injectable seam, so nothing here can count its calls. What *is* measured
+  // is that the loop never starts: `invocations === 0`, and nothing ran.
+  it('refuses the crash-window artefact and never enters the loop', async () => {
     const scene = await scenario();
     writeFileSync(leasePathOf(scene.started.repository), '', 'utf8');
 
@@ -750,9 +754,12 @@ describe('a step budget below one is refused before any loop runs', () => {
     );
 
     // Not `STEP_BUDGET_EXHAUSTED`: the run driver refuses the budget itself, so
-    // the shape the floor guards against never leaves `runTask`.
+    // the shape the floor guards against never leaves `runTask`. The reason code
+    // is asserted too — without it any `NO_PROGRESS` from any other arm would
+    // satisfy this case, and the point is *which* refusal makes the floor dead.
     expect(result.runs[0]?.outcome).toBe('NO_PROGRESS');
     expect(result.runs[0]?.steps).toBe(0);
+    expect(result.runs[0]?.reasonCodes).toContain('STEP_BUDGET_INVALID');
     expect(result.invocations).toBe(1);
     expect(result.outcome).toBe('NO_PROGRESS');
     expectNothingExecuted(scene);
@@ -769,6 +776,11 @@ describe('a step budget below one is refused before any loop runs', () => {
  */
 describe('the report carries the lease vocabulary, not only its codes', () => {
   const repository = { id: 'fixture', root: 'C:\\repos\\fixture' };
+  // `assessment` is the one field built as a cast. `renderLifecycleRun` never
+  // reads it, and constructing a real `StaleLeaseRecoveryAssessment` would mean
+  // fabricating the artefact a recovery produces — which this suite must not do.
+  // The cast is confined to that field; every other value here is a real member
+  // of its vocabulary, so a shape change anywhere else fails the typecheck.
   const base = {
     taskId: TASK_ID,
     acquire: null,
@@ -803,8 +815,14 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
       acquire: 'LEASE_HELD',
     });
 
-    // The sentence an operator most needs before reaching for a kill command.
-    expect(text).toContain('process');
+    // Asserted against the **lifecycle** sentence specifically, not against the
+    // report as a whole. The first version checked the whole text for the word
+    // "process" and for `LEASE_ACQUIRE_SENTENCES.LEASE_HELD` — a different,
+    // pre-existing map printed on the same page, which carries its own pid-reuse
+    // warning. Deleting the warning this case is named for left it green.
+    expect(LIFECYCLE_OUTCOME_SENTENCES.LIVE_OWNER_PRESENT).toContain('ids are reused');
+    expect(text).toContain(LIFECYCLE_OUTCOME_SENTENCES.LIVE_OWNER_PRESENT);
+    // And the acquire vocabulary's own sentence is there too, on the same page.
     expect(text).toContain(LEASE_ACQUIRE_SENTENCES.LEASE_HELD);
   });
 

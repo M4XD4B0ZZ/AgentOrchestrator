@@ -3277,15 +3277,39 @@ and because the failure mode it describes — a command that cannot start is
 
   **Not byte-identical output, though, and an earlier draft of this entry said
   it was.** Routing `run --attended` through the driver changed three visible
-  things on purpose: the step-budget stop is spelled
-  `INVOCATION_BUDGET_EXHAUSTED` (same exit code 5, same meaning); the report
-  comes from `renderLifecycleRun`, which adds the lease and release lines this
-  slice exists to produce; and six acquire refusals moved from exit 4 to exit 3.
-  Only `LEASE_HELD` keeps 4, because another run working here clears itself — an
-  unusable lease location, an incoherent repository record and a filesystem that
-  cannot support the claim do not, and code 4 promises that re-invoking under
-  other conditions can differ. That narrows `L-V2-07L-1` rather than carrying it
-  forward. **Scope:** `run/lifecycle-driver.ts`, `cli/run-command.ts`,
+  things on purpose, and **five** rather than the three an earlier draft of this
+  entry listed:
+
+  1. the step-budget stop is spelled `INVOCATION_BUDGET_EXHAUSTED` — same exit
+     code 5, same meaning;
+  2. the report comes from `renderLifecycleRun`, which adds the lease and release
+     lines this slice exists to produce;
+  3. **seven** of the eight acquire refusals moved from exit 4 to exit 3. Only
+     `LEASE_HELD` keeps 4, because another run working here clears itself; an
+     unusable lease location, an incoherent repository record and a filesystem
+     that cannot support the claim do not, and code 4 promises that re-invoking
+     under other conditions can differ. `STALE_LEASE_RECOVERY_UNSAFE` is the
+     seventh — it is what a crashed repository answers, so it is the one a
+     scheduler actually meets — and it lands on exit 3 through whichever of
+     `STALE_LEASE_PRESENT`, `RECOVERY_UNSAFE`, `LEASE_CHANGED`,
+     `LEASE_DISPLACED`, `RECOVERY_FAILED` or `LEASE_ACQUISITION_REFUSED`
+     applies. One ending is the exception: a recovery that succeeds and is then
+     beaten to the acquisition reports `LIVE_OWNER_PRESENT`, exit 4, correctly.
+     This narrows `L-V2-07L-1` rather than carrying it forward. (This paragraph
+     said "six" while also saying "only `LEASE_HELD` keeps 4", which cannot both
+     be true of an eight-member vocabulary. The code was corrected in review
+     round 2 and this entry was not — the same sibling-site miss that round was
+     convened to fix.);
+  4. each acquire refusal keeps its own sentence in the report, printed beneath
+     the outcome sentence, which is what the command did before the rewiring;
+  5. task selection now happens **outside** the lease. It only reads the
+     repository's own task files, and an invocation with nothing to run should
+     not take a writer lease to discover that. The visible consequence: when a
+     lease is held *and* the selector finds nothing, the report is now the
+     read-only plan rather than a lease refusal, so the exit code is the plan's
+     rather than 4.
+
+  **Scope:** `run/lifecycle-driver.ts`, `cli/run-command.ts`,
   `cli/run-exit-codes.ts`.
 - **L-V3-06-2 — the reset wait was WITHDRAWN from slice 6, and needs a contract
   decision before it can exist.** The slice was to let an unattended run sleep
@@ -3316,11 +3340,14 @@ and because the failure mode it describes — a command that cannot start is
   `run/lifecycle-driver.ts`.
 - **L-V3-06-3 — the real-process harness measures the lease phase, not a driven
   task.** `tests/dist-artifact/lifecycle-restart-dist-artifact.mjs` names a task
-  the plan does not contain, so every phase stops at `TASK_START_REFUSED`. That
-  is what makes it agent-free, and `startTask` being reached at all is the proof
-  that the recovery was followed by a real acquisition — but it does mean no
-  *durable phase* is continued by a real second process anywhere in the gate.
-  Continuation from durable state is covered in-process only. **Scope:**
+  the plan does not contain, so the one phase that reaches `startTask` stops at
+  `TASK_START_REFUSED`; the other three stop in the lease phase and assert
+  `start === null`. (An earlier version of this entry said "every phase" reaches
+  it, which is wrong in three cases out of four.) That is what makes the harness
+  agent-free, and `startTask` being reached *at all* in phase A is the proof that
+  the recovery was followed by a real acquisition — but it does mean no *durable
+  phase* is continued by a real second process anywhere in the gate. Continuation
+  from durable state is covered in-process only. **Scope:**
   `tests/dist-artifact/lifecycle-restart-dist-artifact.mjs`.
 - **L-V3-06-4 — the lifecycle driver does not start what it cannot select.** It
   takes a definite `taskId` and never consults the selector; `run --attended`
@@ -3391,15 +3418,26 @@ and because the failure mode it describes — a command that cannot start is
   is reachable through the current transition table, so widening it to a set of
   seen revisions would defend against a shape the state machine does not have.
   **Scope:** `run/lifecycle-driver.ts`.
-- **L-V3-06-10 — the release-ordering guard is unpinned.** `finish` sets its
-  "already released" flag *after* the release call returns, so a release that
-  threw leaves the flag clear and the outer `catch` tries once more rather than
-  standing down. The mutant that restores the original ordering survives:
-  `releaseRepositoryExecutionLease` is not an injectable seam, and a review that
-  went looking could construct no reachable throw inside it — every filesystem
-  call on that path is already wrapped. The ordering is written the safe way on
-  the argument alone. **Scope:** `run/lifecycle-driver.ts`.
-- **L-V3-06-9 — `INVOCATION_BUDGET_INVALID` is unreachable through the CLI.**
+- **L-V3-06-9 — two lifecycle outcomes are unreachable through the CLI, and one
+  exported accessor has no production caller.**
+
+  `CONTINUATION_NOT_AUTHORISED` is the second one, and it was missed when this
+  entry was first written. `cli/run-command.ts` hardcodes
+  `continuationGrant: true` — the function is only reached under `--attended` —
+  and the sole producer of the underlying run outcome is gated on that grant
+  being false. So the member, its exit-code entry and its operator sentence are
+  dead through the shipped command, exactly as below. Both are kept for the same
+  reason: `driveLifecycle` is an exported API with a second consumer.
+
+  `exitCodeForLifecycle` likewise has no `src/` caller — `exitCodeForLifecycleRun`
+  indexes the table directly. It is kept because it is what
+  `tests/run-exit-codes.test.ts` pins the table through, and a table reachable
+  only via the function that also delegates would be pinned less directly.
+  `exitCodeForRunOutcome` lost its last production caller to this slice's
+  rewiring and is now in the same position; its own doc comment already said "not
+  consumed by any command yet", which became false in V2-05 and is true again.
+
+  And the original subject of this entry:
   `cli/run-command.ts` validates `--max-invocations` and refuses before
   `driveLifecycle` is called, so in the shipped product the outcome, its
   exit-code entry and its operator sentence are all dead. They are kept because
@@ -3409,6 +3447,14 @@ and because the failure mode it describes — a command that cannot start is
   check (`Number.isSafeInteger`); they were not, and the driver's was the weaker,
   which is the defect a defence-in-depth layer is supposed to make impossible.
   **Scope:** `run/lifecycle-driver.ts`, `cli/run-command.ts`.
+- **L-V3-06-10 — the release-ordering guard is unpinned.** `finish` sets its
+  "already released" flag *after* the release call returns, so a release that
+  threw leaves the flag clear and the outer `catch` tries once more rather than
+  standing down. The mutant that restores the original ordering survives:
+  `releaseRepositoryExecutionLease` is not an injectable seam, and a review that
+  went looking could construct no reachable throw inside it — every filesystem
+  call on that path is already wrapped. The ordering is written the safe way on
+  the argument alone. **Scope:** `run/lifecycle-driver.ts`.
 
 ### What V1-08 is not
 

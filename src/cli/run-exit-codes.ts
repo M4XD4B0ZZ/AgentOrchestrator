@@ -351,11 +351,13 @@ const LIFECYCLE_EXIT_CODES = Object.freeze({
   RECONCILIATION_UNOBSERVABLE: EXIT_RUN_NEEDS_OPERATOR,
   STATE_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
 
-  // The lease could not be taken, or could not be given back. Every one of
-  // these is an operator condition rather than a refusal, and the split from
-  // code 4 is the point: `LIVE_OWNER_PRESENT` is somebody else working and
-  // clears itself, while a failed recovery, a displaced lease and an unproven
-  // release each leave something in `.git` that only a human resolves.
+  // The lease phase, split across two codes, and the split is the point.
+  // `LIVE_OWNER_PRESENT` is somebody else working: a refusal, code 4, and it
+  // clears itself. Every other lease condition is an operator condition, code 3,
+  // because a failed recovery, a displaced lease and an unproven release each
+  // leave something in `.git` that only a human resolves. (This comment read
+  // "every one of these is an operator condition rather than a refusal" directly
+  // above the one member that is a refusal.)
   LIVE_OWNER_PRESENT: EXIT_RUN_REFUSED,
   STALE_LEASE_PRESENT: EXIT_RUN_NEEDS_OPERATOR,
   RECOVERY_UNSAFE: EXIT_RUN_NEEDS_OPERATOR,

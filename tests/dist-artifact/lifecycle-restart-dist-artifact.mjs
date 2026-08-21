@@ -59,8 +59,7 @@
  * must still be refused, and the lease must come out byte-identical.
  */
 
-import { spawn } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,

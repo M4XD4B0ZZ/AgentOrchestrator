@@ -16,7 +16,6 @@ import { GRANT_WITHHELD_SENTENCE } from './render-attended-run.js';
 import { renderLifecycleRun } from './render-lifecycle.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
-  EXIT_RUN_REFUSED,
   EXIT_RUN_UNEXPECTED,
   exitCodeForLifecycleRun,
   exitCodeForPlan,
@@ -125,17 +124,22 @@ interface RunOptions {
  *    filesystem that cannot support the claim do not, and code 4's contract says
  *    re-invoking under other conditions can differ. `STALE_LEASE_RECOVERY_UNSAFE`
  *    is the seventh and the one most schedulers will actually meet — it is what
- *    a crashed repository answers — and it moves through whichever of
+ *    a crashed repository answers — and it lands on exit 3 through whichever of
  *    `STALE_LEASE_PRESENT`, `RECOVERY_UNSAFE`, `LEASE_CHANGED`,
- *    `LEASE_DISPLACED` or `RECOVERY_FAILED` applies, all of them exit 3. An
- *    earlier version of this list said six and then said "only `LEASE_HELD`
- *    keeps 4", which cannot both be true of an eight-member vocabulary.
- *    This narrows `L-V2-07L-1` rather than carrying it forward;
- *  - each acquire refusal keeps its own sentence in the report. Six of them
+ *    `LEASE_DISPLACED`, `RECOVERY_FAILED` or `LEASE_ACQUISITION_REFUSED`
+ *    applies. One ending is the exception, and it is the right one: a recovery
+ *    that succeeds and is then beaten to the acquisition reports
+ *    `LIVE_OWNER_PRESENT`, exit 4, because that is what happened. An earlier
+ *    version of this list said six and then said "only `LEASE_HELD` keeps 4",
+ *    which cannot both be true of an eight-member vocabulary. This narrows
+ *    `L-V2-07L-1` rather than carrying it forward;
+ *  - each acquire refusal keeps its own sentence in the report. Several of them
  *    share one lifecycle outcome, so the outcome sentence can only hedge across
  *    them; `renderLifecycleRun` prints `LEASE_ACQUIRE_SENTENCES[code]` beneath
  *    it, which is what this command printed before the rewiring and briefly
- *    stopped printing after it.
+ *    stopped printing after it;
+ *  - task selection happens outside the lease now. See the note on
+ *    `executeAttended`, and `L-V3-06-1` for what an operator sees differently.
  */
 export const DEFAULT_MAX_INVOCATIONS = 1;
 
@@ -226,7 +230,12 @@ async function reportPlan(
  *
  * Selection happens here and outside the lease deliberately: it only reads the
  * repository's own task files, and an invocation with nothing to run should not
- * take a writer lease to find that out. Everything after it — taking the lease,
+ * take a writer lease to find that out. It is also a visible change: before the
+ * rewiring the lease came first, so a held lease plus an empty selector reported
+ * a lease refusal and exited 4; now it reports the read-only plan. Recorded as
+ * the fifth item of `L-V3-06-1`.
+ *
+ * Everything after it — taking the lease,
  * recovering a provably dead one, starting the task, driving it across as many
  * invocations as the operator allowed, and giving the lease back — belongs to
  * `driveLifecycle`, which is the layer that can report what happened to the
@@ -369,13 +378,8 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
             : Number(options.maxInvocations);
         if (!Number.isSafeInteger(maxInvocations) || maxInvocations < 1) {
           process.stdout.write(
-            `
-Failure      : MAX_INVOCATIONS_INVALID — --max-invocations must be a positive whole number.
-
-` +
-              `${READ_ONLY_TRAILER}
-
-`,
+            `\nFailure      : MAX_INVOCATIONS_INVALID — --max-invocations must be a positive whole number.\n\n` +
+              `${READ_ONLY_TRAILER}\n\n`,
           );
           process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
           return;

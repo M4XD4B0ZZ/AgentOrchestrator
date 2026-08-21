@@ -322,6 +322,10 @@ describe('the start exit-code expectations are load-bearing', () => {
  * were covered by nothing. Written out by hand rather than generated from the
  * vocabulary, for the reason the start-table comment above gives: a table that
  * generates its own expectation passes for every possible mapping.
+ *
+ * Thirty-one entries, counted rather than estimated — and the count is asserted
+ * below against `LIFECYCLE_OUTCOMES` rather than written into a sentence that
+ * can drift. An earlier version of this paragraph said thirty.
  */
 const EXPECTED_LIFECYCLE_EXIT_CODES: Readonly<Record<string, number>> = Object.freeze({
   // The task finished.
