@@ -1252,7 +1252,7 @@ describe('a chained task keeps the scope it was started under, after its run is 
       {
         repository,
         taskId: 'B-001',
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: null,
         // A genuinely fresh lease. Not `leaseFor`, which memoises per repository
         // and would hand back the evidence the block run gave up: this caller is

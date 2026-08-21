@@ -36,6 +36,7 @@ import type { LifecycleOutcome } from '../run/lifecycle-driver.js';
 import type { RunOutcome } from '../run/run-driver.js';
 import type { RunPlanConclusion } from '../run/run-plan.js';
 import type { StartTaskOutcome } from '../run/start-task.js';
+import type { UnattendedResumeResult } from '../run/unattended-resume.js';
 
 export const EXIT_RUN_OK = 0;
 export const EXIT_RUN_UNEXPECTED = 1;
@@ -424,6 +425,26 @@ export function exitCodeForLifecycleRun(result: {
     return exitCodeForStartOutcome(result.start.outcome);
   }
   return LIFECYCLE_EXIT_CODES[result.outcome];
+}
+
+/**
+ * Exit code for a whole unattended automatic-resume run (V3-08).
+ *
+ * **No new codes, and deliberately none.** Every ending this mode can reach is
+ * an ending the lifecycle already had — a quota block is still `3`, another
+ * writer is still `4`, an unusable bound is still `2` — and the wait adds no
+ * shell-level instruction of its own. A run that waited and then completed did
+ * not complete differently for having waited.
+ *
+ * The code comes from the **last epoch that ran**, because that is the attempt
+ * whose result the operator is being told about: a run that slept and then met a
+ * live owner exits on the live owner, not on the quota block it slept for. When
+ * no epoch ran at all — an unusable wait bound, a budget too small to cover a
+ * wait — there is no epoch to ask, and the controller's own outcome answers.
+ */
+export function exitCodeForUnattendedResume(result: UnattendedResumeResult): CliExitCode {
+  const last = result.epochs.at(-1);
+  return last === undefined ? LIFECYCLE_EXIT_CODES[result.outcome] : exitCodeForLifecycleRun(last);
 }
 
 /**

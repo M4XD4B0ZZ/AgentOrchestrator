@@ -48,7 +48,15 @@ What *is* implemented:
    but only when every part of that claim is proven — plus
    `release --attended` to hand such a workspace back. See
    [Workspace recovery](#workspace-recovery-v2-06a).
-10. The **block-run ledger** (V2-07): the durable record of one started block
+10. **Unattended automatic resume** (V3-08) —
+    `agent-loop run --automatic-resume-only --task <id>`: continue **one
+    already-durable task** with nobody present, and only where the canonical
+    resume decision freshly answers `AUTOMATIC_ALLOWED`. Optionally, and only
+    when asked for by name, it may wait out a reported quota reset **once**,
+    holding no execution lease while it waits. It cannot start a task, cannot
+    continue ordinary in-flight work, and cannot remove a stale lease. See
+    [Unattended automatic resume](#unattended-automatic-resume-v3-08).
+11. The **block-run ledger** (V2-07): the durable record of one started block
     run, with frozen membership, a successor contract deciding which fields a
     writer may change at all, evidence-backed progress proved at the store, and
     a reconciliation that believes the task records rather than the ledger. It
@@ -953,6 +961,12 @@ Without a reliable reset timestamp, no unattended resume is ever granted.
 > the checkpoint claims the function demands, and Codex has no quota recogniser
 > — each deny it on their own. See
 > [Unattended resume is inert in this build](#unattended-resume-is-inert-in-this-build-and-that-is-now-stated).
+>
+> Since V3-08 there is an *invocation authority* that would act on a grant if
+> one were ever produced — `--automatic-resume-only`, described in
+> [Unattended automatic resume](#unattended-automatic-resume-v3-08). It changes
+> nothing about the sentence above: it is a second requirement on top of this
+> decision and can only ever withhold.
 
 ### Resume points
 
@@ -2731,11 +2745,13 @@ chain — that belongs to the implement step.
 **An in-flight task needs an attended grant.** `classifyResume` reports a
 healthy in-flight task as `ATTENDED_ONLY`, because the most common thing that
 reconciles is an interrupted task with half-written work in its worktree.
-`RunRequest.attendedContinuation` is the operator saying they are present for
-*this run*. It is a second requirement on top of the authority module's answer
-and never a substitute: it can only narrow what runs, and it grants nothing for
-a blocked task, which moves only on `AUTOMATIC_ALLOWED` and stops on anything
-else whatever is set here.
+`RunRequest.continuationGrant` is what the invocation asked for — `ATTENDED` is
+the operator saying they are present for *this run*. It is a second requirement
+on top of the authority module's answer and never a substitute: it can only
+narrow what runs, and it grants nothing for a blocked task, which moves only on
+`AUTOMATIC_ALLOWED` and stops on anything else whatever is set here. Since V3-08
+the field is a closed three-member vocabulary rather than a boolean; see
+[Unattended automatic resume](#unattended-automatic-resume-v3-08).
 
 **The grant is checked before any durable write, including a resume.** Because
 it is a requirement on the *invocation*, the order matters: a resume written
@@ -2961,7 +2977,16 @@ reads as though unattended resume operates. It does not, and cannot:
 3. **Codex has no quota recogniser at all**, so `blockedAgent: 'codex'` is
    unreachable.
 
-Each lock is sufficient alone. F-10 is therefore **not remediated here**: closing
+Each lock is sufficient alone. **V3-08 changed none of them.** It added the
+missing *invocation* authority — `--automatic-resume-only`, and a bounded wait
+above the lease — so that a granted resume would now be acted on rather than
+refused for want of an operator. That is the fourth lock removed, and it was the
+only one that was about authority rather than about evidence: lock 1 in
+particular still makes the whole path unreachable on a real run, because a reset
+time that is never reported cannot be waited for. See
+[Unattended automatic resume](#unattended-automatic-resume-v3-08).
+
+F-10 is therefore **not remediated here**: closing
 it would open one of three doors, and the other two are shut for reasons this
 repository considers correct. Weakening `evaluateAutomaticResume` to accept
 freshly observed facts in place of the withdrawn claims would trade a real safety
@@ -3265,11 +3290,11 @@ and because the failure mode it describes — a command that cannot start is
   that counts probe invocations. **Scope:** `lease/lease-recovery.ts`.
 - **L-V3-06-1 — the continuation grant was examined and is unchanged.** The
   first draft of this entry claimed slice 6 widened it, and that claim was
-  wrong. `attendedContinuation` has never meant "one `runTask` call": it means
+  wrong. The attended grant has never meant "one `runTask` call": it means
   an operator is present for *this invocation of the command*, and
   `block --attended` has driven a `for(;;)` loop over many tasks, each its own
   `runTask`, under a single `--attended` since V2-08 —
-  `block/block-runner.ts:887` passes `attendedContinuation: true` from inside
+  `block/block-runner.ts:887` passes the attended grant from inside
   that loop. `driveLifecycle` does the same for one task, in one foreground
   process the operator started and can stop, and `--max-invocations` defaults to
   one so the command drives a task exactly as far as it did before unless an
@@ -3311,33 +3336,28 @@ and because the failure mode it describes — a command that cannot start is
 
   **Scope:** `run/lifecycle-driver.ts`, `cli/run-command.ts`,
   `cli/run-exit-codes.ts`.
-- **L-V3-06-2 — the reset wait was WITHDRAWN from slice 6, and needs a contract
-  decision before it can exist.** The slice was to let an unattended run sleep
-  until `reportedResetAt` and carry on. It cannot be built without extending an
-  authority this product has not granted, and the chain is short:
-  `run/run-driver.ts` refuses **every** continuation when `attendedContinuation`
-  is false — including one `evaluateAutomaticResume` has already allowed,
-  because the grant is checked before the resume write and can only withhold.
-  So AO has no unattended execution path at all today; the automatic-resume
-  machinery decides *eligibility*, and operator presence is still required on
-  top of it.
+- **L-V3-06-2 — CLOSED by V3-08.** The item recorded that the reset wait was
+  withdrawn from slice 6 because it needed a third continuation authority that
+  did not exist: "may continue with nobody present, but *only* where
+  `classifyResume` already answered `AUTOMATIC_ALLOWED`". V3-08 made that
+  decision and built it. The invocation grant is now the closed vocabulary
+  `NO_CONTINUATION` / `ATTENDED` / `AUTOMATIC_RESUME_ONLY`
+  (`run/invocation-grant.ts`), the wait lives **above** the lifecycle driver in
+  `run/unattended-resume.ts` so that no execution lease is held across it, and
+  the CLI exposes both behind separate opt-ins. See
+  [Unattended automatic resume](#unattended-automatic-resume-v3-08) for the full
+  contract and for what it still cannot do.
 
-  That makes the wait unbuildable in both directions. Keeping the grant across a
-  multi-hour sleep spends a claim of operator presence made long before, which
-  is the widening. Dropping the grant after the sleep makes the wait pointless,
-  because the resume it slept for is refused too.
-
-  **The minimal contract change, if it is ever wanted:** a third continuation
-  authority — "may continue with nobody present, but *only* where
-  `classifyResume` already answered `AUTOMATIC_ALLOWED`" — distinct from
-  `attendedContinuation` and never a substitute for it. It would let an
-  unattended run clear a self-clearing quota pause while still refusing ordinary
-  in-flight work, which is the only shape that satisfies *unattended
-  continuation must not increase authority*. That is a product-contract
-  decision, so it is reported here rather than implemented. Until it is made,
-  `BLOCKED_USAGE_LIMIT` stops the lifecycle driver exactly as it stops every
-  other caller. **Scope:** `run/run-driver.ts`, `core/resume-policy.ts`,
-  `run/lifecycle-driver.ts`.
+  Two things the closure does **not** claim. It is not general unattended
+  execution: the grant passes the run driver's gate only on `AUTOMATIC_ALLOWED`,
+  cannot start a task, and cannot recover a stale lease. And it is not an
+  operating capability yet — the three independent locks in
+  [Unattended resume is inert in this build](#unattended-resume-is-inert-in-this-build-and-that-is-now-stated)
+  are untouched, so the situation the authority authorises still cannot arise on
+  a real run. What changed is that the authority is no longer the missing piece.
+  **Scope:** `run/invocation-grant.ts`, `run/unattended-resume.ts`,
+  `run/run-driver.ts`, `run/lifecycle-driver.ts`, `cli/run-command.ts`,
+  `cli/render-lifecycle.ts`, `cli/run-exit-codes.ts`.
 - **L-V3-06-3 — the real-process harness measures the lease phase, not a driven
   task.** `tests/dist-artifact/lifecycle-restart-dist-artifact.mjs` names a task
   the plan does not contain, so the one phase that reaches `startTask` stops at
@@ -3618,6 +3638,76 @@ and because the failure mode it describes — a command that cannot start is
   any of them adopts the resolver, this reproduces. `runtime-gate-dist-artifact.mjs`
   already does the right thing. **Scope:** the three harnesses named.
   **Not a production defect:** nothing in `src/` hand-builds a repository record.
+- **L-V3-08-1 — the authority exists and cannot fire, and lock 1 is why.** The
+  invocation grant, the run-driver gate, the wait controller and the CLI are all
+  in place, and on a real run none of them is reachable: no agent CLI reports a
+  quota reset time, so `reportedResetAt` is always `null`,
+  `evaluateAutomaticResume` denies `RESET_TIME_MISSING`, and the wait refuses
+  with `RESET_TIME_MISSING` before it sleeps. Every case that exercises the
+  granted path seeds the reset time itself. This is not a defect of the slice —
+  the brief was to supply the authority that was missing — but it is the reason
+  nobody should read the new flag as an operating capability. Closing it means
+  either observing a reset time a CLI actually reports or accepting an operator's
+  own, and both are their own decision. **Scope:**
+  `agent/internal/claude-result-envelope.ts`.
+- **L-V3-08-2 — an unattended resume that runs out of step budget leaves a task
+  no unattended run can pick up again.** The permission to keep driving after a
+  resume is local to one `runTask` call, deliberately. So a resume that reaches
+  `STEP_BUDGET_EXHAUSTED` mid-implementation leaves ordinary in-flight work,
+  which `AUTOMATIC_RESUME_ONLY` refuses on every later invocation — including the
+  second epoch of the same command, and including the next `--max-invocations`
+  iteration. A human continues it with `--attended`.
+
+  That is the correct answer under the brief's own matrix — regular in-flight
+  states are attended-only — and it is a real operating limit rather than a
+  theoretical one: `--max-steps` defaults to 8, and a task that needs more than
+  that after a quota pause will stop there. It is *not* the `V1-07-RR-B1` loss:
+  the resume evidence was spent on work that actually happened, and the task is
+  advanced rather than parked. **Scope:** `run/invocation-grant.ts`,
+  `run/run-driver.ts`.
+- **L-V3-08-3 — the wake-and-resume cycle is measured in process only, and the
+  reason is auth.** `tests/dist-artifact/unattended-auto-resume-dist-artifact.mjs`
+  drives the shipped CLI for the argument refusals and for the task-start
+  negative, both of which are decided before any preflight and are therefore
+  deterministic on every machine. The cycle itself cannot be: every path that
+  reaches a resume calls the real auth preflight, which starts the subscription
+  CLIs — spending quota on a developer machine and stopping at
+  `AUTH_PREFLIGHT_FAILED` on CI, which is a gate that measures the machine rather
+  than the build. Making it uniform would need a seam production does not have.
+  So the sleep, the re-resolution, the fresh preflight and the post-wake decision
+  are covered by `tests/v3-08-unattended-auto-resume.test.ts` with an injected
+  clock and sleep, a real Git repository and the real execution lease. The second
+  lease acquisition inside the sleep is real but happens **in this process**;
+  the exclusive create refuses an existing file whoever asks, so it proves the
+  waiter holds nothing, and it is not a cross-process measurement. **Scope:**
+  `tests/dist-artifact/unattended-auto-resume-dist-artifact.mjs`,
+  `tests/v3-08-unattended-auto-resume.test.ts`.
+- **L-V3-08-4 — three wait dispositions are floors that production cannot
+  reach.** `RESET_TIME_UNPARSEABLE` cannot arise through the durable path at all:
+  the state schema accepts a strict subset of what `Date.parse` accepts, so a
+  timestamp the wait arithmetic could not read is one the loader refuses
+  outright — the run stops at `STATE_UNUSABLE` and the wait is never consulted,
+  which is what the suite pins instead. `RESUME_DECISION_ABSENT` requires a run
+  that stopped on a quota block without recording the decision it stopped on,
+  which `run-driver.ts` cannot produce. `CURRENT_TIME_UNPARSEABLE` needs a clock
+  seam that returns a non-timestamp, and production supplies
+  `() => new Date().toISOString()`. All three are kept as fail-closed arms rather
+  than removed, and none is claimed as tested behaviour. **Scope:**
+  `run/unattended-resume.ts`.
+
+- **L-V3-08-5 — the operator-visible conditions this slice adds, recorded for the
+  ntfy redesign.** No notification behaviour changed here, deliberately: the
+  planned actionable-notifications redesign is its own decision, and progress
+  noise ("waiting started", "woke up") is exactly what its rule excludes. What
+  this slice *does* add is a set of endings a later classifier will have to
+  place. Requiring a human: `BOUND_EXCEEDED` (the reset is further away than
+  allowed), `LEASE_RELEASE_UNPROVEN`, `REPOSITORY_UNRESOLVED_AFTER_WAIT`, and a
+  post-wake epoch ending `AUTH_PREFLIGHT_FAILED`, `RECONCILIATION_DIVERGED`,
+  `STATE_UNUSABLE` or `CONTINUATION_NOT_AUTHORISED`. Self-clearing, and therefore
+  **not** attention-worthy: `NOT_A_QUOTA_BLOCK`, `NOT_REQUESTED`,
+  `RESET_TIME_MISSING` on a run nobody asked to wait, and a post-wake
+  `LIVE_OWNER_PRESENT`. Milestone: a wait that ended in `COMPLETED`. **Scope:**
+  `notify/attention.ts`, when the redesign happens.
 
 ### What V1-08 is not
 
@@ -3683,6 +3773,142 @@ What this does *not* claim is freshness: it proves the preflight ran in this
 process and passed, not that it did so recently. `tests/auth-preflight-evidence.test.ts`
 is written as the counter-proof — four routes back to the old position, each
 refused.
+
+## Unattended automatic resume (V3-08)
+
+The first — and, deliberately, the only — path on which this product runs
+something with nobody present.
+
+```
+agent-loop run --repository <abs path> --task <id> --automatic-resume-only
+                                                  [--wait-for-reset --max-wait-ms <n>]
+                                                  [--max-steps <n>] [--max-invocations <n>]
+```
+
+The flag is deliberately **not** called `--unattended-…`.
+`tests/v2-07lr-lease-recovery.test.ts` refuses any registered option whose name
+carries `force`, `unattended`, `adopt`, `takeover` or `steal`, because such a
+name is a promise to an operator whatever the help text says — and the promise it
+protects ("nothing in this build removes a lease it did not create") is one this
+mode keeps. `--automatic-resume-only` is also the better name on its own terms:
+it is the CLI spelling of the grant it produces, and the trailing `-only` carries
+the restriction.
+
+### Two authorities, conjoined
+
+Continuing anything has needed a *task* authority since V2-04:
+`classifyResume` produces `ResumeDecision.continuation`, and its
+`AUTOMATIC_ALLOWED` member has exactly one source — an `AutomaticResumeDecision`
+with `allowed === true`. V3-08 adds the *invocation* authority beside it, as a
+closed vocabulary rather than the boolean it replaces:
+
+| Grant | Means | Passes the run driver's gate when |
+| --- | --- | --- |
+| `NO_CONTINUATION` | nothing productive may continue | never |
+| `ATTENDED` | a human is present for this invocation | always (every other gate still applies) |
+| `AUTOMATIC_RESUME_ONLY` | nobody is present | `continuation === AUTOMATIC_ALLOWED` |
+
+The two are a **conjunction, never an alternative**. Nothing in
+`run/invocation-grant.ts` can produce `AUTOMATIC_ALLOWED`, and the gate reads
+that value and nothing else — not the state name, not the reconciliation
+verdict. A task can be `BLOCKED_USAGE_LIMIT` and reconcile perfectly while the
+resume is refused, so a grant that consulted either would be a second, weaker
+copy of the decision it is supposed to depend on.
+
+It replaced `attendedContinuation: boolean` rather than adding a second boolean
+beside it. Two booleans would have produced four combinations for three
+meanings, and the fourth — attended and unattended at once — would then have had
+to be given an invented meaning somewhere. The refusal code for
+`NO_CONTINUATION` is unchanged (`ATTENDED_CONTINUATION_NOT_GRANTED`), because
+scripts read it.
+
+### What it cannot do, and where each refusal lives
+
+| It may not | Enforced by |
+| --- | --- |
+| continue ordinary in-flight work | `run/run-driver.ts` — a reconciled `IMPLEMENTING` classifies `ATTENDED_ONLY` |
+| start a task | `run/lifecycle-driver.ts` — `startTask` is not reached under the grant, and the presence check runs before the auth preflight |
+| remove a stale lease | `run/unattended-resume.ts` — `recoverStaleLease` is fixed `false`; the CLI refuses the flag combination outright |
+| select a task | `cli/run-command.ts` — `--task` is required |
+| resume `BLOCKED_VERIFY`, `BLOCKED_AUTH`, `HUMAN_DECISION_REQUIRED`, `SCOPE_VIOLATION` or `RESUME_STATE_DIVERGED` | `core/resume-policy.ts` — `automaticResumeEligible` is false for all five |
+| refill a review budget | unchanged: an exhausted `maxReviewRounds` is `HUMAN_DECISION_REQUIRED`, which is not eligible |
+
+The start refusal is at the **library boundary**, not in the CLI, so a caller
+holding the grant cannot bypass the command and start a task with it.
+
+**One narrow permission does travel with a resume**, and it is worth stating
+plainly. Once a run has performed the automatic resume itself, it continues
+driving the phase that resume entered — inside that one `runTask` call and no
+other. Without it the run would refuse the continuation its own resume just
+authorised, having already spent `resumeFrom` and `reportedResetAt`: a
+self-clearing pause converted into an attended-only task with no work done,
+which is `V1-07-RR-B1`'s failure arriving one iteration later. The permission is
+a local variable that dies with the frame; a *later* invocation meeting the same
+in-flight task is refused.
+
+### The wait: a separate permission, above the lease
+
+Waiting is never implied by a quota block. It happens only when
+`--wait-for-reset` is given, only with a mandatory `--max-wait-ms` (no default,
+ceiling 24 hours), and only when **the reported reset time is the single check
+still refusing the resume**. A denial list containing anything else — a missing
+reset time, an unclean worktree, a moved commit, a failed login — describes a
+task no amount of sleeping will help, so nothing sleeps.
+
+The hard invariant is that **no execution lease is held across the wait**. A
+reset can be hours away and the lease is the repository's single writer slot, so
+the wait controller sits *above* `driveLifecycle`:
+
+```
+epoch 1   acquire → drive → BLOCKED_USAGE_LIMIT → release
+wait      require RELEASED, then sleep holding nothing
+epoch 2   resolve again → acquire again → preflight again → reconcile again → decide again
+```
+
+`RELEASED` is required before the sleep, and it is the only proof accepted — not
+an absent lease file, not a successful-looking outcome. Across the sleep the
+only things that survive are the task id, the grant, the bound and a counter.
+Everything else is established again: the repository is **re-resolved**, the
+lease is acquired through the ordinary path (and is allowed to lose), the auth
+preflight is **run again** — `deps.authPreflight` is a factory, so each epoch
+gets its own once-only preflight and a login that expired during the sleep is
+caught — the durable state is re-loaded, Git is re-observed, and `classifyResume`
+produces a **new** decision.
+
+The sleep length is `reportedResetAt - now + 1` ms. The extra millisecond is not
+an assumption about the policy but a consequence of it —
+`evaluateAutomaticResume` refuses while `now <= reportedResetAt`, so waking *at*
+the reported instant is refused. The arithmetic chooses when to wake; the policy,
+re-run afterwards, decides what happens then.
+
+**One cycle per invocation**, by construction: there is no loop in the
+controller. A second quota block after a successful resume ends the run.
+Recurring operation belongs to a supervisor layer that does not exist.
+
+### Budgets, reporting and exit codes
+
+`--max-invocations` is one bound on the whole command, shared by both epochs
+rather than granted twice. The first epoch spends at least one invocation
+meeting the block, so a wait needs `--max-invocations 2` or more; asking for a
+wait with less is refused **before any effect**, as an unusable input.
+
+The wait reports itself in its own closed vocabulary
+(`RESET_WAIT_DISPOSITIONS`) beside the lifecycle outcome, so "you never asked to
+wait", "the reset time was missing", "the reset is further away than you
+allowed", "the lease could not be given back" and "it waited and re-evaluated"
+are five different things to be told. **No new exit codes.** A run is graded by
+its last attempt: one that slept and then completed exits 0, one that slept and
+then met a live owner exits 4.
+
+### What this does *not* make possible
+
+The three locks in
+[Unattended resume is inert in this build](#unattended-resume-is-inert-in-this-build-and-that-is-now-stated)
+are untouched, and the first of them is decisive: **no agent CLI reports a quota
+reset time**, so `reportedResetAt` is always `null`, `evaluateAutomaticResume`
+denies `RESET_TIME_MISSING`, and neither the resume nor the wait can fire on a
+real run. V3-08 supplies the authority that was missing; it does not supply the
+evidence, and inventing one would be worse than not having it.
 
 ## Scope enforcement (V2-06)
 

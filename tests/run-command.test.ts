@@ -122,18 +122,23 @@ describe('agent-loop run — CLI seam', () => {
     expect(source).toContain('registerDoctorCommand(program);');
   });
 
-  it('offers execution only behind --attended, and no force or overwrite option', () => {
+  it('offers execution only behind a named grant, and no force or overwrite option', () => {
     const run = programWithRun().commands.find((command) => command.name() === 'run');
     expect(run).toBeDefined();
     const flags = (run?.options ?? []).map((option) => option.long);
 
-    // The full option surface, pinned. V2-05 added two flags and V3-06 added
-    // two more, and the list is asserted whole so that a seventh cannot appear
-    // unnoticed. Neither new flag grants anything on its own: `--max-invocations`
-    // is a bound, and `--recover-stale-lease` permits an attempt whose own proof
-    // still has to pass. There is deliberately no flag that lets a run wait out
-    // a quota reset — see `run/lifecycle-driver.ts` on why that needs an
-    // authority this build does not have.
+    // The full option surface, pinned. V2-05 added two flags, V3-06 added two
+    // more and V3-08 added three, and the list is asserted whole so that a tenth
+    // cannot appear unnoticed. None of them grants anything on its own:
+    // `--max-invocations` and `--max-wait-ms` are bounds,
+    // `--recover-stale-lease` permits an attempt whose own proof still has to
+    // pass, and `--automatic-resume-only` passes the run driver's gate only
+    // where the canonical resume decision already answered `AUTOMATIC_ALLOWED`.
+    //
+    // This comment previously said there was "deliberately no flag that lets a
+    // run wait out a quota reset". V3-08 added the authority that made one
+    // buildable, so the sentence is replaced rather than left standing beside
+    // its own contradiction.
     expect(flags).toEqual([
       '--repository',
       '--task',
@@ -141,14 +146,19 @@ describe('agent-loop run — CLI seam', () => {
       '--max-steps',
       '--max-invocations',
       '--recover-stale-lease',
+      '--automatic-resume-only',
+      '--wait-for-reset',
+      '--max-wait-ms',
     ]);
-    expect(flags).not.toContain('--wait-for-reset');
     // The refusals `WORKSPACE_COLLISION` and `STATE_NOT_RECORDED` are meant to
     // stand, and adoption is a later slice (V2-06A). No flag may talk an
     // invocation past them.
     expect(flags).not.toContain('--force');
     expect(flags).not.toContain('--adopt');
     expect(flags).not.toContain('--overwrite');
+    // Still refused, and the distinction is the whole of V3-08: there is a flag
+    // for "resume one automatically-allowed task with nobody present" and there
+    // is deliberately none for "run unattended".
     expect(flags).not.toContain('--unattended');
     // Operator presence and auth evidence are independent requirements, so there
     // must be no way to declare the preflight satisfied from the command line.
@@ -274,5 +284,125 @@ describe('--attended is the grant, and it is not auth evidence', () => {
     expect(attended?.description).toContain('operator is present');
     // The flag must not read as if it also satisfied the preflight.
     expect(attended?.description).toContain('auth preflight');
+  });
+});
+
+/* ═════════ V3-08: the unattended automatic-resume grant, at the CLI ════════ */
+
+/**
+ * The new grant is a *third* mode, and the risk it carries at this layer is not
+ * that it does the wrong thing — the driver decides that — but that an operator
+ * can reach it by accident, or combine it with something that quietly widens
+ * it.
+ *
+ * So every case here is a refusal, and most of them are refusals that must
+ * happen **before the repository is even resolved**. They are driven against a
+ * path that does not exist, which is the strongest available form of "nothing
+ * happened": a run that reached any effect would have had to resolve first, and
+ * resolving that path fails with its own, different code.
+ */
+describe('the unattended automatic-resume mode refuses unusable combinations first', () => {
+  /** A path no fixture created. Resolution of it fails, loudly and differently. */
+  const ABSENT = join('D:', String.fromCharCode(92), 'no-such-repository-v3-08');
+
+  const REFUSALS: readonly { readonly args: readonly string[]; readonly code: string }[] = [
+    {
+      args: ['--attended', '--automatic-resume-only'],
+      code: 'CONTINUATION_GRANT_CONFLICT',
+    },
+    { args: ['--wait-for-reset', '--max-wait-ms', '1000'], code: 'WAIT_WITHOUT_AUTOMATIC_RESUME' },
+    {
+      args: ['--attended', '--wait-for-reset', '--max-wait-ms', '1000'],
+      code: 'WAIT_WITHOUT_AUTOMATIC_RESUME',
+    },
+    { args: ['--automatic-resume-only', '--max-wait-ms', '1000'], code: 'MAX_WAIT_WITHOUT_WAIT' },
+    { args: ['--automatic-resume-only', '--wait-for-reset'], code: 'MAX_WAIT_MS_REQUIRED' },
+    {
+      args: ['--automatic-resume-only', '--wait-for-reset', '--max-wait-ms', '1000', '--recover-stale-lease'],
+      code: 'STALE_RECOVERY_WITH_WAIT',
+    },
+    {
+      args: ['--automatic-resume-only', '--recover-stale-lease'],
+      code: 'STALE_RECOVERY_WITHOUT_OPERATOR',
+    },
+  ];
+
+  for (const refusal of REFUSALS) {
+    it(`refuses ${refusal.args.join(' ')} with ${refusal.code}`, async () => {
+      await invoke(['--repository', ABSENT, '--task', 'V3-08', ...refusal.args]);
+
+      const text = stdout.join('');
+      expect(text).toContain(refusal.code);
+      // The repository was never resolved: its own failure code is absent.
+      expect(text).not.toContain('could not be resolved');
+      expect(stderr.join('')).toBe('');
+      expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    });
+  }
+
+  it('refuses an unusable --max-wait-ms with its own code', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: e2eProfile(),
+      files: { 'tasks/V3-08.md': taskFile('V3-08') },
+    });
+
+    await invoke([
+      '--repository', root,
+      '--task', 'V3-08',
+      '--automatic-resume-only',
+      '--wait-for-reset',
+      '--max-wait-ms', 'soon',
+    ]);
+
+    expect(stdout.join('')).toContain('MAX_WAIT_MS_INVALID');
+    expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+  });
+
+  it('requires a named task, because it may not select one to start', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: e2eProfile(),
+      files: { 'tasks/V3-08.md': taskFile('V3-08') },
+    });
+
+    await invoke(['--repository', root, '--automatic-resume-only']);
+
+    expect(stdout.join('')).toContain('TASK_REQUIRED_FOR_AUTOMATIC_RESUME');
+    expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+  });
+
+  it('creates no state, branch or worktree for a task that was never started', async () => {
+    // The task is genuinely startable — the read-only plan above says
+    // `TASK_NOT_STARTED` for exactly this fixture — so a mode that could start
+    // one would start this one. Nothing may appear.
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: e2eProfile(),
+      files: { 'tasks/V3-08.md': taskFile('V3-08') },
+    });
+    const before = {
+      runtimeState: existsSync(join(root, REPO_PROFILE_DIR_NAME, TASK_RUNTIME_DIR_NAME)),
+      branches: git(root, ['branch', '--list', 'ao/task/*']).trim(),
+      worktrees: git(root, ['worktree', 'list']).trim(),
+    };
+
+    await invoke(['--repository', root, '--task', 'V3-08', '--automatic-resume-only']);
+
+    const after = {
+      runtimeState: existsSync(join(root, REPO_PROFILE_DIR_NAME, TASK_RUNTIME_DIR_NAME)),
+      branches: git(root, ['branch', '--list', 'ao/task/*']).trim(),
+      worktrees: git(root, ['worktree', 'list']).trim(),
+    };
+
+    const text = stdout.join('');
+    expect(text).toContain('TASK_NOT_STARTED');
+    // The unattended contract sentence, and never the attended one.
+    expect(text).toContain('Unattended automatic resume.');
+    expect(text).not.toContain('Attended run.');
+    expect(after).toEqual(before);
+    expect(after.runtimeState).toBe(false);
+    expect(after.branches).toBe('');
+    expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
   });
 });

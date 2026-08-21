@@ -884,7 +884,7 @@ async function driveOneTask(
         // The task id, which is all this module legitimately has. The prose the
         // agents receive is read inside the driver, from the worktree it
         // authorised, so nothing here authors a prompt.
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED',
         authEvidence: evidence,
         lease,
         maxSteps: maxStepsPerTask,

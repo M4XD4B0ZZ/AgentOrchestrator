@@ -410,7 +410,7 @@ function request(root: string, overrides: Partial<RunRequest> = {}): RunRequest 
   return {
     repository: repo,
     taskId: TASK_ID,
-    attendedContinuation: true,
+    continuationGrant: 'ATTENDED' as const,
     authEvidence: provenAuthEvidence(),
     // Acquired for real: the driver re-proves it against the file every
     // iteration, so a fabricated artefact would stop the run on the first one.
@@ -801,7 +801,7 @@ describe('the driver never grants itself an authority it does not have', () => {
     const verify = cappedVerify(0);
 
     const run = await runTask(
-      request(root, { attendedContinuation: false }),
+      request(root, { continuationGrant: 'NO_CONTINUATION' as const }),
       deps(root, { verify: verify.runner, agent: cappedAgent(agentCommandResult(), 0).runner }),
     );
 
@@ -1059,7 +1059,7 @@ describe('a blocked task is never moved by a run that may not continue it', () =
     const verify = cappedVerify(0);
 
     const run = await runTask(
-      request(root, { attendedContinuation: false, maxSteps: 4 }),
+      request(root, { continuationGrant: 'NO_CONTINUATION' as const, maxSteps: 4 }),
       deps(root, { agent: agent.runner, verify: verify.runner }),
     );
 
@@ -1097,7 +1097,7 @@ describe('a blocked task is never moved by a run that may not continue it', () =
     const before = resumableBlock(root, 'REMEDIATE');
 
     const run = await runTask(
-      request(root, { attendedContinuation: true, maxSteps: 1 }),
+      request(root, { continuationGrant: 'ATTENDED' as const, maxSteps: 1 }),
       deps(root, { agent: cappedAgent(agentCommandResult(), 0).runner, verify: cappedVerify(0).runner }),
     );
 
@@ -1132,7 +1132,7 @@ describe('a blocked task is never moved by a run that may not continue it', () =
     const agent = cappedAgent(agentCommandResult(), 0);
 
     const run = await runTask(
-      request(root, { attendedContinuation: false }),
+      request(root, { continuationGrant: 'NO_CONTINUATION' as const }),
       deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
     );
 
@@ -1155,7 +1155,7 @@ describe('a blocked task is never moved by a run that may not continue it', () =
     const verify = scriptedVerify({ exitCode: 0 });
 
     const run = await runTask(
-      request(root, { attendedContinuation: true, maxSteps: 1 }),
+      request(root, { continuationGrant: 'ATTENDED' as const, maxSteps: 1 }),
       deps(root, { verify: verify.runner, agent: cappedAgent(agentCommandResult(), 0).runner }),
     );
 
@@ -1179,7 +1179,7 @@ describe('a blocked task is never moved by a run that may not continue it', () =
     const verify = cappedVerify(0);
 
     const run = await runTask(
-      request(root, { attendedContinuation: false, maxSteps: 12 }),
+      request(root, { continuationGrant: 'NO_CONTINUATION' as const, maxSteps: 12 }),
       deps(root, { agent: agent.runner, verify: verify.runner }),
     );
 
@@ -1388,7 +1388,7 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
     //    reconciliation, which is what makes it a probe: it reports the
     //    comparison without executing or writing anything.
     const probe = await runTask(
-      request(root, { attendedContinuation: false, maxSteps: 1 }),
+      request(root, { continuationGrant: 'NO_CONTINUATION' as const, maxSteps: 1 }),
       deps(root, {
         git: scriptedGit(root, mutated),
         agent: cappedAgent(agentCommandResult(), 0).runner,
@@ -1842,7 +1842,7 @@ describe('task selection', () => {
     const outcome = await runNextTask(
       {
         repository: resolved,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(resolved),
         maxSteps: 4,

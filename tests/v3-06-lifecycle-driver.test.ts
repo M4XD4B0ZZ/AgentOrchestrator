@@ -159,7 +159,7 @@ async function scenario(
     request: (overrides = {}) => ({
       repository: started.repository,
       taskId: TASK_ID,
-      continuationGrant: true,
+      continuationGrant: 'ATTENDED',
       recoverStaleLease: false,
       maxSteps: 8,
       maxInvocations: 1,
@@ -899,7 +899,7 @@ describe('a workspace left by a crashed start is adopted and then driven', () =>
       {
         repository: started.repository,
         taskId: TASK_ID,
-        continuationGrant: true,
+        continuationGrant: 'ATTENDED',
         recoverStaleLease: false,
         maxSteps: 2,
         maxInvocations: 2,

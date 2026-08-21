@@ -48,12 +48,18 @@
  *
  * That the evidence is *fresh*. It proves that this process ran the real
  * preflight and that every check passed, not that it did so recently: nothing
- * here stops a long-lived caller minting once and reusing the artefact. Today
- * no such caller exists — the CLI runs the preflight and the task in one
- * invocation — and a timestamp would need a staleness threshold nobody has
- * argued for yet. The word "fresh" in the callers' documentation is therefore
- * still a statement about *when they call it*, and this module does not
- * pretend to enforce it.
+ * here stops a long-lived caller minting once and reusing the artefact, and a
+ * timestamp would need a staleness threshold nobody has argued for yet. The
+ * word "fresh" in the callers' documentation is therefore still a statement
+ * about *when they call it*, and this module does not pretend to enforce it.
+ *
+ * Since V3-08 one caller really can outlive a preflight by hours:
+ * `run/unattended-resume.ts` may sleep until a quota reset and then continue.
+ * It does not reuse the artefact. It takes the preflight as a **factory** and
+ * builds a new once-only preflight per lifecycle epoch, so the memoisation that
+ * makes an attended run cheap ends at the sleep, and the post-wake attempt runs
+ * the real checks again. That is a discipline in the caller, exactly as this
+ * paragraph says it must be — not a property this artefact acquired.
  */
 
 /**

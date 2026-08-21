@@ -10,20 +10,48 @@ import { renderRunPlan, READ_ONLY_TRAILER } from '../run/render-run-plan.js';
 import { planRun } from '../run/run-plan.js';
 import { driveLifecycle } from '../run/lifecycle-driver.js';
 import { selectRunTask } from '../run/run-driver.js';
+import {
+  driveUnattendedAutomaticResume,
+  isUsableWaitBound,
+  MAX_WAIT_MS_CEILING,
+  type ResetWaitPolicy,
+} from '../run/unattended-resume.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import { runGitCommand } from '../worktree/git-command.js';
 import { GRANT_WITHHELD_SENTENCE } from './render-attended-run.js';
-import { renderLifecycleRun } from './render-lifecycle.js';
+import { renderLifecycleRun, renderUnattendedResume } from './render-lifecycle.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_UNEXPECTED,
   exitCodeForLifecycleRun,
   exitCodeForPlan,
+  exitCodeForUnattendedResume,
   type CliExitCode,
 } from './run-exit-codes.js';
 
 /**
- * `agent-loop run` — the front door, in two modes.
+ * `agent-loop run` — the front door, in three modes.
+ *
+ * ── The third mode, and why it is a mode rather than a flag on the second ───
+ *
+ * V3-08 added `--automatic-resume-only`: continue **one named task** with
+ * nobody present, and only where `classifyResume` freshly answered
+ * `AUTOMATIC_ALLOWED`. Today that is exactly one situation — a task parked on
+ * `BLOCKED_USAGE_LIMIT` whose reported reset has passed and whose worktree,
+ * commits, repository identity and login all still check out.
+ *
+ * It is a separate grant from `--attended`, not a variant of it, and the two are
+ * refused together. `--attended` states that a human is present; this one states
+ * that nobody is, and the whole point of the slice is that the second claim buys
+ * strictly *less*: it cannot start a task, cannot continue ordinary in-flight
+ * work, and cannot remove a stale lease. `run/invocation-grant.ts` holds the
+ * vocabulary and `run/run-driver.ts` holds the gate.
+ *
+ * `--wait-for-reset` is a further, separate opt-in on top of it: permission to
+ * sleep **once**, bounded by a mandatory `--max-wait-ms`, holding no execution
+ * lease, and only while the reported reset time is the single check still
+ * refusing the resume. Waiting is never implied by the block, and there is no
+ * default duration.
  *
  * ── The default mode did not change, and that is a contract ─────────────────
  *
@@ -57,7 +85,9 @@ import {
  * `--attended` on a machine that is not logged in refuses with
  * `AUTH_PREFLIGHT_FAILED`; being fully logged in without `--attended` still
  * produces a plan and writes nothing. This is the CLI-level form of the same
- * rule `RunRequest` states about `attendedContinuation` and `authEvidence`.
+ * rule `RunRequest` states about `continuationGrant` and `authEvidence`, and it
+ * holds identically for `--automatic-resume-only`: that grant states nobody is
+ * present, never that a login is valid.
  *
  * ── The preflight runs at most once, and lazily ─────────────────────────────
  *
@@ -97,9 +127,90 @@ interface RunOptions {
   readonly repository: string;
   readonly task?: string;
   readonly attended?: boolean;
+  readonly automaticResumeOnly?: boolean;
+  readonly waitForReset?: boolean;
+  readonly maxWaitMs?: string;
   readonly maxSteps?: string;
   readonly maxInvocations?: string;
   readonly recoverStaleLease?: boolean;
+}
+
+/**
+ * One refusal of an unusable argument combination, before anything is resolved.
+ *
+ * A closed pair rather than free text, so the report cannot acquire a message
+ * from anywhere but this file. Each has its own code for the reason the numeric
+ * bounds do: an operator who supplied two mutually exclusive grants is not
+ * helped by being told a third flag needs a fourth.
+ */
+interface ArgumentRefusal {
+  readonly code: string;
+  readonly sentence: string;
+}
+
+/**
+ * Every way the new V3-08 flags can be combined into something this command
+ * refuses, checked before the repository is even resolved.
+ *
+ * `null` when the combination is usable. Written as one function so the rules
+ * sit together and can be pinned together: a refusal that lived beside its flag
+ * would be a rule nobody could read as a set.
+ */
+function refuseArguments(options: RunOptions): ArgumentRefusal | null {
+  const unattended = options.automaticResumeOnly === true;
+  const attended = options.attended === true;
+
+  if (attended && unattended) {
+    return {
+      code: 'CONTINUATION_GRANT_CONFLICT',
+      sentence:
+        '--attended and --automatic-resume-only are two different grants and cannot both ' +
+        'be given. One states a human is present; the other states nobody is.',
+    };
+  }
+  if (options.waitForReset === true && !unattended) {
+    return {
+      code: 'WAIT_WITHOUT_AUTOMATIC_RESUME',
+      sentence:
+        '--wait-for-reset only means something under --automatic-resume-only. Waiting for a ' +
+        'quota reset is the automatic-resume path continuing itself later; there is nothing ' +
+        'for an attended or read-only run to wait for.',
+    };
+  }
+  if (options.maxWaitMs !== undefined && options.waitForReset !== true) {
+    return {
+      code: 'MAX_WAIT_WITHOUT_WAIT',
+      sentence: '--max-wait-ms bounds --wait-for-reset, which was not given.',
+    };
+  }
+  if (options.waitForReset === true && options.maxWaitMs === undefined) {
+    return {
+      code: 'MAX_WAIT_MS_REQUIRED',
+      sentence:
+        '--wait-for-reset requires --max-wait-ms. There is deliberately no default: a wait ' +
+        'nobody bounded is a multi-hour sleep nobody asked for.',
+    };
+  }
+  if (options.waitForReset === true && options.recoverStaleLease === true) {
+    return {
+      code: 'STALE_RECOVERY_WITH_WAIT',
+      sentence:
+        '--recover-stale-lease cannot be combined with a wait. Removing a lease is a ' +
+        'destructive permission an operator gives for now, and a wait can put hours between ' +
+        'now and the attempt that would use it. Recover with `agent-loop lease recover` ' +
+        'first, then invoke this.',
+    };
+  }
+  if (unattended && options.recoverStaleLease === true) {
+    return {
+      code: 'STALE_RECOVERY_WITHOUT_OPERATOR',
+      sentence:
+        '--recover-stale-lease cannot be combined with --automatic-resume-only. The ' +
+        'unattended grant exists for runs nobody is watching, and removing another run\'s ' +
+        'lease is not something to do unwatched. Use `agent-loop lease recover`.',
+    };
+  }
+  return null;
 }
 
 /**
@@ -273,7 +384,7 @@ async function executeAttended(
       // this is exactly the per-invocation grant it always was; raising
       // --max-invocations is the operator extending it across the run, which is
       // what the flag means.
-      continuationGrant: true,
+      continuationGrant: 'ATTENDED',
       recoverStaleLease: lifecycle.recoverStaleLease,
       maxSteps: lifecycle.maxSteps,
       maxInvocations: lifecycle.maxInvocations,
@@ -292,6 +403,63 @@ async function executeAttended(
 
   process.stdout.write(renderLifecycleRun(repository, result));
   return exitCodeForLifecycleRun(result);
+}
+
+/**
+ * Continue one already-durable task with nobody present, optionally waiting out
+ * a reported quota reset once (V3-08).
+ *
+ * Deliberately **not** routed through `executeAttended`, and deliberately not
+ * given the selector. Three differences, and each is a refusal rather than an
+ * omission:
+ *
+ *  - the task must be named. `--task` is required here, because selection reads
+ *    the repository's task files to decide what to *start*, and this mode may
+ *    not start anything. A selector answer would be a task nobody continued;
+ *  - the grant and the stale-recovery permission are fixed inside
+ *    `driveUnattendedAutomaticResume`, not passed from here, so nothing this
+ *    function does or forgets can widen them;
+ *  - the auth preflight is handed over as a **factory**. One once-only preflight
+ *    per lifecycle epoch: attended semantics inside an epoch, and a real login
+ *    check again after any wait.
+ */
+async function executeUnattendedAutoResume(
+  repositoryPath: string,
+  repository: ResolvedRepository,
+  taskId: string,
+  bounds: {
+    readonly maxSteps: number;
+    readonly maxInvocations: number;
+    readonly wait: ResetWaitPolicy;
+  },
+  seams: RunCommandSeams,
+): Promise<CliExitCode> {
+  const result = await driveUnattendedAutomaticResume(
+    {
+      repository,
+      taskId,
+      maxSteps: bounds.maxSteps,
+      maxInvocations: bounds.maxInvocations,
+      wait: bounds.wait,
+    },
+    {
+      now: () => new Date().toISOString(),
+      git: runGitCommand,
+      authPreflight: () => onceOnlyPreflight(seams.authPreflight),
+      // Resolved again from the path the operator named, never from the object
+      // the first attempt used. A `ResolvedRepository` is a reading taken at a
+      // moment, and after a wait that moment is hours old.
+      resolveRepository: async () => {
+        const resolution = await resolveRepository({ repositoryPath });
+        return resolution.ok ? resolution.repository : null;
+      },
+      ...(seams.agent !== undefined ? { agent: seams.agent } : {}),
+      ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
+    },
+  );
+
+  process.stdout.write(renderUnattendedResume(repository, result));
+  return exitCodeForUnattendedResume(result);
 }
 
 export function registerRunCommand(program: Command, seams: RunCommandSeams = {}): void {
@@ -332,8 +500,57 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
         'Never removes one on a guess, has no override, and grants nothing by itself: a ' +
         'removal is followed by an ordinary acquisition that is allowed to lose.',
     )
+    // ── Why this is not called `--unattended-…` ─────────────────────────────
+    //
+    // It was, for one round, and `tests/v2-07lr-lease-recovery.test.ts` refused
+    // it: no option registered on any command in this build may carry `force`,
+    // `unattended`, `adopt`, `takeover` or `steal` in its name. That guard
+    // protects a different promise — "nothing in this build removes a lease it
+    // did not create" — and an option whose *name* implies unattended clearing
+    // is a promise to an operator whatever its help text says.
+    //
+    // Widening the guard to admit this flag would have been the wrong repair:
+    // the guard is right, and the name was the problem. `--automatic-resume-only`
+    // is also the better name on its own terms. It is the CLI spelling of the
+    // grant it produces (`AUTOMATIC_RESUME_ONLY`), and the trailing `-only`
+    // carries the restriction, where `--unattended-…` reads as the broad
+    // capability this deliberately is not.
+    .option(
+      '--automatic-resume-only',
+      'Continue ONE named task with nobody present, and only where the resume decision ' +
+        'answers AUTOMATIC_ALLOWED -- today, a quota block whose reported reset has passed ' +
+        'and whose worktree, commits, repository and login all still check out. Requires ' +
+        '--task. Cannot start a task, cannot continue ordinary in-flight work, cannot ' +
+        'recover a stale lease, and is mutually exclusive with --attended.',
+    )
+    .option(
+      '--wait-for-reset',
+      'Permit exactly ONE bounded wait for a reported quota reset, holding no execution ' +
+        'lease while it waits. Only with --automatic-resume-only, only when the reset time ' +
+        'is the single check still refusing the resume, and only with --max-wait-ms.',
+    )
+    .option(
+      '--max-wait-ms <n>',
+      'Bound on that one wait, in milliseconds. Required with --wait-for-reset -- there is ' +
+        `no default -- and at most ${String(MAX_WAIT_MS_CEILING)} (24 hours).`,
+    )
     .action(async (options: RunOptions) => {
       try {
+        // Before the repository is resolved, before a lease, before a preflight:
+        // a combination this command refuses is refused while nothing has
+        // happened yet. Two grants at once and a wait nobody bounded are input
+        // defects, and code 2 tells a scheduler that invoking again with the
+        // same arguments repeats exactly.
+        const refusal = refuseArguments(options);
+        if (refusal !== null) {
+          process.stdout.write(
+            `\nFailure      : ${refusal.code} — ${refusal.sentence}\n\n` +
+              `${READ_ONLY_TRAILER}\n\n`,
+          );
+          process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+          return;
+        }
+
         const resolution = await resolveRepository({ repositoryPath: options.repository });
         if (!resolution.ok) {
           // A resolution failure is the answer, not an accident: a closed code
@@ -350,7 +567,12 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
         const repository = resolution.repository;
         const taskId = options.task ?? null;
 
-        if (options.attended !== true) {
+        // The read-only default, unchanged and load-bearing: neither grant was
+        // given, so this plans and changes nothing. `--automatic-resume-only`
+        // is a *second* way to ask for execution, added beside the promise
+        // rather than inside it — a bare `run` still cannot write.
+        const unattended = options.automaticResumeOnly === true;
+        if (options.attended !== true && !unattended) {
           process.exitCode = await reportPlan(repository, taskId, true);
           return;
         }
@@ -382,6 +604,48 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
               `${READ_ONLY_TRAILER}\n\n`,
           );
           process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+          return;
+        }
+
+        if (unattended) {
+          // The task must be named. Selection decides which task to *start*,
+          // and this mode may not start anything, so a selector answer here
+          // would be a task nobody is going to continue.
+          if (taskId === null) {
+            process.stdout.write(
+              `\nFailure      : TASK_REQUIRED_FOR_AUTOMATIC_RESUME — --automatic-resume-only ` +
+                `continues one named task and never selects one. Pass --task.\n\n` +
+                `${READ_ONLY_TRAILER}\n\n`,
+            );
+            process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+            return;
+          }
+
+          // Its own code and its own ceiling, parsed the same way every other
+          // bound in this command is. `isUsableWaitBound` is the module's, so
+          // the CLI and the controller cannot disagree about what is usable.
+          let wait: ResetWaitPolicy = { wait: false };
+          if (options.waitForReset === true) {
+            const maxWaitMs = Number(options.maxWaitMs);
+            if (!isUsableWaitBound(maxWaitMs)) {
+              process.stdout.write(
+                `\nFailure      : MAX_WAIT_MS_INVALID — --max-wait-ms must be a whole number of ` +
+                  `milliseconds between 1 and ${String(MAX_WAIT_MS_CEILING)}.\n\n` +
+                  `${READ_ONLY_TRAILER}\n\n`,
+              );
+              process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+              return;
+            }
+            wait = { wait: true, maxWaitMs };
+          }
+
+          process.exitCode = await executeUnattendedAutoResume(
+            options.repository,
+            repository,
+            taskId,
+            { maxSteps, maxInvocations, wait },
+            seams,
+          );
           return;
         }
 
