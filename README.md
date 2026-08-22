@@ -2541,12 +2541,22 @@ exactly one source, `evaluateAutomaticResume` reached through `classifyResume`
 after reconciliation, and a second value a driver could mistake for it would be
 a way to resume without ever having checked.
 
-**No reset timestamp is ever invented.** None was observed in either CLI's
-output, so `reportedResetAt` is `null` in practice, `evaluateAutomaticResume`
+**No reset timestamp is ever invented.** None is present in the output AO
+reads, so `reportedResetAt` is `null` in practice, `evaluateAutomaticResume`
 refuses with `RESET_TIME_MISSING`, and the block waits for a human. That is the
 correct outcome for evidence we do not have — a fabricated timestamp would not
 merely mislead a report, it would convert a governed block into an automatic
 retry on a timer.
+
+That sentence used to read "none was observed in either CLI's output", which was
+measured against a healthy envelope and claimed more than it had established.
+The stronger statement is now measured, and it is narrower: Claude Code 2.1.239
+*does* report an absolute reset instant — `rate_limit_event.rate_limit_info.resetsAt`,
+epoch seconds — but only as a stream message under `--output-format stream-json`.
+The writer runs `--output-format json`, which prints the final `result` object
+and nothing else, and no variant of that object carries a reset field. The
+evidence exists and is out of reach; it is not absent from the world. See
+`docs/decisions/2026-08-22-claude-quota-reset-evidence-measurement.md`.
 
 Nothing here retries, sleeps, polls or backs off. One call, one process, one
 result.
@@ -3649,16 +3659,31 @@ and because the failure mode it describes — a command that cannot start is
   **Not a production defect:** nothing in `src/` hand-builds a repository record.
 - **L-V3-08-1 — the authority exists and cannot fire, and lock 1 is why.** The
   invocation grant, the run-driver gate, the wait controller and the CLI are all
-  in place, and on a real run none of them is reachable: no agent CLI reports a
-  quota reset time, so `reportedResetAt` is always `null`,
-  `evaluateAutomaticResume` denies `RESET_TIME_MISSING`, and the wait refuses
-  with `RESET_TIME_MISSING` before it sleeps. Every case that exercises the
-  granted path seeds the reset time itself. This is not a defect of the slice —
-  the brief was to supply the authority that was missing — but it is the reason
-  nobody should read the new flag as an operating capability. Closing it means
-  either observing a reset time a CLI actually reports or accepting an operator's
-  own, and both are their own decision. **Scope:**
-  `agent/internal/claude-result-envelope.ts`.
+  in place, and on a real run none of them is reachable: no reset time reaches
+  AO, so `reportedResetAt` is always `null`, `evaluateAutomaticResume` denies
+  `RESET_TIME_MISSING`, and the wait refuses with `RESET_TIME_MISSING` before it
+  sleeps. Every case that exercises the granted path seeds the reset time itself.
+  This is not a defect of the slice — the brief was to supply the authority that
+  was missing — but it is the reason nobody should read the new flag as an
+  operating capability.
+  **Measured 2026-08-22, and the finding is narrower than the item first
+  assumed.** Claude Code 2.1.239 does report an absolute reset instant:
+  `rate_limit_event.rate_limit_info.resetsAt`, an integer in epoch seconds,
+  whose unit is pinned twice in the shipped bundle and whose timezone is
+  therefore unambiguous. It is emitted only as a stream message under
+  `--output-format stream-json --verbose`. The writer runs `--output-format
+  json`, which prints the final `result` object and nothing else, and neither
+  the success nor the error variant of that object carries a reset field — so a
+  real 429 envelope could not carry one either. The verdict is
+  `RESET_EVIDENCE_REQUIRES_OUTPUT_MODE_CHANGE`, and no ingestion was
+  implemented. Closing this now means one of two decisions, each its own slice:
+  migrating the writer to the stream contract, or accepting an operator-supplied
+  instant. Note also that closing it alone would not make V3-08 fire — F-10
+  below withdraws the checkpoint claims on every block the writer can produce,
+  and the wait sleeps only when the denial list is exactly
+  `[RESET_TIME_NOT_REACHED]`. **Full measurement:**
+  `docs/decisions/2026-08-22-claude-quota-reset-evidence-measurement.md`.
+  **Scope:** `agent/internal/claude-result-envelope.ts`.
 - **L-V3-08-2 — an unattended resume that runs out of step budget leaves a task
   no unattended run can pick up again.** The permission to keep driving after a
   resume is local to one `runTask` call, deliberately. So a resume that reaches
