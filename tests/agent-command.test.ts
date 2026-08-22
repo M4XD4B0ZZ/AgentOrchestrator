@@ -14,15 +14,17 @@
  * delivers on the channel they read from.
  */
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
 import {
   AGENT_COMMAND_MAX_STDERR_BYTES,
-  AGENT_COMMAND_MAX_STDOUT_BYTES,
   AGENT_COMMAND_TIMEOUT_MS,
+  CLAUDE_WRITER_MAX_STDOUT_BYTES,
+  CODEX_REVIEWER_MAX_STDOUT_BYTES,
+  maxStdoutBytesFor,
   toAgentCommandResult,
 } from '../src/agent/agent-command.js';
 import { probeEnvAllowlist } from '../src/auth/env-guard.js';
@@ -362,13 +364,79 @@ describe('the budgets an agent run is given', () => {
   it('bounds wall clock and output', () => {
     expect(Number.isFinite(AGENT_COMMAND_TIMEOUT_MS)).toBe(true);
     expect(AGENT_COMMAND_TIMEOUT_MS).toBeGreaterThan(0);
-    expect(Number.isFinite(AGENT_COMMAND_MAX_STDOUT_BYTES)).toBe(true);
-    expect(AGENT_COMMAND_MAX_STDOUT_BYTES).toBeGreaterThan(0);
+    expect(Number.isFinite(CLAUDE_WRITER_MAX_STDOUT_BYTES)).toBe(true);
+    expect(Number.isFinite(CODEX_REVIEWER_MAX_STDOUT_BYTES)).toBe(true);
     expect(Number.isFinite(AGENT_COMMAND_MAX_STDERR_BYTES)).toBe(true);
     expect(AGENT_COMMAND_MAX_STDERR_BYTES).toBeGreaterThan(0);
-    // V3-11: stdout carries the whole transcript now, stderr does not. The two
-    // budgets are separate so that raising one cannot quietly raise the other.
-    expect(AGENT_COMMAND_MAX_STDOUT_BYTES).toBeGreaterThan(AGENT_COMMAND_MAX_STDERR_BYTES);
+  });
+
+  /**
+   * The exact figures, because "finite and positive" is not a budget.
+   *
+   * A review of the merged slice raised both named mutants against the old
+   * shape of this case and neither died: setting the stdout budget to
+   * `8_388_609` satisfied finite, positive and greater-than-stderr, and so did
+   * swapping the two constants at the wiring site. A budget that only has to be
+   * bigger than another budget is not pinned.
+   */
+  it('pins each stdout budget to its figure', () => {
+    expect(CLAUDE_WRITER_MAX_STDOUT_BYTES).toBe(67_108_864);
+    expect(CODEX_REVIEWER_MAX_STDOUT_BYTES).toBe(8_388_608);
+    expect(AGENT_COMMAND_MAX_STDERR_BYTES).toBe(8_388_608);
+  });
+
+  /**
+   * The two agents do **not** share a stdout budget, and that is a control
+   * boundary rather than a tuning detail.
+   *
+   * V3-11 raised one shared constant for the Claude writer's new `stream-json`
+   * transcript, and the Codex reviewer's reading window went up eightfold with
+   * it. That moved when a human is required: a `codex exec --json` transcript
+   * between 8 and 64 MiB used to exceed the budget and become
+   * `AGENT_PROCESS_UNAVAILABLE` — a human read the review — and afterwards it
+   * was read in full and could advance a task unattended. Nothing argued for
+   * that, so this case exists to make the next raise argue for itself.
+   */
+  it('gives the reviewer a smaller stdout budget than the writer, by agent', () => {
+    expect(maxStdoutBytesFor('claude')).toBe(CLAUDE_WRITER_MAX_STDOUT_BYTES);
+    expect(maxStdoutBytesFor('codex')).toBe(CODEX_REVIEWER_MAX_STDOUT_BYTES);
+    expect(maxStdoutBytesFor('codex')).toBeLessThan(maxStdoutBytesFor('claude'));
+  });
+
+  /**
+   * The size that separates them, stated as the thing it decides.
+   *
+   * A 16 MiB transcript is ordinary for a writing pass and over the reviewer's
+   * ceiling. Asserting it here rather than only asserting the constants is what
+   * makes the *consequence* fail if someone equalises the two again.
+   */
+  it('puts a 16 MiB transcript within the writer and beyond the reviewer', () => {
+    const sixteenMiB = 16 * 1024 * 1024;
+    expect(sixteenMiB).toBeLessThan(maxStdoutBytesFor('claude'));
+    expect(sixteenMiB).toBeGreaterThan(maxStdoutBytesFor('codex'));
+  });
+
+  /**
+   * The wiring, read from the source.
+   *
+   * `runAgentCommand` calls the real `runCommand`, which is imported rather
+   * than injected, so no in-suite case can drive the wiring without starting a
+   * real agent — and this suite starts none. That is stated plainly because a
+   * source assertion is weaker than a behavioural one: what it pins is that the
+   * per-agent function reaches the stdout budget and the shared stderr constant
+   * reaches stderr, which is exactly the mutant (swap the two) that the old
+   * constants-only case could not see.
+   */
+  it('wires the per-agent stdout budget to stdout and the shared one to stderr', () => {
+    const source = readFileSync(
+      new URL('../src/agent/agent-command.ts', import.meta.url),
+      'utf8',
+    );
+    expect(source).toMatch(/maxStdoutBytes:\s*maxStdoutBytesFor\(agent\)/);
+    expect(source).toMatch(/maxStderrBytes:\s*AGENT_COMMAND_MAX_STDERR_BYTES/);
+    // And nowhere is a single constant handed to both.
+    expect(source).not.toMatch(/maxStdoutBytes:\s*AGENT_COMMAND_MAX_STDERR_BYTES/);
+    expect(source).not.toMatch(/maxStderrBytes:\s*maxStdoutBytesFor/);
   });
 
   it('starts each agent with the profile root it needs and no credential', () => {

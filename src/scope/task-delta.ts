@@ -381,16 +381,40 @@ export async function observeTaskDelta(
     '--name-status',
     '--no-renames',
     '--no-color',
-    // Restates the Git default, so it changes nothing in an ordinarily
-    // configured repository. What it removes is the observed repository's
-    // ability to change it: `diff.ignoreSubmodules` or a `.gitmodules`
-    // `ignore = all` hides a moved submodule pointer from this diff, and a
-    // modification the scope gate cannot see is one it cannot refuse. Added
-    // with the matching flag on the two `status` observers in V3-11, because
-    // hardening the cleanliness question alone would have been worse than
-    // hardening neither: a change invisible here but visible there would be
-    // committed by the settlement rather than blocked by the gate.
-    '--ignore-submodules=none',
+    // ── `untracked`, and why not `none` and not `dirty` ────────────────────
+    //
+    // This exists to stop the observed repository answering the scope question
+    // on AO's behalf: `diff.ignoreSubmodules` or a `.gitmodules`
+    // `ignore = all` hides a moved submodule pointer, and a modification the
+    // scope gate cannot see is one it cannot refuse. It goes in alongside the
+    // matching flag on the cleanliness observers, because hardening one alone
+    // is worse than hardening neither — a change invisible here and visible
+    // there gets *committed* by the settlement rather than blocked by the gate.
+    //
+    // The value is `untracked` because that is the measured `git diff` default,
+    // and V3-11 shipped `none` on the false premise that `none` was. It is not:
+    // measured on git 2.55.0.windows.3 against a populated submodule, with no
+    // ignore configuration at all,
+    //
+    //   modification            default    untracked   dirty    none
+    //   gitlink moved              M          M          M        M
+    //   tracked file changed       M          M          —        M
+    //   untracked file only        —          —          —        M
+    //
+    // so `none` newly reports a submodule carrying nothing but build output as
+    // a modified path. That is not a near miss: `classifyPath` answers
+    // `OUTSIDE_ALLOWED`, the assessment is `VIOLATION`, and on the quota path
+    // the settlement discards the reset instant and parks the task — an
+    // accusation about work no writer did. The producer is ordinary: the target
+    // repository's own verification command running `submodule update --init`
+    // and a build. `dirty` avoids that too, and is rejected for the column
+    // above: it stops seeing a tracked file changed inside a submodule, which
+    // the default *does* see, so it would trade one blind spot for another.
+    //
+    // Under a hostile `ignore = all` the default column collapses to `—` in
+    // every row and `untracked` still answers `M` in the first two. That is the
+    // whole of the hardening, and it costs no false positive.
+    '--ignore-submodules=untracked',
     '-z',
     '--end-of-options',
     basePinnedCommit,

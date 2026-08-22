@@ -119,7 +119,9 @@ import {
  *
  * The cost is paid in `agent-command.ts`: stdout is now a transcript rather
  * than one object, so the byte budget had to be sized for one. See
- * `AGENT_COMMAND_MAX_STDOUT_BYTES`.
+ * `CLAUDE_WRITER_MAX_STDOUT_BYTES` — the writer's own constant, and only the
+ * writer's. V3-11 raised a *shared* one and moved the Codex reviewer's
+ * boundary with it, which the remediation undid.
  *
  * ── `--permission-mode acceptEdits`, and why its absence was a defect ───────
  *
@@ -331,13 +333,24 @@ export async function runClaudeWriter(
 
   const result = await run('claude', CLAUDE_WRITER_ARGS, request.worktreePath, request.payload);
   const process = agentProcessEvidence(result);
-  // The excerpt is a redacted *prefix*, and since V3-11 the first four
-  // kilobytes of stdout are the `init` message rather than anything about how
+  // The excerpt is a redacted *prefix*, and since V3-11 the first four thousand
+  // characters of stdout are the `init` message rather than anything about how
   // the run ended. So the terminal `result` line is excerpted where the stream
   // has one — which is what an operator saw before the migration — and the raw
-  // stream where it does not, because a stream with no terminator is one whose
-  // head is the evidence. Diagnostics only: nothing below reads this, and the
-  // classification runs on the whole stream either way.
+  // stream where it does not.
+  //
+  // The fallback used to be justified as "the right answer for a cut stream:
+  // there, the head *is* the evidence". That is **false** and the review
+  // measured why: `toAgentCommandResult` folds `outputTruncated` into
+  // `unavailable()`, which hard-codes `stdout: ''`, so a cut stream arrives here
+  // with no bytes at all and gets an empty excerpt. The cases that really take
+  // the fallback are *complete* streams with no terminator — reachable as
+  // `AGENT_NONZERO_EXIT`, and equally as `AGENT_RESULT_MALFORMED` when a
+  // trailing message follows the `result` on an exit-0 run — and for those the
+  // head is the wrong end. Carried as L-V3-11-4.
+  //
+  // Diagnostics only: nothing below reads this, and the classification runs on
+  // the whole stream either way.
   const diagnostics = agentDiagnostics({
     stdout: diagnosticResultLine(result.stdout) ?? result.stdout,
     stderr: result.stderr,

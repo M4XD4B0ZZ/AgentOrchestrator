@@ -84,28 +84,67 @@
  * position and the whole stream is `UNRECOGNISED` — the same answer as an
  * empty one.
  *
- * That is why an unparseable line elsewhere is *skipped* rather than fatal, as
- * in `codex-review-transcript.ts`, whose `turn.completed` plays the same role.
- * The CLI is entitled to emit message kinds this reader has never seen, and
- * refusing them would break the writer on the next release for no safety
- * benefit. Completeness is not inferred from the lines; it is asserted by the
- * last of them.
+ * Completeness is not inferred from the lines; it is asserted by the last of
+ * them. Note what that argument does and does not license. It licenses
+ * tolerating message *kinds* this reader has never seen — the CLI is entitled
+ * to add them, refusing them would break the writer on the next release for no
+ * safety benefit, and `partitionStreamEvents` drops them one layer down. It was
+ * also used, in the merged slice, to license tolerating lines that are not JSON
+ * **at all**, and those are not the same permission: an unknown kind is still a
+ * JSON object. See the next section.
  *
- * ── The position is what replaced "stdout *is* the envelope" ───────────────
+ * ── The whole document is still the envelope ───────────────────────────────
  *
- * The whole-document reader required the entire trimmed stdout to be the
+ * The whole-document reader required the entire trimmed stdout to parse as the
  * envelope, so a success envelope *quoted inside* a larger document — this
  * repository's own reviewer reading this repository's own tests is an ordinary
  * event, not an attack scenario — could never be read as a verdict. Scanning
- * lines gives that guarantee up, and the terminator's position is what buys it
- * back: prose wrapped around a stream does not end on the `result` line, so it
- * is refused exactly as before. `tests/claude-writer.test.ts` keeps the case.
+ * lines relaxes *where* the envelope's parts may sit; it does not relax what
+ * stdout may contain. Every non-empty line must parse as a JSON object, so
+ * prose on either side of a stream, or between two of its lines, is refused
+ * the way the whole-document reader refused it.
  *
- * Under the production vector the transport is the CLI's own JSONL writer and
- * nothing else — the writer holds `Read Edit Write Glob Grep`, so it has no
- * shell with which to print anything, and `--setting-sources ''` leaves no
- * hook that could. This rule does not depend on that being true; it is what
- * makes the reader correct even when it is not.
+ * V3-11 shipped without that rule and constrained the terminator's *position*
+ * alone, which says nothing about what came before it. Measured against that
+ * build: `"note: replaying capture\n"` in front of a 429 stream read
+ * `USAGE_LIMIT` and handed out a reset instant, and a junk line *between* two
+ * message lines did the same. Restoring the document rule closed both.
+ *
+ * ── The rule does not assume a clean transport; it survives a dirty one ─────
+ *
+ * The chain that writes this stdout is not the CLI alone, and the sentence
+ * that used to stand here said it was. Measured: `resolveOnPath('claude', …)`
+ * under the production env returns `%APPDATA%\npm\claude.cmd` *ahead* of the
+ * WinGet `claude.exe`, and `planSpawn` runs any `.cmd` through
+ * `cmd.exe /d /s /c` (`doctor/exec.ts`). So the pipe this reader is handed is
+ * shared by the launch helper, `cmd.exe`, an npm shim this repository does not
+ * write, and the binary. "The writer has no shell" was never true of the
+ * launch, only of the writer's own tool list.
+ *
+ * What the rule buys is bounded, and saying it exactly matters more than the
+ * rule: **every byte of stdout is accounted for by a grammar this reader
+ * knows.** It is *not* an authenticity boundary. A co-writer able to emit one
+ * well-formed `rate_limit_event` line still supplies the instant that
+ * authorises a relaunch, and `readReportedResetAt` prefers the newest —
+ * measured, and unchanged by this rule. Nothing above may read "the document
+ * parsed" as "the CLI wrote it".
+ *
+ * ── Unknown message kinds cost nothing, and never needed a junk line ───────
+ *
+ * A kind this reader has never seen is still a JSON object, and
+ * `partitionStreamEvents` drops it at layer 2. `system/thinking_tokens` and
+ * `system/permission_denied` are named nowhere in this module, arrived on real
+ * captures taken through `runAgentCommand` with `CLAUDE_WRITER_ARGS`, and were
+ * read as ordinary transcript. Forward compatibility is served there, in full.
+ * Refusing a line that is not JSON at all takes none of it away: those two
+ * captures carry 19 non-empty lines and not one of them is anything but a JSON
+ * object, and the four-line capture recorded in `docs/decisions/` agrees.
+ *
+ * What that is not is a proof. No capture covers a crash, an auto-update
+ * notice, or a long pass with hundreds of tool calls, and the shim self-updates
+ * in place. One real run whose stdout ends on a genuine `result` line and
+ * carries a line that is not JSON would make this rule a false refusal on a
+ * healthy run, and would be the reason to revisit it — see **L-V3-11-7**.
  *
  * Two further guards stand *above* this module and neither may be removed on
  * the strength of the rule above: `runCommand` reports a stream that hit its
@@ -190,6 +229,23 @@ const RATE_LIMIT_STATUS = 429;
 const REJECTED_STATUS = 'rejected';
 
 /**
+ * The `rate_limit_info.status` values that are known **not** to describe the
+ * window that refused, and may therefore be walked past.
+ *
+ * Listed rather than inferred from "anything that is not `rejected`", because
+ * those are not the same statement. "This event is about a window that was
+ * still open" is knowledge; "this event is not one of the two spellings I know"
+ * is ignorance, and ignorance about the *newest* event cannot license reading an
+ * older one — that is the fall-back this module says it does not have. An
+ * unrecognised status therefore stops the search at `null`, and the cost of a
+ * future vocabulary addition is a human decision on a quota block, which is the
+ * direction this repository fails in.
+ */
+const NOT_A_REFUSAL_STATUSES: ReadonlySet<unknown> = Object.freeze(
+  new Set<unknown>(['allowed', 'allowed_warning']),
+);
+
+/**
  * The largest epoch-seconds value this build can carry into a `TaskState`.
  *
  * `9999-12-31T23:59:59Z`, and the year is the reason. The obvious bound is
@@ -238,8 +294,20 @@ export interface ClaudeStreamReading {
   /**
    * What the agent was refused, when the document said so.
    *
-   * Read on every path that produces a reading, including `UNRECOGNISED`,
-   * where it is empty because there is no document to read it from.
+   * Empty on every `UNRECOGNISED` reading, and the reason differs by arm.
+   *
+   * On the **completeness** arms — no line parsed, a line that is not JSON, no
+   * terminator, more than one `result`, or a `result` that is not last — it is
+   * never read, because there is no document this reader is holding. On the
+   * **classification** arms, where a single terminator was read and the verdict
+   * is still `UNRECOGNISED` — a contradictory envelope, an unknown subtype, a
+   * non-boolean `is_error` — the field *was* computed and is dropped
+   * deliberately: a document this reader could not classify is not one whose
+   * other fields it is entitled to report as observations.
+   *
+   * The distinction is written out because two earlier versions of this comment
+   * got it wrong in opposite directions — the first called all of it absent, the
+   * second called all of it deliberate.
    */
   readonly permissionDenials: PermissionDenialObservation;
 }
@@ -267,6 +335,16 @@ interface ClaudeStreamTransport {
    * text that is not an object.
    */
   readonly endsWithObject: boolean;
+  /**
+   * Whether **every** non-empty line was one of them.
+   *
+   * Separate from `endsWithObject` because the two answer different questions:
+   * one is about where the document ends, the other about whether the whole of
+   * it came from a writer whose grammar this reader knows. A stream can end on
+   * a perfect `result` line and still carry bytes this reader cannot account
+   * for, and that is not a document it may read a verdict out of.
+   */
+  readonly everyLineIsObject: boolean;
 }
 
 /**
@@ -284,6 +362,7 @@ interface ClaudeStreamTransport {
 function readStreamObjects(stdout: string): ClaudeStreamTransport {
   const objects: Record<string, unknown>[] = [];
   let endsWithObject = false;
+  let everyLineIsObject = true;
 
   for (const line of stdout.split('\n')) {
     const text = line.trim();
@@ -297,10 +376,13 @@ function readStreamObjects(stdout: string): ClaudeStreamTransport {
     // unpinned: a stream ending in a JSON *array* still looked complete,
     // because the flag was left true by the `result` line before it.
     endsWithObject = parsed !== null;
+    // Latched, never reassigned: one line this reader could not account for is
+    // a fact about the whole document, and a later good line does not undo it.
+    if (parsed === null) everyLineIsObject = false;
     if (parsed !== null) objects.push(parsed);
   }
 
-  return { objects, endsWithObject };
+  return { objects, endsWithObject, everyLineIsObject };
 }
 
 /** One line as a JSON object, or `null` for anything else. */
@@ -320,8 +402,18 @@ function parseObjectLine(text: string): Record<string, unknown> | null {
 interface ClaudeStreamEvents {
   /** Every `type: "result"` message. Plural so the count can be refused. */
   readonly results: readonly Record<string, unknown>[];
-  /** Every `type: "rate_limit_event"` message's `rate_limit_info`, in order. */
-  readonly rateLimits: readonly Record<string, unknown>[];
+  /**
+   * Every `type: "rate_limit_event"` message's `rate_limit_info`, in order,
+   * with `null` where the message carried one this reader could not read.
+   *
+   * The `null` is the point. Dropping such an event instead made the *next*
+   * layer's supersession rule read the wrong event: a newer refusal whose
+   * payload was a string, absent, or an array vanished here, and an older,
+   * readable refusal decided — the fall-back {@link readReportedResetAt} says
+   * it does not have. Presence is a fact about the run; readability is a fact
+   * about one message, and layer 2 may not collapse the first into the second.
+   */
+  readonly rateLimits: readonly (Record<string, unknown> | null)[];
 }
 
 /**
@@ -332,13 +424,15 @@ interface ClaudeStreamEvents {
  * about how the run ended.
  *
  * A `rate_limit_event` whose `rate_limit_info` is missing or is not an object
- * contributes nothing, because there is nothing in it to read.
+ * is carried as `null` rather than dropped. There is nothing in it to read, and
+ * that is a different statement from there being nothing there — the layer
+ * above needs the second one to know that a newer event superseded an older.
  */
 function partitionStreamEvents(
   objects: readonly Record<string, unknown>[],
 ): ClaudeStreamEvents {
   const results: Record<string, unknown>[] = [];
-  const rateLimits: Record<string, unknown>[] = [];
+  const rateLimits: (Record<string, unknown> | null)[] = [];
 
   for (const object of objects) {
     const type = object['type'];
@@ -348,7 +442,10 @@ function partitionStreamEvents(
     }
     if (type !== 'rate_limit_event') continue;
     const info = object['rate_limit_info'];
-    if (isPlainObject(info)) rateLimits.push(info);
+    // Recorded either way. `null` says "an event arrived and this reader could
+    // not read it", which is the only thing that stops the layer above from
+    // treating an older event as still current.
+    rateLimits.push(isPlainObject(info) ? info : null);
   }
 
   return { results, rateLimits };
@@ -357,27 +454,77 @@ function partitionStreamEvents(
 /**
  * The reset instant the CLI reported for the window that **refused**, or `null`.
  *
- * The last such event wins, because it is the CLI's most recent statement
- * about the window, and it is the value the CLI's own `retry-after`
- * derivation would have used at that moment. An earlier event naming a later
- * instant is therefore superseded rather than preferred — a resume granted too
- * early meets the refusal again and re-blocks, which costs an invocation; one
- * granted too late on a stale value costs an operator.
+ * The scan runs backwards and stops at the newest event that is **not** a
+ * known non-refusal. That event decides — including when it turns out to be
+ * unreadable, and including when this reader cannot tell what it is. It is the
+ * CLI's most recent statement about the window that refused, and it is the
+ * value the CLI's own `retry-after` derivation would have used at that moment;
+ * an earlier event naming a later instant is superseded rather than preferred —
+ * a resume granted too early meets the refusal again and re-blocks, which costs
+ * an invocation, while one granted too late on a stale value costs an operator.
  *
- * Every rejection below returns `null`, which is `RESET_TIME_MISSING`, which
- * is a human decision. There is no branch here that guesses.
+ * Only {@link NOT_A_REFUSAL_STATUSES} may be walked past, and that is the whole
+ * of the rule. Everything else — an unreadable payload, an unrecognised status,
+ * a `resetsAt` that is not a plausible instant — returns `null`, which is
+ * `RESET_TIME_MISSING`, which is a human decision. There is no branch here that
+ * guesses and none that falls back to an older statement, and both halves of
+ * that sentence were false in the merged slice: the first was fixed by making
+ * every rejection arm a `return`, the second only by the two guards above,
+ * because the fall-back had moved up into layer 2 where it was invisible from
+ * here.
  */
-function readReportedResetAt(rateLimits: readonly Record<string, unknown>[]): string | null {
+function readReportedResetAt(
+  rateLimits: readonly (Record<string, unknown> | null)[],
+): string | null {
   for (let index = rateLimits.length - 1; index >= 0; index -= 1) {
     const info = rateLimits[index];
-    if (info === undefined || info['status'] !== REJECTED_STATUS) continue;
 
+    // An event arrived and layer 2 could not read its payload. The search stops
+    // here: whether it was a refusal is exactly what is unknown, so no older
+    // event can be shown to be the CLI's current statement. Reading one would
+    // be the fall-back this function's contract denies — and it was reachable,
+    // measured, in five shapes (payload a string, absent, `null`, an array; an
+    // unrecognised status), every one of which returned a 2023 instant from a
+    // superseded refusal.
+    //
+    // A sixth was measured and is deliberately **not** closed: a message whose
+    // `type` is misspelled is not a `rate_limit_event` at all, it is a kind this
+    // reader has never seen, and layer 2 drops it as transcript. Refusing every
+    // unknown message kind is the forward-compatibility cost this module
+    // declines to pay — two such kinds arrive on ordinary healthy runs. So a CLI
+    // that *renamed* the event would leave AO reading the newest event it can
+    // still see, which is the older refusal. Carried, not fixed: **L-V3-11-8**.
+    if (info === undefined || info === null) return null;
+
+    // Known not to be about the window that refused, so it may be walked past:
+    // an `allowed` event emitted after the rejection is about a different
+    // window. Only the two spellings this reader knows earn that.
+    if (NOT_A_REFUSAL_STATUSES.has(info['status'])) continue;
+
+    // Neither a known refusal nor a known non-refusal. Same argument as an
+    // unreadable payload, and the same answer.
+    if (info['status'] !== REJECTED_STATUS) return null;
+
+    // From here the search is **over**, whatever this event turns out to say.
+    // The newest refusal is the CLI's current statement about the window that
+    // refused, and an older one it superseded is not a fallback — reading it
+    // would be answering a question the CLI has since revised. Every exit below
+    // is therefore `return`, never `continue`.
+    //
+    // This was `continue`, and it made the function contradict its own contract:
+    // with a readable older refusal and an unreadable newer one it returned the
+    // older instant, which is exactly the "falls back" arm both this docstring
+    // and the README say does not exist. Found by an independent review of the
+    // slice that introduced it; the reachable harm is small — the value is
+    // still a real CLI statement about a real refusal in the same run, so it can
+    // only be too early, which costs an invocation — but "unreadable" must
+    // reduce AO to a human decision, not to a superseded answer.
     const resetsAt = info['resetsAt'];
     // `Number.isInteger` rejects a string, a float, `NaN` and `Infinity` in one
     // predicate; the CLI's schema says integer, and a value that is not one is
     // not this field however it is spelled.
-    if (typeof resetsAt !== 'number' || !Number.isInteger(resetsAt)) continue;
-    if (resetsAt <= 0 || resetsAt > MAX_EPOCH_SECONDS) continue;
+    if (typeof resetsAt !== 'number' || !Number.isInteger(resetsAt)) return null;
+    if (resetsAt <= 0 || resetsAt > MAX_EPOCH_SECONDS) return null;
 
     return new Date(resetsAt * 1000).toISOString();
   }
@@ -419,15 +566,20 @@ function readPermissionDenials(value: unknown): PermissionDenialObservation {
  * `agentDiagnostics` keeps a redacted *prefix* of stdout for a human reading a
  * failure. Under `--output-format json` that prefix was the whole envelope, so
  * an operator saw what the agent actually said. Under `stream-json` the first
- * four kilobytes are the `init` message — a listing of tools, skills and slash
- * commands — and the run's outcome is at the far end, cut off. That is a
- * regression in exactly the two cases the excerpt exists for,
+ * four *thousand characters* are the `init` message — a listing of tools, skills
+ * and slash commands — and the run's outcome is at the far end, cut off. That is
+ * a regression in exactly the two cases the excerpt exists for,
  * `AGENT_RESULT_MALFORMED` and `AGENT_NONZERO_EXIT`.
  *
  * So the writer excerpts *this* instead when it is available, which restores
- * the pre-V3-11 view, and falls back to the whole stream when it is not —
- * which is the right answer for a truncated stream, where the head is the
- * evidence.
+ * the pre-V3-11 view, and falls back to the whole stream when it is not.
+ *
+ * The fallback used to be justified as "the right answer for a truncated
+ * stream, where the head is the evidence". That is **false**: a truncated
+ * stream never arrives here with bytes, because `toAgentCommandResult` folds
+ * `outputTruncated` into `unavailable()`, which hard-codes `stdout: ''`. The
+ * cases that really take it are *complete* streams with no terminator, and for
+ * those the head is the wrong end — **L-V3-11-4**.
  *
  * It is a separate function returning raw text rather than a field on
  * {@link ClaudeStreamReading}, because everything on that interface is a
@@ -457,8 +609,13 @@ export function diagnosticResultLine(stdout: string): string | null {
  * and it is attached on the `USAGE_LIMIT` branch alone.
  */
 export function readClaudeResultStream(stdout: string): ClaudeStreamReading {
-  const { objects, endsWithObject } = readStreamObjects(stdout);
+  const { objects, endsWithObject, everyLineIsObject } = readStreamObjects(stdout);
   const { results, rateLimits } = partitionStreamEvents(objects);
+
+  // Asked first, and about the whole document rather than its end: bytes this
+  // reader cannot account for mean the transport is not the one it believes it
+  // is holding, and nothing after this point is entitled to a verdict from it.
+  if (!everyLineIsObject) return UNRECOGNISED;
 
   // The terminator, and the completeness proof, in three parts that are not
   // interchangeable. Zero results means the stream never reached its end; more

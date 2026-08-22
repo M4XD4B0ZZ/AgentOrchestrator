@@ -113,9 +113,10 @@ import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js'
 import { leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
 import { commitTaskWork, type CommitTaskWorkResult } from '../worktree/commit-task-work.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
-import { observeRuntime, WORKTREE_CLEANLINESS_ARGS } from '../state/observe-runtime.js';
+import { observeRuntime } from '../state/observe-runtime.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
 import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
+import { observeWorktreeCleanliness } from '../worktree/worktree-cleanliness.js';
 import { runVerification, type VerificationReport } from '../verify/run-verification.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import {
@@ -540,14 +541,15 @@ async function observeSettledWorktree(
     '--end-of-options',
     'HEAD',
   ]);
-  // The same array `state/observe-runtime.ts` uses, imported rather than
-  // repeated. The comment above says these two must ask the question in the
-  // same words; since V3-11 there is only one set of words, so they cannot
-  // drift and no test has to assert that they have not.
-  const status = await git(worktreePath, WORKTREE_CLEANLINESS_ARGS);
+  // The same function `state/observe-runtime.ts` calls, not a second copy of
+  // the question. The comment above says these must ask it in the same words;
+  // since the remediation they ask it through one caller, so they cannot drift
+  // — and that now covers the gitlink probe as well as the argument vector,
+  // which matters more, because a second observer that asked only `git status`
+  // would certify a tree this one calls dirty.
   return Object.freeze({
     observedCommit: head.outcome === 'OK' && head.stdout !== '' ? head.stdout : null,
-    worktreeClean: status.outcome === 'OK' ? status.stdout === '' : null,
+    worktreeClean: await observeWorktreeCleanliness(git, worktreePath),
   });
 }
 
