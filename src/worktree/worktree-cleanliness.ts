@@ -36,11 +36,19 @@
  *
  * ── What this probe is, and firmly is not ──────────────────────────────────
  *
- * **Three Git calls for any ordinary repository**, and a bound rather than a
- * promise beyond that: the cleanliness `status`, one `submodule status`, and the
- * `ls-files` confirmation — which is one call while the pathspec fits on a
- * command line and one per {@link ARGUMENT_BUDGET_CHARS} of pathspec after that,
- * plus at most one whole-index fallback.
+ * The cost, measured rather than asserted, because the two previous versions of
+ * this sentence were both wrong:
+ *
+ *   dirty by `git status`                     1 call   (the probe never runs)
+ *   no submodules                             2
+ *   every gitlink populated                   2        (the `-` filter empties
+ *                                                       the set before `ls-files`)
+ *   any unpopulated gitlink                   3
+ *   more pathspec than the argument budget    3 + one per extra chunk
+ *   either source unusable                    + 1 whole-index fallback
+ *
+ * So: **two calls for an ordinary repository, three when a gitlink is
+ * unpopulated**, and a bound rather than a promise past that.
  *
  * The count is spelled out here because both previous shapes of it were wrong.
  * The first looped the confirmation, and a review measured thirty gitlinks
@@ -80,8 +88,10 @@
  * without its premise is the error the sibling comment in `git-command.ts` was
  * corrected for. An entry costs `51 + len(path)` bytes: measured, this
  * repository's own 296 tracked files take 24,478 bytes — 82.7 B/entry — so its
- * cap falls at about **12,700** files; a fixture with shorter paths reached it
- * at 7,003.
+ * cap falls at about **12,700** files. A fixture whose paths are four times
+ * *longer* (179.9 B/entry, a 129-character mean) reached it at 7,003 — this
+ * sentence first said "shorter", which is the inversion the byte figure exists
+ * to make impossible to state.
  *
  * `git submodule status` prints one line per submodule, so it is the primary.
  * The first version of this module said it "reads the **index**, not
@@ -124,18 +134,26 @@
  * (**L-V3-10-4**), and two shapes a later review measured against this module
  * itself:
  *
- *  - a writer that fabricates a **well-formed** `.git` inside the gitlink —
- *    `git init` there plus a `.git/info/exclude` of `*`. Git then treats the
- *    directory as a real, clean checkout and reports nothing, and this probe
- *    defers because the directory **contains `.git`**, which is the rule above.
- *    Note which signal that is: not the `submodule status` flag. A review found
- *    both readings — the flag is a space (initialised) when `.git/modules/<name>`
- *    exists and `-` when it does not — so anyone closing this by watching the
- *    flag would chase the wrong one. Measured `true` over payload still on disk,
- *    and measured `true` for the same fixture *before* this module existed, so
- *    it is a carried limit rather than a regression (**L-V3-11-13**). The
- *    destructive half is closed by Git's own refusal to remove a worktree with a
- *    populated gitlink; the authority half is not;
+ *  - a writer that fabricates a **well-formed** `.git` inside the gitlink. Git
+ *    then treats the directory as a real, clean checkout and reports nothing,
+ *    and the probe answers `true` over payload still on disk. Measured `true`
+ *    for the same fixture *before* this module existed, so it is a carried limit
+ *    rather than a regression (**L-V3-11-13**). Its destructive half is closed by
+ *    Git's own refusal to remove a worktree holding a populated gitlink — five
+ *    fabricated shapes were driven to `git worktree remove` and every one either
+ *    made `status` exit 128 or was refused at 128 with the payload intact. The
+ *    authority half is not closed.
+ *
+ *    **Two things about it were stated wrongly here and are worth stating
+ *    right.** First, `git init` is not needed: a hand-placed `.git` *file*
+ *    containing `gitdir: …/.git/modules/<name>` — the reach of a writer holding
+ *    only `Write` — produces the same reading. Second, which signal makes the
+ *    probe defer depends on the shape, and this comment has claimed each of them
+ *    exclusively. Measured: the `submodule status` flag is a space when the
+ *    gitdir resolves *in this worktree* and `-` when it does not, so on some
+ *    fabricated shapes the `-`-only filter drops the line before the directory
+ *    is ever read, and on others the `.git` rule above is what defers. Anyone
+ *    closing this by watching one of the two will miss the other;
  *  - a gitlink nested inside a **populated** submodule. `submodule status` is
  *    not recursive, and recursion into arbitrary directories is explicitly
  *    outside this probe's remit (**L-V3-11-14**).

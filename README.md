@@ -1881,13 +1881,20 @@ Preparation: `TASK_ID_INVALID`, `REPOSITORY_ROOT_UNSUITABLE`,
 `WORKTREE_PARENT_UNUSABLE`, `WORKTREE_CREATE_FAILED`,
 `WORKTREE_VERIFICATION_FAILED`, `WORKTREE_ROLLBACK_INCOMPLETE`.
 
-Removal: the five identity codes, plus `GIT_UNAVAILABLE`, `WORKTREE_NOT_OWNED`,
-`WORKTREE_DIRTY`, `TASK_BRANCH_HAS_UNMERGED_WORK`, `BASE_BRANCH_NOT_FOUND`,
-`WORKTREE_REMOVE_FAILED`. `BASE_BRANCH_NOT_FOUND` carries the same meaning it
-does during preparation — a code means one thing wherever it is read.
-Success is `WORKSPACE_REMOVED`, or `WORKSPACE_PARTIALLY_REMOVED` when the
-worktree went and the owned branch did not — reported as its own outcome so a
-leftover branch is never invisible.
+Removal: the five identity codes, plus `GIT_UNAVAILABLE`,
+`WORKTREE_CLEANLINESS_UNKNOWN`, `EXECUTION_LEASE_NOT_HELD`,
+`WORKTREE_NOT_OWNED`, `WORKTREE_DIRTY`, `TASK_BRANCH_HAS_UNMERGED_WORK`,
+`BASE_BRANCH_NOT_FOUND`, `WORKTREE_REMOVE_FAILED`. `BASE_BRANCH_NOT_FOUND`
+carries the same meaning it does during preparation — a code means one thing
+wherever it is read. Success is `WORKSPACE_REMOVED`,
+`WORKSPACE_PARTIALLY_REMOVED` when the worktree went and the owned branch did
+not, or `WORKSPACE_REMOVAL_LOST_LEASE` when authority was lost between the two
+destructive commands — each reported as its own outcome so a leftover branch is
+never invisible.
+
+(This list is prose and nothing binds it to the exported array, which is how it
+came to be missing three members at once: two that had been absent since they
+were introduced, and one a later slice added.)
 
 ### The Git seam
 
@@ -3342,10 +3349,10 @@ one blind spot for another.
 
 **`--untracked-files=all` took a far larger output dependency for nothing.** The
 default, `normal`, collapses an untracked *directory* to one entry; `all` prints
-one line per file. All three consumers of this vector test the output only for
-emptiness — two as `stdout === ''`, the effect gate as
-`stdout.replace(/\0/g, '').trim() === ''` — so none of them can tell the two
-apart. But `runGitCommand` caps output at 1 MiB and reports `UNAVAILABLE` past
+one line per file. Both consumers of this vector test the output only for
+emptiness — `observeWorktreeCleanliness` as `stdout !== ''`, the effect gate as
+`stdout.replace(/\0/g, '').trim() === ''` — so neither can tell the two apart.
+(The gate's second call reads no stdout at all; its own comment says so.) But `runGitCommand` caps output at 1 MiB and reports `UNAVAILABLE` past
 it, at which point cleanliness becomes "not established",
 `WORKTREE_CLEANLINESS_UNKNOWN` makes the verdict `UNOBSERVABLE`, and every step
 of the task that owns that worktree stops for an operator. `normal` closes the
@@ -3374,6 +3381,15 @@ would have justified deleting a guard that works.
 `worktree/prepare-workspace.ts` and `worktree/remove-workspace.ts` deliberately
 keep their own `--untracked-files=all`. They ask a different question — "is this
 workspace pristine / is it safe to destroy" — where the enumeration is the point.
+
+**Both halves of that paragraph turned out to be false, and it is left standing
+with this note because the retraction is the more useful record.** Neither gate
+enumerates: two test the output for emptiness and the third only asks whether
+every line starts with `??`, which `normal` answers identically. And
+`remove-workspace.ts` is no longer in the sentence at all — a later round
+measured its blind reading destroying writer output and moved it onto
+`observeWorktreeCleanliness`, which issues no `status` of its own. See
+**L-V3-11-10**, which now carries only the preparation gates.
 
 **And one fail-open arm in the reader.** `readReportedResetAt` walked backwards
 through the rate-limit events and used `continue` when a `rejected` event's
@@ -4505,9 +4521,20 @@ and because the failure mode it describes — a command that cannot start is
   observed repository hid.** `prepare-workspace.ts`'s two call sites ask
   `status --porcelain --untracked-files=all` with **no** `--ignore-submodules`,
   so a committed `.gitmodules` `ignore = all` makes them report a worktree clean
-  while a submodule inside it holds uncommitted work — measured. Both fail
-  closed downstream and neither destroys anything, so they are carried.
-  **Scope:** `worktree/prepare-workspace.ts`.
+  while a submodule inside it holds uncommitted work — measured. Neither
+  destroys anything, so they are carried.
+
+  One of the two is further than it looks, and the first version of this entry
+  did not say so. `verifyWorkspaceMatches` is the **adoption** check: its reading
+  reaches `adopt-workspace.ts`, which records `worktreeClean: true`, which
+  reaches `start-task.ts` as `worktreeCleanAtCheckpoint`. That is a checkpoint
+  claim made from the blind vector. It is **fail-closed** all the same, and
+  measured so: `core/automatic-resume.ts` requires
+  `evidence.worktreeClean === true` *and* `state.worktreeCleanAtCheckpoint ===
+  true`, and the first of those is a fresh reading through the probe. So a stale
+  clean claim cannot grant a resume on its own — but the claim is written, and an
+  entry that stops at "preflight" hides where it goes.
+  **Scope:** `worktree/prepare-workspace.ts`, `worktree/adopt-workspace.ts`.
 
   **The removal gate is no longer in this entry, and the reason is a correction
   worth keeping.** The first version of this residual said the destructive path
@@ -4530,16 +4557,28 @@ and because the failure mode it describes — a command that cannot start is
   `WORKTREE_CLEANLINESS_ARGS` would **not** have helped — that vector is blind to
   the same content; only the gitlink probe sees it.
 - **L-V3-11-13 — a fabricated `.git` inside a gitlink reads as a real
-  checkout.** A writer that creates a *well-formed* `.git` directory inside an
-  unpopulated gitlink — including a `.git/info/exclude` of `*` — makes Git treat
-  the path as an initialised, clean submodule. `git status` then reports nothing
-  and the probe defers to it, exactly as its rule table says it should for a
-  populated gitlink, so the reading is `true` over payload still on disk.
-  Measured, and measured **identically against the pre-probe reader**, so it is a
-  carried limit of the same family as L-V3-10-4 rather than a regression. Closing
-  it means deciding how AO distinguishes a submodule the operator populated from
-  one the writer fabricated, which needs state AO does not currently keep.
-  **Scope:** `worktree/worktree-cleanliness.ts`.
+  checkout.** A writer that puts a well-formed `.git` inside an unpopulated
+  gitlink makes Git treat the path as an initialised, clean submodule; `git
+  status` reports nothing and the probe answers `true` over payload still on
+  disk. Measured, and measured **identically against the pre-probe reader**, so
+  it is a carried limit of the same family as L-V3-10-4 rather than a regression.
+  Closing it means deciding how AO distinguishes a submodule the operator
+  populated from one the writer fabricated, which needs state AO does not keep.
+
+  Two corrections this entry has needed, both from measurement:
+  **`git init` is not required** — a hand-placed `.git` *file* containing
+  `gitdir: …/.git/modules/<name>`, which is the reach of a writer holding only
+  `Write`, produces the same reading, so the limit is wider than "a writer with a
+  shell". And **which signal makes the probe defer depends on the shape**: the
+  `submodule status` flag is a space when the gitdir resolves in this worktree
+  and `-` when it does not, so some fabricated shapes are dropped by the
+  `-`-only filter before any directory is read and others reach the `.git` rule.
+  Earlier wordings claimed each of those exclusively.
+
+  **The destructive half is closed**, and that was tested rather than assumed:
+  five fabricated shapes driven to `git worktree remove` either made `status`
+  exit 128 (probe `null`) or were refused at exit 128 with the payload intact.
+  The authority half is open. **Scope:** `worktree/worktree-cleanliness.ts`.
 - **L-V3-11-15 — the gitlink probe's index fallback has the same 1 MiB cliff the
   remediation removed from the cleanliness vector.** When `git submodule status`
   cannot be used — an embedded repository never mapped in `.gitmodules`, the

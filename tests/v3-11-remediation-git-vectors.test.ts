@@ -1225,3 +1225,77 @@ describe('a rewritten path is not merely caught by the duplicate guard', () => {
     expect(await observeWorktreeCleanliness(runGitCommand, nbsp)).toBe(true);
   });
 });
+
+/* ═════════ 12. The call count, because the comment states one ═════════════ */
+
+/**
+ * The module's headline says "three Git calls for any ordinary repository", and
+ * both previous shapes of that sentence were false — first one call per gitlink,
+ * then one unbounded call. A sentence about cost that nothing checks is how both
+ * shipped.
+ */
+describe('the probe costs what its comment says it costs', () => {
+  /**
+   * A **populated** submodule costs two, not three: the `-`-only filter empties
+   * the path set before the confirmation is reached. The comment first said
+   * "three for any ordinary repository" and this case is what measured it wrong.
+   */
+  it('answers a repository whose submodule is populated in two Git calls', async () => {
+    const root = repo();
+    withVendorSubmodule(root);
+    const asked: string[][] = [];
+    const git: GitRunner = async (cwd, args) => {
+      asked.push([...args]);
+      return await runGitCommand(cwd, args);
+    };
+
+    expect(await observeWorktreeCleanliness(git, root)).toBe(true);
+    expect(asked).toHaveLength(2);
+  });
+
+  /** An **unpopulated** one costs the third call, and only then. */
+  it('answers a repository whose gitlink is unpopulated in three Git calls', async () => {
+    const root = repo();
+    withVendorSubmodule(root);
+    git(root, ['submodule', 'deinit', '--force', 'vendor']);
+    const asked: string[][] = [];
+    const runner: GitRunner = async (cwd, args) => {
+      asked.push([...args]);
+      return await runGitCommand(cwd, args);
+    };
+
+    expect(await observeWorktreeCleanliness(runner, root)).toBe(true);
+    expect(asked).toHaveLength(3);
+  });
+
+  it('answers a repository with no submodule at all in two', async () => {
+    const root = repo();
+    const asked: string[][] = [];
+    const git: GitRunner = async (cwd, args) => {
+      asked.push([...args]);
+      return await runGitCommand(cwd, args);
+    };
+
+    expect(await observeWorktreeCleanliness(git, root)).toBe(true);
+    expect(asked).toHaveLength(2);
+  });
+
+  /**
+   * And it never pays for the probe at all when `git status` already answered:
+   * a dirty tree short-circuits, because the probe can only turn `true` into
+   * `false` and never the other way.
+   */
+  it('does not probe a tree Git already called dirty', async () => {
+    const root = repo();
+    withVendorSubmodule(root);
+    writeRepoFile(root, 'dirty.txt', `x${NEWLINE}`);
+    const asked: string[][] = [];
+    const git: GitRunner = async (cwd, args) => {
+      asked.push([...args]);
+      return await runGitCommand(cwd, args);
+    };
+
+    expect(await observeWorktreeCleanliness(git, root)).toBe(false);
+    expect(asked).toHaveLength(1);
+  });
+});

@@ -473,6 +473,41 @@ describe('J — a workspace holding work is never destroyed', () => {
     expect(readFileSync(planted, 'utf8')).toBe('payload\n');
   });
 
+  /**
+   * The code round five split out, driven to the gate that produces it.
+   *
+   * A removal refused because cleanliness could not be *established* used to
+   * report `GIT_UNAVAILABLE` — "a required Git command could not be completed" —
+   * and an operator would go looking for a broken Git. Here every Git command
+   * succeeds and the probe still cannot answer: the listing names a gitlink the
+   * index does not hold, which is a disagreement this repository does not
+   * resolve by picking a side.
+   *
+   * Driven through an injected runner because that disagreement cannot be
+   * produced with real Git — the two sources agree by construction. The rest of
+   * this file drives the real one.
+   */
+  it('refuses when cleanliness could not be established, and says so', async () => {
+    const repository = await freshRepository();
+    const workspace = await prepared(repository, 'V1-03');
+    const SHA = 'c'.repeat(40);
+    const OK = { outcome: 'OK' as const, stdout: '', stderr: '', exitCode: 0 };
+
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
+      lease: leaseFor(repository),
+      git: async (cwd, args) => {
+        if (args[0] === 'submodule') return { ...OK, stdout: `-${SHA} vendor` };
+        // The index does not hold it: a contradiction, not a failure.
+        if (args[0] === 'ls-files') return OK;
+        return await runGitCommand(cwd, args);
+      },
+    });
+
+    expect(removal.ok).toBe(false);
+    if (!removal.ok) expect(removal.code).toBe('WORKTREE_CLEANLINESS_UNKNOWN');
+    expect(existsSync(workspace.worktreePath)).toBe(true);
+  });
+
   it('refuses a clean worktree whose branch holds unmerged commits', async () => {
     const repository = await freshRepository();
     const workspace = await prepared(repository, 'V1-03');

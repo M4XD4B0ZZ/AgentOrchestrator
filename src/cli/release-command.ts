@@ -85,9 +85,10 @@ export const RELEASE_OUTCOME_SENTENCES: Readonly<Record<ReleaseResult['outcome']
       'Git could not say whether the workspace holds ignored content, so nothing was removed.',
     REMOVE_FAILED:
       'The workspace was not removed, and the reason code says what stopped it: an ownership\n' +
-      '  proof that did not hold, a Git command that could not be completed, or a removal Git\n' +
-      '  itself refused. Nothing was forced. Only the last of those means Git was asked at\n' +
-      '  all, so read the code before concluding the repository is in a strange state.',
+      '  proof that did not hold, a Git command that could not be completed, a state whose\n' +
+      '  cleanliness could not be established, or a removal Git itself refused. Nothing was\n' +
+      '  forced. Only the last of those means Git was asked to remove anything at all, so\n' +
+      '  read the code before concluding the repository is in a strange state.',
   });
 
 const ATTENDANCE_WITHHELD_SENTENCE =

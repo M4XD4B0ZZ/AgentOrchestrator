@@ -57,18 +57,25 @@ export const WORKSPACE_REMOVAL_FAILURE_CODES = [
   /** A Git command could not be run at all, or its argument was refused. */
   'GIT_UNAVAILABLE',
   /**
-   * Whether the worktree is clean could not be **established** — as distinct
-   * from Git failing to run.
+   * Whether the worktree is clean could not be established.
    *
-   * Added because the two were reported as one, and this module argues against
-   * exactly that a few lines below: a removal refused because a directory could
-   * not be listed, or because `git submodule status` and the index disagreed
-   * about a path, was telling an operator "a required Git command could not be
-   * completed" while every Git command had exited 0. The operator then looks for
-   * a broken Git.
+   * Added because a removal refused for a reason that was not a Git failure —
+   * a directory that could not be listed, or `git submodule status` and the
+   * index disagreeing about a path — was telling an operator "a required Git
+   * command could not be completed" while every Git command had exited 0. The
+   * operator then looks for a broken Git.
    *
-   * Both are refusals and both are fail-closed. Only the sentence differs, and a
-   * false sentence about why AO stopped is a defect here.
+   * **It does not mean "and Git ran fine".** A first version of this comment
+   * claimed that distinction and a review measured it false: cleanliness is also
+   * "not established" when the `status` call itself fails, which happens for a
+   * worktree holding a malformed `.git` inside a gitlink. Two of the four ways
+   * to reach `null` *are* Git failing. What this code separates is the
+   * **question** that could not be answered, not the reason it could not be —
+   * and the reason belongs in the probe, not in a removal outcome.
+   *
+   * All of it is a refusal and all of it is fail-closed. Only the sentence an
+   * operator reads differs, and a false sentence about why AO stopped is a
+   * defect here.
    */
   'WORKTREE_CLEANLINESS_UNKNOWN',
   /**
@@ -297,9 +304,11 @@ export async function removeTaskWorkspace(
   // proceeds — on this gate more than any other, because the cost of a wrong
   // clean reading here is deleted work rather than a withheld resume.
   //
-  // `null` gets its own code. It covers a directory that could not be listed and
-  // a listing the index contradicts, neither of which is a Git command failing —
-  // both are reachable with every Git call exiting 0.
+  // `null` gets its own code: the *question* went unanswered. That covers a
+  // directory that could not be listed and a listing the index contradicts —
+  // both reachable with every Git call exiting 0 — and also a `status` that
+  // failed outright, which is a Git failure. The code does not claim to tell
+  // those apart; see its docstring.
   const clean = await observeWorktreeCleanliness(git, identity.worktreePath);
   if (clean === null) return removalFailure('WORKTREE_CLEANLINESS_UNKNOWN');
   if (!clean) return removalFailure('WORKTREE_DIRTY');
