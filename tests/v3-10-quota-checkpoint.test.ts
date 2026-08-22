@@ -17,11 +17,15 @@
  *
  * ── What is synthetic here, and what is not ────────────────────────────────
  *
- * Exactly one value: the reset time `T`. The production writer still runs
- * `--output-format json`, where no reset instant is reported at all, so
- * `reportedResetAt` is `null` on every real block and `RESET_TIME_MISSING` is
- * the standing denial (L-V3-08-1, open). Isolating F-10 therefore means
- * supplying `T` and nothing else: every other fact these cases judge —
+ * Exactly one value: the reset time `T`. When this suite was written the
+ * production writer ran `--output-format json`, where no reset instant is
+ * reported at all, so `reportedResetAt` was `null` on every real block and
+ * `RESET_TIME_MISSING` was the standing denial (L-V3-08-1, since closed by
+ * V3-11 — `tests/v3-11-quota-reset-stream.test.ts` reaches the same denial list
+ * with nothing synthetic at all). `T` is kept here rather than replaced,
+ * because the property this suite owns is the *checkpoint*, and supplying the
+ * reset time is what isolates it from the reader that now produces one: every
+ * other fact these cases judge —
  * the checkpoint commit, the cleanliness, the resume point, the repository
  * identity, the observation, the reconciliation — comes from production code
  * over a real Git worktree. `T` is applied to a state the producer wrote,

@@ -66,7 +66,7 @@ import type { GitCommandResult, GitRunner } from '../src/worktree/git-command.js
 import { deriveTaskWorkspaceIdentity } from '../src/worktree/workspace-identity.js';
 import {
   agentCommandResult,
-  claudeSuccessEnvelope,
+  claudeResultStream,
   codexTranscript,
   passingReview,
   SHA_A,
@@ -573,7 +573,7 @@ describe('execution authority comes from Git, never from the record', () => {
     const verify = scriptedVerify({ exitCode: 0 });
     const agent = scriptedAgent(
       agentCommandResult({ stdout: findingsReview() }),
-      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ stdout: claudeResultStream() }),
     );
 
     const run = await runTask(
@@ -887,7 +887,7 @@ describe('an authorised quota resume', () => {
       worktreeCleanAtCheckpoint: true,
       findingHistory: [DURABLE_FINDING],
     });
-    const agent = scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const agent = scriptedAgent(agentCommandResult({ stdout: claudeResultStream() }));
 
     const run = await runTask(
       request(root, { maxSteps: 2 }),
@@ -978,7 +978,7 @@ describe('an authorised quota resume', () => {
     });
     const agent = scriptedAgent(
       agentCommandResult({ stdout: findingsReview() }),
-      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ stdout: claudeResultStream() }),
       // The second review, which the cycle now reaches inside four calls: a
       // call holding a remediation brief takes one further step to discharge it
       // (DOGFOOD-REM-001 Task 8), so `REVIEWING → REMEDIATING → VERIFYING` is
@@ -1375,7 +1375,7 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
       request(root, { maxSteps: 1 }),
       deps(root, {
         git: scriptedGit(root),
-        agent: scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() })).runner,
+        agent: scriptedAgent(agentCommandResult({ stdout: claudeResultStream() })).runner,
         verify: cappedVerify(0).runner,
         replace: crashing,
       }),
@@ -1409,7 +1409,7 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
       request(root, { maxSteps: 1 }),
       deps(root, {
         git: scriptedGit(root, { ...mutated, writingPass: true }),
-        agent: scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() })).runner,
+        agent: scriptedAgent(agentCommandResult({ stdout: claudeResultStream() })).runner,
         verify: cappedVerify(0).runner,
       }),
     );
@@ -1455,7 +1455,7 @@ describe('remediation is never started on invented evidence', () => {
 
   it('does start one on the durable record of this round, and says the detail is gone', async () => {
     const root = repoRoot();
-    const agent = scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const agent = scriptedAgent(agentCommandResult({ stdout: claudeResultStream() }));
     persist(root, {
       state: 'REMEDIATING',
       reviewRound: 1,
@@ -1492,7 +1492,7 @@ describe('remediation is never started on invented evidence', () => {
     persist(root, { state: 'REVIEWING', reviewRound: 0, currentCommit: SHA_B });
     const agent = scriptedAgent(
       agentCommandResult({ stdout: findingsReview() }),
-      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ stdout: claudeResultStream() }),
     );
 
     const run = await runTask(
@@ -1595,7 +1595,7 @@ describe('a refused write stops the run', () => {
     const second = scriptedAgent(
       agentCommandResult({ stdout: findingsReview() }),
       // The writer the re-run review hands its brief to, in the same call.
-      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ stdout: claudeResultStream() }),
     );
     const resumed = await runTask(
       request(root, { maxSteps: 1 }),

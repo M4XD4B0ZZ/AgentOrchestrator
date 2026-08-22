@@ -132,11 +132,74 @@ function payload() {
   ].join('\n');
 }
 
+/**
+ * The terminal `result` object, from either output mode.
+ *
+ * Stage 1 drives the production vector, whose stdout has been a JSONL stream
+ * since V3-11; stage 1U drives the pre-fix vector, whose stdout is one
+ * document. Both are handled here, and parsed independently of the production
+ * reader on purpose — a gate that measured the CLI through the classifier it is
+ * checking would agree with it by construction.
+ *
+ * **It throws rather than answering `{}`.** The version that returned an empty
+ * object survived the V3-11 migration and would have kept every check below
+ * green while measuring nothing: `deniedToolNames({})` is `[]`, and "no MCP
+ * tool was reachable" is satisfied by an empty list. An envelope this function
+ * cannot find is a broken gate, and it has to say so.
+ */
 function envelopeOf(result) {
+  const objects = [];
+  const whole = result.stdout.trim();
   try {
-    return JSON.parse(result.stdout.trim());
+    objects.push(JSON.parse(whole));
   } catch {
-    return {};
+    for (const line of result.stdout.split('\n')) {
+      const text = line.trim();
+      if (text.length === 0) continue;
+      try {
+        objects.push(JSON.parse(text));
+      } catch {
+        // Not a message. The CLI is entitled to lines this gate cannot read.
+      }
+    }
+  }
+
+  const envelope = objects.find(
+    (entry) => entry !== null && typeof entry === 'object' && entry.type === 'result',
+  );
+  if (envelope === undefined) {
+    throw new Error(
+      'no terminal `result` message on stdout: the CLI output contract changed, and ' +
+        'every check in this gate would otherwise pass without measuring anything.',
+    );
+  }
+  return envelope;
+}
+
+/**
+ * What the stream said about the rate limit, printed rather than asserted.
+ *
+ * This gate is the only place in the repository that runs a real writer, so it
+ * is the only place a genuine `status: "rejected"` event could ever be observed
+ * in the ordinary course of work. Nothing depends on it — a healthy run reports
+ * `allowed`, and asserting on a quota state would make this gate a measurement
+ * of the operator's account.
+ */
+function reportRateLimit(result) {
+  for (const line of result.stdout.split('\n')) {
+    const text = line.trim();
+    if (text.length === 0 || !text.includes('rate_limit_event')) continue;
+    try {
+      const event = JSON.parse(text);
+      if (event?.type !== 'rate_limit_event') continue;
+      const info = event.rate_limit_info ?? {};
+      console.log(
+        `  rate_limit_event: status=${info.status} type=${info.rateLimitType} ` +
+          `resetsAt=${info.resetsAt}`,
+      );
+    } catch {
+      // Not a message.
+    }
   }
 }
 
@@ -157,6 +220,7 @@ async function stageOne() {
   const started = Date.now();
   const result = await runAgentCommand('claude', CLAUDE_WRITER_ARGS, worktreePath, payload());
   const envelope = envelopeOf(result);
+  reportRateLimit(result);
   const after = readFileSync(join(worktreePath, 'src', 'work.ts'), 'utf8');
   const denied = deniedToolNames(envelope);
 

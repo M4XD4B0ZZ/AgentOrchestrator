@@ -58,7 +58,12 @@ import type { VerificationCommandResult, VerificationRunner } from '../../src/ve
 import { prepareTaskWorkspace, type TaskWorkspace } from '../../src/worktree/prepare-workspace.js';
 import { createRepoFixture, writeRepoFile, git } from './repo-fixtures.js';
 import { resolveFixture, taskWithId, trackWorkspacesOf } from './worktree-fixtures.js';
-import { agentCommandResult, claudeSuccessEnvelope, codexTranscript } from '../fixtures.js';
+import {
+  agentCommandResult,
+  claudeResultStream,
+  codexTranscript,
+  rejectedRateLimit,
+} from '../fixtures.js';
 import { leaseFor } from './lease.js';
 
 /* ─────────────────────────────── profiles ───────────────────────────────── */
@@ -362,7 +367,7 @@ export function findingsReview(path = 'src/index.ts', rule = 'e2e.rule'): Record
 
 /** A Claude run that positively succeeded. */
 export function writerSuccess(): AgentCommandResult {
-  return agentCommandResult({ stdout: claudeSuccessEnvelope() });
+  return agentCommandResult({ stdout: claudeResultStream() });
 }
 
 /*
@@ -413,7 +418,7 @@ export function writerThatEdits(
  */
 export function writerEnvelopeWithDenials(tools: readonly string[]): AgentCommandResult {
   return agentCommandResult({
-    stdout: claudeSuccessEnvelope({
+    stdout: claudeResultStream({
       permission_denials: tools.map((tool, index) => ({
         tool_name: tool,
         tool_use_id: `toolu_${index}`,
@@ -442,23 +447,40 @@ export function writerEnvelopeWithDenials(tools: readonly string[]): AgentComman
 export function writerThatEditsThenHitsUsageLimit(
   fileName: string,
   contents: string,
+  options: { readonly resetsAt?: number } = {},
 ) {
   return (call: { readonly cwd: string }): AgentCommandResult => {
     writeRepoFile(call.cwd, fileName, contents);
-    return usageLimitResult();
+    return usageLimitResult(options);
   };
 }
 
-/** A Claude run refused for quota, in exactly the envelope V1-05 recognises. */
-export function usageLimitResult(): AgentCommandResult {
+/**
+ * A Claude run refused for quota, in exactly the stream V3-11 recognises.
+ *
+ * **The default reports no reset instant**, and that is the conservative half
+ * of the contract rather than an oversight: the CLI emits a
+ * `rate_limit_event` when its rate-limit information *changes*, so a refusal
+ * that arrives without one is a real shape, and the answer to it must stay
+ * `reportedResetAt: null` — `RESET_TIME_MISSING`, a human decision. Every test
+ * written before V3-11 keeps this shape and keeps its old expectations, so a
+ * behaviour change in this slice is visible as an opt-in at the call site.
+ *
+ * Pass `resetsAt` (epoch **seconds**) for the other half: a refusal whose
+ * stream carries the `rejected` event a real 429 produces. That is the only
+ * shape from which an unattended resume can ever be authorised.
+ */
+export function usageLimitResult(
+  options: { readonly resetsAt?: number } = {},
+): AgentCommandResult {
   return agentCommandResult({
     exitCode: 1,
-    stdout: JSON.stringify({
-      type: 'result',
-      subtype: 'error',
-      is_error: true,
-      api_error_status: 429,
-    }),
+    stdout: claudeResultStream(
+      { subtype: 'error', is_error: true, api_error_status: 429 },
+      options.resetsAt === undefined
+        ? {}
+        : { rateLimits: [rejectedRateLimit(options.resetsAt)] },
+    ),
   });
 }
 

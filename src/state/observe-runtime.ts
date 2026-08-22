@@ -57,6 +57,46 @@ import type { TaskState } from '../core/task-state.js';
 import type { GitRunner } from '../worktree/git-command.js';
 import { findByPath, listWorktrees } from '../worktree/worktree-registry.js';
 
+/**
+ * The one way this build asks Git whether a worktree is clean.
+ *
+ * ── Why it is a shared constant and not two identical literals ─────────────
+ *
+ * Two modules ask this question: this one, on every run, to decide whether the
+ * world still matches the record; and `loop/loop-step.ts`, after a
+ * quota-interrupted writer, to decide what the checkpoint may claim. The second
+ * of those already carried a comment saying they must stay the same words,
+ * because "the value recorded here is compared against that module's answer on
+ * every later run, and two observers that phrase the question differently would
+ * eventually disagree about a repository neither had changed". A comment cannot
+ * enforce that; one exported array can, and it is the only construction under
+ * which "they agree" is not itself a claim needing a test.
+ *
+ * ── The two flags are the V3-11 hardening, and they are not cosmetic ───────
+ *
+ * Both restate a Git *default*, so neither changes the answer in an ordinarily
+ * configured repository — and that is the point: what they remove is the
+ * observed repository's ability to change it. A worktree-local
+ * `status.showUntrackedFiles=no` makes a bare `--porcelain` report a tree with
+ * new untracked files as **clean**, and a submodule marked `ignore = all` is
+ * skipped the same way. Both were reproduced against real Git before these
+ * flags were credited with anything.
+ *
+ * Before V3-11 that was a reporting inaccuracy. Since V3-11 a
+ * `BLOCKED_USAGE_LIMIT` checkpoint can carry a reset instant, so
+ * `worktreeCleanAtCheckpoint: true` is what an unattended writer launch is
+ * authorised on — and a configuration file inside the tree the writer just
+ * wrote to must not be able to mint it. See **L-V3-10-4**, which this narrows
+ * rather than closes: a gitignored file the writer created is still invisible
+ * to both, and so is a write outside the worktree.
+ */
+export const WORKTREE_CLEANLINESS_ARGS: readonly string[] = Object.freeze([
+  'status',
+  '--porcelain',
+  '--untracked-files=all',
+  '--ignore-submodules=none',
+]);
+
 export interface ObservedRuntime {
   /** Whether `git worktree list` could be read at all. */
   readonly registryReadable: boolean;
@@ -172,7 +212,7 @@ export async function observeRuntime(
     ]);
     observedCurrentCommit = head.outcome === 'OK' && head.stdout !== '' ? head.stdout : null;
 
-    const status = await git(authorisedPath, ['status', '--porcelain']);
+    const status = await git(authorisedPath, WORKTREE_CLEANLINESS_ARGS);
     worktreeClean = status.outcome === 'OK' ? status.stdout === '' : null;
 
     if (state.basePinnedCommit !== null) {

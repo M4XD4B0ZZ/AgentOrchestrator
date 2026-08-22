@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { CLAUDE_WRITER_ARGS } from '../src/agent/claude-writer.js';
-import { readClaudeResultEnvelope } from '../src/agent/internal/claude-result-envelope.js';
+import { readClaudeResultStream } from '../src/agent/internal/claude-result-stream.js';
 import { renderRunResult } from '../src/cli/render-attended-run.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
 import { buildReviewPayload } from '../src/loop/findings.js';
@@ -54,7 +54,7 @@ import {
   writeHook,
   writeIn,
 } from './helpers/commit-fixtures.js';
-import { passingReview } from './fixtures.js';
+import { claudeResultStream, passingReview } from './fixtures.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
 import { leaseFor, releaseTestLeases } from './helpers/lease.js';
 import { removeRepoFixtures } from './helpers/repo-fixtures.js';
@@ -84,11 +84,12 @@ describe('the writer is configured hermetically and can actually edit', () => {
   // Pinned as a whole. Today NO test pins the contents of this constant —
   // tests/claude-writer.test.ts asserts only that whatever it holds is passed
   // through — so any change to it is currently invisible. That is the gap.
-  it('is exactly the measured vector for CLI 2.1.233', () => {
+  it('is exactly the measured vector, at CLI 2.1.239', () => {
     expect([...CLAUDE_WRITER_ARGS]).toEqual([
       '--print',
       '--output-format',
-      'json',
+      'stream-json',
+      '--verbose',
       '--setting-sources',
       '',
       '--strict-mcp-config',
@@ -149,12 +150,12 @@ describe('the writer is configured hermetically and can actually edit', () => {
 
 /* ══════════ 2. A refused write is observable without reading prose ═════════ */
 
-/** The envelope the real CLI printed for the dogfood's root cause, measured. */
-const refusedButSuccessful = JSON.stringify({
-  type: 'result',
-  subtype: 'success',
-  is_error: false,
-  api_error_status: null,
+/**
+ * The envelope the real CLI printed for the dogfood's root cause, measured —
+ * now carried inside the JSONL stream the writer has read since V3-11, so these
+ * cases exercise the transport layer instead of bypassing it.
+ */
+const refusedButSuccessful = claudeResultStream({
   num_turns: 3,
   result: 'I could not do it. I am blocked. Write permission was not granted.',
   permission_denials: [
@@ -200,7 +201,7 @@ function request(started: StartedTask) {
 
 describe('a refused write is observable without reading prose', () => {
   it('reports the denials as structure', () => {
-    const reading = readClaudeResultEnvelope(refusedButSuccessful);
+    const reading = readClaudeResultStream(refusedButSuccessful);
     expect(reading.permissionDenials).toEqual({ count: 2, tools: ['Write', 'Bash'] });
   });
 
@@ -208,33 +209,24 @@ describe('a refused write is observable without reading prose', () => {
   // that remains what the verdict reports; whether the PASS was real is decided
   // by the measured delta in Task 3, not here.
   it('does not turn denials into a failed verdict', () => {
-    expect(readClaudeResultEnvelope(refusedButSuccessful).verdict).toBe('COMPLETED');
+    expect(readClaudeResultStream(refusedButSuccessful).verdict).toBe('COMPLETED');
   });
 
   it('reports no denials when the field is absent, and does not invent any', () => {
-    const clean = JSON.stringify({
-      type: 'result',
-      subtype: 'success',
-      is_error: false,
-      api_error_status: null,
-    });
-    expect(readClaudeResultEnvelope(clean).permissionDenials).toEqual({ count: 0, tools: [] });
+    const clean = claudeResultStream();
+    expect(readClaudeResultStream(clean).permissionDenials).toEqual({ count: 0, tools: [] });
   });
 
   // A foreign document must not be able to put free text into our observation.
   it('takes only string tool names, and nothing else from the entries', () => {
-    const hostile = JSON.stringify({
-      type: 'result',
-      subtype: 'success',
-      is_error: false,
-      api_error_status: null,
+    const hostile = claudeResultStream({
       permission_denials: [
         { tool_name: 42 },
         { tool_name: 'Write', tool_input: { secret: 'sk-live-x' } },
         'nonsense',
       ],
     });
-    const reading = readClaudeResultEnvelope(hostile);
+    const reading = readClaudeResultStream(hostile);
     expect(reading.permissionDenials.tools).toEqual(['Write']);
     expect(JSON.stringify(reading)).not.toContain('sk-live-x');
   });
@@ -328,15 +320,11 @@ describe('a refused write is observable without reading prose', () => {
     // The closest legitimate variant: a run that genuinely completed while its
     // answer happens to quote the words of a refusal — e.g. a writer editing
     // this very plan. It must read as COMPLETED with zero denials.
-    const quoting = JSON.stringify({
-      type: 'result',
-      subtype: 'success',
-      is_error: false,
-      api_error_status: null,
+    const quoting = claudeResultStream({
       result: 'I added a test asserting the text "permission had not been granted".',
       permission_denials: [],
     });
-    const reading = readClaudeResultEnvelope(quoting);
+    const reading = readClaudeResultStream(quoting);
     expect(reading.verdict).toBe('COMPLETED');
     expect(reading.permissionDenials.count).toBe(0);
   });

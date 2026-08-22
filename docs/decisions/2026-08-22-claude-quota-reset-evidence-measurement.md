@@ -8,6 +8,13 @@ of an absolute quota-reset instant, in the output mode AO already consumes?
 **Verdict:** `RESET_EVIDENCE_REQUIRES_OUTPUT_MODE_CHANGE`. The evidence exists
 and AO cannot see it. L-V3-08-1 stays open.
 
+> **Addendum, same day — the output mode was changed, and the stream was
+> captured.** V3-11 took decision 1 below. The section
+> **"Addendum: the stream, exercised"** at the end of this record supersedes the
+> "`stream-json` was **not** exercised" limit, corrects nothing above, and adds
+> one finding the schema could not have given: the event arrives on healthy runs
+> too.
+
 This record exists because the repository's previous answer — "none was observed
 in either CLI's output" — was measured against a *healthy* envelope only, and is
 no longer precise enough to govern a decision. What follows is the structural
@@ -307,3 +314,126 @@ Either of two decisions, each its own slice:
 Until one is taken, `reportedResetAt` stays `null` in production,
 `evaluateAutomaticResume` denies `RESET_TIME_MISSING`, and the block waits for a
 human. That remains the correct outcome for evidence AO cannot see.
+
+---
+
+# Addendum: the stream, exercised
+
+**Date:** 2026-08-22, later the same day
+**Machine:** unchanged
+**Base:** `main` @ `5dc386b7e3ece3fad1677a90f11676a3084bc6e9` (V3-10 merged)
+**Question:** the record above closes with "`stream-json` was **not**
+exercised". What does the stream actually contain?
+**Verdict:** `RESET_EVIDENCE_REACHABLE`. Decision 1 was taken; L-V3-08-1 is
+closed by V3-11.
+
+## What was run
+
+The production vector, with the one token changed, in a throwaway directory
+outside any repository. Read-only prompt; no file was written.
+
+```
+printf 'Reply with exactly the word: ok' | claude \
+  --print --output-format stream-json --verbose \
+  --setting-sources "" --strict-mcp-config \
+  --permission-mode acceptEdits --tools Read Edit Write Glob Grep
+```
+
+`--verbose` is mandatory rather than preferred, and that was measured directly
+rather than read off the bundle this time. The same vector without it:
+
+```
+Error: When using --print, --output-format=stream-json requires --verbose
+```
+
+Removing that flag does not fall back to the old mode; it stops the writer from
+starting.
+
+Exit 0. **stdout 4741 bytes, stderr 0 bytes.** Four lines, newline-terminated:
+
+```
+0  system     init      1741 B
+1  rate_limit_event      305 B
+2  assistant             733 B
+3  result     success   1958 B
+```
+
+## Finding 1 — the event arrives on a healthy run
+
+This is the finding the shipped schema could not have given, and it changed the
+design.
+
+```json
+{ "status": "allowed",
+  "resetsAt": 1787418000,
+  "rateLimitType": "five_hour",
+  "overageStatus": "rejected",
+  "overageDisabledReason": "out_of_credits",
+  "isUsingOverage": false }
+```
+
+Nothing was refused. The run succeeded, `api_error_status` was `null`,
+`stop_reason` was `end_turn` — and a `resetsAt` was still reported, for the
+window that was still open.
+
+So **`resetsAt` is not evidence that anything was refused.** A reader taking the
+last one it saw would attach a reset instant to every completed pass, and — since
+`rateLimitType` has six members — would happily pair a five-hour window's reset
+with a seven-day exhaustion, authorising a resume days early. V3-11 therefore
+reads only `status: "rejected"`, and attaches the result only to a positively
+recognised `USAGE_LIMIT` verdict.
+
+Three fields in that payload (`overageStatus`, `overageDisabledReason`,
+`isUsingOverage`) are absent from the schema quote above, which is why the
+reader ignores everything it does not name.
+
+## Finding 2 — the unit, now observed as well as derived
+
+`1787418000` is `2026-08-22T17:00:00.000Z`. The capture was taken at
+`12:19Z`. A five-hour window resetting on the hour is what epoch **seconds**
+predicts; no other unit puts it anywhere plausible. The bundle's two arithmetic
+derivations already said this, and they now agree with an observation instead of
+only with each other.
+
+## Finding 3 — the CLI states the authority it granted
+
+The `init` message carried, verbatim:
+
+```
+tools:          ["Edit","Glob","Grep","Read","Write"]
+mcp_servers:    []
+permissionMode: "acceptEdits"
+```
+
+Those are exactly the three hermeticity claims `CLAUDE_WRITER_ARGS` makes,
+stated by the CLI rather than inferred from behaviour — including
+`--strict-mcp-config` doing its job, which had previously been measured only as
+"no MCP tool appeared in `permission_denials`". Nothing reads this yet
+(**L-V3-11-1**).
+
+`memory_paths`, `skills`, `slash_commands` and `agents` were **not** empty. That
+is not a contradiction of `--setting-sources ''`: `--tools` grants five tools,
+none of which can invoke a skill, a slash command or a subagent, and
+`memory_paths` names a directory rather than loaded content. Recorded because it
+looks like a finding and is not one.
+
+## What this does not establish
+
+- **No 429 was observed.** Quota was not exhausted to manufacture one. That a
+  refusal emits `status: "rejected"` with a `resetsAt` is read from the shipped
+  schema and from the CLI's own `status === "rejected" && resetsAt * 1000 <=
+  Date.now()` helper, not from a capture. **If it does not,** the outcome is
+  `reportedResetAt: null` → `RESET_TIME_MISSING` → a human decision, which is
+  the pre-V3-11 behaviour: the failure mode of this assumption being wrong is
+  the status quo, not a regression.
+- **One prompt, one turn.** No tool call was made, so no `user`/tool-result
+  message appears in the capture and the transcript's size under real work is
+  unmeasured. That is what **L-V3-11-2** carries.
+- **Codex was not re-measured.** Both gates on it are unchanged.
+
+## Commands used
+
+Read-only apart from the single agent turn above, which spent one short request
+against the operator's subscription. No account-sensitive material is recorded
+here: `utilization` and any usage figures were not transcribed, and the
+`session_id`/`uuid` values were not.

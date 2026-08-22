@@ -21,14 +21,20 @@
  *
  *  1. nothing was spawned                  → `AGENT_ARGUMENT_REFUSED`
  *  2. the process never reached its own end → `AGENT_PROCESS_UNAVAILABLE`
- *  3. the envelope says quota exhausted    → `AGENT_USAGE_LIMIT`
+ *  3. the stream says quota exhausted      → `AGENT_USAGE_LIMIT`
  *  4. the exit code is non-zero            → `AGENT_NONZERO_EXIT`
- *  5. the envelope is not recognised       → `AGENT_RESULT_MALFORMED`
- *  6. the envelope positively says success → completed
+ *  5. the stream is not recognised         → `AGENT_RESULT_MALFORMED`
+ *  6. the stream positively says success   → completed
  *
  * Step 2 subsumes truncation, which matters more than it looks: a stream cut
  * at its byte budget can still end on a closing brace and parse perfectly.
  * Parsing before checking would turn a cut-off transcript into a verdict.
+ * Since V3-11 the output is JSONL rather than one document, so this guard has
+ * a sibling *inside* the reader — the terminal `result` message is the only
+ * proof the stream reached its end — but the two are independent and neither
+ * replaces the other: this one refuses to read the bytes at all, and it is the
+ * only one of the two that also covers a stream cut in a place that happens to
+ * leave a parseable prefix.
  *
  * Step 2 also subsumes **termination by a signal**, and that is the whole of
  * V1-05-RR-F1. It used to be asked at step 4, below the envelope — so a child
@@ -65,7 +71,10 @@ import {
   type AgentProcessEvidence,
   type PermissionDenialObservation,
 } from './agent-outcome.js';
-import { readClaudeResultEnvelope } from './internal/claude-result-envelope.js';
+import {
+  diagnosticResultLine,
+  readClaudeResultStream,
+} from './internal/claude-result-stream.js';
 
 /**
  * The argument vector for a writing run. A frozen compile-time constant, in
@@ -87,10 +96,30 @@ import { readClaudeResultEnvelope } from './internal/claude-result-envelope.js';
  * same behaviour; the version numbers are recorded rather than merged, because
  * "measured somewhere" and "measured here" are different claims.
  *
- * `--print` is the non-interactive mode; `--output-format json` is what makes
- * the result a structured document rather than prose to be scraped. The prompt
- * is not here — it goes on stdin, because it could not be an argv token even
- * if we wanted it to be.
+ * `--print` is the non-interactive mode. The prompt is not here — it goes on
+ * stdin, because it could not be an argv token even if we wanted it to be.
+ *
+ * ── `--output-format stream-json --verbose`, and what it bought (V3-11) ─────
+ *
+ * This was `--output-format json` until V3-11, and the change is the whole of
+ * that slice. Both modes print a structured document rather than prose to be
+ * scraped; the difference is that `json` prints **only** the terminal `result`
+ * object, and that object carries no reset instant on either of its variants.
+ * `stream-json` prints every message, including `rate_limit_event`, which is
+ * where `resetsAt` lives. Under `json` the CLI builds that event, enqueues it
+ * and never writes it — so `reportedResetAt` was `null` on every real quota
+ * block and no quota pause could end without a human. That was L-V3-08-1.
+ *
+ * `--verbose` is not decorative and not a debugging aid: with `--print`, the
+ * CLI **refuses** `--output-format stream-json` without it —
+ * `Error: When using --print, --output-format=stream-json requires --verbose`.
+ * It widens stdout to the whole transcript and, measured on 2.1.239, left
+ * stderr empty. Removing it does not fall back to the old mode; it stops the
+ * writer from starting at all.
+ *
+ * The cost is paid in `agent-command.ts`: stdout is now a transcript rather
+ * than one object, so the byte budget had to be sized for one. See
+ * `AGENT_COMMAND_MAX_STDOUT_BYTES`.
  *
  * ── `--permission-mode acceptEdits`, and why its absence was a defect ───────
  *
@@ -165,7 +194,8 @@ import { readClaudeResultEnvelope } from './internal/claude-result-envelope.js';
 export const CLAUDE_WRITER_ARGS: readonly string[] = Object.freeze([
   '--print',
   '--output-format',
-  'json',
+  'stream-json',
+  '--verbose',
   '--setting-sources',
   '',
   '--strict-mcp-config',
@@ -301,7 +331,17 @@ export async function runClaudeWriter(
 
   const result = await run('claude', CLAUDE_WRITER_ARGS, request.worktreePath, request.payload);
   const process = agentProcessEvidence(result);
-  const diagnostics = agentDiagnostics(result);
+  // The excerpt is a redacted *prefix*, and since V3-11 the first four
+  // kilobytes of stdout are the `init` message rather than anything about how
+  // the run ended. So the terminal `result` line is excerpted where the stream
+  // has one — which is what an operator saw before the migration — and the raw
+  // stream where it does not, because a stream with no terminator is one whose
+  // head is the evidence. Diagnostics only: nothing below reads this, and the
+  // classification runs on the whole stream either way.
+  const diagnostics = agentDiagnostics({
+    stdout: diagnosticResultLine(result.stdout) ?? result.stdout,
+    stderr: result.stderr,
+  });
   const evidence = { ...base, process, diagnostics };
 
   if (result.outcome === 'REFUSED_UNSAFE_ARGUMENT') {
@@ -317,7 +357,7 @@ export async function runClaudeWriter(
   // process printed before this returns true.
   if (!endedUnderOwnControl(result)) return frozenFailure(evidence, 'AGENT_PROCESS_UNAVAILABLE');
 
-  const envelope = readClaudeResultEnvelope(result.stdout);
+  const envelope = readClaudeResultStream(result.stdout);
 
   // Above the exit-code check on purpose: a quota refusal exits non-zero, and
   // reading the code first would bury it as an ordinary failure.
