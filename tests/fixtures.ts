@@ -177,18 +177,57 @@ export function agentCommandResult(
   };
 }
 
-/** The stdout of a Claude run that positively succeeded, as observed at 2.1.226. */
-export function claudeSuccessEnvelope(overrides: Record<string, unknown> = {}): string {
-  return JSON.stringify({
-    type: 'result',
-    subtype: 'success',
-    is_error: false,
-    api_error_status: null,
-    stop_reason: 'end_turn',
-    terminal_reason: 'completed',
-    result: 'done',
-    ...overrides,
-  });
+/**
+ * The stdout of a Claude run, in the JSONL stream the writer has consumed since
+ * V3-11 — `--print --output-format stream-json --verbose`.
+ *
+ * Shaped after the capture recorded in `internal/claude-result-stream.ts`: a
+ * `system`/`init` message, any `rate_limit_event`s, an `assistant` message and
+ * the terminal `result`, one object per line, newline-terminated. The surround
+ * is not decoration — it is what makes every caller of this fixture exercise
+ * the transport layer instead of handing the classifier a bare object.
+ *
+ * `overrides` patches the terminal `result`; the defaults are the ones observed
+ * at 2.1.226 and unchanged by the migration.
+ */
+export function claudeResultStream(
+  overrides: Record<string, unknown> = {},
+  options: { readonly rateLimits?: readonly Record<string, unknown>[] } = {},
+): string {
+  const lines: string[] = [
+    JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      tools: ['Edit', 'Glob', 'Grep', 'Read', 'Write'],
+      mcp_servers: [],
+      permissionMode: 'acceptEdits',
+    }),
+  ];
+  for (const info of options.rateLimits ?? []) {
+    lines.push(JSON.stringify({ type: 'rate_limit_event', rate_limit_info: info }));
+  }
+  lines.push(JSON.stringify({ type: 'assistant', message: { role: 'assistant' } }));
+  lines.push(
+    JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      api_error_status: null,
+      stop_reason: 'end_turn',
+      terminal_reason: 'completed',
+      result: 'done',
+      ...overrides,
+    }),
+  );
+  return lines.map((line) => `${line}\n`).join('');
+}
+
+/**
+ * A `rate_limit_info` payload reporting a refusal, with the reset instant the
+ * CLI would carry. `resetsAt` is epoch **seconds**.
+ */
+export function rejectedRateLimit(resetsAt: number): Record<string, unknown> {
+  return { status: 'rejected', rateLimitType: 'five_hour', resetsAt };
 }
 
 /** A Codex `--json` transcript ending in `review`, as observed at codex-cli 0.146.0. */

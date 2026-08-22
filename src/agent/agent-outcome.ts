@@ -50,7 +50,7 @@ export const AGENT_FAILURE_CODES = [
    * no result here to act on.
    */
   'AGENT_RESULT_MALFORMED',
-  /** Quota exhaustion, positively recognised. See `internal/claude-result-envelope.ts`. */
+  /** Quota exhaustion, positively recognised. See `internal/claude-result-stream.ts`. */
   'AGENT_USAGE_LIMIT',
   /** An authentication or session rejection, positively recognised. */
   'AGENT_SESSION_REJECTED',
@@ -467,21 +467,24 @@ export function endedUnderOwnControl(result: AgentCommandResult): boolean {
 }
 
 /*
- * There is deliberately no reset-timestamp recogniser here.
+ * There is still deliberately no reset-timestamp recogniser *here*, and since
+ * V3-11 that is a placement decision rather than an absence.
  *
  * One existed and was removed in V1-05-RR-F7: exported, never called, never
- * tested. No producer in this slice ever holds a candidate string to recognise
- * — `readClaudeResultEnvelope` reports `reportedResetAt: null` unconditionally,
- * because no reset timestamp has been observed in the envelope at the version
- * this was written against, and the Codex boundary recognises no quota signal
- * at all.
+ * tested — a validator on a path with no input, which is not a safety measure
+ * but a claim that reset times are handled, standing where the reader expects
+ * to find the code that handles them. That note said the function would come
+ * back "together with the producer that feeds it and the tests that pin both".
  *
- * A validator on a path with no input is not a safety measure; it is a claim
- * that reset times are handled, standing where the reader expects to find the
- * code that handles them. When a CLI is observed to report one, the function
- * comes back together with the producer that feeds it and the tests that pin
- * both. Until then `null` is the honest answer, `evaluateAutomaticResume`
- * refuses with `RESET_TIME_MISSING`, and the block waits for a human.
+ * The producer exists now. It is `readReportedResetAt` in
+ * `internal/claude-result-stream.ts`, and it lives there rather than here for
+ * the reason that module is internal at all: recognising a reset instant is
+ * reading one CLI's document in one output mode, and the value is only
+ * meaningful attached to that CLI's positively recognised refusal. A
+ * general-purpose recogniser exported from this module would be callable
+ * against any string by any caller, which is the shortcut both readers exist
+ * to prevent. The Codex boundary still recognises no quota signal at all, so
+ * `codex-reviewer.ts` still reports `reportedResetAt: null` unconditionally.
  */
 
 /**

@@ -2,7 +2,7 @@
  * Reading a Codex review: the JSONL transcript, and the review document the
  * reviewer is asked to end its turn with.
  *
- * INTERNAL, for the reason `claude-result-envelope.ts` gives — this reads
+ * INTERNAL, for the reason `claude-result-stream.ts` gives — this reads
  * foreign text, and a caller holding it could ask "does this look like a pass"
  * without any of the process-level facts that make the question answerable.
  *

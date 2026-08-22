@@ -941,11 +941,22 @@ describe('a tampered state cannot make the main checkout a task workspace', () =
  * here a writer that wrote nothing at all, so the settlement is the existing
  * HEAD and a positively clean tree, with **no** commit manufactured for it.
  *
- * What remains is lock 1, and it is untouched: `readClaudeResultEnvelope`
- * reports no reset time at `--output-format json`, so `RESET_TIME_MISSING` is
- * the whole denial. That is the point of pinning it here rather than in a
- * fixture — the reason codes are what a real 429 envelope produces end to end,
- * so the day the reset instant arrives, this test says so by changing.
+ * **Lock 1 is gone too, as of V3-11, and this is where that shows.** The writer
+ * now runs `--output-format stream-json --verbose`, where the CLI emits
+ * `rate_limit_event.rate_limit_info.resetsAt`, and `readClaudeResultStream`
+ * reads it. So a refusal has two shapes and each has a case below:
+ *
+ *  - the CLI reported **no** instant — its rate-limit information had not
+ *    changed, so no event was emitted. `RESET_TIME_MISSING`, a human decision,
+ *    and every case written before V3-11 keeps this shape unchanged;
+ *  - the CLI reported one. The denial is then exactly
+ *    `[RESET_TIME_NOT_REACHED]`, which is the list the unattended wait sleeps
+ *    on, and it is reached with **nothing synthetic**: the instant travels from
+ *    the stream through the production recogniser into the durable state.
+ *
+ * Both are asserted as exact lists rather than with `toContain`, because the
+ * claim is about what is *absent*. The full reader-level coverage is in
+ * `tests/v3-11-quota-reset-stream.test.ts`; what these two own is the driver.
  */
 describe('a quota refusal is a governed pause, and this build never lifts it alone', () => {
   it('parks the task with the evidence the recogniser really produced', async () => {
@@ -967,7 +978,9 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
     expect(blocked.state).toBe('BLOCKED_USAGE_LIMIT');
     expect(blocked.blockedAgent).toBe('claude');
     expect(blocked.resumeFrom).toEqual({ phase: 'REMEDIATE', round: 1 });
-    // Never invented: no CLI observed by this build reports one.
+    // Never invented. Since V3-11 this build *can* read one, and this fixture's
+    // stream carries no `rate_limit_event`, so `null` here is the CLI reporting
+    // nothing rather than AO being unable to see it.
     expect(blocked.reportedResetAt).toBeNull();
 
     // Settled, not withdrawn (V3-10). The writer here refused before writing
@@ -1006,12 +1019,59 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
     expect(again.outcome).toBe('BLOCKED_USAGE_LIMIT');
     expect(again.steps).toBe(0);
     expectNothingRan(agent, verify);
-    // One lock, and it is the only one left. Asserted as the exact list rather
-    // than with `toContain`, because the claim being made is that the other two
-    // are *gone*: a `toContain` here would pass unchanged if F-10 came back.
+    // The refusal reported no instant, so this is the human-decision half.
+    // Asserted as the exact list rather than with `toContain`, because the
+    // claim being made is that the checkpoint denials are *gone*: a `toContain`
+    // here would pass unchanged if F-10 came back.
     expect(again.reasonCodes).toEqual(['RESET_TIME_MISSING']);
     // The pause is intact for a human, byte for byte.
     expect(reload(started.root, TASK_ID).revision).toBe(blocked.revision);
+  });
+
+  /**
+   * The other half, and the acceptance proof for L-V3-08-1 at the driver.
+   *
+   * Identical to the case above in every respect except one: the refusal's
+   * stream carries the `rate_limit_event` a real 429 produces. Nothing else is
+   * seeded, and no state is edited — the instant is derived by
+   * `readClaudeResultStream` from the integer the CLI would print, and written
+   * by the ordinary block-recording path.
+   *
+   * The denial list is then a single element, and it is the one the unattended
+   * wait sleeps on. Before V3-11 that intersection was empty for every block
+   * production could create.
+   */
+  it('denies for exactly the reset time when the refusal reported one', async () => {
+    const started = await startTask({ taskId: TASK_ID });
+    seedState(started);
+
+    const run = await runTask(
+      request(started),
+      deps({
+        verify: recordedVerify().runner,
+        agent: recordedAgent({
+          codex: () => reviewResult(findingsReview()),
+          // Far enough ahead that no test machine's clock reaches it mid-run.
+          claude: () => usageLimitResult({ resetsAt: 1_800_000_000 }),
+        }).runner,
+      }),
+    );
+
+    expect(run.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    const blocked = reload(started.root, TASK_ID).state;
+    expect(blocked.reportedResetAt).toBe('2027-01-15T08:00:00.000Z');
+
+    const verify = recordedVerify();
+    const agent = recordedAgent({});
+    const again = await runTask(
+      request(started),
+      deps({ verify: verify.runner, agent: agent.runner }),
+    );
+
+    expect(again.outcome).toBe('BLOCKED_USAGE_LIMIT');
+    expect(again.steps).toBe(0);
+    expectNothingRan(agent, verify);
+    expect(again.reasonCodes).toEqual(['RESET_TIME_NOT_REACHED']);
   });
 
   /**
@@ -1020,8 +1080,8 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
    * An earlier version of this case was titled as though it proved the
    * V1-07-RR-B1 ordering ("an unattended run must not spend the pause before
    * refusing to execute"). It could not, for a reason specific to *this*
-   * fixture: the block is recorded with `reportedResetAt: null`, because no CLI
-   * this build has observed reports a reset time. `evaluateAutomaticResume`
+   * fixture: the block is recorded with `reportedResetAt: null`, because this
+   * refusal's stream carries no `rate_limit_event`. `evaluateAutomaticResume`
    * therefore denies `RESET_TIME_MISSING`, `classifyResume` cannot answer
    * `AUTOMATIC_ALLOWED`, and the blocking gate returns `BLOCKED_USAGE_LIMIT`
    * before the attended-continuation gate is ever reached. Deleting the attended

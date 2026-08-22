@@ -32,7 +32,7 @@ import {
   type ClaudeWriterRequest,
 } from '../src/agent/claude-writer.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
-import { agentCommandResult, claudeSuccessEnvelope, SENSITIVE_MARKER } from './fixtures.js';
+import { agentCommandResult, claudeResultStream, SENSITIVE_MARKER } from './fixtures.js';
 
 const WORKTREE = '/srv/worktrees/alpha/task-0001';
 
@@ -80,7 +80,7 @@ async function writerWith(
 describe('a writing run that positively succeeded', () => {
   it('completes on a recognised result envelope from a clean process', async () => {
     const { outcome } = await writerWith(
-      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ stdout: claudeResultStream() }),
     );
 
     expect(outcome.ok).toBe(true);
@@ -96,7 +96,7 @@ describe('a writing run that positively succeeded', () => {
    */
   it('is the only case in this file that reaches AGENT_COMPLETED', async () => {
     const { outcome } = await writerWith(
-      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ stdout: claudeResultStream() }),
     );
     expect(outcome.ok).toBe(true);
   });
@@ -106,7 +106,7 @@ describe('a writing run that positively succeeded', () => {
 
 describe('how the writer is invoked', () => {
   it('passes the instructions as a payload and never as an argument', async () => {
-    const { agent } = await writerWith(agentCommandResult({ stdout: claudeSuccessEnvelope() }), {
+    const { agent } = await writerWith(agentCommandResult({ stdout: claudeResultStream() }), {
       payload: 'a prompt with spaces, "quotes" & a pipe |',
     });
 
@@ -117,15 +117,15 @@ describe('how the writer is invoked', () => {
   });
 
   it('runs in the worktree it was given, never in the process working directory', async () => {
-    const { agent } = await writerWith(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const { agent } = await writerWith(agentCommandResult({ stdout: claudeResultStream() }));
 
     expect(agent.calls[0]?.cwd).toBe(WORKTREE);
     expect(agent.calls[0]?.cwd).not.toBe(process.cwd());
   });
 
   it('builds the same argument vector and payload for the same request', async () => {
-    const first = await writerWith(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
-    const second = await writerWith(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const first = await writerWith(agentCommandResult({ stdout: claudeResultStream() }));
+    const second = await writerWith(agentCommandResult({ stdout: claudeResultStream() }));
 
     expect(first.agent.calls[0]).toEqual(second.agent.calls[0]);
   });
@@ -146,7 +146,7 @@ describe('how the writer is invoked', () => {
   });
 
   it.each([
-    ['a completed run', agentCommandResult({ stdout: claudeSuccessEnvelope() })],
+    ['a completed run', agentCommandResult({ stdout: claudeResultStream() })],
     ['a non-zero exit', agentCommandResult({ exitCode: 1 })],
     ['an unavailable process', agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null })],
     ['a truncated stream', agentCommandResult({ outcome: 'UNAVAILABLE', outputTruncated: true })],
@@ -164,7 +164,7 @@ describe('process evidence outranks anything the agent printed', () => {
       agentCommandResult({
         outcome: 'UNAVAILABLE',
         exitCode: 0,
-        stdout: claudeSuccessEnvelope(),
+        stdout: claudeResultStream(),
       }),
     );
 
@@ -184,7 +184,7 @@ describe('process evidence outranks anything the agent printed', () => {
       agentCommandResult({
         exitCode: null,
         signal: 'SIGKILL',
-        stdout: claudeSuccessEnvelope(),
+        stdout: claudeResultStream(),
       }),
     );
 
@@ -218,7 +218,7 @@ describe('process evidence outranks anything the agent printed', () => {
       agentCommandResult({
         exitCode: 0,
         signal: 'SIGTERM',
-        stdout: claudeSuccessEnvelope(),
+        stdout: claudeResultStream(),
       }),
     );
 
@@ -231,7 +231,7 @@ describe('process evidence outranks anything the agent printed', () => {
 
   it('refuses a perfect envelope carried on a non-zero exit', async () => {
     const { outcome } = await writerWith(
-      agentCommandResult({ exitCode: 1, stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ exitCode: 1, stdout: claudeResultStream() }),
     );
 
     expect(outcome.ok).toBe(false);
@@ -250,7 +250,7 @@ describe('process evidence outranks anything the agent printed', () => {
       agentCommandResult({
         outcome: 'UNAVAILABLE',
         outputTruncated: true,
-        stdout: claudeSuccessEnvelope(),
+        stdout: claudeResultStream(),
       }),
     );
 
@@ -294,15 +294,20 @@ describe('the result envelope is recognised, never assumed', () => {
   });
 
   /**
-   * The envelope is the whole of stdout, not something found inside it. This
-   * repository's own reviewer reads this repository, so an agent quoting a
+   * The stream must *end* on its terminating `result`, not merely contain one.
+   * This repository's own reviewer reads this repository, so an agent quoting a
    * success envelope out of a source file or a test is an ordinary event, not
    * an attack scenario.
+   *
+   * Until V3-11 the guarantee was stronger by construction — the whole trimmed
+   * stdout had to be the envelope — and scanning a JSONL stream gives that up.
+   * The terminator's *position* is what replaces it, and this case is the pin:
+   * prose wrapped around a stream does not end on the `result` line.
    */
   it('refuses an envelope quoted inside a larger document', async () => {
     const { outcome } = await writerWith(
       agentCommandResult({
-        stdout: `The file contains ${claudeSuccessEnvelope()} on line 12.`,
+        stdout: `The file contains ${claudeResultStream()} on line 12.`,
       }),
     );
 
@@ -313,7 +318,7 @@ describe('the result envelope is recognised, never assumed', () => {
 
   it('refuses an envelope that claims success while carrying an API error status', async () => {
     const { outcome } = await writerWith(
-      agentCommandResult({ stdout: claudeSuccessEnvelope({ api_error_status: 500 }) }),
+      agentCommandResult({ stdout: claudeResultStream({ api_error_status: 500 }) }),
     );
 
     expect(outcome.ok).toBe(false);
@@ -331,7 +336,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
       const { outcome } = await writerWith(
         agentCommandResult({
           exitCode: 1,
-          stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: status }),
+          stdout: claudeResultStream({ is_error: true, subtype: 'error', api_error_status: status }),
         }),
       );
 
@@ -352,7 +357,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
     const { outcome } = await writerWith(
       agentCommandResult({
         exitCode: 1,
-        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+        stdout: claudeResultStream({ is_error: true, subtype: 'error', api_error_status: 429 }),
       }),
     );
 
@@ -364,7 +369,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
     const { outcome } = await writerWith(
       agentCommandResult({
         exitCode: 1,
-        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+        stdout: claudeResultStream({ is_error: true, subtype: 'error', api_error_status: 429 }),
       }),
       { phase: 'REMEDIATE', round: 2 },
     );
@@ -383,7 +388,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
     const { outcome } = await writerWith(
       agentCommandResult({
         exitCode: 1,
-        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+        stdout: claudeResultStream({ is_error: true, subtype: 'error', api_error_status: 429 }),
       }),
       { round: 0 },
     );
@@ -402,10 +407,10 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
    * review that quotes the sentinel's own source file.
    */
   it.each([
-    ['a limit phrase in a successful run', claudeSuccessEnvelope({ result: 'usage limit reached' })],
+    ['a limit phrase in a successful run', claudeResultStream({ result: 'usage limit reached' })],
     [
       'a limit phrase quoted in prose',
-      claudeSuccessEnvelope({ result: 'The file says "Claude usage limit reached. Resets at 3pm".' }),
+      claudeResultStream({ result: 'The file says "Claude usage limit reached. Resets at 3pm".' }),
     ],
   ])('does not read %s as a usage limit', async (_label, stdout) => {
     const { outcome } = await writerWith(agentCommandResult({ stdout }));
@@ -417,7 +422,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
   it('does not read a limit phrase on stderr as authority', async () => {
     const { outcome } = await writerWith(
       agentCommandResult({
-        stdout: claudeSuccessEnvelope(),
+        stdout: claudeResultStream(),
         stderr: 'Claude usage limit reached. Your limit will reset at 3pm.',
       }),
     );
@@ -435,7 +440,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
       agentCommandResult({
         outcome: 'UNAVAILABLE',
         exitCode: null,
-        stdout: claudeSuccessEnvelope({ is_error: true, api_error_status: 429 }),
+        stdout: claudeResultStream({ is_error: true, api_error_status: 429 }),
       }),
     );
 
@@ -466,7 +471,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
         outcome: 'RAN',
         exitCode: null,
         signal: 'SIGKILL',
-        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+        stdout: claudeResultStream({ is_error: true, subtype: 'error', api_error_status: 429 }),
       }),
     );
 
@@ -491,7 +496,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
         outcome: 'RAN',
         exitCode: 0,
         signal: 'SIGTERM',
-        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+        stdout: claudeResultStream({ is_error: true, subtype: 'error', api_error_status: 429 }),
       }),
     );
 
@@ -515,7 +520,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
     async (status) => {
       const { outcome } = await writerWith(
         agentCommandResult({
-          stdout: claudeSuccessEnvelope({ is_error: false, api_error_status: status }),
+          stdout: claudeResultStream({ is_error: false, api_error_status: status }),
         }),
       );
 
@@ -534,7 +539,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
    */
   it('refuses an envelope that claims success while carrying a non-429 error status', async () => {
     const { outcome } = await writerWith(
-      agentCommandResult({ stdout: claudeSuccessEnvelope({ is_error: false, api_error_status: 503 }) }),
+      agentCommandResult({ stdout: claudeResultStream({ is_error: false, api_error_status: 503 }) }),
     );
 
     if (outcome.ok) expect.unreachable();
@@ -550,7 +555,7 @@ describe('usage exhaustion is recognised structurally, never from prose', () => 
     const { outcome } = await writerWith(
       agentCommandResult({
         exitCode: 1,
-        stdout: claudeSuccessEnvelope({ is_error: true, subtype: 'error', api_error_status: 429 }),
+        stdout: claudeResultStream({ is_error: true, subtype: 'error', api_error_status: 429 }),
       }),
     );
 

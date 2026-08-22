@@ -381,6 +381,16 @@ export async function observeTaskDelta(
     '--name-status',
     '--no-renames',
     '--no-color',
+    // Restates the Git default, so it changes nothing in an ordinarily
+    // configured repository. What it removes is the observed repository's
+    // ability to change it: `diff.ignoreSubmodules` or a `.gitmodules`
+    // `ignore = all` hides a moved submodule pointer from this diff, and a
+    // modification the scope gate cannot see is one it cannot refuse. Added
+    // with the matching flag on the two `status` observers in V3-11, because
+    // hardening the cleanliness question alone would have been worse than
+    // hardening neither: a change invisible here but visible there would be
+    // committed by the settlement rather than blocked by the gate.
+    '--ignore-submodules=none',
     '-z',
     '--end-of-options',
     basePinnedCommit,

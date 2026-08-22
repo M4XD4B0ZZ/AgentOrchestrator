@@ -56,7 +56,7 @@ import {
 import type { VerificationCommandResult, VerificationRunner } from '../src/verify/verify-command.js';
 import {
   agentCommandResult,
-  claudeSuccessEnvelope,
+  claudeResultStream,
   codexTranscript,
   passingReview,
   SHA_A,
@@ -611,7 +611,7 @@ describe('the remediation bound', () => {
         if (reviews > 10) throw new Error('reviewer invoked more than 10 times');
         return agentCommandResult({ stdout: findingsReview(`round.${reviews}`) });
       }
-      return agentCommandResult({ stdout: claudeSuccessEnvelope() });
+      return agentCommandResult({ stdout: claudeResultStream() });
     };
     const verify = scriptedVerify({ exitCode: 0 });
 
@@ -664,7 +664,7 @@ describe('the remediate stage', () => {
 
   it('returns a completed writer to VERIFYING, and never straight to REVIEWING', async () => {
     const root = repoRoot();
-    const agent = scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const agent = scriptedAgent(agentCommandResult({ stdout: claudeResultStream() }));
 
     const step = await runRemediateStep(
       persistRemediating(root),
@@ -690,7 +690,7 @@ describe('the remediate stage', () => {
     ['a non-zero exit', agentCommandResult({ exitCode: 2 })],
     ['a malformed envelope', agentCommandResult({ stdout: 'Done!' })],
     ['a process that never ran', agentCommandResult({ outcome: 'UNAVAILABLE', exitCode: null })],
-    ['a run killed from outside', agentCommandResult({ exitCode: 0, signal: 'SIGTERM', stdout: claudeSuccessEnvelope() })],
+    ['a run killed from outside', agentCommandResult({ exitCode: 0, signal: 'SIGTERM', stdout: claudeResultStream() })],
   ])('does not advance out of REMEDIATING on %s', async (_label, result) => {
     const root = repoRoot();
     const verify = scriptedVerify({ exitCode: 0 });
@@ -748,7 +748,7 @@ describe('the remediate stage', () => {
     expect(review.remediationPayload).toContain('src/agent/claude-writer.ts');
     expect(review.remediationPayload).toContain('classification.order');
 
-    const writer = scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const writer = scriptedAgent(agentCommandResult({ stdout: claudeResultStream() }));
     await runRemediateStep(
       reload(root),
       deps(root, {
@@ -762,7 +762,7 @@ describe('the remediate stage', () => {
 
   it('tells the writer when the detail did not survive a restart', async () => {
     const root = repoRoot();
-    const writer = scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const writer = scriptedAgent(agentCommandResult({ stdout: claudeResultStream() }));
 
     await runRemediateStep(
       persist(root, {
@@ -868,7 +868,7 @@ describe('a reviewer cannot add lines to the remediation prompt', () => {
     const root = repoRoot();
     const agent = scriptedAgent(
       agentCommandResult({ stdout: reviewReporting('src/a.ts\r\ninvented.rule') }),
-      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ stdout: claudeResultStream() }),
     );
 
     const step = await runLoopStep(persist(root, { state: 'REVIEWING' }), deps(root, { agent: agent.runner }));
@@ -977,7 +977,7 @@ describe('durability', () => {
     const agent: AgentRunner = async (which) =>
       which === 'codex'
         ? agentCommandResult({ stdout: findingsReview() })
-        : agentCommandResult({ stdout: claudeSuccessEnvelope() });
+        : agentCommandResult({ stdout: claudeResultStream() });
 
     let current = persist(root, { state: 'VERIFYING', maxReviewRounds: 3 });
     const trail: [string, number][] = [];
@@ -1122,7 +1122,7 @@ describe('execution authority', () => {
     const verify = scriptedVerify({ exitCode: 0 });
     const agent = scriptedAgent(
       agentCommandResult({ stdout: findingsReview() }),
-      agentCommandResult({ stdout: claudeSuccessEnvelope() }),
+      agentCommandResult({ stdout: claudeResultStream() }),
     );
 
     let current = persist(root, { state: 'VERIFYING' });
@@ -1205,7 +1205,7 @@ describe('the resumed remediation brief', () => {
    */
   it('accepts a brief the caller brought, and hands it over unaltered', async () => {
     const root = repoRoot();
-    const writer = scriptedAgent(agentCommandResult({ stdout: claudeSuccessEnvelope() }));
+    const writer = scriptedAgent(agentCommandResult({ stdout: claudeResultStream() }));
     const supplied = 'VERIFICATION FAILED: the build does not compile.';
 
     const step = await runRemediateStep(

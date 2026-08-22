@@ -2411,12 +2411,19 @@ never reported as a "non-zero exit" because it carried a signal:
 `AGENT_NONZERO_EXIT` means what it says — exited non-zero, *without* a
 recognised signal — and a terminated process is `AGENT_PROCESS_UNAVAILABLE`.
 
-For the writer, success is the `--output-format json` envelope observed at
-2.1.226: `type: "result"`, `subtype: "success"`, `is_error: false`, and no
-`api_error_status`. The envelope must be the whole of stdout — not something
+For the writer, success is the terminal `result` message: `type: "result"`,
+`subtype: "success"`, `is_error: false`, and no `api_error_status`, as observed
+at 2.1.226. It must be the **last non-empty line** of stdout — not something
 found inside it. That is not paranoia about a hostile agent: the reviewer in
 this system reads *this* repository, so an agent quoting a success envelope out
 of a source file or a test fixture is ordinary traffic.
+
+Until V3-11 the same guarantee was spelled "the envelope is the whole of
+stdout", because the writer ran `--output-format json` and the CLI printed one
+object. It now runs `--output-format stream-json --verbose`, stdout is JSONL,
+and the terminator's *position* carries what the whole-document rule used to.
+That migration is what made the quota reset instant readable; see
+"Reading the reset instant" below.
 
 ### Findings, and who names them
 
@@ -2548,14 +2555,39 @@ correct outcome for evidence we do not have — a fabricated timestamp would not
 merely mislead a report, it would convert a governed block into an automatic
 retry on a timer.
 
-That sentence used to read "none was observed in either CLI's output", which was
-measured against a healthy envelope and claimed more than it had established.
-The stronger statement is now measured, and it is narrower: Claude Code 2.1.239
-*does* report an absolute reset instant — `rate_limit_event.rate_limit_info.resetsAt`,
-epoch seconds — but only as a stream message under `--output-format stream-json`.
-The writer runs `--output-format json`, which prints the final `result` object
-and nothing else, and no variant of that object carries a reset field. The
-evidence exists and is out of reach; it is not absent from the world. See
+#### Reading the reset instant (V3-11)
+
+That paragraph describes what was true until V3-11, and the last clause of it —
+"`reportedResetAt` is `null` in practice" — no longer is. The history is worth
+keeping because it is how a measurement got narrowed twice.
+
+It first read "none was observed in either CLI's output", which was measured
+against a *healthy* envelope and claimed more than it had established. The
+stronger statement was then taken from the shipped bundle: Claude Code 2.1.239
+*does* report an absolute reset instant —
+`rate_limit_event.rate_limit_info.resetsAt`, epoch seconds — but only as a
+**stream** message. Under `--output-format json` the CLI builds that event,
+enqueues it, and never writes it, and no variant of the `result` object carries
+a reset field. The evidence existed and was out of reach.
+
+V3-11 reached it, by migrating the writer to `--output-format stream-json
+--verbose` and reading the field. Two rules bound what that buys:
+
+- **only a refusal supplies an instant.** Measured on 2.1.239: a `rate_limit_event`
+  arrives on a *healthy* run too, carrying `status: "allowed"` and a `resetsAt`
+  for whichever window was still open. So the event alone is not evidence that
+  anything was refused, and pairing a five-hour window's reset with a seven-day
+  exhaustion would authorise a resume days early. Only `status: "rejected"` is
+  read, and only onto a positively recognised `USAGE_LIMIT` verdict — two
+  independent guards, because either alone is one edit away from being the only
+  thing between a healthy run and a timer;
+- **nothing is estimated.** `new Date(resetsAt * 1000).toISOString()` is
+  representation conversion and reads no clock. A value that is not a positive
+  integer inside `Date`'s range yields `null`, which is `RESET_TIME_MISSING`,
+  which is a human decision. A relative "retry in 2h" is still not admissible,
+  and there is no arm that rounds or falls back.
+
+Both measurements, the bundle reading and the live capture, are in
 `docs/decisions/2026-08-22-claude-quota-reset-evidence-measurement.md`.
 
 Nothing here retries, sleeps, polls or backs off. One call, one process, one
@@ -2983,11 +3015,14 @@ the contract held by the caller's good manners rather than by the value.
 `BLOCKED_USAGE_LIMIT` is the one state `automaticResumeEligible` marks, which
 reads as though unattended resume operates. It does not, and cannot:
 
-1. **No reset time exists.** `readClaudeResultEnvelope` returns
-   `reportedResetAt: null` unconditionally, because no such field was observed in
-   either CLI's output, and this build refuses to invent one.
-   `evaluateAutomaticResume` denies `RESET_TIME_MISSING`. This lock is
-   phase-independent.
+1. ~~**No reset time exists.**~~ **Closed in V3-11** — see
+   [Unattended quota resume ships](#l-v3-08-1-closed-the-reset-instant-is-read-where-the-cli-emits-it-v3-11).
+   The reader returned `reportedResetAt: null` unconditionally because the
+   writer's output mode could not carry the field. It now runs
+   `--output-format stream-json --verbose`, and a refusal that reports a
+   `rejected` rate-limit event carries its instant into the durable state. A
+   refusal that reports none still denies `RESET_TIME_MISSING`, and nothing is
+   invented.
 2. ~~**The checkpoint claims are withdrawn (F-10).**~~ **Closed in V3-10** — see
    below. Entering a writing phase still sets `currentCommit: null` and
    `worktreeCleanAtCheckpoint: false`, and that is still correct; what changed is
@@ -2995,14 +3030,22 @@ reads as though unattended resume operates. It does not, and cannot:
 3. **Codex has no quota recogniser at all**, so `blockedAgent: 'codex'` is
    unreachable.
 
-Each lock is sufficient alone. **V3-08 changed none of them.** It added the
+Each lock was sufficient alone. **V3-08 changed none of them.** It added the
 missing *invocation* authority — `--automatic-resume-only`, and a bounded wait
-above the lease — so that a granted resume would now be acted on rather than
-refused for want of an operator. That is the fourth lock removed, and it was the
-only one that was about authority rather than about evidence: lock 1 in
-particular still makes the whole path unreachable on a real run, because a reset
-time that is never reported cannot be waited for. See
+above the lease — so that a granted resume would be acted on rather than refused
+for want of an operator. That was the fourth lock removed, and it was the only
+one about authority rather than about evidence. See
 [Unattended automatic resume](#unattended-automatic-resume-v3-08).
+
+**Locks 1 and 2 are now closed, and lock 3 is not on the Claude path.** Since
+V3-11 an unattended quota resume of a *Claude* block is operational end to end
+for a refusal whose stream reported a reset instant: V3-10 supplies the
+checkpoint, V3-11 supplies the instant, and the denial list is then exactly
+`[RESET_TIME_NOT_REACHED]`, which is the list the wait sleeps on. It still
+requires the operator to pass `--automatic-resume-only`; that grant is not
+implied by anything here, and no unattended execution happens without it.
+Lock 3 stands and is unrelated: an exhausted Codex allowance still reaches a
+human.
 
 F-10 was **not remediated in V1-08**, and the reason it was not is worth keeping:
 weakening `evaluateAutomaticResume` to accept freshly observed facts in place of
@@ -3086,16 +3129,156 @@ What this deliberately did **not** do:
   `TaskStateSchema` imposes no checkpoint constraint on a blocking state.
   `TASK_STATE_SCHEMA_VERSION` is unchanged.
 
-**L-V3-08-1 remains OPEN, and unattended quota resume is still not operational.**
-The writer still runs `--output-format json`, where no reset instant is reported,
-so `reportedResetAt` is `null` on every real block and `RESET_TIME_MISSING` is
-still the standing denial. What V3-10 removes is the *independent* F-10 lock: the
+**L-V3-08-1 remained OPEN at V3-10, and is closed by V3-11 — see the next
+section.** What V3-10 removed is the *independent* F-10 lock: the
 `tests/v1-08-e2e.test.ts` case that used to name three reason codes now asserts
-the exact list `['RESET_TIME_MISSING']`, driven through the same real 429
-envelope. The acceptance proof that the remaining denial becomes exactly
-`[RESET_TIME_NOT_REACHED]` uses a synthetic reset time — allowed there because
-the test isolates F-10 and does not claim the current output mode supplies one.
-Do not read any of this as "unattended resume now works". It does not.
+the exact list `['RESET_TIME_MISSING']` for a refusal that reported no instant,
+driven through the same real 429 envelope. V3-10's own acceptance proof that the
+remaining denial becomes exactly `[RESET_TIME_NOT_REACHED]` uses a synthetic
+reset time, and that is kept rather than rewritten: the property that suite owns
+is the *checkpoint*, and supplying the instant is what isolates it from the
+reader that now produces one.
+
+### L-V3-08-1 closed: the reset instant is read where the CLI emits it (V3-11)
+
+**L-V3-08-1 is closed, and unattended quota resume of a Claude block is
+operational end to end.** The writer runs `--output-format stream-json
+--verbose`; `readClaudeResultStream` reads the terminal `result` out of the
+JSONL stream and, for a positively recognised quota refusal, the reset instant
+out of a `rejected` `rate_limit_event`. With V3-10's checkpoint already in
+place, a real 429 that reported an instant now denies for exactly one reason —
+`RESET_TIME_NOT_REACHED` — and stops denying once it is reached.
+
+This was never a parser fix. It replaced a whole-document contract with a stream
+contract, which changes what "complete output" means and what truncation means,
+so those are stated rather than implied.
+
+**What was measured, and what was read.** The bundle reading that opened this
+item is unchanged and is still the source for the field's unit. What V3-11 adds
+is a **live capture**, which the earlier record explicitly listed as missing
+("`stream-json` was **not** exercised"). The production vector, a one-word
+prompt, a throwaway directory, claude 2.1.239: four lines and 4741 bytes on
+stdout, nothing on stderr, exit 0 — `system`/`init`, `rate_limit_event`,
+`assistant`, `result`. Three consequences, none of which the schema alone could
+have given:
+
+- `resetsAt: 1787418000` renders as `2026-08-22T17:00:00.000Z` against a capture
+  at `12:19Z` — a five-hour window resetting on the hour. Epoch **seconds**,
+  now agreeing with the bundle's two arithmetic derivations rather than only
+  with itself;
+- the event arrives on a **healthy** run, carrying `status: "allowed"`. This is
+  the single most important finding in the slice: `resetsAt` is not by itself
+  evidence of a refusal, and a reader that took the last one it saw would attach
+  an instant to every completed pass. Hence the two guards described above;
+- the `init` message states the authority the CLI granted —
+  `tools: ["Edit","Glob","Grep","Read","Write"]`, `mcp_servers: []`,
+  `permissionMode: "acceptEdits"`. The vector's three hermeticity claims were
+  behavioural measurements; the CLI now says them outright. Nothing reads that
+  message yet — see **L-V3-11-1**.
+
+**The transport contract, and how truncation is refused.** A JSONL stream can
+die inside an object, so the rule is a positive terminator *in a fixed
+position*: the last non-empty line must be the one and only `result` message.
+A cut tail leaves a fragment that does not parse, so the terminator is not there
+and the whole stream is `UNRECOGNISED`. Unparseable lines elsewhere are skipped,
+exactly as `codex-review-transcript.ts` skips them around its `turn.completed` —
+the CLI may grow message kinds, and refusing them would break the writer on the
+next release for no safety benefit. Two more terminators would be refused as
+well: the terminator is what grants a block its authority, and there is no basis
+for preferring one of two.
+
+The position is load-bearing and replaced something real. The whole-document
+reader could not be fooled by a success envelope *quoted inside* a larger
+document, because stdout had to *be* the envelope. Scanning lines gives that up;
+requiring the terminator to be last buys it back, and
+`tests/claude-writer.test.ts` keeps the case.
+
+Two guards above this module are unchanged and neither was weakened: a stream
+that hits its byte budget is `UNAVAILABLE` at the seam, and
+`endedUnderOwnControl` refuses to read a byte from a process ended by a signal.
+`tests/v3-11-quota-reset-stream.test.ts` drives a *perfect* refusal stream
+carrying a valid instant through both and requires `AGENT_PROCESS_UNAVAILABLE`
+with no block at all.
+
+**The output budget moved, and that is a consequence rather than a choice.**
+`AGENT_COMMAND_MAX_OUTPUT_BYTES` (8 MiB, one figure for both streams) became
+`AGENT_COMMAND_MAX_STDOUT_BYTES` (64 MiB) and `AGENT_COMMAND_MAX_STDERR_BYTES`
+(8 MiB, unchanged). The old ceiling was sized against one `result` object; stdout
+now carries the whole transcript, including every tool result, and a writing pass
+that reads several dozen files is an ordinary writing pass. Flooding the budget
+is `AGENT_PROCESS_UNAVAILABLE` — fail-closed, but on a run that had actually
+succeeded. 64 MiB is a **headroom decision, not a measurement**, and is recorded
+as one: see **L-V3-11-2**.
+
+**L-V3-10-4 was narrowed here rather than inherited.** That item accepted four
+blind spots on the grounds that no unattended resume could happen anyway. This
+slice removes that ground, so the two that a repository's own *configuration*
+can open are closed: `status --porcelain` now carries `--untracked-files=all`
+and `--ignore-submodules=none` in both worktree observers, and the scope gate's
+`git diff` carries the submodule flag too. Each restates a Git default, so
+nothing changes in an ordinarily configured repository — what changes is that
+`status.showUntrackedFiles=no` or a `.gitmodules` `ignore = all` can no longer
+answer "is this worktree clean" on AO's behalf. Both were reproduced against
+real Git before the flags were credited with anything, and both are pinned by
+cases that first assert the *hidden* reading and then the observers'. The scope
+gate's flag went in with them deliberately: hardening cleanliness alone would
+have been worse than hardening neither, because a change invisible to the gate
+and visible to the settlement would be *committed* rather than blocked.
+
+**Measured by counter-proof: 21 mutants, 20 killed, 1 equivalent.** Every guard
+above was removed or inverted in `src/` and the suite required to fail. The
+survivor is `results.length !== 1` relaxed to `< 1`, and it is equivalent rather
+than unpinned: with two `result` messages, `results[0]` is the first and
+`objects[objects.length - 1]` is at or after the second, so the position guard
+refuses the stream whatever the count check says. It is kept as the first line
+of the completeness proof — defence in depth on the check that grants a block
+its authority — and is recorded here as equivalent rather than counted as
+covered.
+
+**What the migration cost elsewhere, and what was done about it.** Three
+consequences were found by breaking the slice rather than by reading it, and
+each is a case in the suite:
+
+- **the diagnostic excerpt stopped being about the failure.** `agentDiagnostics`
+  keeps a redacted *prefix* of stdout, which under `--output-format json` was
+  the whole envelope. Under `stream-json` the first four kilobytes are the
+  `init` message — a listing of tools, skills and slash commands — and the
+  outcome is at the far end, cut off. That is a regression in exactly the two
+  cases the excerpt exists for. The writer now excerpts the terminal `result`
+  line where the stream has one, restoring the pre-V3-11 view, and the whole
+  stream where it does not, which is the right answer for a cut stream: there,
+  the head *is* the evidence;
+- **the obvious range bound was the wrong one.** `Date` holds ±8.64e15 ms, and
+  an instant near that end renders `+275760-09-13T00:00:00.000Z` — which
+  `Date.parse` accepts and `z.iso.datetime({ offset: true })` refuses. A reader
+  bounded by `Date` would have handed `recordAgentInterruption` a value the
+  durable contract rejects, so the block would have failed to be *written*: a
+  task stopping with no record of why, which is worse than reporting no instant.
+  The bound is the schema's — `9999-12-31T23:59:59Z` — and it was measured
+  against the shipped schema rather than reasoned about;
+- **one transport guard was unpinned.** A mutant that stopped the tail flag from
+  tracking the last line survived the first run: a stream ending in a JSON
+  *array* still looked complete, because the flag was left true by the `result`
+  line before it. The two-branch assignment became one expression, and the case
+  that kills it is now in the suite.
+
+What this deliberately did **not** do:
+
+- **`evaluateAutomaticResume` is byte-identical.** Again. The denial list got
+  shorter because the evidence arrived, not because a check was relaxed.
+- **No new authority to run unattended.** `--automatic-resume-only` is still
+  required, still mutually exclusive with `--attended`, and still cannot recover
+  a stale lease. What changed is that the grant is now reachable on a real run.
+- **No durable schema change.** `reportedResetAt` already existed and is already
+  `z.iso.datetime({ offset: true })`. `TASK_STATE_SCHEMA_VERSION` is unchanged.
+- **No Codex reset ingestion.** Codex does carry a `resets_at`, and its units are
+  still not established by the installed binary, and AO still has no positive
+  Codex quota classifier. Both gates are unchanged.
+- **No estimation, anywhere.** A relative "retry in 2h" is still inadmissible.
+  The only arithmetic in the reader is `resetsAt * 1000`, and it reads no clock.
+- **The `init` message is not enforced.** Verifying the granted tool set against
+  the vector is the obvious next use of this stream and is not done here; every
+  arm added to a classifier is a new way for a healthy run to be refused.
 
 ### The verification seam now runs (F-8)
 
@@ -3172,20 +3355,48 @@ and because the failure mode it describes — a command that cannot start is
   precisely to avoid this brittleness. So the interrupted state now carries a
   stricter claim than the successful one at the same repository moment. That is
   the trade the resume is bought with, and it is deliberate.
-- **L-V3-10-4 — ACCEPTED LIMIT: a writer effect neither gate can see now buys
-  resume authority instead of denying it.** The scope gate reads `git diff` plus
+- **L-V3-10-4 — NARROWED IN V3-11 to two blind spots, and the remaining two are
+  re-accepted as an operating decision.** The scope gate reads `git diff` plus
   untracked files inside the worktree, and the settlement reads `status
-  --porcelain`. Neither sees a gitignored file the writer created, a write
-  outside the worktree, submodule content under `ignore = all`, or anything
-  hidden by a worktree-local `status.showUntrackedFiles=no`. Those blind spots
-  are unchanged by V3-10 — but their *consequence* reversed direction: such a run
-  used to produce a permanently non-resumable block, and now produces
-  `currentCommit` + `worktreeCleanAtCheckpoint: true`, which is authority for an
-  unattended writer launch. Accepted rather than closed, because closing it means
-  a broader definition of "settled" than Git's own porcelain, which is a contract
-  of its own. **Related:** V3-10 removes two of the three independent locks on
-  unattended quota resume, so closing L-V3-08-1 is the change that *ships*
-  unattended execution — not an isolated output-format migration.
+  --porcelain`. As written at V3-10 neither saw a gitignored file the writer
+  created, a write outside the worktree, submodule content under `ignore = all`,
+  or anything hidden by a worktree-local `status.showUntrackedFiles=no` — and
+  the *consequence* of that had reversed direction: such a run used to produce a
+  permanently non-resumable block, and now produces `currentCommit` +
+  `worktreeCleanAtCheckpoint: true`, which is authority for an unattended writer
+  launch.
+
+  V3-11 is the slice that made that authority reachable, so it did not inherit
+  the acceptance. **The two configuration-opened spots are closed**: both
+  worktree observers (`loop/loop-step.ts`'s settlement and
+  `state/observe-runtime.ts`'s reconciliation) now pass `--untracked-files=all
+  --ignore-submodules=none`, and `scope/task-delta.ts`'s diff passes the
+  submodule flag. Each restates a Git default, so an ordinarily configured
+  repository sees no change; what is removed is the observed repository's
+  ability to answer the cleanliness question on AO's behalf. Both were
+  reproduced against real Git first — a modified submodule under `ignore = all`
+  and an untracked file under `showUntrackedFiles=no` each report a *clean*
+  tree to a bare `--porcelain` — and `tests/v3-11-quota-reset-stream.test.ts`
+  asserts the hidden reading before the observers'. On the settlement observer
+  the change is **symmetry, not a fix**: `commitTaskWork` runs `git add --all`,
+  so a non-ignored file is staged and the post-commit tree is clean either way.
+  It is made explicit there because `observeSettledWorktree` is documented to
+  ask the same question in the same words as `observeRuntime`, and two observers
+  that phrase it differently would eventually disagree about a repository
+  neither had changed.
+
+  **Still open, and now an operating decision rather than a theoretical one:**
+  a **gitignored** file the writer created, and a write **outside the worktree**.
+  Neither is closed here. Closing the first means a broader definition of
+  "settled" than Git's own porcelain — a before/after snapshot of ignored
+  content, which is a contract of its own with a real cost on large trees. The
+  second is bounded by the CLI rather than by Git: `acceptEdits` measured
+  cwd-confined, both for the escape to a sibling and for the tamper of the main
+  checkout, and AO grants no shell. That is a measurement of a foreign CLI, not
+  a property AO enforces, and it is named here so that it is read as one.
+  **The acceptance is now the operator's**: it is what `--automatic-resume-only`
+  buys into, and it should be re-examined by any slice that widens where that
+  grant applies.
 - **L-V3-10-3** — two settlement refusals have **no separate report**.
   `LoopStepResult.scope` and `.commit` name the scope verdict and the commit
   outcome, but "HEAD could not be observed afterwards" and "the tree was still
@@ -3809,34 +4020,57 @@ and because the failure mode it describes — a command that cannot start is
   any of them adopts the resolver, this reproduces. `runtime-gate-dist-artifact.mjs`
   already does the right thing. **Scope:** the three harnesses named.
   **Not a production defect:** nothing in `src/` hand-builds a repository record.
-- **L-V3-08-1 — the authority exists and cannot fire, and lock 1 is why.** The
-  invocation grant, the run-driver gate, the wait controller and the CLI are all
-  in place, and on a real run none of them is reachable: no reset time reaches
-  AO, so `reportedResetAt` is always `null`, `evaluateAutomaticResume` denies
-  `RESET_TIME_MISSING`, and the wait refuses with `RESET_TIME_MISSING` before it
-  sleeps. Every case that exercises the granted path seeds the reset time itself.
-  This is not a defect of the slice — the brief was to supply the authority that
-  was missing — but it is the reason nobody should read the new flag as an
-  operating capability.
-  **Measured 2026-08-22, and the finding is narrower than the item first
-  assumed.** Claude Code 2.1.239 does report an absolute reset instant:
-  `rate_limit_event.rate_limit_info.resetsAt`, an integer in epoch seconds,
-  whose unit is pinned twice in the shipped bundle and whose timezone is
-  therefore unambiguous. It is emitted only as a stream message under
-  `--output-format stream-json --verbose`. The writer runs `--output-format
-  json`, which prints the final `result` object and nothing else, and neither
-  the success nor the error variant of that object carries a reset field — so a
-  real 429 envelope could not carry one either. The verdict is
-  `RESET_EVIDENCE_REQUIRES_OUTPUT_MODE_CHANGE`, and no ingestion was
-  implemented. Closing this now means one of two decisions, each its own slice:
-  migrating the writer to the stream contract, or accepting an operator-supplied
-  instant. Since V3-10 this is the **only** thing standing in the way: F-10 is
-  closed, so a settled quota block's denial list is now exactly
-  `[RESET_TIME_NOT_REACHED]` once a reset time exists — which is the list the
-  wait sleeps on. It does not exist, so nothing sleeps, and unattended quota
-  resume is still not operational end to end. **Full measurement:**
+- **L-V3-08-1 — CLOSED in V3-11.** The item was "the authority exists and cannot
+  fire, and lock 1 is why": the invocation grant, the run-driver gate, the wait
+  controller and the CLI were all in place and none of them was reachable on a
+  real run, because no reset time reached AO. Two measurements narrowed it —
+  first the shipped bundle (the instant exists, as a stream message this output
+  mode discards), then a live capture of that stream — and V3-11 migrated the
+  writer to `--output-format stream-json --verbose` and read the field. The
+  decision taken was the first of the two the measurement offered: the stream
+  contract, not an operator-supplied instant, so `reportedResetAt` still means
+  "reported by the CLI" and by nothing else. `tests/v1-08-e2e.test.ts` now
+  reaches the exact denial list `['RESET_TIME_NOT_REACHED']` through the real
+  recogniser with nothing synthetic. **Full measurement:**
   `docs/decisions/2026-08-22-claude-quota-reset-evidence-measurement.md`.
-  **Scope:** `agent/internal/claude-result-envelope.ts`.
+  **What it left behind:** L-V3-11-1, L-V3-11-2, L-V3-11-3, and the narrowed
+  L-V3-10-4.
+- **L-V3-11-1 — the CLI states the authority it granted, and nothing reads it.**
+  The `system`/`init` message the stream now delivers carries `tools`,
+  `mcp_servers` and `permissionMode`, measured as
+  `["Edit","Glob","Grep","Read","Write"]`, `[]` and `acceptEdits` for the
+  production vector. Those are exactly the three hermeticity claims
+  `CLAUDE_WRITER_ARGS` makes, and they are currently held by a behavioural
+  opt-in gate that spends quota. Reading them would turn an asserted boundary
+  into a measured one — this repository's whole method — and it is not done
+  here because every arm added to a classifier is a new way for a healthy run to
+  be refused, and because deciding what AO should *do* when the granted set
+  differs (refuse the run? refuse the block? report?) is a product decision.
+  **Scope:** `agent/internal/claude-result-stream.ts`,
+  `tests/opt-in/claude-writer-authority.mjs`.
+- **L-V3-11-2 — the whole transcript is buffered, and 64 MiB is a guess.** The
+  seam retains stdout in full and decodes it once at the end, which was
+  unremarkable when stdout was one `result` object and is a different
+  proposition now that it is every message and every tool result. The ceiling
+  was raised from 8 MiB to 64 MiB on reasoning rather than on a measurement: the
+  only figure actually observed is 4741 bytes for a one-word answer, and no real
+  writing pass has been measured. Flooding it is `AGENT_PROCESS_UNAVAILABLE`,
+  which is fail-closed and is also a human decision on a run that succeeded. The
+  structural answer is a line-oriented reader that keeps the terminator and the
+  rate-limit events and discards the transcript, which would make the budget
+  irrelevant; that changes `doctor/exec.ts`'s sink contract and the diagnostics
+  excerpt, and is its own slice. **Scope:** `agent/agent-command.ts`,
+  `doctor/exec.ts`.
+- **L-V3-11-3 — a reset instant already in the past grants an immediate resume.**
+  `evaluateAutomaticResume` grants once `now > reportedResetAt`, so a `rejected`
+  event whose `resetsAt` has already elapsed authorises a retry at once. The CLI
+  itself has a helper for exactly that state, so it is a shape that occurs. The
+  outcome is not unsafe — the retry meets the refusal again and re-blocks — but
+  it spends an invocation, and under `--max-invocations` it can spend several.
+  Not fixed here because the reader has no clock by design and the fix belongs
+  where one already exists: either `recordAgentInterruption`, which holds `now`,
+  or the resume policy. **Scope:** `core/automatic-resume.ts`,
+  `agent/record-interruption.ts`.
 - **L-V3-08-2 — an unattended resume that runs out of step budget leaves a task
   no unattended run can pick up again.** The permission to keep driving after a
   resume is local to one `runTask` call, deliberately. So a resume that reaches

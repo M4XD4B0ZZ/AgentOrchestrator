@@ -66,14 +66,49 @@ import {
 export const AGENT_COMMAND_TIMEOUT_MS = 1_800_000;
 
 /**
- * Per-stream byte budget for one agent run.
+ * Byte budget for one agent run's **stdout**.
  *
  * Larger than the diagnostic default because `--json`/JSONL transcripts are
  * genuinely large, and still a hard ceiling. Exceeding it is reported, never
  * silently absorbed: a truncated stream is the one thing that must never be
  * parsed into a verdict.
+ *
+ * ── Why 64 MiB, and why it was 8 (V3-11) ───────────────────────────────────
+ *
+ * 8 MiB was sized against the writer's old `--output-format json`, which
+ * prints exactly one `result` object — a few kilobytes. Since V3-11 the writer
+ * runs `--output-format stream-json --verbose`, and stdout carries the whole
+ * transcript: every assistant message, and every tool result. A `Read` of a
+ * large source file is a couple of hundred kilobytes of that transcript, and a
+ * writing pass that reads several dozen files is an ordinary writing pass. So
+ * the old ceiling stopped being a hang guard and started being a limit real
+ * work could reach — and reaching it is `UNAVAILABLE`, which is
+ * `AGENT_PROCESS_UNAVAILABLE`, which is a human decision on a run that had
+ * actually succeeded.
+ *
+ * 64 MiB is a headroom decision rather than a measurement, and it is recorded
+ * as one: the transcript size of a real writing pass has not been measured on
+ * this machine, only its lower bound (4741 bytes for a one-word answer). The
+ * arithmetic that bounds the cost is memory: `BoundedSink` retains at most
+ * this many bytes, concatenates them once and decodes once, so the transient
+ * peak is on the order of three times this figure, and it is transient.
+ * Raising it further is not free and lowering it re-opens the regression.
+ *
+ * The failure mode is unchanged and is still fail-closed. A run that floods
+ * this budget is killed and reported unusable; it is never a partial result.
  */
-export const AGENT_COMMAND_MAX_OUTPUT_BYTES = 8_388_608;
+export const AGENT_COMMAND_MAX_STDOUT_BYTES = 67_108_864;
+
+/**
+ * Byte budget for one agent run's **stderr**, kept at the pre-V3-11 figure.
+ *
+ * Split from stdout rather than raised with it because the two carry different
+ * things. Neither installed CLI's *result* travels on stderr — Codex writes
+ * routine diagnostics there on runs that succeed, and Claude wrote nothing
+ * there at all when measured — so a larger budget would buy nothing except a
+ * larger buffer for text no classifier is allowed to read as a verdict.
+ */
+export const AGENT_COMMAND_MAX_STDERR_BYTES = 8_388_608;
 
 /** How one agent run ended, in a closed vocabulary. Never a message. */
 export type AgentCommandOutcome =
@@ -255,8 +290,8 @@ export const runAgentCommand: AgentRunner = async (agent, args, cwd, payload) =>
       // have been started.
       cwd,
       timeoutMs: AGENT_COMMAND_TIMEOUT_MS,
-      maxStdoutBytes: AGENT_COMMAND_MAX_OUTPUT_BYTES,
-      maxStderrBytes: AGENT_COMMAND_MAX_OUTPUT_BYTES,
+      maxStdoutBytes: AGENT_COMMAND_MAX_STDOUT_BYTES,
+      maxStderrBytes: AGENT_COMMAND_MAX_STDERR_BYTES,
       stdin: payload,
     });
   } catch (error) {

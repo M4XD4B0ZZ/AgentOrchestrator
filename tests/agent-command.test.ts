@@ -20,7 +20,8 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import {
-  AGENT_COMMAND_MAX_OUTPUT_BYTES,
+  AGENT_COMMAND_MAX_STDERR_BYTES,
+  AGENT_COMMAND_MAX_STDOUT_BYTES,
   AGENT_COMMAND_TIMEOUT_MS,
   toAgentCommandResult,
 } from '../src/agent/agent-command.js';
@@ -361,8 +362,13 @@ describe('the budgets an agent run is given', () => {
   it('bounds wall clock and output', () => {
     expect(Number.isFinite(AGENT_COMMAND_TIMEOUT_MS)).toBe(true);
     expect(AGENT_COMMAND_TIMEOUT_MS).toBeGreaterThan(0);
-    expect(Number.isFinite(AGENT_COMMAND_MAX_OUTPUT_BYTES)).toBe(true);
-    expect(AGENT_COMMAND_MAX_OUTPUT_BYTES).toBeGreaterThan(0);
+    expect(Number.isFinite(AGENT_COMMAND_MAX_STDOUT_BYTES)).toBe(true);
+    expect(AGENT_COMMAND_MAX_STDOUT_BYTES).toBeGreaterThan(0);
+    expect(Number.isFinite(AGENT_COMMAND_MAX_STDERR_BYTES)).toBe(true);
+    expect(AGENT_COMMAND_MAX_STDERR_BYTES).toBeGreaterThan(0);
+    // V3-11: stdout carries the whole transcript now, stderr does not. The two
+    // budgets are separate so that raising one cannot quietly raise the other.
+    expect(AGENT_COMMAND_MAX_STDOUT_BYTES).toBeGreaterThan(AGENT_COMMAND_MAX_STDERR_BYTES);
   });
 
   it('starts each agent with the profile root it needs and no credential', () => {
