@@ -3307,6 +3307,34 @@ and because the failure mode it describes — a command that cannot start is
   result taken by somebody else at some other moment — and it does make one
   `lease status` two probes. Cosmetic for the CLI; worth knowing for any caller
   that counts probe invocations. **Scope:** `lease/lease-recovery.ts`.
+- **L-V3-05-5 — a fixture's dead pid is a measurement that expires, and eight
+  destructive cases still depend on it.** `tests/v3-05-stale-lease-recovery.test.ts`
+  builds a stale lease by naming an owner pid that a real child really vacated,
+  checked `NOT_FOUND` at the moment the fixture is built. Windows reuses the pid
+  that just became free before it reuses any other, and liveness is the *first*
+  conjunct of the recovery predicate — so a reuse between the fixture and the
+  call turns whatever the case was about into `OWNER_RUNNING`. That is not
+  hypothetical: a loaded gate run reported `OWNER_RUNNING` where
+  `LAUNCH_HISTORY_UNSUPPORTED_VERSION` was expected, with the product correct.
+
+  The reporting cases are fixed rather than carried: `produces every refusal in
+  the closed set from a real input` now supplies `{ processAlive: dead }` for the
+  four history refusals, because the reporting path lets a probe substitute
+  outright and the fixture had already established that fact. Measured by
+  mutation — a `deadProcessId` that returns a living pid reproduces the observed
+  failure, and the fix removes that one case from the failure list while leaving
+  the others exactly where they were.
+
+  What is carried is those others. All eight go through `recoverStaleLease`,
+  which refuses a supplied liveness **by design** — a review reproduced what
+  accepting one costs, one call with `() => 'NOT_FOUND'` removing the lease of a
+  living process — so no seam can make them deterministic. Their exposure is the
+  same expiring measurement, and the same mutant shows all eight. They stayed
+  green through eight suite runs against ~7,800 churned pids, so the window is
+  narrow, but it is open. Closing it needs a fixture that can hold a pid
+  unallocatable for the length of a case, which is a platform measurement of its
+  own and not a test edit. **Scope:**
+  `tests/v3-05-stale-lease-recovery.test.ts`.
 - **L-V3-06-1 — the continuation grant was examined and is unchanged.** The
   first draft of this entry claimed slice 6 widened it, and that claim was
   wrong. The attended grant has never meant "one `runTask` call": it means

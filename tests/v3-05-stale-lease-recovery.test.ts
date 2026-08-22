@@ -1223,9 +1223,32 @@ describe('the safety predicate refuses everything it cannot prove', () => {
     const stale = repositoryFixture();
     staleLease(stale, (evidence) => containedLaunch(stale, evidence));
     const subject = subjectOf(stale);
+    /**
+     * ── Why the history cases supply a liveness and the others do not ───────
+     *
+     * `staleLease` names an owner pid measured `NOT_FOUND` at the moment the
+     * fixture is built. That measurement expires. Windows reuses a pid, and the
+     * one it reuses first is the one that just became free — so under the loaded
+     * gate the real probe can answer `ALIVE` for this same pid a moment later,
+     * and liveness is the *first* conjunct of the predicate. Every history
+     * refusal below then arrives as `OWNER_RUNNING`, which is what was observed:
+     * this case went red on `LAUNCH_HISTORY_UNSUPPORTED_VERSION` with
+     * `OWNER_RUNNING` in its place, in a gate run where the product was correct.
+     *
+     * So the cases whose subject is the *history* take the controlled seam the
+     * neighbouring readings take — the reporting path lets a probe substitute
+     * outright, and `dead` is the fact the fixture already established, now
+     * stated rather than re-measured at an arbitrary later instant.
+     *
+     * The cases whose subject *is* the liveness keep the real probe:
+     * `OWNER_RUNNING` is produced by a genuinely held lease, and
+     * `OWNER_LIVENESS_UNDETERMINED` by the one answer that cannot be measured.
+     * The location, lease-shape and empty-repository cases are left alone
+     * because the predicate refuses them before it ever reaches a pid.
+     */
     const ledgerSays = (raw: unknown): StaleRecoveryRefusal | null => {
       writeLedger(stale, raw);
-      return assessStaleLeaseRecovery(stale).refusal;
+      return assessStaleLeaseRecovery(stale, { processAlive: dead }).refusal;
     };
 
     // A history rebuilt after its file was lost: `historyComplete: false`,
@@ -1273,9 +1296,10 @@ describe('the safety predicate refuses everything it cannot prove', () => {
         root: '\\\\.\\PhysicalDrive0',
         id: 'device',
       }).refusal,
-      LAUNCH_HISTORY_ABSENT: assessStaleLeaseRecovery(legacy).refusal,
-      LAUNCH_HISTORY_INCOMPLETE: assessStaleLeaseRecovery(incomplete).refusal,
-      LAUNCH_HISTORY_UNPROVEN: assessStaleLeaseRecovery(pending).refusal,
+      LAUNCH_HISTORY_ABSENT: assessStaleLeaseRecovery(legacy, { processAlive: dead }).refusal,
+      LAUNCH_HISTORY_INCOMPLETE: assessStaleLeaseRecovery(incomplete, { processAlive: dead })
+        .refusal,
+      LAUNCH_HISTORY_UNPROVEN: assessStaleLeaseRecovery(pending, { processAlive: dead }).refusal,
       LAUNCH_HISTORY_UNSUPPORTED_VERSION: ledgerSays({
         ...sealed({ entries: [] }, subject),
         ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION + 1,
