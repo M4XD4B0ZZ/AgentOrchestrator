@@ -3387,16 +3387,19 @@ could only be too early; the contract violation was not.
 
 **Counter-proof: 9 mutants, all killed**, by
 `tests/v3-11-remediation-git-vectors.test.ts` and the extended
-`tests/v3-11-quota-reset-stream.test.ts`. **Five of the nine cases that existed
-when this paragraph was written** — the file has since grown — measure both
-halves — the reading the hostile configuration produces *and* the reading the
-vector produces — because a case that asserted only the second cannot tell
-hardening from over-reporting, which is exactly how the two wrong tokens shipped.
-The other four are controls and bound checks and are marked as such in the file;
-a control that asserted a hidden reading would be asserting nothing. (The first
-draft of this paragraph said "every case", which was itself a count stated
-without checking — the same defect, in the sentence claiming the defect was
-fixed.)
+`tests/v3-11-quota-reset-stream.test.ts`. Of the nine cases that existed when
+this paragraph was written — the file has since grown well past that — **six**
+measure both halves: the reading the hostile configuration produces *and* the
+reading the vector produces, because a case that asserted only the second cannot
+tell hardening from over-reporting, which is exactly how the two wrong tokens
+shipped. The other three are controls and bound checks, marked as such in the
+file; a control that asserted a hidden reading would be asserting nothing.
+
+(This sentence has now been wrong twice. It first said "every case", a count
+stated without checking — the same defect, in the sentence claiming the defect
+was fixed. It was then corrected to "five", which a later round made stale by
+adding the missing premise half to a sixth. Both were caught by review, not by
+the author.)
 
 The submodule cases declare `ignore = all` in `.gitmodules`, the tracked file at
 the top of the worktree that a writer holding `Write` can actually reach, rather
@@ -3553,15 +3556,15 @@ reports `M vendor`), and it runs first and produces `approvedPaths`, so the path
 is either refused before any commit exists or was approved anyway. Recorded
 under L-V3-11-5 as an asymmetry, not as a defect.
 
-**Counter-proof: 26 mutants, 26 killed.** Both halves of the transport rule
+**Counter-proof: 30 mutants, 30 killed.** Both halves of the transport rule
 (latch and guard) and the latch's *unlatched* variant; three arms of the event
-reader; fifteen arms of the gitlink probe, including both of its sources, the
-distinction between "this path cannot be carried as an argument" and "Git could
-not answer", and the two guards that stop one gitlink answering for another; the
-probe's wiring into `observeRuntime` **and** into the destructive removal gate;
-and three of the budget split.
+reader; nineteen arms of the gitlink probe, including both of its sources, every
+distinction between "the answer is no" and "the question could not be put", the
+two guards that stop one gitlink answering for another, and the batching of the
+index confirmation; the probe's wiring into `observeRuntime` **and** into the
+destructive removal gate; and three of the budget split.
 
-**Five survived their first run**, and they are recorded rather than quietly
+**Six survived their first run**, and they are recorded rather than quietly
 re-run, because what they exposed is the point:
 
 - treating an unparsed `submodule status` line as "no submodule" — which is why
@@ -3571,10 +3574,15 @@ re-run, because what they exposed is the point:
 - narrowing the object-name pattern back to forty characters;
 - dropping the `-`-only filter on `submodule status` lines;
 - matching the index confirmation on the gitlink *mode* alone instead of on the
-  exact path.
+  exact path;
+- sending only the **first** path to a confirmation that claims to ask about all
+  of them. That one survived a case named "confirms every listed path in a single
+  call", because the case asserted the call *count* and a stub answers about
+  paths it was never asked for. The argv is the only place batching is
+  observable, and the case now reads it.
 
-The last three are **equivalent for correctness**: the index fallback reaches the
-right answer without any of them. They are kept because what they buy is not the
+Three of the six are **equivalent for correctness**: the index fallback reaches
+the right answer without any of them. They are kept because what they buy is not the
 answer but the *route* — an ordinary repository with a checked-out submodule
 staying on the bounded pathspec call instead of enumerating the whole index on
 every cleanliness reading, which is the 1 MiB cliff this remediation removed. The
@@ -4506,6 +4514,19 @@ and because the failure mode it describes — a command that cannot start is
   it means deciding how AO distinguishes a submodule the operator populated from
   one the writer fabricated, which needs state AO does not currently keep.
   **Scope:** `worktree/worktree-cleanliness.ts`.
+- **L-V3-11-15 — the gitlink probe's index fallback has the same 1 MiB cliff the
+  remediation removed from the cleanliness vector.** When `git submodule status`
+  cannot be used — an embedded repository never mapped in `.gitmodules`, the
+  ordinary `git add -A` accident — the probe reads the whole index instead.
+  Measured: 7,003 tracked files (1,260,171 bytes of `ls-files --stage -z`) plus
+  one such gitlink, on a **clean** tree, floods the cap and answers "not
+  established", which is `UNOBSERVABLE`, which stops every step of that task for
+  an operator. The threshold is a byte total and not a file count: an entry costs
+  `51 + len(path)` bytes, so this repository's own shape (82.7 B/entry) reaches
+  it at about 12,700 files. Fail-closed on authority, a permanent stop on
+  availability, and narrower than the stall it replaced — the first design
+  stalled that repository at *any* size. **Scope:**
+  `worktree/worktree-cleanliness.ts`.
 - **L-V3-11-14 — a gitlink nested inside a populated submodule is not
   probed.** `git submodule status` is not recursive, and recursion into
   arbitrary directories is deliberately outside this probe's remit. So the

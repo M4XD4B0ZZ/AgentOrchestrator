@@ -683,10 +683,58 @@ describe('the gitlink probe falls back to the index, and refuses when neither so
     expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBeNull();
   });
 
-  it('reports not established when the confirmation cannot be read', async () => {
-    const git = runner({ submodule: { ...CLEAN, stdout: `-${SHA} vendor` }, confirm: UNAVAILABLE });
+  /**
+   * An unreadable *confirmation* is a question that could not be put, not an
+   * answer about the worktree — so it takes the index, which needs no pathspec
+   * and is the authority for gitlinks anyway. Only a **contradiction** refuses.
+   */
+  it('falls back to the index when the confirmation cannot be read', async () => {
+    const git = runner({
+      submodule: { ...CLEAN, stdout: `-${SHA} vendor` },
+      confirm: UNAVAILABLE,
+      index: { ...CLEAN, stdout: `160000 ${SHA} 0\tvendor\0` },
+    });
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBe(true);
+    expect(git.asked.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(true);
+  });
+
+  it('reports not established when the confirmation and the index both fail', async () => {
+    const git = runner({
+      submodule: { ...CLEAN, stdout: `-${SHA} vendor` },
+      confirm: UNAVAILABLE,
+      index: UNAVAILABLE,
+    });
 
     expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBeNull();
+  });
+
+  /**
+   * The confirmation asks about **every** listed path in one call, not one call
+   * per path. A first version looped: thirty unpopulated gitlinks in a clean
+   * tree cost thirty-two subprocesses and ~3.5 seconds per cleanliness reading,
+   * under a comment calling it "one bounded observation".
+   */
+  it('confirms every listed path in a single call', async () => {
+    const paths = Array.from({ length: 8 }, (_, index) => `vendor${index}`);
+    const git = runner({
+      submodule: { ...CLEAN, stdout: paths.map((path) => `-${SHA} ${path}`).join('\n') },
+      confirm: {
+        ...CLEAN,
+        stdout: paths.map((path) => `160000 ${SHA} 0\t${path}\0`).join(''),
+      },
+    });
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => [])).toBe(true);
+
+    const calls = git.asked.filter((args) => args[0] === 'ls-files');
+    expect(calls).toHaveLength(1);
+    // And every path is *in* that call. Asserting the call count alone was not
+    // enough: a mutant that sent only the first path kept the count at one and
+    // the suite green, because a stub answers about paths it was never asked
+    // for. The argv is the only place the batching is observable.
+    const argv = calls[0] ?? [];
+    for (const path of paths) expect(argv).toContain(path);
   });
 
   it('reports not established when neither source answers', async () => {

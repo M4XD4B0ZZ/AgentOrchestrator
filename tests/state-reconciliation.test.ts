@@ -93,7 +93,14 @@ interface GitScript {
   readonly baseObject?: GitCommandResult;
   /** `git submodule status` — the gitlink listing the cleanliness probe reads. */
   readonly submodules?: GitCommandResult;
-  /** `git ls-files --stage -- <path>` — the index confirmation for one gitlink. */
+  /**
+   * `git ls-files --stage` — the gitlink probe's index source.
+   *
+   * Answers both shapes the probe issues: the pathspec-bounded confirmation of
+   * the paths a listing named, and the whole-index fallback taken when the
+   * listing cannot be used. The cases here only reach the second, because a
+   * listing this reader cannot parse never gets as far as confirming anything.
+   */
   readonly gitlink?: GitCommandResult;
 }
 

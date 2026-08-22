@@ -57,6 +57,21 @@ export const WORKSPACE_REMOVAL_FAILURE_CODES = [
   /** A Git command could not be run at all, or its argument was refused. */
   'GIT_UNAVAILABLE',
   /**
+   * Whether the worktree is clean could not be **established** — as distinct
+   * from Git failing to run.
+   *
+   * Added because the two were reported as one, and this module argues against
+   * exactly that a few lines below: a removal refused because a directory could
+   * not be listed, or because `git submodule status` and the index disagreed
+   * about a path, was telling an operator "a required Git command could not be
+   * completed" while every Git command had exited 0. The operator then looks for
+   * a broken Git.
+   *
+   * Both are refusals and both are fail-closed. Only the sentence differs, and a
+   * false sentence about why AO stopped is a defect here.
+   */
+  'WORKTREE_CLEANLINESS_UNKNOWN',
+  /**
    * The caller does not hold this repository's execution lease *now*.
    *
    * Re-proved at each destructive command rather than inherited from the
@@ -99,6 +114,8 @@ const REMOVAL_DETAIL: Readonly<Record<WorkspaceRemovalFailureCode, string>> = Ob
   WORKTREE_PATH_UNSAFE:
     'The derived worktree path cannot be passed to Git as an argument, or is not outside the repository.',
   GIT_UNAVAILABLE: 'A required Git command could not be completed.',
+  WORKTREE_CLEANLINESS_UNKNOWN:
+    'Whether the worktree holds uncommitted work could not be established, so nothing was removed.',
   WORKTREE_NOT_OWNED:
     'No worktree owned by this task is registered at the derived path, so nothing was removed.',
   WORKTREE_DIRTY: 'The worktree has uncommitted or untracked changes, so nothing was removed.',
@@ -279,8 +296,12 @@ export async function removeTaskWorkspace(
   // destructive path gets the probe, and "cannot establish" refuses rather than
   // proceeds — on this gate more than any other, because the cost of a wrong
   // clean reading here is deleted work rather than a withheld resume.
+  //
+  // `null` gets its own code. It covers a directory that could not be listed and
+  // a listing the index contradicts, neither of which is a Git command failing —
+  // both are reachable with every Git call exiting 0.
   const clean = await observeWorktreeCleanliness(git, identity.worktreePath);
-  if (clean === null) return removalFailure('GIT_UNAVAILABLE');
+  if (clean === null) return removalFailure('WORKTREE_CLEANLINESS_UNKNOWN');
   if (!clean) return removalFailure('WORKTREE_DIRTY');
 
   // --- Proof 3b: nothing committed that the base does not already have -----

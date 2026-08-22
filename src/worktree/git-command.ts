@@ -112,39 +112,42 @@ const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
  *
  * ── Which callers, and which ones deliberately do not use it ───────────────
  *
- * Three ask the cleanliness question. `state/observe-runtime.ts` (on every run,
- * to decide whether the world still matches the record) and `loop/loop-step.ts`
- * (after a quota-interrupted writer, to decide what the checkpoint may claim)
- * reach it through {@link observeWorktreeCleanliness}, so they share the probe
- * as well as the vector. `worktree/commit-task-work.ts`'s effect gate uses this
+ * **Four** ask the cleanliness question, and three of them reach it through
+ * {@link observeWorktreeCleanliness} rather than through this array:
+ * `state/observe-runtime.ts` (on every run, to decide whether the world still
+ * matches the record), `loop/loop-step.ts` (after a quota-interrupted writer, to
+ * decide what the checkpoint may claim), and `worktree/remove-workspace.ts`'s
+ * Proof 3a (before it destroys a checkout). The first two are compared against
+ * each other on every later run, so they must agree; the third is destructive,
+ * which is why it was moved onto the probe after a review measured it deleting
+ * writer output. Only `worktree/commit-task-work.ts`'s effect gate uses this
  * array directly, plus `-z`.
  *
- * The first two are compared against each other on every later run, so they
- * must agree; the third decides whether the first two ever see a committed
- * tree. The gate is deliberately *not* on the probe: its question is "is there
+ * That gate is deliberately *not* on the probe: its question is "is there
  * anything for `git add --all` to stage", and measured, `add --all` stages
  * nothing inside a gitlink — so a probe answer there would send the gate into a
  * commit that Git then refuses, reaching the same `NOTHING_TO_COMMIT` by a
  * longer route. The settlement's observer still sees the planted content and
  * still withdraws the checkpoint, which is the fail-closed half that matters.
  *
- * `worktree/prepare-workspace.ts` (two call sites) and
- * `worktree/remove-workspace.ts` do **not** use it. An earlier version of this
- * paragraph said that was "deliberate rather than an oversight", because those
- * gates ask "is this workspace pristine / is it safe to destroy", "where an
- * enumeration is the point". A review measured that and it is **false**: none of
- * the three enumerates. Two test `stdout.length > 0`, and the third,
- * `classifyStatus`, only asks whether every line starts with `??` — which
- * `normal` answers identically, because a collapsed directory entry is still
- * `?? bulk/`. So their `--untracked-files=all` buys nothing and keeps the 1 MiB
- * cliff this vector was corrected to remove, turning `WORKTREE_DIRTY` into
- * `GIT_UNAVAILABLE` for a worktree holding an unignored dependency directory —
- * a false diagnosis, which this repository treats as a defect.
+ * `worktree/prepare-workspace.ts`'s **two** call sites do not use either. An
+ * earlier version of this paragraph said that was "deliberate rather than an
+ * oversight", because those gates ask "is this workspace pristine", "where an
+ * enumeration is the point". A review measured that and it is **false**: neither
+ * enumerates. One tests `stdout.length > 0`; the other, `classifyStatus`, only
+ * asks whether every line starts with `??` — which `normal` answers identically,
+ * because a collapsed directory entry is still `?? bulk/`. So their
+ * `--untracked-files=all` buys nothing and keeps the 1 MiB cliff this vector was
+ * corrected to remove, turning `SOURCE_WORKTREE_DIRTY` and `UNTRACKED_CONTENT`
+ * into `GIT_UNAVAILABLE` and `UNREADABLE` for a worktree holding an unignored
+ * dependency directory — a false diagnosis, which this repository treats as a
+ * defect.
  *
  * They also carry no `--ignore-submodules` at all, so a committed `.gitmodules`
  * `ignore = all` makes them report a worktree clean while a submodule inside it
  * holds uncommitted work (measured).
  *
+ * `remove-workspace.ts` was in that set until a review measured what it cost.
  * An earlier version of this paragraph said the destructive step behind the
  * worst of them was "closed by Git itself — `git worktree remove` refuses
  * outright for any worktree whose index holds a gitlink, exit 128, populated or
@@ -189,10 +192,10 @@ const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
  *
  * `normal` closes the same blind spot — a `status.showUntrackedFiles=no`, which
  * makes a bare `--porcelain` call report a tree with new untracked files as
- * **clean** — at a fraction of the bytes, and all three consumers only test the
- * output for emptiness (two as `stdout === ''`, the effect gate as
- * `stdout.replace(/\0/g, '').trim() === ''`), so none of them can tell `normal`
- * from `all`.
+ * **clean** — at a fraction of the bytes, and every consumer only tests the
+ * output for emptiness (`observeWorktreeCleanliness` as `stdout !== ''`, the
+ * effect gate as `stdout.replace(/\0/g, '').trim() === ''`), so none of them can
+ * tell `normal` from `all`.
  *
  * **`normal` is a smaller constant, not a bound.** It collapses untracked
  * *directories* only; ~34,000 untracked entries at the top of the worktree
