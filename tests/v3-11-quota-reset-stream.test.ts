@@ -189,6 +189,90 @@ describe('the transport layer decides what counts as a complete stream', () => {
   });
 });
 
+/* ═════ 1b. The whole document is the envelope, not only its last line ═════ */
+
+/**
+ * V3-11 replaced "stdout *is* the envelope" with a rule about the terminator's
+ * **position**, and wrote that the two were equivalent — "prose wrapped around
+ * a stream does not end on the `result` line, so it is refused exactly as
+ * before". A review of the merged slice measured that false. A position rule
+ * says nothing about what came before the position, so:
+ *
+ *   "note: replaying capture\n" + a 429 stream  ->  USAGE_LIMIT, with an instant
+ *   a junk line between two message lines       ->  USAGE_LIMIT, with an instant
+ *
+ * Both were fail-closed `AGENT_RESULT_MALFORMED` under the whole-document
+ * reader this slice replaced (`5dc386b` parsed the entire trimmed stdout), and
+ * the instant is the value an unattended relaunch is authorised on. The two
+ * pins that were supposed to cover this — here at :150 and in
+ * `tests/claude-writer.test.ts` — wrap prose on **both** sides, so the trailing
+ * half kills each of them on its own and neither could ever have failed.
+ *
+ * The rule is now "every non-empty line parses as a JSON object". It is a
+ * document-integrity rule and **not** an authenticity boundary: a co-writer
+ * able to emit one well-formed `rate_limit_event` line still supplies the
+ * instant. The module note says so where a reader will find it.
+ */
+describe('a stream carrying a line that is not JSON is not a document', () => {
+  const refusal = (): string => refusalStream([rejectedRateLimit(RESETS_AT)]);
+
+  it('refuses a line in front of the stream, and grants no instant', () => {
+    const reading = readClaudeResultStream(`note: replaying capture${NEWLINE}${refusal()}`);
+
+    expect(reading.verdict).toBe('UNRECOGNISED');
+    expect(reading.reportedResetAt).toBeNull();
+  });
+
+  it('refuses a line in the middle of the stream, and grants no instant', () => {
+    const lines = refusal().split(NEWLINE);
+    const spliced = [...lines.slice(0, 2), 'note: replaying capture', ...lines.slice(2)].join(
+      NEWLINE,
+    );
+    const reading = readClaudeResultStream(spliced);
+
+    expect(reading.verdict).toBe('UNRECOGNISED');
+    expect(reading.reportedResetAt).toBeNull();
+  });
+
+  /**
+   * The positive control, and the reason both cases above are about the new
+   * guard rather than about one of the four older ones.
+   *
+   * Same position, same purpose, same rough length — only JSON-ness varies. A
+   * refusal that survived this substitution would be coming from
+   * `endsWithObject`, from the result count, or from the last-object check, and
+   * the cases above would be pinning something they do not name.
+   */
+  it('accepts the same stream when that line is a JSON object of an unknown kind', () => {
+    const known = JSON.stringify({ type: 'note', text: 'replaying capture' });
+    const reading = readClaudeResultStream(`${known}${NEWLINE}${refusal()}`);
+
+    expect(reading.verdict).toBe('USAGE_LIMIT');
+    expect(reading.reportedResetAt).toBe(RESET_ISO);
+  });
+
+  /**
+   * The tolerances, written down as cases rather than as a comment.
+   *
+   * An unforgiving transport is one over-rejection away from parking every
+   * healthy run, and three of these four shapes arrive from the real CLI: two
+   * captures taken through `runAgentCommand` with `CLAUDE_WRITER_ARGS` carried
+   * `system/thinking_tokens` and `system/permission_denied`, kinds this reader
+   * has never heard of, and Windows line endings are the ordinary case.
+   */
+  it.each([
+    ['CRLF line endings', claudeResultStream().split(NEWLINE).join('\r\n')],
+    ['a leading byte-order mark', `﻿${claudeResultStream()}`],
+    ['blank and whitespace-only lines', `${NEWLINE}   ${NEWLINE}${claudeResultStream()}${NEWLINE}`],
+    [
+      'a message kind it has never seen',
+      `${JSON.stringify({ type: 'system', subtype: 'thinking_tokens' })}${NEWLINE}${claudeResultStream()}`,
+    ],
+  ])('still reads a stream with %s', (_label, stdout) => {
+    expect(readClaudeResultStream(stdout).verdict).toBe('COMPLETED');
+  });
+});
+
 /* ════════════ 2. The reset instant is read, and only from a refusal ═══════ */
 
 describe('the reset instant is read from a rejected rate-limit event', () => {
@@ -238,6 +322,86 @@ describe('the reset instant is read from a rejected rate-limit event', () => {
 
     expect(reading.verdict).toBe('USAGE_LIMIT');
     expect(reading.reportedResetAt).toBeNull();
+  });
+
+  /**
+   * The same fall-back, one layer up, where the first fix could not see it.
+   *
+   * The remediation made every rejection arm in `readReportedResetAt` a
+   * `return`, and strengthened the docstring to "there is no branch here that
+   * guesses and none that falls back to an older statement". A second review
+   * measured that still false: `partitionStreamEvents` only kept a
+   * `rate_limit_event` whose `rate_limit_info` was a plain object, so a newer
+   * refusal in any other envelope **vanished before the scan ran** and a
+   * readable older refusal decided. Six shapes were measured returning a 2023
+   * instant from a superseded event.
+   *
+   * The events are carried as `null` now, and an unreadable newest event stops
+   * the scan. Note what these cases assert: the verdict is still `USAGE_LIMIT`
+   * — the 429 result decides that — and only the instant is withheld, which is
+   * `RESET_TIME_MISSING`, which is a human decision.
+   */
+  it.each([
+    ['a payload that is a string', { type: 'rate_limit_event', rate_limit_info: 'rejected' }],
+    ['no payload at all', { type: 'rate_limit_event' }],
+    ['a null payload', { type: 'rate_limit_event', rate_limit_info: null }],
+    [
+      'a payload that is an array',
+      { type: 'rate_limit_event', rate_limit_info: [{ status: 'rejected' }] },
+    ],
+    [
+      'a status this reader does not know',
+      {
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected_overage', resetsAt: RESETS_AT },
+      },
+    ],
+  ])('reports no instant when a newer event arrives with %s', (_label, event) => {
+    const stream = refusalStream([rejectedRateLimit(RESETS_AT - 7_200)]);
+    const lines = stream.split(NEWLINE);
+    // Spliced in *after* the readable older refusal and before the terminator,
+    // which is the position that made the old code prefer the older instant.
+    const spliced = [
+      ...lines.slice(0, 2),
+      JSON.stringify(event),
+      ...lines.slice(2),
+    ].join(NEWLINE);
+
+    const reading = readClaudeResultStream(spliced);
+
+    expect(reading.verdict).toBe('USAGE_LIMIT');
+    expect(reading.reportedResetAt).toBeNull();
+  });
+
+  /**
+   * The controls, and they matter more than usual here.
+   *
+   * Stopping at every event this reader cannot classify would be trivially
+   * "safe" and would also break the ordinary case: the CLI emits `allowed`
+   * events on healthy runs, and one arriving *after* a refusal is about a
+   * different window, not a revision of it. Only the two spellings in the
+   * documented vocabulary may be walked past — so if these two cases ever fail,
+   * the guard above has become a blanket refusal and the fix is wrong.
+   */
+  it.each([
+    ['allowed', 'allowed'],
+    ['allowed_warning', 'allowed_warning'],
+  ])('keeps the refusal it saw when a later %s event follows it', (_label, status) => {
+    const reading = readClaudeResultStream(
+      refusalStream([rejectedRateLimit(RESETS_AT), { status, resetsAt: RESETS_AT + 86_400 }]),
+    );
+
+    expect(reading.verdict).toBe('USAGE_LIMIT');
+    expect(reading.reportedResetAt).toBe(RESET_ISO);
+  });
+
+  it('lets a newer readable refusal supersede an older one', () => {
+    const reading = readClaudeResultStream(
+      refusalStream([rejectedRateLimit(RESETS_AT - 7_200), rejectedRateLimit(RESETS_AT)]),
+    );
+
+    expect(reading.verdict).toBe('USAGE_LIMIT');
+    expect(reading.reportedResetAt).toBe(RESET_ISO);
   });
 
   it('skips a later event that reports no refusal, and keeps the refusal it saw', () => {
@@ -622,7 +786,16 @@ describe('the observed repository cannot configure away its own cleanliness', ()
     expect(decision.automaticResume).toBeNull();
   });
 
-  it('sees a submodule change that a `.gitmodules` ignore rule hides', async () => {
+  /**
+   * The **operator-set** half. `addDirtySubmodule` runs `git config
+   * submodule.vendor.ignore all`, which lands in the shared `.git/config` —
+   * measured, and outside every worktree, so a writer holding `Write` cannot
+   * reach it. The title said `.gitmodules` and the fixture never touched it;
+   * that is corrected here rather than by changing the fixture, because this
+   * half is worth a case of its own. The writer-reachable `.gitmodules` half is
+   * pinned in `tests/v3-11-remediation-git-vectors.test.ts`.
+   */
+  it('sees a submodule change that a local `.git/config` ignore rule hides', async () => {
     const { repository, root, current, worktreePath } = await implementing();
     const agent = recordedAgent({
       claude: writerThatEditsThenHitsUsageLimit('src/p.ts', `export const p = 1;${NEWLINE}`, {

@@ -265,10 +265,21 @@ export const DIAGNOSTIC_EXCERPT_LIMIT = 4_000;
 export const REDACTION_OVERLAP = 1_024;
 
 /**
- * Says that the excerpt is not the whole stream, and how big the whole stream
- * was. Fixed shape, bounded length, and no arithmetic a reader has to trust:
- * the raw total is a fact, whereas "how much was dropped" stops being one once
+ * Says that the excerpt is not the whole thing, and how big the thing was.
+ *
+ * Fixed shape, bounded length, and no arithmetic a reader has to trust: the raw
+ * total is a fact, whereas "how much was dropped" stops being one once
  * redaction has rewritten what was kept.
+ *
+ * **Read the wording carefully, because it is narrower than it looks.** The
+ * number is `text.length` for whatever `text` this function was handed, and
+ * since V3-11 the writer hands it the terminal `result` *line*, not stdout. So
+ * "in the original stream" is a fact about the substring on that path. Measured
+ * on a 1,166,705-character stream whose result line was 9,138: the operator is
+ * told 9,138. That is not corrected here — the honest fix is to pass the real
+ * total alongside the excerpted text, which changes this function's signature
+ * and every caller — and it is carried as **L-V3-11-11**. Nothing in `src/`
+ * renders `stdoutExcerpt` today, so no operator reads either number yet.
  */
 function truncationNotice(totalLength: number): string {
   return `\n… [truncated; ${totalLength} characters in the original stream]`;
@@ -281,8 +292,11 @@ function truncationNotice(totalLength: number): string {
  *
  * **Cost is bounded.** The redaction rules never see more than
  * `DIAGNOSTIC_EXCERPT_LIMIT + REDACTION_OVERLAP` characters, whatever the
- * stream contains. That matters against an 8 MiB per-stream budget: running the
- * rules over a multi-megabyte stream to then discard all but four kilobytes was
+ * stream contains. That matters against a 64 MiB stdout budget — the figure was
+ * 8 MiB when this paragraph was written and the stale number understated the
+ * hazard it exists to bound by eight times: running the
+ * rules over a multi-megabyte stream to then discard all but four thousand
+ * characters was
  * measured at roughly thirty seconds for a 200 KB input on this machine, and a
  * failing agent run must not cost half a minute of CPU to *describe*. This is
  * why `redactAndClamp` is not used here.

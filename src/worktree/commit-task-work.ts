@@ -342,8 +342,16 @@ export async function commitTaskWork(
   // effect is untracked therefore produced `NOTHING_TO_COMMIT` for a pass that
   // wrote files: fail-closed downstream, because the settlement then measures a
   // dirty tree and withdraws the checkpoint, but a false diagnosis, and this
-  // repository treats a false diagnosis as a defect. `-z` is appended because
-  // this reader parses the output rather than only testing it for emptiness.
+  // repository treats a false diagnosis as a defect.
+  //
+  // `-z` is appended out of caution, not necessity, and the sentence that used
+  // to stand here said the opposite — "this reader parses the output rather
+  // than only testing it for emptiness". It does not parse: the test below is
+  // `.replace(/\0/g, '').trim() === ''`, and the second call site's stdout is
+  // never read at all. What `-z` buys is that a target-controlled
+  // `core.quotePath` cannot reach a reader that ever *does* parse. Note the
+  // spread: `WORKTREE_CLEANLINESS_ARGS` must never grow a `--` or a pathspec,
+  // or `-z` would land after it as one.
   const dirty = await git(worktreePath, [...WORKTREE_CLEANLINESS_ARGS, '-z']);
   if (dirty.outcome !== 'OK') {
     return Object.freeze({ outcome: 'GIT_UNAVAILABLE' as const, step: 'OBSERVE_WORKTREE' as const });

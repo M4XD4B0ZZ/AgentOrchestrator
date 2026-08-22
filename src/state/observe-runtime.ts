@@ -54,7 +54,8 @@ import { existsSync } from 'node:fs';
 import { localBranchRef } from '../repo/branch-name.js';
 import { classifyAncestry, commitObjectPresent } from '../worktree/commit-probes.js';
 import type { TaskState } from '../core/task-state.js';
-import { WORKTREE_CLEANLINESS_ARGS, type GitRunner } from '../worktree/git-command.js';
+import type { GitRunner } from '../worktree/git-command.js';
+import { observeWorktreeCleanliness } from '../worktree/worktree-cleanliness.js';
 import { findByPath, listWorktrees } from '../worktree/worktree-registry.js';
 
 export interface ObservedRuntime {
@@ -172,8 +173,7 @@ export async function observeRuntime(
     ]);
     observedCurrentCommit = head.outcome === 'OK' && head.stdout !== '' ? head.stdout : null;
 
-    const status = await git(authorisedPath, WORKTREE_CLEANLINESS_ARGS);
-    worktreeClean = status.outcome === 'OK' ? status.stdout === '' : null;
+    worktreeClean = await observeWorktreeCleanliness(git, authorisedPath);
 
     if (state.basePinnedCommit !== null) {
       const verdict = await classifyAncestry(git, authorisedPath, state.basePinnedCommit, 'HEAD');
