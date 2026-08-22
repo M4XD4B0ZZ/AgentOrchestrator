@@ -36,13 +36,21 @@
  *
  * ── What this probe is, and firmly is not ──────────────────────────────────
  *
- * **Three Git calls at most**, whatever the repository holds: the cleanliness
- * `status`, one `submodule status`, and one `ls-files` — either the
- * pathspec-bounded confirmation or the whole-index fallback, never both per
- * reading and never one per submodule. An earlier version looped the
- * confirmation and a review measured thirty gitlinks costing thirty-two
- * subprocesses and ~3.5 seconds, under a comment that already called it
- * "one bounded observation". The count is stated here because it was wrong here.
+ * **Three Git calls for any ordinary repository**, and a bound rather than a
+ * promise beyond that: the cleanliness `status`, one `submodule status`, and the
+ * `ls-files` confirmation — which is one call while the pathspec fits on a
+ * command line and one per {@link ARGUMENT_BUDGET_CHARS} of pathspec after that,
+ * plus at most one whole-index fallback.
+ *
+ * The count is spelled out here because both previous shapes of it were wrong.
+ * The first looped the confirmation, and a review measured thirty gitlinks
+ * costing thirty-two subprocesses and ~3.5 seconds under a comment that already
+ * called it "one bounded observation". The fix put every path on one command
+ * line, and the next review measured *that* refused past ~32,700 characters —
+ * whereupon the probe fell back to the whole index and answered "not
+ * established" for a **clean** repository with sixteen hundred submodules, which
+ * the loop had answered correctly. An unbounded loop and an unbounded argv are
+ * the same defect wearing different clothes; chunking is what actually bounds it.
  *
  * It observes paths Git says are gitlinks, and nothing else. It does not
  * populate, initialise, repair, clean, or recurse into arbitrary directories,
@@ -170,6 +178,17 @@ const GITLINK_MODE = '160000';
 const NOT_INITIALISED = '-';
 
 /**
+ * How many characters of pathspec one confirmation call may carry.
+ *
+ * Measured on this platform through `runGitCommand`: the call succeeds at
+ * 32,719 characters of arguments and is refused at 32,738 — the `CreateProcess`
+ * ceiling. This budget is a quarter of that, because the real limit also counts
+ * the executable path and the fixed tokens, and because being under it costs an
+ * extra subprocess while being over it costs a repository its observability.
+ */
+const ARGUMENT_BUDGET_CHARS = 8_000;
+
+/**
  * How one directory is listed. Injected **only** so the "could not be read" arm
  * can be pinned.
  *
@@ -251,6 +270,21 @@ async function gitlinkPaths(
     if (listing.stdout === '') return [];
 
     const parsed = parseSubmoduleStatus(listing.stdout);
+    // Two `-` lines can never legitimately name one path: an index cannot hold
+    // two gitlinks at the same place. A duplicate therefore proves a path was
+    // **rewritten between Git and here**, and it is not this module that did it —
+    // `runGitCommand` trims the whole stdout, so a final path ending in
+    // whitespace Git prints verbatim (U+00A0, U+3000, U+2009, U+FEFF …) arrives
+    // already shortened. Measured: gitlinks `vendnb` and `vendnb ` listed as
+    // two lines and arrived as two identical paths, the confirmation went out as
+    // `-- vendnb vendnb`, the second directory was never read, and the probe
+    // answered clean over a planted file.
+    //
+    // The index is immune — `-z` separates with NUL, which `trim` does not touch
+    // — so a collapse takes the fallback and gets the right answer rather than
+    // merely refusing. A *lone* mangled path needs no rule here: it fails the
+    // confirmation and is `CONTRADICTED` already.
+    if (parsed !== null && hasDuplicate(parsed)) return await gitlinksFromIndex(git, worktreePath);
     if (parsed !== null) {
       switch (await confirmAgainstIndex(git, worktreePath, parsed)) {
         case 'CONFIRMED':
@@ -308,7 +342,19 @@ async function gitlinkPaths(
 function parseSubmoduleStatus(stdout: string): readonly string[] | null {
   const paths: string[] = [];
   for (const line of stdout.split('\n')) {
-    const text = line.trimEnd();
+    // `\r` only, and **never** `trimEnd()`. `trimEnd` strips every ECMAScript
+    // WhiteSpace, which includes U+00A0, U+3000, U+2009 and U+FEFF — so it
+    // rewrites a path whose last character is one of them, which is the very
+    // thing the docstring above promises never happens. Measured: two ordinary
+    // gitlinks `vendnb` and `vendnb ` collapsed to one, the confirmation
+    // was issued as `-- vendnb vendnb`, the second directory was never read, and
+    // the probe answered clean over a planted file that the removal then
+    // deleted. That is the same defect `stripDescribeSuffix` caused, through a
+    // different helper, two rounds later.
+    //
+    // `split('\n')` can leave exactly one thing behind — a `\r` — because
+    // `runGitCommand` has already trimmed the whole stdout.
+    const text = line.endsWith('\r') ? line.slice(0, -1) : line;
     if (text.length === 0) continue;
 
     const parsed = SUBMODULE_STATUS_LINE.exec(text);
@@ -351,30 +397,75 @@ async function confirmAgainstIndex(
   paths: readonly string[],
 ): Promise<IndexConfirmation> {
   if (paths.length === 0) return 'CONFIRMED';
-  // One call for every path, not one call per path. A first version looped, and
-  // a review measured what that costs: thirty unpopulated gitlinks in a clean
-  // tree took **thirty-two subprocesses and ~3.5 seconds** for a single
-  // cleanliness reading, on a loop bounded by nothing the operator controls —
-  // while the comment above the function called it "one bounded observation".
   if (!paths.every((path) => isShellInertArgument(path))) return 'UNUSABLE_PATH';
 
-  const staged = await git(worktreePath, [
-    'ls-files',
-    '--stage',
-    '-z',
-    '--end-of-options',
-    '--',
-    ...paths,
-  ]);
-  if (staged.outcome === 'REFUSED_UNSAFE_ARGUMENT') return 'UNUSABLE_PATH';
-  if (staged.outcome !== 'OK') return 'UNREADABLE';
+  // Batched, and **chunked**. A first version issued one call per path — thirty
+  // gitlinks cost thirty-two subprocesses and ~3.5 seconds — and the fix for
+  // that put every path on one command line, which traded an unbounded loop for
+  // an unbounded argv. Measured through the production runner: the call is
+  // refused past roughly 32,700 characters of arguments, and the probe then fell
+  // back to reading the whole index, which on a large repository floods the
+  // 1 MiB output cap and answers "not established" for a **clean** tree. So the
+  // shape that reintroduced the stall was the fix for the loop.
+  //
+  // The refusal is a refusal and not a truncation — `runCommand` maps the spawn
+  // error to `SPAWN_FAILED` — so nothing ever answered about a shortened list.
+  // That is the only reason this was an availability defect and not a false
+  // clean.
+  const confirmed = new Set<string>();
+  for (const chunk of chunkedByArgumentBudget(paths)) {
+    const staged = await git(worktreePath, [
+      'ls-files',
+      '--stage',
+      '-z',
+      '--end-of-options',
+      '--',
+      ...chunk,
+    ]);
+    if (staged.outcome === 'REFUSED_UNSAFE_ARGUMENT') return 'UNUSABLE_PATH';
+    if (staged.outcome !== 'OK') return 'UNREADABLE';
+
+    const gitlinks = gitlinkPathsIn(staged.stdout);
+    if (gitlinks === null) return 'UNREADABLE';
+    for (const path of gitlinks) confirmed.add(path);
+  }
 
   // Every path must come back as a gitlink **at that exact path**. Matching the
   // mode alone, or matching a set against a count, would let one gitlink answer
   // for another — which is how a rewritten path went unnoticed once already.
-  const gitlinks = gitlinkPathsIn(staged.stdout);
-  if (gitlinks === null) return 'UNREADABLE';
-  return paths.every((path) => gitlinks.has(path)) ? 'CONFIRMED' : 'CONTRADICTED';
+  return paths.every((path) => confirmed.has(path)) ? 'CONFIRMED' : 'CONTRADICTED';
+}
+
+/** Whether any path appears twice. See the call site for why that is a fact. */
+function hasDuplicate(paths: readonly string[]): boolean {
+  return new Set(paths).size !== paths.length;
+}
+
+/**
+ * Splits paths into groups that fit comfortably on one command line.
+ *
+ * The measured ceiling on this platform is ~32,700 characters of arguments;
+ * {@link ARGUMENT_BUDGET_CHARS} is a fraction of it, because the ceiling counts
+ * the executable and the fixed tokens too and because a margin costs one extra
+ * subprocess while exceeding it costs a repository its observability.
+ *
+ * A single path longer than the budget still gets its own chunk rather than
+ * being dropped: the call may then be refused, which is `UNREADABLE`, which
+ * falls back — never a silent omission.
+ */
+function* chunkedByArgumentBudget(paths: readonly string[]): Generator<readonly string[]> {
+  let chunk: string[] = [];
+  let chars = 0;
+  for (const path of paths) {
+    if (chunk.length > 0 && chars + path.length + 1 > ARGUMENT_BUDGET_CHARS) {
+      yield chunk;
+      chunk = [];
+      chars = 0;
+    }
+    chunk.push(path);
+    chars += path.length + 1;
+  }
+  if (chunk.length > 0) yield chunk;
 }
 
 /**

@@ -3520,11 +3520,29 @@ was never read, and the probe answered **clean** over a planted file — reopeni
 inside the fix for it, the data loss that fix exists to close, and minting an
 unattended-resume checkpoint over the same reading.
 
-Two guards now stand against the class. Only `-` lines are taken from the
-listing, and taken **exactly**: populated gitlinks are already covered by the
-cleanliness vector's `--ignore-submodules=none`, so no describe suffix is ever
-parsed and no path is ever rewritten. And the index confirmation must find a
-gitlink **at that exact path**, not merely somewhere in its result.
+Two guards went in. Only `-` lines are taken from the listing, and taken
+**exactly**: populated gitlinks are already covered by the cleanliness vector's
+`--ignore-submodules=none`, so no describe suffix is ever parsed. And the index
+confirmation must find a gitlink **at that exact path**, not merely somewhere in
+its result.
+
+**A third review then found the same defect again, through a different helper —
+and one this module did not write.** `parseSubmoduleStatus` called
+`line.trimEnd()`, which strips every ECMAScript WhiteSpace, so a path ending in
+U+00A0 collapsed onto its sibling exactly as the describe suffix had. Worse, the
+`trimEnd` was not the only culprit: `runGitCommand` trims a command's whole
+stdout, so a **final** path ending in such a character arrives here already
+shortened, and no parser change can recover it.
+
+So the third guard does not try to prevent the rewrite; it detects it. Two `-`
+lines can never legitimately name one path — an index cannot hold two gitlinks in
+one place — so a duplicate is proof that something upstream rewrote one. The
+probe then takes the index, which is NUL-separated and immune to a trim, and gets
+the right answer rather than merely refusing.
+
+That guard is a backstop, and a backstop hides what it protects: with it in
+place, mutation runs reported *both* earlier rewrites as survivors. The cases
+that keep them dead are the ones with no collision to fall back on.
 
 Two things the probe still cannot see are recorded rather than claimed closed:
 a **fabricated** `.git` inside a gitlink (**L-V3-11-13**) and a gitlink nested
@@ -3558,13 +3576,13 @@ under L-V3-11-5 as an asymmetry, not as a defect.
 
 **Counter-proof: 30 mutants, 30 killed.** Both halves of the transport rule
 (latch and guard) and the latch's *unlatched* variant; three arms of the event
-reader; nineteen arms of the gitlink probe, including both of its sources, every
+reader; nineteen arms of the gitlink probe — both of its sources, every
 distinction between "the answer is no" and "the question could not be put", the
-two guards that stop one gitlink answering for another, and the batching of the
+three guards that stop one gitlink answering for another, and the chunking of the
 index confirmation; the probe's wiring into `observeRuntime` **and** into the
 destructive removal gate; and three of the budget split.
 
-**Six survived their first run**, and they are recorded rather than quietly
+**Eight survived their first run**, and they are recorded rather than quietly
 re-run, because what they exposed is the point:
 
 - treating an unparsed `submodule status` line as "no submodule" — which is why
@@ -3579,9 +3597,17 @@ re-run, because what they exposed is the point:
   of them. That one survived a case named "confirms every listed path in a single
   call", because the case asserted the call *count* and a stub answers about
   paths it was never asked for. The argv is the only place batching is
-  observable, and the case now reads it.
+  observable, and the case now reads it;
+- restoring `trimEnd()`, and re-adding the shape-based describe strip. Both
+  survived for the same reason, and it is the most interesting one here: the
+  **duplicate-path guard masks them**. Each rewrite produces a *collision* in the
+  fixture that first exposed it, a collision now falls back to the index, and the
+  index gets the right answer — so the suite could no longer tell the rewrite
+  from the correct code. A backstop hides what it protects. Two cases without a
+  collision (a lone `vendor (old)`, and a `vendnb ` that is not the last
+  line) restore the distinction, and both mutants die on them.
 
-Three of the six are **equivalent for correctness**: the index fallback reaches
+Three of the eight are **equivalent for correctness**: the index fallback reaches
 the right answer without any of them. They are kept because what they buy is not the
 answer but the *route* — an ordinary repository with a checked-out submodule
 staying on the bounded pathspec call instead of enumerating the whole index on

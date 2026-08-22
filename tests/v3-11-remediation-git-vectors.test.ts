@@ -981,3 +981,247 @@ describe('the probe stays on its bounded route, and refuses a substituted path',
     expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => [])).toBeNull();
   });
 });
+
+/* ═══ 9. A path Git printed, and the seam shortened before this module saw it ═ */
+
+/**
+ * The fourth repetition of one defect, and the first one this module did not
+ * cause itself.
+ *
+ * `runGitCommand` trims the whole of a command's stdout. `git submodule status`
+ * prints paths verbatim, so a **final** gitlink whose path ends in whitespace Git
+ * is happy to print — U+00A0, U+3000, U+2009, U+FEFF, anything in ECMAScript's
+ * WhiteSpace set — arrives here already shortened. When the shortened form
+ * matches a sibling gitlink, two lines become one path: the confirmation goes out
+ * as `-- vendnb vendnb`, the second directory is never read, and the probe
+ * answers **clean** over whatever is in it.
+ *
+ * Measured end to end before the fix: `observeWorktreeCleanliness` returned
+ * `true` and the unforced `git worktree remove` behind it exited 0 and deleted
+ * the payload.
+ *
+ * Two `-` lines can never legitimately name one path — an index cannot hold two
+ * gitlinks in one place — so a duplicate is proof that something upstream
+ * rewrote a path. The probe then takes the index, which is NUL-separated and
+ * immune to the trim, and gets the right answer rather than merely refusing.
+ *
+ * A *lone* mangled path needs no rule: it fails its own confirmation and is
+ * `CONTRADICTED` already. Only a collision is silent.
+ */
+describe('a gitlink path the seam shortened does not answer for its sibling', () => {
+  const NBSP = '\u00A0';
+
+  function twoGitlinksDifferingByTrailingNbsp(root: string): void {
+    const inner = createRepoFixture({
+      defaultBranch: 'main',
+      profile: null,
+      files: { 'f.txt': `one${NEWLINE}` },
+    });
+    for (const path of ['vendnb', `vendnb${NBSP}`]) {
+      git(root, [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '--quiet',
+        inner.split('\\').join('/'),
+        path,
+      ]);
+    }
+    git(root, ['add', '--all']);
+    git(root, ['commit', '--quiet', '-m', 'two submodules']);
+    git(root, ['submodule', 'deinit', '--force', '--all']);
+  }
+
+  it('reports a file planted behind the shortened path as dirty', async () => {
+    const root = repo();
+    twoGitlinksDifferingByTrailingNbsp(root);
+
+    // The premise, in two halves. Git lists both paths...
+    expect(git(root, ['submodule', 'status']).split('\n').filter((line) => line !== '')).toHaveLength(
+      2,
+    );
+    // ...and the seam hands this module two identical ones, which is the defect.
+    const listing = await runGitCommand(root, ['submodule', 'status']);
+    expect(listing.outcome).toBe('OK');
+    expect(listing.stdout.endsWith(NBSP)).toBe(false);
+
+    mkdirSync(join(root, `vendnb${NBSP}`), { recursive: true });
+    writeFileSync(join(root, `vendnb${NBSP}`, 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+
+  it('reports the same two gitlinks as clean when neither holds anything', async () => {
+    const root = repo();
+    twoGitlinksDifferingByTrailingNbsp(root);
+
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(true);
+  });
+});
+
+/* ═══════ 10. The confirmation's argv is bounded, not merely batched ═══════ */
+
+/**
+ * An unbounded loop and an unbounded argv are the same defect in different
+ * clothes, and this probe has now shipped both.
+ *
+ * The first shape issued one `ls-files` per gitlink: thirty cost thirty-two
+ * subprocesses. The fix put every path on one command line, and a review measured
+ * that refused past ~32,700 characters — whereupon the probe fell back to reading
+ * the whole index, which on a large repository floods the 1 MiB cap and answers
+ * "not established" for a **clean** tree. The loop had answered it correctly.
+ *
+ * So the property worth pinning is not "one call" and not "few calls": it is that
+ * **no single call's arguments can grow without bound**, and that a repository
+ * large enough to need several still gets an answer.
+ */
+describe('the index confirmation chunks its pathspec instead of growing one call', () => {
+  const SHA = 'b'.repeat(40);
+  const CLEAN = Object.freeze({ outcome: 'OK' as const, stdout: '', stderr: '', exitCode: 0 });
+
+  /** Refuses past the measured platform ceiling, exactly as `runCommand` does. */
+  function ceilingRunner(paths: readonly string[]): GitRunner & { readonly argv: string[][] } {
+    const argv: string[][] = [];
+    const git = (async (_cwd, args) => {
+      if (args[0] === 'status') return CLEAN as never;
+      if (args[0] === 'submodule') {
+        return { ...CLEAN, stdout: paths.map((path) => `-${SHA} ${path}`).join('\n') } as never;
+      }
+      argv.push([...args]);
+      if (args.join(' ').length > 32_700) {
+        return { outcome: 'UNAVAILABLE', stdout: '', stderr: '', exitCode: null } as never;
+      }
+      const asked = args.slice(args.indexOf('--') + 1);
+      return {
+        ...CLEAN,
+        stdout: asked.map((path) => `160000 ${SHA} 0\t${path}\0`).join(''),
+      } as never;
+    }) as GitRunner;
+    return Object.assign(git, { argv });
+  }
+
+  it.each([[30], [800], [1600], [5000]])(
+    'answers for %i gitlinks without any call exceeding the ceiling',
+    async (count) => {
+      const paths = Array.from(
+        { length: count },
+        (_, index) => `vendor${String(index).padStart(6, '0')}aaaaaaaaaaa`,
+      );
+      const git = ceilingRunner(paths);
+
+      expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => [])).toBe(true);
+
+      // Every confirmation call fits, and none of them is the whole-index read —
+      // reaching that fallback here would mean the chunking failed.
+      for (const args of git.argv) {
+        expect(args.join(' ').length).toBeLessThan(32_700);
+        expect(args).toContain('--');
+      }
+    },
+  );
+
+  /**
+   * The control: with the ceiling removed the answer is the same, so the cases
+   * above are not passing because the stub is lenient.
+   */
+  it('answers the same for a count that fits in one call', async () => {
+    const paths = ['vendor-a', 'vendor-b'];
+    const git = ceilingRunner(paths);
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => [])).toBe(true);
+    expect(git.argv).toHaveLength(1);
+  });
+});
+
+/* ═══ 11. The two rewrites, pinned where the duplicate guard cannot mask them ═ */
+
+/**
+ * The duplicate guard is a backstop, and a backstop hides what it protects.
+ *
+ * Both path-rewriting defects this module has shipped — stripping a
+ * ` (describe)` suffix by shape, and `trimEnd()` eating trailing Unicode
+ * whitespace — produce a **collision** in the fixtures that first exposed them,
+ * and a collision now falls back to the index and gets the right answer anyway.
+ * So a mutation run reported both rewrites as survivors: the suite could no
+ * longer tell them from the correct code.
+ *
+ * These two cases remove the collision. One gitlink whose path ends in `)`, and
+ * one whose path ends in U+00A0 with a sibling that does **not** collide with its
+ * shortened form. A rewrite then asks the index about a path that is not a
+ * gitlink, which is `CONTRADICTED`, which is "not established" — so the
+ * distinction the suite must be able to make is `false` versus `null`.
+ */
+describe('a rewritten path is not merely caught by the duplicate guard', () => {
+  const NBSP = '\u00A0';
+
+  function submodulesAt(root: string, paths: readonly string[]): void {
+    const inner = createRepoFixture({
+      defaultBranch: 'main',
+      profile: null,
+      files: { 'f.txt': `one${NEWLINE}` },
+    });
+    for (const path of paths) {
+      git(root, [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '--quiet',
+        inner.split('\\').join('/'),
+        path,
+      ]);
+    }
+    git(root, ['add', '--all']);
+    git(root, ['commit', '--quiet', '-m', 'submodules']);
+    git(root, ['submodule', 'deinit', '--force', '--all']);
+  }
+
+  /**
+   * A lone submodule whose path ends in `)`. Nothing collides with `vendor`,
+   * so stripping the suffix by shape produces a path the index does not hold.
+   */
+  it('reports a file planted in a path ending in a parenthesis as dirty', async () => {
+    const root = repo();
+    submodulesAt(root, ['vendor (old)']);
+    mkdirSync(join(root, 'vendor (old)'), { recursive: true });
+    writeFileSync(join(root, 'vendor (old)', 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+
+  /**
+   * A submodule whose path ends in U+00A0, ordered so it is **not** the last
+   * line — the seam only shortens the last one — beside a sibling that does not
+   * collide with its shortened form.
+   */
+  it('reports a file planted in a path ending in a no-break space as dirty', async () => {
+    const root = repo();
+    submodulesAt(root, [`vendnb${NBSP}`, 'zzz']);
+
+    const listing = await runGitCommand(root, ['submodule', 'status']);
+    expect(listing.outcome).toBe('OK');
+    // The premise: this path is intact when it reaches the parser, so only the
+    // parser can shorten it.
+    expect(listing.stdout).toContain(`vendnb${NBSP}`);
+
+    mkdirSync(join(root, `vendnb${NBSP}`), { recursive: true });
+    writeFileSync(join(root, `vendnb${NBSP}`, 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+
+  /** The control for both: the same shapes, empty, are clean. */
+  it('reports both shapes as clean when neither holds anything', async () => {
+    const parens = repo();
+    submodulesAt(parens, ['vendor (old)']);
+    expect(await observeWorktreeCleanliness(runGitCommand, parens)).toBe(true);
+
+    const nbsp = repo();
+    submodulesAt(nbsp, [`vendnb${NBSP}`, 'zzz']);
+    expect(await observeWorktreeCleanliness(runGitCommand, nbsp)).toBe(true);
+  });
+});
