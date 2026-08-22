@@ -29,6 +29,30 @@
  * own progress as divergence. `reviewRound` is carried for the same reason and
  * is never incremented here — a round that was interrupted was not completed.
  *
+ * ── The checkpoint is withdrawn unless somebody settled the repository ─────
+ *
+ * A writing phase's checkpoint claims are withdrawn here, because a writer that
+ * was interrupted may have moved HEAD or left uncommitted work and the old
+ * claims would then be false (`core/agent-phases.ts`). That is correct, and on
+ * its own it made every production quota block permanently non-resumable:
+ * `evaluateAutomaticResume` requires an exact `currentCommit` *and*
+ * `worktreeCleanAtCheckpoint === true`, so a withdrawal denies with
+ * `CURRENT_COMMIT_MISMATCH` and `WORKTREE_NOT_CLEAN` for ever (F-10).
+ *
+ * Since V3-10 a caller that has actually settled the repository — measured the
+ * writer's effect against the pinned scope, recorded it under AO's own commit
+ * controls, and then *observed* HEAD and a clean tree — may hand that
+ * observation in as {@link RecordInterruptionOptions.checkpoint}, and the two
+ * facts are recorded instead of withdrawn.
+ *
+ * The withdrawal remains the default and the fallback. There is no way to reach
+ * the recorded form by asserting it: the parameter is an opaque artefact only
+ * the settlement path can mint, it is verified at this effect rather than read
+ * off its static type, and a value that fails that check is treated exactly as
+ * an absent one. So the direction of every failure here is still the safe one —
+ * a caller that did not settle the repository, or cannot prove it did, writes a
+ * block no machine will resume.
+ *
  * ── The phase does not advance ─────────────────────────────────────────────
  *
  * An interrupted writer does not reach `VERIFYING`; an interrupted reviewer
@@ -39,7 +63,11 @@
  */
 
 import type { AgentBlockEvidence, AgentDisposition } from './agent-outcome.js';
-import { AGENT_PHASES, withdrawnCheckpointFor } from '../core/agent-phases.js';
+import { AGENT_PHASES, phaseMutatesRepository, withdrawnCheckpointFor } from '../core/agent-phases.js';
+import {
+  interruptionCheckpointCommitOf,
+  type InterruptionCheckpoint,
+} from '../core/interruption-checkpoint.js';
 import { isBlockingState, type TaskStateName } from '../core/states.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
@@ -121,6 +149,23 @@ export interface RecordInterruptionOptions extends AdvanceOptions {
    * the interrupted run would re-enter at.
    */
   readonly fallback: AgentBlockEvidence;
+  /**
+   * A settled repository checkpoint, established **after** the interrupted
+   * writer stopped and **before** this write (V3-10 / F-10).
+   *
+   * Optional, and `null` is the ordinary value: nothing here establishes one,
+   * and a caller that did not settle the repository must not describe one. When
+   * present it replaces the withdrawal below with the two facts it carries, and
+   * the state becomes automatically resumable again — which is why it is an
+   * opaque artefact rather than a pair of fields. See
+   * `core/internal/interruption-checkpoint.ts` for why a `{ commit, clean }`
+   * literal would have been an assertion rather than evidence.
+   *
+   * Verified rather than read, exactly as `evaluateAutomaticResume` verifies
+   * auth evidence: the static type is not a runtime guarantee, so a forged
+   * value withdraws the checkpoint identically to an absent one.
+   */
+  readonly checkpoint?: InterruptionCheckpoint | null;
 }
 
 export interface AgentInterruptionRecord {
@@ -128,6 +173,40 @@ export interface AgentInterruptionRecord {
   /** The state that was written, or `null` when nothing was. */
   readonly state: TaskStateName | null;
   readonly save: StateSaveResult;
+}
+
+/**
+ * The commit a settled checkpoint permits this write to record, or `null`.
+ *
+ * Three conditions, all required, and each closes a different way the claim
+ * could become false:
+ *
+ *  - **the phase must mutate the repository.** For `REVIEWING` nothing is
+ *    withdrawn in the first place, so a checkpoint there could only *overwrite*
+ *    a true checkpoint the reviewer could not have invalidated. The reviewer is
+ *    contractually read-only and AO makes no commit for it (V3-10 §20).
+ *  - **the block must be a usage limit.** `BLOCKED_AUTH` and
+ *    `HUMAN_DECISION_REQUIRED` are not automatically resumable, so a checkpoint
+ *    on them buys nothing and would only put an unattended-authority claim on a
+ *    state nobody may resume unattended. More importantly it keeps the gate
+ *    narrow: a positively recognised quota refusal is the *only* interruption
+ *    this build settles, because it is the only one whose writer is proven to
+ *    have ended under its own control (`agent-outcome.ts:endedUnderOwnControl`).
+ *    A process that may still be alive and writing must never have its worktree
+ *    declared settled.
+ *  - **the artefact must be one the mint produced.** Verified through the safe
+ *    accessor, never read off the static type: `as unknown as` defeats any type
+ *    system, and a forged or captured value must withdraw the checkpoint exactly
+ *    as an absent one does rather than throw. See
+ *    `core/internal/interruption-checkpoint.ts`.
+ */
+function settledCheckpointFor(
+  phase: TaskStateName,
+  usageLimit: boolean,
+  checkpoint: InterruptionCheckpoint | null | undefined,
+): string | null {
+  if (!usageLimit || !phaseMutatesRepository(phase)) return null;
+  return interruptionCheckpointCommitOf(checkpoint);
 }
 
 /**
@@ -141,7 +220,7 @@ export function recordAgentInterruption(
   interruption: AgentInterruption,
   options: RecordInterruptionOptions,
 ): AgentInterruptionRecord {
-  const { now, fallback, ...advance } = options;
+  const { now, fallback, checkpoint, ...advance } = options;
   const target = DISPOSITION_STATE[interruption.disposition];
   const block = interruption.block ?? fallback;
   const usageLimit = interruption.disposition === 'AGENT_BLOCKED_USAGE_LIMIT';
@@ -201,6 +280,8 @@ export function recordAgentInterruption(
     });
   }
 
+  const settled = settledCheckpointFor(current.state.state, usageLimit, checkpoint);
+
   const next = {
     ...current.state,
     state: target,
@@ -222,7 +303,13 @@ export function recordAgentInterruption(
     // for a writing phase and left intact for the read-only reviewer. The rule
     // is the phase's, stated once in `core/agent-phases.ts` and consulted here
     // by the phase the durable state records as running (V1-05-RR-F8).
-    ...withdrawnCheckpointFor(current.state.state),
+    //
+    // Unless the caller settled the repository first and can prove it, in which
+    // case the withdrawal is replaced by what was actually measured — see
+    // {@link settledCheckpointFor} for the three conditions that permits.
+    ...(settled === null
+      ? withdrawnCheckpointFor(current.state.state)
+      : { currentCommit: settled, worktreeCleanAtCheckpoint: true as const }),
   };
 
   const save = advanceTaskState(current, next, advance);

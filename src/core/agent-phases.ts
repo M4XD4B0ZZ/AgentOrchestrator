@@ -90,6 +90,21 @@ export function phaseMutatesRepository(phase: TaskStateName): boolean {
  * `evaluateAutomaticResume` requires an exact `currentCommit` and
  * `worktreeCleanAtCheckpoint === true`, so withdrawing them without cause
  * denies a resume the evidence actually supported.
+ *
+ * ── Withdrawal is the honest answer, and it was the only one ───────────────
+ *
+ * For a *mutating* phase the cost above was paid in full: an interrupted writer
+ * withdrew both claims, `evaluateAutomaticResume` denied
+ * `CURRENT_COMMIT_MISMATCH` and `WORKTREE_NOT_CLEAN`, and every production quota
+ * block was permanently non-resumable however trustworthy its reset time (F-10).
+ *
+ * V3-10 does not weaken that. It adds the only other honest way out: *establish
+ * the two facts again*. `loop/loop-step.ts` settles a quota-interrupted
+ * writer's worktree — scope first, then AO's own commit, then an observation of
+ * HEAD and cleanliness — and `agent/record-interruption.ts` records what was
+ * measured in place of the withdrawal, but only against an artefact that
+ * settlement path mints. Everything else, including every failure of that path,
+ * still lands here.
  */
 export function withdrawnCheckpointFor(
   phase: TaskStateName,

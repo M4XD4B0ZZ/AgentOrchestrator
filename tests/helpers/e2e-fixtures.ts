@@ -423,6 +423,32 @@ export function writerEnvelopeWithDenials(tools: readonly string[]): AgentComman
   });
 }
 
+/**
+ * A Claude run that **edited the worktree and was then refused for quota** —
+ * the shape F-10 is about.
+ *
+ * The combination is the whole point and no existing fixture produced it.
+ * {@link writerThatEdits} writes and succeeds; {@link usageLimitResult} refuses
+ * and writes nothing. Neither can drive the case the settlement path exists for:
+ * a partial, uncommitted change left behind by a writer the CLI cut off. A suite
+ * built on the two of them could not tell a checkpoint that measured the
+ * writer's real effect from one that measured an untouched tree.
+ *
+ * The order matters and mirrors the CLI: the edit lands first, and the refusal
+ * is what the process prints on its way out. The envelope is
+ * {@link usageLimitResult}'s, unchanged, so the recogniser is exercised rather
+ * than bypassed.
+ */
+export function writerThatEditsThenHitsUsageLimit(
+  fileName: string,
+  contents: string,
+) {
+  return (call: { readonly cwd: string }): AgentCommandResult => {
+    writeRepoFile(call.cwd, fileName, contents);
+    return usageLimitResult();
+  };
+}
+
 /** A Claude run refused for quota, in exactly the envelope V1-05 recognises. */
 export function usageLimitResult(): AgentCommandResult {
   return agentCommandResult({

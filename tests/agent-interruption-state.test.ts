@@ -710,6 +710,20 @@ describe('an interruption is recorded against the phase that was running', () =>
  * checkpoint recorded `worktreeCleanAtCheckpoint: false` is "a task with work
  * in progress, which is the normal thing to find and the case this slice exists
  * to survive". Nothing was writing that `false`.
+ *
+ * ── This is the fallback, not the whole rule (V3-10) ───────────────────────
+ *
+ * These cases call `recordAgentInterruption` with no settlement artefact, which
+ * is what every caller that did not settle the repository does — and what every
+ * failure of the settlement path degrades to. So they still pin exactly what
+ * they always pinned, and they are the reason a settlement that cannot be
+ * proven is safe.
+ *
+ * The other branch is deliberately not exercised here. A checkpoint can only be
+ * *produced*, from a real commit and a real observation, so the cases for it
+ * live in `tests/v3-10-quota-checkpoint.test.ts` over a real Git worktree —
+ * including the counter-proof that a fabricated artefact withdraws the
+ * checkpoint exactly as an absent one does.
  */
 describe('an interrupted writer stops claiming checkpoint facts it may have invalidated', () => {
   it.each([

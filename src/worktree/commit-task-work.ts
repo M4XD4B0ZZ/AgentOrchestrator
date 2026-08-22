@@ -13,7 +13,7 @@
  *
  * ── The order is the requirement ───────────────────────────────────────────
  *
- *   writer returns ok
+ *   the writing pass has ended, positively classified
  *     → the scope gate measures the cumulative delta        (the caller's job)
  *     → control two: refuse a repository that would run code (here, FIRST)
  *     → stage, then commit                                   (here)
@@ -22,6 +22,36 @@
  * Control two runs before anything is staged because a check that ran after
  * `git add --all` would be reporting a command that had already executed. A
  * post-hoc measurement cannot un-run a program or un-write a sentinel.
+ *
+ * ── The first line used to read "writer returns ok", and that was narrower
+ *    than what this function actually requires ──────────────────────────────
+ *
+ * It has two callers since V3-10, and only one of them holds a completed pass.
+ * The other settles a writer the CLI cut off for quota (`loop/loop-step.ts`,
+ * `settleQuotaInterruption`). Nothing here reads a writer result, and nothing
+ * here would behave differently if it did: the preconditions are that the
+ * *tree* has stopped changing and that a scope gate has just approved the paths
+ * being handed in. What makes the tree stop changing is that the writing
+ * process ended under its own control, which both callers establish before they
+ * arrive — one from a `COMPLETED` envelope, the other from a `429` in an
+ * envelope only a self-terminated process could have printed.
+ *
+ * So the contract was always about a *classified ending over an approved tree*,
+ * not about success, and the diagram above now says so. What this function
+ * records is therefore not evidence of completion either — see the caller's
+ * state, which is `VERIFYING` for one of them and `BLOCKED_USAGE_LIMIT` for the
+ * other.
+ *
+ * ── The message says which pass, not that it finished ──────────────────────
+ *
+ * `AO:<taskId>:<phase>:r<round>` names the task, the writing phase and the
+ * round, and asserts nothing about the outcome — deliberately, and it is worth
+ * stating now that two kinds of pass produce one. Nothing in `src/` reads or
+ * matches it, so no behaviour keys off it; the durable *state* is what
+ * distinguishes a recorded pass from a recorded interruption, which is the
+ * right place for that distinction to live. A variant spelling for the
+ * interruption would be a second grammar nothing consumes, on a value that is
+ * one shell-inert token by contract.
  *
  * ── Measured, not remembered (git 2.55.0.windows.3, through `runGitCommand`) ─
  *
