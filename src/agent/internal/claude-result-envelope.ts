@@ -40,10 +40,40 @@
  * matched against free text would sooner or later be matched against a review
  * that quotes the sentinel's own source file.
  *
- * No reset timestamp was observed in the envelope at this version, so none is
- * read. `reportedResetAt` stays `null`, `evaluateAutomaticResume` refuses with
- * `RESET_TIME_MISSING`, and the block waits for a human. That is the correct
- * outcome for evidence we do not have.
+ * No reset timestamp is read here, so `reportedResetAt` stays `null`,
+ * `evaluateAutomaticResume` refuses with `RESET_TIME_MISSING`, and the block
+ * waits for a human. That is the correct outcome for evidence we do not have.
+ *
+ * ── Why no reset timestamp is read, measured rather than assumed (2.1.239) ──
+ *
+ * This used to say only that none had been *observed*, which was true of the
+ * healthy envelope it was written from and could not distinguish "absent from
+ * that run" from "absent from the contract". The stronger question has since
+ * been answered against the shipped CLI bundle, and the answer is narrower than
+ * the old note implied.
+ *
+ * Claude Code 2.1.239 does report an absolute reset instant. It is
+ * `rate_limit_event.rate_limit_info.resetsAt`, an integer in epoch seconds —
+ * the unit pinned twice in the bundle, once by `resetsAt - floor(now/1000)`
+ * feeding `retry-after` and once by `resetsAt * 1000 <= Date.now()`, so it is
+ * not inferred from the field's name. Epoch carries its own timezone, so the
+ * instant is unambiguous.
+ *
+ * AO cannot see it. `rate_limit_event` is a *stream* message, written only
+ * under `--output-format stream-json` (which additionally requires
+ * `--verbose`). The writer runs `--output-format json`, whose print loop keeps
+ * the last message and requires it to be the `result`. Neither variant of that
+ * result — success or error — declares a reset field, so a real 429 envelope
+ * could not carry one either. There is no benign side-channel: the CLI exposes
+ * no usage or limits command.
+ *
+ * So the absence here is a property of the output mode, not of the CLI. Reading
+ * the field would mean migrating this reader from a whole-document contract to
+ * a JSONL stream contract, which changes what a complete document is and what
+ * truncation means — a boundary decision, not a parser fix. Until that decision
+ * is taken, nothing is read and nothing is invented. The full measurement,
+ * including the Codex half and the limits of the method, is in
+ * `docs/decisions/2026-08-22-claude-quota-reset-evidence-measurement.md`.
  *
  * ── The measured envelope of the first dogfood run (2.1.233) ───────────────
  *
