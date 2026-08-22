@@ -779,3 +779,157 @@ describe('the gitlink probe refuses an unreadable directory and parses long obje
     expect(git.asked.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(false);
   });
 });
+
+/* ═════ 7. One gitlink must never answer for another ═══════════════════════ */
+
+/**
+ * The defect this section exists for was introduced by the fix for the previous
+ * one, which is why it gets its own section rather than a case.
+ *
+ * A first attempt at reading `git submodule status` stripped a trailing ` (…)`
+ * from every path by **shape**, on the true observation that Git appends a
+ * `(describe)` suffix for a checked-out submodule. Applied to an *unpopulated*
+ * line, that rewrites a path Git had just given verbatim. Two ordinary gitlinks
+ * — two plain `git submodule add` calls, no fabrication, no hostile
+ * configuration — collapse to one:
+ *
+ *     -f0cdac1… vendor
+ *     -f0cdac1… vendor (old)
+ *
+ * Both became `vendor`. The index confirmed `vendor` twice, `vendor (old)` was
+ * never read, and the probe answered **clean** over a planted file — the same
+ * data loss the probe had just been wired into the removal gate to prevent.
+ *
+ * Two guards now stand against the whole class: only `-` lines are taken from
+ * the listing, and they are taken exactly; and the index confirmation must find
+ * a gitlink **at that exact path**, not merely somewhere in the result.
+ */
+describe('a gitlink whose path is a prefix of another is not answered for by it', () => {
+  function twoGitlinks(root: string): void {
+    const inner = createRepoFixture({
+      defaultBranch: 'main',
+      profile: null,
+      files: { 'f.txt': `one${NEWLINE}` },
+    });
+    for (const path of ['vendor', 'vendor (old)']) {
+      git(root, [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '--quiet',
+        inner.split('\\').join('/'),
+        path,
+      ]);
+    }
+    git(root, ['add', '--all']);
+    git(root, ['commit', '--quiet', '-m', 'two submodules']);
+    git(root, ['submodule', 'deinit', '--force', '--all']);
+  }
+
+  it('reports a file planted in the longer path as dirty', async () => {
+    const root = repo();
+    twoGitlinks(root);
+
+    // The premise, measured twice over: Git lists both paths, and every vector
+    // AO owns is blind to what is in the second one.
+    expect(git(root, ['submodule', 'status'])).toContain('vendor (old)');
+    mkdirSync(join(root, 'vendor (old)'), { recursive: true });
+    writeFileSync(join(root, 'vendor (old)', 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+    expect(git(root, ['ls-files', '--others', '--exclude-standard']).trim()).toBe('');
+
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+
+  /**
+   * The control, and it is what stops the case above passing because the probe
+   * now calls every two-submodule repository dirty.
+   */
+  it('reports the same two gitlinks as clean when neither holds anything', async () => {
+    const root = repo();
+    twoGitlinks(root);
+
+    expect(git(root, ['submodule', 'status'])).toContain('vendor (old)');
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(true);
+  });
+
+  /**
+   * And the shorter path still answers for itself: a planted file in `vendor`
+   * is dirty too, so neither case above depends on which of the two was read.
+   */
+  it('reports a file planted in the shorter path as dirty', async () => {
+    const root = repo();
+    twoGitlinks(root);
+    mkdirSync(join(root, 'vendor'), { recursive: true });
+    writeFileSync(join(root, 'vendor', 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+});
+
+/* ═══════ 8. What the two narrowing guards buy, since it is not the answer ══ */
+
+/**
+ * Two guards in the probe are **equivalent for correctness** and are kept
+ * anyway. Mutation runs proved that: removing either leaves every case above
+ * green, because the index fallback reaches the right answer by a longer route.
+ * Rather than delete them or leave them unpinned, these cases assert what they
+ * really buy.
+ */
+describe('the probe stays on its bounded route, and refuses a substituted path', () => {
+  /** Records what a real run asks Git, without changing any answer. */
+  function spy(): GitRunner & { readonly asked: string[][] } {
+    const asked: string[][] = [];
+    const git = (async (cwd, args) => {
+      asked.push([...args]);
+      return await runGitCommand(cwd, args);
+    }) as GitRunner;
+    return Object.assign(git, { asked });
+  }
+
+  /**
+   * Taking only the `-` lines is what keeps an ordinary repository on the
+   * bounded pathspec route.
+   *
+   * Without it, a populated line arrives carrying its ` (describe)` suffix,
+   * which is never a path this seam will carry as an argument — so every
+   * cleanliness reading in every repository with a checked-out submodule falls
+   * back to `ls-files --stage` over the **whole index**, one line per tracked
+   * file. The answer stays right; the 1 MiB cliff this remediation removed comes
+   * back on the ordinary path.
+   */
+  it('reads an ordinary populated repository without enumerating the index', async () => {
+    const root = repo();
+    withVendorSubmodule(root);
+    const git = spy();
+
+    expect(await observeWorktreeCleanliness(git, root)).toBe(true);
+    expect(git.asked.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(false);
+  });
+
+  /**
+   * The confirmation must find a gitlink **at the path it asked about**.
+   *
+   * Matching the mode alone would let a result describing some *other* gitlink
+   * answer for this one — which is precisely how a rewritten path went unnoticed
+   * until a review built two submodules whose names share a prefix. The flag
+   * fix stops the rewrite; this stops the class.
+   */
+  it('reports not established when the index answers about a different path', async () => {
+    const CLEAN = { outcome: 'OK' as const, stdout: '', stderr: '', exitCode: 0 };
+    const SHA = 'bc04a7e93f5e27eaa8518f9721f5838254e14cbb';
+    const git = (async (_cwd, args) => {
+      if (args[0] === 'status') return CLEAN as never;
+      if (args[0] === 'submodule') return { ...CLEAN, stdout: `-${SHA} vendor` } as never;
+      if (args[0] === 'ls-files' && args.includes('--')) {
+        // A gitlink, and not the one that was asked about.
+        return { ...CLEAN, stdout: `160000 ${SHA} 0\tsomewhere-else\0` } as never;
+      }
+      return CLEAN as never;
+    }) as GitRunner;
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => [])).toBeNull();
+  });
+});

@@ -3503,6 +3503,26 @@ one call later. The index is now the **fallback**, taken whenever
 for the case where neither source can answer — which trades a certain stall in
 three ordinary shapes for an unbounded read in those same shapes.
 
+**And the fix for that had a defect of its own, which the second fresh review
+caught.** Reading `git submodule status` meant handling the ` (describe)` suffix
+Git appends for a checked-out submodule, and the first attempt stripped it by
+**shape** — from every line. Applied to an *unpopulated* line it rewrites a path
+Git gave verbatim. Two ordinary gitlinks, two plain `git submodule add` calls:
+
+    -f0cdac1… vendor
+    -f0cdac1… vendor (old)
+
+Both collapsed to `vendor`. The index confirmed `vendor` twice, `vendor (old)`
+was never read, and the probe answered **clean** over a planted file — reopening,
+inside the fix for it, the data loss that fix exists to close, and minting an
+unattended-resume checkpoint over the same reading.
+
+Two guards now stand against the class. Only `-` lines are taken from the
+listing, and taken **exactly**: populated gitlinks are already covered by the
+cleanliness vector's `--ignore-submodules=none`, so no describe suffix is ever
+parsed and no path is ever rewritten. And the index confirmation must find a
+gitlink **at that exact path**, not merely somewhere in its result.
+
 Two things the probe still cannot see are recorded rather than claimed closed:
 a **fabricated** `.git` inside a gitlink (**L-V3-11-13**) and a gitlink nested
 inside a populated submodule (**L-V3-11-14**). The first design's comment
@@ -3533,24 +3553,32 @@ reports `M vendor`), and it runs first and produces `approvedPaths`, so the path
 is either refused before any commit exists or was approved anyway. Recorded
 under L-V3-11-5 as an asymmetry, not as a defect.
 
-**Counter-proof: 23 mutants, 23 killed.** Both halves of the transport rule
+**Counter-proof: 26 mutants, 26 killed.** Both halves of the transport rule
 (latch and guard) and the latch's *unlatched* variant; three arms of the event
-reader; twelve arms of the gitlink probe, including both of its sources and the
+reader; fifteen arms of the gitlink probe, including both of its sources, the
 distinction between "this path cannot be carried as an argument" and "Git could
-not answer"; the probe's wiring into `observeRuntime` **and** into the
-destructive removal gate; and three of the budget split.
+not answer", and the two guards that stop one gitlink answering for another; the
+probe's wiring into `observeRuntime` **and** into the destructive removal gate;
+and three of the budget split.
 
-**Three of the twenty-three survived their first run**, and they are recorded
-rather than quietly re-run, because what they exposed is the point:
+**Five survived their first run**, and they are recorded rather than quietly
+re-run, because what they exposed is the point:
 
 - treating an unparsed `submodule status` line as "no submodule" — which is why
   the probe's failure arms have cases at all;
 - an unreadable gitlink *directory* reading as clean. Pinning it needed a reader
   seam, because a filesystem cannot be asked to fail on demand portably;
-- narrowing the object-name pattern back to forty characters. That one is
-  **equivalent for correctness** — the index fallback gets the SHA-256 repository
-  the right answer anyway — so the case that now kills it asserts what the
-  widened pattern really buys, which is that the fallback is *not* taken.
+- narrowing the object-name pattern back to forty characters;
+- dropping the `-`-only filter on `submodule status` lines;
+- matching the index confirmation on the gitlink *mode* alone instead of on the
+  exact path.
+
+The last three are **equivalent for correctness**: the index fallback reaches the
+right answer without any of them. They are kept because what they buy is not the
+answer but the *route* — an ordinary repository with a checked-out submodule
+staying on the bounded pathspec call instead of enumerating the whole index on
+every cleanliness reading, which is the 1 MiB cliff this remediation removed. The
+cases that now kill them assert exactly that, and say so.
 
 The
 probe's parse-failure and index-confirmation arms are pinned with an injected

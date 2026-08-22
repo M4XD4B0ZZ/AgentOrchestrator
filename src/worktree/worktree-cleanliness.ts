@@ -142,6 +142,9 @@ const SUBMODULE_STATUS_LINE = /^([ +\-U]?)([0-9a-f]{40}|[0-9a-f]{64}) (.+)$/;
 /** `git ls-files --stage` prints this mode for a gitlink, and only for a gitlink. */
 const GITLINK_MODE = '160000';
 
+/** The flag `git submodule status` prints for a gitlink that is not populated. */
+const NOT_INITIALISED = '-';
+
 /**
  * How one directory is listed. Injected **only** so the "could not be read" arm
  * can be pinned.
@@ -241,7 +244,37 @@ async function gitlinkPaths(
   return await gitlinksFromIndex(git, worktreePath);
 }
 
-/** Every path in a `submodule status` listing, or `null` if any line is unreadable. */
+/**
+ * The paths of the **not-initialised** gitlinks in a `submodule status` listing,
+ * or `null` if any line is unreadable.
+ *
+ * ── Why only the `-` lines, and why nothing is stripped ────────────────────
+ *
+ * `git submodule status` appends a ` (describe)` suffix for a *checked-out*
+ * submodule and nothing for an unpopulated one. An earlier version of this
+ * module took every line and stripped a trailing ` (…)` by **shape**, which is
+ * a rewrite of a path Git had just told it verbatim — and a review measured what
+ * that costs. Two ordinary gitlinks, added by two plain `git submodule add`
+ * calls:
+ *
+ *     -f0cdac1… vendor
+ *     -f0cdac1… vendor (old)
+ *
+ * Both collapsed to `vendor`. The index confirmed `vendor` twice, the directory
+ * `vendor (old)` was never read, and the probe answered **clean** over a writer
+ * file physically on disk — reopening, inside this module's own fix for it, the
+ * data loss that fix exists to close.
+ *
+ * A `-` line's path is exact, so it is taken exactly. Populated gitlinks are not
+ * returned at all: they are inside Git's reach, and the cleanliness vector's
+ * `--ignore-submodules=none` has already reported on them. That also means no
+ * describe suffix is ever parsed, so no path is ever rewritten — the shape of
+ * the suffix, and whether a submodule's own path can end in `)`, stop being
+ * questions this module has to get right.
+ *
+ * The index fallback has no flags, so it returns every gitlink; the `.git`
+ * check in the caller is what distinguishes them there.
+ */
 function parseSubmoduleStatus(stdout: string): readonly string[] | null {
   const paths: string[] = [];
   for (const line of stdout.split('\n')) {
@@ -249,23 +282,13 @@ function parseSubmoduleStatus(stdout: string): readonly string[] | null {
     if (text.length === 0) continue;
 
     const parsed = SUBMODULE_STATUS_LINE.exec(text);
+    const flag = parsed?.[1];
     const path = parsed?.[3];
-    if (path === undefined) return null;
-    // A `(describe)` suffix is only printed for a checked-out submodule, and it
-    // is stripped rather than trusted: the path is what this module acts on.
-    paths.push(stripDescribeSuffix(path));
+    if (flag === undefined || path === undefined) return null;
+    if (flag !== NOT_INITIALISED) continue;
+    paths.push(path);
   }
   return paths;
-}
-
-/**
- * Drops the trailing ` (…)` `git submodule status` appends for a populated
- * submodule. Left alone when there is none, which is the `-` case.
- */
-function stripDescribeSuffix(path: string): string {
-  if (!path.endsWith(')')) return path;
-  const opened = path.lastIndexOf(' (');
-  return opened === -1 ? path : path.slice(0, opened);
 }
 
 /**
@@ -300,7 +323,10 @@ async function confirmAgainstIndex(
     ]);
     if (staged.outcome === 'REFUSED_UNSAFE_ARGUMENT') return 'UNUSABLE_PATH';
     if (staged.outcome !== 'OK') return 'UNREADABLE';
-    if (!hasGitlinkEntry(staged.stdout)) return 'CONTRADICTED';
+    // The entry must be a gitlink **at this exact path**. Matching the mode
+    // alone would let a pathspec that happens to cover a *different* gitlink
+    // answer for it, which is how a rewritten path went unnoticed once already.
+    if (!hasGitlinkEntryAt(staged.stdout, path)) return 'CONTRADICTED';
   }
   return 'CONFIRMED';
 }
@@ -330,10 +356,18 @@ async function gitlinksFromIndex(
   return paths;
 }
 
-/** Whether an `ls-files --stage` result contains a gitlink entry. */
-function hasGitlinkEntry(stdout: string): boolean {
+/**
+ * Whether an `ls-files --stage` result records a gitlink at exactly `path`.
+ *
+ * `<mode> <sha> <stage>\t<path>`. The tab is the only separator that cannot
+ * occur inside a path, which is why the comparison is made after it and not by
+ * scanning the whole entry.
+ */
+function hasGitlinkEntryAt(stdout: string, path: string): boolean {
   for (const entry of stdout.split('\0')) {
-    if (entry.startsWith(`${GITLINK_MODE} `)) return true;
+    if (!entry.startsWith(`${GITLINK_MODE} `)) continue;
+    const tab = entry.indexOf('\t');
+    if (tab !== -1 && entry.slice(tab + 1) === path) return true;
   }
   return false;
 }
