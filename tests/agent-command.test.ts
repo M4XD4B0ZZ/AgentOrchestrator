@@ -404,13 +404,17 @@ describe('the budgets an agent run is given', () => {
   });
 
   /**
-   * The size that separates them, stated as the thing it decides.
+   * The size that separates them — and this case is **arithmetic**, not a seam
+   * test, which is why it is named for what it computes.
    *
-   * A 16 MiB transcript is ordinary for a writing pass and over the reviewer's
-   * ceiling. Asserting it here rather than only asserting the constants is what
-   * makes the *consequence* fail if someone equalises the two again.
+   * It evaluates `8_388_608 < 16_777_216 < 67_108_864` and invokes nothing. It
+   * is here because a 16 MiB transcript is ordinary for a writing pass and over
+   * the reviewer's ceiling, so the gap between the two constants is the thing
+   * with a consequence; but a reader must not mistake it for evidence that the
+   * seam behaves that way. The seam behaviour is
+   * `toAgentCommandResult`'s truncation handling, covered separately.
    */
-  it('puts a 16 MiB transcript within the writer and beyond the reviewer', () => {
+  it('places 16 MiB between the two constants, by arithmetic', () => {
     const sixteenMiB = 16 * 1024 * 1024;
     expect(sixteenMiB).toBeLessThan(maxStdoutBytesFor('claude'));
     expect(sixteenMiB).toBeGreaterThan(maxStdoutBytesFor('codex'));

@@ -3387,7 +3387,8 @@ could only be too early; the contract violation was not.
 
 **Counter-proof: 9 mutants, all killed**, by
 `tests/v3-11-remediation-git-vectors.test.ts` and the extended
-`tests/v3-11-quota-reset-stream.test.ts`. **Five of the nine cases** measure both
+`tests/v3-11-quota-reset-stream.test.ts`. **Five of the nine cases that existed
+when this paragraph was written** — the file has since grown — measure both
 halves — the reading the hostile configuration produces *and* the reading the
 vector produces — because a case that asserted only the second cannot tell
 hardening from over-reporting, which is exactly how the two wrong tokens shipped.
@@ -3469,16 +3470,44 @@ mints `worktreeCleanAtCheckpoint: true` over them — an inability to observe re
 as permission.
 
 The blind spot is **pre-existing**; the values V3-11 shipped were equally blind.
-What V3-11 changed is what the clean reading buys, which is why it is closed now
-rather than carried. `worktree/worktree-cleanliness.ts` adds one bounded
-observation: gitlink paths from `git submodule status` (measured to read the
-**index** — deleting `.gitmodules` still lists them, and a fabricated entry is
-*not* listed), each confirmed against the index with a pathspec-bounded
-`ls-files --stage`, and a gitlink that is not an active checkout while holding
-entries is dirty. `ls-files --stage` unfiltered is deliberately not used: it
-prints one line per tracked file and would reintroduce the same 1 MiB cliff this
-remediation removed. Anything the probe cannot establish is `null`, which is
-`UNOBSERVABLE`, which is an operator.
+What V3-11 changed is what the clean reading buys, which is why it is closed at
+the top level rather than carried. `worktree/worktree-cleanliness.ts` adds one
+bounded observation: gitlink paths from `git submodule status`, each confirmed
+against the index with a pathspec-bounded `ls-files --stage`, and a gitlink that
+is not an active checkout while holding entries is dirty. Unfiltered
+`ls-files --stage` is deliberately not the *primary* source: it prints one line
+per tracked file and would reintroduce the same 1 MiB cliff this remediation
+removed. Anything the probe cannot establish is `null`, which is `UNOBSERVABLE`,
+which is an operator.
+
+**The first design of that probe shipped a false generalisation and three
+availability regressions, and the fresh review of the fixed HEAD caught them.**
+It said `git submodule status` "reads the **index**, not `.gitmodules`", citing
+two measurements that are both true — an *uncommitted* deletion of `.gitmodules`
+still lists the gitlink, and a fabricated entry naming a non-gitlink is not
+listed. The generalisation drawn from them is false, and the cases that matter
+were never asked:
+
+| shape | first design | now |
+| --- | --- | --- |
+| submodule path with a space or a non-ASCII character | not established | answers |
+| embedded repo, never mapped in `.gitmodules` (`git add -A`) | not established | answers |
+| SHA-256 repository (64-hex object names) | not established | answers |
+
+Each of those is an ordinary repository, and "not established" is
+`WORKTREE_CLEANLINESS_UNKNOWN` → `UNOBSERVABLE` → every step of every task in it
+stopping for an operator, forever, over a tree that is genuinely clean. That is
+the exact defect class the paragraph two sections above calls out, reintroduced
+one call later. The index is now the **fallback**, taken whenever
+`submodule status` cannot be used or cannot be trusted, and `null` is reserved
+for the case where neither source can answer — which trades a certain stall in
+three ordinary shapes for an unbounded read in those same shapes.
+
+Two things the probe still cannot see are recorded rather than claimed closed:
+a **fabricated** `.git` inside a gitlink (**L-V3-11-13**) and a gitlink nested
+inside a populated submodule (**L-V3-11-14**). The first design's comment
+asserted the first of those *was* closed. It is not, and it was not closed before
+the probe existed either — measured both ways.
 
 **4. The Codex reviewer's autonomy was widened by a constant renamed for the
 writer.** V3-11 raised one shared `AGENT_COMMAND_MAX_STDOUT_BYTES` from 8 MiB to
@@ -3504,13 +3533,26 @@ reports `M vendor`), and it runs first and produces `approvedPaths`, so the path
 is either refused before any commit exists or was approved anyway. Recorded
 under L-V3-11-5 as an asymmetry, not as a defect.
 
-**Counter-proof: 17 mutants, 17 killed.** Both halves of the transport rule
-(latch and guard), the latch's *unlatched* variant, three arms of the event
-reader, seven arms of the gitlink probe, the probe's wiring into
-`observeRuntime`, and three of the budget split. One of the seventeen —
-treating an unparsed `submodule status` line as "no submodule" — **survived its
-first run**, which is why the probe's failure arms have cases at all; it is
-recorded here rather than quietly re-run. The
+**Counter-proof: 23 mutants, 23 killed.** Both halves of the transport rule
+(latch and guard) and the latch's *unlatched* variant; three arms of the event
+reader; twelve arms of the gitlink probe, including both of its sources and the
+distinction between "this path cannot be carried as an argument" and "Git could
+not answer"; the probe's wiring into `observeRuntime` **and** into the
+destructive removal gate; and three of the budget split.
+
+**Three of the twenty-three survived their first run**, and they are recorded
+rather than quietly re-run, because what they exposed is the point:
+
+- treating an unparsed `submodule status` line as "no submodule" — which is why
+  the probe's failure arms have cases at all;
+- an unreadable gitlink *directory* reading as clean. Pinning it needed a reader
+  seam, because a filesystem cannot be asked to fail on demand portably;
+- narrowing the object-name pattern back to forty characters. That one is
+  **equivalent for correctness** — the index fallback gets the SHA-256 repository
+  the right answer anyway — so the case that now kills it asserts what the
+  widened pattern really buys, which is that the fallback is *not* taken.
+
+The
 probe's parse-failure and index-confirmation arms are pinned with an injected
 runner, because real Git will not emit a malformed `submodule status` line on
 demand; the same function is driven against real repositories in the same file,
@@ -4397,19 +4439,52 @@ and because the failure mode it describes — a command that cannot start is
   `ls-files --others --exclude-standard` carries no `--directory`, so its cliff
   (~42,000 files) is untouched. Fail-closed, an availability defect rather than
   an authority one. **Scope:** `worktree/git-command.ts`, `scope/task-delta.ts`.
-- **L-V3-11-10 — the workspace preflight and removal gates cannot see a
-  submodule the observed repository hid.** `prepare-workspace.ts` (two call
-  sites) and `remove-workspace.ts`'s Proof 3a ask
+- **L-V3-11-10 — the workspace *preflight* gates cannot see a submodule the
+  observed repository hid.** `prepare-workspace.ts`'s two call sites ask
   `status --porcelain --untracked-files=all` with **no** `--ignore-submodules`,
   so a committed `.gitmodules` `ignore = all` makes them report a worktree clean
-  while a submodule inside it holds uncommitted work — measured. The original
-  finding said the removal then destroys that work. It does **not**: measured,
-  `git worktree remove` refuses outright for *any* worktree whose index holds a
-  gitlink (`fatal: working trees containing submodules cannot be moved or
-  removed`, exit 128, populated or not), and AO never passes `--force`. So the
-  gate is semantically blind and the destructive step is closed behind it by
-  Git. Recorded as a detection gap, not as data loss.
-  **Scope:** `worktree/prepare-workspace.ts`, `worktree/remove-workspace.ts`.
+  while a submodule inside it holds uncommitted work — measured. Both fail
+  closed downstream and neither destroys anything, so they are carried.
+  **Scope:** `worktree/prepare-workspace.ts`.
+
+  **The removal gate is no longer in this entry, and the reason is a correction
+  worth keeping.** The first version of this residual said the destructive path
+  was closed by Git itself — "`git worktree remove` refuses outright for *any*
+  worktree whose index holds a gitlink … exit 128, **populated or not**" — and
+  concluded "a detection gap, not data loss". That measurement was taken on a
+  *populated* fixture and is false for the unpopulated one, which is the state
+  `git worktree add` leaves and the only state in which the gate is blind:
+
+  | gitlink | `git worktree remove` |
+  | --- | --- |
+  | populated | exit 128, nothing removed |
+  | **unpopulated** | **exit 0, worktree gone, planted files gone** |
+
+  Three independent reviewers of the fixed HEAD caught it, and the data loss was
+  reproduced end to end through the production path: the bare vector reported
+  clean, `removeTaskWorkspace` returned `WORKSPACE_REMOVED`, and two planted
+  writer files were destroyed. `remove-workspace.ts`'s Proof 3a now asks
+  `observeWorktreeCleanliness`. Note that moving it onto
+  `WORKTREE_CLEANLINESS_ARGS` would **not** have helped — that vector is blind to
+  the same content; only the gitlink probe sees it.
+- **L-V3-11-13 — a fabricated `.git` inside a gitlink reads as a real
+  checkout.** A writer that creates a *well-formed* `.git` directory inside an
+  unpopulated gitlink — including a `.git/info/exclude` of `*` — makes Git treat
+  the path as an initialised, clean submodule. `git status` then reports nothing
+  and the probe defers to it, exactly as its rule table says it should for a
+  populated gitlink, so the reading is `true` over payload still on disk.
+  Measured, and measured **identically against the pre-probe reader**, so it is a
+  carried limit of the same family as L-V3-10-4 rather than a regression. Closing
+  it means deciding how AO distinguishes a submodule the operator populated from
+  one the writer fabricated, which needs state AO does not currently keep.
+  **Scope:** `worktree/worktree-cleanliness.ts`.
+- **L-V3-11-14 — a gitlink nested inside a populated submodule is not
+  probed.** `git submodule status` is not recursive, and recursion into
+  arbitrary directories is deliberately outside this probe's remit. So the
+  planted-content shape the probe closes at the top level is still open one
+  gitlink deeper. `--recursive` is the known fix and costs a walk of unknown
+  depth; it is a decision, not a flag.
+  **Scope:** `worktree/worktree-cleanliness.ts`.
 - **L-V3-11-11 — the truncation notice reports the excerpted text's length as
   the stream's.** `truncationNotice` is documented as saying "how big the whole
   stream was", and since V3-11 the writer hands `agentDiagnostics` the terminal

@@ -28,14 +28,21 @@
  * ── `.gitmodules`, not `.git/config` ───────────────────────────────────────
  *
  * The threat model is a repository whose own contents change what AO measures,
- * and the writer holds `Write`. `.git/config` is not reachable by it —
- * `acceptEdits` is cwd-confined and `.git` is not a working-tree path — but
- * `.gitmodules` is a **tracked file at the top of the worktree**. So the
- * submodule cases configure `ignore = all` there, which is the reachable half,
- * and is what V3-11's own cases got wrong by using `.git/config`.
+ * and the writer holds `Write`. `.gitmodules` is a **tracked file at the top of
+ * the worktree**, so the submodule cases configure `ignore = all` there — the
+ * reachable half, and what V3-11's own cases got wrong by using `.git/config`.
+ *
+ * The *reason* `.git/config` is out of reach is narrower than this comment first
+ * stated. It said "`.git` is not a working-tree path", which is false: in a
+ * linked worktree `<worktree>/.git` is a plain text file inside the writer's cwd,
+ * and a review demonstrated a writer creating `<worktree>/vendor/.git/**` with
+ * ordinary writes and changing what `git status` reports (L-V3-11-13). What is
+ * true, and measured, is narrower and sufficient: `git config` issued from a
+ * linked worktree writes to the shared `<main>/.git/config`, which is outside
+ * every worktree.
  */
 
-import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
@@ -145,6 +152,14 @@ describe('the scope gate sees a submodule change the repository hid, and only th
     mkdirSync(join(root, 'vendor', 'dist'), { recursive: true });
     writeFileSync(join(root, 'vendor', 'dist', 'build.log'), `noise${NEWLINE}`, 'utf8');
 
+    // The premise, measured, and the half this case originally lacked: the
+    // shipped-and-wrong `none` *does* report it. Without this the case passes
+    // for a fixture that produced no submodule state at all, which is the same
+    // blind spot as asserting only a hardened reading — in mirror image.
+    expect(
+      git(root, ['diff', '--name-status', '--no-color', '--ignore-submodules=none', base, '--']),
+    ).toContain('vendor');
+
     const delta = await observeTaskDelta(runGitCommand, root, base);
     expect(delta.outcome).toBe('OBSERVED');
     if (delta.outcome !== 'OBSERVED') return;
@@ -197,16 +212,22 @@ describe('the cleanliness question overrides the repository and stays bounded', 
   /**
    * The bound V3-11 gave up by shipping `--untracked-files=all`.
    *
-   * `all` prints one line per file; `normal` collapses an untracked directory
-   * to one entry. The only consumers of this vector test `stdout === ''`, so
-   * they cannot tell the two apart — but `runGitCommand` caps output at 1 MiB
-   * and reports `UNAVAILABLE` past it, at which point cleanliness becomes "not
-   * established" and every step of every task in that repository stops for an
-   * operator.
+   * `all` prints one line per file; `normal` collapses an untracked *directory*
+   * to one entry. All three consumers of this vector test the output only for
+   * emptiness, so none of them can tell the two apart — but `runGitCommand` caps
+   * output at 1 MiB and reports `UNAVAILABLE` past it, at which point cleanliness
+   * becomes "not established" and every step of the task that owns that worktree
+   * stops for an operator.
    *
-   * Six hundred files is far below the real cliff and far above the difference:
-   * it is a ~40x output ratio, which no plausible re-wording of the vector
-   * produces by accident.
+   * Six hundred files is far below the real cliff (~44,000 at these path
+   * lengths) and far above the difference: measured, `all` prints 14,290 bytes
+   * where `normal` prints 8 — a **~1,800x** ratio, not the "~40x" this comment
+   * first claimed. The assertion below asks for 20x, which is a floor chosen so
+   * a re-worded vector cannot pass by accident, not an estimate of the margin.
+   *
+   * Note what this case does *not* show: `normal` is a smaller constant, not a
+   * bound. ~34,000 untracked entries at the top of the worktree still flood the
+   * same cap under `normal` — see L-V3-11-9.
    */
   it('answers a worktree full of untracked files in bounded output', async () => {
     const root = repo();
@@ -440,84 +461,321 @@ describe('content planted inside an unpopulated submodule is not a clean worktre
   });
 });
 
+/* ═══ 4b. Repository shapes the first probe design refused to observe ══════ */
+
+/**
+ * Three ordinary shapes, and what they cost before the fallback existed.
+ *
+ * The first version of this probe read gitlinks only from `git submodule
+ * status`, on the stated ground that it "reads the **index**, not
+ * `.gitmodules`". Two cited measurements were true and the generalisation was
+ * false. A review measured three shapes in which it answered **not
+ * established** — which is `WORKTREE_CLEANLINESS_UNKNOWN`, which is
+ * `UNOBSERVABLE`, which stops every step of every task in that repository
+ * forever, over a tree that is genuinely clean:
+ *
+ *  - a submodule path carrying a space or a non-ASCII character. Both are
+ *    ordinary names; `doctor/exec.ts`'s `SAFE_ARG_PATTERN` refuses to carry
+ *    them as an argument, so the per-path index confirmation could not be made;
+ *  - an **embedded repository** with no `.gitmodules` mapping — the everyday
+ *    `git add -A` accident, which Git itself warns about — where
+ *    `git submodule status` exits 128 rather than listing it;
+ *  - a SHA-256 repository, whose object names are 64 hex characters and not 40.
+ *
+ * Each case asserts the ordinary tree is **clean** and that the same tree with
+ * one planted file is **dirty**. The second half is what stops the fix being
+ * "answer clean whenever unsure", which would close the availability hole by
+ * reopening the safety one.
+ */
+describe('the gitlink probe answers for repository shapes its first design refused', () => {
+  function innerRepo(): string {
+    return createRepoFixture({
+      defaultBranch: 'main',
+      profile: null,
+      files: { 'f.txt': `one${NEWLINE}` },
+    });
+  }
+
+  /** Adds a populated submodule at `path`, then empties it. */
+  function withDeinitialisedSubmoduleAt(root: string, path: string): void {
+    git(root, [
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--quiet',
+      innerRepo().split('\\').join('/'),
+      path,
+    ]);
+    git(root, ['add', '--all']);
+    git(root, ['commit', '--quiet', '-m', 'add submodule']);
+    git(root, ['submodule', 'deinit', '--force', path]);
+  }
+
+  it.each([
+    ['a space', 'third party'],
+    ['a non-ASCII character', 'bücher'],
+  ])('answers for a submodule path containing %s', async (_label, path) => {
+    const root = repo();
+    withDeinitialisedSubmoduleAt(root, path);
+
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(true);
+
+    writeFileSync(join(root, path, 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+
+  it('answers for an embedded repository that `.gitmodules` never mapped', async () => {
+    const root = repo();
+    const inner = innerRepo();
+    mkdirSync(join(root, 'tools'), { recursive: true });
+    cpSync(inner, join(root, 'tools', 'embedded'), { recursive: true });
+    git(root, ['add', '--all']);
+    git(root, ['commit', '--quiet', '-m', 'embed']);
+
+    // The premise, measured: Git records the gitlink and refuses to describe it.
+    expect(git(root, ['ls-files', '--stage', '--', 'tools/embedded'])).toContain('160000');
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(true);
+
+    git(root, ['submodule', 'deinit', '--force', '--all']);
+    rmSync(join(root, 'tools', 'embedded'), { recursive: true, force: true });
+    mkdirSync(join(root, 'tools', 'embedded'), { recursive: true });
+    writeFileSync(join(root, 'tools', 'embedded', 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+
+  it('answers for a SHA-256 repository, whose object names are not forty characters', async () => {
+    const root = createRepoFixture({
+      defaultBranch: 'main',
+      profile: null,
+      objectFormat: 'sha256',
+    });
+    const inner = createRepoFixture({
+      defaultBranch: 'main',
+      profile: null,
+      objectFormat: 'sha256',
+      files: { 'f.txt': `one${NEWLINE}` },
+    });
+    git(root, [
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--quiet',
+      inner.split('\\').join('/'),
+      'vendor',
+    ]);
+    git(root, ['add', '--all']);
+    git(root, ['commit', '--quiet', '-m', 'add vendor']);
+
+    // The premise, measured: the object name really is 64 characters.
+    expect(git(root, ['rev-parse', 'HEAD']).trim()).toHaveLength(64);
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(true);
+
+    git(root, ['submodule', 'deinit', '--force', 'vendor']);
+    writeFileSync(join(root, 'vendor', 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+});
+
+
 /* ══════ 5. The probe's own failure arms, which real Git will not produce ══ */
 
 /**
  * A stubbed runner, because these are the arms where **Git itself misbehaves**
  * and real Git will not misbehave on demand.
  *
- * This is a combination, not a substitution: section 4 above drives the same
- * function against real repositories and proves the commands run and mean what
+ * This is a combination, not a substitution: the sections above drive the same
+ * function against real repositories and prove the commands run and mean what
  * this module thinks they mean. What a stub adds is the classification of
- * outputs that cannot be produced to order — a `submodule status` line in a
- * shape this reader does not recognise, and an index that does not confirm a
- * path the listing just named.
+ * outputs that cannot be produced to order.
  *
- * Every one of them must answer **not established**, never "clean". A parse
- * this module got wrong is ignorance about the worktree, and ignorance is the
- * one thing that must not read as permission — a mis-parsed path simply would
- * not exist on disk, and "does not exist" is the *clean* answer, so this arm is
- * the difference between failing closed and failing silently.
+ * The probe has **two** sources for the gitlink set, and the distinction these
+ * cases exist to pin is which failures fall back and which refuse:
+ *
+ *  - `submodule status` unreadable, or a line in it unparsable, or a path this
+ *    seam cannot carry as an argument → **fall back to the index**. Nothing was
+ *    contradicted; one source is unavailable and the other needs no pathspec.
+ *    This is the arm that stopped three ordinary repository shapes from
+ *    stalling forever.
+ *  - the index **contradicting** the listing about a path, or the index itself
+ *    unreadable → **not established**. A disagreement is not something this
+ *    module may resolve by picking a side, and "clean" is never the answer to a
+ *    question that could not be asked.
  */
-describe('the gitlink probe fails closed when it cannot read its own instruments', () => {
+describe('the gitlink probe falls back to the index, and refuses when neither source answers', () => {
   const CLEAN = Object.freeze({ outcome: 'OK' as const, stdout: '', stderr: '', exitCode: 0 });
+  const UNAVAILABLE = Object.freeze({
+    outcome: 'UNAVAILABLE' as const,
+    stdout: '',
+    stderr: '',
+    exitCode: null,
+  });
   const SHA = 'bc04a7e93f5e27eaa8518f9721f5838254e14cbb';
 
-  /** Answers `status` clean, then whatever the case wants for the probe calls. */
+  /**
+   * Answers `status` clean, then whatever the case wants — separately for the
+   * pathspec-bounded confirmation (`ls-files … -- <path>`) and the whole-index
+   * fallback (`ls-files --stage -z`), because the two are different questions
+   * and a stub that conflated them could not tell which arm fired.
+   */
   function runner(replies: {
     readonly submodule?: Record<string, unknown>;
-    readonly lsFiles?: Record<string, unknown>;
-  }): GitRunner {
-    return async (_cwd, args) => {
+    readonly confirm?: Record<string, unknown>;
+    readonly index?: Record<string, unknown>;
+  }): GitRunner & { readonly asked: string[][] } {
+    const asked: string[][] = [];
+    const git = (async (_cwd, args) => {
+      asked.push([...args]);
       if (args[0] === 'status') return CLEAN as never;
       if (args[0] === 'submodule') return (replies.submodule ?? CLEAN) as never;
-      if (args[0] === 'ls-files') return (replies.lsFiles ?? CLEAN) as never;
+      if (args[0] === 'ls-files') {
+        return (args.includes('--') ? (replies.confirm ?? CLEAN) : (replies.index ?? CLEAN)) as never;
+      }
       return CLEAN as never;
-    };
+    }) as GitRunner;
+    return Object.assign(git, { asked });
   }
 
-  it('reports not established when a submodule-status line does not parse', async () => {
-    const git = runner({ submodule: { ...CLEAN, stdout: 'something else entirely' } });
+  it('falls back to the index when a submodule-status line does not parse', async () => {
+    const git = runner({
+      submodule: { ...CLEAN, stdout: 'something else entirely' },
+      index: { ...CLEAN, stdout: `160000 ${SHA} 0\tvendor\0` },
+    });
 
-    expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBeNull();
+    // The path does not exist on this synthetic root, so an answer at all
+    // proves the index was consulted rather than the listing guessed at.
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBe(true);
+    expect(git.asked.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(true);
   });
 
-  it('reports not established when the submodule listing cannot be read', async () => {
-    const git = runner({ submodule: { outcome: 'UNAVAILABLE', stdout: '', stderr: '', exitCode: null } });
+  it('falls back to the index when the submodule listing cannot be read', async () => {
+    const git = runner({
+      submodule: UNAVAILABLE,
+      index: { ...CLEAN, stdout: `160000 ${SHA} 0\tvendor\0` },
+    });
 
-    expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBeNull();
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBe(true);
+    expect(git.asked.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(true);
   });
 
-  it('reports not established when the index does not confirm the named path', async () => {
+  it('falls back to the index for a path this seam cannot carry as an argument', async () => {
+    const git = runner({
+      submodule: { ...CLEAN, stdout: `-${SHA} third party` },
+      index: { ...CLEAN, stdout: `160000 ${SHA} 0\tthird party\0` },
+    });
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBe(true);
+    // And it never put the unsafe path on a command line.
+    expect(git.asked.some((args) => args.includes('third party'))).toBe(false);
+  });
+
+  it('reports not established when the index contradicts the listing', async () => {
     const git = runner({
       submodule: { ...CLEAN, stdout: `-${SHA} vendor` },
       // A tracked *file*, not a gitlink: mode 100644.
-      lsFiles: { ...CLEAN, stdout: `100644 ${SHA} 0\tvendor\0` },
+      confirm: { ...CLEAN, stdout: `100644 ${SHA} 0\tvendor\0` },
     });
 
     expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBeNull();
   });
 
-  it('reports not established when the index cannot be read', async () => {
+  it('reports not established when the confirmation cannot be read', async () => {
+    const git = runner({ submodule: { ...CLEAN, stdout: `-${SHA} vendor` }, confirm: UNAVAILABLE });
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBeNull();
+  });
+
+  it('reports not established when neither source answers', async () => {
+    const git = runner({ submodule: UNAVAILABLE, index: UNAVAILABLE });
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBeNull();
+  });
+
+  it('reports not established when an index entry has no path separator', async () => {
     const git = runner({
-      submodule: { ...CLEAN, stdout: `-${SHA} vendor` },
-      lsFiles: { outcome: 'UNAVAILABLE', stdout: '', stderr: '', exitCode: null },
+      submodule: UNAVAILABLE,
+      index: { ...CLEAN, stdout: `160000 ${SHA} 0 vendor\0` },
     });
 
     expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBeNull();
   });
 
   /**
-   * The control. The same stub shape, with a listing this reader *does*
-   * understand and an index that confirms it, answers clean — so the four
-   * refusals above come from what they name and not from the stub itself.
+   * The control, and it has to be a real one: the listing carries the `-` flag,
+   * so the confirmation is actually issued. An earlier version of this case used
+   * an in-sync listing, which skips the confirmation entirely — its `ls-files`
+   * fixture was dead, and it would have passed with the confirmation deleted.
    */
   it('reports clean when the listing parses and the index confirms it', async () => {
     const git = runner({
-      submodule: { ...CLEAN, stdout: `${SHA} vendor (heads/main)` },
-      lsFiles: { ...CLEAN, stdout: `160000 ${SHA} 0\tvendor\0` },
+      submodule: { ...CLEAN, stdout: `-${SHA} vendor` },
+      confirm: { ...CLEAN, stdout: `160000 ${SHA} 0\tvendor\0` },
     });
 
     expect(await observeWorktreeCleanliness(git, 'C:/nowhere')).toBe(true);
+    expect(git.asked.some((args) => args[0] === 'ls-files' && args.includes('--'))).toBe(true);
+  });
+});
+
+/* ═══ 6. Two arms real Git will not produce, and one it produces rarely ════ */
+
+describe('the gitlink probe refuses an unreadable directory and parses long object names', () => {
+  const CLEAN = Object.freeze({ outcome: 'OK' as const, stdout: '', stderr: '', exitCode: 0 });
+  const SHA1 = 'bc04a7e93f5e27eaa8518f9721f5838254e14cbb';
+  const SHA256 = 'a'.repeat(64);
+
+  function runner(submoduleStdout: string): GitRunner & { readonly asked: string[][] } {
+    const asked: string[][] = [];
+    const git = (async (_cwd, args) => {
+      asked.push([...args]);
+      if (args[0] === 'submodule') return { ...CLEAN, stdout: submoduleStdout } as never;
+      if (args[0] === 'ls-files' && args.includes('--')) {
+        return { ...CLEAN, stdout: `160000 ${SHA1} 0\tvendor\0` } as never;
+      }
+      return CLEAN as never;
+    }) as GitRunner;
+    return Object.assign(git, { asked });
+  }
+
+  /**
+   * A directory that exists and cannot be listed is **not established**, never
+   * clean. Absent is `[]` and is genuinely clean; unreadable is ignorance, and
+   * ignorance on this path becomes `worktreeCleanAtCheckpoint`.
+   *
+   * Driven through the injected reader because a filesystem cannot be asked to
+   * fail on demand portably. Every other case in this file uses the real one.
+   */
+  it('reports not established when a gitlink directory cannot be listed', async () => {
+    const git = runner(`-${SHA1} vendor`);
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => null)).toBeNull();
+  });
+
+  /** The control: the same shape with a readable, empty directory is clean. */
+  it('reports clean when that directory is readable and empty', async () => {
+    const git = runner(`-${SHA1} vendor`);
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => [])).toBe(true);
+  });
+
+  /**
+   * A 64-character object name is parsed by the primary source rather than
+   * sending the probe to the index.
+   *
+   * The fallback makes the widened pattern unnecessary for *correctness* — a
+   * mutation run proved that, by narrowing the pattern back to forty characters
+   * and watching the SHA-256 repository still get the right answer through
+   * `ls-files`. It is not unnecessary for *cost*: the fallback reads one line per
+   * tracked file. So what this case pins is that the fallback is not taken.
+   */
+  it('parses a sixty-four character object name without falling back to the index', async () => {
+    const git = runner(`-${SHA256} vendor`);
+
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => [])).toBe(true);
+    expect(git.asked.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(false);
   });
 });

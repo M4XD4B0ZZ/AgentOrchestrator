@@ -143,15 +143,30 @@ const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
  *
  * They also carry no `--ignore-submodules` at all, so a committed `.gitmodules`
  * `ignore = all` makes them report a worktree clean while a submodule inside it
- * holds uncommitted work (measured). The destructive step behind the worst of
- * them is closed by Git itself — `git worktree remove` refuses outright for any
- * worktree whose index holds a gitlink, exit 128, and AO never passes `--force`
- * — so this is a detection gap and not data loss.
+ * holds uncommitted work (measured).
  *
- * Both are left unchanged here and carried as **L-V3-11-10**: moving three
- * preflight and destructive gates onto this vector is a decision about those
- * gates, not a token correction, and this remediation is not the place to make
- * it silently.
+ * An earlier version of this paragraph said the destructive step behind the
+ * worst of them was "closed by Git itself — `git worktree remove` refuses
+ * outright for any worktree whose index holds a gitlink, exit 128, populated or
+ * not — so this is a detection gap and not data loss". **That was false, and it
+ * was the whole justification for not fixing the gate.** The refusal is a
+ * property of *population*, not of the index, and it was measured on a populated
+ * fixture only:
+ *
+ *   populated gitlink   -> exit 128, nothing removed
+ *   unpopulated gitlink -> exit 0, worktree gone, planted files gone
+ *
+ * Unpopulated is the state `git worktree add` leaves and the only state in which
+ * the gate is blind, so the two conditions coincide exactly. Reproduced end to
+ * end through the production path: the bare vector reported clean,
+ * `removeTaskWorkspace` returned `WORKSPACE_REMOVED`, and two planted files were
+ * destroyed. `remove-workspace.ts`'s Proof 3a therefore asks
+ * {@link observeWorktreeCleanliness} now — note that moving it to *this array*
+ * would not have helped, because this array is blind to that content too.
+ *
+ * `prepare-workspace.ts`'s two gates are still unchanged and carried as
+ * **L-V3-11-10**: they are preflight rather than destructive, and moving them is
+ * a decision about those gates rather than a token correction.
  *
  * ── Every token is measured, and two of them are not what they look like ───
  *

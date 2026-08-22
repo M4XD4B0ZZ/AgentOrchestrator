@@ -62,6 +62,12 @@ export interface RepoFixtureOptions {
   readonly remote?: boolean;
   /** Extra files, keyed by repo-relative POSIX path. */
   readonly files?: Readonly<Record<string, string>>;
+  /**
+   * Object name format. Omitted means Git's default, which is `sha1` on the
+   * installed build; `sha256` exists so a reader that parses object names can be
+   * asked the 64-character question a SHA-1 fixture cannot pose.
+   */
+  readonly objectFormat?: 'sha256';
 }
 
 /** The canonical location of a repository profile. Duplicated deliberately:
@@ -80,7 +86,13 @@ export function createRepoFixture(options: RepoFixtureOptions): string {
   created.push(raw);
   const root = realpathSync.native(raw);
 
-  git(root, ['init', '-b', options.defaultBranch, '--quiet']);
+  git(root, [
+    'init',
+    '-b',
+    options.defaultBranch,
+    '--quiet',
+    ...(options.objectFormat === undefined ? [] : [`--object-format=${options.objectFormat}`]),
+  ]);
 
   // Line endings are the fixture's own business, not the host's.
   //

@@ -414,6 +414,65 @@ describe('J — a workspace holding work is never destroyed', () => {
     expect(existsSync(workspace.worktreePath)).toBe(true);
   });
 
+  /**
+   * The destructive gate and the unpopulated gitlink.
+   *
+   * A review of the V3-11 remediation measured that a writer can plant files
+   * inside an **unpopulated** submodule directory, where no spelling of
+   * `git status` looks. The remediation hardened the two cleanliness observers
+   * and left this gate — the one in front of `git worktree remove` — asking the
+   * blind question, on the stated ground that Git refuses to remove a worktree
+   * containing a submodule anyway.
+   *
+   * That ground was taken from a *populated* fixture and is false for the
+   * unpopulated one, which is the state `git worktree add` leaves and the only
+   * state in which this gate is blind. Measured:
+   *
+   *   populated gitlink   -> exit 128, "working trees containing submodules
+   *                          cannot be moved or removed", nothing lost
+   *   unpopulated gitlink -> exit 0, worktree gone, planted files gone
+   *
+   * So this case asserts **both halves**: that the bare vector this gate used to
+   * ask reports the tree clean, and that the gate refuses anyway. A case
+   * asserting only the second could not tell a closed blind spot from a gate
+   * that happens to refuse for another reason.
+   */
+  it('refuses a file planted in an unpopulated submodule, and keeps it', async () => {
+    const repository = await freshRepository();
+    const workspace = await prepared(repository, 'V1-03');
+    const inner = createRepoFixture({ defaultBranch: 'main', profile: null });
+    const wt = workspace.worktreePath;
+
+    // A gitlink in the index whose directory is empty — what a checkout of a
+    // submodule-bearing repository looks like before `submodule update`.
+    git(wt, [
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--quiet',
+      inner.split('\\').join('/'),
+      'vendor',
+    ]);
+    git(wt, ['commit', '--quiet', '-m', 'add vendor']);
+    git(wt, ['submodule', 'deinit', '--force', 'vendor']);
+
+    const planted = join(wt, 'vendor', 'planted.ts');
+    writeFileSync(planted, 'payload\n', 'utf8');
+
+    // The premise, measured: the vector this gate used to ask sees nothing.
+    expect(git(wt, ['status', '--porcelain', '--untracked-files=all']).trim()).toBe('');
+
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
+      lease: leaseFor(repository),
+    });
+
+    expect(removal.ok).toBe(false);
+    if (!removal.ok) expect(removal.code).toBe('WORKTREE_DIRTY');
+    expect(existsSync(planted)).toBe(true);
+    expect(readFileSync(planted, 'utf8')).toBe('payload\n');
+  });
+
   it('refuses a clean worktree whose branch holds unmerged commits', async () => {
     const repository = await freshRepository();
     const workspace = await prepared(repository, 'V1-03');

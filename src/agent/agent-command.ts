@@ -107,9 +107,11 @@ export const AGENT_COMMAND_TIMEOUT_MS = 1_800_000;
  * L-V3-11-2's deferral is also narrower than it was written. It says a
  * streaming reader "changes `doctor/exec.ts`'s sink contract and the
  * diagnostics excerpt"; that is true of the *sink* half and false of the
- * *retention* half — the sibling `internal/codex-review-transcript.ts` already
- * streams the same JSONL keeping only what it needs, retaining nothing and
- * touching no seam.
+ * *retention* half — the sibling `internal/codex-review-transcript.ts` reads the
+ * same JSONL keeping only what it needs and retaining no parsed objects, and it
+ * touches no seam. (It is not *streaming*: it takes the whole string and splits
+ * it, exactly as this reader does. What it avoids is holding every parsed
+ * object, which is the half L-V3-11-2 says is entangled and is not.)
  *
  * ── The sentence this replaces was false, and the falsehood had a cost ─────
  *

@@ -488,25 +488,39 @@ describe('reconciling state against Git', () => {
    * `observeRuntime` asks through `observeWorktreeCleanliness`, which also
    * probes gitlinks — because `git status` cannot see files planted inside an
    * **unpopulated** submodule, and since V3-11 the clean reading is what mints
-   * a checkpoint. A clean `status` beside a gitlink listing this reader cannot
-   * parse must therefore be "not established", not "clean".
+   * a checkpoint.
    *
-   * Without this case the wiring is unpinned: `observeRuntime` could go back to
-   * reading `status` directly and every other case here would stay green.
+   * The probe has two sources for the gitlink set and only refuses when
+   * **neither** answers: an unreadable `submodule status` falls back to the
+   * index, because three ordinary repository shapes reach this module that way
+   * and refusing them stalled every task in such a repository forever. So the
+   * case that pins the wiring has to deny both sources.
+   *
+   * Without it the wiring is unpinned: `observeRuntime` could go back to reading
+   * `status` directly and every other case here would stay green.
    */
-  it('reports an unreadable gitlink listing as unobservable, with status clean', async () => {
+  it('reports a clean status with no readable gitlink source as unobservable', async () => {
     const report = await reconcileWith({
       status: OK(''),
       submodules: OK('this is not a submodule status line'),
+      gitlink: UNAVAILABLE,
     });
 
     expect(report.verdict).toBe('UNOBSERVABLE');
     expect(report.findings).toContain('WORKTREE_CLEANLINESS_UNKNOWN');
   });
 
-  /** The control: the same reading with a listing it *can* parse is clean. */
-  it('reports a clean status beside an empty gitlink listing as clean', async () => {
-    const report = await reconcileWith({ status: OK(''), submodules: OK('') });
+  /**
+   * The control, and it is the one that stops the case above from passing for
+   * the wrong reason: the *same* unreadable listing, with the index readable,
+   * falls back and answers clean.
+   */
+  it('falls back to the index when the gitlink listing is unreadable', async () => {
+    const report = await reconcileWith({
+      status: OK(''),
+      submodules: OK('this is not a submodule status line'),
+      gitlink: OK(''),
+    });
 
     expect(report.findings).not.toContain('WORKTREE_CLEANLINESS_UNKNOWN');
     expect(report.findings).not.toContain('WORKTREE_DIRTY');

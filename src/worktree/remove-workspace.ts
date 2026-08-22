@@ -43,6 +43,7 @@ import { localBranchRef, LOCAL_BRANCH_REF_PREFIX } from '../repo/branch-name.js'
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import { classifyAncestry as classifyCommitAncestry } from './commit-probes.js';
 import { runGitCommand, type GitRunner } from './git-command.js';
+import { observeWorktreeCleanliness } from './worktree-cleanliness.js';
 import {
   deriveTaskWorkspaceIdentity,
   isOwnedTaskBranch,
@@ -255,13 +256,32 @@ export async function removeTaskWorkspace(
   }
 
   // --- Proof 3a: nothing uncommitted in the worktree -----------------------
-  const status = await git(identity.worktreePath, [
-    'status',
-    '--porcelain',
-    '--untracked-files=all',
-  ]);
-  if (status.outcome !== 'OK') return removalFailure('GIT_UNAVAILABLE');
-  if (status.stdout.length > 0) return removalFailure('WORKTREE_DIRTY');
+  //
+  // Asked through {@link observeWorktreeCleanliness}, not through a bare
+  // `status`, and that is a correction with a measured cost behind it.
+  //
+  // This gate stands in front of `git worktree remove`, which deletes the
+  // checkout. A review measured that a writer can plant files inside an
+  // **unpopulated** submodule directory where no `status` spelling looks, and
+  // the remediation that found it hardened the two cleanliness *observers* and
+  // left this one asking the blind question — on the reasoning that Git refuses
+  // to remove a worktree containing a submodule anyway. That reasoning was taken
+  // from a populated fixture and is **false** for the unpopulated one, which is
+  // the state every AO worktree starts in and the only state in which this gate
+  // is blind:
+  //
+  //   populated gitlink   -> fatal: working trees containing submodules cannot
+  //                          be moved or removed        exit 128, nothing lost
+  //   unpopulated gitlink -> exit 0, worktree gone, planted files gone
+  //
+  // Reproduced end to end: the bare vector reported clean, `removeTaskWorkspace`
+  // returned `WORKSPACE_REMOVED`, and two planted files were destroyed. So the
+  // destructive path gets the probe, and "cannot establish" refuses rather than
+  // proceeds — on this gate more than any other, because the cost of a wrong
+  // clean reading here is deleted work rather than a withheld resume.
+  const clean = await observeWorktreeCleanliness(git, identity.worktreePath);
+  if (clean === null) return removalFailure('GIT_UNAVAILABLE');
+  if (!clean) return removalFailure('WORKTREE_DIRTY');
 
   // --- Proof 3b: nothing committed that the base does not already have -----
   // Checked *before* the worktree goes, not after: discovering unmerged work

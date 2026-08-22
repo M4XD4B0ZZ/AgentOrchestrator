@@ -617,12 +617,21 @@ export function readClaudeResultStream(stdout: string): ClaudeStreamReading {
   // is holding, and nothing after this point is entitled to a verdict from it.
   if (!everyLineIsObject) return UNRECOGNISED;
 
-  // The terminator, and the completeness proof, in three parts that are not
-  // interchangeable. Zero results means the stream never reached its end; more
-  // than one means this reader does not understand the document it is holding;
-  // and a result that is not what the stream *ends* on means whatever produced
-  // this stdout kept talking afterwards — prose around a quoted envelope, or a
-  // transport that is not the CLI's JSONL writer at all.
+  // The terminator, and the completeness proof. Zero results means the stream
+  // never reached its end; more than one means this reader does not understand
+  // the document it is holding; and a result that is not what the stream *ends*
+  // on means whatever produced this stdout kept talking afterwards.
+  //
+  // `endsWithObject` is now **subsumed** by the guard above and kept anyway. The
+  // two flags are set from the same expression, and `everyLineIsObject` is
+  // latched and checked first, so by the time this line runs the only document
+  // that can reach it with `endsWithObject === false` is one with no non-empty
+  // lines at all — which `results.length !== 1` refuses on the next line.
+  // Measured: `''` and `'\n\n  \n'` are both `UNRECOGNISED` with this guard
+  // removed. It stays because it is the sentence that says what the transport
+  // promised, and a later relaxation of the whole-document rule would put it
+  // back in play; it is documented as subsumed so nobody counts it as a second
+  // independent check.
   if (!endsWithObject) return UNRECOGNISED;
   if (results.length !== 1) return UNRECOGNISED;
   const result = results[0];
