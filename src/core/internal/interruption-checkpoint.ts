@@ -68,9 +68,25 @@ import { GIT_SHA_PATTERN } from './task-state-object-schema.js';
  */
 const MINTED = new WeakSet<object>();
 
-function isMinted(value: object): boolean {
-  return MINTED.has(value);
-}
+/**
+ * `MINTED.has`, captured at module load.
+ *
+ * The class is frozen below so that `InterruptionCheckpointProof.holds = () =>
+ * true` cannot disable the gate. The same move survives one level down:
+ * `MINTED.has(value)` resolves through `WeakSet.prototype` at call time, so
+ * `WeakSet.prototype.has = () => true` anywhere in the process flips it.
+ *
+ * No authority is gained by that route — the `#commit` field acts as a second
+ * brand, so a foreign object that passed a subverted registry check still makes
+ * the accessor throw, and `interruptionCheckpointCommitOf` reports the refusal
+ * as `null`, which withdraws the checkpoint. But a gate that can be switched off
+ * is not a gate, and binding it costs one line —
+ * `internal/execution-lease-evidence.ts` reached this conclusion first, by
+ * review, and this file shipped without it while claiming parity.
+ */
+const isMinted: (value: object) => boolean = WeakSet.prototype.has.bind(MINTED) as (
+  value: object,
+) => boolean;
 
 /**
  * The two facts a settlement must have established, as the caller observed

@@ -784,13 +784,19 @@ describe('checkpoint evidence can only be produced, never asserted', () => {
     expect(isInterruptionCheckpoint(cast)).toBe(false);
     expect(interruptionCheckpointCommitOf(cast)).toBeNull();
 
-    // Route 3: reach the class through a genuine artefact and build one, with
-    // no import of the mint at all. `instanceof` would accept both of these.
+    // Route 3: reach the class through a genuine artefact, with no import of
+    // the mint at all. This is how the class was reached against this
+    // codebase's earlier opaque artefacts, and it is closed twice over — the
+    // deleted `constructor` means the lookup no longer finds the class (route 4
+    // asserts that directly), and the registry would refuse the result anyway.
+    //
+    // Both halves are kept: `Object.create` on the prototype is still a genuine
+    // route to an object `instanceof` would accept, and it is refused.
     if (genuine === null) expect.unreachable();
     const Constructor = Object.getPrototypeOf(genuine).constructor as new (c: string) => unknown;
-    const constructed = new Constructor(SHA);
-    expect(isInterruptionCheckpoint(constructed)).toBe(false);
+    expect(isInterruptionCheckpoint(new Constructor(SHA))).toBe(false);
     const created = Object.create(Object.getPrototypeOf(genuine)) as unknown;
+    expect(created).toBeInstanceOf(Proof);
     expect(isInterruptionCheckpoint(created)).toBe(false);
     expect(interruptionCheckpointCommitOf(created)).toBeNull();
 
@@ -881,11 +887,14 @@ describe('checkpoint evidence can only be produced, never asserted', () => {
   });
 
   it('refuses a genuine checkpoint for a phase that could not have changed the tree', async () => {
-    const { repository, root, current } = await implementing();
+    const { repository, root } = await implementing();
     // A real `REVIEWING` state, reached by the same producer path, so the gate
-    // is asked the question it exists for. Codex is contractually read-only and
-    // AO makes no commit for it, so a checkpoint here could only *overwrite* a
-    // true one the reviewer could not have invalidated.
+    // is asked the question it exists for rather than a fabricated one. Codex
+    // is contractually read-only and AO makes no commit for it, so a checkpoint
+    // offered here is a claim about a phase that could not have changed the
+    // tree — and `withdrawnCheckpointFor` correspondingly withdraws nothing.
+    // What must not happen is the caller's artefact being written over whatever
+    // the state carries.
     const reviewing = await driveTo(repository, root, 'REVIEWING');
     const genuine = mintInterruptionCheckpoint({
       observedCommit: reviewing.state.currentCommit ?? reviewing.state.basePinnedCommit,
@@ -910,12 +919,18 @@ describe('checkpoint evidence can only be produced, never asserted', () => {
     expect(record.outcome).toBe('PAUSED_USAGE_LIMIT');
 
     // Nothing was withdrawn — a read-only phase invalidates nothing — and
-    // nothing was written over it either. The checkpoint is the one the state
-    // already carried, not the one the caller handed in.
+    // nothing was written over it either: the recorded value is still the one
+    // the state carried, not the one the caller handed in.
+    //
+    // Here `carried` is `null`, because the write into `VERIFYING` withdrew it
+    // and `REVIEWING` did not restore it. That makes the assertion sharp rather
+    // than weak: the artefact offered is minted over the base pin, which is not
+    // null, so dropping `phaseMutatesRepository` from the gate would write that
+    // commit here and this would fail.
+    expect(carried).toBeNull();
     const blocked = reload(root).state;
     expect(blocked.state).toBe('BLOCKED_USAGE_LIMIT');
     expect(blocked.currentCommit).toBe(carried);
-    void current;
   });
 
   /**

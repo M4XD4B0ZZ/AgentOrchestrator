@@ -794,49 +794,6 @@ function leaseAdvanceOptions(deps: LoopDependencies): AdvanceOptions {
 
 /* ─────────────────────────── the scope guard ────────────────────────────── */
 
-/**
- * The gate both mutating steps run — before the writer, and again before the
- * durable move to `VERIFYING`.
- *
- * `blocked` is `null` when the task's whole effect is inside the scope it was
- * pinned under, and a finished {@link LoopStepResult} when it is not. A caller
- * that gets one must return it unchanged: the single durable write for this
- * step has already been made.
- *
- * `assessment` is reported either way, so a step that passes the gate can hand
- * back what the guard actually saw rather than only the fact that it survived.
- *
- * ── Why the check runs twice ───────────────────────────────────────────────
- *
- * The **post**-writer check is the one the guarantee is about. Checking a scope
- * only before a writer runs controls the *intention* and not the *effect*, and
- * the effect is the only thing a repository actually suffers.
- *
- * The **pre**-writer check is not symmetry. A violation is durable — the
- * offending changes are deliberately left in the tree as evidence — so a tree
- * can already be out of scope when a step begins: a previous pass violated it
- * and the `SCOPE_VIOLATION` write was refused, or a human continued the task
- * without cleaning up. Without a pre-check, the next run would hand that tree to
- * a writing agent and only notice afterwards, having spent an agent invocation
- * to compound a violation somebody already had to look at.
- *
- * ── Why two different blocking states ──────────────────────────────────────
- *
- * A proven violation is `SCOPE_VIOLATION`: not resumable, no resume point
- * permitted, and it tells an operator to go and inspect what an agent wrote.
- *
- * An *indeterminate* assessment — Git unreadable, the pin gone, no profile in
- * the pinned tree — is `HUMAN_DECISION_REQUIRED`, carrying the phase the task
- * was heading for. Nothing was proven about the agent, and saying "an agent
- * wrote outside its allowed scope" because Git could not be run would send an
- * operator hunting for damage that may not exist. The same split
- * `runVerifyStep` already makes between `BLOCKED_VERIFY` and an unusable
- * verification, for the same reason. Both stop the task; only one accuses.
- *
- * Neither path reverts anything. The changes stay exactly where the writer left
- * them — see `scope/assess-scope.ts` for why undoing them would be the more
- * dangerous act.
- */
 /** What the scope guard needs, and what both of its halves are given. */
 interface ScopeGuardOptions {
   readonly now: string;
@@ -910,6 +867,49 @@ function writeScopeViolation(
   return saved(save, 'SCOPE_VIOLATION', 'BLOCKED', { scope: assessment });
 }
 
+/**
+ * The gate both mutating steps run — before the writer, and again before the
+ * durable move to `VERIFYING`.
+ *
+ * `blocked` is `null` when the task's whole effect is inside the scope it was
+ * pinned under, and a finished {@link LoopStepResult} when it is not. A caller
+ * that gets one must return it unchanged: the single durable write for this
+ * step has already been made.
+ *
+ * `assessment` is reported either way, so a step that passes the gate can hand
+ * back what the guard actually saw rather than only the fact that it survived.
+ *
+ * ── Why the check runs twice ───────────────────────────────────────────────
+ *
+ * The **post**-writer check is the one the guarantee is about. Checking a scope
+ * only before a writer runs controls the *intention* and not the *effect*, and
+ * the effect is the only thing a repository actually suffers.
+ *
+ * The **pre**-writer check is not symmetry. A violation is durable — the
+ * offending changes are deliberately left in the tree as evidence — so a tree
+ * can already be out of scope when a step begins: a previous pass violated it
+ * and the `SCOPE_VIOLATION` write was refused, or a human continued the task
+ * without cleaning up. Without a pre-check, the next run would hand that tree to
+ * a writing agent and only notice afterwards, having spent an agent invocation
+ * to compound a violation somebody already had to look at.
+ *
+ * ── Why two different blocking states ──────────────────────────────────────
+ *
+ * A proven violation is `SCOPE_VIOLATION`: not resumable, no resume point
+ * permitted, and it tells an operator to go and inspect what an agent wrote.
+ *
+ * An *indeterminate* assessment — Git unreadable, the pin gone, no profile in
+ * the pinned tree — is `HUMAN_DECISION_REQUIRED`, carrying the phase the task
+ * was heading for. Nothing was proven about the agent, and saying "an agent
+ * wrote outside its allowed scope" because Git could not be run would send an
+ * operator hunting for damage that may not exist. The same split
+ * `runVerifyStep` already makes between `BLOCKED_VERIFY` and an unusable
+ * verification, for the same reason. Both stop the task; only one accuses.
+ *
+ * Neither path reverts anything. The changes stay exactly where the writer left
+ * them — see `scope/assess-scope.ts` for why undoing them would be the more
+ * dangerous act.
+ */
 async function enforceScope(
   current: StateLoadSuccess,
   options: {
