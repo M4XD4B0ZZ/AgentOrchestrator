@@ -2988,11 +2988,10 @@ reads as though unattended resume operates. It does not, and cannot:
    either CLI's output, and this build refuses to invent one.
    `evaluateAutomaticResume` denies `RESET_TIME_MISSING`. This lock is
    phase-independent.
-2. **The checkpoint claims are withdrawn (F-10).** Entering `REMEDIATING` sets
-   `currentCommit: null` and `worktreeCleanAtCheckpoint: false` — correctly,
-   because a phase whose purpose is to modify the worktree may not assert a clean
-   one. `evaluateAutomaticResume` independently requires both, and denies
-   `CURRENT_COMMIT_MISMATCH` and `WORKTREE_NOT_CLEAN`.
+2. ~~**The checkpoint claims are withdrawn (F-10).**~~ **Closed in V3-10** — see
+   below. Entering a writing phase still sets `currentCommit: null` and
+   `worktreeCleanAtCheckpoint: false`, and that is still correct; what changed is
+   that a quota interruption now *re-establishes* both before it is written down.
 3. **Codex has no quota recogniser at all**, so `blockedAgent: 'codex'` is
    unreachable.
 
@@ -3005,14 +3004,94 @@ particular still makes the whole path unreachable on a real run, because a reset
 time that is never reported cannot be waited for. See
 [Unattended automatic resume](#unattended-automatic-resume-v3-08).
 
-F-10 is therefore **not remediated here**: closing
-it would open one of three doors, and the other two are shut for reasons this
-repository considers correct. Weakening `evaluateAutomaticResume` to accept
-freshly observed facts in place of the withdrawn claims would trade a real safety
-property — "nothing moved while we waited" — for a capability that still would
-not work. The V1-08 suite pins the denial with its three reason codes, driven
-through a real 429 envelope rather than a hand-built state, so the gap is a
-tested fact rather than an implication of fixtures.
+F-10 was **not remediated in V1-08**, and the reason it was not is worth keeping:
+weakening `evaluateAutomaticResume` to accept freshly observed facts in place of
+the withdrawn claims would have traded a real safety property — "nothing moved
+while we waited" — for a capability that still would not work. The V1-08 suite
+pinned the denial with its three reason codes, driven through a real 429 envelope
+rather than a hand-built state, so the gap was a tested fact rather than an
+implication of fixtures.
+
+### F-10 closed: a quota interruption is settled before it is written down (V3-10)
+
+**F-10 is closed.** A positively recognised Claude quota interruption from a
+mutating phase is settled to an exact repository checkpoint before
+`BLOCKED_USAGE_LIMIT` is written — when, and only when, AO can prove the partial
+effect is within scope and the resulting repository is settled.
+
+The order is the guarantee, and it lives in `loop/loop-step.ts`
+(`settleQuotaInterruption`):
+
+```
+positively recognised AGENT_USAGE_LIMIT        (the only refusal that qualifies)
+  → POST-SCOPE on the writer's actual effect
+       violation      → SCOPE_VIOLATION, and the quota block is not written
+       indeterminate  → HUMAN_DECISION_REQUIRED, nothing committed
+       within scope   ↓
+  → AO stages and commits under its own identity and controls
+       nothing changed → no commit, and no empty one is manufactured
+  → HEAD and cleanliness are OBSERVED, never inferred from the commit
+  → one durable write: BLOCKED_USAGE_LIMIT
+       currentCommit = the observed checkpoint HEAD
+       worktreeCleanAtCheckpoint = true
+       resumeFrom, reportedResetAt, review budget: unchanged
+```
+
+What this deliberately did **not** do:
+
+- **Automatic-resume policy was not weakened.** `evaluateAutomaticResume` is
+  byte-identical. `CURRENT_COMMIT_MISMATCH`, `WORKTREE_NOT_CLEAN` and
+  `DIVERGENCE_DETECTED` all still deny, and `false` still does not mean "dirty is
+  acceptable". Mutants removing either of the first two are killed by
+  `tests/automatic-resume.test.ts`.
+- **A checkpoint is not a completed pass.** The task stays
+  `BLOCKED_USAGE_LIMIT` at the exact phase and round that was interrupted; it
+  does not advance to `VERIFYING`, and no review round is spent. The commit
+  message is the existing `AO:<task>:<phase>:r<round>`, which names the pass and
+  asserts nothing about its outcome — nothing in `src/` reads it, and the durable
+  *state* is what distinguishes a recorded pass from a recorded interruption.
+- **Moving anything while the task waits still refuses.** A HEAD that moved, a
+  tracked file that changed, an untracked file that appeared, a worktree that
+  disappeared — each is `DIVERGED` through the existing reconciler, with no new
+  reason vocabulary.
+- **Settlement failure is fail-closed.** Git unavailable, a refused commit, an
+  executable content driver, a HEAD that cannot be read, a tree still dirty
+  afterwards: every one leaves `BLOCKED_USAGE_LIMIT` with the claims withdrawn —
+  byte for byte the behaviour above, which denies. `HUMAN_DECISION_REQUIRED` was
+  rejected for those cases because every such write clears `reportedResetAt`, so
+  the record would stop saying *why* the task stopped for a transient Git
+  failure. A proven scope violation is the exception and outranks the quota
+  block, because it is an accusation the tree supports.
+- **Nothing else about a writer's ending changed.** `AGENT_NONZERO_EXIT`,
+  `AGENT_RESULT_MALFORMED` and `AGENT_PROCESS_UNAVAILABLE` are not settled, and
+  the last of those must never be: it is the diagnosis for a run that did *not*
+  end under its own control, and a worktree whose writer may still be alive is
+  exactly what must not be declared settled. A completed writer's path is
+  unchanged, including the rule that a completed pass which changed nothing is
+  inadmissible.
+- **The checkpoint cannot be asserted, only produced.** It is an opaque artefact
+  minted in `core/internal/interruption-checkpoint.ts` behind a `WeakSet`
+  registry — not `instanceof`, because `Object.create` hands anybody the
+  prototype, and not a private-field probe, because the constructor is reachable
+  from any genuine artefact. Both routes were used against this codebase's
+  earlier opaque artefacts, and `tests/v3-10-quota-checkpoint.test.ts` tries all
+  three (literal, cast, prototype) plus the reachability pin that exactly one
+  module in `src/` imports the mint.
+- **No durable schema change.** `currentCommit`, `worktreeCleanAtCheckpoint`,
+  `blockedAgent`, `resumeFrom` and `reportedResetAt` already exist, and
+  `TaskStateSchema` imposes no checkpoint constraint on a blocking state.
+  `TASK_STATE_SCHEMA_VERSION` is unchanged.
+
+**L-V3-08-1 remains OPEN, and unattended quota resume is still not operational.**
+The writer still runs `--output-format json`, where no reset instant is reported,
+so `reportedResetAt` is `null` on every real block and `RESET_TIME_MISSING` is
+still the standing denial. What V3-10 removes is the *independent* F-10 lock: the
+`tests/v1-08-e2e.test.ts` case that used to name three reason codes now asserts
+the exact list `['RESET_TIME_MISSING']`, driven through the same real 429
+envelope. The acceptance proof that the remaining denial becomes exactly
+`[RESET_TIME_NOT_REACHED]` uses a synthetic reset time — allowed there because
+the test isolates F-10 and does not claim the current output mode supplies one.
+Do not read any of this as "unattended resume now works". It does not.
 
 ### The verification seam now runs (F-8)
 
@@ -3068,6 +3147,28 @@ and because the failure mode it describes — a command that cannot start is
 
 ### Carried forward, deliberately
 
+- **L-V3-10-1** — the quota settlement's **scope reads** go through the unleased
+  `git ?? runGitCommand`, exactly as the completed-writer path's do. The two
+  effects are fenced — the commit through `leasedGit`, the durable write through
+  `advanceTaskState` — and these reads only produce evidence for them, so the
+  guarantee holds. It is still an asymmetry: the reads that authorise a commit
+  should share the commit's authority. Deferred rather than fixed here because
+  the gap is pre-existing and identical on both mutating paths, and closing it on
+  one of them would make them differ, which is worse than either.
+- **L-V3-10-2** — a **settled quota block is harder to recover by hand** than an
+  unsettled one, and deliberately so. Before V3-10 the withdrawn checkpoint made
+  no claim, so a human who edited the paused worktree still got `CONSISTENT` and
+  an attended continuation. A checkpoint asserts an exact HEAD and a clean tree,
+  so any later edit is `DIVERGED` and refuses on **every** run, attended
+  included. That is the F-10 safety property working as specified — "nothing
+  moved while we waited" — and it is also a real cost, recorded here so it is a
+  decision rather than a surprise.
+- **L-V3-10-3** — two settlement refusals have **no separate report**.
+  `LoopStepResult.scope` and `.commit` name the scope verdict and the commit
+  outcome, but "HEAD could not be observed afterwards" and "the tree was still
+  dirty afterwards" are visible only as the withdrawn checkpoint in the durable
+  state. Both are fail-closed and both are tested; naming them would mean
+  widening `LoopStepResult`, which is a reporting change of its own.
 - **F-4** — on Windows `isAbsolute` accepts a root-relative path (`\foo` —
   absolute within whichever volume the process is standing on), so
   two states recording it compare equal while naming different volumes. No
@@ -3706,10 +3807,11 @@ and because the failure mode it describes — a command that cannot start is
   `RESET_EVIDENCE_REQUIRES_OUTPUT_MODE_CHANGE`, and no ingestion was
   implemented. Closing this now means one of two decisions, each its own slice:
   migrating the writer to the stream contract, or accepting an operator-supplied
-  instant. Note also that closing it alone would not make V3-08 fire — F-10
-  below withdraws the checkpoint claims on every block the writer can produce,
-  and the wait sleeps only when the denial list is exactly
-  `[RESET_TIME_NOT_REACHED]`. **Full measurement:**
+  instant. Since V3-10 this is the **only** thing standing in the way: F-10 is
+  closed, so a settled quota block's denial list is now exactly
+  `[RESET_TIME_NOT_REACHED]` once a reset time exists — which is the list the
+  wait sleeps on. It does not exist, so nothing sleeps, and unattended quota
+  resume is still not operational end to end. **Full measurement:**
   `docs/decisions/2026-08-22-claude-quota-reset-evidence-measurement.md`.
   **Scope:** `agent/internal/claude-result-envelope.ts`.
 - **L-V3-08-2 — an unattended resume that runs out of step budget leaves a task

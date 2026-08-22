@@ -930,13 +930,22 @@ describe('a tampered state cannot make the main checkout a task workspace', () =
 /**
  * What a quota refusal really does, driven through the production recogniser.
  *
- * The important assertion here is a *denial*. `evaluateAutomaticResume` demands
- * a reported reset time, an exact recorded `currentCommit` and
- * `worktreeCleanAtCheckpoint === true`; entering `REMEDIATING` withdraws the
- * last two by contract, and no CLI this build has observed reports a reset time
- * at all. So an unattended resume of a block this loop recorded is not merely
- * unlikely — it is unreachable, and V1-08 pins that rather than leaving it
- * implied by fixtures which hand-build states production never writes.
+ * The important assertion here is still a *denial*, and since V3-10 it is a
+ * denial for exactly one reason rather than three.
+ *
+ * `evaluateAutomaticResume` demands a reported reset time, an exact recorded
+ * `currentCommit` and `worktreeCleanAtCheckpoint === true`. Until V3-10 entering
+ * a writing phase withdrew the last two and nothing put them back, so an
+ * unattended resume was unreachable three times over (F-10). It now settles the
+ * repository the interrupted writer left behind and records what it measured —
+ * here a writer that wrote nothing at all, so the settlement is the existing
+ * HEAD and a positively clean tree, with **no** commit manufactured for it.
+ *
+ * What remains is lock 1, and it is untouched: `readClaudeResultEnvelope`
+ * reports no reset time at `--output-format json`, so `RESET_TIME_MISSING` is
+ * the whole denial. That is the point of pinning it here rather than in a
+ * fixture — the reason codes are what a real 429 envelope produces end to end,
+ * so the day the reset instant arrives, this test says so by changing.
  */
 describe('a quota refusal is a governed pause, and this build never lifts it alone', () => {
   it('parks the task with the evidence the recogniser really produced', async () => {
@@ -960,9 +969,19 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
     expect(blocked.resumeFrom).toEqual({ phase: 'REMEDIATE', round: 1 });
     // Never invented: no CLI observed by this build reports one.
     expect(blocked.reportedResetAt).toBeNull();
-    // Withdrawn on the way into the writing phase, and still withdrawn here.
-    expect(blocked.currentCommit).toBeNull();
-    expect(blocked.worktreeCleanAtCheckpoint).toBe(false);
+
+    // Settled, not withdrawn (V3-10). The writer here refused before writing
+    // anything, so the checkpoint is the HEAD that was already there — proven
+    // by reading the worktree, not by trusting the state.
+    const worktreePath = started.workspace.worktreePath;
+    expect(blocked.currentCommit).toBe(headOf(worktreePath));
+    expect(blocked.worktreeCleanAtCheckpoint).toBe(true);
+
+    // And no work was manufactured to get there. A writer that changed nothing
+    // produces no commit: HEAD is still the base pin, and the tree is clean
+    // because Git says so, not because the record does.
+    expect(blocked.currentCommit).toBe(started.workspace.basePinnedCommit);
+    expect(git(worktreePath, ['status', '--porcelain'])).toBe('');
   });
 
   it('refuses to resume that block unattended, naming every check that denied it', async () => {
@@ -987,10 +1006,10 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
     expect(again.outcome).toBe('BLOCKED_USAGE_LIMIT');
     expect(again.steps).toBe(0);
     expectNothingRan(agent, verify);
-    // The three independent locks, each sufficient on its own.
-    expect(again.reasonCodes).toContain('RESET_TIME_MISSING');
-    expect(again.reasonCodes).toContain('CURRENT_COMMIT_MISMATCH');
-    expect(again.reasonCodes).toContain('WORKTREE_NOT_CLEAN');
+    // One lock, and it is the only one left. Asserted as the exact list rather
+    // than with `toContain`, because the claim being made is that the other two
+    // are *gone*: a `toContain` here would pass unchanged if F-10 came back.
+    expect(again.reasonCodes).toEqual(['RESET_TIME_MISSING']);
     // The pause is intact for a human, byte for byte.
     expect(reload(started.root, TASK_ID).revision).toBe(blocked.revision);
   });

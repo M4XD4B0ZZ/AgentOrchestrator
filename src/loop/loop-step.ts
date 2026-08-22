@@ -91,7 +91,7 @@
  * because a round that was interrupted was not completed.
  */
 
-import { runClaudeWriter } from '../agent/claude-writer.js';
+import { runClaudeWriter, type ClaudeWriterFailed } from '../agent/claude-writer.js';
 import { codexReviewResumePoint, runCodexReviewer } from '../agent/codex-reviewer.js';
 import {
   interruptedResumePoint,
@@ -101,6 +101,8 @@ import {
 import type { AgentRunner } from '../agent/agent-command.js';
 import { recordAgentInterruption } from '../agent/record-interruption.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
+import type { InterruptionCheckpoint } from '../core/interruption-checkpoint.js';
+import { mintInterruptionCheckpoint } from '../core/internal/interruption-checkpoint.js';
 import { absolutePathsEqual, isComparablePath } from '../core/path-identity.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import type { ExecutionBriefResult } from '../plan/task-brief.js';
@@ -404,6 +406,14 @@ function saved(save: StateSaveResult, state: TaskStateName, outcome: LoopStepOut
  * whole of R2 in one line, and it parks rather than advancing, because a writing
  * phase that produced no effect is not a phase that can be verified.
  *
+ * That rule belongs to a *completed* pass, and this function is where it lives.
+ * {@link settleQuotaInterruption} calls the same `commitTaskWork` and reads
+ * `NOTHING_TO_COMMIT` as a settlement instead — a writer the CLI cut off before
+ * it wrote anything is an ordinary pause, not an inadmissible pass, and it does
+ * not advance either. The shared mechanism is the commit and its two controls;
+ * what a zero-change answer *means* is the caller's question, and the two
+ * callers legitimately give different answers to it.
+ *
  * ── The refusals are deliberately all one state ────────────────────────────
  *
  * Every way this can fail parks at `HUMAN_DECISION_REQUIRED` with a resume
@@ -463,6 +473,269 @@ async function commitPassOrPark(
   });
 
   return { blocked: commit.outcome === 'COMMITTED' ? null : park(commit), commit };
+}
+
+/* ─────────────── the quota interruption's own settlement ────────────────── */
+
+/**
+ * What the settlement leaves the step to do.
+ *
+ * `BLOCKED` means the settlement's own gate already made this step's one
+ * durable write and the step must return that result unchanged. `RECORD` means
+ * the interruption is still to be recorded, with whatever the settlement was
+ * able to establish — which may be nothing.
+ */
+type QuotaSettlement =
+  | { readonly kind: 'BLOCKED'; readonly result: LoopStepResult }
+  | {
+      readonly kind: 'RECORD';
+      /** A settled checkpoint, or `null` — the withdrawal, as before V3-10. */
+      readonly checkpoint: InterruptionCheckpoint | null;
+      readonly scope: ScopeAssessment | null;
+      readonly commit: CommitTaskWorkResult | null;
+    };
+
+/**
+ * Nothing was settled and nothing was measured.
+ *
+ * The value for an interruption this build does not settle at all, and the
+ * shape every settlement failure degrades to: `checkpoint: null` is what makes
+ * `recordAgentInterruption` withdraw the checkpoint claims exactly as it did
+ * before V3-10.
+ */
+const UNSETTLED: QuotaSettlement = Object.freeze({
+  kind: 'RECORD' as const,
+  checkpoint: null,
+  scope: null,
+  commit: null,
+});
+
+/**
+ * HEAD and cleanliness, read **after** a settlement rather than inferred from
+ * it.
+ *
+ * Both facts have to be measured, and neither may be taken from the commit that
+ * produced them. `commitTaskWork` reads HEAD *inside* itself, before its own
+ * path-set control runs, so its answer is a statement about the past; and it
+ * never observes cleanliness at all — its `COMMITTED` arm does no post-commit
+ * `status`, and its `NOTHING_TO_COMMIT` arm carries no commit id. Inferring
+ * "the tree must be clean, we just committed" is the exact substitution
+ * `evaluateAutomaticResume` exists to refuse.
+ *
+ * `null` on either side is "not established", never a plausible default, and
+ * the mint treats it as a denial. Same vocabulary and same two commands as
+ * `state/observe-runtime.ts`, deliberately: the value recorded here is compared
+ * against that module's answer on every later run, and two observers that
+ * phrase the question differently would eventually disagree about a repository
+ * neither had changed.
+ */
+async function observeSettledWorktree(
+  git: GitRunner,
+  worktreePath: string,
+): Promise<{ readonly observedCommit: string | null; readonly worktreeClean: boolean | null }> {
+  const head = await git(worktreePath, [
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    '--end-of-options',
+    'HEAD',
+  ]);
+  const status = await git(worktreePath, ['status', '--porcelain']);
+  return Object.freeze({
+    observedCommit: head.outcome === 'OK' && head.stdout !== '' ? head.stdout : null,
+    worktreeClean: status.outcome === 'OK' ? status.stdout === '' : null,
+  });
+}
+
+/**
+ * Settles the repository a quota-interrupted writer left behind, so that the
+ * block about to be recorded describes it exactly (V3-10, F-10).
+ *
+ * ── Why a block needs a checkpoint at all ──────────────────────────────────
+ *
+ * `BLOCKED_USAGE_LIMIT` is the one state an unattended resume may leave, and
+ * `evaluateAutomaticResume` grants that only against an exact recorded
+ * `currentCommit` and `worktreeCleanAtCheckpoint === true` which a *fresh*
+ * observation still agrees with. A writing phase's interruption withdraws both
+ * — correctly, because the writer may have moved HEAD or left work uncommitted
+ * — so every production quota block was permanently non-resumable. The answer is
+ * to establish the two facts honestly, not to stop requiring them.
+ *
+ * ── The order is the guarantee ─────────────────────────────────────────────
+ *
+ *   positively recognised usage limit    (the caller's job, and the only one)
+ *     → POST-SCOPE on the writer's actual effect            (here, FIRST)
+ *     → stage and commit under AO's own controls            (here)
+ *     → observe HEAD and cleanliness                        (here, AFTER)
+ *     → one durable write                                   (the caller's job)
+ *
+ * **Scope comes first, and nothing is committed without a positive verdict.**
+ * A writer that escaped its sandbox and then ran out of quota must be recorded
+ * as `SCOPE_VIOLATION`, not as a self-clearing pause — otherwise a timer would
+ * eventually turn an escape into an automatic writer. It matters mechanically
+ * too: `assessTaskScope` approves no paths at all on `VIOLATION` *or*
+ * `INDETERMINATE`, so committing on either would create a real object and then
+ * fail the path-set control for every path in it, and refusals here do not undo.
+ *
+ * ── Only a positively recognised usage limit ───────────────────────────────
+ *
+ * The caller gates this on `AGENT_BLOCKED_USAGE_LIMIT` and nothing else, and
+ * `recordAgentInterruption` independently refuses a checkpoint for any other
+ * disposition. `AGENT_PROCESS_UNAVAILABLE` is the one that must never be added:
+ * it is the code for a run that did *not* end under its own control, and a
+ * worktree whose writer may still be alive and writing is exactly what must not
+ * be declared settled.
+ *
+ * ── Every failure degrades to the old behaviour ────────────────────────────
+ *
+ * A refusal from any step returns {@link UNSETTLED}, and the block is then
+ * recorded with its checkpoint withdrawn — byte for byte what this build did
+ * before V3-10, and a state `evaluateAutomaticResume` denies with
+ * `CURRENT_COMMIT_MISMATCH` and `WORKTREE_NOT_CLEAN`. That is deliberate: when
+ * Git will not answer, two things are true at once — the CLI positively reported
+ * quota exhaustion, and the checkpoint is unknown — and `BLOCKED_USAGE_LIMIT`
+ * with the claims withdrawn is the only durable shape that states both.
+ * `HUMAN_DECISION_REQUIRED` would state the second and destroy the first: every
+ * such write in this module clears `reportedResetAt`, so the record would stop
+ * saying why the task stopped, for a transient Git failure.
+ *
+ * The two scope refusals are the exception, and they are not settlement
+ * failures: they are proven facts about the tree, and `enforceScope` owns both
+ * of their durable outcomes already.
+ */
+async function settleQuotaInterruption(
+  current: StateLoadSuccess,
+  deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+): Promise<QuotaSettlement> {
+  const state = current.state;
+  const { now, authorisedWorktreePath, git, phase, round } = deps;
+
+  // POST-SCOPE, before anything is staged. `blocked` is non-null for a proven
+  // violation *and* for an unreadable one, and the guard has already made this
+  // step's durable write in either case.
+  const after = await enforceScope(current, {
+    now,
+    git: git ?? runGitCommand,
+    authorisedWorktreePath,
+    phase,
+    round,
+    writerRan: true,
+    advance: leaseAdvanceOptions(deps),
+  });
+  if (after.blocked !== null) return Object.freeze({ kind: 'BLOCKED' as const, result: after.blocked });
+
+  // Asked again rather than assumed, exactly as `commitPassOrPark` does: this
+  // is a second entry point into the same commit, and a task with no base pin
+  // cannot be committed against one.
+  if (state.basePinnedCommit === null) {
+    return Object.freeze({
+      kind: 'RECORD' as const,
+      checkpoint: null,
+      scope: after.assessment,
+      commit: null,
+    });
+  }
+
+  const commit = await commitTaskWork(leasedGit(deps), authorisedWorktreePath, {
+    taskId: state.taskId,
+    phase,
+    round,
+    // Handed down from the gate that approved them, never re-derived here: a
+    // set measured at this point would be measured after any injection and
+    // would therefore contain it (G12).
+    approvedPaths: after.assessment.approvedPaths,
+    basePinnedCommit: state.basePinnedCommit,
+  });
+
+  // `NOTHING_TO_COMMIT` is a settlement, not a failure, and this is the one
+  // place the two commit callers legitimately differ. A completed pass that
+  // changed nothing is inadmissible — there is nothing for verification to look
+  // at. A quota refusal that changed nothing is an ordinary pause: the writer
+  // was cut off before it wrote, and an interruption does not need fake work to
+  // become resumable. No empty commit is manufactured for it; `commitTaskWork`
+  // has no `--allow-empty` by contract, and the existing HEAD is what the
+  // observation below reads.
+  if (commit.outcome !== 'COMMITTED' && commit.outcome !== 'NOTHING_TO_COMMIT') {
+    return Object.freeze({
+      kind: 'RECORD' as const,
+      checkpoint: null,
+      scope: after.assessment,
+      commit,
+    });
+  }
+
+  return Object.freeze({
+    kind: 'RECORD' as const,
+    // `null` when either fact failed to establish — a HEAD Git would not print,
+    // or a tree still holding uncommitted work. Both withdraw the checkpoint.
+    checkpoint: mintInterruptionCheckpoint(
+      await observeSettledWorktree(leasedGit(deps), authorisedWorktreePath),
+    ),
+    scope: after.assessment,
+    commit,
+  });
+}
+
+/**
+ * Records a writing pass that did not complete — settling the repository first
+ * when, and only when, the refusal was a positively recognised usage limit.
+ *
+ * The one path both mutating steps take, because the two differ in the cause
+ * they give a writer and in nothing else, and an interruption they handled
+ * differently would be a second opinion about what an interrupted writer costs
+ * the checkpoint.
+ *
+ * ── Why only a usage limit is settled ──────────────────────────────────────
+ *
+ * Every other refusal leads to a state no machine may resume — `BLOCKED_AUTH`
+ * and `HUMAN_DECISION_REQUIRED` are both `automaticResumeEligible: false` — so
+ * settling them would buy nothing and cost a commit. That is the cheap half of
+ * the argument. The load-bearing half is `AGENT_PROCESS_UNAVAILABLE`: it is the
+ * diagnosis for a run that did **not** end under its own control, and observing
+ * a worktree whose writer may still be alive and writing would record a
+ * checkpoint about a repository that was changing while it was measured. A
+ * usage limit is the only refusal this build recognises *positively*, from a
+ * `429` in a structured envelope that could only have been printed by a process
+ * `endedUnderOwnControl` already vouched for.
+ *
+ * Widening this set is a decision with its own evidence to gather, not a
+ * generalisation to make in passing.
+ */
+async function recordInterruption(
+  current: StateLoadSuccess,
+  writer: ClaudeWriterFailed,
+  deps: LoopDependencies & { readonly phase: 'IMPLEMENT' | 'REMEDIATE'; readonly round: number },
+): Promise<LoopStepResult> {
+  const { now, phase, round } = deps;
+
+  const settlement =
+    writer.disposition === 'AGENT_BLOCKED_USAGE_LIMIT'
+      ? await settleQuotaInterruption(current, deps)
+      : UNSETTLED;
+
+  // The scope gate refused, and it has already made this step's one durable
+  // write. Returned unchanged: a second write here is the invariant this whole
+  // module rests on.
+  if (settlement.kind === 'BLOCKED') return settlement.result;
+
+  const fallback: AgentBlockEvidence = {
+    blockedAgent: 'claude',
+    resumeFrom: interruptedResumePoint(phase, round),
+    reportedResetAt: null,
+  };
+  const record = recordAgentInterruption(
+    current,
+    { disposition: writer.disposition, block: writer.block },
+    { now, fallback, checkpoint: settlement.checkpoint, ...leaseAdvanceOptions(deps) },
+  );
+
+  // What Git said is true whether or not the write landed, so both endings
+  // carry it — the same rule `saved()` applies to a refused scope write.
+  const measured = { scope: settlement.scope, commit: settlement.commit };
+  if (record.outcome === 'STATE_NOT_RECORDED') {
+    return result({ outcome: 'STATE_NOT_RECORDED', save: record.save, ...measured });
+  }
+  return result({ outcome: 'BLOCKED', state: record.state, save: record.save, ...measured });
 }
 
 /** The advance options, separated from the execution seams they travel with. */
@@ -982,20 +1255,7 @@ export async function runRemediateStep(
   );
 
   if (!writer.ok) {
-    const fallback: AgentBlockEvidence = {
-      blockedAgent: 'claude',
-      resumeFrom: interruptedResumePoint('REMEDIATE', round),
-      reportedResetAt: null,
-    };
-    const record = recordAgentInterruption(
-      current,
-      { disposition: writer.disposition, block: writer.block },
-      { now, fallback, ...advance },
-    );
-    if (record.outcome === 'STATE_NOT_RECORDED') {
-      return result({ outcome: 'STATE_NOT_RECORDED', save: record.save });
-    }
-    return result({ outcome: 'BLOCKED', state: record.state, save: record.save });
+    return await recordInterruption(current, writer, { ...deps, phase: 'REMEDIATE', round });
   }
 
   // POST-SCOPE. Identical to the implement pass, and deliberately so: the two
@@ -1254,20 +1514,7 @@ export async function runImplementStep(
   );
 
   if (!writer.ok) {
-    const fallback: AgentBlockEvidence = {
-      blockedAgent: 'claude',
-      resumeFrom: interruptedResumePoint('IMPLEMENT', round),
-      reportedResetAt: null,
-    };
-    const record = recordAgentInterruption(
-      current,
-      { disposition: writer.disposition, block: writer.block },
-      { now, fallback, ...advance },
-    );
-    if (record.outcome === 'STATE_NOT_RECORDED') {
-      return result({ outcome: 'STATE_NOT_RECORDED', save: record.save });
-    }
-    return result({ outcome: 'BLOCKED', state: record.state, save: record.save });
+    return await recordInterruption(current, writer, { ...deps, phase: 'IMPLEMENT', round });
   }
 
   // POST-SCOPE. The guarantee: no mutating step is left successfully until the
