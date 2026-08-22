@@ -206,6 +206,40 @@ describe('the reset instant is read from a rejected rate-limit event', () => {
     expect(reading.reportedResetAt).toBe(RESET_ISO);
   });
 
+  /**
+   * The newest refusal decides, **including when it turns out to be
+   * unreadable**. Found by an independent review of the merged slice: the
+   * rejection arms used `continue`, so a readable older refusal beside an
+   * unreadable newer one produced the older instant — the "falls back to an
+   * older statement" arm this module's own docstring says does not exist.
+   *
+   * Every spelling is listed rather than one, because the fall-back lived in
+   * the shared tail of all of them.
+   */
+  it.each([
+    ['a string instant', String(RESETS_AT)],
+    ['a fractional instant', RESETS_AT + 0.5],
+    ['a zero instant', 0],
+    ['an instant beyond the durable contract', 253_402_300_800],
+  ])('reports no instant when the newest refusal carries %s', (_label, resetsAt) => {
+    const older = rejectedRateLimit(RESETS_AT - 7_200);
+    const reading = readClaudeResultStream(
+      refusalStream([older, { status: 'rejected', rateLimitType: 'seven_day', resetsAt }]),
+    );
+
+    expect(reading.verdict).toBe('USAGE_LIMIT');
+    expect(reading.reportedResetAt).toBeNull();
+  });
+
+  it('reports no instant when the newest refusal carries none at all', () => {
+    const reading = readClaudeResultStream(
+      refusalStream([rejectedRateLimit(RESETS_AT - 7_200), { status: 'rejected' }]),
+    );
+
+    expect(reading.verdict).toBe('USAGE_LIMIT');
+    expect(reading.reportedResetAt).toBeNull();
+  });
+
   it('skips a later event that reports no refusal, and keeps the refusal it saw', () => {
     const reading = readClaudeResultStream(
       refusalStream([
@@ -236,7 +270,7 @@ describe('the reset instant is read from a rejected rate-limit event', () => {
     ['a fractional instant', { status: 'rejected', resetsAt: RESETS_AT + 0.5 }],
     ['a zero instant', { status: 'rejected', resetsAt: 0 }],
     ['a negative instant', { status: 'rejected', resetsAt: -RESETS_AT }],
-    ['an instant beyond what a Date can hold', { status: 'rejected', resetsAt: 8_640_000_000_001 }],
+    ['an instant beyond what the durable contract can hold', { status: 'rejected', resetsAt: 253_402_300_800 }],
     ['a non-finite instant', { status: 'rejected', resetsAt: Number.POSITIVE_INFINITY }],
     ['a missing status', { resetsAt: RESETS_AT }],
     ['a null payload', null],

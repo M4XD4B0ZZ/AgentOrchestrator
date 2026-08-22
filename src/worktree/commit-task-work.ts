@@ -117,7 +117,7 @@
  */
 
 import { isShellInertArgument } from '../doctor/exec.js';
-import type { GitRunner } from './git-command.js';
+import { WORKTREE_CLEANLINESS_ARGS, type GitRunner } from './git-command.js';
 
 /** The identity every AO commit carries. Decided once, here (G11). */
 export const AO_COMMIT_IDENTITY = Object.freeze({
@@ -332,7 +332,19 @@ export async function commitTaskWork(
 
   // The effect gate. Asked before anything is staged, and before control two
   // spends two Git calls on a pass that produced nothing.
-  const dirty = await git(worktreePath, ['status', '--porcelain', '-z']);
+  //
+  // It asks through {@link WORKTREE_CLEANLINESS_ARGS} rather than through a
+  // bare `--porcelain`, and that is a correction rather than tidying. V3-11
+  // hardened the two *observers* of cleanliness against a repository that
+  // configures the answer away, and left this gate — which decides whether
+  // those observers ever see a committed tree — asking the blind question. A
+  // worktree-local `status.showUntrackedFiles=no` and a writer whose whole
+  // effect is untracked therefore produced `NOTHING_TO_COMMIT` for a pass that
+  // wrote files: fail-closed downstream, because the settlement then measures a
+  // dirty tree and withdraws the checkpoint, but a false diagnosis, and this
+  // repository treats a false diagnosis as a defect. `-z` is appended because
+  // this reader parses the output rather than only testing it for emptiness.
+  const dirty = await git(worktreePath, [...WORKTREE_CLEANLINESS_ARGS, '-z']);
   if (dirty.outcome !== 'OK') {
     return Object.freeze({ outcome: 'GIT_UNAVAILABLE' as const, step: 'OBSERVE_WORKTREE' as const });
   }
@@ -357,7 +369,7 @@ export async function commitTaskWork(
     // already answered that question, so reaching it here means the tree was
     // dirty with something `add --all` does not stage — an ignored file, say.
     // Reported as the honest "nothing was recorded" rather than as a failure.
-    const after = await git(worktreePath, ['status', '--porcelain', '-z']);
+    const after = await git(worktreePath, [...WORKTREE_CLEANLINESS_ARGS, '-z']);
     if (after.outcome === 'OK' && committed.exitCode === 1) {
       return Object.freeze({ outcome: 'NOTHING_TO_COMMIT' as const });
     }

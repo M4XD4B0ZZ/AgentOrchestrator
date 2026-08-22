@@ -113,9 +113,13 @@ import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js'
 import { leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
 import { commitTaskWork, type CommitTaskWorkResult } from '../worktree/commit-task-work.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
-import { observeRuntime, WORKTREE_CLEANLINESS_ARGS } from '../state/observe-runtime.js';
+import { observeRuntime } from '../state/observe-runtime.js';
 import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js';
-import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
+import {
+  runGitCommand,
+  WORKTREE_CLEANLINESS_ARGS,
+  type GitRunner,
+} from '../worktree/git-command.js';
 import { runVerification, type VerificationReport } from '../verify/run-verification.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import {
@@ -540,10 +544,10 @@ async function observeSettledWorktree(
     '--end-of-options',
     'HEAD',
   ]);
-  // The same array `state/observe-runtime.ts` uses, imported rather than
-  // repeated. The comment above says these two must ask the question in the
-  // same words; since V3-11 there is only one set of words, so they cannot
-  // drift and no test has to assert that they have not.
+  // The same array `state/observe-runtime.ts` and `commit-task-work.ts`'s
+  // effect gate use, imported from the seam that owns it rather than repeated.
+  // The comment above says these must ask the question in the same words;
+  // there is only one set of words, so they cannot drift.
   const status = await git(worktreePath, WORKTREE_CLEANLINESS_ARGS);
   return Object.freeze({
     observedCommit: head.outcome === 'OK' && head.stdout !== '' ? head.stdout : null,

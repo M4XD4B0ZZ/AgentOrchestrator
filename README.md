@@ -2342,8 +2342,10 @@ runs no loop.
 ### Two agents, one execution seam
 
 `src/agent/agent-command.ts` wraps `doctor/exec.ts` the way
-`worktree/git-command.ts` does: agent-sized budgets (thirty minutes, 8 MiB per
-stream), the one thrown condition translated into data, and an injectable
+`worktree/git-command.ts` does: agent-sized budgets (thirty minutes, and since
+V3-11 64 MiB of stdout against 8 MiB of stderr — the writer's stdout is a whole
+JSONL transcript now, its stderr is not), the one thrown condition translated
+into data, and an injectable
 `AgentRunner` so a quota refusal or a process killed mid-sentence is
 reproducible without a real CLI. There is no second spawn implementation — the
 bounded sinks, the two-stage process-tree termination and the `.cmd` codec
@@ -2583,9 +2585,12 @@ V3-11 reached it, by migrating the writer to `--output-format stream-json
   thing between a healthy run and a timer;
 - **nothing is estimated.** `new Date(resetsAt * 1000).toISOString()` is
   representation conversion and reads no clock. A value that is not a positive
-  integer inside `Date`'s range yields `null`, which is `RESET_TIME_MISSING`,
-  which is a human decision. A relative "retry in 2h" is still not admissible,
-  and there is no arm that rounds or falls back.
+  integer within what the **durable contract** can hold — `9999-12-31T23:59:59Z`,
+  which is narrower than `Date`'s own range, and the difference is the defect
+  described below — yields `null`, which is `RESET_TIME_MISSING`, which is a
+  human decision. A relative "retry in 2h" is still not admissible, and since the
+  remediation there is genuinely no arm that rounds or falls back: the newest
+  refusal decides even when it is unreadable.
 
 Both measurements, the bundle reading and the live capture, are in
 `docs/decisions/2026-08-22-claude-quota-reset-evidence-measurement.md`.
@@ -3213,17 +3218,26 @@ as one: see **L-V3-11-2**.
 **L-V3-10-4 was narrowed here rather than inherited.** That item accepted four
 blind spots on the grounds that no unattended resume could happen anyway. This
 slice removes that ground, so the two that a repository's own *configuration*
-can open are closed: `status --porcelain` now carries `--untracked-files=all`
-and `--ignore-submodules=none` in both worktree observers, and the scope gate's
-`git diff` carries the submodule flag too. Each restates a Git default, so
-nothing changes in an ordinarily configured repository — what changes is that
+can open are closed: the cleanliness question is asked through one shared
+`WORKTREE_CLEANLINESS_ARGS` (`worktree/git-command.ts`) carrying
+`--untracked-files=normal --ignore-submodules=none`, and the scope gate's
+`git diff` carries `--ignore-submodules=untracked`. What is removed is that
 `status.showUntrackedFiles=no` or a `.gitmodules` `ignore = all` can no longer
-answer "is this worktree clean" on AO's behalf. Both were reproduced against
-real Git before the flags were credited with anything, and both are pinned by
-cases that first assert the *hidden* reading and then the observers'. The scope
-gate's flag went in with them deliberately: hardening cleanliness alone would
-have been worse than hardening neither, because a change invisible to the gate
-and visible to the settlement would be *committed* rather than blocked.
+answer "is this worktree clean" on AO's behalf. Both hidden readings were
+reproduced against real Git before the flags were credited with anything, and
+both are pinned by cases that first assert the *hidden* reading and then the
+observers'. The scope gate's flag went in with them deliberately: hardening
+cleanliness alone would have been worse than hardening neither, because a change
+invisible to the gate and visible to the settlement would be *committed* rather
+than blocked.
+
+**Each token restates the default of the command it is on, and V3-11 shipped
+two that did not.** That correction is its own remediation and is recorded with
+the measurements in
+[the remediation section](#v3-11-remediation-the-git-vectors-measured-rather-than-assumed).
+`git status`'s submodule default really is `none`; its untracked default is
+`normal`, not `all`; and `git diff`'s submodule default is `untracked`, not
+`none`. The two wrong tokens each had a cost, and neither was theoretical.
 
 **Measured by counter-proof: 21 mutants, 20 killed, 1 equivalent.** Every guard
 above was removed or inverted in `src/` and the suite required to fail. The
@@ -3279,6 +3293,86 @@ What this deliberately did **not** do:
 - **The `init` message is not enforced.** Verifying the granted tool set against
   the vector is the obvious next use of this stream and is not done here; every
   arm added to a classifier is a new way for a healthy run to be refused.
+
+### V3-11 remediation: the Git vectors, measured rather than assumed
+
+An independent adversarial review of the merged V3-11 commit found that the
+sentence "each restates a Git default" — written three times, once per flag —
+was **false for two of the three tokens**, and that neither was pinned by a case
+that could have said so. This section records the correction, because the
+mistake is more instructive than the fix: the flags were reasoned about instead
+of measured, in a slice whose whole method is measurement.
+
+Measured on git 2.55.0.windows.3, against a superproject with a populated
+submodule, with and without a hostile declaration:
+
+| question | V3-11 shipped | actual default | correction |
+| --- | --- | --- | --- |
+| `status` untracked | `all` | `normal` | `normal` |
+| `status` submodules | `none` | `none` ✓ | unchanged |
+| `diff` submodules | `none` | `untracked` | `untracked` |
+
+**`--ignore-submodules=none` on the scope diff was the costly one.** `git diff`
+treats a submodule as modified under `none` when it merely *contains* an
+untracked file, which a populated submodule does the moment the target
+repository's own verification command runs `submodule update --init` and a
+build. The gate then reports `vendor` as a changed path, `classifyPath` answers
+`OUTSIDE_ALLOWED`, and the assessment is `VIOLATION` — a terminal accusation
+about work no writer did, and on the quota path the settlement takes the same
+arm and discards the reset instant this whole slice exists to capture. The
+correction is `untracked`, not `dirty`: measured, `dirty` stops seeing a tracked
+file changed *inside* a submodule, which the default does see, so it would trade
+one blind spot for another.
+
+| modification (hostile `ignore = all`) | default | `untracked` | `dirty` | `none` |
+| --- | --- | --- | --- | --- |
+| gitlink moved | — | M | M | M |
+| tracked file changed inside | — | M | — | M |
+| untracked file only inside | — | — | — | **M** |
+
+**`--untracked-files=all` took an unbounded output dependency for nothing.** The
+default, `normal`, collapses an untracked directory to one entry; `all` prints
+one line per file. The only consumers of this vector test `stdout === ''`, so
+neither can tell the two apart — but `runGitCommand` caps output at 1 MiB and
+reports `UNAVAILABLE` past it, at which point cleanliness becomes "not
+established", `WORKTREE_CLEANLINESS_UNKNOWN` makes the verdict `UNOBSERVABLE`,
+and every step of every task in that repository stops for an operator. `normal`
+closes the identical blind spot — a worktree-local `status.showUntrackedFiles=no`
+— in a handful of bytes.
+
+**The vector moved to the seam, and gained a third caller.** It lives in
+`worktree/git-command.ts` now, because `worktree/commit-task-work.ts` needs it
+too and importing `state/` from `worktree/` is the wrong direction. That third
+caller is the substantive part: its effect gate asked the *bare*, blinded
+question, so under `status.showUntrackedFiles=no` a writer whose whole effect was
+untracked produced `NOTHING_TO_COMMIT` and `git add --all` never ran. The
+register's claim that the observer change was "symmetry, not a fix" rested on
+that `add --all` and was therefore wrong in the one direction that matters — it
+would have justified deleting a guard that works.
+
+`worktree/prepare-workspace.ts` and `worktree/remove-workspace.ts` deliberately
+keep their own `--untracked-files=all`. They ask a different question — "is this
+workspace pristine / is it safe to destroy" — where the enumeration is the point.
+
+**And one fail-open arm in the reader.** `readReportedResetAt` walked backwards
+through the rate-limit events and used `continue` when a `rejected` event's
+`resetsAt` was unreadable, so a readable *older* refusal beside an unreadable
+newer one produced the older instant — precisely the "falls back to an older
+statement" arm that both the function's docstring and this README said did not
+exist. The newest refusal now decides even when it turns out to be unreadable,
+and every rejection returns `null`. The reachable harm was small, because the
+value was still a real CLI statement about a real refusal in the same run and so
+could only be too early; the contract violation was not.
+
+**Counter-proof: 9 mutants, all killed**, by
+`tests/v3-11-remediation-git-vectors.test.ts` and the extended
+`tests/v3-11-quota-reset-stream.test.ts`. Every case measures both halves — the
+reading the hostile configuration produces *and* the reading the vector produces
+— because a case that asserted only the second cannot tell hardening from
+over-reporting, which is exactly how the two wrong tokens shipped. The submodule
+cases declare `ignore = all` in `.gitmodules`, the tracked file at the top of the
+worktree that a writer holding `Write` can actually reach, rather than in
+`.git/config`, which it cannot — a second thing V3-11's own cases got wrong.
 
 ### The verification seam now runs (F-8)
 
@@ -3367,23 +3461,30 @@ and because the failure mode it describes — a command that cannot start is
   launch.
 
   V3-11 is the slice that made that authority reachable, so it did not inherit
-  the acceptance. **The two configuration-opened spots are closed**: both
-  worktree observers (`loop/loop-step.ts`'s settlement and
-  `state/observe-runtime.ts`'s reconciliation) now pass `--untracked-files=all
-  --ignore-submodules=none`, and `scope/task-delta.ts`'s diff passes the
-  submodule flag. Each restates a Git default, so an ordinarily configured
-  repository sees no change; what is removed is the observed repository's
-  ability to answer the cleanliness question on AO's behalf. Both were
-  reproduced against real Git first — a modified submodule under `ignore = all`
-  and an untracked file under `showUntrackedFiles=no` each report a *clean*
-  tree to a bare `--porcelain` — and `tests/v3-11-quota-reset-stream.test.ts`
-  asserts the hidden reading before the observers'. On the settlement observer
-  the change is **symmetry, not a fix**: `commitTaskWork` runs `git add --all`,
-  so a non-ignored file is staged and the post-commit tree is clean either way.
-  It is made explicit there because `observeSettledWorktree` is documented to
-  ask the same question in the same words as `observeRuntime`, and two observers
-  that phrase it differently would eventually disagree about a repository
-  neither had changed.
+  the acceptance. **The two configuration-opened spots are closed**: three
+  callers — `state/observe-runtime.ts`'s reconciliation, `loop/loop-step.ts`'s
+  settlement and `worktree/commit-task-work.ts`'s effect gate — ask the
+  cleanliness question through one shared `WORKTREE_CLEANLINESS_ARGS`
+  (`--untracked-files=normal --ignore-submodules=none`), and
+  `scope/task-delta.ts`'s diff passes `--ignore-submodules=untracked`. What is
+  removed is the observed repository's ability to answer either question on
+  AO's behalf. Every hidden reading was reproduced against real Git first — a
+  modified submodule under `ignore = all` and an untracked file under
+  `showUntrackedFiles=no` each report a *clean* tree to a bare `--porcelain` —
+  and `tests/v3-11-remediation-git-vectors.test.ts` asserts the hidden reading
+  before the hardened one, in every case.
+
+  The effect gate is in that list because of a claim this register got wrong.
+  It read "on the settlement observer the change is **symmetry, not a fix**:
+  `commitTaskWork` runs `git add --all`, so a non-ignored file is staged and the
+  post-commit tree is clean either way." That is **false**, and it invited
+  deleting a guard that works: `add --all` sits *behind* an effect gate
+  (`commit-task-work.ts`) which asked the bare, blinded question, so under
+  `status.showUntrackedFiles=no` a writer whose whole effect was untracked
+  produced `NOTHING_TO_COMMIT` and `add --all` never ran. Fail-closed
+  downstream — the settlement then measured a dirty tree and withdrew the
+  checkpoint — but a false diagnosis about a pass that wrote files. The gate now
+  asks the shared question.
 
   **Still open, and now an operating decision rather than a theoretical one:**
   a **gitignored** file the writer created, and a write **outside the worktree**.
@@ -4066,11 +4167,40 @@ and because the failure mode it describes — a command that cannot start is
   event whose `resetsAt` has already elapsed authorises a retry at once. The CLI
   itself has a helper for exactly that state, so it is a shape that occurs. The
   outcome is not unsafe — the retry meets the refusal again and re-blocks — but
-  it spends an invocation, and under `--max-invocations` it can spend several.
+  it spends an invocation. (An earlier wording said "under `--max-invocations`
+  it can spend several"; that overstated the limit — `lifecycle-driver.ts`
+  re-enters only on `STEP_BUDGET_EXHAUSTED`, so a re-block ends the lifecycle
+  after one call.)
   Not fixed here because the reader has no clock by design and the fix belongs
   where one already exists: either `recordAgentInterruption`, which holds `now`,
   or the resume policy. **Scope:** `core/automatic-resume.ts`,
   `agent/record-interruption.ts`.
+- **L-V3-11-4 — the writer's diagnostic excerpt is head-anchored, and for a
+  stream with no terminator the head is the wrong end.** `diagnosticResultLine`
+  restores the pre-V3-11 view whenever the stream *has* a terminal `result`; for
+  a stream that has none — reachable as `AGENT_NONZERO_EXIT` — the fallback is
+  the whole stream, and `diagnosticExcerpt` keeps its first four kilobytes,
+  which under `stream-json` is the `init` message and the opening turns rather
+  than what the agent last said. Anchoring the excerpt to the tail instead is
+  not a one-line change: `agent-outcome.ts` derives its redaction safety from
+  the two passes *agreeing on a prefix*, and a tail excerpt needs that argument
+  made again from the other end. Bounded today by the fact that nothing in
+  `src/` renders `stdoutExcerpt`, so no operator sees either version.
+  **Scope:** `agent/agent-outcome.ts`, `agent/claude-writer.ts`.
+- **L-V3-11-5 — a dirty submodule cannot be settled, and `add --all` is why.**
+  Pre-existing, unchanged by V3-11 or by its remediation, and recorded because
+  the review surfaced it while checking the hardening. Measured: for a submodule
+  whose *content* is modified while its gitlink is unchanged, `git add --all`
+  stages **nothing**, `git commit` answers "nothing to commit", and the tree
+  stays ` M sub` afterwards. So `commitTaskWork` returns `NOTHING_TO_COMMIT` for
+  a tree that is genuinely dirty, and a quota settlement over that shape can
+  never converge: the checkpoint is withdrawn on every attempt and the task is
+  attended-only forever. Fail-closed, and a permanent stall rather than a wrong
+  answer. Closing it means deciding what AO should *do* about a submodule it
+  does not own — commit the gitlink? refuse the task? — which is a product
+  decision, not a flag. `commitTaskWork`'s control one has the matching gap in
+  the other direction: its committed-path set cannot contain a submodule change
+  the scope gate approved. **Scope:** `worktree/commit-task-work.ts`.
 - **L-V3-08-2 — an unattended resume that runs out of step budget leaves a task
   no unattended run can pick up again.** The permission to keep driving after a
   resume is local to one `runTask` call, deliberately. So a resume that reaches

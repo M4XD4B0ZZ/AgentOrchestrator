@@ -238,8 +238,13 @@ export interface ClaudeStreamReading {
   /**
    * What the agent was refused, when the document said so.
    *
-   * Read on every path that produces a reading, including `UNRECOGNISED`,
-   * where it is empty because there is no document to read it from.
+   * Empty on every `UNRECOGNISED` reading, and the reason is narrower than it
+   * looks. Where the stream had no readable terminator there is genuinely no
+   * document to read denials from. Where there *is* a terminator and the
+   * verdict is still `UNRECOGNISED` — a contradictory envelope, an unknown
+   * subtype, a non-boolean `is_error` — the field is dropped deliberately
+   * rather than absently: a document this reader could not classify is not one
+   * whose other fields it is entitled to report as observations.
    */
   readonly permissionDenials: PermissionDenialObservation;
 }
@@ -357,27 +362,46 @@ function partitionStreamEvents(
 /**
  * The reset instant the CLI reported for the window that **refused**, or `null`.
  *
- * The last such event wins, because it is the CLI's most recent statement
- * about the window, and it is the value the CLI's own `retry-after`
- * derivation would have used at that moment. An earlier event naming a later
- * instant is therefore superseded rather than preferred — a resume granted too
- * early meets the refusal again and re-blocks, which costs an invocation; one
- * granted too late on a stale value costs an operator.
+ * The **newest** `rejected` event decides, and it decides even when it turns
+ * out to be unreadable. It is the CLI's most recent statement about the window
+ * that refused, and it is the value the CLI's own `retry-after` derivation
+ * would have used at that moment; an earlier event naming a later instant is
+ * superseded rather than preferred — a resume granted too early meets the
+ * refusal again and re-blocks, which costs an invocation, while one granted too
+ * late on a stale value costs an operator.
  *
- * Every rejection below returns `null`, which is `RESET_TIME_MISSING`, which
- * is a human decision. There is no branch here that guesses.
+ * Every rejection returns `null`, which is `RESET_TIME_MISSING`, which is a
+ * human decision. There is no branch here that guesses and none that falls
+ * back to an older statement.
  */
 function readReportedResetAt(rateLimits: readonly Record<string, unknown>[]): string | null {
   for (let index = rateLimits.length - 1; index >= 0; index -= 1) {
     const info = rateLimits[index];
+    // Not a refusal, so it says nothing about the window that refused. Keep
+    // looking: an `allowed` event emitted after the rejection does not
+    // supersede it, it is about a different window.
     if (info === undefined || info['status'] !== REJECTED_STATUS) continue;
 
+    // From here the search is **over**, whatever this event turns out to say.
+    // The newest refusal is the CLI's current statement about the window that
+    // refused, and an older one it superseded is not a fallback — reading it
+    // would be answering a question the CLI has since revised. Every exit below
+    // is therefore `return`, never `continue`.
+    //
+    // This was `continue`, and it made the function contradict its own contract:
+    // with a readable older refusal and an unreadable newer one it returned the
+    // older instant, which is exactly the "falls back" arm both this docstring
+    // and the README say does not exist. Found by an independent review of the
+    // slice that introduced it; the reachable harm is small — the value is
+    // still a real CLI statement about a real refusal in the same run, so it can
+    // only be too early, which costs an invocation — but "unreadable" must
+    // reduce AO to a human decision, not to a superseded answer.
     const resetsAt = info['resetsAt'];
     // `Number.isInteger` rejects a string, a float, `NaN` and `Infinity` in one
     // predicate; the CLI's schema says integer, and a value that is not one is
     // not this field however it is spelled.
-    if (typeof resetsAt !== 'number' || !Number.isInteger(resetsAt)) continue;
-    if (resetsAt <= 0 || resetsAt > MAX_EPOCH_SECONDS) continue;
+    if (typeof resetsAt !== 'number' || !Number.isInteger(resetsAt)) return null;
+    if (resetsAt <= 0 || resetsAt > MAX_EPOCH_SECONDS) return null;
 
     return new Date(resetsAt * 1000).toISOString();
   }
