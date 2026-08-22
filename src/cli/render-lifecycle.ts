@@ -87,16 +87,26 @@ export const UNATTENDED_AUTO_RESUME_TRAILER =
  * it was found", which `NO_CONTINUATION` does not prove. `mayStartTask` permits
  * every grant but `AUTOMATIC_RESUME_ONLY`, so a caller reaching `driveLifecycle`
  * with this one can create a worktree, a branch and a first durable state
- * through `startTask` before `runTask` refuses the continuation. The refusal is
- * real and is what this sentence is about; the effects before it belong to the
- * outcome line, which reports them accurately.
+ * through `startTask` before `runTask` refuses the continuation.
+ *
+ * A second review narrowed it again. The sentence had said "the run driver
+ * refused before any step", which reads as *the grant is why this run stopped*
+ * — and that is not proven either. In `runTask` the terminal gate and the
+ * blocking-state gate both return before `permitsContinuation` is consulted, so
+ * a `READY_FOR_PR`, `ABORTED`, `BLOCKED_VERIFY` or `HUMAN_DECISION_REQUIRED`
+ * run under this grant stops for a reason the grant never had a chance to
+ * cause. What the grant proves is one thing only: **no productive continuation
+ * was authorised.** Which gate actually stopped this run, and what it did on the
+ * way, is the outcome line's job, and the sentence now says so instead.
  */
 export const NO_CONTINUATION_TRAILER =
   'No continuation grant. Neither --attended nor --automatic-resume-only was given, so no\n' +
-  'productive continuation was authorised: the run driver refused before any step, and no\n' +
-  'claim of operator presence is made. What the lifecycle did before reaching that refusal is\n' +
-  'the outcome above, not this sentence. Pass --attended to execute with an operator present,\n' +
-  'or --automatic-resume-only to continue one already-durable task without one.';
+  'productive continuation was authorised, and no claim of operator presence is made. That\n' +
+  'is all this sentence claims. What this particular run did, and why it stopped, is\n' +
+  'the outcome above, not this sentence: terminal and blocking states are decided before\n' +
+  'the grant is consulted at all, so the grant need not be what refused. Pass --attended\n' +
+  'to execute with an operator present, or --automatic-resume-only to continue one\n' +
+  'already-durable task without one.';
 
 /** One static sentence per lifecycle outcome. Closed, and pinned by test. */
 export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, string>> =
@@ -402,8 +412,10 @@ export const RESET_WAIT_SENTENCES: Readonly<Record<ResetWaitDisposition, string>
       '  is its own report, above.** No authority or evidence from before the wait is reused as\n' +
       '  proof after it: not the old lease, not the auth artefact, not the resume decision, not\n' +
       '  the reconciliation, and not the repository, worktree or commit facts observed then.\n' +
-      '  What does cross the sleep is process-local control data only -- which task, which\n' +
-      '  grant, which bounds, and a counter. There is no second wait in one invocation.',
+      '  What deliberately crosses the sleep is the task id, the grant, the bounds and a\n' +
+      '  counter. The first attempt is kept in memory too, so it can be printed above -- kept\n' +
+      '  for reporting, never consulted: no retained result authorises the attempt after the\n' +
+      '  wait. There is no second wait in one invocation.',
   });
 
 /**

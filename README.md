@@ -3931,19 +3931,21 @@ the wait controller sits *above* `driveLifecycle`:
 
 ```
 epoch 1   acquire → drive → BLOCKED_USAGE_LIMIT → release
-wait      require RELEASED, then sleep holding nothing
+wait      require RELEASED, then sleep holding no lease
 epoch 2   resolve again → acquire again → preflight again → reconcile again → decide again
 ```
 
 `RELEASED` is required before the sleep, and it is the only proof accepted — not
 an absent lease file, not a successful-looking outcome. Across the sleep the
-only things that survive are the task id, the grant, the bound and a counter.
-Everything else is established again: the repository is **re-resolved**, the
-lease is acquired through the ordinary path (and is allowed to lose), the auth
-preflight is **run again** — `deps.authPreflight` is a factory, so each epoch
-gets its own once-only preflight and a login that expired during the sleep is
-caught — the durable state is re-loaded, Git is re-observed, and `classifyResume`
-produces a **new** decision.
+only things that survive *as input to the next epoch* are the task id, the
+grant, the bound and a counter. The first epoch's result also stays in memory —
+the report prints both attempts — but it is retained for reporting only and
+authorises nothing. Everything else is established again: the repository is
+**re-resolved**, the lease is acquired through the ordinary path (and is allowed
+to lose), the auth preflight is **run again** — `deps.authPreflight` is a
+factory, so each epoch gets its own once-only preflight and a login that expired
+during the sleep is caught — the durable state is re-loaded, Git is re-observed,
+and `classifyResume` produces a **new** decision.
 
 The sleep length is `reportedResetAt - now + 1` ms. The extra millisecond is not
 an assumption about the policy but a consequence of it —

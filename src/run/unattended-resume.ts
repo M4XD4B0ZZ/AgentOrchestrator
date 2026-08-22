@@ -6,8 +6,13 @@
  *
  * A thin controller **above** `driveLifecycle` that may, at most once per
  * command invocation, sleep until a reported quota reset has passed and then
- * start a completely new lifecycle epoch — holding nothing across the sleep
- * except the task id, the grant, the bound and a counter.
+ * start a completely new lifecycle epoch — carrying no authority and no evidence
+ * across the sleep, only the task id, the grant, the bound and a counter.
+ *
+ * "Holding nothing except" was too strong and is retracted: the first epoch's
+ * `LifecycleResult` stays in `epochs` across the `await`, because the report
+ * prints both attempts. It is retained for reporting and never consulted —
+ * nothing kept from before the wait authorises anything after it.
  *
  * ── Why above, and not inside ──────────────────────────────────────────────
  *
@@ -18,7 +23,7 @@
  * sleeping owner really is alive. So the layering is:
  *
  *     epoch 1: driveLifecycle  → acquire → drive → BLOCKED_USAGE_LIMIT → release
- *     here   : read the result, prove RELEASED, sleep holding nothing
+ *     here   : read the result, prove RELEASED, sleep holding no lease
  *     epoch 2: driveLifecycle  → acquire again, ordinarily → drive → release
  *
  * `driveLifecycle` keeps one job and keeps it whole; this module never reaches

@@ -1078,7 +1078,19 @@ describe('everything the second attempt acts on is established after the wait', 
     // and that is what the sentence must say.
     expect(report).not.toContain('carries nothing over');
     expect(report).toContain('No authority or evidence from before the wait is reused as');
-    expect(report).toContain('process-local control data only');
+
+    // And the *next* overclaim, which replaced it: "what does cross the sleep is
+    // process-local control data only" is false as written. The first epoch's
+    // `LifecycleResult` is pushed into `epochs` before the `await` and is still
+    // there afterwards — this very report prints it. The invariant is about
+    // authority, not about residency, so the sentence says retained-for-
+    // reporting rather than not-retained.
+    expect(report).not.toContain('control data only');
+    expect(report).toContain('kept in memory too');
+    expect(report).toContain('no retained result authorises the attempt after the');
+    // Proof that the retained result really does survive: this report is two
+    // labelled epochs, and the first one was produced before the sleep.
+    expect(result.epochs).toHaveLength(2);
   });
 
   it('resolves the repository again rather than reusing the object it began with', async () => {
@@ -1555,6 +1567,17 @@ describe('the report distinguishes every way this mode can end', () => {
     // state through `startTask` before `runTask` refuses. A review caught it.
     expect(NO_CONTINUATION_TRAILER).not.toContain('left exactly as it was found');
     expect(NO_CONTINUATION_TRAILER).not.toContain('no agent was started');
+
+    // Nor does it claim the grant is *why* this run stopped. `runTask` consults
+    // `permitsContinuation` only after the terminal gate and the blocking-state
+    // gate have both declined to return, so a `READY_FOR_PR`, `ABORTED`,
+    // `BLOCKED_VERIFY` or `HUMAN_DECISION_REQUIRED` run under this grant stops
+    // for a reason the grant never caused. The grant proves what was authorised,
+    // not what happened.
+    expect(NO_CONTINUATION_TRAILER).not.toContain('refused before any step');
+    expect(NO_CONTINUATION_TRAILER).not.toContain('the run driver refused');
+    expect(NO_CONTINUATION_TRAILER).toContain('and why it stopped');
+    expect(NO_CONTINUATION_TRAILER).toContain('the grant need not be what refused');
     // Within one rendered line: these sentences are hard-wrapped, so a needle
     // that spans a break is a needle that can never be found.
     expect(NO_CONTINUATION_TRAILER).toContain('productive continuation was authorised');
