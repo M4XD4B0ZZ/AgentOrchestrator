@@ -83,7 +83,7 @@ function request(started: StartedTask, overrides: Record<string, unknown> = {}) 
   return {
     repository: started.repository,
     taskId: started.taskId,
-    attendedContinuation: true,
+    continuationGrant: 'ATTENDED' as const,
     authEvidence: provenAuthEvidence(),
     // Real, and re-proved by the driver on every iteration.
     lease: leaseFor(started.repository),
@@ -1022,7 +1022,7 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
    *
    * So the ownership split is: this case owns the earlier **blocking-gate**
    * behaviour for a block this build can actually produce, and the run-driver
-   * regression owns the **attendedContinuation** behaviour. What this case
+   * regression owns the **continuationGrant** behaviour. What this case
    * genuinely proves is narrower and still worth having: for a block denied by
    * the authority module, the operator's grant changes nothing.
    */
@@ -1039,7 +1039,7 @@ describe('a quota refusal is a governed pause, and this build never lifts it alo
     const blocked = reload(started.root, TASK_ID);
 
     const again = await runTask(
-      request(started, { attendedContinuation: false }),
+      request(started, { continuationGrant: 'NO_CONTINUATION' as const }),
       deps({ verify: recordedVerify().runner, agent: recordedAgent({}).runner }),
     );
 
@@ -1068,7 +1068,7 @@ describe('selection reads the repository\'s own task files', () => {
     const first = await runNextTask(
       {
         repository: started.repository,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(started.repository),
         maxSteps: 8,
@@ -1086,7 +1086,7 @@ describe('selection reads the repository\'s own task files', () => {
     const second = await runNextTask(
       {
         repository: started.repository,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(started.repository),
         maxSteps: 8,

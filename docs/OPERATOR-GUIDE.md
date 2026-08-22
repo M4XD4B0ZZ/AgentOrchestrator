@@ -37,6 +37,38 @@ der Zustand der Maschine danach, hängen davon ab, dass ein Mensch da ist.* Gena
 das behauptet `--attended`. Deshalb blockiert keiner von ihnen den beaufsichtigten
 Betrieb, und jeder von ihnen ist für unbeaufsichtigten Betrieb tödlich.
 
+### Seit V3-08: ein sehr schmaler unbeaufsichtigter Pfad — und was er nicht ist
+
+`agent-loop run --automatic-resume-only --task <id>` setzt **einen einzelnen,
+bereits gestarteten Task** ohne anwesenden Menschen fort — und nur dann, wenn die
+kanonische Resume-Entscheidung frisch `AUTOMATIC_ALLOWED` liefert. Mit
+`--wait-for-reset --max-wait-ms <n>` darf er dafür **einmal** auf ein gemeldetes
+Quota-Reset warten, ohne dabei die Execution Lease zu halten.
+
+Das ist **keine** Freigabe für unbeaufsichtigten Betrieb, und U1–U4 bleiben offen.
+Der Modus kann nicht:
+
+* einen Task starten (kein Worktree, kein Branch, kein State);
+* laufende Arbeit aufnehmen, die er **nicht selbst resumed hat** — ein
+  reconciled `IMPLEMENTING` oder `VERIFYING` wird abgelehnt;
+* eine Stale Lease entfernen;
+* einen Task auswählen — `--task` ist Pflicht;
+* ein Review-Budget auffüllen;
+* mehr als einmal pro Aufruf warten.
+
+Was er nach einem erlaubten Resume **sehr wohl** tut: den Task ganz normal
+weiterfahren — Writer, Verify, Review, Remediation — bis `--max-steps`. Die
+Einschränkung liegt am *Eingang*, nicht auf dem, was danach passiert. (Ein
+Review hat hier ursprünglich "normale laufende Arbeit fortsetzen" gefunden,
+was schlicht falsch war.)
+
+**Und heute kann er ohnehin nicht auslösen.** Keine der beiden Agent-CLIs meldet
+eine Quota-Reset-Zeit, also ist `reportedResetAt` immer `null`, und
+`evaluateAutomaticResume` verweigert mit `RESET_TIME_MISSING`. Der Slice liefert
+die fehlende *Autorität*, nicht den fehlenden *Nachweis*. Praktisch heißt das:
+Ein Run, der auf `BLOCKED_USAGE_LIMIT` stoppt, wird auch mit diesen Flags nicht
+von selbst weiterlaufen — du startest ihn nach dem Reset weiterhin selbst.
+
 AgentOrchestrator kann heute:
 
 ```text

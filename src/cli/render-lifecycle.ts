@@ -23,6 +23,11 @@ import type {
   LifecycleOutcome,
   LifecycleResult,
 } from '../run/lifecycle-driver.js';
+import type { InvocationGrant } from '../run/invocation-grant.js';
+import type {
+  ResetWaitDisposition,
+  UnattendedResumeResult,
+} from '../run/unattended-resume.js';
 import {
   ATTENDED_TRAILER,
   line,
@@ -44,9 +49,64 @@ import {
  */
 export const LIFECYCLE_TRAILER =
   'This run continued past its first invocation, in one foreground process and under one\n' +
-  'grant -- the same scope `block --attended` has always had. It never waits: a task parked\n' +
-  'on a quota limit stops the run, because continuing with nobody present is an authority\n' +
-  'this build does not grant.';
+  'grant -- the same scope `block --attended` has always had. A task parked on a quota limit\n' +
+  'stops it: waiting for a reset is a separate authority that is never implied, and is asked\n' +
+  'for by name with --automatic-resume-only --wait-for-reset.';
+
+/**
+ * The closing sentence of a run made under the unattended automatic-resume grant.
+ *
+ * It replaces `ATTENDED_TRAILER`, which claims an operator is present and would
+ * be false here. Every clause is a property this build enforces rather than
+ * intends: the grant passes `run-driver.ts`'s gate only on `AUTOMATIC_ALLOWED`,
+ * `lifecycle-driver.ts` never reaches `startTask` under it, and
+ * `unattended-resume.ts` fixes `recoverStaleLease` to false and builds one
+ * once-only auth preflight per lifecycle epoch.
+ */
+export const UNATTENDED_AUTO_RESUME_TRAILER =
+  'Unattended automatic resume. --automatic-resume-only was given, so this invocation could\n' +
+  'enter ONE task that already had durable state, and only where the resume decision freshly\n' +
+  'answered AUTOMATIC_ALLOWED. Having resumed it, the run then drives it like any other --\n' +
+  'writer, verification, review, remediation -- up to --max-steps. It could not start a task,\n' +
+  'could not pick up in-flight work it had not itself resumed, and could not remove a stale\n' +
+  'lease. Auth is a separate requirement that this grant says nothing about: every attempt\n' +
+  'that gets as far as driving proves it again, and one that stopped earlier -- on the lease,\n' +
+  'or with nothing to continue -- never asked.';
+
+/**
+ * The closing sentence of a run made under no continuation grant at all.
+ *
+ * The third member existed from the start and had no sentence of its own, so it
+ * printed `ATTENDED_TRAILER` — "--attended was given" — about a run whose grant
+ * is precisely the absence of that claim. No production path renders it today;
+ * it is written because this renderer's job is to be true for every value of a
+ * closed type, not only for the values that happen to be reachable this week.
+ *
+ * **It states the grant, never the history**, and a review caught the first
+ * version doing the latter: it claimed "any task it reached was left exactly as
+ * it was found", which `NO_CONTINUATION` does not prove. `mayStartTask` permits
+ * every grant but `AUTOMATIC_RESUME_ONLY`, so a caller reaching `driveLifecycle`
+ * with this one can create a worktree, a branch and a first durable state
+ * through `startTask` before `runTask` refuses the continuation.
+ *
+ * A second review narrowed it again. The sentence had said "the run driver
+ * refused before any step", which reads as *the grant is why this run stopped*
+ * — and that is not proven either. In `runTask` the terminal gate and the
+ * blocking-state gate both return before `permitsContinuation` is consulted, so
+ * a `READY_FOR_PR`, `ABORTED`, `BLOCKED_VERIFY` or `HUMAN_DECISION_REQUIRED`
+ * run under this grant stops for a reason the grant never had a chance to
+ * cause. What the grant proves is one thing only: **no productive continuation
+ * was authorised.** Which gate actually stopped this run, and what it did on the
+ * way, is the outcome line's job, and the sentence now says so instead.
+ */
+export const NO_CONTINUATION_TRAILER =
+  'No continuation grant. Neither --attended nor --automatic-resume-only was given, so no\n' +
+  'productive continuation was authorised, and no claim of operator presence is made. That\n' +
+  'is all this sentence claims. What this particular run did, and why it stopped, is\n' +
+  'the outcome above, not this sentence: terminal and blocking states are decided before\n' +
+  'the grant is consulted at all, so the grant need not be what refused. Pass --attended\n' +
+  'to execute with an operator present, or --automatic-resume-only to continue one\n' +
+  'already-durable task without one.';
 
 /** One static sentence per lifecycle outcome. Closed, and pinned by test. */
 export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, string>> =
@@ -87,15 +147,18 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       '  outcome above says why.',
     AUTH_PREFLIGHT_FAILED:
       'The auth preflight produced no evidence, so no agent could have run. Nothing was driven.\n' +
-      '  It runs once per invocation of this command and a failure is not retried inside one, so\n' +
-      '  log the agent CLIs in and invoke again.',
+      '  It runs once per attempt -- an ordinary run makes one, and a run that waited for a quota\n' +
+      '  reset proves auth again afterwards rather than trusting the artefact it minted before --\n' +
+      '  and a failure is never retried inside an attempt. Log the agent CLIs in and invoke again.',
     COMPLETED:
       'The task reached READY_FOR_PR. Terminal: a human opens the pull request from here.',
     TASK_ABORTED: 'The task was already ABORTED. Nothing was run.',
     BLOCKED_USAGE_LIMIT:
       'A subscription quota is exhausted. A pause rather than a failure, and this run stops on\n' +
-      '  it: nothing here waits for a reset, because continuing afterwards would need a grant of\n' +
-      '  operator presence made hours earlier. Invoke again once the quota has returned.',
+      '  it. Waiting for the reset is a separate authority and is never implied by the block: it\n' +
+      '  happens only when --automatic-resume-only and --wait-for-reset were both given, and\n' +
+      '  only while the reported reset time is the one check still refusing the resume.\n' +
+      '  Otherwise, invoke again once the quota has returned.',
     BLOCKED_VERIFY:
       'The repository\'s verification commands failed and were not retried. The only\n' +
       '  continuation is remediation, which is a decision.',
@@ -135,8 +198,11 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       'An invocation reported durable progress and the state file did not move, or the task is\n' +
       '  in a state this build does not drive. Repeating would do the same thing, so it stopped.',
     INVOCATION_BUDGET_INVALID:
-      'The --max-invocations bound is not a positive whole number, so nothing was taken and\n' +
-      '  nothing ran. Invoking again with the same value repeats this exactly.',
+      'A bound this run was given cannot be used, so nothing was taken and nothing ran. The\n' +
+      '  reasons below name which: --max-invocations is not a positive whole number, or a wait\n' +
+      '  was requested and --max-invocations leaves no invocation for the attempt after it (one\n' +
+      '  wait needs at least 2, because the first is spent meeting the block), or --max-wait-ms\n' +
+      '  is not a usable number of milliseconds. Invoking again unchanged repeats this exactly.',
     INVOCATION_BUDGET_EXHAUSTED:
       'Durable progress was still being made when this run\'s invocation budget ran out.\n' +
       '  Everything is on disk; invoke again to continue, or raise --max-invocations.',
@@ -165,6 +231,18 @@ function codes(values: readonly string[]): string {
 export function renderLifecycleRun(
   repository: { id: string; root: string },
   result: LifecycleResult,
+  /**
+   * The grant this run was made under. **Required, and deliberately not
+   * defaulted.**
+   *
+   * It had a default of `'ATTENDED'` for one round, and a review named the
+   * problem: that is the value which asserts an operator was present, so a
+   * future call site that forgot the argument would print "--attended was
+   * given" about a run where it was not. Everywhere else in this slice the
+   * grant has no default and cannot be inferred (`LifecycleRequest`,
+   * `RunRequest`, the CLI); this is now the same rule, held by the compiler.
+   */
+  grant: InvocationGrant,
 ): string {
   const lines: string[] = [
     '',
@@ -234,13 +312,169 @@ export function renderLifecycleRun(
     );
   }
 
-  // The attended contract sentence, unchanged and on every attended run: an
-  // operator who passed --attended is owed the same statement of what the grant
-  // permitted, whether the run took one invocation or ten. The lifecycle
-  // sentence is added only when the run did something that sentence does not
-  // describe — continued past its first invocation.
-  lines.push('', ATTENDED_TRAILER);
-  if (result.invocations > 1) lines.push('', LIFECYCLE_TRAILER);
+  // The contract sentence for whichever grant this run was made under: an
+  // operator is owed the same statement of what the grant permitted, whether the
+  // run took one invocation or ten. `ATTENDED_TRAILER` says "--attended was
+  // given", so it may not be printed for a run where it was not — the grant
+  // decides which sentence is true, rather than one sentence being printed on
+  // every path and being false on one of them.
+  //
+  // **Chosen by an exhaustive switch, not by `!== 'AUTOMATIC_RESUME_ONLY'`.**
+  // That test was here for one round and it was wrong in the same way this
+  // parameter's old default was: it folded `NO_CONTINUATION` in with `ATTENDED`
+  // and printed an operator-presence claim for a run whose grant is precisely
+  // the absence of one. Making the parameter required stopped a caller
+  // *forgetting* the grant; it did nothing about a three-member value handled
+  // two ways.
+  //
+  // The repeated-run sentence stays attended-only: it describes the scope
+  // `block --attended` has, which is neither of the other two. The unattended
+  // trailer states its own scope in full, and a run granted no continuation made
+  // no invocations to describe.
+  lines.push('', trailerFor(grant));
+  if (grant === 'ATTENDED' && result.invocations > 1) lines.push('', LIFECYCLE_TRAILER);
   lines.push('');
   return lines.join('\n');
+}
+
+/**
+ * The contract sentence for one grant. Total over {@link InvocationGrant}.
+ *
+ * No `default` clause, deliberately: a new grant member must be given a sentence
+ * here rather than silently inheriting whichever one a boolean happened to fall
+ * through to. That is the whole reason this is a switch.
+ */
+function trailerFor(grant: InvocationGrant): string {
+  switch (grant) {
+    case 'ATTENDED':
+      return ATTENDED_TRAILER;
+    case 'AUTOMATIC_RESUME_ONLY':
+      return UNATTENDED_AUTO_RESUME_TRAILER;
+    case 'NO_CONTINUATION':
+      return NO_CONTINUATION_TRAILER;
+  }
+}
+
+/* ────────────────────── the unattended automatic resume ─────────────────── */
+
+/** One static sentence per wait disposition. Closed, and pinned by test. */
+export const RESET_WAIT_SENTENCES: Readonly<Record<ResetWaitDisposition, string>> =
+  Object.freeze({
+    NOT_A_QUOTA_BLOCK:
+      'No wait was in question: this run did not stop on a subscription quota block, and a\n' +
+      '  reset is the only thing this mode ever waits for.',
+    NOT_REQUESTED:
+      'The task is parked on a quota block and no wait was requested, so nothing slept. Waiting\n' +
+      '  is opt-in: add --wait-for-reset with --max-wait-ms to permit exactly one bounded wait.',
+    RESUME_DECISION_ABSENT:
+      'The quota block this run stopped on is one it met after its last resume decision --\n' +
+      '  typically one its own work ran into -- so nothing has judged that block yet and nothing\n' +
+      '  slept. The task is durably parked and correct. Invoke again once the quota has\n' +
+      '  returned, and the resume decision will be made about this block.',
+    RESUME_DENIED_BY_OTHER_CHECKS:
+      'The automatic resume was refused, and at least one of the reasons is something the\n' +
+      '  passage of time does not fix, so nothing slept -- waiting would have delayed a refusal\n' +
+      '  rather than cleared one. The reasons below name every check that denied it; the ones\n' +
+      '  that are not about the reset time have to be resolved before any resume proceeds.',
+    RESET_TIME_MISSING:
+      'The durable state records no reported quota reset time, so there is nothing to wait for\n' +
+      '  and nothing slept. A reset time is only ever recorded when an agent CLI reported one;\n' +
+      '  this build never invents one.',
+    RESET_TIME_UNPARSEABLE:
+      'The recorded quota reset time is not a timestamp this build can read, so nothing slept.\n' +
+      '  A human has to look at the durable state.',
+    CURRENT_TIME_UNPARSEABLE:
+      'The clock produced something that is not a timestamp, so no wait could be measured and\n' +
+      '  nothing slept.',
+    BOUND_EXCEEDED:
+      'The wait this reset would need is longer than --max-wait-ms allowed, so nothing slept and\n' +
+      '  the task stays parked. Raise the bound, or invoke again after the reset.',
+    WAIT_BOUND_UNUSABLE:
+      'The --max-wait-ms value is not a bound this build will sleep on, so no wait was possible\n' +
+      '  and nothing ran -- not even a lease was taken. It must be a whole number of\n' +
+      '  milliseconds between 1 and 86400000 (24 hours), and there is no default. Raising it is\n' +
+      '  not the fix unless the value was simply too large.',
+    LEASE_RELEASE_UNPROVEN:
+      'The execution lease was not provably given back before the wait, so nothing slept. A\n' +
+      '  waiter that cannot prove it released may still be this repository\'s writer, and it was\n' +
+      '  about to be unreachable for hours. Read the release code beside the run above.',
+    INVOCATION_BUDGET_SPENT:
+      'There was no invocation left to spend on the attempt after the wait, so nothing slept.\n' +
+      '  One wait needs at least --max-invocations 2: the first is spent meeting the block.',
+    REPOSITORY_UNRESOLVED_AFTER_WAIT:
+      'The wait completed and the repository could not be resolved again afterwards, so no lease\n' +
+      '  was taken and nothing ran. Nothing before the wait is treated as proof that the\n' +
+      '  repository is still there.',
+    WAITED:
+      'The reported reset time was the one check still refusing the resume, so this run slept\n' +
+      '  once -- holding no execution lease, having proven the earlier one given back -- then\n' +
+      '  resolved the repository again and started a fresh attempt. **How far that attempt got\n' +
+      '  is its own report, above.** No authority or evidence from before the wait is reused as\n' +
+      '  proof after it: not the old lease, not the auth artefact, not the resume decision, not\n' +
+      '  the reconciliation, and not the repository, worktree or commit facts observed then.\n' +
+      '  What deliberately crosses the sleep is the task id, the grant, the bounds and a\n' +
+      '  counter. The first attempt is kept in memory too, so it can be printed above -- kept\n' +
+      '  for reporting, never consulted: no retained result authorises the attempt after the\n' +
+      '  wait. There is no second wait in one invocation.',
+  });
+
+/**
+ * The whole report for one unattended automatic-resume run.
+ *
+ * Both epochs are printed when there are two, and labelled, because they are two
+ * different attempts under two different leases and an operator reading "another
+ * writer owns the repository" needs to know it happened *after* the wait. The
+ * wait itself sits between them, which is where it happened.
+ */
+export function renderUnattendedResume(
+  repository: { id: string; root: string },
+  result: UnattendedResumeResult,
+): string {
+  const parts: string[] = [];
+  const epochs = result.epochs;
+
+  if (epochs.length === 0) {
+    // Refused before any lifecycle epoch ran: an unusable wait bound, or a
+    // budget that cannot cover a wait. There is no lease phase and no run to
+    // report, so the report is the refusal and nothing else.
+    parts.push(
+      '',
+      line('Repository', `${repository.id}  (${repository.root})`),
+      line('Target', result.taskId),
+      line('Lifecycle', result.outcome),
+      `  ${LIFECYCLE_OUTCOME_SENTENCES[result.outcome]}`,
+      '',
+    );
+  }
+
+  epochs.forEach((epoch, index) => {
+    if (epochs.length > 1) {
+      parts.push(
+        '',
+        line('Attempt', `${String(index + 1)} of ${String(epochs.length)}`),
+      );
+    }
+    parts.push(renderLifecycleRun(repository, epoch, 'AUTOMATIC_RESUME_ONLY'));
+  });
+
+  parts.push(
+    line('Wait', waitLabel(result.wait.disposition, result.wait.waitedMs)),
+    `  ${RESET_WAIT_SENTENCES[result.wait.disposition]}`,
+    line('Wait reasons', codes(result.wait.reasonCodes)),
+    '',
+  );
+
+  return parts.join('\n');
+}
+
+/**
+ * The wait line's value: the disposition, and the measured duration when there
+ * was one.
+ *
+ * The duration is a number this module computed from two validated timestamps,
+ * so it is safe to print; there is no free text on this line and no path by
+ * which any arrives.
+ */
+function waitLabel(disposition: ResetWaitDisposition, waitedMs: number | null): string {
+  return waitedMs === null ? disposition : `${disposition}  (${String(waitedMs)} ms)`;
 }

@@ -658,6 +658,7 @@ describe('the lifecycle report still says what it said', () => {
         reasonCodes: [],
         permissionDenials: [],
       } as unknown as Parameters<typeof renderLifecycleRun>[1],
+      'ATTENDED',
     );
     expect(text).toContain(leaseReleaseLine('Release', release));
     // And not the per-code sentence: this report has its own outcome sentence,

@@ -48,8 +48,10 @@
  *     whole of what `L-V3-06-7` still records.
  *
  * A fourth gap — waiting out a recorded quota reset — was **withdrawn from this
- * slice**, and the reason is in the authority model rather than in the
- * mechanism. See "What is deliberately absent" at the end of this header.
+ * slice** because it needed an authority the product had not granted. V3-08
+ * granted exactly that authority and built the wait *above* this module rather
+ * than inside it. See "The wait lives above this layer" at the end of this
+ * header.
  *
  * ── Durable state is the authority between invocations ─────────────────────
  *
@@ -93,44 +95,42 @@
  * is allowed to lose — a successor that appeared in between wins, and this run
  * stops having executed nothing.
  *
- * ── One operator grant, many invocations: the existing contract ───────────
+ * ── One grant, many invocations: the existing contract ────────────────────
  *
- * `attendedContinuation` says an operator is present for *this invocation of the
- * command*. It has never meant "for one `runTask` call": `block --attended`
- * (V2-08) has driven a `for(;;)` loop over many tasks, each its own `runTask`,
- * under a single `--attended` since it shipped — `block/block-runner.ts` passes
- * `attendedContinuation: true` from inside that loop. This layer does the same
- * for one task, inside one foreground process the operator started and can stop.
- * So the loop below extends no authority; it reuses a scope the product already
- * has, and `--max-invocations` defaults to one, so the command drives a task
- * exactly as far as it did before. **Its report did change** — `cli/run-command.ts`
- * lists the four differences, none of which is a change to what runs.
+ * `ATTENDED` says an operator is present for *this invocation of the command*.
+ * It has never meant "for one `runTask` call": `block --attended` (V2-08) has
+ * driven a `for(;;)` loop over many tasks, each its own `runTask`, under a
+ * single `--attended` since it shipped — `block/block-runner.ts` passes the
+ * attended grant from inside that loop. This layer does the same for one task,
+ * inside one foreground process the operator started and can stop. So the loop
+ * below extends no authority; it reuses a scope the product already has, and
+ * `--max-invocations` defaults to one, so the command drives a task exactly as
+ * far as it did before. **Its report did change** — `cli/run-command.ts` lists
+ * the four differences, none of which is a change to what runs.
  *
- * ── What is deliberately absent: the wait ─────────────────────────────────
+ * ── The wait lives above this layer, and that is the safety property ──────
  *
- * An earlier form of this module could sleep until `reportedResetAt` and then
- * carry on. It was withdrawn before review, because it could not be built
- * without extending an authority this product has not granted.
+ * An earlier form of this module could sleep until `reportedResetAt` inside the
+ * lease-held section. That form was withdrawn, and it is not what V3-08 built.
  *
- * The chain is short and it is decisive. `run-driver.ts` refuses **every**
- * continuation when `attendedContinuation` is false — including one
- * `evaluateAutomaticResume` has already allowed, because the grant is checked
- * before the resume write and can only withhold. So AO has no unattended
- * execution path at all today: the automatic-resume machinery decides
- * *eligibility*, and an operator being present is still required on top of it.
+ * The invariant it violated is short: **no execution lease may be held across a
+ * quota wait.** A reset can be hours away, the lease is this repository's single
+ * writer slot, and a process asleep inside `driveUnderLease` holds it the whole
+ * time — refusing every other invocation, and refusing stale recovery too,
+ * because a sleeping owner is genuinely alive.
  *
- * That makes a wait unbuildable two ways at once. Keeping the grant across a
- * six-hour sleep uses a claim of operator presence hours after it was made,
- * which is the widening. Dropping the grant after the sleep makes the wait
- * pointless, because the resume it slept for is then refused too.
+ * So the wait is a controller *above* this function, in `run/unattended-resume.ts`.
+ * This module keeps one job and keeps it whole: take the lease, drive, give the
+ * lease back, return a structured result. The controller reads that result,
+ * requires the release to have been proven `RELEASED`, sleeps holding nothing,
+ * and then calls `driveLifecycle` **again** — a new epoch, with a freshly
+ * resolved repository, a fresh lease taken through the ordinary path, a fresh
+ * auth preflight and a fresh reconciliation. Nothing this call established is
+ * authority for the next one.
  *
- * A wait therefore needs a *third* authority — something like "may continue
- * without a human, but only where `classifyResume` already answered
- * `AUTOMATIC_ALLOWED`" — which would let an unattended run clear a quota pause
- * while still refusing ordinary in-flight work. That is a product-contract
- * decision, not a driver detail, so it is reported rather than implemented.
- * `BLOCKED_USAGE_LIMIT` stops this driver, exactly as it stops every other
- * caller today.
+ * `BLOCKED_USAGE_LIMIT` therefore still stops *this* driver, exactly as it stops
+ * every other caller. What changed in V3-08 is that one caller above it is now
+ * allowed to try again later, and only under `AUTOMATIC_RESUME_ONLY`.
  */
 
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
@@ -155,6 +155,11 @@ import {
 import type { VerificationRunner } from '../verify/verify-command.js';
 import type { CompletionObserver } from '../loop/loop-step.js';
 import type { GitRunner } from '../worktree/git-command.js';
+import {
+  mayRecoverStaleLease,
+  mayStartTask,
+  type InvocationGrant,
+} from './invocation-grant.js';
 import { startTask, type StartTaskResult } from './start-task.js';
 import { runTask, type RunOutcome, type RunResult } from './run-driver.js';
 
@@ -395,22 +400,25 @@ export interface LifecycleRequest {
    */
   readonly taskId: string;
   /**
-   * The operator's grant to continue a task that reconciles but is not cleared
-   * for unattended execution, forwarded verbatim to
-   * `RunRequest.attendedContinuation`.
+   * What this invocation is permitted to continue, forwarded verbatim to
+   * `RunRequest.continuationGrant`.
    *
-   * **Not a widening**, though an earlier version of this doc called it "the one
-   * contract widening in this slice". `attendedContinuation` has never meant
-   * "one `runTask` call": it means an operator is present for this invocation of
-   * the *command*, and `block --attended` has passed one grant to many `runTask`
-   * calls since V2-08. This forwards it the same way, inside one foreground
-   * process the operator started and can stop.
+   * **Not a widening.** `ATTENDED` has never meant "one `runTask` call": it
+   * means an operator is present for this invocation of the *command*, and
+   * `block --attended` has passed one grant to many `runTask` calls since V2-08.
+   * This forwards it the same way, inside one foreground process the operator
+   * started and can stop.
    *
-   * It is still a human grant, it still cannot be inferred, it has no default,
-   * and it still only ever narrows what runs: a *blocked* task moves on
-   * `AUTOMATIC_ALLOWED` and on nothing else, whatever is set here.
+   * It cannot be inferred, it has no default, and it only ever narrows what
+   * runs: a *blocked* task moves on `AUTOMATIC_ALLOWED` and on nothing else,
+   * whatever is set here.
+   *
+   * `AUTOMATIC_RESUME_ONLY` additionally changes what this layer does *before*
+   * the loop. It is not a grant to start anything, so `startTask` is not
+   * reached at all under it — see {@link mayStartTask} and the start phase in
+   * `driveUnderLease`.
    */
-  readonly continuationGrant: boolean;
+  readonly continuationGrant: InvocationGrant;
   /**
    * Whether this run may remove a lease it can prove is dead.
    *
@@ -515,7 +523,15 @@ function takeLease(
     };
   }
 
-  if (!request.recoverStaleLease) {
+  // The grant decides this as well as the flag, and both must say yes.
+  //
+  // Removing a lease is destructive and belongs to an operator who asked for it
+  // now; `AUTOMATIC_RESUME_ONLY` states nobody is there. `unattended-resume.ts`
+  // passes `false` and the CLI refuses the combination, so no caller reaches
+  // this with both set today — which is exactly why the check belongs here
+  // rather than only in them: the property was argued from callers instead of
+  // held by the layer that performs the removal.
+  if (!request.recoverStaleLease || !mayRecoverStaleLease(request.continuationGrant)) {
     return {
       held: false,
       outcome: 'STALE_LEASE_PRESENT',
@@ -694,27 +710,57 @@ async function driveUnderLease(
   };
 
   try {
-    start = await startTask(
-      { repository, taskId },
-      { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease: evidence },
-    );
-    // The three outcomes that leave a durable state to drive.
+    // --- the start phase, which one grant may not enter at all --------------
     //
-    // `ADOPTED` is among them, and `run --attended` refusing it was an anomaly
-    // rather than a policy: `startTask` returns it only after proving a pristine
-    // orphan worktree is this task's own and writing the first durable state, so
-    // by then the task *is* started. `block --attended` has driven it since
-    // V2-06A — `tests/v2-08-attended-block-runner.test.ts` maps `ADOPTED` to
-    // `DRIVE`. Refusing it here produced the worst possible report for the exact
-    // case this slice exists for: a crash-restart that adopted a workspace, wrote
-    // state, drove nothing, printed "the task could not be started or adopted",
-    // and exited 0.
-    if (
-      start.outcome !== 'STARTED' &&
-      start.outcome !== 'ALREADY_STARTED' &&
-      start.outcome !== 'ADOPTED'
-    ) {
-      return finish('TASK_START_REFUSED', [start.outcome]);
+    // `startTask` creates a worktree, creates a branch and writes the first
+    // durable state a task ever has. None of that is a *continuation*, so
+    // `AUTOMATIC_RESUME_ONLY` — "carry on with one task that already exists" —
+    // must not reach it (V3-08).
+    //
+    // The refusal is here, at the boundary, and not in the CLI. A library
+    // caller holding this grant would otherwise be able to start a task
+    // unattended by calling the driver directly, which is precisely the
+    // authority this mode is defined not to have. It is also placed **before**
+    // `deps.authPreflight()`, so a run with nothing to continue starts no
+    // subscription CLI either: the loop below runs the preflight on every path
+    // that is about to drive, and this path is not one.
+    //
+    // What replaces the start is a presence check, not a second opinion about
+    // the task: the state is only *loaded*, and every judgement about it — is
+    // it terminal, does it reconcile, may it resume — stays where it already
+    // lives, inside `runTask`. `NO_STATE` is the one code that means "there is
+    // nothing here to continue"; anything else is a record that exists and
+    // cannot be used, which is a different errand for an operator.
+    if (mayStartTask(request.continuationGrant)) {
+      start = await startTask(
+        { repository, taskId },
+        { git: deps.git, now: deps.now, authPreflight: deps.authPreflight, lease: evidence },
+      );
+      // The three outcomes that leave a durable state to drive.
+      //
+      // `ADOPTED` is among them, and `run --attended` refusing it was an anomaly
+      // rather than a policy: `startTask` returns it only after proving a pristine
+      // orphan worktree is this task's own and writing the first durable state, so
+      // by then the task *is* started. `block --attended` has driven it since
+      // V2-06A — `tests/v2-08-attended-block-runner.test.ts` maps `ADOPTED` to
+      // `DRIVE`. Refusing it here produced the worst possible report for the exact
+      // case this slice exists for: a crash-restart that adopted a workspace, wrote
+      // state, drove nothing, printed "the task could not be started or adopted",
+      // and exited 0.
+      if (
+        start.outcome !== 'STARTED' &&
+        start.outcome !== 'ALREADY_STARTED' &&
+        start.outcome !== 'ADOPTED'
+      ) {
+        return finish('TASK_START_REFUSED', [start.outcome]);
+      }
+    } else {
+      const present = loadTaskState(repository.root, taskId);
+      if (!present.ok) {
+        return finish(present.code === 'NO_STATE' ? 'TASK_NOT_STARTED' : 'STATE_UNUSABLE', [
+          present.code,
+        ]);
+      }
     }
 
     // The revision the previous invocation left behind, used only to refuse to
@@ -744,7 +790,7 @@ async function driveUnderLease(
         {
           repository,
           taskId,
-          attendedContinuation: request.continuationGrant,
+          continuationGrant: request.continuationGrant,
           authEvidence,
           lease: evidence,
           maxSteps: request.maxSteps,

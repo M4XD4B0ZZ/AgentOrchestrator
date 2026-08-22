@@ -22,9 +22,12 @@
  *  2. `classifyResume` — decide what, if anything, may continue. Only
  *     `AUTOMATIC_ALLOWED` continues a *blocked* task, and it has exactly one
  *     source, which this module feeds rather than re-implements;
- *  3. `attendedContinuation` — whether *this invocation* is cleared to continue
- *     at all. A second requirement on top of the authority module's answer,
- *     and one this run either has or does not;
+ *  3. `continuationGrant` — whether *this invocation* is cleared to continue
+ *     at all. A second requirement on top of the authority module's answer, and
+ *     one this run either has or does not. Since V3-08 it is a closed
+ *     three-member vocabulary rather than a boolean, and its third member,
+ *     `AUTOMATIC_RESUME_ONLY`, passes only where step 2 answered
+ *     `AUTOMATIC_ALLOWED` — a conjunct, never an alternative;
  *  4. `observed.authorisedWorktreePath` — the directory Git vouched for. Absent
  *     authority stops the run before anything is spawned;
  *  5. only then a durable write: the one transition an unattended resume
@@ -82,6 +85,7 @@ import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
+import { permitsContinuation, type InvocationGrant } from './invocation-grant.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import {
@@ -323,25 +327,31 @@ export interface RunRequest {
   /** The task to drive. */
   readonly taskId: string;
   /**
-   * Whether this run may continue a task that reconciles but is not cleared for
-   * unattended execution.
+   * What *this invocation* is permitted to continue.
    *
    * `classifyResume` reports a healthy in-flight task as `ATTENDED_ONLY`,
    * because "the record is accurate" and "carry on without me" are different
    * statements — the most common thing that reconciles is an interrupted task
-   * with half-written work in its worktree. This flag is the operator saying
-   * they are present for *this run*. It is a second requirement on top of the
-   * authority module's answer and never a substitute for it: it can only ever
-   * narrow what runs, and it grants nothing for a *blocked* task, which moves
-   * only on `AUTOMATIC_ALLOWED` and stops on anything else whatever is set
-   * here.
+   * with half-written work in its worktree. This field is what the caller asked
+   * for. It is a second requirement on top of the authority module's answer and
+   * never a substitute for it: it can only ever narrow what runs, and no value
+   * here can produce `AUTOMATIC_ALLOWED` for a *blocked* task, which still moves
+   * only on that verdict and stops on anything else.
+   *
+   * It was `attendedContinuation: boolean` until V3-08. The boolean's `false`
+   * is now `NO_CONTINUATION` and its `true` is `ATTENDED`, with the same reason
+   * code on refusal; the third member, `AUTOMATIC_RESUME_ONLY`, is the
+   * invocation authority `L-V3-06-2` asked for and passes this gate only where
+   * the resume decision answered `AUTOMATIC_ALLOWED`. See
+   * `run/invocation-grant.ts` for why a closed type rather than a second
+   * boolean beside the first.
    *
    * Because it is a requirement on the *invocation*, it is checked before any
    * durable write, including the one an unattended resume authorises. A run
    * that will refuse to execute must not first spend a task's resume evidence
    * on a transition it cannot follow up (V1-07-RR-B1).
    */
-  readonly attendedContinuation: boolean;
+  readonly continuationGrant: InvocationGrant;
   /**
    * The artefact a *fresh* auth preflight produced, or `null` when none ran.
    *
@@ -355,9 +365,9 @@ export interface RunRequest {
    *
    * `null` is the honest value for a path that ran no preflight, and it denies
    * an unattended resume. It does not, on its own, stop a run: an attended run
-   * of a non-blocked task never consults it. Operator presence
-   * ({@link attendedContinuation}) and auth evidence are independent
-   * requirements, and neither substitutes for the other.
+   * of a non-blocked task never consults it. The invocation grant
+   * ({@link continuationGrant}) and auth evidence are independent requirements,
+   * and neither substitutes for the other.
    */
   readonly authEvidence: AuthPreflightEvidence | null;
   /**
@@ -496,6 +506,32 @@ export async function runTask(
    * one round can never be handed to another.
    */
   let remediationPayload: string | undefined;
+  /**
+   * Whether *this call* has already performed the automatic resume it is now
+   * driving.
+   *
+   * A local, and that is the whole of its safety. The resume write moves the
+   * task into a work-loop phase, so from the next iteration `classifyResume`
+   * answers `ATTENDED_ONLY` about it — accurately. Without this flag an
+   * `AUTOMATIC_RESUME_ONLY` run would refuse the continuation its own resume
+   * authorised, having already spent `resumeFrom` and `reportedResetAt`: the
+   * pause converted into an attended-only task with no work done, which is
+   * V1-07-RR-B1's failure arriving one iteration later than it used to.
+   *
+   * It dies with this frame. A second `runTask` — the next invocation of the
+   * lifecycle loop, or a later command — starts with it `false` and is refused
+   * the same in-flight task, so the grant never becomes durable and never
+   * becomes "run unattended".
+   *
+   * Within the frame it is **not** limited to the phase the resume entered. It
+   * is set once and read on every remaining iteration, so the loop drives the
+   * whole work cycle up to `maxSteps` — writer, verification, review,
+   * remediation — exactly as an attended run would. That is the intended
+   * behaviour and it is stated here because an earlier version of this comment
+   * said "the phase that resume entered", which describes only the first
+   * iteration after the write.
+   */
+  let continuingOwnAutomaticResume = false;
 
   // The budget bounds steps that **begin new work**.
   //
@@ -652,7 +688,7 @@ export async function runTask(
     // --- 4. Is *this invocation* cleared to continue at all? ----------------
     //
     // Ahead of every durable write, and that ordering is the whole point
-    // (V1-07-RR-B1). The operator's grant is a second requirement on top of the
+    // (V1-07-RR-B1). The caller's grant is a second requirement on top of the
     // authority module's answer, so an invocation without it will refuse to
     // execute whatever `classifyResume` said — and a resume written first would
     // then be a state change made by a run that never did any work.
@@ -660,20 +696,50 @@ export async function runTask(
     // For a blocked task the cost of that ordering is not a lost step but a
     // lost *pause*: `resumeBlockedTask` spends `resumeFrom`, `reportedResetAt`
     // and `blockedAgent`, and the work-loop state it lands in classifies
-    // `ATTENDED_ONLY` from then on. So an unattended run that wrote the resume
-    // and then stopped would have converted a self-clearing quota block into a
-    // task no unattended run can ever pick up, having executed nothing. The
-    // grant is therefore checked before the write, never after it.
+    // `ATTENDED_ONLY` from then on. So a run that wrote the resume and then
+    // stopped would have converted a self-clearing quota block into a task no
+    // unattended run can ever pick up, having executed nothing. The grant is
+    // therefore checked before the write, never after it.
     //
-    // This narrows and never widens. `AUTOMATIC_ALLOWED` remains necessary for
-    // a blocked task to move — nothing here can substitute for it — and this
-    // flag can still only withhold.
-    if (!request.attendedContinuation) {
+    // The invariant, stated as the one that actually holds: **no invocation
+    // grant can manufacture `AUTOMATIC_ALLOWED`.** The verdict is computed from
+    // the grant *and* `resume.continuation`, so `AUTOMATIC_RESUME_ONLY` is
+    // *entered* only where the one authority that produces `AUTOMATIC_ALLOWED`
+    // already did. It reads that value and nothing else — not the state name,
+    // not the reconciliation verdict — because a blocked task can be
+    // `BLOCKED_USAGE_LIMIT` and reconcile perfectly while the resume is refused,
+    // and a grant that consulted either would be a second, weaker copy of the
+    // decision it is supposed to depend on.
+    //
+    // This paragraph said "narrows and never widens, and V3-08 did not change
+    // that" while the widening was described nine lines below it. There is
+    // exactly one, it is named `continuingOwnAutomaticResume`, and it extends
+    // nothing except the resume **this same frame** already performed under an
+    // authorisation this gate granted.
+    //
+    // The blocking gate above already stopped a blocked task without
+    // `AUTOMATIC_ALLOWED`, so what this arm actually refuses under
+    // `AUTOMATIC_RESUME_ONLY` is the *in-flight* case — a reconciled
+    // `IMPLEMENTING` or `REVIEWING`, which classifies `ATTENDED_ONLY`. That is
+    // the whole difference between "resume a self-clearing pause" and "run
+    // unattended", and it is enforced here rather than argued for.
+    //
+    // With one exception, and it is local: an in-flight task **this call itself
+    // just resumed** is the continuation the resume authorised, so the third
+    // argument carries it — for the rest of this call, not for one phase. See
+    // `continuingOwnAutomaticResume` above for why refusing there would spend a
+    // pause and do no work, and why the permission cannot outlive this frame.
+    const granted = permitsContinuation(
+      request.continuationGrant,
+      resume.continuation,
+      continuingOwnAutomaticResume,
+    );
+    if (!granted.permitted) {
       return stop({
         outcome: 'CONTINUATION_NOT_AUTHORISED',
         state: state.state,
         steps,
-        reasonCodes: Object.freeze(['ATTENDED_CONTINUATION_NOT_GRANTED']),
+        reasonCodes: Object.freeze([granted.refusal]),
         reconciliation,
         resume,
       });
@@ -768,6 +834,11 @@ export async function runTask(
       }
       // The resume is itself a durable step, and the phase it entered is what
       // the next iteration reconciles and drives. Nothing was executed here.
+      //
+      // Set **after** the write landed, never before it and never on any path
+      // that refused: the flag means "this run really did resume this task",
+      // and a run that only intended to must not inherit the permission.
+      continuingOwnAutomaticResume = true;
       steps += 1;
       remediationPayload = undefined;
       continue;
@@ -1072,7 +1143,7 @@ export async function runNextTask(
     {
       repository: request.repository,
       taskId: task.id,
-      attendedContinuation: request.attendedContinuation,
+      continuationGrant: request.continuationGrant,
       authEvidence: request.authEvidence,
       lease: request.lease,
       maxSteps: request.maxSteps,

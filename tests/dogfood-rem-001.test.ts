@@ -191,7 +191,7 @@ function request(started: StartedTask) {
   return {
     repository: started.repository,
     taskId: started.taskId,
-    attendedContinuation: true,
+    continuationGrant: 'ATTENDED' as const,
     authEvidence: provenAuthEvidence(),
     lease: leaseFor(started.repository),
     maxSteps: 8,

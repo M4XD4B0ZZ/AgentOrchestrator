@@ -492,7 +492,7 @@ describe('a task created by production code now runs', () => {
       {
         repository,
         taskId: 'V2-04',
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: leaseFor(repository),
         maxSteps: 3,

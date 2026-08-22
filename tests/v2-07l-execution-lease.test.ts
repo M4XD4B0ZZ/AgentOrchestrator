@@ -583,7 +583,7 @@ describe('no productive writer path runs without the lease', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: forged,
         maxSteps: 4,
@@ -690,7 +690,7 @@ describe('no productive writer path runs without the lease', () => {
       {
         repository: target.repository,
         taskId: TASK_ID,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: foreign,
         maxSteps: 4,
@@ -750,7 +750,7 @@ describe('a lease acquired minutes ago is not a lease held now', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
         maxSteps: 4,
@@ -890,7 +890,7 @@ describe('no durable transition happens after the lease is lost', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
         maxSteps: 4,
@@ -1386,7 +1386,7 @@ describe('a mutation never happens on a lease proved somewhere earlier', () => {
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
         maxSteps: 6,
@@ -1874,7 +1874,7 @@ describe('every seam that starts a process is fenced, not just the writer', () =
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
         // One step, which `WORKTREE_READY` satisfies without starting anything.
@@ -3062,7 +3062,7 @@ describe('a gate is proved by what it stops, when the outcome no longer differs'
       {
         repository: fixture.repository,
         taskId: TASK_ID,
-        attendedContinuation: true,
+        continuationGrant: 'ATTENDED' as const,
         authEvidence: provenAuthEvidence(),
         lease: evidence,
         maxSteps: 4,

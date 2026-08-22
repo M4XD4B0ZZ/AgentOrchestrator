@@ -159,7 +159,7 @@ async function scenario(
     request: (overrides = {}) => ({
       repository: started.repository,
       taskId: TASK_ID,
-      continuationGrant: true,
+      continuationGrant: 'ATTENDED',
       recoverStaleLease: false,
       maxSteps: 8,
       maxInvocations: 1,
@@ -426,15 +426,21 @@ describe('an invocation is repeated only while the durable state moves', () => {
 /* ═══ 3. a quota pause stops the run, and this is an authority question ═══ */
 
 /**
- * The wait was withdrawn from this slice, and these cases pin the refusal.
+ * A quota pause stops **this driver**, and these cases pin that it still does.
  *
- * `run-driver.ts` refuses every continuation when `attendedContinuation` is
- * false — including one `evaluateAutomaticResume` has already allowed, because
- * the grant is checked before the resume write and can only withhold. So a run
- * that slept for hours and carried on would be spending a claim of operator
- * presence made before the sleep, and a run that dropped the grant instead
- * could not resume at all. Either way a wait needs an authority this build does
- * not have, so there is none.
+ * The wait was withdrawn from slice 6 because it needed an authority the build
+ * did not have. V3-08 added that authority, and built the wait *above* this
+ * layer, in `run/unattended-resume.ts` — precisely so that no execution lease is
+ * held across a sleep that can last hours. So the property these cases measure
+ * did not change and is not obsolete: `driveLifecycle` returns on
+ * `BLOCKED_USAGE_LIMIT`, gives the lease back, and waits for nothing. What may
+ * try again later is the controller one layer up, under
+ * `AUTOMATIC_RESUME_ONLY`, and `tests/v3-08-unattended-auto-resume.test.ts`
+ * owns that.
+ *
+ * (This comment used to end "a wait needs an authority this build does not
+ * have, so there is none". Both halves are now false, and an independent review
+ * of V3-08 found it still standing.)
  */
 describe('a quota pause stops the run rather than being waited out', () => {
   const usageLimit = {
@@ -702,7 +708,7 @@ describe('the lifecycle report', () => {
     const scene = await scenario();
     const result = await driveLifecycle(scene.request(), scene.deps());
 
-    const text = renderLifecycleRun(scene.started.repository, result);
+    const text = renderLifecycleRun(scene.started.repository, result, 'ATTENDED');
 
     expect(text).toContain(`Lifecycle    : ${result.outcome}`);
     expect(text).toContain(LIFECYCLE_OUTCOME_SENTENCES[result.outcome]);
@@ -725,7 +731,7 @@ describe('the lifecycle report', () => {
     );
     expect(result.invocations).toBeGreaterThan(1);
 
-    expect(renderLifecycleRun(scene.started.repository, result)).toContain(LIFECYCLE_TRAILER);
+    expect(renderLifecycleRun(scene.started.repository, result, 'ATTENDED')).toContain(LIFECYCLE_TRAILER);
   });
 });
 
@@ -802,7 +808,9 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
       ...base,
       outcome: 'LEASE_ACQUISITION_REFUSED',
       acquire: 'LEASE_LOCATION_NETWORK_UNSUPPORTED',
-    });
+    },
+      'ATTENDED',
+    );
 
     expect(text).toContain('Lease        : LEASE_LOCATION_NETWORK_UNSUPPORTED');
     expect(text).toContain(LEASE_ACQUIRE_SENTENCES.LEASE_LOCATION_NETWORK_UNSUPPORTED);
@@ -813,7 +821,9 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
       ...base,
       outcome: 'LIVE_OWNER_PRESENT',
       acquire: 'LEASE_HELD',
-    });
+    },
+      'ATTENDED',
+    );
 
     // Asserted against the **lifecycle** sentence specifically, not against the
     // report as a whole. The first version checked the whole text for the word
@@ -837,7 +847,9 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
         detail: null,
         assessment: null as never,
       },
-    });
+    },
+      'ATTENDED',
+    );
 
     expect(text).toContain('Recovery     : RECOVERY_UNSAFE  (LAUNCH_HISTORY_UNPROVEN)');
     expect(text).toContain(STALE_RECOVERY_SENTENCES.LAUNCH_HISTORY_UNPROVEN);
@@ -858,7 +870,9 @@ describe('the report carries the lease vocabulary, not only its codes', () => {
         detail: 'UNIDENTIFIABLE_AND_UNOWNED',
         assessment: null as never,
       },
-    });
+    },
+      'ATTENDED',
+    );
 
     expect(text).toContain('Recovery     : RECOVERY_FAILED  (UNIDENTIFIABLE_AND_UNOWNED)');
   });
@@ -899,7 +913,7 @@ describe('a workspace left by a crashed start is adopted and then driven', () =>
       {
         repository: started.repository,
         taskId: TASK_ID,
-        continuationGrant: true,
+        continuationGrant: 'ATTENDED',
         recoverStaleLease: false,
         maxSteps: 2,
         maxInvocations: 2,
