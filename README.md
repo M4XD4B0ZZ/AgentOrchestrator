@@ -3026,7 +3026,7 @@ The order is the guarantee, and it lives in `loop/loop-step.ts`
 positively recognised AGENT_USAGE_LIMIT        (the only refusal that qualifies)
   → POST-SCOPE on the writer's actual effect
        violation      → SCOPE_VIOLATION, and the quota block is not written
-       indeterminate  → HUMAN_DECISION_REQUIRED, nothing committed
+       indeterminate  → nothing committed, checkpoint withdrawn, still a pause
        within scope   ↓
   → AO stages and commits under its own identity and controls
        nothing changed → no commit, and no empty one is manufactured
@@ -3054,14 +3054,18 @@ What this deliberately did **not** do:
   tracked file that changed, an untracked file that appeared, a worktree that
   disappeared — each is `DIVERGED` through the existing reconciler, with no new
   reason vocabulary.
-- **Settlement failure is fail-closed.** Git unavailable, a refused commit, an
+- **Settlement failure is fail-closed, and keeps the quota record.** Git
+  unavailable at *any* step — the scope read included — a refused commit, an
   executable content driver, a HEAD that cannot be read, a tree still dirty
-  afterwards: every one leaves `BLOCKED_USAGE_LIMIT` with the claims withdrawn —
+  afterwards: every one leaves `BLOCKED_USAGE_LIMIT` with the claims withdrawn,
   byte for byte the behaviour above, which denies. `HUMAN_DECISION_REQUIRED` was
-  rejected for those cases because every such write clears `reportedResetAt`, so
+  rejected for all of them because every such write clears `reportedResetAt`, so
   the record would stop saying *why* the task stopped for a transient Git
-  failure. A proven scope violation is the exception and outranks the quota
-  block, because it is an accusation the tree supports.
+  failure. This is the one place the quota path deliberately differs from the
+  completed-writer path, which does park an indeterminate scope: there, nothing
+  else holds the task and a human has to look; here, quota does. A **proven**
+  scope violation is the exception and outranks the quota block, because it is an
+  accusation the tree supports.
 - **Nothing else about a writer's ending changed.** `AGENT_NONZERO_EXIT`,
   `AGENT_RESULT_MALFORMED` and `AGENT_PROCESS_UNAVAILABLE` are not settled, and
   the last of those must never be: it is the diagnosis for a run that did *not*
@@ -3162,7 +3166,26 @@ and because the failure mode it describes — a command that cannot start is
   so any later edit is `DIVERGED` and refuses on **every** run, attended
   included. That is the F-10 safety property working as specified — "nothing
   moved while we waited" — and it is also a real cost, recorded here so it is a
-  decision rather than a surprise.
+  decision rather than a surprise. Note the inversion it creates: the
+  *completed* pass makes the identical commit and then deliberately does **not**
+  record the checkpoint (`withdrawnCheckpointFor` on the write into `VERIFYING`),
+  precisely to avoid this brittleness. So the interrupted state now carries a
+  stricter claim than the successful one at the same repository moment. That is
+  the trade the resume is bought with, and it is deliberate.
+- **L-V3-10-4 — ACCEPTED LIMIT: a writer effect neither gate can see now buys
+  resume authority instead of denying it.** The scope gate reads `git diff` plus
+  untracked files inside the worktree, and the settlement reads `status
+  --porcelain`. Neither sees a gitignored file the writer created, a write
+  outside the worktree, submodule content under `ignore = all`, or anything
+  hidden by a worktree-local `status.showUntrackedFiles=no`. Those blind spots
+  are unchanged by V3-10 — but their *consequence* reversed direction: such a run
+  used to produce a permanently non-resumable block, and now produces
+  `currentCommit` + `worktreeCleanAtCheckpoint: true`, which is authority for an
+  unattended writer launch. Accepted rather than closed, because closing it means
+  a broader definition of "settled" than Git's own porcelain, which is a contract
+  of its own. **Related:** V3-10 removes two of the three independent locks on
+  unattended quota resume, so closing L-V3-08-1 is the change that *ships*
+  unattended execution — not an isolated output-format migration.
 - **L-V3-10-3** — two settlement refusals have **no separate report**.
   `LoopStepResult.scope` and `.commit` name the scope verdict and the commit
   outcome, but "HEAD could not be observed afterwards" and "the tree was still

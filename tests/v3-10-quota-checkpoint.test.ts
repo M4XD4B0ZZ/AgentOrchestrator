@@ -43,14 +43,17 @@ import { join } from 'node:path';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
-import { runImplementStep, type LoopDependencies } from '../src/loop/loop-step.js';
+import { runImplementStep, runVerifyStep, type LoopDependencies } from '../src/loop/loop-step.js';
 import { recordAgentInterruption } from '../src/agent/record-interruption.js';
 import {
   isInterruptionCheckpoint,
   interruptionCheckpointCommitOf,
   type InterruptionCheckpoint,
 } from '../src/core/interruption-checkpoint.js';
-import { mintInterruptionCheckpoint } from '../src/core/internal/interruption-checkpoint.js';
+import {
+  InterruptionCheckpointProof as Proof,
+  mintInterruptionCheckpoint,
+} from '../src/core/internal/interruption-checkpoint.js';
 import { PACKAGE_ROOT } from '../src/config/paths.js';
 import { parseTaskState, type TaskState } from '../src/core/task-state.js';
 import { readExecutionBrief } from '../src/plan/task-brief.js';
@@ -69,6 +72,7 @@ import {
   e2eProfile,
   headOf,
   recordedAgent,
+  recordedVerify,
   usageLimitResult,
   writerSuccess,
   writerThatEdits,
@@ -152,6 +156,33 @@ async function implementing(): Promise<{
   return { repository, root, current, worktreePath: current.state.worktreePath };
 }
 
+/**
+ * Drives a fresh task all the way to `REVIEWING` through production steps.
+ *
+ * Needed because the read-only half of the checkpoint gate can only be asked
+ * from a phase that runs the reviewer, and a seeded state would not prove the
+ * producer ever reaches one carrying the shape being tested.
+ */
+async function driveTo(
+  repository: ResolvedRepository,
+  root: string,
+  target: 'REVIEWING',
+): Promise<StateLoadSuccess> {
+  let current = reload(root);
+  const agent = recordedAgent({
+    claude: writerThatEdits('src/done.ts', `export const done = true;${NEWLINE}`),
+  });
+  expect(
+    (await runImplementStep(current, stepDeps(current, repository, { agent: agent.runner }))).state,
+  ).toBe('VERIFYING');
+  current = reload(root);
+  const verify = recordedVerify();
+  expect(
+    (await runVerifyStep(current, stepDeps(current, repository, { verify: verify.runner }))).state,
+  ).toBe(target);
+  return reload(root);
+}
+
 function reload(root: string): StateLoadSuccess {
   const loaded = loadTaskState(root, TASK_ID);
   if (loaded.classification !== 'STATE_VALID') {
@@ -211,10 +242,18 @@ async function decide(
  * exit is Git *answering*, and several of the commands here answer questions
  * with their exit status.
  */
-function gitFailing(match: (args: readonly string[]) => boolean): GitRunner {
+function gitFailing(
+  match: (args: readonly string[]) => boolean,
+  options: { readonly after?: number } = {},
+): GitRunner {
+  let seen = 0;
+  const after = options.after ?? 0;
   return async (cwd, args) => {
     if (match(args)) {
-      return Object.freeze({ outcome: 'UNAVAILABLE' as const, stdout: '', exitCode: null });
+      seen += 1;
+      if (seen > after) {
+        return Object.freeze({ outcome: 'UNAVAILABLE' as const, stdout: '', exitCode: null });
+      }
     }
     return runGitCommand(cwd, args);
   };
@@ -393,22 +432,56 @@ describe('a quota response never hides what the writer did to the repository', (
     const agent = recordedAgent({
       claude: writerThatEditsThenHitsUsageLimit('src/partial.ts', `export const partial = 1;${NEWLINE}`),
     });
-    // The delta probe cannot answer, so no verdict about the agent exists.
-    const blindToDelta = gitFailing((args) => args.includes('diff'));
+    // The delta probe answers for PRE-SCOPE and then stops answering, so the
+    // writer really runs and it is the **post**-writer assessment that has no
+    // verdict. Failing it from the first call would park the task before the
+    // writer ever started — this case would then pass while measuring the
+    // pre-writer gate, which is not what it claims.
+    const blindAfterPreScope = gitFailing((args) => args.includes('diff'), { after: 1 });
     const step = await runImplementStep(
       current,
-      stepDeps(current, repository, { agent: agent.runner, git: blindToDelta }),
+      stepDeps(current, repository, { agent: agent.runner, git: blindAfterPreScope }),
     );
+    expect(agent.countFor('claude')).toBe(1);
 
     expect(step.scope?.verdict).toBe('INDETERMINATE');
-    // Nothing was committed on an assessment that approved nothing.
+    // Nothing was committed on an assessment that approved nothing — which is
+    // the fail-closed half, and the one §15 requires.
     expect(step.commit).toBeNull();
 
     const blocked = reload(root).state;
-    expect(blocked.state).toBe('HUMAN_DECISION_REQUIRED');
+    // Still a quota pause, and this is where the quota path deliberately
+    // differs from the completed-writer path. `enforceScope` parks an
+    // indeterminate tree at `HUMAN_DECISION_REQUIRED`, which clears
+    // `reportedResetAt` — spending the one fact that *is* known, because
+    // `git diff` would not answer. Here the block keeps saying why the task
+    // stopped, and denies the resume with its withdrawn claims instead.
+    expect(blocked.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(blocked.resumeFrom).toEqual({ phase: 'IMPLEMENT', round: 1 });
     expect(blocked.currentCommit).toBeNull();
     expect(blocked.worktreeCleanAtCheckpoint).toBe(false);
-    expect((await decide(blocked, repository, AFTER_T)).continuation).not.toBe('AUTOMATIC_ALLOWED');
+
+    releaseTestLeases();
+    const waiting = withSyntheticReset(blocked, T);
+    expect((await decide(waiting, repository, AFTER_T)).continuation).not.toBe('AUTOMATIC_ALLOWED');
+  });
+
+  it('still parks an indeterminate scope for a writer that COMPLETED', async () => {
+    const { repository, root, current } = await implementing();
+    const agent = recordedAgent({
+      claude: writerThatEdits('src/done.ts', `export const done = true;${NEWLINE}`),
+    });
+    const blindAfterPreScope = gitFailing((args) => args.includes('diff'), { after: 1 });
+    const step = await runImplementStep(
+      current,
+      stepDeps(current, repository, { agent: agent.runner, git: blindAfterPreScope }),
+    );
+
+    // The control for the case above: nothing else holds a completed pass, so a
+    // human has to look. The asymmetry is about the quota fact, not about scope.
+    expect(agent.countFor('claude')).toBe(1);
+    expect(step.scope?.verdict).toBe('INDETERMINATE');
+    expect(reload(root).state.state).toBe('HUMAN_DECISION_REQUIRED');
   });
 });
 
@@ -432,7 +505,13 @@ describe('a settlement that cannot be proven leaves the block denying', () => {
     ],
     [
       'HEAD cannot be observed afterwards',
-      gitFailing((args) => args[0] === 'rev-parse' && args.includes('HEAD')),
+      // `--end-of-options` is what distinguishes the two `rev-parse HEAD` calls
+      // in this flow. `commitTaskWork` reads HEAD with a bare `['rev-parse',
+      // 'HEAD']`, so a seam matching on the command name alone breaks *that*
+      // call first and this case becomes a second copy of "the commit cannot be
+      // made" — the post-settlement observation is then never reached at all. A
+      // review caught exactly that.
+      gitFailing((args) => args[0] === 'rev-parse' && args.includes('--end-of-options')),
     ],
     [
       'cleanliness cannot be observed afterwards',
@@ -464,9 +543,23 @@ describe('a settlement that cannot be proven leaves the block denying', () => {
     const waiting = withSyntheticReset(blocked, T);
     const decision = await decide(waiting, repository, AFTER_T);
     expect(decision.continuation).not.toBe('AUTOMATIC_ALLOWED');
-    expect(decision.automaticResume?.reasonCodes ?? decision.reasonCodes).toContain(
-      decision.automaticResume === null ? 'WORKTREE_DIRTY' : 'CURRENT_COMMIT_MISMATCH',
-    );
+
+    // Fixed, not derived from the result. An expectation computed from the
+    // value under test passes for either shape, so it would not notice a case
+    // silently changing which refusal it exercises.
+    //
+    // Reconciliation is `CONSISTENT` in all three, and that is the point rather
+    // than a weakness: a withdrawn checkpoint *accounts for* whatever the tree
+    // holds — `worktreeCleanAtCheckpoint: false` is exactly the record that
+    // stops a dirty tree being a contradiction. So the world agrees with the
+    // record, no divergence hides the result, and the refusal has to come from
+    // the unattended authority itself, naming both withdrawn claims. That is
+    // the property this slice must not lose, measured with nothing else in
+    // front of it.
+    expect(decision.reconciliation.verdict).toBe('CONSISTENT');
+    expect(decision.classification).toBe('AUTOMATIC_RESUME_REFUSED');
+    expect(decision.automaticResume?.reasonCodes).toContain('CURRENT_COMMIT_MISMATCH');
+    expect(decision.automaticResume?.reasonCodes).toContain('WORKTREE_NOT_CLEAN');
   });
 
   it('refuses to settle a target repository whose configuration would run code', async () => {
@@ -491,25 +584,46 @@ describe('a settlement that cannot be proven leaves the block denying', () => {
     expect(blocked.worktreeCleanAtCheckpoint).toBe(false);
   });
 
-  it('records nothing at all when the lease is gone before the state write', async () => {
-    const { repository, root, current } = await implementing();
+  it('commits nothing and records nothing when the lease is lost mid-step', async () => {
+    const { repository, root, current, worktreePath } = await implementing();
+    const before = headOf(worktreePath);
+
+    // The lease has to be **valid while the writer runs and gone afterwards**.
+    // Releasing it before the step instead would make `leasedAgent` refuse to
+    // start the writer at all: the tree would stay untouched, nothing would be
+    // settled, and the case would pass having measured a step that never
+    // reached the settlement. So it is given back from inside the writer, which
+    // is also what a real lease loss looks like — minutes of subprocess time
+    // after the step began.
+    const writer = writerThatEditsThenHitsUsageLimit(
+      'src/partial.ts',
+      `export const partial = 1;${NEWLINE}`,
+    );
     const agent = recordedAgent({
-      claude: writerThatEditsThenHitsUsageLimit('src/partial.ts', `export const partial = 1;${NEWLINE}`),
+      claude: (call) => {
+        const result = writer(call);
+        releaseTestLeases();
+        return result;
+      },
     });
-    const deps = stepDeps(current, repository, { agent: agent.runner });
-    // Given back after the step was built, so the writer runs and the durable
-    // write is the thing that finds no authority.
-    releaseTestLeases();
 
-    const step = await runImplementStep(current, deps);
-    expect(step.outcome).not.toBe('ADVANCED');
+    const step = await runImplementStep(current, stepDeps(current, repository, { agent: agent.runner }));
+    expect(agent.countFor('claude')).toBe(1);
+    expect(step.outcome).toBe('STATE_NOT_RECORDED');
 
-    const after = reload(root).state;
-    // Whatever happened, the durable record never became a resumable claim.
-    expect(after.currentCommit === null || after.state !== 'BLOCKED_USAGE_LIMIT').toBe(true);
-    if (after.state === 'BLOCKED_USAGE_LIMIT') {
-      expect(after.worktreeCleanAtCheckpoint).toBe(false);
-    }
+    // Positive assertions, because "not ADVANCED" and "currentCommit is null"
+    // are both already true of the state this step started from — an earlier
+    // version of this case would have passed had the step done nothing at all.
+    // What has to be shown is that the *effects* were refused: no object
+    // entered the repository, the writer's work is still there as evidence, and
+    // the durable record never moved.
+    expect(step.commit?.outcome).toBe('GIT_UNAVAILABLE');
+    expect(headOf(worktreePath)).toBe(before);
+    expect(git(worktreePath, ['status', '--porcelain']).trim()).not.toBe('');
+
+    const after = reload(root);
+    expect(after.state.state).toBe('IMPLEMENTING');
+    expect(after.revision).toBe(current.revision);
   });
 });
 
@@ -679,6 +793,39 @@ describe('checkpoint evidence can only be produced, never asserted', () => {
     const created = Object.create(Object.getPrototypeOf(genuine)) as unknown;
     expect(isInterruptionCheckpoint(created)).toBe(false);
     expect(interruptionCheckpointCommitOf(created)).toBeNull();
+
+    // Route 4: turn the gate off process-wide instead of getting past it.
+    //
+    // This is the route that mattered. `execution-lease-evidence.ts` records
+    // `ExecutionLeaseProof.holds = () => true` as how an adversarial review
+    // disabled that artefact's gate once it had reached the class — and the
+    // class is reachable from any genuine artefact, above, with no import. Two
+    // assignments here would make `recordAgentInterruption` write an
+    // unattended-resume grant for a repository nobody looked at.
+    //
+    // The class and its prototype are frozen, so both throw in strict mode
+    // (which every ESM module is). An earlier version of this file shipped
+    // without the freeze while its header claimed parity with its siblings.
+    // First: the class is not reachable from an artefact at all any more.
+    // `Reflect.deleteProperty(prototype, 'constructor')` means the lookup walks
+    // past it to `Object`, so the no-import route to the class is closed.
+    expect(Object.getPrototypeOf(genuine).constructor).not.toBe(Proof);
+
+    // And with the class in hand — which needs the internal import this test
+    // deliberately has — the statics cannot be replaced.
+    const gate = Proof as unknown as Record<string, unknown>;
+    expect(() => {
+      gate['holds'] = (): boolean => true;
+    }).toThrow(TypeError);
+    expect(() => {
+      gate['commitOf'] = (): string => 'f'.repeat(40);
+    }).toThrow(TypeError);
+    expect(Object.isFrozen(Proof)).toBe(true);
+    expect(Object.isFrozen(Proof.prototype)).toBe(true);
+
+    // The gate still answers truthfully afterwards.
+    expect(isInterruptionCheckpoint({ commit: SHA })).toBe(false);
+    expect(isInterruptionCheckpoint(genuine)).toBe(true);
   });
 
   it('withdraws the checkpoint for a forged artefact exactly as for an absent one', async () => {
@@ -731,6 +878,44 @@ describe('checkpoint evidence can only be produced, never asserted', () => {
     expect(blocked.state).toBe('BLOCKED_AUTH');
     expect(blocked.currentCommit).toBeNull();
     expect(blocked.worktreeCleanAtCheckpoint).toBe(false);
+  });
+
+  it('refuses a genuine checkpoint for a phase that could not have changed the tree', async () => {
+    const { repository, root, current } = await implementing();
+    // A real `REVIEWING` state, reached by the same producer path, so the gate
+    // is asked the question it exists for. Codex is contractually read-only and
+    // AO makes no commit for it, so a checkpoint here could only *overwrite* a
+    // true one the reviewer could not have invalidated.
+    const reviewing = await driveTo(repository, root, 'REVIEWING');
+    const genuine = mintInterruptionCheckpoint({
+      observedCommit: reviewing.state.currentCommit ?? reviewing.state.basePinnedCommit,
+      worktreeClean: true,
+    });
+    expect(genuine).not.toBeNull();
+    const carried = reviewing.state.currentCommit;
+
+    const record = recordAgentInterruption(
+      reviewing,
+      {
+        disposition: 'AGENT_BLOCKED_USAGE_LIMIT',
+        block: { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 1 }, reportedResetAt: null },
+      },
+      {
+        now: '2026-08-22T11:00:00.000Z',
+        fallback: { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 1 }, reportedResetAt: null },
+        checkpoint: genuine,
+        lease: leaseAuthorityFor(repository),
+      },
+    );
+    expect(record.outcome).toBe('PAUSED_USAGE_LIMIT');
+
+    // Nothing was withdrawn — a read-only phase invalidates nothing — and
+    // nothing was written over it either. The checkpoint is the one the state
+    // already carried, not the one the caller handed in.
+    const blocked = reload(root).state;
+    expect(blocked.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(blocked.currentCommit).toBe(carried);
+    void current;
   });
 
   /**

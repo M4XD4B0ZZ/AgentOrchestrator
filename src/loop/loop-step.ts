@@ -599,9 +599,14 @@ async function observeSettledWorktree(
  * such write in this module clears `reportedResetAt`, so the record would stop
  * saying why the task stopped, for a transient Git failure.
  *
- * The two scope refusals are the exception, and they are not settlement
- * failures: they are proven facts about the tree, and `enforceScope` owns both
- * of their durable outcomes already.
+ * A **proven** scope violation is the one exception, and it is not a settlement
+ * failure: it is a fact about the tree that outranks the quota block, and it
+ * takes `SCOPE_VIOLATION` — a state nothing may continue.
+ *
+ * An *indeterminate* assessment is a settlement failure like any other and is
+ * treated as one, which is where this path deliberately differs from
+ * `enforceScope`'s. See the comment at that arm for why: parking it would spend
+ * the quota record to buy nothing.
  */
 async function settleQuotaInterruption(
   current: StateLoadSuccess,
@@ -610,28 +615,66 @@ async function settleQuotaInterruption(
   const state = current.state;
   const { now, authorisedWorktreePath, git, phase, round } = deps;
 
-  // POST-SCOPE, before anything is staged. `blocked` is non-null for a proven
-  // violation *and* for an unreadable one, and the guard has already made this
-  // step's durable write in either case.
-  const after = await enforceScope(current, {
+  const guard = {
     now,
     git: git ?? runGitCommand,
     authorisedWorktreePath,
-    phase,
-    round,
     writerRan: true,
     advance: leaseAdvanceOptions(deps),
-  });
-  if (after.blocked !== null) return Object.freeze({ kind: 'BLOCKED' as const, result: after.blocked });
+  };
 
-  // Asked again rather than assumed, exactly as `commitPassOrPark` does: this
-  // is a second entry point into the same commit, and a task with no base pin
-  // cannot be committed against one.
+  // POST-SCOPE, before anything is staged, and the verdict is switched on
+  // directly rather than through a `blocked` value. That is deliberate: this is
+  // the one caller for which the three verdicts do **not** map onto two
+  // outcomes, so a nullable result would be a value it is possible to misread as
+  // permission. `WITHIN_SCOPE` is the only arm that falls through to a commit.
+  const assessment = await measureScope(current, guard);
+
+  // A proven violation outranks the quota block and takes this step's one
+  // durable write. `SCOPE_VIOLATION` is not resumable and carries no re-entry
+  // point, so no timer can turn an escape back into an automatic writer.
+  if (assessment.verdict === 'VIOLATION') {
+    return Object.freeze({
+      kind: 'BLOCKED' as const,
+      result: writeScopeViolation(current, guard, assessment),
+    });
+  }
+
+  // An **indeterminate** assessment is where this caller parts company with the
+  // completed-writer path, and the reason is the quota fact.
+  //
+  // `enforceScope` parks an indeterminate tree at `HUMAN_DECISION_REQUIRED`, and
+  // for a completed writer that is right: nothing else holds the task, and a
+  // human has to look. Here something else does hold it — the CLI positively
+  // reported quota exhaustion — and every `HUMAN_DECISION_REQUIRED` write in
+  // this module clears `reportedResetAt`. Taking that edge because `git diff`
+  // would not answer discards a fact that *is* known in order to record one that
+  // is not, and converts a self-clearing pause into an operator ticket for a
+  // transient failure. A review caught this module doing exactly what the
+  // paragraph above forbids.
+  //
+  // So it fails closed the other way: the block is recorded with its checkpoint
+  // withdrawn. Nothing is committed on an assessment that approved nothing, no
+  // unattended resume is possible, and the scope question is asked again — by
+  // PRE-SCOPE — before any writer runs in that worktree again.
+  if (assessment.verdict !== 'WITHIN_SCOPE') {
+    return Object.freeze({
+      kind: 'RECORD' as const,
+      checkpoint: null,
+      scope: assessment,
+      commit: null,
+    });
+  }
+
+  // Unreachable in practice — `assessTaskScope` answers `INDETERMINATE` for a
+  // task with no base pin, which the arm above has already taken — and kept
+  // because `commitTaskWork` requires the value to be a string, and a narrowing
+  // that depends on another module's verdict is a narrowing that can rot.
   if (state.basePinnedCommit === null) {
     return Object.freeze({
       kind: 'RECORD' as const,
       checkpoint: null,
-      scope: after.assessment,
+      scope: assessment,
       commit: null,
     });
   }
@@ -643,7 +686,7 @@ async function settleQuotaInterruption(
     // Handed down from the gate that approved them, never re-derived here: a
     // set measured at this point would be measured after any injection and
     // would therefore contain it (G12).
-    approvedPaths: after.assessment.approvedPaths,
+    approvedPaths: assessment.approvedPaths,
     basePinnedCommit: state.basePinnedCommit,
   });
 
@@ -659,7 +702,7 @@ async function settleQuotaInterruption(
     return Object.freeze({
       kind: 'RECORD' as const,
       checkpoint: null,
-      scope: after.assessment,
+      scope: assessment,
       commit,
     });
   }
@@ -671,7 +714,7 @@ async function settleQuotaInterruption(
     checkpoint: mintInterruptionCheckpoint(
       await observeSettledWorktree(leasedGit(deps), authorisedWorktreePath),
     ),
-    scope: after.assessment,
+    scope: assessment,
     commit,
   });
 }
@@ -794,6 +837,79 @@ function leaseAdvanceOptions(deps: LoopDependencies): AdvanceOptions {
  * them — see `scope/assess-scope.ts` for why undoing them would be the more
  * dangerous act.
  */
+/** What the scope guard needs, and what both of its halves are given. */
+interface ScopeGuardOptions {
+  readonly now: string;
+  readonly git: GitRunner;
+  readonly authorisedWorktreePath: string;
+  readonly phase: ResumePhase;
+  readonly round: number;
+  /** Whether the writing agent has already run in this pass. */
+  readonly writerRan: boolean;
+  readonly advance: AdvanceOptions;
+}
+
+/**
+ * The measurement, on its own.
+ *
+ * Derived from Git, never accepted as an input. The scope declaration is not
+ * passed either — `assessTaskScope` reads it out of the pinned commit.
+ *
+ * Separated from the writes below so that a caller which needs a *different*
+ * durable outcome for one of the refusals can still get the verdict from the
+ * one place that produces it. There is exactly one such caller
+ * ({@link settleQuotaInterruption}) and exactly one refusal it treats
+ * differently; everything about how the verdict is reached stays here.
+ */
+async function measureScope(
+  current: StateLoadSuccess,
+  options: Pick<ScopeGuardOptions, 'git' | 'authorisedWorktreePath'>,
+): Promise<ScopeAssessment> {
+  const state = current.state;
+  return await assessTaskScope({
+    git: options.git,
+    authorisedWorktreePath: options.authorisedWorktreePath,
+    basePinnedCommit: state.basePinnedCommit,
+    // From the record, not from this invocation. A chained task's authority has
+    // to outlive the block run that started it, and a value threaded through
+    // `RunRequest` would protect the run and nothing after it.
+    scopeAuthorityCommit: state.scopeAuthorityCommit,
+  });
+}
+
+/**
+ * The one durable write for a **proven** violation.
+ *
+ * Extracted rather than duplicated: it is taken by two callers with different
+ * ideas about the *other* refusal, and two copies of an accusation's write shape
+ * would be free to disagree about what a violation records.
+ */
+function writeScopeViolation(
+  current: StateLoadSuccess,
+  options: Pick<ScopeGuardOptions, 'now' | 'writerRan' | 'advance'>,
+  assessment: ScopeAssessment,
+): LoopStepResult {
+  const state = current.state;
+  const save = advanceTaskState(
+    current,
+    {
+      ...state,
+      state: 'SCOPE_VIOLATION',
+      stateEnteredAt: options.now,
+      // Only when a writer actually ran. A pre-writer violation is a fact about
+      // the tree this step found, and naming an agent that was never started
+      // would attribute it to a run that did not happen.
+      blockedAgent: options.writerRan ? 'claude' : null,
+      // The state cannot be continued, so it may not carry a re-entry point.
+      resumeFrom: null,
+      reportedResetAt: null,
+      ...withdrawnCheckpointFor(state.state),
+    },
+    options.advance,
+  );
+  return saved(save, 'SCOPE_VIOLATION', 'BLOCKED', { scope: assessment });
+}
+
 async function enforceScope(
   current: StateLoadSuccess,
   options: {
@@ -808,40 +924,11 @@ async function enforceScope(
   },
 ): Promise<{ readonly blocked: LoopStepResult | null; readonly assessment: ScopeAssessment }> {
   const state = current.state;
-
-  // Derived here from Git, never accepted as an input. The scope declaration is
-  // not passed either — `assessTaskScope` reads it out of the pinned commit.
-  const assessment = await assessTaskScope({
-    git: options.git,
-    authorisedWorktreePath: options.authorisedWorktreePath,
-    basePinnedCommit: state.basePinnedCommit,
-    // From the record, not from this invocation. A chained task's authority has
-    // to outlive the block run that started it, and a value threaded through
-    // `RunRequest` would protect the run and nothing after it.
-    scopeAuthorityCommit: state.scopeAuthorityCommit,
-  });
+  const assessment = await measureScope(current, options);
 
   if (assessment.verdict === 'WITHIN_SCOPE') return { blocked: null, assessment };
-
   if (assessment.verdict === 'VIOLATION') {
-    const save = advanceTaskState(
-      current,
-      {
-        ...state,
-        state: 'SCOPE_VIOLATION',
-        stateEnteredAt: options.now,
-        // Only when a writer actually ran. A pre-writer violation is a fact
-        // about the tree this step found, and naming an agent that was never
-        // started would attribute it to a run that did not happen.
-        blockedAgent: options.writerRan ? 'claude' : null,
-        // The state cannot be continued, so it may not carry a re-entry point.
-        resumeFrom: null,
-        reportedResetAt: null,
-        ...withdrawnCheckpointFor(state.state),
-      },
-      options.advance,
-    );
-    return { blocked: saved(save, 'SCOPE_VIOLATION', 'BLOCKED', { scope: assessment }), assessment };
+    return { blocked: writeScopeViolation(current, options, assessment), assessment };
   }
 
   const save = advanceTaskState(

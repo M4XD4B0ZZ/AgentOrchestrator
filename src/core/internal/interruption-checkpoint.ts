@@ -140,3 +140,20 @@ export function mintInterruptionCheckpoint(
   MINTED.add(proof);
   return proof;
 }
+
+// Closed for the same two reasons the containment attestation and the lease
+// proof are closed, and this artefact carries the higher-value claim of the
+// three: the constructor is reachable from any instance through its prototype,
+// and a writable static is a process-wide off switch for the gate. Neither is
+// what makes the type safe — the registry is — and both are cheap.
+//
+// The second one is not hypothetical. `execution-lease-evidence.ts` records
+// `ExecutionLeaseProof.holds = () => true` as the way an adversarial review
+// disabled that gate process-wide once it had reached the class. The same two
+// assignments here — `holds` and `commitOf` — would make
+// `recordAgentInterruption` write an unattended-resume grant for a repository
+// nobody observed. An earlier version of this file omitted these lines while
+// its own header claimed parity with its siblings; a review caught the gap.
+Reflect.deleteProperty(InterruptionCheckpointProof.prototype, 'constructor');
+Object.freeze(InterruptionCheckpointProof.prototype);
+Object.freeze(InterruptionCheckpointProof);
