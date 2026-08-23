@@ -3,10 +3,15 @@
  *
  * ── The location, and why not somewhere else ───────────────────────────────
  *
- * `<repositoryRoot>/.agent-orchestrator/runtime/<taskId>.delivery.json` — a
- * companion beside the task-state file it is bound to, published through the
- * same crash-safe primitive (`state/atomic-file.ts`: stage in the same
- * directory, flush, close, one rename).
+ * `<repositoryRoot>/.agent-orchestrator/runtime/delivery/<taskId>.json` — a
+ * companion beside the task-state file it is bound to, one directory down,
+ * published through the same crash-safe primitive (`state/atomic-file.ts`:
+ * stage in the same directory, flush, close, one rename).
+ *
+ * The directory is not decoration: it is what stops a delivery record and a
+ * task state from ever addressing the same path. See
+ * {@link DELIVERY_EVIDENCE_DIR_NAME} for the collision that made it necessary,
+ * which a review reproduced rather than argued.
  *
  * Beside, and not *inside*, the task state. That is the same decision
  * `lease/containment-evidence.ts` records, taken for a different reason and
@@ -31,14 +36,14 @@
  * written there makes the checkout dirty and the *next* run refuses with
  * `SOURCE_WORKTREE_DIRTY`. `state/runtime-ignored.ts` exists for exactly that
  * and is run before the first task-state write — but it asks about two names,
- * `<taskId>.json` and its staging probe, and this slice creates two more.
+ * `<taskId>.json` and its staging probe, and this slice writes two more, in a
+ * directory that did not exist when that check was written.
  *
  * Most ignore rules that cover those two cover these as well. Not all: a rule
- * written as `.agent-orchestrator/runtime/<taskId>.json*` ignores both names the
- * existing check asks about and neither of the names here. That is narrow, and
- * it is constructible, and the cost of being wrong is a repository that stops
- * being runnable for a reason nothing points at. So it is asked, about the
- * names this module really writes, before anything is written.
+ * written as `.agent-orchestrator/runtime/*.json` matches the state file and
+ * nothing one level down, and the cost of being wrong is a repository that
+ * stops being runnable for a reason nothing points at. So it is asked, about
+ * the exact paths this module really writes, before anything is written.
  *
  * ── One latest snapshot, not a history ─────────────────────────────────────
  *
@@ -57,7 +62,11 @@ import { isAbsolute, join } from 'node:path';
 import { safeErrnoCode } from '../core/safe-error.js';
 import { isContained } from '../doctor/safe-write.js';
 import { isValidTaskId } from '../plan/task-id.js';
-import { taskRuntimeDirectory } from '../state/state-location.js';
+import {
+  isStateFileName,
+  taskRuntimeDirectory,
+  TASK_STATE_FILE_EXTENSION,
+} from '../state/state-location.js';
 import { writeFileAtomically, type ReplaceFn, type TempSuffixFn } from '../state/atomic-file.js';
 import {
   DELIVERY_EVIDENCE_VERSION,
@@ -71,32 +80,57 @@ import {
 import { deliveryObservationFactsOf } from './delivery-observation-proof.js';
 
 /**
- * The suffix that distinguishes this record from the task state beside it.
+ * The directory that separates delivery records from task state.
  *
- * `<taskId>.delivery.json`, so the two sort together and an operator reading
- * the directory can see which task a record belongs to. Deliberately *not* a
- * name `state/state-location.ts`'s `isStateFileName` would accept — that
- * predicate answers "is this the file name of some task's state", and a
- * delivery record must never be mistaken for one.
+ * `<runtime>/delivery/<taskId>.json`, following the precedent
+ * `block/block-store.ts` already sets with `<runtime>/blocks/<runId>.json`: a
+ * second kind of per-repository record gets its own directory rather than its
+ * own name inside a shared one.
+ *
+ * ── A suffix was tried first, and it was a state-destroying defect ─────────
+ *
+ * The first version of this module wrote `<taskId>.delivery.json` into the
+ * runtime directory itself, and its header claimed that was "deliberately not a
+ * name `isStateFileName` would accept". **That was false, and an adversarial
+ * review reproduced the consequence.** The task-id grammar
+ * (`plan/task-id.ts`) admits `.`, so `T-001.delivery` is a perfectly legal task
+ * id — which means `deriveTaskStateLocation(root, 'T-001.delivery')` and the
+ * old `deriveDeliveryEvidenceLocation(root, 'T-001')` produced the **same
+ * path**. Recording an observation for `T-001` would have renamed an evidence
+ * blob over another task's durable state, destroying it; the reverse write
+ * would have clobbered the evidence.
+ *
+ * That is exactly the class `lease/containment-evidence.ts` records as its
+ * reason for a companion file — stage-and-rename is an ABA on a *name*, and a
+ * name somebody else legitimately owns is the worst one to hold.
+ *
+ * A directory closes it structurally rather than by grammar. Task state is
+ * always joined from `taskRuntimeDirectory()` and can never land one level
+ * down, so no task id — however it is spelled — can produce a collision. The
+ * file name is then simply `<taskId>.json`, judged by
+ * `state-location.ts`'s own `isStateFileName`: the same grammar, shared rather
+ * than restated, because the separation is structural and a second copy of the
+ * rule could only drift from the first.
  */
-export const DELIVERY_EVIDENCE_FILE_SUFFIX = '.delivery.json';
+export const DELIVERY_EVIDENCE_DIR_NAME = 'delivery';
+
+/** The extension of a delivery evidence file. */
+export const DELIVERY_EVIDENCE_FILE_EXTENSION = TASK_STATE_FILE_EXTENSION;
+
+/** The directory holding delivery records for a canonical repository root. */
+export function deliveryEvidenceDirectory(repositoryRoot: string): string {
+  return join(taskRuntimeDirectory(repositoryRoot), DELIVERY_EVIDENCE_DIR_NAME);
+}
 
 /**
- * Longest name a delivery evidence file may have.
+ * `true` when `name` is the evidence file name of *some* canonically valid task.
  *
- * Derived from the task-id budget and this module's own suffix rather than
- * borrowed from `MAX_STATE_FILE_NAME_LENGTH`, which is derived from a different
- * suffix. Borrowing an unrelated length budget from another module is how a
- * storage layer quietly redefines the task-id contract — the mistake
- * `state-location.ts` documents at length about `isPlainFileName`.
+ * Identical to the task-state grammar, and shared with it rather than restated.
+ * The two records are told apart by the directory they sit in, which is a
+ * property no task id can spell its way around.
  */
-export const MAX_DELIVERY_EVIDENCE_FILE_NAME_LENGTH = 128 + DELIVERY_EVIDENCE_FILE_SUFFIX.length;
-
-/** `true` when `name` is the evidence file name of *some* canonically valid task. */
 export function isDeliveryEvidenceFileName(name: string): boolean {
-  if (name.length > MAX_DELIVERY_EVIDENCE_FILE_NAME_LENGTH) return false;
-  if (!name.endsWith(DELIVERY_EVIDENCE_FILE_SUFFIX)) return false;
-  return isValidTaskId(name.slice(0, name.length - DELIVERY_EVIDENCE_FILE_SUFFIX.length));
+  return isStateFileName(name);
 }
 
 export interface DeliveryEvidenceLocation {
@@ -133,13 +167,13 @@ export function deriveDeliveryEvidenceLocation(
   if (!isValidTaskId(taskId)) {
     return Object.freeze({ ok: false as const, code: 'TASK_ID_UNSUITABLE' as const });
   }
-  const fileName = `${taskId}${DELIVERY_EVIDENCE_FILE_SUFFIX}`;
+  const fileName = `${taskId}${DELIVERY_EVIDENCE_FILE_EXTENSION}`;
   // Belt and braces: the derived name is judged in its own right, so a future
-  // suffix change cannot silently produce a name nothing would accept back.
+  // change cannot silently produce a name nothing would accept back.
   if (!isDeliveryEvidenceFileName(fileName)) {
     return Object.freeze({ ok: false as const, code: 'TASK_ID_UNSUITABLE' as const });
   }
-  const directory = taskRuntimeDirectory(repositoryRoot);
+  const directory = deliveryEvidenceDirectory(repositoryRoot);
   const path = join(directory, fileName);
   // Belt and braces: even with a validated id, prove the result stayed inside
   // the repository it belongs to.
@@ -292,7 +326,7 @@ export async function recordDeliveryEvidence(
   }
 
   // ── 3. The ignore question, before any filesystem effect ─────────────────
-  const relativeRecord = `.agent-orchestrator/runtime/${location.fileName}`;
+  const relativeRecord = `.agent-orchestrator/runtime/${DELIVERY_EVIDENCE_DIR_NAME}/${location.fileName}`;
   // `writeFileAtomically` stages `<name>.tmp-<suffix>` beside the target, and a
   // crash can leave one behind, so the staging shape is asked about too. Two
   // calls rather than two arguments: `check-ignore` ORs its arguments, so one

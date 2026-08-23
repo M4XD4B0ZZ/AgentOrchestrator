@@ -47,9 +47,14 @@ A time-to-live would be an invented number presented as safety. It would license
 acting on a stale answer for as long as somebody guessed, and refuse a
 still-correct answer the moment the guess expired. Neither behaviour is
 derivable from anything GitHub tells us. Nothing in this build compares
-`observedAt` against a threshold, and a test asserts the code contains no such
-comparison — scanned with comments stripped, so this paragraph can go on
-existing.
+`observedAt` against a threshold.
+
+Stated precisely, because a review found the first version of this sentence
+claimed more than the test delivers: the test is a **keyword and shape scan** of
+the source with comments stripped (`observedAt <`, `Date.now`, `TTL`, `maxAge`,
+`expiry`, `expires`, `staleAfter`), not a proof. A comparison written as
+`Date.parse(record.observedAt) < cutoff` would evade it. It is a tripwire
+against the obvious form, and the property itself rests on review.
 
 ### Three states, and only two are decidable from bytes
 
@@ -72,12 +77,36 @@ a test refuses any export matching `current|fresh|isGreen|isPassing|approved`.
 
 ## Where the record lives
 
-`<repositoryRoot>/.agent-orchestrator/runtime/<taskId>.delivery.json`
+`<repositoryRoot>/.agent-orchestrator/runtime/delivery/<taskId>.json`
 
-A companion beside the task-state file it is bound to, published through the same
-crash-safe primitive: stage in the same directory, flush, close, one `rename`
-(`state/atomic-file.ts`). One latest snapshot per task; a later observation
-replaces it.
+A companion beside the task-state file it is bound to, one directory down,
+published through the same crash-safe primitive: stage in the same directory,
+flush, close, one `rename` (`state/atomic-file.ts`). One latest snapshot per
+task; a later observation replaces it.
+
+### The directory is load-bearing, and the first design was a defect
+
+The first version wrote `runtime/<taskId>.delivery.json` and its header claimed
+that was "deliberately not a name `isStateFileName` would accept". **That was
+false and an adversarial review reproduced the consequence.** The task-id
+grammar (`plan/task-id.ts`) admits `.`, so `T-001.delivery` is a legal task id —
+which made `deriveTaskStateLocation(root, 'T-001.delivery')` and
+`deriveDeliveryEvidenceLocation(root, 'T-001')` the *same path*. Recording an
+observation for `T-001` would have renamed an evidence blob over another task's
+durable state and destroyed it; the reverse write would have clobbered the
+evidence.
+
+That is exactly the class `lease/containment-evidence.ts` documents as its reason
+for a companion file: stage-and-rename is an ABA on a **name**, and a name
+somebody else legitimately owns is the worst one to hold.
+
+A directory closes it structurally rather than by grammar, following the
+precedent `block/block-store.ts` already sets with `runtime/blocks/<runId>.json`.
+Task state is always joined from `taskRuntimeDirectory()` and can never land one
+level down, so no task id — however it is spelled — can collide. The file name is
+then simply `<taskId>.json`, judged by `state-location.ts`'s own
+`isStateFileName`: the same grammar, shared rather than restated, because the
+separation is structural and a second copy of the rule could only drift.
 
 ### Rejected alternatives
 
@@ -97,13 +126,13 @@ The runtime directory is inside the target repository, so an un-ignored file
 written there makes the checkout dirty and the *next* run refuses with
 `SOURCE_WORKTREE_DIRTY`. `state/runtime-ignored.ts` exists for exactly that, and
 runs before the first task-state write — but it asks about two names,
-`<taskId>.json` and its staging probe, and this slice creates two more.
+`<taskId>.json` and its staging probe, and this slice writes two more, in a
+directory that did not exist when that check was written.
 
 Most rules covering those two cover these. Not all: a rule written as
-`.agent-orchestrator/runtime/<taskId>.json*` ignores both names the existing
-check asks about and neither of the names here. Narrow, constructible, and the
-cost of being wrong is a repository that stops being runnable for a reason
-nothing points at.
+`.agent-orchestrator/runtime/*.json` matches the state file and nothing one
+level down, and the cost of being wrong is a repository that stops being
+runnable for a reason nothing points at.
 
 So the record asks, about the names it really writes, before writing anything —
 through `askRuntimeIgnored`, a partial application of the existing check rather
@@ -262,6 +291,14 @@ agent is dispatched, and nothing in `src/` merges anything.
   seam, not a real failure.** Measured on Windows: `openSync` on a *directory*
   succeeds and reports size 0, so the obvious fixture never reaches that branch.
   A real `EACCES` cannot be provoked on demand here.
+- `L-V4-03-7` — **the "no TTL" property is enforced by a keyword scan, not
+  proved.** A comparison spelled `Date.parse(observedAt) < cutoff` would pass
+  the test. The tripwire catches the obvious forms; the property rests on
+  review.
+- `L-V4-03-8` — **the fresh-versus-stored comparison is on outcome words and the
+  pull-request number only.** A stored `SUCCESS` over two check runs beside a
+  fresh `SUCCESS` over ten reports "the same outcome", which is true and is less
+  than "nothing changed". Both sets of counts are printed above it.
 - `L-V4-03-6` — **`recordedAt` is not compared with `observedAt`.** A record
   whose write instant precedes its observation instant is accepted. Both are
   written by the same invocation from the same clock, so the disagreement would

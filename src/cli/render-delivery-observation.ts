@@ -174,7 +174,19 @@ export const HISTORICAL_LABEL = 'Recorded';
  * only honest option — and the fresh answer is already printed above, so the
  * line only has to name the stored one and the fact of the difference.
  */
-export const EVIDENCE_DISAGREEMENT_PREFIX = 'differs from the observation above';
+export const EVIDENCE_DISAGREEMENT_PREFIX = 'the observation above reports a different outcome';
+
+/**
+ * The agreement half, and it says exactly what was compared.
+ *
+ * It used to read "the observation above agrees", which claims more than the
+ * comparison makes: only the two outcome words and the pull-request number are
+ * compared, so a stored `SUCCESS (2 check runs)` beside a fresh `SUCCESS (10
+ * check runs, 8 of them new)` would have been called agreement. Both sets of
+ * counts are printed two lines above, so the operator can see the difference —
+ * but the sentence should not have told them there was none.
+ */
+export const EVIDENCE_AGREEMENT_SUFFIX = 'the observation above reports the same outcome';
 
 export interface StoredEvidenceView {
   readonly reading: DeliveryEvidenceReading;
@@ -195,7 +207,11 @@ export interface DeliveryObservationView {
   /** What is already on disk for this task, or `null` when it was not looked for. */
   readonly stored?: StoredEvidenceView | null;
   /** What `--record` amounted to, or `null` when it was not asked for. */
-  readonly recording?: { readonly outcome: string; readonly recorded: boolean } | null;
+  readonly recording?: {
+    readonly outcome: string;
+    readonly recorded: boolean;
+    readonly detail: string | null;
+  } | null;
 }
 
 /**
@@ -250,8 +266,17 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
 
   const recording = view.recording ?? null;
   if (recording !== null) {
+    // The code alone when it succeeded, and the code plus its sentence when it
+    // did not. A refusal is the case an operator has to act on, so it is the
+    // one that carries an explanation; `RECORDED — RECORDED`, which the first
+    // version printed, explained nothing twice.
     lines.push(
-      line('Record', recording.recorded ? `RECORDED — ${recording.outcome}` : recording.outcome),
+      line(
+        'Record',
+        recording.recorded
+          ? recording.outcome
+          : `${recording.outcome}${recording.detail === null ? '' : ` — ${recording.detail}`}`,
+      ),
     );
   }
 
@@ -316,7 +341,7 @@ export function renderStoredEvidenceLine(
       freshPull !== stored.pullRequestOutcome ||
       freshNumber !== stored.pullRequestNumber ||
       observation.checks.outcome !== stored.checkOutcome;
-    text += differs ? `; ${EVIDENCE_DISAGREEMENT_PREFIX}` : '; the observation above agrees';
+    text += `; ${differs ? EVIDENCE_DISAGREEMENT_PREFIX : EVIDENCE_AGREEMENT_SUFFIX}`;
   }
 
   return line(HISTORICAL_LABEL, text);

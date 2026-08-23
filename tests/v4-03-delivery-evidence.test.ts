@@ -25,7 +25,15 @@
  */
 
 import { Command } from 'commander';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  rmSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -39,10 +47,13 @@ import {
 } from '../src/cli/delivery-command.js';
 import {
   HISTORICAL_LABEL,
+  EVIDENCE_AGREEMENT_SUFFIX,
   EVIDENCE_DISAGREEMENT_PREFIX,
   renderStoredEvidenceLine,
 } from '../src/cli/render-delivery-observation.js';
 import { buildProgram } from '../src/cli/index.js';
+import { isValidTaskId } from '../src/plan/task-id.js';
+import { deriveTaskStateLocation } from '../src/state/state-location.js';
 import { TERMINAL_STATES } from '../src/core/states.js';
 import { TRANSITION_TABLE } from '../src/core/transitions.js';
 import {
@@ -59,7 +70,8 @@ import {
   readDeliveryEvidence,
 } from '../src/deliver/delivery-evidence.js';
 import {
-  DELIVERY_EVIDENCE_FILE_SUFFIX,
+  DELIVERY_EVIDENCE_DIR_NAME,
+  DELIVERY_EVIDENCE_FILE_EXTENSION,
   deriveDeliveryEvidenceLocation,
   isDeliveryEvidenceFileName,
   loadDeliveryEvidence,
@@ -164,7 +176,9 @@ const EXPECTED: ExpectedBinding = Object.freeze({
 /** A scratch repository root. Never the real one. */
 function scratchRoot(): { root: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), 'ao-v403-'));
-  mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
+  mkdirSync(join(root, '.agent-orchestrator', 'runtime', DELIVERY_EVIDENCE_DIR_NAME), {
+    recursive: true,
+  });
   return {
     root,
     cleanup: () => {
@@ -268,7 +282,13 @@ function read(root: string, over: Partial<ExpectedBinding> & { taskId?: string; 
 }
 
 function recordPath(root: string, taskId = 'T-001'): string {
-  return join(root, '.agent-orchestrator', 'runtime', `${taskId}${DELIVERY_EVIDENCE_FILE_SUFFIX}`);
+  return join(
+    root,
+    '.agent-orchestrator',
+    'runtime',
+    DELIVERY_EVIDENCE_DIR_NAME,
+    `${taskId}${DELIVERY_EVIDENCE_FILE_EXTENSION}`,
+  );
 }
 
 // ── 1. Provenance: a claim must come from an observation ───────────────────
@@ -384,34 +404,63 @@ describe('a forge-observation claim cannot be manufactured', () => {
    * can reach the mint.
    */
   it('is minted from exactly one module beside its own public wrapper', () => {
-    const sources = [
-      'src/deliver/observe-delivery.ts',
-      'src/deliver/delivery-observation-proof.ts',
-      'src/deliver/delivery-evidence-store.ts',
-      'src/deliver/delivery-evidence.ts',
-      'src/cli/delivery-command.ts',
-      'src/cli/render-delivery-observation.ts',
-      'src/deliver/github-observer.ts',
-      'src/deliver/forge-observation.ts',
-    ];
-    const importers = sources.filter((file) =>
-      readFileSync(file, 'utf8').includes('internal/delivery-observation-proof.js'),
-    );
-    // Positive control: the files really were read and really do mention the
-    // things they should. An empty scan here would pass the assertion below
-    // while measuring nothing.
-    expect(readFileSync('src/deliver/observe-delivery.ts', 'utf8')).toContain(
-      'mintDeliveryObservation',
-    );
-    expect(importers.sort()).toEqual([
+    // Walks the whole of `src/` rather than a list written here.
+    //
+    // The first version filtered a hand-written array of eight files, which is
+    // not a reachability check at all: a ninth module anywhere in `src/`
+    // importing the mint — the exact event this pin exists to prevent — would
+    // have left it green. A review caught that, and it is the difference
+    // between a pin and a note.
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const full = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) return walk(full);
+        return entry.isFile() && full.endsWith('.ts') ? [full] : [];
+      });
+    const sources = walk('src');
+    // Positive control: the walk really found the tree, not an empty directory.
+    expect(sources.length).toBeGreaterThan(100);
+    expect(sources).toContain('src/deliver/observe-delivery.ts');
+
+    // Import statements in code, not mentions in prose. The first version
+    // matched the raw text and caught `delivery-evidence.ts`, whose header
+    // *names* the mint while importing nothing from it — a scan that cannot
+    // tell a citation from a dependency is not measuring reachability either.
+    const importers = sources
+      .filter((file) =>
+        /from\s+'[^']*internal\/delivery-observation-proof\.js'/.test(codeOnly(file)),
+      )
+      .sort();
+    expect(importers).toEqual([
       'src/deliver/delivery-observation-proof.ts',
       'src/deliver/observe-delivery.ts',
     ]);
-    // And the mint's name may not appear in the public wrapper, which would be
-    // a re-export in all but name.
+
+    // Positive control on the search itself: it finds the mint's own name where
+    // one exists, so an empty result above would be a fact about the tree and
+    // not about the scan.
+    expect(readFileSync('src/deliver/observe-delivery.ts', 'utf8')).toContain(
+      'mintDeliveryObservation',
+    );
+    // Nothing anywhere may re-export the mint or the class, which would walk
+    // past the import pin entirely.
+    for (const file of sources) {
+      if (file === 'src/deliver/internal/delivery-observation-proof.ts') continue;
+      const source = readFileSync(file, 'utf8');
+      expect(source).not.toMatch(/export\s*\{[^}]*mintDeliveryObservation/);
+      expect(source).not.toMatch(/export\s*\{[^}]*DeliveryObservationEvidence/);
+    }
+    // And the mint's name may not appear in the public wrapper at all, which
+    // would be a re-export in all but name.
     expect(readFileSync('src/deliver/delivery-observation-proof.ts', 'utf8')).not.toContain(
       'mintDeliveryObservation',
     );
+    // No dynamic import can route around the static scan either.
+    for (const file of sources) {
+      expect(readFileSync(file, 'utf8')).not.toMatch(
+        /import\s*\(\s*[^)]*delivery-observation-proof/,
+      );
+    }
   });
 });
 
@@ -663,6 +712,79 @@ describe('evidence is bound to one delivery target', () => {
     const elsewhere = { taskId: 'T-001', repositoryRoot: 'D:\\other', stateRevision: REV };
     const rebound = { ...payload, binding: deliveryEvidenceBinding(elsewhere, payload) };
     expect(readDeliveryEvidence(rebound, elsewhere, EXPECTED)).toBe('NOT_THIS_TASK');
+  });
+
+  /**
+   * Every payload field is covered by the binding digest, asserted against the
+   * digest itself.
+   *
+   * The on-disk loop below is not this proof and a review showed why: it
+   * collapses every refusal into one boolean, so for the eleven fields governed
+   * by a regex, an enum, a literal or the version arm the mutated value is
+   * refused *before* the digest is ever consulted. Delete `observedAt` from
+   * `deliveryEvidenceBinding`'s input list and that loop still passes — while an
+   * on-disk record's instant could then be rewritten to any valid ISO string and
+   * still read `HISTORICAL_VALID`.
+   *
+   * This checks the property directly instead: change one field, and the digest
+   * must change. A field left out of the digest fails here and nowhere else.
+   */
+  it('covers every payload field in the binding digest', () => {
+    const scratchSubject = { taskId: 'T-001', repositoryRoot: 'D:\\repo', stateRevision: REV };
+    const payload = {
+      evidenceVersion: DELIVERY_EVIDENCE_VERSION,
+      taskId: 'T-001',
+      repositoryRoot: 'D:\\repo',
+      taskState: 'READY_FOR_PR',
+      stateRevision: REV,
+      subjectCommit: HEAD,
+      basePinnedCommit: BASE,
+      provider: 'github' as const,
+      host: IDENTITY.host,
+      owner: IDENTITY.owner,
+      name: IDENTITY.name,
+      declaredRemote: 'origin',
+      pullRequestOutcome: 'MATCHED' as const,
+      pullRequestNumber: 56,
+      pullRequestHeadSha: HEAD,
+      checkQueriedCommit: HEAD,
+      checkOutcome: 'SUCCESS' as const,
+      checkRuns: 2,
+      commitStatuses: 0,
+      checksFailed: 0,
+      checksPending: 0,
+      checksSucceeded: 2,
+      checksNeutralOrSkipped: 0,
+      observedAt: AT,
+      recordedAt: AT,
+    };
+    const original = deliveryEvidenceBinding(scratchSubject, payload);
+    const fields = Object.keys(payload);
+    // Positive controls: this really is the whole payload — it satisfies the
+    // schema when the digest is attached, and it is the full field count, so a
+    // loop that silently covered three fields cannot pass.
+    expect(DeliveryEvidenceSchema.safeParse({ ...payload, binding: original }).success).toBe(true);
+    expect(fields.length).toBe(25);
+
+    for (const field of fields) {
+      const mutated = { ...payload } as Record<string, unknown>;
+      const value = mutated[field];
+      mutated[field] =
+        typeof value === 'number' ? value + 1 : typeof value === 'string' ? `${value}x` : 'x';
+      expect(
+        deliveryEvidenceBinding(scratchSubject, mutated as typeof payload),
+        `field ${field} is not covered by the binding digest`,
+      ).not.toBe(original);
+    }
+
+    // And the subject's own identity is covered too, which is what makes a
+    // record copied into another task fail before any agreement check runs.
+    expect(
+      deliveryEvidenceBinding({ ...scratchSubject, taskId: 'T-002' }, payload),
+    ).not.toBe(original);
+    expect(
+      deliveryEvidenceBinding({ ...scratchSubject, repositoryRoot: 'D:\\other' }, payload),
+    ).not.toBe(original);
   });
 
   it('detects a per-field edit for every field the payload carries', async () => {
@@ -1007,8 +1129,8 @@ describe('recording is an explicit act, and refuses everything else', () => {
       // arguments, so one call carrying both would answer "ignored" whenever
       // either passed.
       expect(asked).toEqual([
-        '.agent-orchestrator/runtime/T-001.delivery.json.tmp-probe',
-        '.agent-orchestrator/runtime/T-001.delivery.json',
+        '.agent-orchestrator/runtime/delivery/T-001.json.tmp-probe',
+        '.agent-orchestrator/runtime/delivery/T-001.json',
       ]);
     } finally {
       scratch.cleanup();
@@ -1035,14 +1157,67 @@ describe('recording is an explicit act, and refuses everything else', () => {
     }
   });
 
+  /**
+   * The state-destroying collision, and the reason the record lives one
+   * directory down.
+   *
+   * The task-id grammar admits `.` (`plan/task-id.ts`), so `T-001.delivery` is a
+   * legal task id. The first version of this slice wrote
+   * `runtime/<taskId>.delivery.json`, which meant the evidence path for `T-001`
+   * and the *task-state* path for `T-001.delivery` were the same string —
+   * recording an observation for one task would have renamed a blob over
+   * another task's durable record and destroyed it.
+   *
+   * This is the counter-proof, and it is written as an inequality of paths
+   * rather than as a claim about names, because a name-based check is exactly
+   * what was wrong before: the old test asserted the converse
+   * (`isDeliveryEvidenceFileName('T-001.json') === false`) and the property it
+   * claimed to establish was never asserted and was false.
+   */
+  it('cannot collide with any task-state path, for any legal task id', () => {
+    // The grammar really does admit the dot. Positive control: without this the
+    // inequality below would be about a case that cannot arise.
+    expect(isValidTaskId('T-001.delivery')).toBe(true);
+    expect(isValidTaskId('T-001')).toBe(true);
+
+    const root = 'D:\\repo';
+    for (const [evidenceTask, stateTask] of [
+      ['T-001', 'T-001.delivery'],
+      ['T-001', 'T-001'],
+      ['a', 'a.delivery'],
+      ['x.y', 'x.y.delivery'],
+    ]) {
+      const evidence = deriveDeliveryEvidenceLocation(root, evidenceTask as string);
+      const state = deriveTaskStateLocation(root, stateTask as string);
+      expect(evidence.ok).toBe(true);
+      expect(state.ok).toBe(true);
+      if (!evidence.ok || !state.ok) continue;
+      expect(evidence.path).not.toBe(state.path);
+    }
+
+    // And the structural reason, stated as a fact about the directories rather
+    // than about the names: task state never leaves the runtime directory, and
+    // a delivery record is never in it.
+    const anyState = deriveTaskStateLocation(root, 'T-001');
+    const anyEvidence = deriveDeliveryEvidenceLocation(root, 'T-001');
+    expect(anyState.ok && anyEvidence.ok).toBe(true);
+    if (anyState.ok && anyEvidence.ok) {
+      expect(anyState.directory).not.toBe(anyEvidence.directory);
+      expect(anyEvidence.directory).toBe(join(anyState.directory, DELIVERY_EVIDENCE_DIR_NAME));
+    }
+  });
+
   it('names a location that is inside the repository and is not a state file', () => {
     const location = deriveDeliveryEvidenceLocation('D:\\repo', 'T-001');
     expect(location.ok).toBe(true);
     if (!location.ok) return;
-    expect(location.fileName).toBe('T-001.delivery.json');
+    expect(location.fileName).toBe('T-001.json');
     expect(isDeliveryEvidenceFileName(location.fileName)).toBe(true);
-    // It must never be mistaken for a task-state file name.
-    expect(isDeliveryEvidenceFileName('T-001.json')).toBe(false);
+    // The name grammar is deliberately the SAME as a task state's, shared
+    // rather than restated. The two are told apart by the directory, which is
+    // the property the test above proves and the one a task id cannot spell
+    // its way around.
+    expect(location.directory.endsWith(DELIVERY_EVIDENCE_DIR_NAME)).toBe(true);
   });
 
   it.each([
@@ -1103,9 +1278,16 @@ describe('a stored observation is never presented as the current one', () => {
   });
 
   it('says in the operator report that a record is not a claim about now', () => {
-    expect(REMOTE_FRESHNESS_SENTENCE).toContain('one past moment');
-    expect(REMOTE_FRESHNESS_SENTENCE).toContain('not a claim about the forge now');
-    expect(REMOTE_FRESHNESS_SENTENCE).toContain('Nothing here has asked again.');
+    // Matched flat: the sentence is pre-wrapped so an operator's console does
+    // not decide where it breaks, and where it breaks is not part of the claim.
+    const flat = REMOTE_FRESHNESS_SENTENCE.replace(/\s+/g, ' ');
+    expect(flat).toContain('one past moment');
+    expect(flat).toContain('not a claim about the forge now');
+    expect(flat).toContain('Nothing here has asked again.');
+    // Wrapped, and to a width the rest of this report already uses.
+    for (const wrapped of REMOTE_FRESHNESS_SENTENCE.split('\n')) {
+      expect(wrapped.length).toBeLessThanOrEqual(90);
+    }
   });
 
   it('renders a stored SUCCESS in the past tense, under a HISTORICAL label', () => {
@@ -1172,7 +1354,13 @@ describe('a stored observation is never presented as the current one', () => {
       checkOutcome: 'SUCCESS',
     };
     // Agreement, as the control.
-    expect(renderStoredEvidenceLine(stored, settled())).toContain('the observation above agrees');
+    expect(renderStoredEvidenceLine(stored, settled())).toContain(EVIDENCE_AGREEMENT_SUFFIX);
+    // The agreement sentence says what was compared and no more: only the two
+    // outcome words and the pull-request number are. A review pointed out that
+    // 'agrees' claimed more than that — a stored SUCCESS over 2 check runs
+    // beside a fresh SUCCESS over 10 is not nothing having changed.
+    expect(EVIDENCE_AGREEMENT_SUFFIX).toContain('the same outcome');
+    expect(EVIDENCE_AGREEMENT_SUFFIX).not.toContain('agrees');
 
     // The checks went red since. Neither side is preferred; the difference is
     // reported.
@@ -1407,8 +1595,27 @@ describe('the delivery command records only when asked', () => {
         { from: 'user' },
       );
       expect(existsSync(recordPath(scratch.root))).toBe(true);
-      expect(h.out.join('')).toContain('RECORDED');
+      const text = h.out.join('');
+      expect(text).toContain('Record       : RECORDED');
+      expect(text).not.toContain('RECORDED — RECORDED');
       expect(read(scratch.root).reading).toBe('HISTORICAL_VALID');
+
+      // The report describes the store as this invocation LEAVES it, which
+      // means the record is written before it is read back.
+      //
+      // This is the assertion whose absence let the defect ship. The first
+      // version read first, so on this exact flow — a task with no prior record
+      // — it printed "Recorded : ABSENT — No observation has been recorded for
+      // this task" on the line directly above "Record : RECORDED": a sentence
+      // false at the moment it was printed, contradicting the line beneath it,
+      // and suppressing the freshness sentence as a bonus. Asserting only that
+      // the file exists afterwards cannot see any of that.
+      expect(text).toContain(`${HISTORICAL_LABEL}     : HISTORICAL`);
+      expect(text).not.toContain('ABSENT');
+      expect(text).toContain(REMOTE_FRESHNESS_SENTENCE);
+      // And it is the record just written, not a superseded one: the instant is
+      // this invocation's own clock.
+      expect(text).toContain(`at ${AT} this was MATCHED (#56)`);
     } finally {
       h.restore();
       scratch.cleanup();
@@ -1428,7 +1635,12 @@ describe('the delivery command records only when asked', () => {
         ['delivery', '--repository', scratch.root, '--task', 'T-001', '--record'],
         { from: 'user' },
       );
-      expect(h.out.join('')).toContain('RECORD_REQUIRES_OBSERVATION');
+      const text = h.out.join('');
+      expect(text).toContain('RECORD_REQUIRES_OBSERVATION');
+      // The refusal carries its sentence, because a refusal is the case an
+      // operator has to act on. A success prints the code alone -- the first
+      // version printed 'RECORDED -- RECORDED', explaining nothing twice.
+      expect(text).toContain(RECORD_REFUSAL_DETAIL.RECORD_REQUIRES_OBSERVATION);
       expect(existsSync(recordPath(scratch.root))).toBe(false);
       // And it stayed a local command: no client was constructed.
       expect(started).toBe(0);

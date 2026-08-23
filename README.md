@@ -8545,11 +8545,16 @@ agent-loop delivery --repository D:\AgentOrchestrator --task T-014 --observe --r
 
 ```
 Subject      : 10583ee91a5747d0049f563ffaac64b0cf643aeb
-Pull request : MATCHED  (#55)
+Pull request : MATCHED  (#57)
 Checks       : SUCCESS  (2 check run(s), 0 commit status(es): 2 succeeded, 0 pending, 0 failed, 0 neutral/skipped)
-Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#55), checks SUCCESS; the observation above agrees
-Record       : RECORDED — RECORDED
+Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#57), checks SUCCESS; the observation above reports the same outcome
+Record       : RECORDED
 ```
+
+The record is written before it is read back, so the `Recorded` line describes the
+store as this invocation leaves it. A first version read first, and printed
+`Recorded : ABSENT — No observation has been recorded for this task` directly
+above `Record : RECORDED` — a sentence false at the moment it was printed.
 
 A later local run, with no network at all, still knows what was recorded:
 
@@ -8560,11 +8565,17 @@ agent-loop delivery --repository D:\AgentOrchestrator --task T-014
 ```
 Pull request : not observed  (pass --observe to ask the forge about this commit)
 Checks       : not observed  (pass --observe to ask the forge about this commit)
-Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#55), checks SUCCESS
+Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#57), checks SUCCESS
 
-A stored observation is a record of one past moment. It is not a claim about the forge now:
-the pull request, its head and the checks may all have changed since. Nothing here has asked
-again.
+A stored observation is a record of one past moment. It is not a claim about the forge
+now: the pull request, its head and the checks may all have changed since. Nothing
+here has asked again.
+```
+
+`--record` without `--observe` refuses, and says why:
+
+```
+Record       : RECORD_REQUIRES_OBSERVATION — Recording stores an observation, so one has to be made. Pass --observe as well.
 ```
 
 ### The one rule
@@ -8591,9 +8602,17 @@ than preferring either.
 
 ### Where it lives, and what it is bound to
 
-`<repositoryRoot>/.agent-orchestrator/runtime/<taskId>.delivery.json` — a
-companion beside the task-state file, published by stage-flush-rename, one latest
-snapshot per task. **Not** a `TaskState` field: writing one of those needs a held
+`<repositoryRoot>/.agent-orchestrator/runtime/delivery/<taskId>.json` — a
+companion beside the task-state file, one directory down, published by
+stage-flush-rename, one latest snapshot per task.
+
+The directory is not decoration. The first version wrote
+`runtime/<taskId>.delivery.json`, and the task-id grammar admits `.` — so
+`T-001.delivery` is a legal task id whose *task-state* file is that exact path.
+Recording for `T-001` would have renamed an evidence blob over another task's
+durable record and destroyed it. An adversarial review reproduced it; a
+directory closes it structurally, since task state can never land one level
+down. **Not** a `TaskState` field: writing one of those needs a held
 execution lease re-proved at the write, and `delivery` is a read-only command
 that holds none. Taking a lease to record an observation would make it an
 executing command.

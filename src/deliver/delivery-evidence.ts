@@ -444,9 +444,9 @@ export const DELIVERY_EVIDENCE_READING_DETAIL: Readonly<
  * a test can pin it. The whole slice is one claim, and this is it.
  */
 export const REMOTE_FRESHNESS_SENTENCE =
-  'A stored observation is a record of one past moment. It is not a claim about the forge now: ' +
-  'the pull request, its head and the checks may all have changed since. Nothing here has asked ' +
-  'again.';
+  'A stored observation is a record of one past moment. It is not a claim about the forge\n' +
+  'now: the pull request, its head and the checks may all have changed since. Nothing\n' +
+  'here has asked again.';
 
 /**
  * Reads a stored record against the task it is supposed to be about.

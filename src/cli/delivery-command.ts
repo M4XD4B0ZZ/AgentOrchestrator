@@ -233,10 +233,36 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
 
       const conclusion = concludeObservation(subject, observation);
 
-      // Whatever is already on disk, judged against the task as it is now. Read
-      // on every invocation, including one with no `--observe`, because "what
-      // does AO already know about this task" is a local question and answering
-      // it needs no network. It is reported as history and never as truth.
+      // Recording happens BEFORE the record is read back, and the order is the
+      // contract rather than an accident.
+      //
+      // The first version of this read first, and a review reproduced what that
+      // prints: on a successful `--observe --record` for a task with no prior
+      // record, the report said "Recorded : ABSENT — No observation has been
+      // recorded for this task" on the line directly above "Record : RECORDED".
+      // A sentence false at the moment it is printed, contradicting the line
+      // beneath it, and it suppressed the freshness sentence as a bonus. On a
+      // second run it showed the record that had just been *superseded*.
+      //
+      // So the read is the last thing that happens, and what it reports is the
+      // state of the store as the invocation leaves it.
+      const recording =
+        options.record === true
+          ? await performRecording({
+              options,
+              repositoryRoot: repository.root,
+              subject,
+              taskLoad,
+              observation,
+              conclusion,
+              seams,
+            })
+          : null;
+
+      // Whatever is on disk, judged against the task as it is now. Read on every
+      // invocation, including one with no `--observe`, because "what does AO
+      // already know about this task" is a local question and answering it needs
+      // no network. It is reported as history and never as truth.
       const stored =
         subject.ok && taskLoad.ok
           ? loadDeliveryEvidence(
@@ -255,19 +281,6 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
                 declaredRemote: subject.remoteName,
               },
             )
-          : null;
-
-      const recording =
-        options.record === true
-          ? await performRecording({
-              options,
-              repositoryRoot: repository.root,
-              subject,
-              taskLoad,
-              observation,
-              conclusion,
-              seams,
-            })
           : null;
 
       process.stdout.write(
@@ -298,6 +311,8 @@ export type RecordOutcome = RecordRefusal | DeliveryEvidenceRecordCode;
 export interface RecordingResult {
   readonly outcome: RecordOutcome;
   readonly recorded: boolean;
+  /** The operator sentence for a refusal this command decided, else null. */
+  readonly detail: string | null;
 }
 
 interface RecordingInputs {
@@ -321,8 +336,8 @@ interface RecordingInputs {
  * refusal is a sentence.
  */
 async function performRecording(inputs: RecordingInputs): Promise<RecordingResult> {
-  const refuse = (outcome: RecordOutcome): RecordingResult =>
-    Object.freeze({ outcome, recorded: false as const });
+  const refuse = (outcome: RecordRefusal): RecordingResult =>
+    Object.freeze({ outcome, recorded: false as const, detail: RECORD_REFUSAL_DETAIL[outcome] });
 
   if (inputs.options.observe !== true) return refuse('RECORD_REQUIRES_OBSERVATION');
   if (!inputs.subject.ok) return refuse('RECORD_WITHOUT_SUBJECT');
@@ -363,7 +378,10 @@ async function performRecording(inputs: RecordingInputs): Promise<RecordingResul
       inputs.seams.checkIgnored ??
       createRuntimeIgnoreProbe(inputs.repositoryRoot, inputs.seams.git ?? runGitCommand),
   });
-  return Object.freeze({ outcome: result.code, recorded: result.recorded });
+  // The store's own codes carry no sentence here: they are already a closed
+  // vocabulary an operator can look up, and inventing a second sentence for
+  // each in this module would be a second place for them to drift.
+  return Object.freeze({ outcome: result.code, recorded: result.recorded, detail: null });
 }
 
 /**
