@@ -4578,14 +4578,26 @@ and because the failure mode it describes — a command that cannot start is
   worth keeping.** The first version of this residual said the destructive path
   was closed by Git itself — "`git worktree remove` refuses outright for *any*
   worktree whose index holds a gitlink … exit 128, **populated or not**" — and
-  concluded "a detection gap, not data loss". That measurement was taken on a
-  *populated* fixture and is false for the unpopulated one, which is the state
-  `git worktree add` leaves and the only state in which the gate is blind:
+  concluded "a detection gap, not data loss". That measurement was taken on one
+  fixture and is false for the shape AO actually produces.
 
-  | gitlink | `git worktree remove` |
+  **The first correction to it was also wrong**, and the second is written with
+  its premise attached for that reason. It said the refusal is a property of
+  *population*; measured, it turns on **provenance** — whether Git keeps a
+  `<super>/.git/worktrees/<task>/modules` directory for that worktree:
+
+  | how the gitlink got there | `git worktree remove` |
   | --- | --- |
-  | populated | exit 128, nothing removed |
-  | **unpopulated** | **exit 0, worktree gone, planted files gone** |
+  | added *inside* the worktree, then deinitialised | exit 128, nothing removed — **and it is unpopulated** |
+  | present in the base commit, via `git worktree add` | **exit 0, worktree gone, planted files gone** |
+
+  The first row is what falsified "population". The second is how a task worktree
+  is made here, so it is the row that decides, and in it the gate is the only
+  thing standing. Both destructive cases in `tests/worktree-lifecycle.test.ts`
+  built the first shape until a review pointed it out — which made their
+  "the payload survives" assertion a tautology, since Git refused either way.
+  They build the second now, and assert the absence of that `modules` directory
+  so the fixture cannot silently drift back.
 
   Three independent reviewers of the fixed HEAD caught it, and the data loss was
   reproduced end to end through the production path: the bare vector reported
@@ -4594,14 +4606,28 @@ and because the failure mode it describes — a command that cannot start is
   `observeWorktreeCleanliness`. Note that moving it onto
   `WORKTREE_CLEANLINESS_ARGS` would **not** have helped — that vector is blind to
   the same content; only the gitlink probe sees it.
-- **L-V3-11-13 — a fabricated `.git` inside a gitlink reads as a real
-  checkout.** A writer that puts a well-formed `.git` inside an unpopulated
-  gitlink makes Git treat the path as an initialised, clean submodule; `git
-  status` reports nothing and the probe answers `true` over payload still on
-  disk. Measured, and measured **identically against the pre-probe reader**, so
-  it is a carried limit of the same family as L-V3-10-4 rather than a regression.
-  Closing it means deciding how AO distinguishes a submodule the operator
-  populated from one the writer fabricated, which needs state AO does not keep.
+- **L-V3-11-13 — a populated submodule's own `.gitignore` hides a planted file
+  from every reading.** The exposure is real and the *cause* this entry first
+  gave for it was not, so both are recorded.
+
+  What reproduces: a genuinely populated submodule carrying a `.gitignore` of
+  `*`. The superproject's `git status` reports nothing, `submodule status` shows
+  it in sync, and the probe answers `true` over a planted file — because a
+  populated gitlink is Git's to report on and Git has been told to ignore it.
+  That is **L-V3-10-4's** mechanism (a gitignored file the writer created), one
+  boundary further in.
+
+  What this entry claimed instead: that a writer *fabricating* a `.git` inside
+  an unpopulated gitlink produces the same reading. A review tested three such
+  shapes, including the two a previous review reported as reaching it, and none
+  did — a minimal `.git` directory makes `status` exit 128 (probe `null`), and a
+  `.git` file pointing at a real modules directory makes `status` report
+  ` M vendor` (probe `false`). Both fail closed. The fabrication route is
+  therefore **not** established; the ignore route is.
+
+  Measured identically against the pre-probe reader, so it is a carried limit
+  rather than a regression. Closing it means looking inside a submodule AO does
+  not own, which is a product decision.
 
   Two corrections this entry has needed, both from measurement:
   **`git init` is not required** — a hand-placed `.git` *file* containing
@@ -4623,9 +4649,11 @@ and because the failure mode it describes — a command that cannot start is
   resolves here. Anyone about to write a fourth version should measure first.
 
   **The destructive half is closed**, and that was tested rather than assumed:
-  five fabricated shapes driven to `git worktree remove` either made `status`
-  exit 128 (probe `null`) or were refused at exit 128 with the payload intact.
-  The authority half is open. **Scope:** `worktree/worktree-cleanliness.ts`.
+  the shapes driven to `git worktree remove` either made `status` exit 128 (probe
+  `null`) or were refused at exit 128 with the payload intact — a populated
+  gitlink is exactly the provenance Git refuses to remove, so the two halves are
+  complementary rather than coincidental. The authority half is open.
+  **Scope:** `worktree/worktree-cleanliness.ts`.
 - **L-V3-11-15 — the gitlink probe's index fallback has the same 1 MiB cliff the
   remediation removed from the cleanliness vector.** When `git submodule status`
   cannot be used — an embedded repository never mapped in `.gitmodules`, the
@@ -4642,13 +4670,21 @@ and because the failure mode it describes — a command that cannot start is
   availability, and narrower than the stall it replaced — the first design
   stalled that repository at *any* size.
 
-  A second route into this fallback was measured and **closed**, and is recorded
-  because it is the shape of mistake this register exists for: the index
-  confirmation once put every submodule path on one command line, which the
-  platform refuses past ~32,700 characters, and the refusal sent the probe here.
-  A clean superproject with 1,600 submodules therefore answered "not
-  established". The confirmation is chunked now, so only an unusable
-  `submodule status` reaches the fallback.
+  **Three ordinary shapes reach this fallback with `submodule status` exiting 0**,
+  and an earlier version of this entry named only one. `SAFE_ARG_PATTERN` carries
+  neither a space nor a non-ASCII character, so a submodule at `third party` or
+  `bücher` answers `UNUSABLE_PATH` at the confirmation and takes the unbounded
+  read — measured, three calls, the third being the whole-index one. So a clean
+  repository with a `bücher` submodule and enough tracked files stalls, and the
+  sentence "only an unusable `submodule status` reaches the fallback" was wrong.
+  The module's own comment names these shapes correctly; only this entry did not.
+
+  A fourth route was measured and **closed**, recorded because it is the shape of
+  mistake this register exists for: the index confirmation once put every
+  submodule path on one command line, which the platform refuses past ~32,700
+  characters of command line, and the refusal sent the probe here. A clean
+  superproject with 1,600 submodules therefore answered "not established". The
+  confirmation is chunked now.
   **Scope:** `worktree/worktree-cleanliness.ts`.
 - **L-V3-11-16 — `rawStdout` is optional, so a runner that omits it reads a
   trimmed listing.** `GitCommandResult.rawStdout` is what stops a gitlink path

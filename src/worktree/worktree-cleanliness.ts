@@ -89,9 +89,13 @@
  * corrected for. An entry costs `51 + len(path)` bytes: measured, this
  * repository's own 296 tracked files take 24,478 bytes — 82.7 B/entry — so its
  * cap falls at about **12,700** files. A fixture whose paths are four times
- * *longer* (179.9 B/entry, a 129-character mean) reached it at 7,003 — this
- * sentence first said "shorter", which is the inversion the byte figure exists
- * to make impossible to state.
+ * *longer* (179.9 B/entry, a 129-character mean) reaches it at about **5,800**.
+ *
+ * That sentence has been wrong twice: first "shorter" for longer, then "reached
+ * it at 7,003" — which is the *size* of the fixture, not its cap, put beside a
+ * computed cap in the paragraph whose whole subject is that a file count without
+ * its byte premise misleads. The README was corrected and this was not; a
+ * correction applied to one copy of a claim is half a correction.
  *
  * `git submodule status` prints one line per submodule, so it is the primary.
  * The first version of this module said it "reads the **index**, not
@@ -185,11 +189,16 @@ import { WORKTREE_CLEANLINESS_ARGS, type GitRunner } from './git-command.js';
  * SHA-256; the first version of this pattern accepted only 40, which made every
  * SHA-256 repository with a submodule unobservable.
  *
- * The flag is **optional**, and that is not laxity. `runGitCommand` trims the
- * command's whole stdout, so an in-sync submodule — whose flag *is* a space —
- * arrives with no flag at all when it is the first line, and with one when it is
- * not. An absent flag can only ever have been the space, because the other
- * three are not whitespace.
+ * The flag is **optional**, and the reason is now historical rather than
+ * current. It was written when this parser read `stdout`, which `runGitCommand`
+ * trims: an in-sync submodule — whose flag *is* a space — arrived with no flag
+ * at all when it was the first line. The parser reads `rawStdout` now, so the
+ * leading space is present and the optional arm is dead for the production
+ * runner.
+ *
+ * It is kept for the runners that supply no `rawStdout`, where the old shape
+ * still arrives, and because an absent flag can only ever have been the space —
+ * the other three are not whitespace, so nothing is lost by accepting it.
  *
  * A line that does not match sends the whole probe to the index instead of
  * being guessed at, because the alternative reading — treating an unparsed line
@@ -459,7 +468,9 @@ async function confirmAgainstIndex(
   // gitlinks cost thirty-two subprocesses and ~3.5 seconds — and the fix for
   // that put every path on one command line, which traded an unbounded loop for
   // an unbounded argv. Measured through the production runner: the call is
-  // refused past roughly 32,700 characters of arguments, and the probe then fell
+  // refused past roughly 32,700 characters of **command line** — see the budget
+  // constant for why that is the invariant and the argument total is not — and the
+  // probe then fell
   // back to reading the whole index, which on a large repository floods the
   // 1 MiB output cap and answers "not established" for a **clean** tree. So the
   // shape that reintroduced the stall was the fix for the loop.
@@ -500,7 +511,9 @@ function hasDuplicate(paths: readonly string[]): boolean {
 /**
  * Splits paths into groups that fit comfortably on one command line.
  *
- * The measured ceiling on this platform is ~32,700 characters of arguments;
+ * The measured ceiling on this platform is ~32,700 characters of **command
+ * line**, which is the invariant; the argument total that corresponds to it
+ * ranges 16,377-32,135 with argument shape, so it is not the thing to bound;
  * {@link ARGUMENT_BUDGET_CHARS} is a fraction of it, because the ceiling counts
  * the executable and the fixed tokens too and because a margin costs one extra
  * subprocess while exceeding it costs a repository its observability.

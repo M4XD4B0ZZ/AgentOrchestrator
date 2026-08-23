@@ -395,6 +395,40 @@ describe('I — a clean, owned workspace is released completely', () => {
 
 // ── J. Cleanup of a workspace with unsaved work ─────────────────────────────
 
+/**
+ * Adds submodules to the **source repository** and commits them, so a worktree
+ * created afterwards receives the gitlinks through `git worktree add`.
+ *
+ * The provenance is the point, and a review had to measure it because this file
+ * first got it wrong. `git worktree remove` refuses — `fatal: working trees
+ * containing submodules cannot be moved or removed`, exit 128 — whenever Git
+ * keeps a `<super>/.git/worktrees/<task>/modules` directory for that worktree,
+ * which it creates when a submodule is added *inside* the worktree, and which
+ * survives `submodule deinit`. So:
+ *
+ *   added inside the worktree, then deinitialised  ->  refuses, exit 128
+ *   present in the base commit, never populated    ->  **exit 0, and deletes**
+ *
+ * A destructive case built the first way proves nothing: the payload survives
+ * whatever the gate does. These build the second.
+ */
+function withSubmoduleInBase(repository: ResolvedRepository, ...paths: readonly string[]): void {
+  const inner = createRepoFixture({ defaultBranch: 'main', profile: null });
+  for (const path of paths) {
+    git(repository.root, [
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--quiet',
+      inner.split('\\').join('/'),
+      path,
+    ]);
+  }
+  git(repository.root, ['add', '--all']);
+  git(repository.root, ['commit', '--quiet', '-m', 'add submodules']);
+}
+
 describe('J — a workspace holding work is never destroyed', () => {
   it('refuses a dirty worktree and leaves the files in place', async () => {
     const repository = await freshRepository();
@@ -439,29 +473,25 @@ describe('J — a workspace holding work is never destroyed', () => {
    */
   it('refuses a file planted in an unpopulated submodule, and keeps it', async () => {
     const repository = await freshRepository();
+    // The submodule is committed in the **source repository**, before the
+    // worktree exists, so the gitlink arrives through `git worktree add`. That
+    // is not a detail — see the docstring above: it is the only provenance in
+    // which `git worktree remove` will actually delete.
+    withSubmoduleInBase(repository, 'vendor');
     const workspace = await prepared(repository, 'V1-03');
-    const inner = createRepoFixture({ defaultBranch: 'main', profile: null });
     const wt = workspace.worktreePath;
 
-    // A gitlink in the index whose directory is empty — what a checkout of a
-    // submodule-bearing repository looks like before `submodule update`.
-    git(wt, [
-      '-c',
-      'protocol.file.allow=always',
-      'submodule',
-      'add',
-      '--quiet',
-      inner.split('\\').join('/'),
-      'vendor',
-    ]);
-    git(wt, ['commit', '--quiet', '-m', 'add vendor']);
-    git(wt, ['submodule', 'deinit', '--force', 'vendor']);
-
     const planted = join(wt, 'vendor', 'planted.ts');
+    mkdirSync(join(wt, 'vendor'), { recursive: true });
     writeFileSync(planted, 'payload\n', 'utf8');
 
-    // The premise, measured: the vector this gate used to ask sees nothing.
+    // Premise one: the vector this gate used to ask sees nothing.
     expect(git(wt, ['status', '--porcelain', '--untracked-files=all']).trim()).toBe('');
+    // Premise two, and the half this case lacked: the fixture is the destroying
+    // kind. Git keeps no `modules` directory for this worktree, which is what
+    // makes its own refusal *not* fire — so the only thing between the payload
+    // and deletion is the gate below.
+    expect(existsSync(join(repository.root, '.git', 'worktrees', 'V1-03', 'modules'))).toBe(false);
 
     const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
       lease: leaseFor(repository),
@@ -513,43 +543,32 @@ describe('J — a workspace holding work is never destroyed', () => {
    * writes and no Git command at all**.
    *
    * A superproject with two gitlinks whose paths differ only by a trailing
-   * U+00A0. The writer plants a payload in the longer one and a `.git` gitfile
-   * in the shorter, which is enough to make Git treat the shorter as a populated
-   * checkout. `runGitCommand` trims stdout, so `git submodule status`'s final
-   * path arrived shortened onto that sibling, the probe read the wrong directory,
-   * and the unforced `git worktree remove` behind this gate destroyed the
-   * payload.
+   * U+00A0, both arriving through `git worktree add` and neither populated.
+   * `runGitCommand` trims stdout, so `git submodule status`'s final path arrived
+   * shortened onto its sibling, the probe read the wrong directory, and the
+   * unforced `git worktree remove` behind this gate destroyed the payload.
    *
-   * The probe reads `rawStdout` now. This case asserts the gate, not the probe:
-   * the reading is only worth anything if the destructive step honours it.
+   * The probe reads `rawStdout` now. This case asserts the **gate**, not the
+   * probe: the reading is only worth anything if the destructive step honours
+   * it. An earlier version of this docstring described a `.git` gitfile the body
+   * never wrote — the collapse needs no fabrication, only two ordinary
+   * `submodule add`s.
    */
   it('refuses a payload behind a path the seam would have shortened, and keeps it', async () => {
     const repository = await freshRepository();
-    const workspace = await prepared(repository, 'V1-03');
-    const inner = createRepoFixture({ defaultBranch: 'main', profile: null });
-    const wt = workspace.worktreePath;
     const nbsp = '\u00A0';
-
-    for (const path of ['vendnb', `vendnb${nbsp}`]) {
-      git(wt, [
-        '-c',
-        'protocol.file.allow=always',
-        'submodule',
-        'add',
-        '--quiet',
-        inner.split('\\').join('/'),
-        path,
-      ]);
-    }
-    git(wt, ['commit', '--quiet', '-m', 'two submodules']);
-    git(wt, ['submodule', 'deinit', '--force', `vendnb${nbsp}`]);
+    withSubmoduleInBase(repository, 'vendnb', `vendnb${nbsp}`);
+    const workspace = await prepared(repository, 'V1-03');
+    const wt = workspace.worktreePath;
 
     const planted = join(wt, `vendnb${nbsp}`, 'planted.ts');
     mkdirSync(join(wt, `vendnb${nbsp}`), { recursive: true });
     writeFileSync(planted, 'payload\n', 'utf8');
 
-    // The premise: Git's own cleanliness reading sees nothing.
+    // The premises: Git's own cleanliness reading sees nothing, and Git's own
+    // refusal will not fire for this provenance.
     expect(git(wt, ['status', '--porcelain', '--untracked-files=all']).trim()).toBe('');
+    expect(existsSync(join(repository.root, '.git', 'worktrees', 'V1-03', 'modules'))).toBe(false);
 
     const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
       lease: leaseFor(repository),

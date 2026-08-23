@@ -23,6 +23,15 @@
  *     commit the base does not already have. Either check failing refuses the
  *     *whole* operation with the workspace still standing.
  *
+ *     That promise is not kept here alone, and a review was right to say so.
+ *     Content a `.gitignore` hides is closed one layer up, by
+ *     `run/release-workspace.ts`, which runs its own ignored-content proof
+ *     *before* calling this — and this module's cleanliness reading does not see
+ *     it. Today that is sound because `releaseTaskWorkspace` is the only
+ *     production caller (`grep -rn "removeTaskWorkspace" src/`). A **second**
+ *     caller would reopen the route, so adding one means bringing the proof with
+ *     it or moving it in here.
+ *
  * ── Never forced ───────────────────────────────────────────────────────────
  *
  * `git worktree remove` without `--force` and `git branch -d` without `-D`.
@@ -290,13 +299,21 @@ export async function removeTaskWorkspace(
   // the remediation that found it hardened the two cleanliness *observers* and
   // left this one asking the blind question — on the reasoning that Git refuses
   // to remove a worktree containing a submodule anyway. That reasoning was taken
-  // from a populated fixture and is **false** for the unpopulated one, which is
-  // the state every AO worktree starts in and the only state in which this gate
-  // is blind:
+  // from one fixture and is **false** for the shape AO actually produces.
   //
-  //   populated gitlink   -> fatal: working trees containing submodules cannot
-  //                          be moved or removed        exit 128, nothing lost
-  //   unpopulated gitlink -> exit 0, worktree gone, planted files gone
+  // What the refusal turns on is **provenance** — whether Git keeps a
+  // `<super>/.git/worktrees/<task>/modules` directory for this worktree — and
+  // not population, which the first correction claimed and a later review also
+  // had to measure wrong:
+  //
+  //   added inside the worktree, then deinitialised -> fatal: working trees
+  //                          containing submodules cannot be moved or removed,
+  //                          exit 128, nothing lost — *and it is unpopulated*
+  //   present in the base commit, arriving through `git worktree add`
+  //                       -> exit 0, worktree gone, planted files gone
+  //
+  // The second row is how a task worktree is made here, so it is the row that
+  // matters, and in it this gate is the only thing standing.
   //
   // Reproduced end to end: the bare vector reported clean, `removeTaskWorkspace`
   // returned `WORKSPACE_REMOVED`, and two planted files were destroyed. So the

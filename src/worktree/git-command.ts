@@ -118,7 +118,21 @@ export type GitRunner = (cwd: string, args: readonly string[]) => Promise<GitCom
  */
 const GIT_COMMAND_TIMEOUT_MS = 120_000;
 
-/** `worktree list --porcelain` is the largest output here; 1 MiB is generous. */
+/**
+ * The output ceiling every Git command here shares.
+ *
+ * This said "`worktree list --porcelain` is the largest output here; 1 MiB is
+ * generous", and it stopped being true when a later slice added readers that
+ * enumerate. `ls-files --stage -z` over a whole index is the largest by orders
+ * of magnitude — measured, this repository's own 296 tracked files are 24 KiB,
+ * and the cap falls at roughly 12,700 files at that shape — and it is the
+ * command whose cliff **L-V3-11-15** is entirely about. `git status` with
+ * `--untracked-files=all` was the other, which is why the cleanliness vector
+ * carries `normal`.
+ *
+ * "Generous" is therefore the wrong word for it, and the residual says so rather
+ * than the constant pretending otherwise.
+ */
 const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
 
 /**
@@ -173,15 +187,22 @@ const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
  * worst of them was "closed by Git itself — `git worktree remove` refuses
  * outright for any worktree whose index holds a gitlink, exit 128, populated or
  * not — so this is a detection gap and not data loss". **That was false, and it
- * was the whole justification for not fixing the gate.** The refusal is a
- * property of *population*, not of the index, and it was measured on a populated
- * fixture only:
+ * was the whole justification for not fixing the gate.**
  *
- *   populated gitlink   -> exit 128, nothing removed
- *   unpopulated gitlink -> exit 0, worktree gone, planted files gone
+ * The replacement said the refusal is a property of *population*. A later review
+ * measured that wrong too, so here is what it actually turns on — **provenance**,
+ * meaning whether Git keeps a `<super>/.git/worktrees/<task>/modules` directory
+ * for this worktree:
  *
- * Unpopulated is the state `git worktree add` leaves and the only state in which
- * the gate is blind, so the two conditions coincide exactly. Reproduced end to
+ *   submodule added *inside* the worktree, then deinitialised
+ *                                      -> exit 128, nothing removed
+ *   gitlink present in the base commit, arriving via `git worktree add`
+ *                                      -> **exit 0, worktree gone, files gone**
+ *
+ * The first row is unpopulated and still refuses, which is what falsified
+ * "population". The second is the shape AO actually produces — a task worktree
+ * is created by `git worktree add` from a base commit — and it is the shape in
+ * which this gate is the only thing between a planted file and deletion. Reproduced end to
  * end through the production path: the bare vector reported clean,
  * `removeTaskWorkspace` returned `WORKSPACE_REMOVED`, and two planted files were
  * destroyed. `remove-workspace.ts`'s Proof 3a therefore asks
