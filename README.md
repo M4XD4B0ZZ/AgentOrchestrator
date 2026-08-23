@@ -3388,7 +3388,10 @@ enumerates: two test the output for emptiness and the third only asks whether
 every line starts with `??`, which `normal` answers identically. And
 `remove-workspace.ts` is no longer in the sentence at all — a later round
 measured its blind reading destroying writer output and moved it onto
-`observeWorktreeCleanliness`, which issues no `status` of its own. See
+`observeWorktreeCleanliness`. (`remove-workspace.ts` issues no `status` of its
+own any more — `grep` finds none in that file. The probe of course issues one;
+an earlier wording left the antecedent ambiguous enough to read as the opposite.)
+See
 **L-V3-11-10**, which now carries only the preparation gates.
 
 **And one fail-open arm in the reader.** `readReportedResetAt` walked backwards
@@ -4604,11 +4607,20 @@ and because the failure mode it describes — a command that cannot start is
   **`git init` is not required** — a hand-placed `.git` *file* containing
   `gitdir: …/.git/modules/<name>`, which is the reach of a writer holding only
   `Write`, produces the same reading, so the limit is wider than "a writer with a
-  shell". And **which signal makes the probe defer depends on the shape**: the
-  `submodule status` flag is a space when the gitdir resolves in this worktree
-  and `-` when it does not, so some fabricated shapes are dropped by the
-  `-`-only filter before any directory is read and others reach the `.git` rule.
-  Earlier wordings claimed each of those exclusively.
+  shell". And **which signal makes the probe defer depends on the shape** — some
+  fabricated shapes are dropped by the `-`-only filter before any directory is
+  read, others reach the `.git` rule — so a reader watching one of them will miss
+  the other.
+
+  **The rule for that flag has now been written wrongly three times**, twice
+  after a review measured the previous version false, so it is recorded here as a
+  measurement rather than a rule: on five fabricated shapes, a `.git` file
+  pointing at a gitdir that resolves gives flag `-` *and* a working `git status`,
+  which refutes both "a space when the gitdir resolves" and "a `-` flag means
+  `status` aborts". Isolated on one directory, `git submodule init` flipped the
+  flag by writing only `submodule.<name>.url` and `.active` into the local
+  config. The flag tracks config initialisation **together with** a gitdir that
+  resolves here. Anyone about to write a fourth version should measure first.
 
   **The destructive half is closed**, and that was tested rather than assumed:
   five fabricated shapes driven to `git worktree remove` either made `status`
@@ -4618,12 +4630,15 @@ and because the failure mode it describes — a command that cannot start is
   remediation removed from the cleanliness vector.** When `git submodule status`
   cannot be used — an embedded repository never mapped in `.gitmodules`, the
   ordinary `git add -A` accident — the probe reads the whole index instead.
-  Measured: 7,003 tracked files (1,260,171 bytes of `ls-files --stage -z`) plus
-  one such gitlink, on a **clean** tree, floods the cap and answers "not
-  established", which is `UNOBSERVABLE`, which stops every step of that task for
-  an operator. The threshold is a byte total and not a file count: an entry costs
-  `51 + len(path)` bytes, so this repository's own shape (82.7 B/entry) reaches
-  it at about 12,700 files. Fail-closed on authority, a permanent stop on
+  Measured on a **clean** tree with one such gitlink: the fallback floods the cap
+  and answers "not established", which is `UNOBSERVABLE`, which stops every step
+  of that task for an operator. The threshold is a byte total and not a file
+  count — an entry costs `51 + len(path)` bytes — so it moves with path length:
+  this repository's own shape is 82.7 B/entry and reaches the cap at about
+  **12,700** files, while a fixture at 179.9 B/entry reaches it at about
+  **5,800**. (That fixture was described here as "7,003 tracked files", which is
+  its *size*, not its cap, in the sentence whose whole subject is that a count
+  without its byte premise misleads.) Fail-closed on authority, a permanent stop on
   availability, and narrower than the stall it replaced — the first design
   stalled that repository at *any* size.
 
@@ -4991,11 +5006,21 @@ then met a live owner exits 4.
 
 The three locks in
 [Unattended resume is inert in this build](#unattended-resume-is-inert-in-this-build-and-that-is-now-stated)
-are untouched, and the first of them is decisive: **no agent CLI reports a quota
-reset time**, so `reportedResetAt` is always `null`, `evaluateAutomaticResume`
-denies `RESET_TIME_MISSING`, and neither the resume nor the wait can fire on a
-real run. V3-08 supplies the authority that was missing; it does not supply the
-evidence, and inventing one would be worse than not having it.
+were untouched **at the time of that slice**, and the first of them was decisive:
+no agent CLI reported a quota reset time, so `reportedResetAt` was always `null`,
+`evaluateAutomaticResume` denied `RESET_TIME_MISSING`, and neither the resume nor
+the wait could fire on a real run. V3-08 supplied the authority that was missing;
+it did not supply the evidence, and inventing one would have been worse than not
+having it.
+
+> **Superseded by V3-11.** The Claude CLI *does* report the instant — one output
+> mode away, in a `rate_limit_event` that `--output-format json` builds and never
+> writes. Reading it is what V3-11 did. This paragraph is left in the past tense
+> rather than deleted because it records why the lock existed; the section it
+> points at carries the current state. A review of the V3-11 remediation found
+> this sentence still in the present tense, contradicting the same document 2,000
+> lines earlier — it was already on `main` and outside that PR's delta, and is
+> corrected here rather than carried.
 
 ## Scope enforcement (V2-06)
 

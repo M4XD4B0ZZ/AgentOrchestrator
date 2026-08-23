@@ -508,6 +508,58 @@ describe('J — a workspace holding work is never destroyed', () => {
     expect(existsSync(workspace.worktreePath)).toBe(true);
   });
 
+  /**
+   * The destructive gate against the shape a review reached with **two file
+   * writes and no Git command at all**.
+   *
+   * A superproject with two gitlinks whose paths differ only by a trailing
+   * U+00A0. The writer plants a payload in the longer one and a `.git` gitfile
+   * in the shorter, which is enough to make Git treat the shorter as a populated
+   * checkout. `runGitCommand` trims stdout, so `git submodule status`'s final
+   * path arrived shortened onto that sibling, the probe read the wrong directory,
+   * and the unforced `git worktree remove` behind this gate destroyed the
+   * payload.
+   *
+   * The probe reads `rawStdout` now. This case asserts the gate, not the probe:
+   * the reading is only worth anything if the destructive step honours it.
+   */
+  it('refuses a payload behind a path the seam would have shortened, and keeps it', async () => {
+    const repository = await freshRepository();
+    const workspace = await prepared(repository, 'V1-03');
+    const inner = createRepoFixture({ defaultBranch: 'main', profile: null });
+    const wt = workspace.worktreePath;
+    const nbsp = '\u00A0';
+
+    for (const path of ['vendnb', `vendnb${nbsp}`]) {
+      git(wt, [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '--quiet',
+        inner.split('\\').join('/'),
+        path,
+      ]);
+    }
+    git(wt, ['commit', '--quiet', '-m', 'two submodules']);
+    git(wt, ['submodule', 'deinit', '--force', `vendnb${nbsp}`]);
+
+    const planted = join(wt, `vendnb${nbsp}`, 'planted.ts');
+    mkdirSync(join(wt, `vendnb${nbsp}`), { recursive: true });
+    writeFileSync(planted, 'payload\n', 'utf8');
+
+    // The premise: Git's own cleanliness reading sees nothing.
+    expect(git(wt, ['status', '--porcelain', '--untracked-files=all']).trim()).toBe('');
+
+    const removal = await removeTaskWorkspace(repository, taskWithId('V1-03'), {
+      lease: leaseFor(repository),
+    });
+
+    expect(removal.ok).toBe(false);
+    if (!removal.ok) expect(removal.code).toBe('WORKTREE_DIRTY');
+    expect(existsSync(planted)).toBe(true);
+  });
+
   it('refuses a clean worktree whose branch holds unmerged commits', async () => {
     const repository = await freshRepository();
     const workspace = await prepared(repository, 'V1-03');

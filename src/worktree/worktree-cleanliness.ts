@@ -144,16 +144,24 @@
  *    made `status` exit 128 or was refused at 128 with the payload intact. The
  *    authority half is not closed.
  *
- *    **Two things about it were stated wrongly here and are worth stating
- *    right.** First, `git init` is not needed: a hand-placed `.git` *file*
- *    containing `gitdir: …/.git/modules/<name>` — the reach of a writer holding
- *    only `Write` — produces the same reading. Second, which signal makes the
- *    probe defer depends on the shape, and this comment has claimed each of them
- *    exclusively. Measured: the `submodule status` flag is a space when the
- *    gitdir resolves *in this worktree* and `-` when it does not, so on some
- *    fabricated shapes the `-`-only filter drops the line before the directory
- *    is ever read, and on others the `.git` rule above is what defers. Anyone
- *    closing this by watching one of the two will miss the other;
+ *    Two things about it were stated wrongly here before. `git init` is not
+ *    needed: a hand-placed `.git` *file* containing
+ *    `gitdir: …/.git/modules/<name>` — the reach of a writer holding only
+ *    `Write` — produces the same reading. And which signal makes the probe defer
+ *    depends on the shape, so anyone closing this by watching one of them will
+ *    miss the other.
+ *
+ *    **Do not add a fourth version of the flag rule.** Three have now been
+ *    written here and all three were false, the last two after a review measured
+ *    the previous one wrong. What is measured, on five fabricated shapes: a
+ *    `.git` file pointing at a gitdir that resolves gives flag `-` *and* a
+ *    working `git status` — which refutes both "the flag is a space when the
+ *    gitdir resolves" and "a `-` flag means `status` aborts". Isolated on one
+ *    directory with no file changed, `git submodule init` flipped the flag from
+ *    `-` to a space by writing only `submodule.<name>.url` and `.active` into
+ *    the local config, so the flag tracks **config initialisation together with
+ *    a gitdir that resolves here**, not either alone. Treat that as the last
+ *    word only until someone measures it again;
  *  - a gitlink nested inside a **populated** submodule. `submodule status` is
  *    not recursive, and recursion into arbitrary directories is explicitly
  *    outside this probe's remit (**L-V3-11-14**).
@@ -198,11 +206,19 @@ const NOT_INITIALISED = '-';
 /**
  * How many characters of pathspec one confirmation call may carry.
  *
- * Measured on this platform through `runGitCommand`: the call succeeds at
- * 32,719 characters of arguments and is refused at 32,738 — the `CreateProcess`
- * ceiling. This budget is a quarter of that, because the real limit also counts
- * the executable path and the fixed tokens, and because being under it costs an
- * extra subprocess while being over it costs a repository its observability.
+ * The invariant is the **command line**, not the argument characters, and saying
+ * it the other way round is how this comment was first written. Measured through
+ * `runGitCommand`, varying only argument size at the boundary: the command line
+ * refuses at about 32,727 characters every time, while the *accepted* argument
+ * total that corresponds to it ranges from 16,377 (many one-character arguments,
+ * where per-argument overhead dominates) to 32,135 (few long ones). For this
+ * probe's real shape — many short paths — the honest figure is nearer 16,000
+ * than 32,000.
+ *
+ * This budget counts `len + 1` per path, which is what the command line actually
+ * spends, and 8,000 of them yield a ~8,043-character command line: under even
+ * the worst-shaped ceiling by a factor of two. Being under it costs an extra
+ * subprocess; being over it costs a repository its observability.
  */
 const ARGUMENT_BUDGET_CHARS = 8_000;
 
@@ -315,6 +331,15 @@ async function gitlinkPaths(
     // — so a collapse takes the fallback and gets the right answer rather than
     // merely refusing. A *lone* mangled path needs no rule here: it fails the
     // confirmation and is `CONTRADICTED` already.
+    //
+    // **This guard is the backstop, not the fix**, and the distinction is the
+    // whole lesson of the rounds that produced it. It sees a collapse only when
+    // both colliding paths are `-` lines. When the shortened path lands on a
+    // *populated* sibling, that sibling's line is filtered out above and no
+    // duplicate ever forms — measured, and it answered clean over a planted file.
+    // The reason it is nevertheless sound now is that the line above reads
+    // `rawStdout`, so through the production runner no collapse happens at all.
+    // What remains for this guard is a runner that supplies no `rawStdout`.
     if (parsed !== null && hasDuplicate(parsed)) return await gitlinksFromIndex(git, worktreePath);
     if (parsed !== null) {
       switch (await confirmAgainstIndex(git, worktreePath, parsed)) {

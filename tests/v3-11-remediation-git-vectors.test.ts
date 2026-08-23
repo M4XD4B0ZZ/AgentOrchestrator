@@ -1006,7 +1006,13 @@ describe('the probe stays on its bounded route, and refuses a substituted path',
  * immune to the trim, and gets the right answer rather than merely refusing.
  *
  * A *lone* mangled path needs no rule: it fails its own confirmation and is
- * `CONTRADICTED` already. Only a collision is silent.
+ * `CONTRADICTED` already.
+ *
+ * What this section does **not** establish, and an earlier version of it claimed:
+ * that a collision is the only silent case. It is not. A collision onto a
+ * *populated* sibling is silent too, and the guard cannot see it — the populated
+ * line is gone before the duplicate check runs. That is section 13, and it is why
+ * the trim is now read around rather than detected.
  */
 describe('a gitlink path the seam shortened does not answer for its sibling', () => {
   const NBSP = '\u00A0';
@@ -1486,5 +1492,63 @@ describe('the duplicate guard still catches a collapse a runner hands it', () =>
     // confirmation itself, so the inner one never sees it.
     expect(seen.some((args) => args[0] === 'ls-files' && args.includes('--'))).toBe(true);
     expect(seen.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(false);
+  });
+});
+
+/* ═══ 15. The shapes the untrimmed read has to get right on its own ═══════ */
+
+/**
+ * Two cases the fourth review named as what it would take to unblock, and they
+ * are not redundant with section 13.
+ *
+ * Section 13 is the *collision*: a shortened path landing on a populated
+ * sibling. These are the cases either side of it — a shortened path with nothing
+ * to land on, which must still be read correctly rather than merely refused, and
+ * the whole thing driven through the destructive gate rather than through the
+ * probe alone.
+ */
+describe('a lone path ending in whitespace is read, not merely refused', () => {
+  const NBSP = '\u00A0';
+
+  function loneNbspSubmodule(root: string): void {
+    const inner = createRepoFixture({
+      defaultBranch: 'main',
+      profile: null,
+      files: { 'f.txt': `one${NEWLINE}` },
+    });
+    git(root, [
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--quiet',
+      inner.split('\\').join('/'),
+      `vendnb${NBSP}`,
+    ]);
+    git(root, ['add', '--all']);
+    git(root, ['commit', '--quiet', '-m', 'one submodule']);
+    git(root, ['submodule', 'deinit', '--force', '--all']);
+  }
+
+  /**
+   * Before the untrimmed read this answered **`null`**: the shortened `vendnb`
+   * is not a gitlink, so the index contradicted the listing and the probe
+   * refused. Fail-closed, and still wrong — a genuinely clean worktree that can
+   * never be observed is a task that can never run.
+   */
+  it('reports a clean worktree with one such gitlink as clean', async () => {
+    const root = repo();
+    loneNbspSubmodule(root);
+
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(true);
+  });
+
+  it('reports the same worktree as dirty once something is planted in it', async () => {
+    const root = repo();
+    loneNbspSubmodule(root);
+    writeFileSync(join(root, `vendnb${NBSP}`, 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
   });
 });
