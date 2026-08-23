@@ -39,7 +39,11 @@ import {
 } from '../src/auth/env-guard.js';
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import { formatSafeError } from '../src/core/safe-error.js';
-import type { CommandResult, RunOptions } from '../src/doctor/exec.js';
+import {
+  WINDOWS_PLATFORM_BACKFILL,
+  type CommandResult,
+  type RunOptions,
+} from '../src/doctor/exec.js';
 import { renderReportSummary } from '../src/doctor/render.js';
 import { runDoctor } from '../src/doctor/run-doctor.js';
 import type { DoctorReport } from '../src/doctor/report.js';
@@ -183,6 +187,12 @@ const EXPECTED_KEYS: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = {
   // credential variable: CLI-login operation is the expected mode.
   'agent:claude': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
   'agent:codex': ['PATH', 'PATHEXT', 'HOME', 'USERPROFILE'],
+  // V4 slice 2. The one policy with a *measured* need for an app-data root:
+  // `gh help environment` names `$AppData/GitHub CLI` as the Windows config
+  // directory, and the installed client was measured to report "please run gh
+  // auth login" without it and to answer normally with it. It gets no profile
+  // root, because the login it reads is not under one.
+  'forge:github': ['PATH', 'PATHEXT', 'APPDATA'],
 };
 
 /**
@@ -277,23 +287,67 @@ describe('the policy matrix is exact', () => {
     expect(codex).not.toBe(probeEnvAllowlist('auth:codex'));
   });
 
-  /** AO-FOUNDATION-REM-003A-RR-02. */
-  it('withholds the app-data roots from every policy, including auth:claude', () => {
+  /**
+   * AO-FOUNDATION-REM-003A-RR-02, narrowed once by V4 slice 2.
+   *
+   * The original guarantee was "no policy has a demonstrated need for an
+   * app-data root". Exactly one now does, and it was demonstrated the way that
+   * rule asks for — by measurement, not by listing where a credential might
+   * live. The guarantee is therefore narrowed rather than deleted: it still
+   * holds in full for `LOCALAPPDATA` and for every policy but one, and the one
+   * exception is named here so that a second one cannot appear quietly.
+   */
+  const APPDATA_POLICIES = ['forge:github'] as const;
+
+  it('withholds LOCALAPPDATA from every policy without exception', () => {
     for (const policy of PROBE_ENV_POLICIES) {
       const env = createProbeEnv(policy, sourceEnv());
-      const upper = keysUpper(env);
-      for (const name of APP_DATA_ROOTS) {
-        expect(env[name]).toBeUndefined();
-        expect(upper).not.toContain(name);
-        expect(probeEnvAllowlist(policy).map((n) => n.toUpperCase())).not.toContain(name);
-      }
-      const serialised = JSON.stringify(env);
-      expect(serialised).not.toContain(OPERATIONAL.APPDATA);
-      expect(serialised).not.toContain(OPERATIONAL.LOCALAPPDATA);
+      expect(env['LOCALAPPDATA']).toBeUndefined();
+      expect(keysUpper(env)).not.toContain('LOCALAPPDATA');
+      expect(probeEnvAllowlist(policy).map((n) => n.toUpperCase())).not.toContain('LOCALAPPDATA');
+      expect(JSON.stringify(env)).not.toContain(OPERATIONAL.LOCALAPPDATA);
     }
   });
 
-  /** AO-FOUNDATION-REM-003B, the executable-selection provenance defect. */
+  it('withholds APPDATA from every policy except the forge client', () => {
+    for (const policy of PROBE_ENV_POLICIES) {
+      const env = createProbeEnv(policy, sourceEnv());
+      const upper = keysUpper(env);
+      const allowed = (APPDATA_POLICIES as readonly string[]).includes(policy);
+      if (allowed) {
+        // Positive control: the exception is real, not merely tolerated.
+        expect(env['APPDATA']).toBe(OPERATIONAL.APPDATA);
+        expect(upper).toContain('APPDATA');
+        continue;
+      }
+      expect(env['APPDATA']).toBeUndefined();
+      expect(upper).not.toContain('APPDATA');
+      expect(probeEnvAllowlist(policy).map((n) => n.toUpperCase())).not.toContain('APPDATA');
+      expect(JSON.stringify(env)).not.toContain(OPERATIONAL.APPDATA);
+    }
+  });
+
+  it('names every policy that receives an app-data root', () => {
+    const withAppData = PROBE_ENV_POLICIES.filter((policy) =>
+      probeEnvAllowlist(policy)
+        .map((n) => n.toUpperCase())
+        .some((n) => (APP_DATA_ROOTS as readonly string[]).includes(n)),
+    );
+    expect([...withAppData].sort()).toEqual([...APPDATA_POLICIES].sort());
+  });
+
+  /**
+   * AO-FOUNDATION-REM-003B, the executable-selection provenance defect.
+   *
+   * "Withholds" means *this module supplies none of them*, which is the whole
+   * of the provenance claim: the system tools come from a fixed,
+   * environment-independent boundary, so no caller-controlled value can choose
+   * which binary answers. It does **not** mean the child's environment lacks
+   * them — `SYSTEMROOT` and `WINDIR` are back-filled into every Windows child
+   * by `runCommand`, as the union pin at the bottom of this file measures, and
+   * `COMSPEC` genuinely is absent from that back-fill. Said here because V4
+   * slice 2 shipped exactly that confusion in a different policy comment.
+   */
   it('withholds SystemRoot, windir and COMSPEC from every policy', () => {
     for (const policy of PROBE_ENV_POLICIES) {
       const env = createProbeEnv(policy, sourceEnv());
@@ -699,19 +753,11 @@ describe('a NODE_OPTIONS preload does not reach a real probe', () => {
     // child legitimately holds a few names the policy did not supply. Pinning
     // the union keeps that bounded: a variable that is neither policy-allowed
     // nor on libuv's list would be a real leak, and this fails on it.
-    const LIBUV_REQUIRED = [
-      'HOMEDRIVE',
-      'HOMEPATH',
-      'LOGONSERVER',
-      'PATH',
-      'SYSTEMDRIVE',
-      'SYSTEMROOT',
-      'TEMP',
-      'USERDOMAIN',
-      'USERNAME',
-      'USERPROFILE',
-      'WINDIR',
-    ];
+    // Taken from the constant the product applies rather than hand-copied. It
+    // was a fourth literal restatement of the same eleven names, and V4 slice 2
+    // exported `WINDOWS_PLATFORM_BACKFILL` precisely so this list stops being
+    // maintained in parallel with the behaviour it is supposed to measure.
+    const LIBUV_REQUIRED = WINDOWS_PLATFORM_BACKFILL.map((name) => name.toUpperCase());
     const permitted = new Set([
       ...probeEnvAllowlist('capability:generic').map((n) => n.toUpperCase()),
       ...(process.platform === 'win32' ? LIBUV_REQUIRED : []),

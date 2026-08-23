@@ -17,6 +17,7 @@ import { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
 import { registerBlockCommand } from './block-command.js';
+import { registerDeliveryCommand } from './delivery-command.js';
 import { registerDoctorCommand } from './doctor-command.js';
 import { registerLeaseCommand } from './lease-command.js';
 import { registerReleaseCommand } from './release-command.js';
@@ -35,25 +36,59 @@ const DESCRIPTION = [
   '  - attended execution of a block of independent tasks: `block --attended`',
   '  - `release --attended`: hand back a workspace a crashed start left behind,',
   '    and only one proven to be that task’s own untouched leftovers',
-  '  - the repository execution lease: read-only `lease status` to inspect it',
-  '  - an opt-in operator notification for a block run that needs a human:',
-  '    off unless ~/.agent-orchestrator/notify.yaml exists, and no network',
-  '    access of any kind happens without it',
+  '  - the repository execution lease: read-only `lease status` to inspect it,',
+  '    and `lease recover` to remove one this build can prove is dead',
+  '  - the read-only `delivery` report: which repository a finished task would',
+  '    be delivered to, and which exact commit an observation would be about',
   '',
-  'Execution requires three independent things, and none implies another:',
-  '`--attended`, the operator stating they are present for this invocation; a',
-  'fresh auth preflight that passes; and this repository’s execution lease, which',
-  'makes at most one invocation its writer at a time. Without --attended, `run`',
-  'still only reports: it starts no agent, writes no task state and prepares no',
+  'Network access, stated in full. Exactly one request is made by this process',
+  'itself, and it is opt-in:',
+  '  - the operator notification for a block run that needs a human: off unless',
+  '    ~/.agent-orchestrator/notify.yaml exists, and never enabled by anything',
+  '    inside a repository',
+  '',
+  'Every other request this build is answerable for is made by a program it',
+  'starts. That still counts as network access here, under the same rule the',
+  'delivery residual L-V4-02-6 applies to the GitHub CLI — a spawned client’s',
+  'traffic is the command’s traffic:',
+  '  - `delivery --observe` starts the GitHub CLI, which asks github.com two',
+  '    read-only questions about one exact commit. That client also makes calls',
+  '    of its own — telemetry, and a periodic update check — which this build',
+  '    does not suppress. Without --observe the command starts no client and',
+  '    contacts no forge',
+  '  - `doctor` starts the agent CLIs to read their login state',
+  '  - `run --attended`, `run --automatic-resume-only` and `block --attended`',
+  '    start the agent CLIs, and run whatever verification commands the',
+  '    repository’s own profile declares',
+  '',
+  'What those programs contact is their own affair. This build neither bounds it',
+  'nor reports it.',
+  '',
+  'Execution requires three independent things, and none implies another: a',
+  'grant on the command line — `--attended`, the operator stating they are',
+  'present for this invocation, or `--automatic-resume-only`, stating that nobody',
+  'is; a fresh auth preflight that passes; and this repository’s execution lease,',
+  'which makes at most one invocation its writer at a time. Given neither grant,',
+  '`run` only reports: it starts no agent, writes no task state and prepares no',
   'workspace.',
   '',
   'A lease whose owner is gone is never taken over automatically: a dead owner',
-  'does not prove that no agent process survived it. This build ships no command',
-  'that removes a lease it did not create, and prints no procedure for doing it by',
-  'hand: an attended break was shipped twice and withdrawn twice, because for a',
-  'record left by a crash there is no fact an operator can be shown that still',
-  'names the same object once the removal runs. Clearing one is a decision outside',
-  'this tool.',
+  'does not prove that no agent process survived it. It is removed only where',
+  'that is proved, and only by an operator asking for it now — `lease recover`,',
+  'or `run --recover-stale-lease` before acquiring. Both require that the owner',
+  'process is gone AND that every writer launch under the lease is proved to have',
+  'run inside a process job coupled to that owner. Anything unproved, unreadable',
+  'or written by an older build is refused, and there is no override.',
+  '',
+  'What is not shipped is a break — removing a lease that cannot be proved dead.',
+  'It was shipped twice and withdrawn twice, because for a record left by a crash',
+  'there is no fact an operator can be shown that still names the same object once',
+  'the removal runs. The consequence is stated rather than enumerated, because it',
+  'is a rule and not a list: a lease this build cannot prove dead stays outside',
+  'this tool for good. That includes one written by an older build and one whose',
+  'launch history was never published. `lease status` still reports whatever owner',
+  'it can read from such a lease, and whether that process is alive, so there is',
+  'someone to ask.',
   '',
   'A block runs attended and sequentially: one lease for the whole run, one active',
   'task at a time, and a task that fails locally is recorded and does not end the',
@@ -66,7 +101,11 @@ const DESCRIPTION = [
   'permission. A member whose predecessors are not ordered relative to each other',
   'has no single commit to build on, and the whole block is refused.',
   '',
-  'Unattended running and opening pull requests are not in this build.',
+  'Opening pull requests is not in this build. Unattended running is, narrowly:',
+  '`run --automatic-resume-only` continues ONE named task with nobody present,',
+  'and only where the resume decision answers AUTOMATIC_ALLOWED. It cannot start',
+  'a task, cannot pick up in-flight work it did not itself resume, cannot recover',
+  'a stale lease, and nothing schedules it.',
 ].join('\n');
 
 export function buildProgram(): Command {
@@ -99,6 +138,7 @@ export function buildProgram(): Command {
   registerBlockCommand(program);
   registerReleaseCommand(program);
   registerLeaseCommand(program);
+  registerDeliveryCommand(program);
 
   return program;
 }

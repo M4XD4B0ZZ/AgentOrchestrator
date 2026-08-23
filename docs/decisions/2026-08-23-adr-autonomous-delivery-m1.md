@@ -198,4 +198,17 @@ an invariant list, and a first slice that can be reviewed on its own.
 capability and environment policy, answering, for a named repository and an
 exact commit object name: does a pull request exist for this head, and what is
 the check state *of that head*. It is the slice that discharges invariants 1–6.
-It is not started.
+
+**Delivered** as V4 slice 2 on 2026-08-23. Its own decision record —
+`2026-08-23-adr-delivery-observation-seam.md` — carries the forge, egress and
+credential contract, the measurements behind it, the restated invariant table
+and its residuals `L-V4-02-1..9`. Two things it changed here are worth naming
+at this level:
+
+- invariants 1–6 move from `[open]` to `[held]` *for observation*. They remain
+  open for every action, because nothing acts;
+- slice 1's residual `L-V4-01-2` — "the host is carried, not judged" — is
+  decided. The host is judged, against one name, and the judgement gates a
+  network destination rather than merely labelling one.
+
+`READY_FOR_PR: []` is still unchanged, and nothing in `src/` merges anything.

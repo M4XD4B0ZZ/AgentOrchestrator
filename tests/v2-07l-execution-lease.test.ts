@@ -2548,6 +2548,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'agent', 'codex-reviewer.ts'),
         join('src', 'auth', 'auth-preflight.ts'),
         join('src', 'boundary', 'owned-command.ts'),
+        join('src', 'deliver', 'github-observer.ts'),
         join('src', 'doctor', 'capabilities.ts'),
         join('src', 'repo', 'git-query.ts'),
         join('src', 'verify', 'run-verification.ts'),
@@ -2558,13 +2559,27 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'worktree', 'worktree-cleanliness.ts'),
       ].sort(),
     );
-    // Of those, six can actually start a process; the rest import
+    // Of those, seven can actually start a process; the rest import
     // `isShellInertArgument` or a type. The list exists so that a *new*
     // importer of the execution module has to be classified rather than
     // appearing silently, and the runner fence itself is asserted in 'lets
     // exactly one module reach the raw runners' above.
     //
-    // `worktree/worktree-cleanliness.ts` is the newest, and it is in the second
+    // `deliver/github-observer.ts` is the newest, and it is in the FIRST group:
+    // it really does start a process — `gh api` — so it has to be classified
+    // here rather than waved through. It is outside the lease, deliberately,
+    // and that is not a hole in the fence for one reason: the fence exists so
+    // that at most one invocation is a repository's *writer*, and this module
+    // writes nothing. It starts no agent, issues no Git command, touches no
+    // worktree, saves no task state, and does not even run inside a repository
+    // — `FORGE_CLIENT_WORKING_DIRECTORY` is the OS temp directory. Taking the
+    // execution lease to read a forge would claim writer authority for an
+    // operation that has none to use, which is the widening this suite exists
+    // to prevent, not a precaution. What it *is* fenced by is an explicit
+    // `--observe`, asserted in `tests/v4-02-delivery-observation.test.ts` with
+    // a matched control: same fixture, no flag, zero processes.
+    //
+    // `worktree/worktree-cleanliness.ts` was the previous addition, and it is in the second
     // group: it imports `isShellInertArgument` only, to decide whether a
     // submodule path can be carried as a pathspec before it tries. It starts
     // nothing — every command it issues goes through the injected `GitRunner` it

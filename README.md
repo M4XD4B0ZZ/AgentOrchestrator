@@ -8267,17 +8267,285 @@ data does not carry would be the same mistake in the other direction.
   exit status, which `worktree/git-command.ts` is explicit is a narrow,
   documented act rather than a general licence.
 
+
+### Carried forward from V4 slice 2, deliberately
+
+- **L-V4-02-1 — a check suite with no check runs is invisible.** GitHub has a
+  third concept beside check runs and legacy statuses, and a suite that has
+  registered but emitted no run appears in neither mechanism this slice reads.
+  Measured on `10583ee…`: `check-suites` reported three suites, two of them
+  `queued` with `conclusion: null` and zero runs, while `check-runs` reported two
+  successes and GitHub's own rollup reported `SUCCESS`. Reading a runless queued
+  suite as `PENDING` would leave this repository permanently pending — both of
+  its dormant suites have sat that way across every commit measured. So
+  `SUCCESS` is a statement about the records that exist, not a prediction that no
+  further record will appear, and it says so.
+- **L-V4-02-2 — one refusal covers three different situations.** `REQUEST_FAILED`
+  does not tell "no such repository" from "not visible to this login" from "the
+  network failed". Measured: all three exit 1, and only `stderr` distinguishes
+  them — which is exactly what this slice will not read, because a client's error
+  stream can carry an account name, a URL or a proxy's error page. Fail-closed in
+  every case; the operator sentence names no cause it cannot establish.
+- **L-V4-02-3 — proxy configuration is not forwarded.** `HTTPS_PROXY` was
+  measured to redirect every request and `NO_PROXY` to undo it, and neither
+  appears in `gh help environment`. They are refused with everything else, so on
+  a machine that reaches GitHub only through a proxy the observation refuses
+  rather than succeeding. That is the correct direction for a variable that
+  chooses a network destination, and it is a real limitation.
+- **L-V4-02-4 — POSIX is not supported for this capability.** The environment
+  policy carries `APPDATA`, which is where the client keeps its config on
+  Windows. Elsewhere it will not find its login, report that it needs an
+  authentication, and the observation refuses. Consistent with the
+  Windows/NTFS-first platform contract: the fallback is declared absent rather
+  than half-built.
+- **L-V4-02-5 — `filter=latest` is sent, and its interaction with `total_count`
+  is unmeasured.** The parameter is the endpoint's own default and is written out
+  explicitly so a change of default cannot change these semantics silently.
+  Whether `total_count` under that filter counts filtered or unfiltered runs was
+  not established; if it is unfiltered, a repository with a re-run check reports
+  `RESULTS_TRUNCATED` instead of an answer. Fail-closed, and untested.
+- **L-V4-02-6 — the client makes network calls of its own.** Measured with
+  `GH_TELEMETRY=log`: telemetry is enabled by default and its payload carries a
+  stable per-machine device id, the command name and the flag names — no
+  repository identity and no commit. An update check also runs once every 24
+  hours. Neither is suppressed, and the reason is stated plainly rather than
+  dressed up as forwarding: `createProbeEnv` supplies a fixed list of names, so
+  `GH_TELEMETRY` and `DO_NOT_TRACK` do not reach the client whether the operator
+  set them or not. An operator who wants the client quiet sets it in the
+  client's own configuration — `gh config` documents a `telemetry` key taking
+  `enabled | disabled | log`, default `enabled` — not in their environment.
+  Named here so that "this
+  command contacts github.com" is understood to include the client's own
+  housekeeping — and so that the limitation is visible rather than implied.
+- **L-V4-02-7 — whether two open pull requests can share a head commit was not
+  established.** Settling it would have meant creating a pull request, which a
+  read-only investigation may not do, and no documentation sentence was found
+  that decides it. The mechanism reports every claimant either way, and
+  `AMBIGUOUS` exists for the case, so the answer does not depend on the question.
+- **L-V4-02-8 — truncation on the locator endpoint is detected, not proved.**
+  `commits/{sha}/pulls` returns a bare array with no `total_count`, so unlike the
+  two check endpoints there is nothing to compare a page against. The test is
+  that the page came back full, which means a commit contained in exactly
+  `OBSERVATION_PAGE_SIZE` open pull requests is reported `RESULTS_TRUNCATED`
+  rather than answered. That is the fail-closed direction and it is not reachable
+  on any repository this build has been used on, but it is a heuristic and is
+  recorded as one rather than described as a proof.
+- **L-V4-02-9 — the platform back-fill is checked for one thing only.** The
+  suite pins that none of the eleven names Windows back-fills into every child
+  is one of the GitHub CLI's own documented override variables. It cannot see an
+  influence route the client does not document. Two are worth naming anyway:
+  `PATH` is in both the policy and the back-fill and does decide which `gh` runs
+  — supplied deliberately, with executable provenance settled separately by
+  AO-FOUNDATION-REM-003B — and `HOMEDRIVE`/`HOMEPATH` compose into a home
+  directory a config-directory fallback could in principle consult. Measured
+  only this far: `USERPROFILE` alone does not authenticate the client.
+
+## The delivery observation seam (V4 slice 2)
+
+Slice 1 made the delivery target **nameable**. This slice makes it **askable**,
+read-only, for one exact commit at a time:
+
+```
+agent-loop delivery --repository D:\AgentOrchestrator --task T-014 --observe
+```
+
+```
+Repository   : ao  (D:\AgentOrchestrator)
+Task         : T-014
+Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator  (identity only; nothing is delivered)
+State        : READY_FOR_PR
+Subject      : 10583ee91a5747d0049f563ffaac64b0cf643aeb
+Pull request : MATCHED  (#55)
+Checks       : SUCCESS  (2 check run(s), 0 commit status(es): 2 succeeded, 0 pending, 0 failed, 0 neutral/skipped)
+
+Conclusion   : OBSERVED
+  Both questions were answered for exactly the commit named above. Nothing was delivered.
+
+Read-only. This build asked about no commit but the one named above, and about no other
+repository. No task state was written. No pull request was opened, updated, reviewed or
+merged. The GitHub CLI also makes calls of its own — telemetry, and a periodic update
+check — which this build does not suppress (L-V4-02-6).
+```
+
+Without `--observe` the same command builds the subject and stops, contacting
+nothing:
+
+```
+Pull request : not observed  (pass --observe to ask the forge about this commit)
+Checks       : not observed  (pass --observe to ask the forge about this commit)
+
+Conclusion   : NOT_OBSERVED
+  The subject is established. Nothing was contacted; pass --observe to ask the forge.
+
+Read-only. No forge was contacted, no task state was written, and nothing was delivered.
+```
+
+`agent-loop run` gained nothing and still contacts nothing. There is no branch
+in this command on which a client is constructed without `--observe`, so "nothing
+was contacted" is a property of the code rather than a promise in help text.
+
+### The subject is a commit, and the endpoint is only a locator
+
+The question is never "what is the state of this branch". It is:
+
+> for `{ host, owner, name }` and **this exact 40-hex commit object name** — is
+> there exactly one open pull request whose current head is this commit, and
+> what is the check state of this commit?
+
+That matters because GitHub has no API that filters by exact head object name.
+Measured on 2026-08-23:
+
+```
+GET /repos/M4XD4B0ZZ/AgentOrchestrator/commits/46629f0.../pulls
+  -> [ { "number": 55, "state": "open",
+         "head": { "sha": "10583ee91a5747d0049f563ffaac64b0cf643aeb" } } ]
+```
+
+`46629f0` is not that pull request's head — it is an earlier commit on the same
+branch. The endpoint answers "which pull requests **contain** this commit" and
+reports each one's head as it stands *now*. The GraphQL twin
+(`associatedPullRequests`) and the search API behave the same way.
+
+So the endpoint is treated as a locator and every candidate is re-tested against
+its own reported head. Measured against the live repository, through the shipped
+code:
+
+| Subject | Answer |
+| --- | --- |
+| `10583ee…` — the open pull request's head | `MATCHED  (#55)` |
+| `46629f0…` — an earlier commit on that same branch | `NO_MATCHING_PULL_REQUEST` |
+| `28359dd…` — a commit whose pull request was merged | `NO_MATCHING_PULL_REQUEST` |
+| `deadbeef…` — not in the repository | `REQUEST_FAILED` |
+| `10583ee` — abbreviated | `SUBJECT_UNUSABLE`, before any request |
+| `main` — a branch name | `SUBJECT_UNUSABLE`, before any request |
+
+The last two are refused by this build rather than by GitHub, and that is
+deliberate: REST's `{ref}` accepts an abbreviation *and* a branch name — measured,
+`commits/10583ee/check-runs` and `commits/main/check-runs` both answer 200.
+Nothing on the far side insists the subject is an object name, so this side does.
+
+### Both check mechanisms, because either can gate a merge
+
+GitHub carries check state for a commit in two independent mechanisms. Measured
+for the same commit in the same minute:
+
+```
+GET /commits/<sha>/check-runs -> total_count 2, both success
+GET /commits/<sha>/status     -> state "pending", 0 statuses
+```
+
+The combined-status endpoint reports `pending` for a commit that has **no legacy
+statuses at all** — documented: *"pending if there are no statuses or a context
+is pending"*. A build reading only that would call a green commit pending; a
+build reading only check runs would miss a legacy status context that is
+blocking. Both are read, and the summary word is never read — only the records
+beside it.
+
+The order is a guard, not a habit. Check runs are asked for first because
+`/commits/{sha}/status` answers **HTTP 200 `pending`** for a commit that is not
+in the repository at all, echoing the requested sha back, while `/check-runs`
+answers 422. Asking the combined status first would turn a typo into a `PENDING`
+an operator waits on forever.
+
+`SUCCESS` means: every check run and every legacy status attached to this commit
+has finished, and none blocks. `success`, `neutral` and `skipped` are defined
+here as non-blocking, and the counts are printed separately so the definition is
+visible instead of hidden inside one word. `NO_CHECKS` is its own answer and is
+never `SUCCESS` — the same rule `CLAUDE.md` states for this repository's own
+merge gate.
+
+### The destination is a constant, not a parsed value
+
+A remote URL is repository-controlled data. If the host parsed out of it chose
+the destination, a checked-out repository could point an authenticated client at
+a host of its choosing. So the parsed host is used as a **predicate** and never
+as a destination:
+
+- `SUPPORTED_FORGE_HOSTS` is `['github.com']`, a constant in code. Any other host
+  is `UNSUPPORTED_HOST`, refused before a process starts;
+- the request carries `--hostname github.com`, written in this build;
+- the client's environment is **built**: the `forge:github` policy supplies
+  `PATH`, `PATHEXT`, `APPDATA` and nothing else, so none of `GH_TOKEN`,
+  `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GH_HOST`, `GH_REPO`, `GH_CONFIG_DIR`,
+  `XDG_CONFIG_HOME`, `GH_DEBUG`, `GH_PAGER` or any proxy variable reaches it.
+  *Supplies*, not "is what the child gets": on Windows `runCommand` back-fills
+  eleven fixed OS names into every child — `SYSTEMROOT`, `USERPROFILE`, `TEMP`
+  and eight more — and the client really does receive those. The suite pins that
+  none of the eleven is one of the client's own documented override variables.
+  That is a real check and a bounded one: the two lists come from different
+  families, so it cannot see an influence route the client does not document.
+  Recorded as `L-V4-02-9` rather than presented as a proof;
+- the client is run in the OS temp directory, never in a repository — so it has
+  no working directory to infer repository context from.
+
+This is the decision on slice 1's `L-V4-01-2` ("the host is carried, not
+judged"). It is judged now, against one name.
+
+### AO never sees a credential
+
+`gh` reads its own stored login and attaches it itself. No token is passed in,
+none is read out, `gh auth token` is never called, and no result type in this
+slice has a field that could hold one. The client's `stderr` is never read,
+parsed, rendered or logged — every failure is classified from the process
+outcome and exit code alone, the same discipline `doctor/capabilities.ts` adopted
+when it stopped persisting probe output.
+
+`gh` was chosen over an HTTP client for exactly that reason: writing one here
+would mean this build reading a token, holding it in a value and putting it in a
+header.
+
+### Everything fails closed
+
+Ten refusals, and not one of them carries a payload: `UNSUPPORTED_HOST`,
+`SUBJECT_UNUSABLE`, `FORGE_CLIENT_ABSENT`, `ENVIRONMENT_UNUSABLE`,
+`FORGE_CLIENT_UNUSABLE`, `NOT_AUTHENTICATED`, `REQUEST_FAILED`,
+`RESPONSE_MALFORMED`, `SUBJECT_MISMATCH`, `RESULTS_TRUNCATED`.
+
+A pull-request number exists only on `MATCHED`, and check counts only on a
+graded outcome, so no caller can read an identity out of a refusal — there is no
+field to read.
+
+Two of those are worth naming. `SUBJECT_MISMATCH` binds the evidence to the
+question rather than to the request: every check run carries `head_sha` and the
+combined status carries a top-level `sha`, so an answer that names a different
+commit is refused rather than counted. `RESULTS_TRUNCATED` refuses a page that
+might be a prefix. On the two check endpoints that is provable in one round
+trip: `total_count` is the ref-wide total, not the page length, so a
+disagreement with the array beside it produces a refusal rather than a smaller
+answer. The locator endpoint returns a bare array and carries no total, so there
+the test is that the page came back full — a conservative heuristic, recorded as
+`L-V4-02-8` rather than described as a proof.
+
+### What this slice does not do
+
+It does not open, update, review, comment on or merge a pull request, and there
+is no flag that would. It writes no task state, takes no lease and starts no
+agent. `READY_FOR_PR` is still terminal.
+
+It also does not answer *"may this be merged"*, and nothing in it combines its
+two answers into something that could be read that way. `PR_EXISTS` is not
+`MERGEABLE`, `MERGEABLE` is not `CI_SUCCESS`, `CI_SUCCESS` is not "review
+requirements satisfied", and all of them together are not authority to merge.
+Those are later decisions, and they are easier to take honestly if this layer
+never quietly pre-empted them.
+
+See [`docs/decisions/2026-08-23-adr-delivery-observation-seam.md`](docs/decisions/2026-08-23-adr-delivery-observation-seam.md)
+for the full forge, egress and credential contract and every measurement behind
+it.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
 POSIX; and any product-side PR/CI/merge automation. `READY_FOR_PR` remains
 terminal — the orchestrator hands a finished task to a human and stops there.
 
-V4 slice 1 does not shorten that list. It adds the one thing every item on it
-needs first: a repository can **declare** its delivery target, and AO resolves it
-to a `host/owner/name` identity and reports it in the read-only plan. Nothing is
-pushed, no forge is contacted, no durable field is written and `READY_FOR_PR` is
-still terminal — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1)
+V4 slices 1 and 2 do not shorten that list. They add the two things every item on
+it needs first. Slice 1: a repository can **declare** its delivery target, and AO
+resolves it to a `host/owner/name` identity. Slice 2: that identity plus one exact
+commit can be **asked about**, read-only and only on request — is there exactly one
+open pull request at this head, and what is this commit’s check state. Nothing is
+pushed, nothing is opened or merged, no durable field is written and `READY_FOR_PR`
+is still terminal — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on

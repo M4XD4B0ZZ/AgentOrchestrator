@@ -902,8 +902,16 @@ function usableGrace(value: number | undefined, fallback: number): number {
  * decision and a separate one — the ADR is explicit that a job object bounds
  * process lifetime and nothing else, and is "no argument for widening or
  * narrowing an agent's authority".
+ *
+ * Exported so that a downstream policy can *assert* something about this list
+ * rather than restate it. V4 slice 2 needs that: it runs a client whose
+ * behaviour some environment variables would redirect, and a policy comment
+ * that described only what AO supplies was read — twice, by two independent
+ * reviewers — as a claim about what the child receives. What that slice asserts
+ * is disjointness from the client's own documented override variables, and the
+ * limits of that check are stated where the claim is made, not here.
  */
-const WINDOWS_PLATFORM_BACKFILL = Object.freeze([
+export const WINDOWS_PLATFORM_BACKFILL = Object.freeze([
   'HOMEDRIVE',
   'HOMEPATH',
   'LOGONSERVER',
