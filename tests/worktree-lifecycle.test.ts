@@ -399,22 +399,21 @@ describe('I — a clean, owned workspace is released completely', () => {
  * Adds submodules to the **source repository** and commits them, so a worktree
  * created afterwards receives the gitlinks through `git worktree add`.
  *
- * How the gitlink got there is the point, and a review had to measure it because
- * this file first got it wrong. `git worktree remove` refuses — `fatal: working
- * trees containing submodules cannot be moved or removed`, exit 128 — when
- * **either** of two conditions holds, and neither is necessary:
+ * How the gitlink got there is the point, and this file first got it wrong.
+ * `git worktree remove` refuses for a range of shapes — `fatal: working trees
+ * containing submodules cannot be moved or removed`, exit 128 — and four
+ * attempts to state *which* shapes have each been measured false. The seven
+ * fixtures that were measured are tabulated in `README.md` under L-V3-11-10; no
+ * rule is repeated here, because every rule so far has been wrong.
  *
- *   a `<super>/.git/worktrees/<task>/modules` directory exists for that
- *     worktree, which Git creates when a submodule is added *inside* it and
- *     which survives `submodule deinit`         ->  refuses, exit 128
- *   a gitlink path holds a real repository       ->  refuses, exit 128
- *   neither                                      ->  **exit 0, and deletes**
+ * The one fact these cases need has never moved: a worktree made by
+ * `git worktree add` from a base commit, gitlinks never populated, is
+ * **deleted** by the unforced remove — payload and all.
  *
- * A destructive case built either of the first two ways proves nothing: the
- * payload survives whatever the gate does, so the assertion that it survived is
- * a tautology. These build the third, which is what `git worktree add` from a
- * base commit leaves, and each asserts the `modules` directory is absent so the
- * fixture cannot drift back.
+ * A destructive case built on any *refusing* shape proves nothing: the payload
+ * survives whatever the gate does, so asserting that it survived is a tautology.
+ * These build the deleting shape, and each asserts that no `modules` directory
+ * exists for the worktree so the fixture cannot drift back.
  */
 function withSubmoduleInBase(repository: ResolvedRepository, ...paths: readonly string[]): void {
   const inner = createRepoFixture({ defaultBranch: 'main', profile: null });

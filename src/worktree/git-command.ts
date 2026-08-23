@@ -189,23 +189,18 @@ const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
  * not — so this is a detection gap and not data loss". **That was false, and it
  * was the whole justification for not fixing the gate.**
  *
- * Two replacements were also wrong — "a property of *population*", then "it
- * turns on *provenance*, not population" — and both failed by asserting an
- * exclusive mechanism. Stated as sufficiency, which is what was measured: the
- * unforced remove refuses when **either** condition holds, and neither is
- * necessary.
+ * Three replacements were also wrong — "a property of *population*", then "it
+ * turns on *provenance*", then "a gitlink path holding a real repository" —
+ * each written from the fixtures to hand and falsified by the next fixture
+ * anyone built. So no mechanism is asserted here any more. What is recorded in
+ * `README.md` under **L-V3-11-10** is a table of seven measured fixtures, and
+ * nothing is inferred from it about a shape not in the table.
  *
- *   a `.git/worktrees/<task>/modules` directory exists, even empty
- *                                      -> exit 128, and the gitlink may be
- *                                         unpopulated (this killed "population")
- *   a gitlink path holds a real repository, no `modules` anywhere
- *                                      -> exit 128 (this killed "provenance")
- *   neither                            -> **exit 0, worktree gone, files gone**
- *
- * The last row is the shape AO produces — `git worktree add` from a base commit
- * — and it is the shape in which the removal gate is the only thing between a
- * planted file and deletion. That conclusion held under all three explanations;
- * only the explanations kept being retracted. Reproduced end to
+ * The one fact this file needs is stable and has been under all four
+ * explanations: a worktree made by `git worktree add` from a base commit, with
+ * its gitlinks never populated, is **deleted** by the unforced remove — payload
+ * and all. That is the shape AO produces, and it is the shape in which the
+ * removal gate is the only thing standing. Reproduced end to
  * end through the production path: the bare vector reported clean,
  * `removeTaskWorkspace` returned `WORKSPACE_REMOVED`, and two planted files were
  * destroyed. `remove-workspace.ts`'s Proof 3a therefore asks

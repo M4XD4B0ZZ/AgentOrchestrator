@@ -301,22 +301,16 @@ export async function removeTaskWorkspace(
   // to remove a worktree containing a submodule anyway. That reasoning was taken
   // from one fixture and is **false** for the shape AO actually produces.
   //
-  // Two attempts to say *why* were also wrong — "it is a property of population",
-  // then "it turns on provenance and not population" — and both failed the same
-  // way, by claiming an exclusive mechanism. So this is stated as sufficiency.
-  // Measured, the unforced remove refuses when **either** holds:
+  // Three attempts to say *why* were each measured false in turn — "a property
+  // of population", "it turns on provenance", "a gitlink path holding a real
+  // repository" — so this comment asserts no mechanism. The seven measured
+  // fixtures are tabulated in `README.md` under L-V3-11-10.
   //
-  //   a `<super>/.git/worktrees/<task>/modules` directory exists for this
-  //     worktree, even an empty hand-made one  -> exit 128, and the gitlink may
-  //                                               be unpopulated
-  //   a gitlink path holds a real repository, with no `modules` directory
-  //     anywhere                               -> exit 128
-  //   neither                                  -> exit 0, worktree gone,
-  //                                               planted files gone
-  //
-  // The last row is what `git worktree add` from a base commit leaves, which is
-  // how every task worktree here is made. In it this gate is the only thing
-  // standing, and that has been true under all three explanations.
+  // The fact this gate rests on is the one that never moved: a worktree made by
+  // `git worktree add` from a base commit, gitlinks never populated, is
+  // **deleted** by the unforced remove, payload and all. That is what
+  // `prepareTaskWorkspace` produces for every task, so here the gate is the only
+  // thing standing.
   //
   // Reproduced end to end: the bare vector reported clean, `removeTaskWorkspace`
   // returned `WORKSPACE_REMOVED`, and two planted files were destroyed. So the
