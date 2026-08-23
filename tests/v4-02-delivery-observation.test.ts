@@ -1509,6 +1509,16 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     expect(flat).not.toContain('Unattended running and opening pull requests are not in this build');
     expect(flat).not.toContain('Without --attended, `run` still only reports');
     expect(flat).not.toContain('ships no command that removes a lease it did not create');
+    // And the withdrawn one, which was written in a *fix* for the sentence above
+    // and was false three ways: the lease is claimed by linking a fully staged
+    // file (`execution-lease.ts:1136`), so the half-written artefact it named is
+    // not producible; `legibleOwnerPid` exists precisely so an unvalidatable
+    // lease still reports an owner (`:3772`); and the unclearable class is a
+    // rule, not one case — a launch history that failed to publish leaves the
+    // lease held and unrecoverable, as `execution-lease.ts:1157` says in so many
+    // words. It came from the README rather than from the code.
+    expect(flat).not.toContain('no legible owner');
+    expect(flat).not.toContain('one narrow case stays outside this tool');
 
     // And the same live-surface binding for the removal commands, since that is
     // what made the claim false: while `lease recover` is registered and `run`
