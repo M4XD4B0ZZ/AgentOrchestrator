@@ -186,9 +186,9 @@ commit had succeeded". A review showed that false using the product's own
 grading: `aggregateCheckState` counts `neutral` and `skipped` as non-blocking,
 so a commit whose *only* check run was `skipped` aggregates to `SUCCESS` with
 `succeeded: 0`. A path-filtered or `if:`-guarded workflow job produces exactly
-that, on this repository included — and the report contradicted itself two lines
-apart, printing `0 succeeded … 1 neutral/skipped` above the claim that every
-check had succeeded.
+that, on this repository included — and the report contradicted itself, printing
+`0 succeeded … 1 neutral/skipped` above the claim that every check had
+succeeded.
 
 The behaviour is slice 2's and is unchanged. What changed is that slice 4 stops
 adding a second, stronger English definition on top of it: the member is

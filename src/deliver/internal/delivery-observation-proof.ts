@@ -220,9 +220,11 @@ function counted(value: unknown): value is number {
  *  - either half unsettled: the forge did not answer that question, so there is
  *    no observation of it to attest to. This is the one that matters, and it is
  *    re-derived from the outcome word rather than taken as a flag;
- *  - a `MATCHED` outcome carrying no pull-request number, or a non-matched one
- *    carrying one: the payload and the outcome disagree, and a record built
- *    from them would be internally false;
+ *  - a `MATCHED` outcome carrying no usable pull-request number: the payload
+ *    and the outcome disagree, and a record built from them would be
+ *    internally false. The mirror case is neutralised rather than refused — a
+ *    non-matched outcome's number is never read, and the record carries `null`
+ *    for both the number and the head it would otherwise have pinned;
  *  - a graded check outcome carrying no counts: the aggregate cannot be
  *    explained, and an unexplainable aggregate is exactly what this slice is
  *    built not to persist;

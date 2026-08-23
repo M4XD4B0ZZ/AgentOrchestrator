@@ -131,11 +131,21 @@ export const DELIVERY_DECISIONS = [
    * entirely. A green answer for commit A never satisfies a question about
    * commit B, and this is where that rule is enforced at the decision layer.
    *
-   * Ahead of the next member, and the order was corrected to match the code
-   * after a review found the two disagreeing. "These answers are about
-   * something else" is a fact about the artefact in hand; "the subject could
-   * not be re-read" is a fact about the world a moment later, and the first is
-   * the one worth reading when both hold.
+   * Ahead of the next member in {@link decideDelivery}, and that order was
+   * corrected to match that function after a review found the two disagreeing.
+   * "These answers are about something else" is a fact about the artefact in
+   * hand; "the subject could not be re-read" is a fact about the world a moment
+   * later, and the first is the one worth reading when both hold.
+   *
+   * The order is a claim about {@link decideDelivery} alone, because the next
+   * member has a second producer above it: {@link concludeDeliveryDecision}
+   * refuses a missing revalidation before any proof is compared, so a
+   * hand-built call passing a mismatched proof with no verdict grades
+   * `SUBJECT_REVALIDATION_FAILED` rather than this. No operator input reaches
+   * that combination — on the decide path a missing verdict implies a missing
+   * proof, which is refused a step earlier — and the outer function is
+   * deliberately not reordered to match, because refusing the incomplete input
+   * before reading the artefact is the fail-closed direction.
    */
   'SUBJECT_CHANGED',
   /** The local subject could not be re-established after the observation. */
@@ -170,15 +180,15 @@ export const DELIVERY_DECISIONS = [
    * `neutral` and `skipped` as non-blocking, so a commit whose *only* check run
    * was `skipped` aggregates to `SUCCESS` with `succeeded: 0`. That is not
    * exotic — a path-filtered or `if:`-guarded workflow job produces exactly it,
-   * on this repository included — and the report contradicted itself two lines
-   * apart, printing `0 succeeded … 1 neutral/skipped` directly above the claim
-   * that every check had succeeded.
+   * on this repository included — and the report contradicted itself, printing
+   * `0 succeeded … 1 neutral/skipped` in the same block as the claim that every
+   * check had succeeded.
    *
    * So this member carries slice 2's own graded word and adds no stronger
    * English on top of it. `SUCCESS` has one definition in this product, it
    * lives where the grading happens, and the counts that show which arm applied
-   * are printed one line above this decision. A second gloss here was a second
-   * definition, and the second one was wrong.
+   * are printed above this decision in the same report. A second gloss here was
+   * a second definition, and the second one was wrong.
    *
    * It does not claim the pull request is mergeable, that it is not a draft,
    * that reviews are satisfied, that branch rules are met, that any check was

@@ -545,7 +545,7 @@ describe('the two answers are graded together', () => {
     check: CheckStateObservation,
   ): DeliveryDecision => decideDelivery(proofFor(subject, observation(pull, check)), subject, 'UNCHANGED');
 
-  it('is positive only for one open pull request and every check succeeded', () => {
+  it('is positive for one matched open pull request whose checks graded SUCCESS', () => {
     expect(decide(matched(), checks('SUCCESS'))).toBe(POSITIVE_DELIVERY_DECISION);
   });
 
@@ -1263,6 +1263,26 @@ describe('the delivery command decides only when asked', () => {
       }
     } finally {
       process.exitCode = previous;
+      scratch.cleanup();
+    }
+  });
+
+  it('registers --decide with the sentence that was pinned, not a copy', () => {
+    // Pinning `DECIDE_OPTION_DESCRIPTION` by literal proves what the constant
+    // says; it does not prove commander was ever given it. An inline copy at
+    // the registration site would satisfy every other assertion in this file
+    // while the operator read a different sentence. Slices 2 and 3 both pin
+    // the wiring of their own flag for exactly that reason.
+    const scratch = scratchRoot();
+    const h = harness(scratch.root);
+    try {
+      const delivery = h.program.commands.find((c) => c.name() === 'delivery');
+      const help = delivery?.helpInformation() ?? '';
+      const collapse = (t: string): string => t.replace(/\s+/g, ' ').trim();
+      expect(help).toContain('--decide');
+      expect(collapse(help)).toContain(collapse(DECIDE_OPTION_DESCRIPTION));
+    } finally {
+      h.restore();
       scratch.cleanup();
     }
   });
