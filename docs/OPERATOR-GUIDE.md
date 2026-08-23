@@ -959,7 +959,82 @@ auseinanderlaufen, glaubt AO den Task-Records — und stoppt, statt zu repariere
 
 ---
 
-## 19. Jetzt speziell: Zera / HealthApp
+## 19. Delivery beobachten (V4 Slice 2) — read-only
+
+Nach `READY_FOR_PR` übergibt AO an einen Menschen. Seit V4 Slice 2 kann AO dir
+dabei **zwei Fragen beantworten**, ohne irgendetwas zu tun:
+
+```powershell
+agent-loop delivery --repository D:\Pfad\Zum\Projekt --task <taskId>
+```
+
+Ohne `--observe` passiert **kein Netzwerkzugriff**. Der Befehl zeigt nur, worüber
+eine Beobachtung überhaupt ginge: das Delivery-Ziel aus `repo-profile.yaml` und
+den exakten Commit aus dem Task-State.
+
+Mit `--observe` fragt AO `github.com` — lesend:
+
+```powershell
+agent-loop delivery --repository D:\Pfad\Zum\Projekt --task <taskId> --observe
+```
+
+```text
+Delivery     : origin -> github.com/Owner/Repo  (identity only; nothing is delivered)
+State        : READY_FOR_PR
+Subject      : 10583ee91a5747d0049f563ffaac64b0cf643aeb
+Pull request : MATCHED  (#55)
+Checks       : SUCCESS  (2 check run(s), 0 commit status(es): 2 succeeded, 0 pending, 0 failed, 0 neutral/skipped)
+
+Conclusion   : OBSERVED
+```
+
+### Was die Antworten bedeuten — und was nicht
+
+- **`Subject`** ist der exakte Commit. Jede Zeile darunter gilt für **genau
+  diesen** Commit. Nicht für den Branch, nicht für „den neuesten Stand".
+- **`MATCHED (#N)`** heißt: genau ein **offener** Pull Request hat **genau diesen
+  Commit** als aktuellen Head. Ein PR, dessen Head inzwischen weitergewandert
+  ist, ergibt `NO_MATCHING_PULL_REQUEST` — das ist eine Antwort, kein Fehler.
+- **`SUCCESS`** heißt: alle Check Runs **und** alle Legacy-Commit-Statuses zu
+  diesem Commit sind fertig und keiner blockiert. `NO_CHECKS` ist **kein**
+  Erfolg, sondern eine eigene Antwort.
+- **Alles andere** — `NOT_AUTHENTICATED`, `REQUEST_FAILED`, `UNSUPPORTED_HOST`,
+  `RESULTS_TRUNCATED`, … — heißt: **nichts** ist festgestellt. Nicht „wahrscheinlich
+  ok".
+
+**Der Befehl entscheidet nichts.** Er sagt dir nicht, ob gemerged werden darf.
+`PR vorhanden` ist nicht `mergebar`, `mergebar` ist nicht `CI grün`, und `CI grün`
+ist nicht „Review erfüllt". Diese Entscheidung bleibt bei dir.
+
+### Voraussetzungen
+
+- `repo-profile.yaml` deklariert ein Delivery-Ziel (siehe §6.2, `delivery.remote`);
+- der Task hat einen gepinnten Commit (`currentCommit`), also mindestens einmal
+  committet;
+- **GitHub CLI installiert und eingeloggt**: `gh auth login`. AO liest deinen
+  Token **nie** — `gh` hält ihn selbst. Ohne Login: `NOT_AUTHENTICATED`.
+- **Nur `github.com`.** Ein anderes Ziel ergibt `UNSUPPORTED_HOST`, und es wird
+  nichts kontaktiert.
+- **Kein Proxy-Support.** Proxy-Variablen werden bewusst nicht weitergereicht.
+
+### Exit-Codes
+
+```text
+0   Beide Fragen beantwortet (auch bei „kein PR" oder „Checks rot"),
+    oder ohne --observe geplant.
+2   Kein Subjekt feststellbar (kein Delivery-Ziel, kein State, kein Commit).
+4   Mindestens eine Frage blieb offen — nichts ist festgestellt.
+```
+
+### Was der Befehl nicht tut
+
+Kein Push, kein PR anlegen, kein Kommentar, kein Review, kein Merge. Kein
+Task-State wird geschrieben, keine Lease genommen, kein Agent gestartet.
+`READY_FOR_PR` bleibt terminal.
+
+---
+
+## 20. Jetzt speziell: Zera / HealthApp
 
 AgentOrchestrator soll die **zentrale Orchestrierung für Zera/HealthApp**
 übernehmen. Die HealthApp-eigene Queue ist Übergangsinfrastruktur:
@@ -973,7 +1048,7 @@ Beide dürfen **nicht gleichzeitig als konkurrierende Writer** laufen.
 
 ---
 
-## 20. Zera Repository
+## 21. Zera Repository
 
 Der reale Checkout ist:
 
@@ -1008,7 +1083,7 @@ nicht geraten.
 
 ---
 
-## 21. Zera: CodeGraph ist Pflicht — auf zwei Ebenen
+## 22. Zera: CodeGraph ist Pflicht — auf zwei Ebenen
 
 Für Zera gilt verbindlich: **jeder Claude-Code-Task beginnt mit einem
 CodeGraph-Preflight.** Das zerfällt in zwei Teile, und nur einer davon lässt sich
@@ -1048,7 +1123,7 @@ beweisen kann. Dann bekommt sie einen *eigenen* zweiten Status — sie definiert
 
 ---
 
-## 22. Zera: Kontext klein halten
+## 23. Zera: Kontext klein halten
 
 Für Zera soll AO nicht ständig komplette `ROADMAP.md`, `VERIFY.md`, `AGENTS.md`,
 Historie und alte Handoffs in den Agent-Kontext laden.
@@ -1073,7 +1148,7 @@ veraltete Kontextpakete.
 
 ---
 
-## 23. Zera: Subagents
+## 24. Zera: Subagents
 
 Bei Claude-Code-Tasks muss ausdrücklich stehen, ob Subagents sinnvoll sind.
 
@@ -1097,7 +1172,7 @@ Ein Writer bleibt autoritativ.
 
 ---
 
-## 24. Zera: Verify + Review
+## 25. Zera: Verify + Review
 
 Der gewünschte normale AO-Ablauf:
 
@@ -1131,7 +1206,7 @@ bindet `completion.maxReviewRounds` im Profil.
 
 ---
 
-## 25. Erstmalige Zera-Adoption
+## 26. Erstmalige Zera-Adoption
 
 **Noch nicht blind einen AO-Run starten.** Einmalig nötig:
 
@@ -1153,7 +1228,7 @@ Danach ist das kein Setup mehr, sondern Routine.
 
 ---
 
-## 26. Beispiel für den späteren Zera-Aufruf
+## 27. Beispiel für den späteren Zera-Aufruf
 
 Wenn der nächste echte Block `ZERA-X-A → ZERA-X-B` lautet, zuerst:
 
@@ -1180,7 +1255,7 @@ node .\dist\cli\index.js block `
 
 ---
 
-## 27. Kurzcheck vor jedem produktiven Run
+## 28. Kurzcheck vor jedem produktiven Run
 
 ```text
 AgentOrchestrator

@@ -147,6 +147,78 @@ export const OBSERVED_PROVIDER_ENV_VARS = [
 
 export type ObservedProviderEnvVar = (typeof OBSERVED_PROVIDER_ENV_VARS)[number];
 
+/**
+ * Every variable `gh help environment` documents as able to change *where a
+ * request goes, who it authenticates as, where the credential is read from, or
+ * what appears on the client's streams* (V4 slice 2).
+ *
+ * Like the lists above this is documentation and a test surface, not the
+ * mechanism: `forge:github` names three variables and the allow-list excludes
+ * everything else by construction, so not one of these reaches the client even
+ * though none of them is filtered. Naming them makes the property assertable
+ * instead of inferred, and records what was actually read rather than guessed.
+ *
+ * Grouped by what each one would do, from `gh` 2.97.0's own help text:
+ *
+ *  - credentials: `GH_TOKEN`, `GITHUB_TOKEN` take precedence over the stored
+ *    login for `github.com`; `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`
+ *    do the same for an Enterprise host;
+ *  - destination: `GH_HOST` picks the host when one is not given, `GH_REPO`
+ *    picks the repository for commands that would otherwise use the local one;
+ *  - credential location: `GH_CONFIG_DIR` moves the config directory outright,
+ *    and `XDG_CONFIG_HOME` takes precedence over the Windows app-data path that
+ *    `APPDATA` names;
+ *  - streams: `GH_DEBUG` set to `api` logs the details of HTTP traffic to
+ *    standard error; `GH_FORCE_TTY` and `CLICOLOR_FORCE` make the client emit
+ *    terminal formatting into output that is being parsed;
+ *  - other programs: `GH_PAGER`, `PAGER`, `GH_BROWSER`, `BROWSER`, `GH_EDITOR`,
+ *    `GIT_EDITOR`, `VISUAL` and `EDITOR` each name a program the client may
+ *    start.
+ *
+ * The proxy variables at the end are **not** in `gh help environment` at all.
+ * They are here because they were measured to redirect the request anyway:
+ * `HTTPS_PROXY=http://127.0.0.1:1 gh api …` failed with
+ * `proxyconnect tcp: dial tcp 127.0.0.1:1` while the same call without it
+ * answered normally, and `NO_PROXY` was measured to undo that redirection. A
+ * list built only from the client's own documentation would have missed the
+ * variables that decide where the request goes.
+ *
+ * The consequence is stated rather than worked around: this build does not
+ * forward proxy configuration, so on a machine that reaches GitHub only through
+ * a proxy the observation refuses instead of succeeding. That is the correct
+ * direction for a variable that chooses a network destination.
+ */
+export const FORGE_CLIENT_OVERRIDE_ENV_VARS = [
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+  'GH_HOST',
+  'GH_REPO',
+  'GH_CONFIG_DIR',
+  'XDG_CONFIG_HOME',
+  'GH_DEBUG',
+  'GH_FORCE_TTY',
+  'CLICOLOR_FORCE',
+  'GH_PAGER',
+  'PAGER',
+  'GH_BROWSER',
+  'BROWSER',
+  'GH_EDITOR',
+  'GIT_EDITOR',
+  'VISUAL',
+  'EDITOR',
+  'GH_PATH',
+  'HTTPS_PROXY',
+  'https_proxy',
+  'HTTP_PROXY',
+  'http_proxy',
+  'ALL_PROXY',
+  'NO_PROXY',
+] as const;
+
+export type ForgeClientOverrideEnvVar = (typeof FORGE_CLIENT_OVERRIDE_ENV_VARS)[number];
+
 // ── Probe environment policies ─────────────────────────────────────────────
 
 /**
@@ -162,6 +234,7 @@ export const PROBE_ENV_POLICIES = [
   'auth:codex',
   'agent:claude',
   'agent:codex',
+  'forge:github',
 ] as const;
 
 export type ProbeEnvPolicy = (typeof PROBE_ENV_POLICIES)[number];
@@ -263,6 +336,40 @@ const POLICY_ALLOWLIST: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = Ob
 
   /** The Codex *reviewer* run. Same reasoning, against `~/.codex`, and no Claude anything. */
   'agent:codex': Object.freeze([...EXEC_CONTRACT_VARS, 'HOME', 'USERPROFILE']),
+
+  /**
+   * `gh api …` — the read-only GitHub observation client (V4 slice 2).
+   *
+   * `APPDATA` is here because it was **measured** to be the one addition that
+   * makes the installed client find its own stored login, and because
+   * `gh help environment` names `$AppData/GitHub CLI` as the Windows config
+   * directory. Measured on this build with `gh` 2.97.0, three runs each:
+   *
+   *     PATH + PATHEXT                -> exit 4, "please run gh auth login"
+   *     PATH + PATHEXT + APPDATA      -> exit 0, an authenticated answer
+   *     PATH + PATHEXT + USERPROFILE  -> exit 4
+   *     PATH + PATHEXT + LOCALAPPDATA -> exit 4
+   *
+   * So this is the smallest set that works, arrived at by measurement rather
+   * than by listing the variables a credential *might* live under — the same
+   * standard `auth:claude` was held to when `APPDATA` and `LOCALAPPDATA` were
+   * removed from it for being carried on a guess.
+   *
+   * `SystemRoot` is **not** here, and that is load-bearing rather than
+   * inherited caution. Adding it to the four runs above changed the outcome to
+   * `error connecting to api.github.com`, reproducibly, three times out of
+   * three. The mechanism is not established and is not claimed; the fact is
+   * that this policy's contents change whether the client can reach GitHub at
+   * all, so the contents are the measured ones.
+   *
+   * No credential variable appears, and in particular none of
+   * {@link FORGE_CLIENT_OVERRIDE_ENV_VARS}: the client authenticates itself
+   * from the operator's own config directory, and this build never handles the
+   * token. On a host where that directory is not under `APPDATA` the client
+   * reports that it needs an authentication, and the observation refuses —
+   * which is the correct closed answer, not a fallback.
+   */
+  'forge:github': Object.freeze([...EXEC_CONTRACT_VARS, 'APPDATA']),
 });
 
 /** Thrown when a caller asks for a policy that does not exist. */

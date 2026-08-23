@@ -17,6 +17,7 @@ import { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
 import { registerBlockCommand } from './block-command.js';
+import { registerDeliveryCommand } from './delivery-command.js';
 import { registerDoctorCommand } from './doctor-command.js';
 import { registerLeaseCommand } from './lease-command.js';
 import { registerReleaseCommand } from './release-command.js';
@@ -99,6 +100,7 @@ export function buildProgram(): Command {
   registerBlockCommand(program);
   registerReleaseCommand(program);
   registerLeaseCommand(program);
+  registerDeliveryCommand(program);
 
   return program;
 }
