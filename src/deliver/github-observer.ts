@@ -290,9 +290,12 @@ async function request(
   }
 
   // `createProbeEnv` throws on an ambiguous or unreadable source. This module
-  // reports facts and refusals; it does not raise. Caught here so that a
-  // machine with two Windows spellings of one allow-listed name produces a
-  // closed answer instead of an exception out of an observation.
+  // reports facts and refusals rather than raising, for every condition it has
+  // a name for — which is not the same as never raising: a throw it has no name
+  // for is a defect, and the runner guard below lets those through rather than
+  // dressing them as a forge that did not answer. Caught here so that a machine
+  // with two Windows spellings of one allow-listed name produces a closed answer
+  // instead of an exception out of an observation.
   let env: NodeJS.ProcessEnv;
   try {
     env = createProbeEnv(FORGE_ENV_POLICY, deps.envSource);

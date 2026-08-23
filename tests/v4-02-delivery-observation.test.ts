@@ -440,34 +440,52 @@ describe('the request vector is pinned, not described', () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync('src/deliver/github-observer.ts', 'utf8');
 
-    // The array literal each `request(...)` call site passes as its params.
-    const sites = [...source.matchAll(/\brequest\(\s*subject,[\s\S]*?\[([^\]]*)\]/g)].map(
-      (m) => m[1] ?? '',
+    // Each `request(...)` call site's third argument, read as a whole. The
+    // params must be an array LITERAL: a lazy `[...]` search would walk past a
+    // call that passed a variable and match the next bracket anywhere in the
+    // file — measured, and it found `"statuses":[]` inside a docstring 25 lines
+    // on, captured the empty string and passed. So the shape is required, not
+    // searched for.
+    const sites = [...source.matchAll(/\brequest\(\s*subject,\s*[^,]+,\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*)/g)].map((m) =>
+      (m[1] ?? '').trim(),
     );
     // Positive control: there really are three, so an empty scan is a broken
     // regex rather than a module with no requests in it.
     expect(sites).toHaveLength(3);
     for (const site of sites) {
-      for (const token of site.split(',')) {
+      expect(site.startsWith('[')).toBe(true);
+      for (const token of site.replace(/^\[|\]$/g, '').split(',')) {
         const cleaned = token.trim();
         if (cleaned === '') continue;
         expect(['PER_PAGE_PARAM', 'CHECK_RUNS_FILTER_PARAM']).toContain(cleaned);
       }
     }
 
-    // Second control: the scan would catch a threaded value. This is the exact
-    // shape the docstring claims to prevent, run against the same regex.
-    const threaded = `const r = await request(subject, commitStatusPath(subject), [PER_PAGE_PARAM, \`body=@\${x}\`], deps);`;
-    const caught = [...threaded.matchAll(/\brequest\(\s*subject,[\s\S]*?\[([^\]]*)\]/g)].map(
-      (m) => m[1] ?? '',
+    // Two controls on the scan itself, both being the shapes the docstring
+    // claims to prevent. The second is the one the first version of this test
+    // let through: a params value that is not a literal at all.
+    const scan = (text: string): string[] =>
+      [...text.matchAll(/\brequest\(\s*subject,\s*[^,]+,\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*)/g)].map((m) =>
+        (m[1] ?? '').trim(),
+      );
+
+    const threadedLiteral = scan(
+      'await request(subject, commitStatusPath(subject), [PER_PAGE_PARAM, evil], deps);',
     );
-    expect(caught).toHaveLength(1);
+    expect(threadedLiteral).toHaveLength(1);
     expect(
-      (caught[0] ?? '')
+      (threadedLiteral[0] ?? '')
+        .replace(/^\[|\]$/g, '')
         .split(',')
         .map((t) => t.trim())
         .some((t) => !['PER_PAGE_PARAM', 'CHECK_RUNS_FILTER_PARAM'].includes(t)),
     ).toBe(true);
+
+    const threadedVariable = scan(
+      'await request(subject, commitStatusPath(subject), evilParams, deps);',
+    );
+    expect(threadedVariable).toEqual(['evilParams']);
+    expect(threadedVariable[0]?.startsWith('[')).toBe(false);
 
     // Positive control on the emitted vector: `-F` really is present, its
     // values really are these two, and neither can name a file.
@@ -1563,6 +1581,33 @@ describe('the CLI surface', () => {
     });
     return { program, out, calls, restore: () => write.mockRestore() };
   }
+
+  /**
+   * The wiring, not just the constant.
+   *
+   * Pinning `OBSERVE_OPTION_DESCRIPTION` by literal proves what the constant
+   * says; it does not prove commander was given it. An inline literal
+   * reintroduced at the `.option()` call would pass that pin and print whatever
+   * it liked — which is exactly how the withdrawn over-claim survived in this
+   * help text after `CONTACTED_TRAILER` was corrected.
+   */
+  it('registers the flag with the sentence that was pinned, not a copy of it', () => {
+    const h = harness({});
+    try {
+      const delivery = h.program.commands.find((c) => c.name() === 'delivery');
+      expect(delivery).toBeDefined();
+      const help = delivery?.helpInformation() ?? '';
+      // Positive control: help really was rendered for the right command.
+      expect(help).toContain('--observe');
+      expect(help).toContain('--repository');
+      // Commander re-wraps help text, so compare on collapsed whitespace.
+      const collapse = (text: string): string => text.replace(/\s+/g, ' ').trim();
+      expect(collapse(help)).toContain(collapse(OBSERVE_OPTION_DESCRIPTION));
+      expect(collapse(help)).not.toContain('and nothing else');
+    } finally {
+      h.restore();
+    }
+  });
 
   /** The egress property, as a fact about the code rather than about help text. */
   it('starts no client when --observe was not given', async () => {

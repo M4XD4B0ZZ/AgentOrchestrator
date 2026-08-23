@@ -8311,8 +8311,10 @@ data does not carry would be the same mistake in the other direction.
   hours. Neither is suppressed, and the reason is stated plainly rather than
   dressed up as forwarding: `createProbeEnv` supplies a fixed list of names, so
   `GH_TELEMETRY` and `DO_NOT_TRACK` do not reach the client whether the operator
-  set them or not. An operator who wants the client quiet configures that in the
-  client's own config, not in their environment. Named here so that "this
+  set them or not. An operator who wants the client quiet sets it in the
+  client's own configuration — `gh config` documents a `telemetry` key taking
+  `enabled | disabled | log`, default `enabled` — not in their environment.
+  Named here so that "this
   command contacts github.com" is understood to include the client's own
   housekeeping — and so that the limitation is visible rather than implied.
 - **L-V4-02-7 — whether two open pull requests can share a head commit was not
@@ -8320,6 +8322,14 @@ data does not carry would be the same mistake in the other direction.
   read-only investigation may not do, and no documentation sentence was found
   that decides it. The mechanism reports every claimant either way, and
   `AMBIGUOUS` exists for the case, so the answer does not depend on the question.
+- **L-V4-02-8 — truncation on the locator endpoint is detected, not proved.**
+  `commits/{sha}/pulls` returns a bare array with no `total_count`, so unlike the
+  two check endpoints there is nothing to compare a page against. The test is
+  that the page came back full, which means a commit contained in exactly
+  `OBSERVATION_PAGE_SIZE` open pull requests is reported `RESULTS_TRUNCATED`
+  rather than answered. That is the fail-closed direction and it is not reachable
+  on any repository this build has been used on, but it is a heuristic and is
+  recorded as one rather than described as a proof.
 - **L-V4-02-9 — the platform back-fill is checked for one thing only.** The
   suite pins that none of the eleven names Windows back-fills into every child
   is one of the GitHub CLI's own documented override variables. It cannot see an
@@ -8329,14 +8339,6 @@ data does not carry would be the same mistake in the other direction.
   AO-FOUNDATION-REM-003B — and `HOMEDRIVE`/`HOMEPATH` compose into a home
   directory a config-directory fallback could in principle consult. Measured
   only this far: `USERPROFILE` alone does not authenticate the client.
-- **L-V4-02-8 — truncation on the locator endpoint is detected, not proved.**
-  `commits/{sha}/pulls` returns a bare array with no `total_count`, so unlike the
-  two check endpoints there is nothing to compare a page against. The test is
-  that the page came back full, which means a commit contained in exactly
-  `OBSERVATION_PAGE_SIZE` open pull requests is reported `RESULTS_TRUNCATED`
-  rather than answered. That is the fail-closed direction and it is not reachable
-  on any repository this build has been used on, but it is a heuristic and is
-  recorded as one rather than described as a proof.
 
 ## The delivery observation seam (V4 slice 2)
 

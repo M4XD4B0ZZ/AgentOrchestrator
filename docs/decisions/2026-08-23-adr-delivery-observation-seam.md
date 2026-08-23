@@ -206,12 +206,20 @@ remediation loop driven by CI. No GitLab or Bitbucket abstraction.
   rather than an answer. That is the fail-closed direction, and it is untested.
 - `L-V4-02-6` — the client makes network calls of its own beyond the request:
   telemetry is on by default and carries a per-machine device id, and an update
-  check runs once every 24 hours. Neither is suppressed, because suppressing
-  them would mean inventing environment values rather than forwarding measured
-  ones.
+  check runs once every 24 hours. Neither is suppressed, and the reason is that
+  this policy supplies a fixed list of names rather than passing any through:
+  `GH_TELEMETRY` and `DO_NOT_TRACK` do not reach the client whether the operator
+  set them or not. Quieting it is done in the client's own configuration —
+  `gh config` documents a `telemetry` key taking `enabled | disabled | log`,
+  default `enabled` — and not in the environment.
 - `L-V4-02-7` — whether two open pull requests can share a head commit was not
   established; the mechanism reports all of them either way, and `AMBIGUOUS`
   exists for the case.
+- `L-V4-02-8` — the locator endpoint returns a bare array with no `total_count`,
+  so truncation there is detected by the page coming back full rather than
+  proved. A commit contained in exactly `OBSERVATION_PAGE_SIZE` open pull
+  requests is reported `RESULTS_TRUNCATED` rather than answered. Fail-closed,
+  and not reachable on any repository this build has been used on.
 - `L-V4-02-9` — the platform back-fill is checked only for disjointness from the
   client's own documented override variables. That cannot see an influence route
   the client does not document. Two names are worth naming: `PATH`, which is in
@@ -220,11 +228,6 @@ remediation loop driven by CI. No GitLab or Bitbucket abstraction.
   `HOMEDRIVE`/`HOMEPATH`, which compose into a home directory a config-directory
   fallback could in principle consult. Measured only to the extent that
   `USERPROFILE` alone does not authenticate the client.
-- `L-V4-02-8` — the locator endpoint returns a bare array with no `total_count`,
-  so truncation there is detected by the page coming back full rather than
-  proved. A commit contained in exactly `OBSERVATION_PAGE_SIZE` open pull
-  requests is reported `RESULTS_TRUNCATED` rather than answered. Fail-closed,
-  and not reachable on any repository this build has been used on.
 
 ## The next slice, named only
 
