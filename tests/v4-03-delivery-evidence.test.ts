@@ -422,14 +422,38 @@ describe('a forge-observation claim cannot be manufactured', () => {
     expect(sources.length).toBeGreaterThan(100);
     expect(sources).toContain('src/deliver/observe-delivery.ts');
 
-    // Import statements in code, not mentions in prose. The first version
+    // Import statements in code, not mentions in prose. One earlier version
     // matched the raw text and caught `delivery-evidence.ts`, whose header
     // *names* the mint while importing nothing from it — a scan that cannot
     // tell a citation from a dependency is not measuring reachability either.
+    //
+    // And the specifier is matched by its **file name**, not by requiring an
+    // `internal/` segment. A second review found that hole: the version that
+    // required the segment could not see a module placed *inside*
+    // `src/deliver/internal/`, which would import its neighbour as
+    // `'./delivery-observation-proof.js'` — and that directory is precisely
+    // where a new collaborator of the mint would be put. The fix had moved the
+    // hole rather than closed it.
+    const specifier = /from\s+'([^']*delivery-observation-proof\.js)'/g;
     const importers = sources
-      .filter((file) =>
-        /from\s+'[^']*internal\/delivery-observation-proof\.js'/.test(codeOnly(file)),
-      )
+      .filter((file) => {
+        const code = codeOnly(file);
+        for (const match of code.matchAll(specifier)) {
+          const found = match[1] ?? '';
+          // The public wrapper is a different module and importing *it* is
+          // ordinary. Only the mint's own module is restricted, and it is
+          // named by the last path segment either way it is spelled.
+          const target = found.split('/').slice(-2).join('/');
+          if (target === 'internal/delivery-observation-proof.js') return true;
+          if (
+            found === './delivery-observation-proof.js' &&
+            file.startsWith('src/deliver/internal/')
+          ) {
+            return true;
+          }
+        }
+        return false;
+      })
       .sort();
     expect(importers).toEqual([
       'src/deliver/delivery-observation-proof.ts',
@@ -1359,8 +1383,13 @@ describe('a stored observation is never presented as the current one', () => {
     // outcome words and the pull-request number are. A review pointed out that
     // 'agrees' claimed more than that — a stored SUCCESS over 2 check runs
     // beside a fresh SUCCESS over 10 is not nothing having changed.
-    expect(EVIDENCE_AGREEMENT_SUFFIX).toContain('the same outcome');
+    expect(EVIDENCE_AGREEMENT_SUFFIX).toContain('the same outcome and pull request');
     expect(EVIDENCE_AGREEMENT_SUFFIX).not.toContain('agrees');
+    // The disagreement half may NOT name the outcome, because it also fires
+    // when only the pull-request number moved -- a PR closed and another opened
+    // at the same head gives MATCHED on both sides and identical outcome words.
+    // A second review found the first correction had made this half false.
+    expect(EVIDENCE_DISAGREEMENT_PREFIX).not.toContain('outcome');
 
     // The checks went red since. Neither side is preferred; the difference is
     // reported.
@@ -1474,24 +1503,72 @@ describe('recording grants nothing and moves nothing', () => {
     expect([...TERMINAL_STATES]).toContain('READY_FOR_PR');
   });
 
-  it('names no merge, pull-request mutation or state transition anywhere in the slice', () => {
-    for (const file of [
+  /**
+   * Every module this slice adds or changes, and the criterion is the one the
+   * title states.
+   *
+   * The first version was titled "anywhere in the slice" while scanning four of
+   * the six modules, and a review pointed out that the omission was not
+   * incidental: `cli/delivery-command.ts` imports `loadTaskState`, which the
+   * import ban below would have flagged. So the title was false of the slice,
+   * and the list was hand-written — the exact shape rejected one screen above
+   * for the reachability pin.
+   *
+   * The criterion is split instead, because the two halves are different
+   * claims. **No module writes task state** — that holds for all six, and it is
+   * checked as the absence of a *call*. **Only the CLI reads it** — the four
+   * library modules may not import the store at all, and the CLI's read is
+   * admitted by name.
+   */
+  it('writes no task state and names no pull-request mutation, in every module of the slice', () => {
+    const LIBRARY = [
       'src/deliver/delivery-evidence.ts',
       'src/deliver/delivery-evidence-store.ts',
       'src/deliver/internal/delivery-observation-proof.ts',
       'src/deliver/delivery-observation-proof.ts',
-    ]) {
+    ];
+    const SURFACE = ['src/cli/delivery-command.ts', 'src/cli/render-delivery-observation.ts'];
+
+    for (const file of [...LIBRARY, ...SURFACE]) {
       const code = codeOnly(file);
       // Positive control: the file really was read and the stripper left code.
       expect(code.length).toBeGreaterThan(200);
-      // No *call* and no *import*. Scanned on the code alone, so a header may
+      // No writer *call*, anywhere. Scanned on the code alone, so a header may
       // go on explaining why the task-state writer is not used here — which is
       // the load-bearing part of the design and the first thing a reader needs.
-      expect(code).not.toMatch(/\badvanceTaskState\s*\(/);
-      expect(code).not.toMatch(/\bsaveTaskState\s*\(/);
-      expect(code).not.toMatch(/from '[^']*state\/(advance-state|state-store)\.js'/);
-      expect(code).not.toMatch(/\bmergePullRequest\b|\bcreatePullRequest\b/);
+      expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
+      expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
+      expect(code, file).not.toMatch(/\bmergePullRequest\b|\bcreatePullRequest\b/);
+      expect(code, file).not.toMatch(/\brecordAgentInterruption\s*\(/);
+      expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
     }
+
+    // The library may not reach the store at all.
+    for (const file of LIBRARY) {
+      expect(codeOnly(file), file).not.toMatch(
+        /from '[^']*state\/(advance-state|state-store)\.js'/,
+      );
+    }
+
+    // The module that owns the ignore contract must name the path this slice
+    // really writes. Its header said `<taskId>.delivery.json` for a whole
+    // review round after the record moved — the same class of stale claim as
+    // the collision it was moved to fix, left in the one module the new path
+    // depends on.
+    const ignored = readFileSync('src/state/runtime-ignored.ts', 'utf8');
+    expect(ignored).toContain('runtime/delivery/<taskId>.json');
+    expect(ignored).not.toContain('<taskId>.delivery.json');
+
+    // The CLI surface imports exactly one thing from it, and it reads.
+    const cli = codeOnly('src/cli/delivery-command.ts');
+    const stateImports = [...cli.matchAll(/import \{([^}]*)\} from '[^']*state\/state-store\.js'/g)]
+      .map((m) => (m[1] ?? '').trim());
+    // Positive control: the import really is there, so an empty scan cannot
+    // pass this by finding nothing.
+    expect(stateImports).toEqual(['loadTaskState']);
+    expect(codeOnly('src/cli/render-delivery-observation.ts')).not.toMatch(
+      /from '[^']*state\/(advance-state|state-store)\.js'/,
+    );
   });
 
   it('takes no execution lease and dispatches no agent', () => {

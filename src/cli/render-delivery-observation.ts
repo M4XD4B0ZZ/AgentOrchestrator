@@ -174,19 +174,33 @@ export const HISTORICAL_LABEL = 'Recorded';
  * only honest option — and the fresh answer is already printed above, so the
  * line only has to name the stored one and the fact of the difference.
  */
-export const EVIDENCE_DISAGREEMENT_PREFIX = 'the observation above reports a different outcome';
+export const EVIDENCE_DISAGREEMENT_PREFIX = 'the observation above does not match it';
 
 /**
  * The agreement half, and it says exactly what was compared.
  *
- * It used to read "the observation above agrees", which claims more than the
- * comparison makes: only the two outcome words and the pull-request number are
- * compared, so a stored `SUCCESS (2 check runs)` beside a fresh `SUCCESS (10
- * check runs, 8 of them new)` would have been called agreement. Both sets of
- * counts are printed two lines above, so the operator can see the difference —
- * but the sentence should not have told them there was none.
+ * ── Both sentences have now been wrong in opposite directions ─────────────
+ *
+ * The first pair read "agrees" / "differs from the observation above". "Agrees"
+ * claimed more than the comparison makes: only the two outcome words and the
+ * pull-request number are compared, so a stored `SUCCESS (2 check runs)` beside
+ * a fresh `SUCCESS (10 check runs, 8 of them new)` was called agreement. Both
+ * sets of counts are printed two lines above, so the operator could see the
+ * difference — but the sentence should not have said there was none.
+ *
+ * The correction replaced them with "reports the same outcome" / "reports a
+ * different outcome", and a second review found the disagreement half was then
+ * false in a case the suite deliberately exercises: a pull request closed and
+ * another opened at the same head gives `MATCHED` on both sides with different
+ * numbers, so the outcome *word* is identical and the sentence said it was not.
+ *
+ * So the two are no longer symmetrical, because the underlying comparison is
+ * not. The agreement half names what was compared and claims only that; the
+ * disagreement half says the two do not match, without naming which of the
+ * three compared values moved — all three are printed above it.
  */
-export const EVIDENCE_AGREEMENT_SUFFIX = 'the observation above reports the same outcome';
+export const EVIDENCE_AGREEMENT_SUFFIX =
+  'the observation above reports the same outcome and pull request';
 
 export interface StoredEvidenceView {
   readonly reading: DeliveryEvidenceReading;

@@ -8545,14 +8545,21 @@ agent-loop delivery --repository D:\AgentOrchestrator --task T-014 --observe --r
 
 ```
 Subject      : 10583ee91a5747d0049f563ffaac64b0cf643aeb
-Pull request : MATCHED  (#57)
+Pull request : MATCHED  (#55)
 Checks       : SUCCESS  (2 check run(s), 0 commit status(es): 2 succeeded, 0 pending, 0 failed, 0 neutral/skipped)
-Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#57), checks SUCCESS; the observation above reports the same outcome
+Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#55), checks SUCCESS; the observation above reports the same outcome and pull request
 Record       : RECORDED
 ```
 
-The record is written before it is read back, so the `Recorded` line describes the
-store as this invocation leaves it. A first version read first, and printed
+The subject and the pull-request number are this repository's own, from the
+slice-2 measurement table above; the `Recorded` and `Record` lines are the shape
+the code renders, driven through the real command against a substituted forge
+client. **Nothing in this section was captured against a live GitHub**, and a
+first version of it said otherwise — it showed `#57` for a commit the same
+document measures as `#55`, so the page contradicted itself two screens apart.
+
+The record is written before it is read back, so the `Recorded` line describes
+the store as this invocation leaves it. A first version read first, and printed
 `Recorded : ABSENT — No observation has been recorded for this task` directly
 above `Record : RECORDED` — a sentence false at the moment it was printed.
 
@@ -8565,7 +8572,7 @@ agent-loop delivery --repository D:\AgentOrchestrator --task T-014
 ```
 Pull request : not observed  (pass --observe to ask the forge about this commit)
 Checks       : not observed  (pass --observe to ask the forge about this commit)
-Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#57), checks SUCCESS
+Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#55), checks SUCCESS
 
 A stored observation is a record of one past moment. It is not a claim about the forge
 now: the pull request, its head and the checks may all have changed since. Nothing

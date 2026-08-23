@@ -99,9 +99,10 @@ async function ask(
  * directory asks the same question, through the same command, and gets the same
  * three-way verdict — rather than growing a second opinion about what Git
  * ignores. V4 slice 3 is the first such caller: it writes
- * `<taskId>.delivery.json` beside the task state, and
+ * `runtime/delivery/<taskId>.json`, one directory below the task state, and
  * {@link checkRuntimeIgnored} asks only about the two names the *state* writer
- * creates.
+ * creates — which a rule keyed on the runtime directory's own files need not
+ * cover.
  *
  * A caller that writes through `writeFileAtomically` must ask about the staging
  * shape as well, and must ask in two calls rather than one: `check-ignore` ORs
