@@ -209,6 +209,7 @@ function repository(root: string): ResolvedRepository {
     scope: Object.freeze({ allowedPaths: Object.freeze(['src']), protectedPaths: Object.freeze([]) }),
     completion: Object.freeze({ maxReviewRounds: 3 }),
     remote: Object.freeze({ required: false, present: false }),
+    delivery: Object.freeze({ declared: false as const }),
   });
 }
 

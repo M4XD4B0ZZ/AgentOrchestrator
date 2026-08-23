@@ -72,6 +72,7 @@ function repositoryAt(
     scope: { allowedPaths: ['src'], protectedPaths: ['dist'] },
     completion: { maxReviewRounds: 3 },
     remote: { required: false, present: false },
+    delivery: { declared: false as const },
   });
 }
 

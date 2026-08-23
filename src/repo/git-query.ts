@@ -40,6 +40,24 @@ export interface GitQueryResult {
   readonly outcome: GitQueryOutcome;
   /** Trimmed stdout on `OK`, the empty string otherwise. */
   readonly stdout: string;
+  /**
+   * Stdout **exactly as Git wrote it**, when the runner can supply it.
+   *
+   * Optional, and carried alongside {@link stdout} rather than instead of it,
+   * for the reason `worktree/git-command.ts` gives for the identically named
+   * field on its own result: `.trim()` removes *every* trailing whitespace
+   * character, not merely the line terminator, so a reader that parses a value
+   * out of a command's output can be handed a shortened one.
+   *
+   * The caller that needs it is `deliver/delivery-target.ts`. Measured: a
+   * remote configured as `https://github.com/Owner/Repo.git ` keeps that
+   * trailing space through `git remote get-url`, and trimming it turns a URL
+   * the delivery grammar must refuse into a confident, wrong repository
+   * identity. That reader therefore uses this field and treats its absence as
+   * an unreadable answer; every other caller here wants {@link stdout} and is
+   * unaffected.
+   */
+  readonly rawStdout?: string;
 }
 
 /** Wall-clock ceiling for a single local Git question. Generous but bounded. */
@@ -73,5 +91,10 @@ export async function gitQuery(
 
   if (result.outcome !== 'COMPLETED') return RESULT_UNAVAILABLE;
   if (result.exitCode !== 0) return Object.freeze({ outcome: 'NONZERO_EXIT' as const, stdout: '' });
-  return Object.freeze({ outcome: 'OK' as const, stdout: result.stdout.trim() });
+  return Object.freeze({
+    outcome: 'OK' as const,
+    stdout: result.stdout.trim(),
+    // Carried alongside, never instead of. See {@link GitQueryResult.rawStdout}.
+    rawStdout: result.stdout,
+  });
 }

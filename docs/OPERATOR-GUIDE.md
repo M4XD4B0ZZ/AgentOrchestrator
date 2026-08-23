@@ -382,7 +382,8 @@ Run verweigern wird.
 
 ### 6.2 `repo-profile.yaml`
 
-Vollständig — alle Felder sind Pflicht, `additionalProperties` ist aus:
+Vollständig. `additionalProperties` ist aus, und alle Felder sind Pflicht — mit
+einer Ausnahme: `delivery` ist optional.
 
 ```yaml
 schemaVersion: 1
@@ -414,9 +415,11 @@ completion:
   maxReviewRounds: 3
 remote:
   required: true
+delivery:                           # optional; fehlt der Block, gibt es kein Ziel
+  remote: origin                    # das Remote, dessen PUSH-URL das Ziel benennt
 ```
 
-Zwei Dinge, die man einmal wissen muss:
+Drei Dinge, die man einmal wissen muss:
 
 * **Die Verify-Policy kann ein Writer nicht umschreiben.** Sie stammt aus einer
   Lesung des Source-Checkouts zu Beginn der Invocation und wird als Wert
@@ -424,6 +427,13 @@ Zwei Dinge, die man einmal wissen muss:
 * **`defaultBranch` wird nicht geraten.** Nennt das Profil einen Branch, der
   lokal nicht existiert, ist das `DEFAULT_BRANCH_NOT_FOUND` und nicht ein
   stillschweigender Rückfall auf `main`.
+* **`delivery` benennt ein Ziel und erlaubt nichts.** AO liest daraus
+  `host/owner/name` und zeigt es im Read-only-Plan an. Dieser Build pusht nicht,
+  öffnet keinen Pull Request, liest keine CI und merged nicht; `READY_FOR_PR`
+  bleibt terminal. Fehlt der Block, fragt AO Git gar nicht danach. Das Remote
+  wird genannt, nicht geraten: `origin` ist eine Konvention von `git clone`,
+  keine Tatsache über einen Checkout — und gelesen wird die **Push**-URL, weil
+  ein Pull Request dort entsteht, wohin der Branch gepusht wurde.
 
 ---
 

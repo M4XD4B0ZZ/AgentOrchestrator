@@ -8050,11 +8050,235 @@ recovery is not a review round and does not touch that budget. Acquisition does
 **not** recover automatically — that stays an operator decision, taken by running
 one command.
 
+## The delivery target (V4 slice 1)
+
+**AO can now name the repository a finished task would be delivered to, and
+that is all this slice does.** It is the first slice of autonomous delivery —
+see [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md)
+for the contract it belongs to and for why identity comes before observation.
+
+A repository profile may declare the remote whose **push** URL names its
+delivery target:
+
+```yaml
+delivery:
+  remote: origin
+```
+
+The block is optional and absence is a real answer: a profile that omits it
+declares no delivery target, and Git is asked nothing on its behalf. A profile
+written before the field existed means exactly that, which is why the field was
+added optionally rather than by a contract-version bump — and why an older build
+still fails closed on a profile that *does* carry one, because it meets an
+unknown key at a `.strict()` boundary and refuses.
+
+Resolution turns that remote into an identity or into one of a closed set of
+refusals:
+
+```
+Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator  (identity only; nothing is delivered)
+Delivery     : origin -> REMOTE_URL_AMBIGUOUS — Git did not answer with exactly one push URL …
+Delivery     : not declared  (this repository declares no delivery target)
+```
+
+| Part | Where |
+| --- | --- |
+| The reader, the grammar and the vocabulary | `src/deliver/delivery-target.ts` |
+| The declaration | `src/repo/internal/repo-profile-object-schema.ts` (`delivery`) |
+| Where it is resolved and carried | `src/repo/resolve-repository.ts` (`ResolvedRepository.delivery`) |
+| The operator's line | `src/run/render-run-plan.ts` (`renderDeliveryLine`) |
+| Its contract, grammar, counter-proofs and controls | `tests/v4-01-delivery-target.test.ts` |
+
+### The remote is declared, not guessed
+
+`origin` is what `git clone` happens to call the remote it cloned from. It is a
+convention, not a fact about a checkout: a checkout may have several remotes,
+none at all, or an `origin` pointing at a fork. A delivery target inferred from
+convention is a delivery target chosen by whoever last ran `git remote add`, and
+"wrong repository" is exactly the failure a delivery controller exists not to
+have. So the repository states it, in the same file in which it states which
+paths may be written and how it is verified.
+
+Declaring it grants nothing. This build pushes nothing, opens nothing, reads no
+forge and merges nothing; `READY_FOR_PR` is still terminal and still hands a
+finished task to a human. The declaration makes the target **nameable**, which
+is the half that has to exist first.
+
+### Every token of the vector is measured
+
+The authority is `git remote get-url --push --all -- <remote>`, and three of its
+four tokens fail *silently* when removed — the command still exits 0 and still
+prints a URL. Measured on `git 2.55.0.windows.3`:
+
+- **`--push`.** A remote may carry a push URL distinct from its fetch URL, and a
+  pull request is opened on the repository the branch was pushed to. With
+  `url` = `…/Owner/Fetched.git` and `pushurl` = `…/Other/Pushed.git`, the bare
+  call answers `Owner/Fetched`. When no push URL is configured, `--push` falls
+  back to the fetch URL — measured, not assumed.
+- **`--all`.** Without it Git prints only the *first* of several configured
+  URLs. A push goes to **every** push URL a remote has, so more than one is not
+  a preference to resolve but an ambiguity: `REMOTE_URL_AMBIGUOUS`. Dropping
+  `--all` turns that ambiguity into a confident wrong answer.
+- **`--`.** The remote name comes from a repository-authored profile, and Git
+  would read a leading `-` as an option. The profile grammar refuses such a name
+  and the reader refuses it again where the vector is built.
+
+`get-url` also **applies `insteadOf` / `pushInsteadOf` rewrites** — measured — so
+it reports the URL Git *uses*, not the one that was typed. That is the direction
+this reader wants: reading `remote.<name>.url` out of the config would report
+`github.com` for a checkout whose pushes land elsewhere, which is an identity
+that is wrong exactly when it is being lied to. So a rewritten host is reported
+as that host — and **no host is judged in this build**, by design and by
+omission. Saying a rewrite is "caught downstream" would cite a control that does
+not exist; it is carried open as `L-V4-01-2`.
+
+### The URL is read as bytes, and never carried
+
+A configured URL can end in a space, and it survives `get-url` — measured. The
+read-only Git seam's `stdout` is `.trim()`ed, so a reader using it would see a
+shortened URL and resolve a repository the configuration does not name. This
+reader therefore parses `rawStdout`, for the reason `worktree/git-command.ts`
+already gives for the identically named field, and treats its absence as an
+unreadable answer rather than falling back to the trimmed form.
+
+Nothing beyond the three identity parts leaves the reader. Not the URL, not its
+scheme, and not its user information: a `DeliveryTargetResult` has no field to
+carry one, so no report, log or console line can print one. Only the literal
+user `git` is accepted, and every other user information is
+`REMOTE_URL_CARRIES_USERINFO` — including a bare user name with no password,
+because GitHub accepts a personal access token *as* the user name, which makes
+"there is no colon, so there is no secret" false.
+
+### Fail-closed by construction, and not a resolution failure
+
+`target` exists only on the `RESOLVED` member of the result, so no caller can
+read an identity out of a refusal and there is no default to fall back to.
+
+A declared target that does not resolve does **not** fail repository
+resolution. The work still happens and `READY_FOR_PR` still hands it to a human;
+stopping every task in a repository because of a field no step depends on would
+be the wrong trade. The refusal is carried as data, and the fail-closed
+obligation belongs to whichever later step wants to *act* on a target — which
+cannot, because a refusal carries none.
+
+### What proves it
+
+Twenty-eight mutants, each removing exactly one mechanism: **27 killed** by
+`tests/v4-01-delivery-target.test.ts`, and **one measured equivalent**, named
+below rather than hidden in an arithmetic. Four of the twenty-eight were added
+after a review found them surviving — the scp slash rule, the printable gate's
+"no space" half, the freeze on the undeclared branch, and the operator sentences
+themselves, which were pinned only for existence and not for content. The ones worth naming among the kills
+are the four whose removal is silent — drop `--push`, drop `--all`, use the
+trimmed `stdout`, and filter every blank line instead of one terminator —
+because each has a fixture built only to make that removal visible. The
+printable-ASCII gate is measured too, and by a single case: `U+212A KELVIN SIGN`
+lower-cases to ASCII `k`, so without that gate `https://<K>EYS.example.com/…`
+would normalise into `keys.example.com` and be accepted as a host. Every other
+refusal in the grammar is also caught by a component pattern; that one is not.
+
+The argument vector is pinned twice — by its effects against real repositories,
+and at the boundary, through a delegating spy on the read-only Git seam that
+records what the product actually sends. The same spy measures the negative
+case: a profile with no `delivery` block issues no URL query at all, against a
+fixture whose remote *would* have resolved cleanly.
+
+The equivalent one is the split spelling. `split('\n')` and `split(/\r?\n/)`
+change no outcome for any shape the reader can meet, and the reason is the line
+*count* rather than the line contents: both break at exactly the same `\n`
+offsets, so at a count of one there is no `\n` left for `\r?\n` to match and the
+single element is byte-identical, while at a count of two or more the answer is
+refused before any line is parsed. The contents *do* differ — `\r?\n` eats a `\r`
+before an internal newline — which is why the argument rests on the count.
+Measured, and recorded here rather than left as a mechanism a comment claims
+and no test can kill.
+
+The last control is the one this slice most needs: a remote configured with a
+token in its URL must produce `REMOTE_URL_CARRIES_USERINFO` in the run plan and
+no fragment of that URL anywhere in the rendered text.
+
+### One line is not one URL, and that was a fail-open
+
+The first version of this slice stated that Git refuses a config value
+containing an escaped newline, and dropped every empty line from `get-url`'s
+output on the strength of it. **Both halves were false**, and a review found it.
+Measured: `git-config(5)` lists `\n` among the recognised escapes, a remote URL
+configured as `\nhttps://github.com/Evil/Repo.git` is accepted by `git remote add`, and
+`get-url --push --all` then prints that URL with its leading newline intact.
+Filtering the empty line collapsed it into one clean-looking URL and resolved
+`Evil/Repo` from bytes that are not that string — the same trailing-whitespace
+class the raw-bytes decision exists to close, arriving through the splitter
+instead of through `.trim()`. A trailing *space* was refused; a trailing
+*newline* resolved.
+
+Exactly one trailing terminator is removed now, and nothing else is, so a URL
+containing a newline stays visible as the extra line it produces and is refused.
+`REMOTE_URL_AMBIGUOUS` covers it together with the genuine many-URL case,
+because the two are indistinguishable in this output: Git's line-oriented answer
+cannot represent a URL containing a newline, and inventing a distinction the
+data does not carry would be the same mistake in the other direction.
+
+### Carried forward from V4 slice 1, deliberately
+
+- **L-V4-01-1 — the identity is not durable, on purpose.** No task state, ledger
+  or lease field holds a delivery target; it is re-derived from Git wherever it
+  is needed. A pinned copy is a claim about a configuration that can change
+  underneath it, and a stale delivery target is worse than none. If a later
+  slice needs delivery evidence to survive a restart, it has to say what it is
+  evidence *of* and bind it to a commit.
+- **L-V4-01-2 — the host is carried, not judged.** The identity reports whatever
+  host the URL named. Whether AO may talk to that host is the observation
+  slice's decision and needs an allow-list there; this slice deliberately does
+  not pretend to have made it.
+- **L-V4-01-3 — owner and repository names keep their case.** A forge may treat
+  them case-insensitively; a comparison that needs to know that has to fold
+  deliberately rather than inherit an assumption from here.
+- **L-V4-01-4 — this is the declared remote's push URL, not "where a push would
+  go".** Measured: `branch.<name>.pushRemote` and `remote.pushDefault` select a
+  different *remote* for a push, before any URL is chosen — with
+  `branch.main.pushRemote = fork`, a bare `git push` writes to `fork` while this
+  reader, asked for `origin`, answers `origin`'s URL. Nothing here consults that
+  resolution, checks that the work branch has been pushed anywhere, or checks
+  that the repository exists at all.
+- **L-V4-01-5 — only the read-only plan shows it.** `run --attended` and
+  `block --attended` report a finished task without naming its delivery target,
+  which is the surface an operator is on when they go and open the pull request.
+  The consequence, stated plainly: a misdeclared remote — `orgin` for `origin` —
+  resolves `REMOTE_NOT_CONFIGURED` forever, and the only surface that says so is
+  the run plan. That is `agent-loop run` without the grant, and also `run
+  --attended` on an invocation that selects no task, since both reach the same
+  renderer; `block` renders no delivery line at all, with or without the grant.
+  The preview is where this repository's own workflow starts, so the feedback is
+  not absent — it is on one surface, and a declaration is worth checking there
+  before a run. Adding the line to the execution reports is a rendering decision
+  for the slice that has something to say about the target beyond its name.
+- **L-V4-01-6 — the repository root answers, not the task's worktree.** AO
+  commits in a linked worktree, and a linked worktree may carry its own
+  `remote.<name>.pushurl` or `url.*.pushInsteadOf` in `config.worktree` once
+  `extensions.worktreeConfig` is set. The query runs against the resolved
+  repository root and does not consult it.
+- **L-V4-01-7 — Git's reasons for refusing are not distinguished.** The
+  read-only Git seam collapses every non-zero answer into one outcome and
+  carries no exit status, so "no such remote" (exit 2), "this configuration
+  cannot be read" (exit 128) and a `git` killed by a signal all arrive as
+  `REMOTE_NOT_CONFIGURED`. Fail-closed in every case — none produces an
+  identity — and the sentence an operator sees names no cause it cannot
+  establish. Telling them apart means teaching the read-only seam to carry an
+  exit status, which `worktree/git-command.ts` is explicit is a narrow,
+  documented act rather than a general licence.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
 POSIX; and any product-side PR/CI/merge automation. `READY_FOR_PR` remains
 terminal — the orchestrator hands a finished task to a human and stops there.
+
+V4 slice 1 does not shorten that list. It adds the one thing every item on it
+needs first: a repository can **declare** its delivery target, and AO resolves it
+to a `host/owner/name` identity and reports it in the read-only plan. Nothing is
+pushed, no forge is contacted, no durable field is written and `READY_FOR_PR` is
+still terminal — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1)
+and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on
 that list: V3 slice 4 delivered the per-launch record and V3 slice 5 the writer-

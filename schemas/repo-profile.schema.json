@@ -188,6 +188,21 @@
         "required"
       ],
       "additionalProperties": false
+    },
+    "delivery": {
+      "type": "object",
+      "properties": {
+        "remote": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        }
+      },
+      "required": [
+        "remote"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

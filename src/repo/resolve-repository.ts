@@ -65,6 +65,7 @@ import {
   REPO_PROFILE_RELATIVE_PATH,
 } from './profile-location.js';
 import { safeParseRepoProfile, type RepoProfile } from './repo-profile.js';
+import { observeDeliveryTarget, type ResolvedDelivery } from '../deliver/delivery-target.js';
 
 // ── Failure vocabulary ─────────────────────────────────────────────────────
 
@@ -207,9 +208,35 @@ export interface ResolvedRemote {
    * Whether the repository has at least one configured remote. Only the fact is
    * recorded — never a remote name and never a URL, which would put a host and
    * possibly a credential into a value that gets logged.
+   *
+   * {@link ResolvedRepository.delivery} does not weaken that rule. It carries a
+   * parsed *identity* — host, owner and repository name, each one through its
+   * own grammar — and never the URL those came from, never its scheme and never
+   * its user information, which is the part a credential lives in.
    */
   readonly present: boolean;
 }
+
+/**
+ * `ResolvedDelivery` lives in `deliver/delivery-target.ts`, with the vocabulary
+ * it is made of. Two notes belong here, where it is produced:
+ *
+ * **A declared target that does not resolve is not a resolution failure.** A
+ * repository whose delivery target AO cannot name is still a repository AO may
+ * work in: the work happens, and `READY_FOR_PR` still hands it to a human.
+ * Failing resolution here would stop every task in a repository because of a
+ * field no step in this build depends on. The refusal is carried as data, and
+ * the fail-closed obligation belongs to whichever later step wants to *act* on a
+ * target — which cannot, because a refusal carries no identity.
+ *
+ * **It costs one more local Git process, and only when a target is declared.**
+ * Considered, and accepted: `resolveRepository` already starts five, this one is
+ * bounded by the same read-only ceiling as the rest, and a profile that declares
+ * nothing pays nothing. It is charged to every command that resolves a
+ * repository, including `lease` and `release`, which do not render the answer —
+ * the alternative, resolving it only where it is printed, would make *which
+ * repository this is* have two answers depending on the caller.
+ */
 
 /**
  * A repository the orchestrator may act on, and the contract governing it.
@@ -250,6 +277,12 @@ export interface ResolvedRepository {
   readonly scope: ResolvedScopePolicy;
   readonly completion: { readonly maxReviewRounds: number };
   readonly remote: ResolvedRemote;
+  /**
+   * The declared delivery target, resolved. Read-only, local, and authority for
+   * nothing — see `deliver/delivery-target.ts` for what a resolved target is
+   * and is not, and the note above for why a refusal here is data.
+   */
+  readonly delivery: ResolvedDelivery;
 }
 
 export interface RepositoryResolutionSuccess {
@@ -530,6 +563,22 @@ export async function resolveRepository(
   const remotePresent = remotes.outcome === 'OK' && remotes.stdout.length > 0;
   if (profile.remote.required && !remotePresent) return failure('REMOTE_REQUIRED_BUT_ABSENT');
 
+  // --- 10a. Delivery target ------------------------------------------------
+  // Only asked when the profile declares one. A repository that declares no
+  // delivery target has Git asked nothing on its behalf, which is both the
+  // cheaper answer and the honest one: there is no target to be wrong about.
+  //
+  // A declared target that does not resolve is carried, not raised. See
+  // `ResolvedDelivery` for why this step has no failure code of its own.
+  const delivery: ResolvedDelivery =
+    profile.delivery === undefined
+      ? Object.freeze({ declared: false as const })
+      : Object.freeze({
+          declared: true as const,
+          remoteName: profile.delivery.remote,
+          result: await observeDeliveryTarget(root, profile.delivery.remote, gitQuery),
+        });
+
   // --- 11. The frozen result ----------------------------------------------
   const repository: ResolvedRepository = Object.freeze({
     root,
@@ -566,6 +615,7 @@ export async function resolveRepository(
     }),
     completion: Object.freeze({ maxReviewRounds: profile.completion.maxReviewRounds }),
     remote: Object.freeze({ required: profile.remote.required, present: remotePresent }),
+    delivery,
   });
 
   return Object.freeze({ ok: true as const, code: 'RESOLVED' as const, repository });
