@@ -9,7 +9,13 @@
  *  - closed vocabulary codes from the layers the plan composed;
  *  - the canonical repository root and repository id, both produced by
  *    `resolveRepository` and nothing else;
- *  - ISO timestamps the state contract validated.
+ *  - ISO timestamps the state contract validated;
+ *  - the delivery target, which is three values that each passed their own
+ *    grammar — a host, an owner and a repository name — plus a remote name the
+ *    profile contract accepted. The URL they were parsed out of is not
+ *    representable here, because `DeliveryTargetResult` never carries one: a
+ *    remote URL is the value most likely to hold a credential, and this is a
+ *    console the operator reads and pastes.
  *
  * Task *titles*, file paths from findings, raw Git output and exception text
  * are not representable in a plan and therefore cannot be printed. The static
@@ -17,6 +23,10 @@
  * `safe-error.ts`: nothing foreign is ever interpolated into them.
  */
 
+import {
+  DELIVERY_TARGET_DETAIL,
+  type ResolvedDelivery,
+} from '../deliver/delivery-target.js';
 import type { RunPlan, RunPlanConclusion } from './run-plan.js';
 
 /**
@@ -66,15 +76,44 @@ function codes(values: readonly string[]): string {
 }
 
 /**
+ * The delivery line.
+ *
+ * Three shapes, and the middle one is the point of the whole slice: a resolved
+ * target is printed as the identity itself, so an operator can see *which*
+ * repository this checkout would deliver to before anything is built that
+ * delivers to it. A refusal prints its closed code and the static sentence that
+ * says what to do about it — never Git's output, and never the URL.
+ *
+ * The trailing clause is not decoration. This build pushes nothing, opens
+ * nothing and merges nothing, and a line that named a forge repository without
+ * saying so would read as a claim that it does.
+ */
+export function renderDeliveryLine(delivery: ResolvedDelivery): string {
+  if (!delivery.declared) {
+    return line('Delivery', 'not declared  (this repository declares no delivery target)');
+  }
+  const result = delivery.result;
+  const answer =
+    result.outcome === 'RESOLVED'
+      ? `${result.target.host}/${result.target.owner}/${result.target.name}`
+      : `${result.outcome} — ${DELIVERY_TARGET_DETAIL[result.outcome]}`;
+  return line('Delivery', `${delivery.remoteName} -> ${answer}  (identity only; nothing is delivered)`);
+}
+
+/**
  * Renders one plan for the console. The trailing note is part of the contract:
  * a plan executes nothing, and the report says so every time rather than
  * assuming the operator remembers. See {@link READ_ONLY_TRAILER} for the exact
  * scope of that promise.
  */
-export function renderRunPlan(plan: RunPlan, repository: { id: string; root: string }): string {
+export function renderRunPlan(
+  plan: RunPlan,
+  repository: { id: string; root: string; delivery: ResolvedDelivery },
+): string {
   const lines: string[] = [
     '',
     line('Repository', `${repository.id}  (${repository.root})`),
+    renderDeliveryLine(repository.delivery),
     line('Selection', plan.selection.code),
   ];
 

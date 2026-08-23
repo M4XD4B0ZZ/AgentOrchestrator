@@ -214,6 +214,78 @@ export const RemotePolicySchema = z
   })
   .strict();
 
+/**
+ * A Git remote *name*, as a repository profile may declare it.
+ *
+ * Narrower than Git's own rules, and the first character is the reason. The
+ * declared name is spliced into an argument vector
+ * (`deliver/delivery-target.ts`), and a name beginning with `-` would be read
+ * by Git as an option rather than as a remote. Requiring an alphanumeric first
+ * character refuses that, and also refuses a leading `.`; the remaining
+ * characters are the ordinary ones a remote is named with.
+ *
+ * This is a contract-boundary refusal, not the only one: the reader that builds
+ * the vector applies the same rule again at the point of use, because a
+ * profile is repository-supplied input and one gate is one place to forget.
+ * `tests/v4-01-delivery-target.test.ts` pins that the two agree, since a shared
+ * constant would drag the whole process layer into the module the JSON-Schema
+ * generator imports.
+ *
+ * It is a real limitation and not merely a tightening: a remote genuinely may be
+ * named with a leading `-` — measured, `git remote add -- -dash <url>` exits 0
+ * and reads back fine — and such a remote can never be a declared delivery
+ * target. Accepted, because the alternative is putting a repository-authored
+ * string that Git reads as an option into an argument vector.
+ */
+export const RemoteNameSchema = z
+  .string()
+  .min(1, 'A remote name must not be empty.')
+  .max(100, 'A remote name must not exceed 100 characters.')
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    'A remote name must start with a letter or digit and consist of letters, digits, ".", "_" and "-".',
+  );
+
+/**
+ * Where a finished task would be **delivered**, declared by the repository.
+ *
+ * ── What declaring it does, and what it does not ───────────────────────────
+ *
+ * It names the remote whose push URL identifies the delivery target, and that
+ * is all it does. `READY_FOR_PR` is still terminal, nothing is pushed, no pull
+ * request is opened, nothing is merged and no network is contacted: this build
+ * resolves the identity from local Git and reports it. Whether AO may talk to
+ * the resolved host, with what credential, and to take what action, are
+ * separate decisions that need their own contract.
+ *
+ * ── Why the remote is declared rather than assumed ─────────────────────────
+ *
+ * `origin` is what `git clone` happens to call the remote it cloned from. It
+ * is a convention, not a fact about a checkout, and a checkout may have several
+ * remotes, none of them, or an `origin` pointing at a fork. A delivery target
+ * inferred from convention is a delivery target chosen by whoever last ran
+ * `git remote add`, which is the "wrong repository" failure a delivery
+ * controller exists to not have. So the repository states it, in the same file
+ * in which it states which paths may be written and how it is verified.
+ *
+ * ── Absence is the default, and it is a real answer ────────────────────────
+ *
+ * The whole block is optional. A profile that omits it declares no delivery
+ * target, and AO asks Git nothing on its behalf — which is what every profile
+ * written before this field existed means, and what a repository that is
+ * delivered by hand goes on meaning. Added optionally rather than by a contract
+ * version bump for the reason `core/task-state.ts` gives for
+ * `scopeAuthorityCommit`: nothing is invented for an older document, and the
+ * other direction fails closed on its own, because an older build meets an
+ * unknown key at a `.strict()` boundary and refuses the profile.
+ */
+export const DeliveryPolicySchema = z
+  .object({
+    /** The remote whose **push** URL names the delivery target. */
+    remote: RemoteNameSchema,
+  })
+  .strict();
+
 export const RepositoryIdentitySchema = z
   .object({
     id: RepositoryIdSchema,
@@ -233,5 +305,6 @@ export const RepoProfileObjectSchema = z
     scope: ScopePolicySchema,
     completion: CompletionPolicySchema,
     remote: RemotePolicySchema,
+    delivery: DeliveryPolicySchema.optional(),
   })
   .strict();
