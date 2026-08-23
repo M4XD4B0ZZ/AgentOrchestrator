@@ -1433,27 +1433,83 @@ describe('the operator sentences are pinned by literal, not by reading the map',
       expect(text).not.toContain('and nothing else');
     }
 
-    // The ban reaches one level up too, because that is where it came back.
-    // Correcting three strings on this surface left the *top-level* help saying
-    // "no network access of any kind" — and the replacement for that reused the
-    // banned phrase in a sentence that was itself false, because attended
-    // execution starts agent CLIs that are network clients. A promise about
-    // egress made on the front page is the one most likely to be believed.
-    const { readFileSync } = await import('node:fs');
-    const cliSource = readFileSync('src/cli/index.ts', 'utf8');
-    const description = cliSource.slice(
-      cliSource.indexOf('const DESCRIPTION'),
-      cliSource.indexOf('].join('),
-    );
-    // Positive control: this really is the description block.
+    // The ban reaches one level up too, because that is where it kept coming
+    // back. Three rounds ran on this one paragraph: the top-level help said "no
+    // network access of any kind"; the replacement reused the banned phrase in
+    // a sentence that was itself false; and the replacement for THAT named two
+    // of the four commands that start a network client, under a heading reading
+    // "stated in full". Every round corrected the previous round's sentence and
+    // left a shorter list than the truth.
+    //
+    // So this is no longer a string ban. The enumeration is checked against the
+    // REGISTERED command surface — the object commander builds, reached the way
+    // an operator reaches it — because the omission was never a typo. It was a
+    // grant that shipped in V3-08 (`run --automatic-resume-only`) while the
+    // front page stayed as it was, and a `doctor` that has started the agent
+    // CLIs for its auth preflight since long before that.
+    const { buildProgram } = await import('../src/cli/index.js');
+    const program = buildProgram();
+    const description = program.description();
+    // Line breaks are a property of the rendering, not of the claim, so the
+    // phrases below are matched against a flattened copy. Checking the raw
+    // string would make every assertion hostage to where a sentence wraps.
+    const flat = description.replace(/\s+/g, ' ');
+
+    // Positive control, and stronger than the previous one: this reads the
+    // description through `buildProgram()`, so a `.description(DESCRIPTION)`
+    // that was deleted — which the old file-slice version could not have seen —
+    // fails here rather than leaving every negative below vacuous.
     expect(description).toContain('This build ships:');
     expect(description.length).toBeGreaterThan(400);
 
     expect(description).not.toContain('and nothing else');
     expect(description).not.toContain('no network');
-    // And it must still name the two requests this build makes itself.
-    expect(description).toContain('notify.yaml');
-    expect(description).toContain('delivery --observe');
+
+    // Every command that starts a program which opens a socket of its own, and
+    // the one request this process makes itself. `doctor` and all three
+    // execution grants reach `runAuthPreflight`, which starts `claude auth
+    // status` and `codex login status`; `delivery --observe` starts the GitHub
+    // CLI.
+    for (const claim of [
+      'notify.yaml',
+      '`delivery --observe` starts the GitHub CLI',
+      '`doctor` starts the agent CLIs',
+      '`run --attended`, `run --automatic-resume-only` and `block --attended`',
+    ]) {
+      expect(flat).toContain(claim);
+    }
+
+    // The client's own calls are disclosed on the flag's help (L-V4-02-6). A
+    // front page that omitted them would be making the narrower claim in the
+    // more prominent place, which is the direction that matters.
+    expect(flat).toContain('telemetry');
+
+    // The two surfaces must agree on the count. The front page said "one
+    // read-only question" while `delivery --help` said "two", about the same
+    // two questions and the same three requests.
+    expect(flat).toContain('two read-only questions about one exact commit');
+    expect(DELIVERY_COMMAND_DESCRIPTION).toContain('two read-only questions');
+
+    // The two retracted sentences, banned by literal so they cannot come back
+    // the way the last two did. Both were true when they were written and
+    // neither was moved when the grant that falsified them shipped.
+    expect(flat).not.toContain('Unattended running and opening pull requests are not in this build');
+    expect(flat).not.toContain('Without --attended, `run` still only reports');
+
+    // And the prose is bound to the live surface in both directions, rather
+    // than to a remembered list: while these two grants are registered on
+    // `run`, the description must name them, and if either is ever withdrawn
+    // this fails until the sentence goes with it. The whole-option-list pin
+    // that catches a *new* flag arriving lives in `tests/run-command.test.ts`
+    // and is deliberately not copied here — two copies of one list is how a
+    // list goes stale.
+    const runCommand = program.commands.find((command) => command.name() === 'run');
+    expect(runCommand).toBeDefined();
+    const runFlags = (runCommand?.options ?? []).map((option) => option.long);
+    for (const grant of ['--attended', '--automatic-resume-only']) {
+      expect(runFlags).toContain(grant);
+      expect(flat).toContain(`run ${grant}`);
+    }
 
     expect({ ...OBSERVATION_CONCLUSION_DETAIL }).toEqual({
       NOT_OBSERVED:
