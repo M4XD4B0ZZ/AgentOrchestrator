@@ -234,5 +234,19 @@ remediation loop driven by CI. No GitLab or Bitbucket abstraction.
 **Durable delivery evidence.** Nothing here is written down, so every answer is
 re-derived and no later slice can say "this is the pull request we observed at
 this head". That is the piece a merge decision would need, and it needs its own
-decision about what may be pinned, for how long, and what invalidates it. It is
-not started.
+decision about what may be pinned, for how long, and what invalidates it.
+
+**Delivered** as V4 slice 3 on 2026-08-23. Its own decision record —
+`2026-08-23-adr-durable-delivery-evidence.md` — carries the persistence
+location and the rejected alternatives, the forgery boundary and its exact
+limits, and the residuals `L-V4-03-1..6`. Three things it settled are worth
+naming at this level:
+
+- **"for how long" is answered by refusing the question.** There is no TTL. A
+  stored observation is a historical snapshot at every age, and the vocabulary
+  says so: the good reading is `HISTORICAL_VALID`, never `VALID`;
+- this slice's non-goal "no durable pull-request identity and no durable forge
+  evidence — nothing is written" is superseded, and narrowly. Something is
+  written now, and it is bound to a task, a target and an exact commit; it is
+  still not authority, and `delivery --observe` on its own is still read-only;
+- `READY_FOR_PR: []` is unchanged, and no transition was added.

@@ -8533,19 +8533,155 @@ See [`docs/decisions/2026-08-23-adr-delivery-observation-seam.md`](docs/decision
 for the full forge, egress and credential contract and every measurement behind
 it.
 
+## Durable delivery evidence (V4 slice 3)
+
+Slice 2 could answer a question and then forget it. This slice writes the answer
+down, so a later slice can tell *"AO has never observed this"* from *"AO observed
+this exact pull request, head and check state at time T"*.
+
+```
+agent-loop delivery --repository D:\AgentOrchestrator --task T-014 --observe --record
+```
+
+```
+Subject      : 10583ee91a5747d0049f563ffaac64b0cf643aeb
+Pull request : MATCHED  (#55)
+Checks       : SUCCESS  (2 check run(s), 0 commit status(es): 2 succeeded, 0 pending, 0 failed, 0 neutral/skipped)
+Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#55), checks SUCCESS; the observation above agrees
+Record       : RECORDED — RECORDED
+```
+
+A later local run, with no network at all, still knows what was recorded:
+
+```
+agent-loop delivery --repository D:\AgentOrchestrator --task T-014
+```
+
+```
+Pull request : not observed  (pass --observe to ask the forge about this commit)
+Checks       : not observed  (pass --observe to ask the forge about this commit)
+Recorded     : HISTORICAL — at 2026-08-23T14:00:00.000Z this was MATCHED (#55), checks SUCCESS
+
+A stored observation is a record of one past moment. It is not a claim about the forge now:
+the pull request, its head and the checks may all have changed since. Nothing here has asked
+again.
+```
+
+### The one rule
+
+**Persistence does not freeze GitHub.**
+
+```
+STORED SUCCESS      is not  CURRENT SUCCESS
+STORED PR MATCH     is not  CURRENT PR MATCH
+A RECENT TIMESTAMP  is not  FRESHNESS
+```
+
+`observedAt` says **when** the forge was asked. It says nothing about whether the
+answer still holds, and **there is no TTL** — a time-to-live is an invented
+number presented as safety, licensing action on a stale answer for as long as
+somebody guessed and refusing a still-correct one the moment the guess expired.
+Neither is derivable from anything GitHub tells us.
+
+So the good reading is called `HISTORICAL_VALID`, never `VALID` and never
+`CURRENT`; nothing exported from the module is named for freshness; and the
+report prints the sentence above every time it shows a record. When a fresh
+observation disagrees with a stored one, the report **says they differ** rather
+than preferring either.
+
+### Where it lives, and what it is bound to
+
+`<repositoryRoot>/.agent-orchestrator/runtime/<taskId>.delivery.json` — a
+companion beside the task-state file, published by stage-flush-rename, one latest
+snapshot per task. **Not** a `TaskState` field: writing one of those needs a held
+execution lease re-proved at the write, and `delivery` is a read-only command
+that holds none. Taking a lease to record an observation would make it an
+executing command.
+
+Six closed readings, of which exactly one is evidence:
+
+| Reading | Meaning |
+| --- | --- |
+| `HISTORICAL_VALID` | a past observation for exactly this task, target and commit |
+| `ABSENT` | nobody wrote one — absence of an observation, never an observation of absence |
+| `UNSUPPORTED_VERSION` | written by another build |
+| `MALFORMED` | not a record this build recognises |
+| `NOT_THIS_TASK` | bound to a different task, or edited since it was written |
+| `LOCAL_BINDING_MISMATCH` | the commit, target or durable record moved under it |
+
+The strongest local invalidator is `stateRevision`, the SHA-256 of the exact
+task-state bytes: *any* change to the task's record invalidates evidence derived
+from it, without this module enumerating which fields would have mattered.
+
+### Provenance, and its exact limits
+
+Recording takes a **minted proof**, not an observation object. The mint is a
+`WeakSet` registry in one internal module, reachable from one call site, and it
+refuses anything that did not settle both questions — so `NOT_AUTHENTICATED` has
+no durable form at all.
+
+What that buys: ordinary product code cannot manufacture a forge-observation
+claim without going through the observation boundary. What it does **not** buy,
+said plainly because the reassuring reading is wrong: the binding digest is an
+integrity binding and not a MAC, every input to it is readable by anyone who can
+read the repository, and **anyone who can create a file in the runtime directory
+can write a record that reads `HISTORICAL_VALID` having observed nothing**. The
+digest catches a record copied between tasks, a field edited without
+recomputation, and a record from a build that disagrees about the payload. It
+does not catch a determined author, and that is why the record may never be read
+as authority.
+
+### What it still does not do
+
+`delivery --observe` on its own remains read-only — slice 2's contract had to
+stay literally true, so recording is a second explicit flag. `--record` without
+`--observe` refuses and contacts nothing. `READY_FOR_PR` is still terminal, no
+transition was added, no lease is taken, no agent is dispatched, and nothing here
+merges, opens or updates anything.
+
+See [`docs/decisions/2026-08-23-adr-durable-delivery-evidence.md`](docs/decisions/2026-08-23-adr-durable-delivery-evidence.md)
+for the rejected persistence alternatives, the forgery boundary and the
+residuals `L-V4-03-1..6`.
+
+### Carried forward from V4 slice 3, deliberately
+
+- **L-V4-03-1 — the record is not tamper-proof, and is not offered as one.**
+  Anyone who can create a file in the repository's runtime directory can write
+  one that reads `HISTORICAL_VALID`. The mint bounds product code, not the
+  filesystem.
+- **L-V4-03-2 — one snapshot per task, so nothing counts observations.** A
+  failed write leaves the previous record standing, and no reader can tell that
+  from a record deliberately kept.
+- **L-V4-03-3 — the ignore check is asked at record time.** Rules that change
+  afterwards are not re-checked and an existing record is not removed.
+- **L-V4-03-4 — `AMBIGUOUS` is stored without its claimants.** The outcome is
+  durable; which pull requests claimed the head is not.
+- **L-V4-03-5 — the non-`ENOENT` open branch is proved through an injected
+  seam.** Measured on Windows: `openSync` on a directory *succeeds* and reports
+  size 0, so the obvious fixture never reaches that branch.
+- **L-V4-03-6 — `recordedAt` is not compared with `observedAt`.** Both come from
+  one invocation and one clock; a disagreement would mean a clock that moved
+  backwards, and this build has nothing better to do than store what it was told.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
 POSIX; and any product-side PR/CI/merge automation. `READY_FOR_PR` remains
 terminal — the orchestrator hands a finished task to a human and stops there.
 
-V4 slices 1 and 2 do not shorten that list. They add the two things every item on
-it needs first. Slice 1: a repository can **declare** its delivery target, and AO
-resolves it to a `host/owner/name` identity. Slice 2: that identity plus one exact
-commit can be **asked about**, read-only and only on request — is there exactly one
-open pull request at this head, and what is this commit’s check state. Nothing is
-pushed, nothing is opened or merged, no durable field is written and `READY_FOR_PR`
-is still terminal — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1)
+V4 slices 1 to 3 do not shorten that list. They add the three things every item
+on it needs first. Slice 1: a repository can **declare** its delivery target, and
+AO resolves it to a `host/owner/name` identity. Slice 2: that identity plus one
+exact commit can be **asked about**, read-only and only on request — is there
+exactly one open pull request at this head, and what is this commit’s check
+state. Slice 3: that answer can be **written down**, so a later slice can tell
+“never observed” from “observed at time T”.
+
+What slice 3 does *not* add is authority. A stored `SUCCESS` is a historical
+snapshot and never a current one; there is no TTL; `delivery --observe` is still
+read-only on its own; nothing is pushed, opened or merged; and `READY_FOR_PR` is
+still terminal — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1),
+[Durable delivery evidence (V4 slice 3)](#durable-delivery-evidence-v4-slice-3)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on

@@ -212,3 +212,13 @@ at this level:
   network destination rather than merely labelling one.
 
 `READY_FOR_PR: []` is still unchanged, and nothing in `src/` merges anything.
+
+**V4 slice 3, durable delivery evidence**, followed on 2026-08-23 —
+`2026-08-23-adr-durable-delivery-evidence.md`. It is the first slice to write
+something this contract calls durable, and it is the reason invariant 12 above is
+worth re-reading: slice 1's corollary was *do not call it durable*, and this
+slice does, for one thing only and under a name that says what it is. A stored
+observation is a **historical snapshot**, never current truth, and there is
+deliberately no time-to-live to blur that. Invariants 1, 5 and 6 hold durably
+now rather than only within one process; 7 and 8 remain open, because nothing
+still acts.
