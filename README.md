@@ -8689,25 +8689,142 @@ residuals `L-V4-03-1..6`.
   one invocation and one clock; a disagreement would mean a clock that moved
   backwards, and this build has nothing better to do than store what it was told.
 
+## The delivery decision (V4 slice 4)
+
+Slices 1 to 3 report facts. This is the first place two of them become one word.
+
+```
+agent-loop delivery --repository D:\AgentOrchestrator --task T-014 --observe --decide
+```
+
+```
+Decision     : PULL_REQUEST_MATCHED_CHECKS_PASSED
+  At the moment of the observation, exactly one open pull request had this exact
+  commit as its head and every check on this commit had succeeded. Nothing was
+  merged and nothing was granted.
+  Local subject re-checked after the answers came back: UNCHANGED.
+
+Merge eligibility is not established by any of these decisions, and cannot be by
+this build. Draft status, mergeability, required reviews, branch protection and
+repository rulesets are not observed here — and the rule endpoints answer the
+same way for "there are none" as for "you may not read them", so their absence is
+not provable. A decision describes the moment it was taken: anything that later
+acts on it must observe again first.
+```
+
+That closing paragraph is printed under **every** decision, including the good
+one, and it is the honest half of the slice.
+
+### Why it is not called merge eligibility
+
+Because AO cannot establish it, and that was measured rather than assumed. To
+claim "every required check passed" you must be able to enumerate the required
+checks, and every surface that would tell you answers the same way for "there
+are none" as for "you may not read them": `branches/{b}/protection` returns 404
+in both cases, `rulesets` returns `200 []` in both cases — including for two
+repositories that demonstrably have rulesets — and `rules/branches/{b}` returns
+`[]` for repositories protected the classic way whose pull requests are
+measurably `BLOCKED`. The negative is not provable, so it is not claimed.
+
+`mergeStateStatus: CLEAN` is not the missing ingredient either: this repository's
+own PR #57 is `CLEAN` with *zero* required checks, so `CLEAN` there means
+"nothing to satisfy".
+
+### Eleven answers, one of them positive
+
+`SUBJECT_NOT_ESTABLISHED`, `NOT_DECIDED`, `OBSERVATION_UNSETTLED`,
+`SUBJECT_REVALIDATION_FAILED`, `SUBJECT_CHANGED`, `CHECKS_FAILED`,
+`PULL_REQUEST_AMBIGUOUS`, `PULL_REQUEST_REQUIRED`, `CHECKS_PENDING`,
+`CHECKS_ABSENT` — and `PULL_REQUEST_MATCHED_CHECKS_PASSED`.
+
+The order is the precedence, and it is asserted rather than left to whoever
+reads the ladder: a failed check outranks every pull-request answer, ambiguity
+comes next, and a missing pull request outranks a pending or absent check.
+`CHECKS_ABSENT` is deliberately not a success — zero checks is the absence of
+evidence. No member may contain a word that reads as permission, and that is a
+test over the derived vocabulary rather than a list somebody maintains.
+
+### History can never decide, and it is the type that says so
+
+`decideDelivery` takes slice 3's opaque `DeliveryObservationProof`, which exists
+only if *this process* went through the observation boundary and both questions
+came back settled. A stored record returns plain fields, and nothing here
+accepts them — there is no overload, no `fromRecord`, and no shape to write down
+instead. A forgery carrying every correct field is refused; the same facts
+through the real mint decide.
+
+Nothing reads `observedAt`. An hour-old proof and a millisecond-old proof decide
+identically, and a test pins that. There is still no TTL.
+
+So slice 3's record is not an input. It stays what it was — audit history, shown
+beside the fresh answer. What slice 4 reuses is slice 3's **mint**.
+
+### The local subject is re-read, and the remote race is not pretended away
+
+After the forge answers, the whole resolution runs again — repository, task
+record, subject — and the target identity, the pinned commit and the task state
+name are compared. A task aborted while the request was in flight has the same
+commit and the same target, which is why the state name is part of the identity.
+
+`UNCHANGED` is not a claim that the answers are still true. Nothing can make
+that claim, and a later merge slice must observe again immediately before it
+acts.
+
+### What it still does not do
+
+It writes nothing. No task state, no decision record, no evidence unless
+`--record` is also given. `READY_FOR_PR` is still terminal and gained no
+outgoing transition — a `SETTLED` block-ledger entry is re-proved against the
+exact task-state bytes, so *any* write to a finished task's record breaks a
+block run in another process, and that is a block-contract change of its own.
+The exit code is unchanged by `--decide`: it still answers only "was the
+observation settled".
+
+See [`docs/decisions/2026-08-23-adr-delivery-decision.md`](docs/decisions/2026-08-23-adr-delivery-decision.md)
+for the measurements, the rejected state-machine options and the residuals
+`L-V4-04-1..6`.
+
+### Carried forward from V4 slice 4, deliberately
+
+- **L-V4-04-1 — draft status is not observed**, so a positive decision can be
+  true of a draft pull request. It is free on the wire and costs an
+  evidence-record version bump, which is slice 3's contract to change.
+- **L-V4-04-2 — the decision is not machine-consumable.** It is rendered for a
+  person; the exit code does not carry it, on purpose.
+- **L-V4-04-3 — merge eligibility is not establishable at all** with the
+  surfaces above. A property of GitHub's permission model, not a gap.
+- **L-V4-04-4 — `COMMIT_STATUS_STATES` omits `expected`**, which GraphQL's
+  `StatusState` declares. If REST emits it the whole observation refuses as
+  malformed — fail-closed, and worth a deliberate arm.
+- **L-V4-04-5 — runless queued check suites stay invisible** to both mechanisms
+  (2 measured on PR #57). Inherited from slice 2.
+- **L-V4-04-6 — the decision is not auditable after the process ends.** Nothing
+  records it, because a stored verdict is a worse artefact than a stored fact.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
 POSIX; and any product-side PR/CI/merge automation. `READY_FOR_PR` remains
 terminal — the orchestrator hands a finished task to a human and stops there.
 
-V4 slices 1 to 3 do not shorten that list. They add the three things every item
+V4 slices 1 to 4 do not shorten that list. They add the four things every item
 on it needs first. Slice 1: a repository can **declare** its delivery target, and
 AO resolves it to a `host/owner/name` identity. Slice 2: that identity plus one
 exact commit can be **asked about**, read-only and only on request — is there
 exactly one open pull request at this head, and what is this commit’s check
 state. Slice 3: that answer can be **written down**, so a later slice can tell
-“never observed” from “observed at time T”.
+“never observed” from “observed at time T”. Slice 4: two fresh answers can be
+**classified** into one word, from an observation this process made and from
+nothing else.
 
-What slice 3 does *not* add is authority. A stored `SUCCESS` is a historical
-snapshot and never a current one; there is no TTL; `delivery --observe` is still
-read-only on its own; nothing is pushed, opened or merged; and `READY_FOR_PR` is
-still terminal — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1),
-[Durable delivery evidence (V4 slice 3)](#durable-delivery-evidence-v4-slice-3)
+What none of them adds is authority. A stored `SUCCESS` is a historical snapshot
+and never a current one; there is no TTL; `delivery --observe` is still read-only
+on its own; a decision is not merge eligibility and cannot be — the endpoints
+that would prove it answer the same way for "no rules" as for "no permission";
+nothing is pushed, opened or merged; and `READY_FOR_PR` is still terminal, with
+no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1),
+[Durable delivery evidence (V4 slice 3)](#durable-delivery-evidence-v4-slice-3),
+[The delivery decision (V4 slice 4)](#the-delivery-decision-v4-slice-4)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on

@@ -45,6 +45,12 @@ import {
   REMOTE_FRESHNESS_SENTENCE,
   type DeliveryEvidenceReading,
 } from '../deliver/delivery-evidence.js';
+import {
+  DELIVERY_DECISION_DETAIL,
+  MERGE_ELIGIBILITY_SENTENCE,
+  type DeliveryDecision,
+  type SubjectRevalidation,
+} from '../deliver/delivery-decision.js';
 
 /**
  * The closing contract sentence, in the two shapes this command has.
@@ -226,6 +232,26 @@ export interface DeliveryObservationView {
     readonly recorded: boolean;
     readonly detail: string | null;
   } | null;
+  /** What `--decide` amounted to, or `null` when it was not asked for. */
+  readonly decision?: DeliveryDecisionView | null;
+}
+
+/**
+ * The decision, and the second look that qualified it.
+ *
+ * The revalidation verdict is carried and printed even when it is `UNCHANGED`,
+ * deliberately. It answers "was this still the same subject when the answers
+ * came back", and a report that printed it only when it went wrong would leave
+ * a reader unable to tell "it was checked and held" from "nobody checked".
+ *
+ * `null` is that second case, and it is a real one: nothing was observed, so
+ * there was no window for the subject to move in and no re-read was taken. It
+ * prints as its own phrase rather than as `UNCHANGED`, because claiming a check
+ * that did not happen is the failure this field exists to prevent.
+ */
+export interface DeliveryDecisionView {
+  readonly decision: DeliveryDecision;
+  readonly revalidation: SubjectRevalidation | null;
 }
 
 /**
@@ -306,6 +332,27 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   // still not the reason that answer is true.
   if (stored !== null && stored.reading === 'HISTORICAL_VALID') {
     lines.push('', REMOTE_FRESHNESS_SENTENCE);
+  }
+
+  // The decision, after the conclusion it is derived from and after the record
+  // it is deliberately not derived from. Its own sentence follows it
+  // unconditionally, for the same reason the freshness sentence follows the
+  // record: it is true of every decision including the good one, so it is not a
+  // caveat attached to the bad ones.
+  const decision = view.decision ?? null;
+  if (decision !== null) {
+    lines.push(
+      '',
+      `Decision     : ${decision.decision}`,
+      `  ${DELIVERY_DECISION_DETAIL[decision.decision]}`,
+      `  ${
+        decision.revalidation === null
+          ? 'The local subject was not re-checked: nothing was observed, so nothing could go stale.'
+          : `Local subject re-checked after the answers came back: ${decision.revalidation}.`
+      }`,
+      '',
+      MERGE_ELIGIBILITY_SENTENCE,
+    );
   }
 
   lines.push(
