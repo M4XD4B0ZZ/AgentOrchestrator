@@ -165,9 +165,22 @@ export const DELIVERY_TARGET_OUTCOMES: readonly [
   /** The Git query could not be completed, or the runner supplied no raw bytes. */
   'GIT_UNAVAILABLE',
   /**
-   * Git answered non-zero: there is no such remote (measured: exit 2, `error:
-   * No such remote`). Also the code for a remote name this module will not put
-   * in an argument vector at all — see {@link observeDeliveryTarget}.
+   * No usable remote of the declared name was obtained. Two producers, and the
+   * code deliberately names neither cause beyond what it can establish:
+   *
+   *  - Git ran and answered non-zero. The ordinary case is that there is no
+   *    such remote (measured: exit 2, `error: No such remote`) — but it is
+   *    **not** the only one. `gitQuery` collapses every non-zero answer into
+   *    `NONZERO_EXIT`, and it has no exit status to hand on, so a `git` that
+   *    refused because it could not parse the repository's configuration
+   *    (measured: exit 128, `fatal: bad config line …`), or one killed by a
+   *    signal (`exitCode === null`, which `git-query.ts` reads as non-zero),
+   *    arrives here too. Carried as **L-V4-01-7** rather than diagnosed: the
+   *    read-only seam would have to carry the exit status first, and
+   *    `worktree/git-command.ts` is explicit that reading one is a narrow,
+   *    documented act rather than a general licence.
+   *  - The declared name is one this module will not put in an argument vector
+   *    at all — see {@link observeDeliveryTarget}.
    *
    * It is **not** the code for "the remote exists but has no URL". Measured,
    * Git answers that case by printing the *remote's own name* and exiting 0
@@ -201,7 +214,8 @@ export type DeliveryTargetRefusal = Exclude<DeliveryTargetOutcome, 'RESOLVED'>;
 export const DELIVERY_TARGET_DETAIL: Readonly<Record<DeliveryTargetRefusal, string>> =
   Object.freeze({
     GIT_UNAVAILABLE: 'The remote URL could not be read from Git.',
-    REMOTE_NOT_CONFIGURED: 'The profile declares a remote this repository does not have.',
+    REMOTE_NOT_CONFIGURED:
+      'No usable remote of the declared name was obtained: Git refused the question about it, or the declared name is one AO will not put in a command.',
     REMOTE_URL_AMBIGUOUS:
       'Git did not answer with exactly one push URL for the declared remote, so there is no single delivery target.',
     REMOTE_URL_CARRIES_USERINFO:
@@ -316,10 +330,14 @@ function refuse(code: DeliveryTargetRefusal): DeliveryTargetRefused {
  *
  * The *spelling* of the split below is deliberately not claimed to matter, and
  * that is measured too: replacing `split('\n')` with `split(/\r?\n/)` changes no
- * outcome for any shape this reader can meet. Only one terminator is removed and
- * it is a `\n`, so a `\r` stays attached to its line under either spelling; and
- * both spellings break at exactly the same `\n` positions, so a multi-line
- * answer is refused by its line *count* before any line is parsed. It is
+ * outcome for any shape this reader can meet, and the reason is the line
+ * *count* rather than the line contents. Both spellings break at exactly the
+ * same `\n` offsets, so the count is identical for every input: at a count of
+ * one there is no `\n` left in `body` for `\r?\n` to match, so the single
+ * element is byte-identical either way; at a count of two or more the answer is
+ * refused before any line is parsed, so the contents are never observed. (The
+ * contents do differ — `\r?\n` eats a `\r` before an *internal* newline — which
+ * is exactly why the argument has to rest on the count.) It is
  * recorded as this slice's one equivalent mutant rather than left as a mechanism
  * a comment claims and no test can kill.
  */
@@ -413,9 +431,13 @@ function splitRemoteUrl(url: string): SplitUrl | null {
   if (slash >= 0 && slash < colon) return null;
 
   const path = url.slice(colon + 1);
-  // `git@host:/owner/repo` is as legal as `git@host:owner/repo`; exactly one
-  // leading slash is absorbed so both spell the same identity. A second one
-  // leaves an empty first segment and is refused with everything else.
+  // A forge accepts `git@host:/owner/repo` and `git@host:owner/repo` as the
+  // same repository, so exactly one leading slash is absorbed. Note what that
+  // costs elsewhere: on a plain `sshd` host the two are *different* paths — one
+  // relative to the account's home, one from the filesystem root — and this
+  // grammar collapses them into one identity. Harmless while nothing acts on
+  // the identity; a collision the moment something does. A second slash leaves
+  // an empty first segment and is refused with everything else.
   return { authority: url.slice(0, colon), path: path.startsWith('/') ? path.slice(1) : path };
 }
 
@@ -498,11 +520,16 @@ export const DELIVERY_REMOTE_URL_ARGS: readonly string[] = Object.freeze([
 /**
  * The remote names this module will place in an argument vector.
  *
- * The same rule `DeliveryPolicySchema` applies to a declared remote, repeated
- * here because this is where the argument is built and a profile is not the
- * only way to reach this function. `tests/v4-01-delivery-target.test.ts` pins
- * that the two agree; a shared constant would drag the whole process layer into
- * the schema module that the JSON-Schema generator imports.
+ * The same rule `DeliveryPolicySchema` applies to a declared remote, and the two
+ * accept exactly the same set — `tests/v4-01-delivery-target.test.ts` pins that,
+ * because a shared constant would drag the whole process layer into the schema
+ * module the JSON-Schema generator imports.
+ *
+ * So this guard cannot fire on any input the one production caller can supply,
+ * and that is the point: it is a floor for the *next* caller, placed where the
+ * argument is built rather than left to whoever adds one. Said plainly rather
+ * than as "a profile is not the only way to reach this function", which today
+ * is not true.
  *
  * The first character is the security-relevant part: Git reads a leading `-` as
  * an option. A remote genuinely *may* be named that way — measured, `git remote

@@ -43,7 +43,7 @@ Established from the code at `c89ef60`, not from plans:
 | The branch? | **Yes** — `workBranch` and `baseBranch`. |
 | The repository? | **A declared slug** (`repositoryId`) and a local path (`repositoryRoot`). Neither names a repository on a forge. |
 | A remote? | **A boolean.** `ResolvedRemote` carries `present`, and says in so many words that it will not carry a name or a URL — "which would put a host and possibly a credential into a value that gets logged". |
-| A pull request, a check, a merge? | **Nothing.** No product module mentions GitHub; the only `git remote` call in `src/` computes that boolean. |
+| A pull request, a check, a merge? | **Nothing.** No product module carries a forge concept — the one occurrence of the word in `src/` is a comment naming this repository's own CI workflow — and the only `git remote` call in `src/` computes that boolean. |
 | Is `gh` a runtime dependency? | **No.** `KNOWN_PROGRAMS` is `node, npm, git, claude, codex`; the product spawns those and the repository's own verification vector, and nothing else. |
 | Network egress? | **One path**, opt-in: the ntfy notification, off unless `~/.agent-orchestrator/notify.yaml` exists. |
 

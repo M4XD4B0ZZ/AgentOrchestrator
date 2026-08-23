@@ -82,7 +82,7 @@ function codes(values: readonly string[]): string {
  * target is printed as the identity itself, so an operator can see *which*
  * repository this checkout would deliver to before anything is built that
  * delivers to it. A refusal prints its closed code and the static sentence that
- * says what to do about it — never Git's output, and never the URL.
+ * describes it — never Git's output, and never the URL.
  *
  * The trailing clause is not decoration. This build pushes nothing, opens
  * nothing and merges nothing, and a line that named a forge repository without

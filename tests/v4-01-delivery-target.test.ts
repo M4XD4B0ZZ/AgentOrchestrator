@@ -207,6 +207,11 @@ describe('the remote-URL grammar', () => {
     ['https://github.com/', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
     ['https://github.com', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
     ['git@github.com://Owner/Repo.git', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
+    // A local path whose first slash precedes its first colon. Git reads it as
+    // a path, not as an scp-like URL, and so does the splitter. Without that
+    // rule the authority becomes `foo/bar@github.com` and the answer is
+    // `REMOTE_URL_CARRIES_USERINFO` — a refusal, but the wrong diagnosis.
+    ['foo/bar@github.com:Owner/Repo.git', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
 
     // A local path is not a delivery target, in either platform's spelling. The
     // Windows one is the case the dotted-host rule exists for: without it, `D`
@@ -251,6 +256,11 @@ describe('the remote-URL grammar', () => {
     ['https://KEYS.example.com/Owner/Repo.git', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
 
     // Whitespace and control characters never reach a component grammar.
+    // A space inside the user information. The component grammars catch every
+    // other space — in a host, an owner or a name — so this is the case that
+    // makes the gate's `no space` half load-bearing: widen it to   and the
+    // answer becomes `REMOTE_URL_CARRIES_USERINFO`.
+    ['https://gi t@github.com/Owner/Repo.git', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
     ['https://github.com/Owner/Repo.git ', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
     [' https://github.com/Owner/Repo.git', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
     ['https://github.com/Owner/Repo.git\r', 'REMOTE_URL_NOT_REPOSITORY_SHAPED'],
@@ -612,6 +622,9 @@ describe('repository resolution', () => {
 
     expect(repository.delivery).toEqual({ declared: false });
     expect(Object.hasOwn(repository.delivery, 'result')).toBe(false);
+    // Frozen on this branch too: the outer freeze of the resolved repository
+    // does not reach a nested object.
+    expect(Object.isFrozen(repository.delivery)).toBe(true);
     // The measured half: a remote *exists* and would resolve cleanly, so a
     // build that asked anyway would produce an identity here. Nothing asked.
     expect(urlQueries(root)).toEqual([]);
@@ -666,9 +679,38 @@ describe('the delivery line', () => {
   it('has a static sentence for every refusal, and none for the identity', () => {
     const refusals = DELIVERY_TARGET_OUTCOMES.filter((outcome) => outcome !== 'RESOLVED');
     expect(Object.keys(DELIVERY_TARGET_DETAIL).sort()).toEqual([...refusals].sort());
-    for (const refusal of refusals) {
-      expect(DELIVERY_TARGET_DETAIL[refusal as keyof typeof DELIVERY_TARGET_DETAIL]).toMatch(/\S/);
-    }
+  });
+
+  it('pins what each refusal actually tells an operator', () => {
+    // Completeness was proved above and correctness was not, which is the trap
+    // a `Record<keyof T>` sets: every key present, every value unread. A review
+    // found the consequence — the README quoted a sentence for
+    // `REMOTE_URL_AMBIGUOUS` that named a cause this slice deliberately refuses
+    // to name, and nothing failed. The snapshot makes a reword a reviewable
+    // diff rather than a silent one.
+    expect(DELIVERY_TARGET_DETAIL).toMatchInlineSnapshot(`
+      {
+        "GIT_UNAVAILABLE": "The remote URL could not be read from Git.",
+        "REMOTE_NOT_CONFIGURED": "No usable remote of the declared name was obtained: Git refused the question about it, or the declared name is one AO will not put in a command.",
+        "REMOTE_URL_AMBIGUOUS": "Git did not answer with exactly one push URL for the declared remote, so there is no single delivery target.",
+        "REMOTE_URL_CARRIES_USERINFO": "The remote URL embeds user information. A credential in a remote URL is not read, carried or reported.",
+        "REMOTE_URL_NOT_REPOSITORY_SHAPED": "The remote URL does not name a host, an owner and a repository.",
+      }
+    `);
+  });
+
+  it('names no cause it cannot establish', () => {
+    // `REMOTE_NOT_CONFIGURED` has two producers and Git's non-zero answers have
+    // more than one meaning: exit 2 is "no such remote", exit 128 is a
+    // configuration Git could not read, and a signal-killed child arrives with
+    // a null exit status that the read-only seam also reads as non-zero. The
+    // sentence must therefore not assert that the repository lacks the remote.
+    expect(DELIVERY_TARGET_DETAIL.REMOTE_NOT_CONFIGURED).not.toContain('does not have');
+    expect(DELIVERY_TARGET_DETAIL.REMOTE_NOT_CONFIGURED).toContain('or');
+    // And the ambiguity sentence must not name a cause either, for the reason
+    // the newline fix exists: a single URL spanning lines and a genuinely
+    // multi-URL remote are indistinguishable in this output.
+    expect(DELIVERY_TARGET_DETAIL.REMOTE_URL_AMBIGUOUS).not.toContain('more than one push URL');
   });
 
   it('names the identity, and says that naming it delivers nothing', () => {
@@ -691,7 +733,10 @@ describe('the delivery line', () => {
       result: { outcome: 'REMOTE_URL_AMBIGUOUS' },
     });
     expect(text).toContain('REMOTE_URL_AMBIGUOUS');
-    expect(text).toContain(DELIVERY_TARGET_DETAIL.REMOTE_URL_AMBIGUOUS);
+    // The sentence as a literal, not as `DELIVERY_TARGET_DETAIL[...]`. Reading
+    // it out of the map compares the map with itself and stays green under
+    // every edit to it — a co-occurrence control, which is what this was.
+    expect(text).toContain('Git did not answer with exactly one push URL for the declared remote');
   });
 
   it('says so plainly when no delivery target is declared', () => {

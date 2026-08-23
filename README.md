@@ -8077,7 +8077,7 @@ refusals:
 
 ```
 Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator  (identity only; nothing is delivered)
-Delivery     : origin -> REMOTE_URL_AMBIGUOUS — The declared remote has more than one push URL, …
+Delivery     : origin -> REMOTE_URL_AMBIGUOUS — Git did not answer with exactly one push URL …
 Delivery     : not declared  (this repository declares no delivery target)
 ```
 
@@ -8163,9 +8163,12 @@ cannot, because a refusal carries none.
 
 ### What proves it
 
-Twenty-four mutants, each removing exactly one mechanism: **23 killed** by
+Twenty-eight mutants, each removing exactly one mechanism: **27 killed** by
 `tests/v4-01-delivery-target.test.ts`, and **one measured equivalent**, named
-below rather than hidden in an arithmetic. The ones worth naming among the kills
+below rather than hidden in an arithmetic. Four of the twenty-eight were added
+after a review found them surviving — the scp slash rule, the printable gate's
+"no space" half, the freeze on the undeclared branch, and the operator sentences
+themselves, which were pinned only for existence and not for content. The ones worth naming among the kills
 are the four whose removal is silent — drop `--push`, drop `--all`, use the
 trimmed `stdout`, and filter every blank line instead of one terminator —
 because each has a fixture built only to make that removal visible. The
@@ -8181,11 +8184,14 @@ case: a profile with no `delivery` block issues no URL query at all, against a
 fixture whose remote *would* have resolved cleanly.
 
 The equivalent one is the split spelling. `split('\n')` and `split(/\r?\n/)`
-change no outcome for any shape the reader can meet: only the `\n` terminator
-is removed, so a `\r` stays attached to its line either way, and both break at
-the same `\n` positions, so a multi-line answer is refused by its line *count*
-before any line is parsed. Measured, and recorded here rather than left as a
-mechanism a comment claims and no test can kill.
+change no outcome for any shape the reader can meet, and the reason is the line
+*count* rather than the line contents: both break at exactly the same `\n`
+offsets, so at a count of one there is no `\n` left for `\r?\n` to match and the
+single element is byte-identical, while at a count of two or more the answer is
+refused before any line is parsed. The contents *do* differ — `\r?\n` eats a `\r`
+before an internal newline — which is why the argument rests on the count.
+Measured, and recorded here rather than left as a mechanism a comment claims
+and no test can kill.
 
 The last control is the one this slice most needs: a remote configured with a
 token in its URL must produce `REMOTE_URL_CARRIES_USERINFO` in the run plan and
@@ -8234,21 +8240,32 @@ data does not carry would be the same mistake in the other direction.
   reader, asked for `origin`, answers `origin`'s URL. Nothing here consults that
   resolution, checks that the work branch has been pushed anywhere, or checks
   that the repository exists at all.
+- **L-V4-01-5 — only the read-only plan shows it.** `run --attended` and
+  `block --attended` report a finished task without naming its delivery target,
+  which is the surface an operator is on when they go and open the pull request.
+  The consequence, stated plainly: a misdeclared remote — `orgin` for `origin` —
+  resolves `REMOTE_NOT_CONFIGURED` forever, and the only surface that says so is
+  the run plan. That is `agent-loop run` without the grant, and also `run
+  --attended` on an invocation that selects no task, since both reach the same
+  renderer; `block` renders no delivery line at all, with or without the grant.
+  The preview is where this repository's own workflow starts, so the feedback is
+  not absent — it is on one surface, and a declaration is worth checking there
+  before a run. Adding the line to the execution reports is a rendering decision
+  for the slice that has something to say about the target beyond its name.
 - **L-V4-01-6 — the repository root answers, not the task's worktree.** AO
   commits in a linked worktree, and a linked worktree may carry its own
   `remote.<name>.pushurl` or `url.*.pushInsteadOf` in `config.worktree` once
   `extensions.worktreeConfig` is set. The query runs against the resolved
   repository root and does not consult it.
-- **L-V4-01-5 — only the read-only plan shows it.** `run --attended` and
-  `block --attended` report a finished task without naming its delivery target,
-  which is the surface an operator is on when they go and open the pull request.
-  The consequence, stated plainly: a misdeclared remote — `orgin` for `origin` —
-  resolves `REMOTE_NOT_CONFIGURED` forever and is visible **only** in
-  `agent-loop run` without the grant. That preview is where this repository's own
-  workflow starts, so the feedback is not absent; it is on one surface, and a
-  declaration is worth checking there before a run. Adding the line to the
-  execution reports is a rendering decision for the slice that has something to
-  say about the target beyond its name.
+- **L-V4-01-7 — Git's reasons for refusing are not distinguished.** The
+  read-only Git seam collapses every non-zero answer into one outcome and
+  carries no exit status, so "no such remote" (exit 2), "this configuration
+  cannot be read" (exit 128) and a `git` killed by a signal all arrive as
+  `REMOTE_NOT_CONFIGURED`. Fail-closed in every case — none produces an
+  identity — and the sentence an operator sees names no cause it cannot
+  establish. Telling them apart means teaching the read-only seam to carry an
+  exit status, which `worktree/git-command.ts` is explicit is a narrow,
+  documented act rather than a general licence.
 
 ## Not implemented yet
 
