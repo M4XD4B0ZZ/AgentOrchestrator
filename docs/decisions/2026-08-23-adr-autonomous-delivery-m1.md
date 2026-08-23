@@ -202,7 +202,7 @@ the check state *of that head*. It is the slice that discharges invariants 1–6
 **Delivered** as V4 slice 2 on 2026-08-23. Its own decision record —
 `2026-08-23-adr-delivery-observation-seam.md` — carries the forge, egress and
 credential contract, the measurements behind it, the restated invariant table
-and its residuals `L-V4-02-1..7`. Two things it changed here are worth naming
+and its residuals `L-V4-02-1..9`. Two things it changed here are worth naming
 at this level:
 
 - invariants 1–6 move from `[open]` to `[held]` *for observation*. They remain

@@ -83,7 +83,8 @@ not given up. It is moved into this build, where it can be mutation-tested.
   Windows the child additionally receives the eleven names `runCommand`
   back-fills — `SYSTEMROOT`, `USERPROFILE`, `TEMP` and eight more — and none of
   those can carry a credential, choose a host, move a config directory or name a
-  proxy, which is asserted rather than argued.
+  proxy. Checked as disjointness from the client's own documented override
+  list, with the limits of that check carried as `L-V4-02-9`.
 - **Which are refused:** everything else, by construction rather than by
   filtering — including `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
   `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`, `GH_REPO`, `GH_CONFIG_DIR`,
@@ -140,7 +141,7 @@ All against `github.com` on 2026-08-23, `gh` 2.97.0, `git 2.55.0.windows.3`.
 | A non-2xx still writes GitHub's error document to **stdout**, and exits 1. | The exit code is judged before the body is parsed. |
 | Exit 4 is documented as "a command requires authentication" and is reachable. | `NOT_AUTHENTICATED` is a distinct refusal, not folded into failure. |
 | `env -i PATH … PATHEXT …` → exit 4, unauthenticated. Adding `APPDATA` → exit 0. Adding `USERPROFILE` or `LOCALAPPDATA` instead → still exit 4. | The policy allow-list is exactly `PATH`, `PATHEXT`, `APPDATA` — the smallest measured set, not the variables a credential might live under. |
-| **The row above measures a shell environment, not the shipped one.** On Windows `runCommand` back-fills eleven OS names — `SYSTEMROOT`, `USERPROFILE`, `TEMP` among them — into every child, so the client always receives them. Re-measured against the shipped path: `PATH + PATHEXT + APPDATA + SYSTEMROOT` → exit 0, the full back-filled shape → exit 0, and a real `agent-loop delivery --observe` returned a graded check state for a real commit. | A policy names what AO **supplies**, never what the child receives. An earlier version of this ADR read one as the other and recorded `SystemRoot` as load-bearing for connectivity; it is not, and the claim is withdrawn. What replaces it is the property that actually matters and is assertable: not one of the eleven back-filled names can carry a credential, choose a host, move a config directory or name a proxy — pinned in `tests/v4-02-…` against `FORGE_CLIENT_OVERRIDE_ENV_VARS`. |
+| **The row above measures a shell environment, not the shipped one.** On Windows `runCommand` back-fills eleven OS names — `SYSTEMROOT`, `USERPROFILE`, `TEMP` among them — into every child, so the client always receives them. Re-measured against the shipped path: `PATH + PATHEXT + APPDATA + SYSTEMROOT` → exit 0, the full back-filled shape → exit 0, and a real `agent-loop delivery --observe` returned a graded check state for a real commit. | A policy names what AO **supplies**, never what the child receives. An earlier version of this ADR read one as the other and recorded `SystemRoot` as load-bearing for connectivity; it is not, and the claim is withdrawn. What replaces it is checkable rather than rhetorical: none of the eleven back-filled names is one of the client's own documented override variables, pinned in `tests/v4-02-…` as disjointness from `FORGE_CLIENT_OVERRIDE_ENV_VARS`. That is a bounded check — the two lists come from different families, so it cannot see an influence route the client does not document — and its limits are carried as `L-V4-02-9` rather than presented as a proof. |
 | `HTTPS_PROXY` redirects every request and `NO_PROXY` undoes it. **Neither appears in `gh help environment`.** | The refused-variable list was built from measurement as well as from the client's own documentation. AO does not forward proxy configuration, so behind a proxy the observation refuses rather than succeeding. |
 | Given only the names this policy supplies, the client writes `.local/state/gh/device-id` **relative to its working directory** — it has no `HOME`/`XDG_STATE_HOME` to use. Re-measured with `USERPROFILE` present — which the back-fill always supplies — it wrote **nothing** there. | The client is run in the OS temp directory, never in a repository. The dirtied checkout is a property of the policy block alone and is **not** reproduced by the shipped Windows path, so this is defence in depth rather than the fix for a live defect. It stays on three grounds: it costs nothing, it is still right if that back-fill ever narrows, and it independently removes the last path by which a checkout could influence the request. |
 
@@ -211,6 +212,14 @@ remediation loop driven by CI. No GitLab or Bitbucket abstraction.
 - `L-V4-02-7` — whether two open pull requests can share a head commit was not
   established; the mechanism reports all of them either way, and `AMBIGUOUS`
   exists for the case.
+- `L-V4-02-9` — the platform back-fill is checked only for disjointness from the
+  client's own documented override variables. That cannot see an influence route
+  the client does not document. Two names are worth naming: `PATH`, which is in
+  both this policy and the back-fill and does decide which `gh` runs (supplied
+  deliberately; executable provenance is settled by AO-FOUNDATION-REM-003B), and
+  `HOMEDRIVE`/`HOMEPATH`, which compose into a home directory a config-directory
+  fallback could in principle consult. Measured only to the extent that
+  `USERPROFILE` alone does not authenticate the client.
 - `L-V4-02-8` — the locator endpoint returns a bare array with no `total_count`,
   so truncation there is detected by the page coming back full rather than
   proved. A commit contained in exactly `OBSERVATION_PAGE_SIZE` open pull

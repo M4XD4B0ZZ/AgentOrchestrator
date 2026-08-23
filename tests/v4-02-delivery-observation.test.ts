@@ -26,7 +26,12 @@ import {
   probeEnvAllowlist,
   PROBE_ENV_POLICIES,
 } from '../src/auth/env-guard.js';
-import { registerDeliveryCommand, exitCodeFor } from '../src/cli/delivery-command.js';
+import {
+  DELIVERY_COMMAND_DESCRIPTION,
+  OBSERVE_OPTION_DESCRIPTION,
+  registerDeliveryCommand,
+  exitCodeFor,
+} from '../src/cli/delivery-command.js';
 import {
   CONTACTED_TRAILER,
   NOT_CONTACTED_TRAILER,
@@ -42,6 +47,8 @@ import {
 } from '../src/deliver/delivery-target.js';
 import {
   aggregateCheckState,
+  BLOCKING_CONCLUSIONS,
+  NON_BLOCKING_CONCLUSIONS,
   CHECK_RUN_CONCLUSIONS,
   CHECK_RUN_STATUSES,
   COMMIT_STATUS_STATES,
@@ -85,6 +92,7 @@ import {
 } from '../src/deliver/observe-delivery.js';
 import {
   isShellInertArgument,
+  UnsafeArgumentError,
   WINDOWS_PLATFORM_BACKFILL,
   type CommandResult,
 } from '../src/doctor/exec.js';
@@ -420,27 +428,46 @@ describe('the request vector is pinned, not described', () => {
    *
    * `gh api --help`: "if the value starts with `@`, the rest of the value is
    * interpreted as a filename" — and `@` is inside `SAFE_ARG_PATTERN`, so the
-   * process boundary would not refuse `-F body=@C:/secret`. Nothing supplies
-   * such a value today: `forgeRequestArgs` is called from two places, each with
-   * module constants. This pins that, so a future caller that threads a value
-   * through has to trip over it.
+   * process boundary would not refuse `-F body=@C:/secret`.
+   *
+   * The first version of this scanned the `forgeRequestArgs(...)` call sites and
+   * accepted `params` — the pass-through identifier — as one of its permitted
+   * values, which made it blind to the only place a value is actually chosen.
+   * `forgeRequestArgs` is called once, from `request`; the values come from the
+   * three `request(...)` call sites, and those are what is read here.
    */
   it('gives -F only its own constants, never a value from anywhere else', async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync('src/deliver/github-observer.ts', 'utf8');
 
-    // Every `-F` the module can emit comes from `forgeRequestArgs`, and every
-    // call to it passes only the two exported constants.
-    const calls = [...source.matchAll(/forgeRequestArgs\(([^)]*)\)/g)].map((m) => m[1] ?? '');
-    expect(calls.length).toBeGreaterThan(0);
-    for (const call of calls) {
-      if (call.includes('path: string')) continue; // the declaration itself
-      for (const token of call.split(',').slice(1)) {
-        const cleaned = token.replace(/[[\]\s]/g, '');
+    // The array literal each `request(...)` call site passes as its params.
+    const sites = [...source.matchAll(/\brequest\(\s*subject,[\s\S]*?\[([^\]]*)\]/g)].map(
+      (m) => m[1] ?? '',
+    );
+    // Positive control: there really are three, so an empty scan is a broken
+    // regex rather than a module with no requests in it.
+    expect(sites).toHaveLength(3);
+    for (const site of sites) {
+      for (const token of site.split(',')) {
+        const cleaned = token.trim();
         if (cleaned === '') continue;
-        expect(['PER_PAGE_PARAM', 'CHECK_RUNS_FILTER_PARAM', 'params']).toContain(cleaned);
+        expect(['PER_PAGE_PARAM', 'CHECK_RUNS_FILTER_PARAM']).toContain(cleaned);
       }
     }
+
+    // Second control: the scan would catch a threaded value. This is the exact
+    // shape the docstring claims to prevent, run against the same regex.
+    const threaded = `const r = await request(subject, commitStatusPath(subject), [PER_PAGE_PARAM, \`body=@\${x}\`], deps);`;
+    const caught = [...threaded.matchAll(/\brequest\(\s*subject,[\s\S]*?\[([^\]]*)\]/g)].map(
+      (m) => m[1] ?? '',
+    );
+    expect(caught).toHaveLength(1);
+    expect(
+      (caught[0] ?? '')
+        .split(',')
+        .map((t) => t.trim())
+        .some((t) => !['PER_PAGE_PARAM', 'CHECK_RUNS_FILTER_PARAM'].includes(t)),
+    ).toBe(true);
 
     // Positive control on the emitted vector: `-F` really is present, its
     // values really are these two, and neither can name a file.
@@ -803,36 +830,41 @@ describe('the transport turns every process outcome into a closed refusal', () =
   });
 
   /**
-   * The module's stated contract is "it reports facts and refusals; it does not
-   * raise", and that has to hold for the seam as well as for the parsers.
+   * The seam is guarded the way the other three seams over `runCommand` are
+   * guarded, and no wider.
    *
-   * `createProbeEnv` was guarded and the runner was not, so a rejecting runner
-   * escaped as an exception. `runCommand` re-throws one condition of its own —
-   * a request the boundary's transport cannot represent — and an injected
-   * runner may reject for any reason at all. Neither produced an answer, which
-   * is what `FORGE_CLIENT_UNUSABLE` already means.
+   * `runCommand` documents exactly one thrown error — `UnsafeArgumentError`,
+   * a programming error in this repository rather than a runtime condition —
+   * and `worktree/git-command.ts`, `agent/agent-command.ts` and
+   * `verify/verify-command.ts` all map that one to a typed refusal and let
+   * everything else propagate.
+   *
+   * A first attempt at this guard used a bare `catch` returning
+   * `FORGE_CLIENT_UNUSABLE`. That laundered a programming error into an
+   * operator sentence, and it swallowed every other throw as well — a defect
+   * anywhere under the call would have been reported as a forge that did not
+   * answer. Both halves are pinned below.
    */
-  it('answers FORGE_CLIENT_UNUSABLE rather than throwing when the runner rejects', async () => {
-    const exploding: ForgeCommandRunner = () => {
-      throw new Error('spawn gh ENOENT /secret/path/token');
+  it('maps an unsafe argument to SUBJECT_UNUSABLE, the way the sibling seams do', async () => {
+    const refusing: ForgeCommandRunner = () => {
+      throw new UnsafeArgumentError('repos/o/r?evil=1');
     };
     const result = await observePullRequestAtHead(subjectOf(), {
-      runner: exploding,
+      runner: refusing,
       envSource: { PATH: '/usr/bin' },
     });
-    expect(result).toEqual({ outcome: 'FORGE_CLIENT_UNUSABLE' });
-    // Nothing from the error is read: it may quote an argument vector or a path.
-    expect(JSON.stringify(result)).not.toContain('secret');
-    expect(JSON.stringify(result)).not.toContain('ENOENT');
+    expect(result).toEqual({ outcome: 'SUBJECT_UNUSABLE' });
+    // Nothing from the error is read: it quotes the offending token.
+    expect(JSON.stringify(result)).not.toContain('evil');
   });
 
-  it('answers FORGE_CLIENT_UNUSABLE when the runner rejects asynchronously', async () => {
-    const rejecting: ForgeCommandRunner = async () => Promise.reject(new Error('boom'));
-    const checks = await observeCheckStateAtCommit(subjectOf(), {
-      runner: rejecting,
-      envSource: { PATH: '/usr/bin' },
-    });
-    expect(checks).toEqual({ outcome: 'FORGE_CLIENT_UNUSABLE' });
+  it('lets every other throw propagate rather than reporting it as a forge answer', async () => {
+    const broken: ForgeCommandRunner = () => {
+      throw new TypeError('a defect under this call');
+    };
+    await expect(
+      observeCheckStateAtCommit(subjectOf(), { runner: broken, envSource: { PATH: '/usr/bin' } }),
+    ).rejects.toThrow(TypeError);
   });
 
   it('bounds the request in time and in bytes', async () => {
@@ -1312,7 +1344,7 @@ describe('the operator sentences are pinned by literal, not by reading the map',
       ENVIRONMENT_UNUSABLE:
         'The environment for the GitHub CLI could not be built unambiguously, so nothing was started.',
       FORGE_CLIENT_UNUSABLE:
-        'The GitHub CLI started but did not produce a usable answer, so nothing is established.',
+        'The GitHub CLI produced no usable answer, so nothing is established.',
       NOT_AUTHENTICATED:
         'The GitHub CLI reports that this request needs an authentication it does not have.',
       REQUEST_FAILED: 'The GitHub CLI ran and the request did not succeed.',
@@ -1353,6 +1385,26 @@ describe('the operator sentences are pinned by literal, not by reading the map',
         'merged. The GitHub CLI also makes calls of its own — telemetry, and a periodic update\n' +
         'check — which this build does not suppress (L-V4-02-6).',
     );
+
+    // The flag's own sentence is a promise too, and it was the last copy of the
+    // withdrawn over-claim: `CONTACTED_TRAILER` was corrected and this was not,
+    // so two strings made the same promise and only one was true. Pinned by
+    // literal, and both help strings are checked for the phrase itself so a
+    // third copy cannot reappear anywhere on this surface.
+    expect(OBSERVE_OPTION_DESCRIPTION).toBe(
+      'Ask github.com about the commit named above, read-only. This is the only way this ' +
+        'build contacts a forge for delivery, and it asks about no commit but that one. The ' +
+        'GitHub CLI additionally makes calls of its own (telemetry, update check) that this ' +
+        'build does not suppress. Without this flag nothing leaves this machine.',
+    );
+    for (const text of [
+      OBSERVE_OPTION_DESCRIPTION,
+      DELIVERY_COMMAND_DESCRIPTION,
+      CONTACTED_TRAILER,
+      NOT_CONTACTED_TRAILER,
+    ]) {
+      expect(text).not.toContain('and nothing else');
+    }
 
     expect({ ...OBSERVATION_CONCLUSION_DETAIL }).toEqual({
       NOT_OBSERVED:
@@ -1411,6 +1463,46 @@ describe('the operator sentences are pinned by literal, not by reading the map',
       }),
     );
     expect(readme).toContain(renderPullRequestLine({ outcome: 'MATCHED', pullRequest: 55 }));
+  });
+
+  /**
+   * The grading is fail-closed, and this is what keeps it honest.
+   *
+   * `aggregateCheckState` counts `success` as the only success and everything
+   * that is not non-blocking as blocking. So a conclusion GitHub adds later —
+   * which `parseCheckRuns` would accept the moment it joined
+   * `CHECK_RUN_CONCLUSIONS` — is graded `FAILED`, never `SUCCESS`, whatever
+   * anyone remembers to update. The arms used to be ordered the other way, with
+   * an `else succeeded` default, which graded an unclassified conclusion green.
+   *
+   * The partition is asserted so that "this build has decided about every
+   * conclusion it accepts" stays true rather than becoming a stale list, and a
+   * new member turns a test red — a decision to take, not a silent grading.
+   */
+  it('has decided about every check-run conclusion it accepts', () => {
+    const decided = new Set<string>([
+      ...BLOCKING_CONCLUSIONS,
+      ...NON_BLOCKING_CONCLUSIONS,
+      'success',
+    ]);
+    expect([...decided].sort()).toEqual([...CHECK_RUN_CONCLUSIONS].sort());
+    // The three classes are disjoint: no conclusion is both blocking and not.
+    for (const conclusion of NON_BLOCKING_CONCLUSIONS) {
+      expect(BLOCKING_CONCLUSIONS.has(conclusion)).toBe(false);
+    }
+    expect(BLOCKING_CONCLUSIONS.has('success')).toBe(false);
+    expect(NON_BLOCKING_CONCLUSIONS.has('success')).toBe(false);
+  });
+
+  it('grades a conclusion it has never seen as FAILED, not as SUCCESS', () => {
+    // The counter-proof for the ordering above, driven through the aggregate
+    // rather than through the list: a value outside all three classes must not
+    // reach `succeeded`. `parseCheckRuns` would refuse this shape, which is why
+    // the aggregate is called directly — the question is what the grading does
+    // if the enumeration ever widens ahead of the classification.
+    const graded = aggregateCheckState([{ status: 'completed', conclusion: 'quarantined' }], []);
+    expect(graded.outcome).toBe('FAILED');
+    expect(graded).toMatchObject({ counts: { failed: 1, succeeded: 0 } });
   });
 
   it('names every enumeration this build accepts from the forge', () => {
@@ -1548,10 +1640,11 @@ describe('the CLI surface', () => {
     // It also had no positive control, so a renamed file or a mistyped path
     // would have produced three vacuous passes.
     //
-    // Every module the command can reach is named here instead — the command,
-    // the composition, the contract, the transport and the renderer — which is
-    // the whole of `deliver/` plus the two `cli/` files, and the import graph
-    // is asserted separately in 'the observation modules reach no writer'.
+    // Every module this slice adds or owns is named here instead — the command,
+    // the renderer, and the whole of `deliver/` including slice 1's
+    // `delivery-target.ts`, which the first version of this list forgot. It is
+    // a check on these six files and says so; what they import is a separate
+    // case, 'the observation modules reach no writer, by import'.
     const { readFileSync } = await import('node:fs');
     const reachable = [
       'src/cli/delivery-command.ts',
@@ -1559,6 +1652,7 @@ describe('the CLI surface', () => {
       'src/deliver/observe-delivery.ts',
       'src/deliver/forge-observation.ts',
       'src/deliver/github-observer.ts',
+      'src/deliver/delivery-target.ts',
     ];
     for (const file of reachable) {
       const source = readFileSync(file, 'utf8');
@@ -1584,11 +1678,14 @@ describe('the CLI surface', () => {
     expect(readFileSync('src/state/state-store.ts', 'utf8')).toContain('saveTaskState');
   });
 
-  it('the observation modules reach no writer, by import', async () => {
-    // The structural half the case above deliberately does not claim. Every
-    // module specifier imported by the five reachable files is collected, and
-    // none of them may be a state, lease or worktree module. This is what
-    // "there is no save in the module graph it reaches" actually requires.
+  it('the observation modules import no writer, one level out', async () => {
+    // Deliberately titled for what it does. It collects the specifiers the six
+    // slice modules import and judges those; it does **not** follow them, so it
+    // is a depth-one check and not a transitive graph proof. An earlier version
+    // of this comment called it "the module graph it reaches", which it never
+    // was. The transitive question is answered elsewhere and differently: the
+    // execution-lease suite pins, across the whole of `src/`, which modules may
+    // reach a runner and which may start a process at all.
     const { readFileSync } = await import('node:fs');
     const specifier = /(?:^|\n)\s*(?:import|export)[\s\S]*?from\s+'([^']+)'/g;
     const seen = new Set<string>();
@@ -1598,6 +1695,7 @@ describe('the CLI surface', () => {
       'src/deliver/observe-delivery.ts',
       'src/deliver/forge-observation.ts',
       'src/deliver/github-observer.ts',
+      'src/deliver/delivery-target.ts',
     ]) {
       const source = readFileSync(file, 'utf8');
       for (const match of source.matchAll(specifier)) {
@@ -1686,7 +1784,10 @@ describe('the product contract is unchanged', () => {
 
     // Positive control, and the reason the case above is evidence rather than a
     // broken regex: each pattern is shown to match the thing it is aimed at, on
-    // text written here. Deleting any guard the title names turns this red.
+    // text written here. It is a control on the SEARCH, not on production code —
+    // the sweep looks for mutation text that was added, so no production deletion
+    // can turn either half red, and saying otherwise would be the same over-claim
+    // this case exists to remove.
     const mutants = [
       `runner('gh', ['api', '-X', 'POST', path])`,
       `runner('gh', ['api', '--method', 'PATCH', path])`,

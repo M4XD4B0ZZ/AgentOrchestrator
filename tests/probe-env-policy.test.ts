@@ -39,7 +39,11 @@ import {
 } from '../src/auth/env-guard.js';
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import { formatSafeError } from '../src/core/safe-error.js';
-import type { CommandResult, RunOptions } from '../src/doctor/exec.js';
+import {
+  WINDOWS_PLATFORM_BACKFILL,
+  type CommandResult,
+  type RunOptions,
+} from '../src/doctor/exec.js';
 import { renderReportSummary } from '../src/doctor/render.js';
 import { runDoctor } from '../src/doctor/run-doctor.js';
 import type { DoctorReport } from '../src/doctor/report.js';
@@ -332,7 +336,18 @@ describe('the policy matrix is exact', () => {
     expect([...withAppData].sort()).toEqual([...APPDATA_POLICIES].sort());
   });
 
-  /** AO-FOUNDATION-REM-003B, the executable-selection provenance defect. */
+  /**
+   * AO-FOUNDATION-REM-003B, the executable-selection provenance defect.
+   *
+   * "Withholds" means *this module supplies none of them*, which is the whole
+   * of the provenance claim: the system tools come from a fixed,
+   * environment-independent boundary, so no caller-controlled value can choose
+   * which binary answers. It does **not** mean the child's environment lacks
+   * them — `SYSTEMROOT` and `WINDIR` are back-filled into every Windows child
+   * by `runCommand`, as the union pin at the bottom of this file measures, and
+   * `COMSPEC` genuinely is absent from that back-fill. Said here because V4
+   * slice 2 shipped exactly that confusion in a different policy comment.
+   */
   it('withholds SystemRoot, windir and COMSPEC from every policy', () => {
     for (const policy of PROBE_ENV_POLICIES) {
       const env = createProbeEnv(policy, sourceEnv());
@@ -738,19 +753,11 @@ describe('a NODE_OPTIONS preload does not reach a real probe', () => {
     // child legitimately holds a few names the policy did not supply. Pinning
     // the union keeps that bounded: a variable that is neither policy-allowed
     // nor on libuv's list would be a real leak, and this fails on it.
-    const LIBUV_REQUIRED = [
-      'HOMEDRIVE',
-      'HOMEPATH',
-      'LOGONSERVER',
-      'PATH',
-      'SYSTEMDRIVE',
-      'SYSTEMROOT',
-      'TEMP',
-      'USERDOMAIN',
-      'USERNAME',
-      'USERPROFILE',
-      'WINDIR',
-    ];
+    // Taken from the constant the product applies rather than hand-copied. It
+    // was a fourth literal restatement of the same eleven names, and V4 slice 2
+    // exported `WINDOWS_PLATFORM_BACKFILL` precisely so this list stops being
+    // maintained in parallel with the behaviour it is supposed to measure.
+    const LIBUV_REQUIRED = WINDOWS_PLATFORM_BACKFILL.map((name) => name.toUpperCase());
     const permitted = new Set([
       ...probeEnvAllowlist('capability:generic').map((n) => n.toUpperCase()),
       ...(process.platform === 'win32' ? LIBUV_REQUIRED : []),

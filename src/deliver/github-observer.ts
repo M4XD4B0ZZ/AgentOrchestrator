@@ -23,10 +23,10 @@
  *    "Supplies" and not "is the child's environment": on Windows `runCommand`
  *    merges eleven fixed OS names into every child block — `SYSTEMROOT`,
  *    `USERPROFILE`, `TEMP` and eight more — so the client really does receive
- *    those. That back-fill is what makes the property worth stating precisely
- *    rather than loosely: not one of the eleven can carry a credential, choose
- *    a host, move the config directory or name a proxy, which is asserted in
- *    `tests/v4-02-…` against the override list rather than argued here;
+ *    those. `tests/v4-02-…` pins that none of the eleven is one of the client's
+ *    own documented override variables; the limits of that check, and the two
+ *    names worth naming anyway, are set out at the policy itself and carried as
+ *    `L-V4-02-9`;
  *  - the **credential** is never seen. `gh` reads its own stored login from the
  *    operator's config directory and attaches it itself. No token is passed in,
  *    none is read out, and no code path here handles credential bytes.
@@ -78,7 +78,7 @@
 import { tmpdir } from 'node:os';
 
 import { createProbeEnv } from '../auth/env-guard.js';
-import { runCommand, type CommandResult } from '../doctor/exec.js';
+import { runCommand, UnsafeArgumentError, type CommandResult } from '../doctor/exec.js';
 import {
   aggregateCheckState,
   checkStateRefusal,
@@ -300,15 +300,26 @@ async function request(
     return Object.freeze({ ok: false as const, refusal: 'ENVIRONMENT_UNUSABLE' as const });
   }
 
-  // The runner is guarded for the same reason `createProbeEnv` is, and the
-  // reason is the sentence two comments above rather than a known throw:
-  // this module reports facts and refusals, and a contract that holds only
-  // while the injected seam behaves is not the contract it claims. `runCommand`
-  // re-throws one condition of its own — a request the boundary's transport
-  // cannot represent — and an injected runner may reject for any reason at all.
-  // Either way nothing was answered, which is what `FORGE_CLIENT_UNUSABLE`
-  // already means. Nothing from the error is read: it may quote an argument
-  // vector or a spawn message, and none of that belongs in a result.
+  // `runCommand` is documented to throw exactly one error — `UnsafeArgumentError`,
+  // for a token outside the argument grammar — and that is a programming error
+  // in this repository rather than a runtime condition. The three existing seams
+  // over it (`worktree/git-command.ts`, `agent/agent-command.ts`,
+  // `verify/verify-command.ts`) all handle it the same way: turn that one error
+  // into a typed refusal, and let everything else propagate. This does the same.
+  //
+  // The first version of this guard was a bare `catch` returning
+  // `FORGE_CLIENT_UNUSABLE`, which was wrong twice. It laundered a programming
+  // error into an operator-facing sentence that says the client *started* — and
+  // it caught every other throw as well, so a defect anywhere under this call
+  // would have been reported as a forge that did not answer.
+  //
+  // Unreachable today, and asserted so: every token this module can emit is
+  // built from a validated subject and two module constants, and the suite
+  // checks each one against `isShellInertArgument`. It is mapped rather than
+  // rethrown because the vocabulary already has the honest name for it — an
+  // argument this build will not put in a request is `SUBJECT_UNUSABLE`, which
+  // is also true of the only way one could arise here. Nothing from the error
+  // is read: it quotes the offending token.
   let result: CommandResult;
   try {
     result = await deps.runner(FORGE_CLIENT_COMMAND, forgeRequestArgs(path, params), {
@@ -318,8 +329,11 @@ async function request(
       maxStdoutBytes: OBSERVATION_MAX_RESPONSE_BYTES,
       maxStderrBytes: OBSERVATION_MAX_RESPONSE_BYTES,
     });
-  } catch {
-    return Object.freeze({ ok: false as const, refusal: 'FORGE_CLIENT_UNUSABLE' as const });
+  } catch (error) {
+    if (error instanceof UnsafeArgumentError) {
+      return Object.freeze({ ok: false as const, refusal: 'SUBJECT_UNUSABLE' as const });
+    }
+    throw error;
   }
 
   if (result.outcome === 'NOT_FOUND') {

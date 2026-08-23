@@ -8308,15 +8308,27 @@ data does not carry would be the same mistake in the other direction.
   `GH_TELEMETRY=log`: telemetry is enabled by default and its payload carries a
   stable per-machine device id, the command name and the flag names — no
   repository identity and no commit. An update check also runs once every 24
-  hours. Neither is suppressed, because suppressing them would mean inventing
-  environment values rather than forwarding measured ones, and `createProbeEnv`
-  forwards rather than invents. Named here so that "this command contacts
-  github.com" is understood to include the client's own housekeeping.
+  hours. Neither is suppressed, and the reason is stated plainly rather than
+  dressed up as forwarding: `createProbeEnv` supplies a fixed list of names, so
+  `GH_TELEMETRY` and `DO_NOT_TRACK` do not reach the client whether the operator
+  set them or not. An operator who wants the client quiet configures that in the
+  client's own config, not in their environment. Named here so that "this
+  command contacts github.com" is understood to include the client's own
+  housekeeping — and so that the limitation is visible rather than implied.
 - **L-V4-02-7 — whether two open pull requests can share a head commit was not
   established.** Settling it would have meant creating a pull request, which a
   read-only investigation may not do, and no documentation sentence was found
   that decides it. The mechanism reports every claimant either way, and
   `AMBIGUOUS` exists for the case, so the answer does not depend on the question.
+- **L-V4-02-9 — the platform back-fill is checked for one thing only.** The
+  suite pins that none of the eleven names Windows back-fills into every child
+  is one of the GitHub CLI's own documented override variables. It cannot see an
+  influence route the client does not document. Two are worth naming anyway:
+  `PATH` is in both the policy and the back-fill and does decide which `gh` runs
+  — supplied deliberately, with executable provenance settled separately by
+  AO-FOUNDATION-REM-003B — and `HOMEDRIVE`/`HOMEPATH` compose into a home
+  directory a config-directory fallback could in principle consult. Measured
+  only this far: `USERPROFILE` alone does not authenticate the client.
 - **L-V4-02-8 — truncation on the locator endpoint is detected, not proved.**
   `commits/{sha}/pulls` returns a bare array with no `total_count`, so unlike the
   two check endpoints there is nothing to compare a page against. The test is
@@ -8456,10 +8468,11 @@ as a destination:
   `XDG_CONFIG_HOME`, `GH_DEBUG`, `GH_PAGER` or any proxy variable reaches it.
   *Supplies*, not "is what the child gets": on Windows `runCommand` back-fills
   eleven fixed OS names into every child — `SYSTEMROOT`, `USERPROFILE`, `TEMP`
-  and eight more — and the client really does receive those. That is harmless
-  for a precise reason rather than a hopeful one, and the reason is asserted in
-  the suite: not one of the eleven can carry a credential, choose a host, move a
-  config directory or name a proxy;
+  and eight more — and the client really does receive those. The suite pins that
+  none of the eleven is one of the client's own documented override variables.
+  That is a real check and a bounded one: the two lists come from different
+  families, so it cannot see an influence route the client does not document.
+  Recorded as `L-V4-02-9` rather than presented as a proof;
 - the client is run in the OS temp directory, never in a repository — so it has
   no working directory to infer repository context from.
 

@@ -2579,7 +2579,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // `--observe`, asserted in `tests/v4-02-delivery-observation.test.ts` with
     // a matched control: same fixture, no flag, zero processes.
     //
-    // `worktree/worktree-cleanliness.ts` is the newest, and it is in the second
+    // `worktree/worktree-cleanliness.ts` was the previous addition, and it is in the second
     // group: it imports `isShellInertArgument` only, to decide whether a
     // submodule path can be carried as a pathspec before it tries. It starts
     // nothing — every command it issues goes through the injected `GitRunner` it

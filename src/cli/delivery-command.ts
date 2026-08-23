@@ -69,6 +69,20 @@ export interface DeliveryCommandSeams {
   readonly envSource?: NodeJS.ProcessEnv;
 }
 
+/**
+ * The flag's own sentence, exported so it can be pinned by literal.
+ *
+ * It used to end "it asks about one commit and nothing else" — the identical
+ * over-claim that was withdrawn from `CONTACTED_TRAILER`, left standing on the
+ * surface an operator reads *before* running the command, and pinned by
+ * nothing. Two strings made the same promise and only one was corrected.
+ */
+export const OBSERVE_OPTION_DESCRIPTION =
+  'Ask github.com about the commit named above, read-only. This is the only way this ' +
+  'build contacts a forge for delivery, and it asks about no commit but that one. The ' +
+  'GitHub CLI additionally makes calls of its own (telemetry, update check) that this ' +
+  'build does not suppress. Without this flag nothing leaves this machine.';
+
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
   'and — only with --observe — ask github.com two read-only questions about that commit: ' +
@@ -94,9 +108,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     )
     .option(
       '--observe',
-      'Ask github.com about the commit named above, read-only. This is the only way this ' +
-        'build contacts a forge for delivery, and it asks about one commit and nothing else. ' +
-        'Without it nothing leaves this machine.',
+      OBSERVE_OPTION_DESCRIPTION,
     )
     .action(async (options: DeliveryOptions) => {
       const resolution = await resolve({ repositoryPath: options.repository });
@@ -143,7 +155,11 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
 }
 
 /**
- * Three outcomes, three codes, and the distinction a scheduler needs.
+ * Four conclusions, three codes, and the distinction a scheduler needs.
+ *
+ * Three codes because two conclusions share one: a subject that was established
+ * and not observed, and one that was observed and settled, are both "nothing to
+ * go and fix".
  *
  * `OBSERVED` is zero even when the answer is "no pull request has this head" or
  * "the checks failed". Those are answers, and a command that exits non-zero on

@@ -149,8 +149,13 @@ export type ObservedProviderEnvVar = (typeof OBSERVED_PROVIDER_ENV_VARS)[number]
 
 /**
  * Every variable `gh help environment` documents as able to change *where a
- * request goes, who it authenticates as, where the credential is read from, or
- * what appears on the client's streams* (V4 slice 2).
+ * request goes, who it authenticates as, where the credential is read from,
+ * what appears on the client's streams, or what traffic the client sends of its
+ * own accord* (V4 slice 2).
+ *
+ * The fifth class was added after the fourth turned out not to cover
+ * `GH_TELEMETRY` and `DO_NOT_TRACK`, which change the client's own network
+ * behaviour rather than its output.
  *
  * Like the lists above this is documentation and a test surface, not the
  * mechanism: `forge:github` names three variables and the allow-list excludes
@@ -174,9 +179,14 @@ export type ObservedProviderEnvVar = (typeof OBSERVED_PROVIDER_ENV_VARS)[number]
  *    formatting into output that is being parsed;
  *  - the client's own traffic: `GH_TELEMETRY` prints telemetry to standard
  *    error or disables it outright, and `DO_NOT_TRACK` disables it. Neither is
- *    forwarded, so the client's own calls are left exactly as the operator
- *    configured them — see residual `L-V4-02-6`, which records that they
- *    happen rather than suppressing them with a value this build invented;
+ *    forwarded, and the consequence is stated rather than dressed up: an
+ *    operator who has `DO_NOT_TRACK` set in their own environment does **not**
+ *    get it honoured here, because this policy supplies names rather than
+ *    passing them through. The client's own calls are therefore left to its own
+ *    configuration file, which is where residual `L-V4-02-6` points. Forwarding
+ *    them would mean this allow-list carrying variables whose only purpose is to
+ *    change the behaviour of a program AO does not own, and the same argument
+ *    that keeps `GH_HOST` out keeps these out;
  *  - other programs: `GH_PAGER`, `PAGER`, `GH_BROWSER`, `BROWSER`, `GH_EDITOR`,
  *    `GIT_EDITOR`, `VISUAL` and `EDITOR` each name a program the client may
  *    start.
@@ -378,11 +388,24 @@ const POLICY_ALLOWLIST: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = Ob
    * and a claim about the child's environment that is measured with `env -i`
    * in a shell is a claim about a different environment.
    *
-   * That back-fill is bounded and it is why it does not weaken this policy:
-   * not one of the eleven is a member of {@link FORGE_CLIENT_OVERRIDE_ENV_VARS}
-   * — none carries a credential, selects a host, moves the config directory or
-   * names a proxy. Asserted rather than argued, in
-   * `tests/v4-02-delivery-observation.test.ts`.
+   * That back-fill is bounded, and this is exactly how far the bound is
+   * checked. `tests/v4-02-delivery-observation.test.ts` asserts that not one of
+   * the eleven appears in {@link FORGE_CLIENT_OVERRIDE_ENV_VARS} — so none of
+   * them is a variable the client's own documentation says will redirect
+   * authentication, host selection, the config directory, the streams or the
+   * client's own traffic.
+   *
+   * What that assertion is **not** is a proof that no back-filled name can
+   * influence the client by some route its documentation does not describe: the
+   * two lists are drawn from different families, so their disjointness is close
+   * to given. Two of the eleven are worth naming for that reason. `PATH` is in
+   * both this policy and the back-fill and it does decide *which* `gh` runs —
+   * supplied deliberately, and executable provenance is settled separately
+   * (AO-FOUNDATION-REM-003B). And `HOMEDRIVE`/`HOMEPATH` compose into a home
+   * directory that a config-directory fallback could in principle consult;
+   * measured here only to the extent that `USERPROFILE` alone does not
+   * authenticate the client, which is the case that would have mattered.
+   * Carried as `L-V4-02-9` rather than described as closed.
    *
    * Measured against the shipped path rather than against a shell, same client,
    * same day: `PATH + PATHEXT + APPDATA + SYSTEMROOT` answers exit 0, the full

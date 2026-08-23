@@ -136,9 +136,16 @@ export const OBSERVATION_REFUSALS = [
    */
   'ENVIRONMENT_UNUSABLE',
   /**
-   * A forge client was started but produced no usable completion — it timed
-   * out, exceeded its output budget, failed to spawn, or the ownership
-   * boundary was lost before its exit could be observed.
+   * No usable completion came back from the forge client — it timed out,
+   * exceeded its output budget, failed to spawn, or the ownership boundary was
+   * lost before its exit could be observed.
+   *
+   * Deliberately **not** phrased as "the client started". Two of those endings
+   * — `SPAWN_FAILED` and `BOUNDARY_LOST` — can occur with nothing running, and
+   * an operator sentence that asserts a process existed would be false in
+   * exactly the cases that are hardest to diagnose. `CommandResult.started`
+   * could distinguish them and is deliberately not read: it would split one
+   * refusal into two that mean the same thing to a caller.
    */
   'FORGE_CLIENT_UNUSABLE',
   /** The forge client reports that the request needs an authentication it does not have. */
@@ -199,7 +206,7 @@ export const OBSERVATION_REFUSAL_DETAIL: Readonly<Record<ObservationRefusal, str
     ENVIRONMENT_UNUSABLE:
       'The environment for the GitHub CLI could not be built unambiguously, so nothing was started.',
     FORGE_CLIENT_UNUSABLE:
-      'The GitHub CLI started but did not produce a usable answer, so nothing is established.',
+      'The GitHub CLI produced no usable answer, so nothing is established.',
     NOT_AUTHENTICATED:
       'The GitHub CLI reports that this request needs an authentication it does not have.',
     REQUEST_FAILED: 'The GitHub CLI ran and the request did not succeed.',
@@ -467,10 +474,25 @@ export const COMMIT_STATUS_STATES = ['error', 'failure', 'pending', 'success'] a
  * separately from the successes precisely so an operator can see that this
  * definition was applied rather than having it hidden inside one word.
  */
-const NON_BLOCKING_CONCLUSIONS: ReadonlySet<string> = new Set(['neutral', 'skipped']);
+export const NON_BLOCKING_CONCLUSIONS: ReadonlySet<string> = new Set(['neutral', 'skipped']);
 
-/** The conclusions that block. Everything not here and not non-blocking is `success`. */
-const BLOCKING_CONCLUSIONS: ReadonlySet<string> = new Set([
+/**
+ * The conclusions that block.
+ *
+ * **This set is no longer the mechanism.** `aggregateCheckState` grades
+ * `success` as the only success and everything else as blocking, so a member
+ * added to `CHECK_RUN_CONCLUSIONS` and forgotten here still fails closed. It
+ * used to be the mechanism, with an `else succeeded` default, and that graded
+ * an unclassified conclusion green.
+ *
+ * What it is instead is the *statement of which conclusions this build has
+ * actually decided about*, and the third part of a partition the suite asserts:
+ * blocking ∪ non-blocking ∪ `{'success'}` must be exactly
+ * {@link CHECK_RUN_CONCLUSIONS}. A new GitHub conclusion therefore turns a test
+ * red — which is a decision to take, not a silent grading — while the runtime
+ * behaviour in the meantime is the safe one.
+ */
+export const BLOCKING_CONCLUSIONS: ReadonlySet<string> = new Set([
   'failure',
   'cancelled',
   'timed_out',
@@ -652,6 +674,10 @@ export function parseCommitStatuses(
  *  3. **A blocking record makes it `FAILED`**, even when another record is
  *     still running. A failure is already decisive, and reporting `PENDING`
  *     would invite an operator to wait for an answer that has arrived.
+ *     "Blocking" is the default and not the listed case: a check run counts as
+ *     succeeded only for the literal conclusion `success`, is neutral only for
+ *     the two named non-blocking ones, and blocks otherwise. So a conclusion
+ *     GitHub adds later cannot be graded green by having been forgotten.
  *  4. **An unfinished record makes it `PENDING`.**
  *  5. Otherwise `SUCCESS`, meaning: every record in both mechanisms finished,
  *     and none of them blocks under the definition stated above.
@@ -689,9 +715,18 @@ export function aggregateCheckState(
       continue;
     }
     if (run.conclusion === null) return checkStateRefusal('RESPONSE_MALFORMED');
-    if (BLOCKING_CONCLUSIONS.has(run.conclusion)) failed += 1;
+    // `success` is named, and it is the ONLY thing that counts as a success.
+    // The arms used to be ordered blocking / non-blocking / else-succeeded,
+    // which failed **open**: a conclusion added to `CHECK_RUN_CONCLUSIONS` in
+    // some later version — and `parseCheckRuns` accepts every member of that
+    // list — would have been graded `SUCCESS` without anyone deciding it
+    // should be. That is the same defect this slice's `exitCodeFor` was
+    // corrected for, in the place where it can turn a blocking check green.
+    // The default arm is `failed`, which matches the legacy-status grading
+    // eight lines below and is the direction a delivery gate must fail in.
+    if (run.conclusion === 'success') succeeded += 1;
     else if (NON_BLOCKING_CONCLUSIONS.has(run.conclusion)) neutralOrSkipped += 1;
-    else succeeded += 1;
+    else failed += 1;
   }
 
   for (const status of statuses) {

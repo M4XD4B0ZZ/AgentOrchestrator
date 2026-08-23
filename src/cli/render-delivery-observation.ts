@@ -62,9 +62,12 @@ export const NOT_CONTACTED_TRAILER =
  * (`L-V4-02-6`) was visible everywhere except in the one place an operator
  * actually reads. And the trailer is selected on whether an observation was
  * *requested*, so it also printed when every request refused before a process
- * existed. The wording below is true in both cases: it is a statement about
- * what this build asks, which is bounded, rather than about what crossed the
- * network, which is not this build's alone to promise.
+ * existed. The first two sentences below are true in both cases, because they
+ * are statements about what this build asks — which is bounded — rather than
+ * about what crossed the network, which is not this build's alone to promise.
+ * The closing clause is deliberately in the generic present: it describes what
+ * the client does, not what it did on this run, because on the paths where no
+ * process started it did nothing at all.
  */
 export const CONTACTED_TRAILER =
   'Read-only. This build asked about no commit but the one named above, and about no other\n' +

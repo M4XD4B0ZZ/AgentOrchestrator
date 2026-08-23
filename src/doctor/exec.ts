@@ -903,12 +903,13 @@ function usableGrace(value: number | undefined, fallback: number): number {
  * process lifetime and nothing else, and is "no argument for widening or
  * narrowing an agent's authority".
  *
- * Exported so that the one property that makes it harmless can be *asserted*
- * rather than argued: no name here carries a credential, selects a host, moves
- * a config directory or names a proxy. V4 slice 2 needs that, because it runs a
- * client whose behaviour those four classes of variable would change, and a
- * policy comment that described only what AO supplies was read — twice, by two
- * independent reviewers — as a claim about what the child receives.
+ * Exported so that a downstream policy can *assert* something about this list
+ * rather than restate it. V4 slice 2 needs that: it runs a client whose
+ * behaviour some environment variables would redirect, and a policy comment
+ * that described only what AO supplies was read — twice, by two independent
+ * reviewers — as a claim about what the child receives. What that slice asserts
+ * is disjointness from the client's own documented override variables, and the
+ * limits of that check are stated where the claim is made, not here.
  */
 export const WINDOWS_PLATFORM_BACKFILL = Object.freeze([
   'HOMEDRIVE',
