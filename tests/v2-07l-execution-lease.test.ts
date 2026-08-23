@@ -2555,6 +2555,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'worktree', 'commit-task-work.ts'),
         join('src', 'worktree', 'git-command.ts'),
         join('src', 'worktree', 'workspace-identity.ts'),
+        join('src', 'worktree', 'worktree-cleanliness.ts'),
       ].sort(),
     );
     // Of those, six can actually start a process; the rest import
@@ -2562,6 +2563,13 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // importer of the execution module has to be classified rather than
     // appearing silently, and the runner fence itself is asserted in 'lets
     // exactly one module reach the raw runners' above.
+    //
+    // `worktree/worktree-cleanliness.ts` is the newest, and it is in the second
+    // group: it imports `isShellInertArgument` only, to decide whether a
+    // submodule path can be carried as a pathspec before it tries. It starts
+    // nothing — every command it issues goes through the injected `GitRunner` it
+    // is handed, which is `leasedGit` on the productive paths. Classified here
+    // because this list is the place that requires it.
     //
     // It is pinned by *specifier* and not by the name `runCommand`, and that is
     // not a stylistic choice. `importsOf` finds statements with a regex, and

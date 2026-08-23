@@ -83,7 +83,10 @@ export const RELEASE_OUTCOMES = [
    * This said "every proof held and Git still refused", which is true of exactly
    * one of its producers. `WORKTREE_DIRTY` reaches it with an ownership proof
    * that did *not* hold and with Git never asked to remove anything;
-   * `GIT_UNAVAILABLE` reaches it without a removal being attempted either. An
+   * `GIT_UNAVAILABLE` reaches it without a removal being attempted either; and
+   * so does `WORKTREE_CLEANLINESS_UNKNOWN`, which a later slice added and which
+   * this list did not carry until a review pointed out that the docstring
+   * warning against narrating one cause as all of them had itself gone stale. An
    * outcome that narrates one of its causes as though it were all of them sends
    * an operator looking for the wrong thing.
    */

@@ -23,6 +23,15 @@
  *     commit the base does not already have. Either check failing refuses the
  *     *whole* operation with the workspace still standing.
  *
+ *     That promise is not kept here alone, and a review was right to say so.
+ *     Content a `.gitignore` hides is closed one layer up, by
+ *     `run/release-workspace.ts`, which runs its own ignored-content proof
+ *     *before* calling this — and this module's cleanliness reading does not see
+ *     it. Today that is sound because `releaseTaskWorkspace` is the only
+ *     production caller (`grep -rn "removeTaskWorkspace" src/`). A **second**
+ *     caller would reopen the route, so adding one means bringing the proof with
+ *     it or moving it in here.
+ *
  * ── Never forced ───────────────────────────────────────────────────────────
  *
  * `git worktree remove` without `--force` and `git branch -d` without `-D`.
@@ -43,6 +52,7 @@ import { localBranchRef, LOCAL_BRANCH_REF_PREFIX } from '../repo/branch-name.js'
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import { classifyAncestry as classifyCommitAncestry } from './commit-probes.js';
 import { runGitCommand, type GitRunner } from './git-command.js';
+import { observeWorktreeCleanliness } from './worktree-cleanliness.js';
 import {
   deriveTaskWorkspaceIdentity,
   isOwnedTaskBranch,
@@ -55,6 +65,28 @@ export const WORKSPACE_REMOVAL_FAILURE_CODES = [
   ...WORKSPACE_IDENTITY_FAILURE_CODES,
   /** A Git command could not be run at all, or its argument was refused. */
   'GIT_UNAVAILABLE',
+  /**
+   * Whether the worktree is clean could not be established.
+   *
+   * Added because a removal refused for a reason that was not a Git failure —
+   * a directory that could not be listed, or `git submodule status` and the
+   * index disagreeing about a path — was telling an operator "a required Git
+   * command could not be completed" while every Git command had exited 0. The
+   * operator then looks for a broken Git.
+   *
+   * **It does not mean "and Git ran fine".** A first version of this comment
+   * claimed that distinction and a review measured it false: cleanliness is also
+   * "not established" when the `status` call itself fails, which happens for a
+   * worktree holding a malformed `.git` inside a gitlink. Two of the four ways
+   * to reach `null` *are* Git failing. What this code separates is the
+   * **question** that could not be answered, not the reason it could not be —
+   * and the reason belongs in the probe, not in a removal outcome.
+   *
+   * All of it is a refusal and all of it is fail-closed. Only the sentence an
+   * operator reads differs, and a false sentence about why AO stopped is a
+   * defect here.
+   */
+  'WORKTREE_CLEANLINESS_UNKNOWN',
   /**
    * The caller does not hold this repository's execution lease *now*.
    *
@@ -98,6 +130,8 @@ const REMOVAL_DETAIL: Readonly<Record<WorkspaceRemovalFailureCode, string>> = Ob
   WORKTREE_PATH_UNSAFE:
     'The derived worktree path cannot be passed to Git as an argument, or is not outside the repository.',
   GIT_UNAVAILABLE: 'A required Git command could not be completed.',
+  WORKTREE_CLEANLINESS_UNKNOWN:
+    'Whether the worktree holds uncommitted work could not be established, so nothing was removed.',
   WORKTREE_NOT_OWNED:
     'No worktree owned by this task is registered at the derived path, so nothing was removed.',
   WORKTREE_DIRTY: 'The worktree has uncommitted or untracked changes, so nothing was removed.',
@@ -255,13 +289,43 @@ export async function removeTaskWorkspace(
   }
 
   // --- Proof 3a: nothing uncommitted in the worktree -----------------------
-  const status = await git(identity.worktreePath, [
-    'status',
-    '--porcelain',
-    '--untracked-files=all',
-  ]);
-  if (status.outcome !== 'OK') return removalFailure('GIT_UNAVAILABLE');
-  if (status.stdout.length > 0) return removalFailure('WORKTREE_DIRTY');
+  //
+  // Asked through {@link observeWorktreeCleanliness}, not through a bare
+  // `status`, and that is a correction with a measured cost behind it.
+  //
+  // This gate stands in front of `git worktree remove`, which deletes the
+  // checkout. A review measured that a writer can plant files inside an
+  // **unpopulated** submodule directory where no `status` spelling looks, and
+  // the remediation that found it hardened the two cleanliness *observers* and
+  // left this one asking the blind question — on the reasoning that Git refuses
+  // to remove a worktree containing a submodule anyway. That reasoning was taken
+  // from one fixture and is **false** for the shape AO actually produces.
+  //
+  // Three attempts to say *why* were each measured false in turn — "a property
+  // of population", "it turns on provenance", "a gitlink path holding a real
+  // repository" — so this comment asserts no mechanism. The seven measured
+  // fixtures are tabulated in `README.md` under L-V3-11-10.
+  //
+  // The fact this gate rests on is the one that never moved: a worktree made by
+  // `git worktree add` from a base commit, gitlinks never populated, is
+  // **deleted** by the unforced remove, payload and all. That is what
+  // `prepareTaskWorkspace` produces for every task, so here the gate is the only
+  // thing standing.
+  //
+  // Reproduced end to end: the bare vector reported clean, `removeTaskWorkspace`
+  // returned `WORKSPACE_REMOVED`, and two planted files were destroyed. So the
+  // destructive path gets the probe, and "cannot establish" refuses rather than
+  // proceeds — on this gate more than any other, because the cost of a wrong
+  // clean reading here is deleted work rather than a withheld resume.
+  //
+  // `null` gets its own code: the *question* went unanswered. That covers a
+  // directory that could not be listed and a listing the index contradicts —
+  // both reachable with every Git call exiting 0 — and also a `status` that
+  // failed outright, which is a Git failure. The code does not claim to tell
+  // those apart; see its docstring.
+  const clean = await observeWorktreeCleanliness(git, identity.worktreePath);
+  if (clean === null) return removalFailure('WORKTREE_CLEANLINESS_UNKNOWN');
+  if (!clean) return removalFailure('WORKTREE_DIRTY');
 
   // --- Proof 3b: nothing committed that the base does not already have -----
   // Checked *before* the worktree goes, not after: discovering unmerged work

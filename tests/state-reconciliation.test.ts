@@ -91,6 +91,17 @@ interface GitScript {
   readonly status?: GitCommandResult;
   readonly ancestry?: GitCommandResult;
   readonly baseObject?: GitCommandResult;
+  /** `git submodule status` — the gitlink listing the cleanliness probe reads. */
+  readonly submodules?: GitCommandResult;
+  /**
+   * `git ls-files --stage` — the gitlink probe's index source.
+   *
+   * Answers both shapes the probe issues: the pathspec-bounded confirmation of
+   * the paths a listing named, and the whole-index fallback taken when the
+   * listing cannot be used. The cases here only reach the second, because a
+   * listing this reader cannot parse never gets as far as confirming anything.
+   */
+  readonly gitlink?: GitCommandResult;
 }
 
 interface GitInvocation {
@@ -109,6 +120,13 @@ function scriptedGit(
     invocations.push({ cwd, args: [...args] });
     if (startsWith(args, ['worktree', 'list'])) return script.registry ?? OK(HEALTHY_REGISTRY);
     if (startsWith(args, ['status'])) return script.status ?? OK('');
+    // Cleanliness is `status` **and** the gitlink probe, since the V3-11
+    // remediation's second round: `git status` cannot see inside an unpopulated
+    // submodule, so a clean `status` alone is not a clean worktree. An empty
+    // listing is "this repository has no submodules", which is what every
+    // fixture here is unless it says otherwise.
+    if (startsWith(args, ['submodule', 'status'])) return script.submodules ?? OK('');
+    if (startsWith(args, ['ls-files', '--stage'])) return script.gitlink ?? OK('');
     if (startsWith(args, ['merge-base', '--is-ancestor'])) return script.ancestry ?? OK();
     // The base-pin probe. Both of its questions — `cat-file -t` and, only when
     // that one fails, `cat-file -e` — are answered from the same script entry,
@@ -469,6 +487,50 @@ describe('reconciling state against Git', () => {
 
     expect(report.verdict).toBe('UNOBSERVABLE');
     expect(report.findings).toContain('WORKTREE_CLEANLINESS_UNKNOWN');
+  });
+
+  /**
+   * Cleanliness is not `git status` alone, and this is where that is wired.
+   *
+   * `observeRuntime` asks through `observeWorktreeCleanliness`, which also
+   * probes gitlinks — because `git status` cannot see files planted inside an
+   * **unpopulated** submodule, and since V3-11 the clean reading is what mints
+   * a checkpoint.
+   *
+   * The probe has two sources for the gitlink set and only refuses when
+   * **neither** answers: an unreadable `submodule status` falls back to the
+   * index, because three ordinary repository shapes reach this module that way
+   * and refusing them stalled every task in such a repository forever. So the
+   * case that pins the wiring has to deny both sources.
+   *
+   * Without it the wiring is unpinned: `observeRuntime` could go back to reading
+   * `status` directly and every other case here would stay green.
+   */
+  it('reports a clean status with no readable gitlink source as unobservable', async () => {
+    const report = await reconcileWith({
+      status: OK(''),
+      submodules: OK('this is not a submodule status line'),
+      gitlink: UNAVAILABLE,
+    });
+
+    expect(report.verdict).toBe('UNOBSERVABLE');
+    expect(report.findings).toContain('WORKTREE_CLEANLINESS_UNKNOWN');
+  });
+
+  /**
+   * The control, and it is the one that stops the case above from passing for
+   * the wrong reason: the *same* unreadable listing, with the index readable,
+   * falls back and answers clean.
+   */
+  it('falls back to the index when the gitlink listing is unreadable', async () => {
+    const report = await reconcileWith({
+      status: OK(''),
+      submodules: OK('this is not a submodule status line'),
+      gitlink: OK(''),
+    });
+
+    expect(report.findings).not.toContain('WORKTREE_CLEANLINESS_UNKNOWN');
+    expect(report.findings).not.toContain('WORKTREE_DIRTY');
   });
 
   /**

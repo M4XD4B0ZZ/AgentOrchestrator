@@ -292,6 +292,11 @@ function scriptedGit(root: string, script: GitScript = {}) {
       if (writing !== null) return writing;
     }
     if (startsWith(args, ['status'])) return script.status ?? OK('');
+    // The gitlink probe, added by the V3-11 remediation's second round:
+    // cleanliness is `status` **and** "is anything sitting inside a submodule
+    // Git is not looking into". These synthetic roots hold no submodule, which
+    // is what an empty listing says, and the probe then asks nothing further.
+    if (startsWith(args, ['submodule', 'status'])) return OK('');
     if (startsWith(args, ['merge-base', '--is-ancestor'])) return OK();
     if (startsWith(args, ['rev-parse']) && args.includes('HEAD')) return script.head ?? OK(SHA_B);
     if (startsWith(args, ['rev-parse'])) return OK(SHA_A);
@@ -491,6 +496,12 @@ describe('nothing executes before the world has been re-read', () => {
         return reads === 1 ? OK(healthyRegistry(root)) : UNAVAILABLE;
       }
       if (startsWith(args, ['status'])) return OK('');
+      // Answered explicitly rather than by the catch-all below: this runner's
+      // fallback returns a bare SHA, and the gitlink probe reads that as a
+      // `submodule status` line it cannot parse — which is "not established",
+      // which is the correct answer to nonsense and the wrong subject for this
+      // case. No submodules here.
+      if (startsWith(args, ['submodule', 'status'])) return OK('');
       if (startsWith(args, ['merge-base', '--is-ancestor'])) return OK();
       if (startsWith(args, ['rev-parse']) && args.includes('HEAD')) return OK(SHA_B);
       return OK(SHA_A);

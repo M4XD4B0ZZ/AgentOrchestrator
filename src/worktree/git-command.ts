@@ -61,6 +61,27 @@ export interface GitCommandResult {
   /** Trimmed stdout on `OK`, the empty string otherwise. */
   readonly stdout: string;
   /**
+   * Stdout **exactly as Git wrote it**, when the runner can supply it.
+   *
+   * Optional, and deliberately so: every caller here wants {@link stdout}, and
+   * the injected runners a test supplies do not have to produce this. One caller
+   * does need it, and the reason is a defect that took four rounds to find.
+   *
+   * {@link stdout} is `.trim()`ed, which removes *every* trailing whitespace
+   * character and not merely the line terminator. `git submodule status` prints
+   * submodule paths verbatim, so a final gitlink whose path ends in U+00A0 —
+   * or U+3000, U+2009, U+FEFF — arrives shortened, and a shortened path that
+   * matches a real sibling gitlink makes a reader answer about the wrong
+   * directory. Measured: a worktree with `vendnb` and `vendnb ` reported
+   * clean over a planted file, and the removal gate behind that reading deletes.
+   *
+   * Detecting the collapse afterwards was tried and is not sufficient — see
+   * `worktree/worktree-cleanliness.ts`. The only reliable answer is to read the
+   * bytes Git wrote, so a reader that parses paths out of a command's output
+   * uses this and states why.
+   */
+  readonly rawStdout?: string;
+  /**
    * The exit code Git returned, or `null` when no process ran to completion.
    *
    * Carried because a handful of Git commands answer a *question* with their
@@ -97,8 +118,169 @@ export type GitRunner = (cwd: string, args: readonly string[]) => Promise<GitCom
  */
 const GIT_COMMAND_TIMEOUT_MS = 120_000;
 
-/** `worktree list --porcelain` is the largest output here; 1 MiB is generous. */
+/**
+ * The output ceiling every Git command here shares.
+ *
+ * This said "`worktree list --porcelain` is the largest output here; 1 MiB is
+ * generous", and it stopped being true when a later slice added readers that
+ * enumerate. `ls-files --stage -z` over a whole index is the largest by orders
+ * of magnitude — measured, this repository's own 296 tracked files are 24 KiB,
+ * and the cap falls at roughly 12,700 files at that shape — and it is the
+ * command whose cliff **L-V3-11-15** is entirely about. `git status` with
+ * `--untracked-files=all` was the other, which is why the cleanliness vector
+ * carries `normal`.
+ *
+ * "Generous" is therefore the wrong word for it, and the residual says so rather
+ * than the constant pretending otherwise.
+ */
 const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
+
+/**
+ * The one *argument vector* this build uses to ask Git about cleanliness.
+ *
+ * Not the whole question. `git status` cannot see inside an unpopulated
+ * submodule, so the cleanliness *answer* is
+ * {@link observeWorktreeCleanliness} in `worktree/worktree-cleanliness.ts`,
+ * which asks this and then asks the part this cannot reach. Callers deciding
+ * whether a worktree is clean use that; this array is exported for the callers
+ * that need the vector itself.
+ *
+ * ── Which callers, and which ones deliberately do not use it ───────────────
+ *
+ * **Four** ask the cleanliness question, and three of them reach it through
+ * {@link observeWorktreeCleanliness} rather than through this array:
+ * `state/observe-runtime.ts` (on every run, to decide whether the world still
+ * matches the record), `loop/loop-step.ts` (after a quota-interrupted writer, to
+ * decide what the checkpoint may claim), and `worktree/remove-workspace.ts`'s
+ * Proof 3a (before it destroys a checkout). The first two are compared against
+ * each other on every later run, so they must agree; the third is destructive,
+ * which is why it was moved onto the probe after a review measured it deleting
+ * writer output. Only `worktree/commit-task-work.ts`'s effect gate uses this
+ * array directly, plus `-z`.
+ *
+ * That gate is deliberately *not* on the probe: its question is "is there
+ * anything for `git add --all` to stage", and measured, `add --all` stages
+ * nothing inside a gitlink — so a probe answer there would send the gate into a
+ * commit that Git then refuses, reaching the same `NOTHING_TO_COMMIT` by a
+ * longer route. The settlement's observer still sees the planted content and
+ * still withdraws the checkpoint, which is the fail-closed half that matters.
+ *
+ * `worktree/prepare-workspace.ts`'s **two** call sites do not use either. An
+ * earlier version of this paragraph said that was "deliberate rather than an
+ * oversight", because those gates ask "is this workspace pristine", "where an
+ * enumeration is the point". A review measured that and it is **false**: neither
+ * enumerates. One tests `stdout.length > 0`; the other, `classifyStatus`, only
+ * asks whether every line starts with `??` — which `normal` answers identically,
+ * because a collapsed directory entry is still `?? bulk/`. So their
+ * `--untracked-files=all` buys nothing and keeps the 1 MiB cliff this vector was
+ * corrected to remove, turning `SOURCE_WORKTREE_DIRTY` and `UNTRACKED_CONTENT`
+ * into `GIT_UNAVAILABLE` and `UNREADABLE` for a worktree holding an unignored
+ * dependency directory — a false diagnosis, which this repository treats as a
+ * defect.
+ *
+ * They also carry no `--ignore-submodules` at all, so a committed `.gitmodules`
+ * `ignore = all` makes them report a worktree clean while a submodule inside it
+ * holds uncommitted work (measured).
+ *
+ * `remove-workspace.ts` was in that set until a review measured what it cost.
+ * An earlier version of this paragraph said the destructive step behind the
+ * worst of them was "closed by Git itself — `git worktree remove` refuses
+ * outright for any worktree whose index holds a gitlink, exit 128, populated or
+ * not — so this is a detection gap and not data loss". **That was false, and it
+ * was the whole justification for not fixing the gate.**
+ *
+ * Three replacements were also wrong — "a property of *population*", then "it
+ * turns on *provenance*", then "a gitlink path holding a real repository" —
+ * each written from the fixtures to hand and falsified by the next fixture
+ * anyone built. So no mechanism is asserted here any more. What is recorded in
+ * `README.md` under **L-V3-11-10** is a table of seven measured fixtures, and
+ * nothing is inferred from it about a shape not in the table.
+ *
+ * The one fact this file needs is stable and has been under all four
+ * explanations: a worktree made by `git worktree add` from a base commit, with
+ * its gitlinks never populated, is **deleted** by the unforced remove — payload
+ * and all. That is the shape AO produces, and it is the shape in which the
+ * removal gate is the only thing standing. Reproduced end to
+ * end through the production path: the bare vector reported clean,
+ * `removeTaskWorkspace` returned `WORKSPACE_REMOVED`, and two planted files were
+ * destroyed. `remove-workspace.ts`'s Proof 3a therefore asks
+ * {@link observeWorktreeCleanliness} now — note that moving it to *this array*
+ * would not have helped, because this array is blind to that content too.
+ *
+ * `prepare-workspace.ts`'s two gates are still unchanged and carried as
+ * **L-V3-11-10**: they are preflight rather than destructive, and moving them is
+ * a decision about those gates rather than a token correction.
+ *
+ * ── Every token is measured, and two of them are not what they look like ───
+ *
+ * Measured on git 2.55.0.windows.3, against a superproject with a populated
+ * submodule, with and without a hostile `submodule.<name>.ignore = all`
+ * declared in the tracked `.gitmodules` — the writer-reachable half — and
+ * confirmed to behave identically when declared in `.git/config`.
+ *
+ * `--untracked-files=normal` restates the status default. It is **not**
+ * `=all`, which V3-11 shipped and which is *not* the default: `all` prints one
+ * line per file instead of collapsing an untracked directory to one entry, so a
+ * worktree whose untracked non-ignored paths total more than
+ * {@link GIT_COMMAND_MAX_OUTPUT_BYTES} of `?? <path>` lines exceeds it, the
+ * command reports `UNAVAILABLE`, cleanliness becomes "not established", and
+ * every step of the task that owns that worktree stops for an operator. That
+ * total is a function of path length, not of a file count — measured, ~15,800
+ * files at a 60-character mean path and ~44,000 at a 20-character one, so the
+ * "roughly seventeen thousand" this comment first carried was right for one
+ * unstated shape and wrong by 2.6x for another.
+ *
+ * `normal` closes the same blind spot — a `status.showUntrackedFiles=no`, which
+ * makes a bare `--porcelain` call report a tree with new untracked files as
+ * **clean** — at a fraction of the bytes, and every consumer only tests the
+ * output for emptiness (`observeWorktreeCleanliness` as `stdout !== ''`, the
+ * effect gate as `stdout.replace(/\0/g, '').trim() === ''`), so none of them can
+ * tell `normal` from `all`.
+ *
+ * **`normal` is a smaller constant, not a bound.** It collapses untracked
+ * *directories* only; ~34,000 untracked entries at the top of the worktree
+ * still flood the same cap. Carried as **L-V3-11-9**, not closed.
+ *
+ * A note on `status.showUntrackedFiles`, because the threat model matters more
+ * than the flag: it is **not** worktree-local. Measured, `git config` issued
+ * inside a linked worktree writes to the shared `<main>/.git/config` and the
+ * setting is visible from sibling worktrees, so this half defends against an
+ * operator-set or repository-set configuration, not against the writer. The
+ * `.gitmodules` half is the writer-reachable one.
+ *
+ * `--ignore-submodules=none` restates the *status* default, which really is
+ * `none`: measured, a bare `git status --porcelain` reports ` M sub` for a
+ * submodule carrying only an untracked file. It is here to override a
+ * `submodule.<name>.ignore = all`, under which the bare call reports nothing at
+ * all. Note that the same spelling is **wrong** for `git diff`, whose default is
+ * `untracked` — see `scope/task-delta.ts`.
+ *
+ * ── Why it is a shared constant and not three identical literals ───────────
+ *
+ * Because a comment saying "these must stay the same words" cannot enforce it,
+ * and one exported array can. It is also the only construction under which
+ * "they agree" is not itself a claim needing a test.
+ *
+ * ── What this still cannot see ─────────────────────────────────────────────
+ *
+ * A gitignored file the writer created, and a write outside the worktree
+ * (**L-V3-10-4**). Neither is closed by any spelling of `status`, and both are
+ * carried.
+ *
+ * The first version of this list said "both", as though it were exhaustive. It
+ * was not: a third shape — files planted inside an **unpopulated** submodule
+ * directory — is invisible to this vector at every spelling, and to `git diff`
+ * and `ls-files --others` as well. That one is *not* carried; it is closed, one
+ * layer up, by {@link observeWorktreeCleanliness} in
+ * `worktree/worktree-cleanliness.ts`, which is what callers deciding
+ * cleanliness must use. This array alone is not the whole question.
+ */
+export const WORKTREE_CLEANLINESS_ARGS: readonly string[] = Object.freeze([
+  'status',
+  '--porcelain',
+  '--untracked-files=normal',
+  '--ignore-submodules=none',
+]);
 
 const RESULT_UNAVAILABLE: GitCommandResult = Object.freeze({
   outcome: 'UNAVAILABLE' as const,
@@ -141,6 +323,8 @@ export const runGitCommand: GitRunner = async (cwd, args) => {
   return Object.freeze({
     outcome: 'OK' as const,
     stdout: result.stdout.trim(),
+    // Carried alongside, never instead of. See {@link GitCommandResult.rawStdout}.
+    rawStdout: result.stdout,
     exitCode: 0,
   });
 };
