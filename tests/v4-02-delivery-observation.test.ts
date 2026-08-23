@@ -1462,8 +1462,19 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     expect(description).toContain('This build ships:');
     expect(description.length).toBeGreaterThan(400);
 
-    expect(description).not.toContain('and nothing else');
-    expect(description).not.toContain('no network');
+    // Banned on the flattened copy as well as the raw one. A confirmation round
+    // pointed out that the raw check alone is evadable by a phrase that happens
+    // to wrap — `no\nnetwork` is the same promise to a reader and a different
+    // string to `toContain`.
+    for (const banned of ['and nothing else', 'no network']) {
+      expect(description).not.toContain(banned);
+      expect(flat).not.toContain(banned);
+    }
+
+    // The registered `run` surface, read once and used by both bindings below.
+    const runCommand = program.commands.find((command) => command.name() === 'run');
+    expect(runCommand).toBeDefined();
+    const runFlags = (runCommand?.options ?? []).map((option) => option.long);
 
     // Every command that starts a program which opens a socket of its own, and
     // the one request this process makes itself. `doctor` and all three
@@ -1490,11 +1501,29 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     expect(flat).toContain('two read-only questions about one exact commit');
     expect(DELIVERY_COMMAND_DESCRIPTION).toContain('two read-only questions');
 
-    // The two retracted sentences, banned by literal so they cannot come back
-    // the way the last two did. Both were true when they were written and
-    // neither was moved when the grant that falsified them shipped.
+    // The retracted sentences, banned by literal so they cannot come back the
+    // way the last ones did. Each was true when it was written, and none was
+    // moved when the slice that falsified it shipped — V3-08 for the first two,
+    // V3-05 for the third, which shipped `lease recover` while the front page
+    // went on saying no such command existed.
     expect(flat).not.toContain('Unattended running and opening pull requests are not in this build');
     expect(flat).not.toContain('Without --attended, `run` still only reports');
+    expect(flat).not.toContain('ships no command that removes a lease it did not create');
+
+    // And the same live-surface binding for the removal commands, since that is
+    // what made the claim false: while `lease recover` is registered and `run`
+    // carries `--recover-stale-lease`, the description may not say the build has
+    // no way to remove a lease it did not create, and must name the command that
+    // does. The `--automatic-resume-only` restriction added above states that
+    // one grant cannot recover a stale lease, which only means anything if the
+    // others can.
+    const leaseCommand = program.commands.find((command) => command.name() === 'lease');
+    expect(leaseCommand).toBeDefined();
+    const leaseSubcommands = (leaseCommand?.commands ?? []).map((command) => command.name());
+    expect(leaseSubcommands).toContain('recover');
+    expect(runFlags).toContain('--recover-stale-lease');
+    expect(flat).toContain('`lease recover`');
+    expect(flat).toContain('run --recover-stale-lease');
 
     // And the prose is bound to the live surface in both directions, rather
     // than to a remembered list: while these two grants are registered on
@@ -1503,9 +1532,6 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     // that catches a *new* flag arriving lives in `tests/run-command.test.ts`
     // and is deliberately not copied here — two copies of one list is how a
     // list goes stale.
-    const runCommand = program.commands.find((command) => command.name() === 'run');
-    expect(runCommand).toBeDefined();
-    const runFlags = (runCommand?.options ?? []).map((option) => option.long);
     for (const grant of ['--attended', '--automatic-resume-only']) {
       expect(runFlags).toContain(grant);
       expect(flat).toContain(`run ${grant}`);
