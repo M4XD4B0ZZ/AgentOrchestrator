@@ -34,6 +34,7 @@ import {
   registerDeliveryCommand,
 } from '../src/cli/delivery-command.js';
 import { renderDeliveryObservation } from '../src/cli/render-delivery-observation.js';
+import { EXIT_RUN_OK, EXIT_RUN_REFUSED } from '../src/cli/run-exit-codes.js';
 import { ALL_STATES, TERMINAL_STATES, isTerminalState } from '../src/core/states.js';
 import { TRANSITION_TABLE } from '../src/core/transitions.js';
 import {
@@ -55,9 +56,14 @@ import {
 } from '../src/deliver/delivery-evidence.js';
 import {
   deliveryObservationFactsOf,
+  isDeliveryObservationProof,
   type DeliveryObservationProof,
 } from '../src/deliver/delivery-observation-proof.js';
 import {
+  CHECK_RUN_CONCLUSIONS,
+  CHECK_RUN_STATUSES,
+  COMMIT_STATUS_STATES,
+  OBSERVATION_REFUSALS,
   createObservationSubject,
   type CheckStateObservation,
   type ObservationSubject,
@@ -232,19 +238,94 @@ describe('the decision vocabulary', () => {
     expect([...DELIVERY_DECISIONS].some((d) => MERGE_ELIGIBILITY_SENTENCE.includes(d))).toBe(false);
   });
 
-  it('grades every settled outcome the observation layer can produce', () => {
-    // The partition, derived from slice 3's recordable sets — which are exactly
-    // the outcomes a proof may carry. The three check words the ladder names
-    // explicitly, plus the one it grades as success, must be the whole set. A
-    // fifth word added to the mint turns this red, which is a decision to take
-    // rather than a value silently inheriting the ladder's last arm.
-    const namedChecks = ['FAILED', 'PENDING', 'NO_CHECKS'];
-    expect(
-      [...RECORDABLE_CHECK_OUTCOMES].filter((o) => !namedChecks.includes(o)).sort(),
-    ).toEqual(['SUCCESS']);
+  /**
+   * The partition the ladder's last arm rests on — probed against the **mint**,
+   * not against a second array that happens to agree with it today.
+   *
+   * The first version derived from `RECORDABLE_CHECK_OUTCOMES`, a hand-written
+   * array in `delivery-evidence.ts`, while the code and the ADR both claimed it
+   * would fail "the moment the mint's settled set grows a fifth member". A
+   * review showed the two were never tied together: the mint's set is a private
+   * `Set` in `internal/delivery-observation-proof.ts`, and adding a word to it
+   * left every assertion green.
+   *
+   * So the mint is asked directly, across the **whole declared outcome union** —
+   * the recordable words plus every shared refusal, which together are the
+   * entire domain of `CheckStateOutcome` and `PullRequestOutcome`. The claim is
+   * now what the sentence says it is: a word the mint starts accepting, or stops
+   * accepting, turns this red.
+   */
+  it('mints exactly the settled outcome words, and no other word in reach', () => {
+    // Every candidate is tried in **both** payload shapes, and that is the
+    // whole reason this assertion works.
+    //
+    // The first attempt tried each word bare, and it was vacuous in both
+    // directions: the mint refuses anything but `NO_CHECKS` that arrives
+    // without counts, so a word added to its settled set was still refused —
+    // by the *counts* gate — and the probe could not tell the two refusals
+    // apart. Two mutants survived it. A candidate counts as accepted if
+    // *either* shape mints.
+    const withCounts = (outcome: string): CheckStateObservation =>
+      ({
+        outcome,
+        counts: {
+          checkRuns: 1,
+          commitStatuses: 0,
+          failed: 0,
+          pending: 0,
+          succeeded: 1,
+          neutralOrSkipped: 0,
+        },
+      }) as CheckStateObservation;
 
-    // Same for the pull-request half: the ladder names AMBIGUOUS and MATCHED,
-    // and everything else falls to PULL_REQUEST_REQUIRED, which is a refusal.
+    const checkAccepts = (outcome: string): boolean =>
+      [withCounts(outcome), { outcome } as CheckStateObservation].some(
+        (state) =>
+          attestDeliveryObservation(subjectOf(), observation(matched(), state), AT) !== null,
+      );
+
+    const pullAccepts = (outcome: string): boolean =>
+      [
+        outcome === 'MATCHED' ? matched() : ({ outcome, pullRequest: 57 } as PullRequestObservation),
+        { outcome, pullRequests: [1, 2] } as unknown as PullRequestObservation,
+        { outcome } as PullRequestObservation,
+      ].some(
+        (state) =>
+          attestDeliveryObservation(subjectOf(), observation(state, checks('SUCCESS')), AT) !== null,
+      );
+
+    // The candidate space is derived from the neighbouring vocabularies rather
+    // than typed out: the declared outcome union, plus every raw GitHub word
+    // this build knows, upper-cased. Those are the words a future author would
+    // plausibly add to the mint's private set, and `STALE` — the one a review
+    // used to show the previous assertion was empty — is among them.
+    const raw = [
+      ...CHECK_RUN_CONCLUSIONS,
+      ...CHECK_RUN_STATUSES,
+      ...COMMIT_STATUS_STATES,
+    ].map((word) => word.toUpperCase());
+
+    const checkUniverse = [
+      ...new Set([...RECORDABLE_CHECK_OUTCOMES, ...OBSERVATION_REFUSALS, ...raw]),
+    ];
+    expect(checkUniverse.length).toBeGreaterThan(RECORDABLE_CHECK_OUTCOMES.length);
+    expect(checkUniverse.filter(checkAccepts).sort()).toEqual([...RECORDABLE_CHECK_OUTCOMES].sort());
+
+    const pullUniverse = [
+      ...new Set([...RECORDABLE_PULL_REQUEST_OUTCOMES, ...OBSERVATION_REFUSALS, ...raw]),
+    ];
+    expect(pullUniverse.filter(pullAccepts).sort()).toEqual(
+      [...RECORDABLE_PULL_REQUEST_OUTCOMES].sort(),
+    );
+
+    // And the ladder's arms account for that set exactly: three check words are
+    // named explicitly and the remainder — one word — is what the closed
+    // success set holds. A fifth mintable word would have nowhere to land but
+    // the floor, and the assertion above is what makes it visible.
+    const namedChecks = ['FAILED', 'PENDING', 'NO_CHECKS'];
+    expect([...RECORDABLE_CHECK_OUTCOMES].filter((o) => !namedChecks.includes(o)).sort()).toEqual([
+      'SUCCESS',
+    ]);
     const namedPulls = ['AMBIGUOUS', 'MATCHED'];
     expect(
       [...RECORDABLE_PULL_REQUEST_OUTCOMES].filter((o) => !namedPulls.includes(o)).sort(),
@@ -339,11 +420,24 @@ describe('a positive decision requires this process to have observed', () => {
     expect(decideDelivery(GREEN(), subjectOf(), 'UNCHANGED')).toBe(POSITIVE_DELIVERY_DECISION);
   });
 
-  it('refuses a value that passed a captured registry but carries no facts', () => {
-    // The registry-capture forgery `delivery-observation-proof.ts` documents:
-    // it satisfies `isDeliveryObservationProof` and throws on the private-field
-    // read, so the safe accessor answers null. It must not decide anything.
-    const captured = Object.create(Object.getPrototypeOf(GREEN()) as object) as DeliveryObservationProof;
+  /**
+   * A forgery built from a genuine proof's own prototype.
+   *
+   * The name and comment here used to claim this exercised the safe accessor's
+   * `catch` — a value that passes the registry gate and throws on the
+   * private-field read. A review measured it and that is false:
+   * `Object.create` never enters the `WeakSet`, so `isDeliveryObservationProof`
+   * answers `false` and the value is refused at the gate, one step earlier. The
+   * test is kept for what it does prove — the prototype route documented in the
+   * mint's header buys nothing — and the claim is corrected to match. The
+   * accessor's `catch` remains unpinned; it needs registry capture, which is
+   * slice 3's boundary and not reachable from here.
+   */
+  it('refuses a forgery built from a real proof prototype, at the registry gate', () => {
+    const captured = Object.create(
+      Object.getPrototypeOf(GREEN()) as object,
+    ) as DeliveryObservationProof;
+    expect(isDeliveryObservationProof(captured)).toBe(false);
     expect(decideDelivery(captured, subjectOf(), 'UNCHANGED')).toBe('OBSERVATION_UNSETTLED');
   });
 
@@ -407,18 +501,16 @@ describe('the decision is bound to exactly one commit', () => {
     );
   });
 
-  it('refuses a proof whose two halves name different commits', () => {
-    // Constructed through the mint by observing subject A while the check
-    // answer was about A — then asked about A, but with the pull-request head
-    // deliberately elsewhere. The mint refuses a MATCHED outcome whose head is
-    // not the subject, so the reachable form of this is the check half.
+  /**
+   * Renamed after a review pointed out the old title claimed coverage the body
+   * does not have. There is no mintable proof whose two halves name different
+   * commits — that comparison is a floor, and the pin for its premise lives in
+   * "the mint derives both bound commits from the subject" below. What this
+   * body actually proves is the layer beneath: an unsettled half mints nothing
+   * at all, so no proof carrying a refusal can reach the decision.
+   */
+  it('cannot be handed a proof built from an unsettled half', () => {
     const subject = subjectOf(HEAD);
-    const proof = proofFor(subject, observation(matched(), checks('SUCCESS')));
-    // A matched pull request is only ever matched at the subject's own head:
-    // the mint enforces it, and the decision asks again. Both agree here.
-    expect(decideDelivery(proof, subject, 'UNCHANGED')).toBe(POSITIVE_DELIVERY_DECISION);
-    // The negative control for the same rule, one layer down: the mint will not
-    // produce a proof at all for an unsettled observation.
     expect(
       attestDeliveryObservation(
         subject,
@@ -426,9 +518,14 @@ describe('the decision is bound to exactly one commit', () => {
         AT,
       ),
     ).toBeNull();
+    // The positive control: the same subject with both halves settled does mint
+    // and does decide, so the null above is the refusal and not a broken fixture.
+    expect(
+      decideDelivery(proofFor(subject, observation(matched(), checks('SUCCESS'))), subject, 'UNCHANGED'),
+    ).toBe(POSITIVE_DELIVERY_DECISION);
   });
 
-  it('is unmoved by a pull-request number when the head is not the subject', () => {
+  it('refuses when the pull request no longer has this commit as its head', () => {
     // The same pull request, its head moved on. The observation layer answers
     // NO_MATCHING_PULL_REQUEST for the old commit, and the decision must be a
     // refusal rather than a match carried over by number.
@@ -464,6 +561,41 @@ describe('the two answers are graded together', () => {
     // Absent checks are not passing checks. This is the arm most likely to be
     // "simplified" into success by someone reading NO_CHECKS as "nothing wrong".
     expect(decide(matched(), NO_CHECKS)).toBe('CHECKS_ABSENT');
+  });
+
+  /**
+   * The case that made the positive decision rename itself.
+   *
+   * A commit whose only check run was `skipped` aggregates to `SUCCESS` with
+   * `succeeded: 0` — `aggregateCheckState` counts `neutral`/`skipped` as
+   * non-blocking, and a path-filtered or `if:`-guarded workflow job produces
+   * exactly that on ordinary repositories. The decision is reached, and the
+   * member used to be called `…_CHECKS_PASSED` with a sentence saying "every
+   * check on this commit had succeeded", which was false of this input while
+   * the counts printed directly above it said `0 succeeded`.
+   *
+   * The behaviour is unchanged and deliberate; what changed is that the name
+   * and the sentence now describe it. This test exists so the disclosure cannot
+   * quietly drift back.
+   */
+  it('reaches the positive decision for a commit whose only check was skipped', () => {
+    const skippedOnly = Object.freeze({
+      outcome: 'SUCCESS' as const,
+      counts: Object.freeze({
+        checkRuns: 1,
+        commitStatuses: 0,
+        failed: 0,
+        pending: 0,
+        succeeded: 0,
+        neutralOrSkipped: 1,
+      }),
+    });
+    expect(decide(matched(), skippedOnly)).toBe(POSITIVE_DELIVERY_DECISION);
+    // And the sentence the operator reads does not claim anything succeeded.
+    const sentence = DELIVERY_DECISION_DETAIL[POSITIVE_DELIVERY_DECISION];
+    expect(sentence).not.toContain('every check on this commit had succeeded');
+    expect(sentence).toContain('graded SUCCESS');
+    expect(sentence).toContain('nothing having succeeded');
   });
 
   it('refuses when no open pull request has this head', () => {
@@ -532,6 +664,23 @@ describe('the local subject is re-checked', () => {
   it('turns a green observation into a refusal when the subject moved', () => {
     expect(decideDelivery(GREEN(), subjectOf(), 'CHANGED')).toBe('SUBJECT_CHANGED');
     expect(decideDelivery(GREEN(), subjectOf(), 'UNAVAILABLE')).toBe('SUBJECT_REVALIDATION_FAILED');
+  });
+
+  /**
+   * The case where both refusals are true at once, which the declared order has
+   * to settle and did not.
+   *
+   * A review measured this against the documented precedence and found them
+   * disagreeing: the list put `SUBJECT_REVALIDATION_FAILED` first while the code
+   * answers `SUBJECT_CHANGED`. The code is the better answer — "these answers
+   * are about something else" is a fact about the artefact in hand, and it does
+   * not depend on the second look succeeding — so the list moved, and the
+   * behaviour is pinned here rather than left to whoever reads the ladder.
+   */
+  it('answers SUBJECT_CHANGED when the proof is about another subject and the re-read also failed', () => {
+    expect(decideDelivery(GREEN(subjectOf(HEAD)), subjectOf(OTHER), 'UNAVAILABLE')).toBe(
+      'SUBJECT_CHANGED',
+    );
   });
 
   /**
@@ -1034,16 +1183,86 @@ describe('the delivery command decides only when asked', () => {
     }
   });
 
-  it('decides nothing when the forge did not answer', async () => {
+  /**
+   * A refused observation is not a re-checked subject.
+   *
+   * The gate used to be "a request was attempted" rather than "an answer was
+   * settled", and a review drove a refusing forge through it: the report said
+   * "Local subject re-checked after the answers came back: UNCHANGED" on a run
+   * where no answer came back, and paid a whole `resolveRepository` — several
+   * Git children — to learn nothing. Both halves are asserted, the sentence and
+   * the absence of the work.
+   */
+  it('decides nothing when the forge did not answer, and re-reads nothing', async () => {
     const scratch = scratchRoot();
     const refusing: ForgeCommandRunner = async () =>
       commandResult({ started: false, outcome: 'NOT_FOUND', exitCode: null });
     const h = harness(scratch.root, { runner: refusing });
     try {
       await run(h, scratch.root, '--observe', '--decide');
-      expect(h.out.join('')).toContain('Decision     : OBSERVATION_UNSETTLED');
+      const text = h.out.join('');
+      expect(text).toContain('Decision     : OBSERVATION_UNSETTLED');
+      expect(text).toContain('The local subject was not re-checked');
+      expect(text).not.toContain('re-checked after the answers came back');
+      // One resolve and one load: the second pass never ran.
+      expect(h.calls()).toEqual({ loads: 1, resolves: 1 });
     } finally {
       h.restore();
+      scratch.cleanup();
+    }
+  });
+
+  /**
+   * The exit code is not the decision channel, and that is asserted rather than
+   * merely intended.
+   *
+   * A caller that could read "deliver this" out of an exit status would have
+   * been handed the machine-consumable merge signal this slice exists not to
+   * give. So the code answers exactly what it answered in slices 2 and 3 —
+   * "was the observation settled" — and `--decide` does not move it, whichever
+   * way the decision came out.
+   */
+  it('leaves the exit code answering only whether the observation settled', async () => {
+    const previous = process.exitCode;
+    const scratch = scratchRoot();
+    try {
+      // A positive decision: settled, so zero.
+      const green = harness(scratch.root);
+      try {
+        process.exitCode = undefined;
+        await run(green, scratch.root, '--observe', '--decide');
+        expect(green.out.join('')).toContain(`Decision     : ${POSITIVE_DELIVERY_DECISION}`);
+        expect(process.exitCode).toBe(EXIT_RUN_OK);
+      } finally {
+        green.restore();
+      }
+
+      // A failing check is an *answer*, so it is still zero. This is the pin
+      // that stops anyone turning the decision into an exit status.
+      const red = harness(scratch.root, { runner: runnerFor(HEAD, 'failure') });
+      try {
+        process.exitCode = undefined;
+        await run(red, scratch.root, '--observe', '--decide');
+        expect(red.out.join('')).toContain('Decision     : CHECKS_FAILED');
+        expect(process.exitCode).toBe(EXIT_RUN_OK);
+      } finally {
+        red.restore();
+      }
+
+      // An unsettled observation is not an answer, and that one does move it —
+      // exactly as it did before this slice existed.
+      const refused = harness(scratch.root, {
+        runner: async () => commandResult({ started: false, outcome: 'NOT_FOUND', exitCode: null }),
+      });
+      try {
+        process.exitCode = undefined;
+        await run(refused, scratch.root, '--observe', '--decide');
+        expect(process.exitCode).toBe(EXIT_RUN_REFUSED);
+      } finally {
+        refused.restore();
+      }
+    } finally {
+      process.exitCode = previous;
       scratch.cleanup();
     }
   });

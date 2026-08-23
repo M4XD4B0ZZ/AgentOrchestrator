@@ -244,10 +244,11 @@ export interface DeliveryObservationView {
  * came back", and a report that printed it only when it went wrong would leave
  * a reader unable to tell "it was checked and held" from "nobody checked".
  *
- * `null` is that second case, and it is a real one: nothing was observed, so
- * there was no window for the subject to move in and no re-read was taken. It
- * prints as its own phrase rather than as `UNCHANGED`, because claiming a check
- * that did not happen is the failure this field exists to prevent.
+ * `null` is that second case, and it is a real one: no settled answer was
+ * obtained — nothing was contacted, or the forge refused — so there was nothing
+ * to bind to a subject and no re-read was taken. It prints as its own phrase
+ * rather than as `UNCHANGED`, because claiming a check that did not happen is
+ * the failure this field exists to prevent.
  */
 export interface DeliveryDecisionView {
   readonly decision: DeliveryDecision;
@@ -347,7 +348,8 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
       `  ${DELIVERY_DECISION_DETAIL[decision.decision]}`,
       `  ${
         decision.revalidation === null
-          ? 'The local subject was not re-checked: nothing was observed, so nothing could go stale.'
+          ? 'The local subject was not re-checked: no settled answer was obtained, so there was ' +
+            'nothing to bind to it.'
           : `Local subject re-checked after the answers came back: ${decision.revalidation}.`
       }`,
       '',

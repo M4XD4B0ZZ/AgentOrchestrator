@@ -86,11 +86,11 @@ import type { ObservationSubject } from './forge-observation.js';
  * cannot forget it and a test can pin it by literal.
  */
 export const MERGE_ELIGIBILITY_SENTENCE =
-  'Merge eligibility is not established by any of these decisions, and cannot be by this build. ' +
-  'Draft status, mergeability, required reviews, branch protection and repository rulesets are ' +
-  'not observed here — and the rule endpoints answer the same way for "there are none" as for ' +
-  '"you may not read them", so their absence is not provable. A decision describes the moment it ' +
-  'was taken: anything that later acts on it must observe again first.';
+  'Merge eligibility is not established by any of these decisions, and cannot be by this build.\n' +
+  'Draft status, mergeability, required reviews, branch protection and repository rulesets are not\n' +
+  'observed here — and the rule endpoints answer the same way for "there are none" as for "you may\n' +
+  'not read them", so their absence is not provable. A decision describes the moment it was taken:\n' +
+  'anything that later acts on it must observe again first.';
 
 /**
  * Every way one delivery decision can come out. Closed, and total over the
@@ -124,16 +124,22 @@ export const DELIVERY_DECISIONS = [
    * the commit, lands — an unreadable attestation is not an observation.
    */
   'OBSERVATION_UNSETTLED',
-  /** The local subject could not be re-established after the observation. */
-  'SUBJECT_REVALIDATION_FAILED',
   /**
    * The subject the answers are about is not the subject in front of us — the
    * task pinned a new commit, its state changed, the delivery target now
    * resolves elsewhere, or the proof was minted for a different subject
    * entirely. A green answer for commit A never satisfies a question about
    * commit B, and this is where that rule is enforced at the decision layer.
+   *
+   * Ahead of the next member, and the order was corrected to match the code
+   * after a review found the two disagreeing. "These answers are about
+   * something else" is a fact about the artefact in hand; "the subject could
+   * not be re-read" is a fact about the world a moment later, and the first is
+   * the one worth reading when both hold.
    */
   'SUBJECT_CHANGED',
+  /** The local subject could not be re-established after the observation. */
+  'SUBJECT_REVALIDATION_FAILED',
   /** At least one check attached to exactly this commit did not succeed. */
   'CHECKS_FAILED',
   /** More than one open pull request claims this exact head. AO cannot tell which. */
@@ -154,15 +160,32 @@ export const DELIVERY_DECISIONS = [
   /**
    * The only positive decision. It claims exactly two things, both about the
    * instant of the observation: exactly one **open** pull request had this
-   * exact commit as its head, and every check attached to this exact commit had
-   * succeeded.
+   * exact commit as its head, and this commit's check state graded `SUCCESS`.
+   *
+   * ── Why the second half names slice 2's word instead of glossing it ───────
+   *
+   * The first version of this member was `…_CHECKS_PASSED` and its sentence
+   * said "every check on this commit had succeeded". A review showed that
+   * false, with the product's own code: `aggregateCheckState` grades
+   * `neutral` and `skipped` as non-blocking, so a commit whose *only* check run
+   * was `skipped` aggregates to `SUCCESS` with `succeeded: 0`. That is not
+   * exotic — a path-filtered or `if:`-guarded workflow job produces exactly it,
+   * on this repository included — and the report contradicted itself two lines
+   * apart, printing `0 succeeded … 1 neutral/skipped` directly above the claim
+   * that every check had succeeded.
+   *
+   * So this member carries slice 2's own graded word and adds no stronger
+   * English on top of it. `SUCCESS` has one definition in this product, it
+   * lives where the grading happens, and the counts that show which arm applied
+   * are printed one line above this decision. A second gloss here was a second
+   * definition, and the second one was wrong.
    *
    * It does not claim the pull request is mergeable, that it is not a draft,
    * that reviews are satisfied, that branch rules are met, that any check was
-   * *required*, or that any of it is still true now. See
-   * {@link MERGE_ELIGIBILITY_SENTENCE}.
+   * *required*, that anything actually ran, or that any of it is still true
+   * now. See {@link MERGE_ELIGIBILITY_SENTENCE}.
    */
-  'PULL_REQUEST_MATCHED_CHECKS_PASSED',
+  'PULL_REQUEST_MATCHED_CHECKS_SUCCESS',
 ] as const;
 
 export type DeliveryDecision = (typeof DELIVERY_DECISIONS)[number];
@@ -194,21 +217,28 @@ export const DELIVERY_DECISION_DETAIL: Readonly<Record<DeliveryDecision, string>
   CHECKS_ABSENT:
     'The pull request matched and this commit carries no checks at all. Absent checks are not ' +
     'passing checks.',
-  PULL_REQUEST_MATCHED_CHECKS_PASSED:
+  PULL_REQUEST_MATCHED_CHECKS_SUCCESS:
     'At the moment of the observation, exactly one open pull request had this exact commit as its ' +
-    'head and every check on this commit had succeeded. Nothing was merged and nothing was granted.',
+    "head, and this commit's check state graded SUCCESS: nothing failing and nothing still " +
+    'running. Neutral and skipped runs count as non-blocking, so read the counts above — a commit ' +
+    'whose only checks were skipped reaches this decision with nothing having succeeded. Nothing ' +
+    'was merged and nothing was granted.',
 });
 
 /**
  * The one positive member, named once.
  *
- * Exported so "is this decision a positive one" has a single answer in the
- * codebase rather than a comparison spelled out wherever it is asked. The suite
- * partitions the vocabulary against this constant, so a second positive member
- * added and forgotten here turns a test red rather than quietly widening what
- * counts as success.
+ * What this is for today, stated accurately: the suite partitions the
+ * vocabulary against it, so a second positive member added and forgotten here
+ * turns a test red rather than quietly widening what counts as success.
+ *
+ * It is **not** yet in use anywhere in `src/`, and the first version of this
+ * comment claimed it existed so the question would not be "spelled out wherever
+ * it is asked" — nothing asks. The name is kept because the concept needs one
+ * owner before the slice that consumes it arrives, and because the partition
+ * assertion has to compare against something.
  */
-export const POSITIVE_DELIVERY_DECISION = 'PULL_REQUEST_MATCHED_CHECKS_PASSED' as const;
+export const POSITIVE_DELIVERY_DECISION = 'PULL_REQUEST_MATCHED_CHECKS_SUCCESS' as const;
 
 /** `true` for the one decision that says both facts landed the good way. */
 export function isPositiveDeliveryDecision(decision: DeliveryDecision): boolean {
@@ -363,12 +393,26 @@ export function decideDelivery(
   //
   // Also a floor today, and measured as one: the three arms above name every
   // settled check word except `SUCCESS`, so replacing this with an
-  // unconditional success kills no test. What keeps it honest is not a mutant
-  // but the partition assertion in the suite, which fails the moment the mint's
-  // settled set grows a fifth member — turning a silent grading into a decision
-  // somebody has to take.
+  // unconditional success kills no test.
+  //
+  // What keeps it honest is a probe of the mint, and this sentence took two
+  // corrections to become true of one. It first claimed the suite "fails the
+  // moment the mint's settled set grows a fifth member", while the assertion
+  // derived from `RECORDABLE_CHECK_OUTCOMES` — a hand-written array in another
+  // module that nothing tied to the mint. The repair probed the mint but only
+  // in one payload shape, and the mint refuses anything but `NO_CHECKS` that
+  // arrives without counts, so a widened settled set was still refused by the
+  // *counts* gate and the probe could not tell the two refusals apart. Both
+  // versions were counter-proved empty.
+  //
+  // What is pinned now, exactly: the suite asks the mint, in both payload
+  // shapes, about every word in the declared outcome union plus every raw
+  // GitHub check word this build knows, upper-cased — and asserts the accepted
+  // set is exactly `RECORDABLE_CHECK_OUTCOMES`. Adding `STALE` to the mint's
+  // private set turns it red; so does adding a refusal word; so does dropping
+  // `NO_CHECKS`. All three are measured, not asserted.
   return PASSING_CHECK_OUTCOMES.has(facts.checkOutcome)
-    ? 'PULL_REQUEST_MATCHED_CHECKS_PASSED'
+    ? 'PULL_REQUEST_MATCHED_CHECKS_SUCCESS'
     : 'OBSERVATION_UNSETTLED';
 }
 

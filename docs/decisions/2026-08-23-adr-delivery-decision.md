@@ -121,9 +121,12 @@ asserted, not left to whoever reads the ladder:
 2. `NOT_DECIDED` — nothing was contacted;
 3. `OBSERVATION_UNSETTLED` — the forge did not answer both questions, or the
    proof cannot be read, or its two halves name different commits;
-4. `SUBJECT_REVALIDATION_FAILED` — the local subject could not be re-read;
-5. `SUBJECT_CHANGED` — the answers are about a different subject from the one in
-   front of us now;
+4. `SUBJECT_CHANGED` — the answers are about a different subject from the one in
+   front of us now. Ahead of the next member: a review measured the code
+   answering this when both were true while the list claimed the other, and the
+   code is the better answer — "these answers are about something else" does not
+   depend on the second look having succeeded;
+5. `SUBJECT_REVALIDATION_FAILED` — the local subject could not be re-read;
 6. `CHECKS_FAILED` — ahead of every pull-request answer, because a pull request
    at a red commit does not make the commit green;
 7. `PULL_REQUEST_AMBIGUOUS` — AO cannot tell which pull request it would mean;
@@ -131,7 +134,7 @@ asserted, not left to whoever reads the ladder:
    one is the next action and can be taken while checks run;
 9. `CHECKS_PENDING`;
 10. `CHECKS_ABSENT` — **not** a success. Zero checks is the absence of evidence;
-11. `PULL_REQUEST_MATCHED_CHECKS_PASSED` — the only positive.
+11. `PULL_REQUEST_MATCHED_CHECKS_SUCCESS` — the only positive.
 
 No member may contain a word that reads as permission. That is a test over the
 *derived* vocabulary rather than a list of names, so a member added tomorrow is
@@ -153,11 +156,46 @@ of the three kills no test:
   mutant that breaks the mint's derivation **is** killed — so a change there
   makes these live rather than leaving them quietly wrong;
 - the closed success set. The three arms above it name every settled check word
-  except `SUCCESS`. What keeps it honest is the partition assertion, which fails
-  the moment the mint's settled set grows a fifth member.
+  except `SUCCESS`.
 
 This is written down rather than glossed because "defence in depth" is exactly
 how an unreachable branch gets mistaken for a working one.
+
+The third floor's justification took **two corrections** before it was true, and
+both were found by counter-proof rather than by reading:
+
+1. it first cited a partition assertion that "fails the moment the mint's settled
+   set grows a fifth member" — while the assertion derived from
+   `RECORDABLE_CHECK_OUTCOMES`, a hand-written array in another module that
+   nothing tied to the mint. Adding `STALE` to the mint left every test green;
+2. the repair probed the mint directly, but in one payload shape only. The mint
+   refuses anything but `NO_CHECKS` that arrives without counts, so a widened
+   settled set was still refused — by the *counts* gate — and the probe could
+   not tell the two refusals apart. Two mutants survived it as well.
+
+What is pinned now: the suite asks the mint, in **both** payload shapes, about
+every word in the declared outcome union plus every raw GitHub check word this
+build knows, upper-cased, and asserts the accepted set is exactly
+`RECORDABLE_CHECK_OUTCOMES`. Three mutants are killed by it — mint accepts
+`STALE`, mint accepts a refusal word, mint drops `NO_CHECKS`.
+
+### The positive decision names slice 2's word, and does not gloss it
+
+The member was `…_CHECKS_PASSED`, and its sentence said "every check on this
+commit had succeeded". A review showed that false using the product's own
+grading: `aggregateCheckState` counts `neutral` and `skipped` as non-blocking,
+so a commit whose *only* check run was `skipped` aggregates to `SUCCESS` with
+`succeeded: 0`. A path-filtered or `if:`-guarded workflow job produces exactly
+that, on this repository included — and the report contradicted itself two lines
+apart, printing `0 succeeded … 1 neutral/skipped` above the claim that every
+check had succeeded.
+
+The behaviour is slice 2's and is unchanged. What changed is that slice 4 stops
+adding a second, stronger English definition on top of it: the member is
+`PULL_REQUEST_MATCHED_CHECKS_SUCCESS`, it carries slice 2's own graded word, and
+its sentence names the definition and points at the counts printed above it.
+Pinned by a test that drives the skipped-only case to the positive decision and
+asserts the sentence does not claim anything succeeded.
 
 ## The local race, and the honest limit of what is closed
 
@@ -293,6 +331,19 @@ is reported to a person. That is the whole product effect.
 - **`L-V4-04-6`** — the decision is not recorded anywhere, so "AO decided X at
   time T" is not auditable after the process ends. Deliberate; revisit only if a
   consumer appears that a fresh observation cannot serve.
+- **`L-V4-04-7`** — the positive decision is reachable for a commit on which
+  **nothing succeeded**. Slice 2 grades `neutral`/`skipped` as non-blocking, so
+  a commit whose only check run was `skipped` aggregates to `SUCCESS` with
+  `succeeded: 0`. That grading is slice 2's decision and is unchanged here; what
+  slice 4 owes is disclosure, which is in the member's sentence and pinned by
+  test. A decision that distinguished "something ran and passed" from "nothing
+  blocking ran" would need the counts in the vocabulary, and that is a wider
+  contract than this slice takes.
+- **`L-V4-04-8`** — `deliveryObservationFactsOf`'s `catch` — a value that passes
+  the registry gate and throws on the private-field read — is unpinned by any
+  test in this slice. It needs registry capture, which is slice 3's boundary.
+  The prototype-derived forgery this suite drives is refused one step earlier,
+  at the gate, and the test says so rather than claiming the `catch`.
 
 ## The next slice, named only
 

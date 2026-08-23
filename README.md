@@ -8698,22 +8698,22 @@ agent-loop delivery --repository D:\AgentOrchestrator --task T-014 --observe --d
 ```
 
 ```
-Decision     : PULL_REQUEST_MATCHED_CHECKS_PASSED
-  At the moment of the observation, exactly one open pull request had this exact
-  commit as its head and every check on this commit had succeeded. Nothing was
-  merged and nothing was granted.
+Decision     : PULL_REQUEST_MATCHED_CHECKS_SUCCESS
+  At the moment of the observation, exactly one open pull request had this exact commit as its head, and this commit's check state graded SUCCESS: nothing failing and nothing still running. Neutral and skipped runs count as non-blocking, so read the counts above — a commit whose only checks were skipped reaches this decision with nothing having succeeded. Nothing was merged and nothing was granted.
   Local subject re-checked after the answers came back: UNCHANGED.
 
-Merge eligibility is not established by any of these decisions, and cannot be by
-this build. Draft status, mergeability, required reviews, branch protection and
-repository rulesets are not observed here — and the rule endpoints answer the
-same way for "there are none" as for "you may not read them", so their absence is
-not provable. A decision describes the moment it was taken: anything that later
-acts on it must observe again first.
+Merge eligibility is not established by any of these decisions, and cannot be by this build.
+Draft status, mergeability, required reviews, branch protection and repository rulesets are not
+observed here — and the rule endpoints answer the same way for "there are none" as for "you may
+not read them", so their absence is not provable. A decision describes the moment it was taken:
+anything that later acts on it must observe again first.
 ```
 
-That closing paragraph is printed under **every** decision, including the good
-one, and it is the honest half of the slice.
+Those lines are the emitter's, not a paraphrase — a review caught the first
+version of this block re-wrapping a sentence the command prints unwrapped, so
+the sample now carries the real line breaks. The closing paragraph is printed
+under **every** decision, including the good one, and it is the honest half of
+the slice.
 
 ### Why it is not called merge eligibility
 
@@ -8733,9 +8733,9 @@ own PR #57 is `CLEAN` with *zero* required checks, so `CLEAN` there means
 ### Eleven answers, one of them positive
 
 `SUBJECT_NOT_ESTABLISHED`, `NOT_DECIDED`, `OBSERVATION_UNSETTLED`,
-`SUBJECT_REVALIDATION_FAILED`, `SUBJECT_CHANGED`, `CHECKS_FAILED`,
+`SUBJECT_CHANGED`, `SUBJECT_REVALIDATION_FAILED`, `CHECKS_FAILED`,
 `PULL_REQUEST_AMBIGUOUS`, `PULL_REQUEST_REQUIRED`, `CHECKS_PENDING`,
-`CHECKS_ABSENT` — and `PULL_REQUEST_MATCHED_CHECKS_PASSED`.
+`CHECKS_ABSENT` — and `PULL_REQUEST_MATCHED_CHECKS_SUCCESS`.
 
 The order is the precedence, and it is asserted rather than left to whoever
 reads the ladder: a failed check outranks every pull-request answer, ambiguity
@@ -8782,7 +8782,7 @@ observation settled".
 
 See [`docs/decisions/2026-08-23-adr-delivery-decision.md`](docs/decisions/2026-08-23-adr-delivery-decision.md)
 for the measurements, the rejected state-machine options and the residuals
-`L-V4-04-1..6`.
+`L-V4-04-1..8`.
 
 ### Carried forward from V4 slice 4, deliberately
 
@@ -8800,6 +8800,14 @@ for the measurements, the rejected state-machine options and the residuals
   (2 measured on PR #57). Inherited from slice 2.
 - **L-V4-04-6 — the decision is not auditable after the process ends.** Nothing
   records it, because a stored verdict is a worse artefact than a stored fact.
+- **L-V4-04-7 — the positive decision is reachable for a commit on which nothing
+  succeeded.** Slice 2 grades `neutral`/`skipped` as non-blocking, so a commit
+  whose only check run was `skipped` aggregates to `SUCCESS` with `succeeded: 0`.
+  That grading is slice 2’s and is unchanged; what slice 4 owes is disclosure,
+  which is in the decision’s own sentence and pinned by test.
+- **L-V4-04-8 — the safe accessor’s `catch` is unpinned by this slice.** It needs
+  registry capture, which is slice 3’s boundary; the prototype forgery driven
+  here is refused one step earlier, at the gate.
 
 ## Not implemented yet
 

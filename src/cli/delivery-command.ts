@@ -190,11 +190,11 @@ export const RECORD_OPTION_DESCRIPTION =
  */
 export const DECIDE_OPTION_DESCRIPTION =
   'Classify this invocation\'s own answers into one delivery decision. Requires --observe: a ' +
-  'stored record can never produce a decision, and without a fresh observation the answer is ' +
-  'always NOT_DECIDED. The local subject is re-read afterwards and the decision is refused if it ' +
-  'moved. This does not establish merge eligibility — draft state, mergeability, reviews and ' +
-  'branch rules are not observed, and their absence is not provable from what GitHub returns. ' +
-  'Writes nothing.';
+  'stored record can never produce a decision, so once a subject exists and nothing was ' +
+  'contacted the answer is NOT_DECIDED. The local subject is re-read after the answers come ' +
+  'back and the decision is refused if it moved. This does not establish merge eligibility — ' +
+  'draft state, mergeability, reviews and branch rules are not observed, and their absence is ' +
+  'not provable from what GitHub returns. Writes nothing.';
 
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
@@ -288,12 +288,17 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           : null;
 
       // The second look at the local world, taken *after* the answers came
-      // back and before anything is reported against them. Only on the decide
-      // path, and only when something was actually observed: there is nothing
-      // to invalidate otherwise, and a re-read taken anyway would print a
-      // verdict about a race that could not have happened.
+      // back and before anything is reported against them.
+      //
+      // Gated on the observation having **settled**, not merely on a request
+      // having been attempted. The first version used `observation !== null`,
+      // and a review drove a refusing forge through it: the report then said
+      // "Local subject re-checked after the answers came back: UNCHANGED" on a
+      // run where no answer came back at all. It also paid a full
+      // `resolveRepository` — several Git children — to learn nothing. There is
+      // no window to protect when nothing was established.
       const revalidation: SubjectRevalidation | null =
-        options.decide === true && subject.ok && observation !== null
+        options.decide === true && subject.ok && conclusion === 'OBSERVED'
           ? await revalidateLocalSubject(options, resolve, load, {
               subject: subject.subject,
               taskState: subject.taskState,
