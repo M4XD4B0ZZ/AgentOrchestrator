@@ -1299,3 +1299,192 @@ describe('the probe costs what its comment says it costs', () => {
     expect(asked).toHaveLength(1);
   });
 });
+
+/* ═══ 13. The trim is upstream, so the fix has to be too ═══════════════════ */
+
+/**
+ * The fifth instance of one defect, and the one that finally located its cause.
+ *
+ * `runGitCommand` returns `stdout.trim()`, which removes every trailing
+ * whitespace character and not merely the line terminator. `git submodule
+ * status` prints paths verbatim, so a **final** gitlink whose path ends in
+ * U+00A0 arrives at this module already shortened.
+ *
+ * Round six answered that by *detecting* the collapse: two `-` lines naming one
+ * path proves a rewrite, so fall back to the index. That guard runs on the list
+ * **after** the `-`-only filter, and so it cannot see the case where the
+ * shortened path collides with a **populated** sibling — the populated line is
+ * already gone. Measured at that HEAD: `vendnb` populated, `vendnb `
+ * unpopulated and holding a planted file, probe answered `true` in three calls,
+ * having confirmed and skipped `vendnb` twice.
+ *
+ * So the parser reads `rawStdout`. The intact path then fails
+ * `isShellInertArgument`, the confirmation answers `UNUSABLE_PATH`, and the
+ * probe takes the NUL-separated index, which no trim can shorten. Detecting an
+ * upstream rewrite four different ways was never going to be as good as not
+ * having one.
+ */
+describe('a gitlink path is read as Git wrote it, not as the seam trimmed it', () => {
+  const NBSP = '\u00A0';
+
+  function nbspSiblingWithOnePopulated(root: string): void {
+    const inner = createRepoFixture({
+      defaultBranch: 'main',
+      profile: null,
+      files: { 'f.txt': `one${NEWLINE}` },
+    });
+    for (const path of ['vendnb', `vendnb${NBSP}`]) {
+      git(root, [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '--quiet',
+        inner.split('\\').join('/'),
+        path,
+      ]);
+    }
+    git(root, ['add', '--all']);
+    git(root, ['commit', '--quiet', '-m', 'two submodules']);
+    // Only the shorter one is deinitialised out — the longer stays populated,
+    // which is what removes it from the `-` list and blinds a duplicate guard.
+    git(root, ['submodule', 'deinit', '--force', `vendnb${NBSP}`]);
+  }
+
+  it('reports a file planted behind a path that collides with a populated sibling', async () => {
+    const root = repo();
+    nbspSiblingWithOnePopulated(root);
+
+    // The premise, in three measured halves.
+    const listing = await runGitCommand(root, ['submodule', 'status']);
+    expect(listing.outcome).toBe('OK');
+    // Git wrote the path intact...
+    expect(listing.rawStdout ?? '').toContain(`vendnb${NBSP}`);
+    // ...and the trimmed reading this module used to parse has lost it.
+    expect(listing.stdout).not.toContain(`vendnb${NBSP}`);
+    // ...while Git's own cleanliness reading sees nothing at all.
+    writeFileSync(join(root, `vendnb${NBSP}`, 'planted.ts'), `payload${NEWLINE}`, 'utf8');
+    expect(git(root, [...WORKTREE_CLEANLINESS_ARGS]).trim()).toBe('');
+
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(false);
+  });
+
+  it('reports the same shape as clean when nothing is planted', async () => {
+    const root = repo();
+    nbspSiblingWithOnePopulated(root);
+
+    expect(await observeWorktreeCleanliness(runGitCommand, root)).toBe(true);
+  });
+
+  /**
+   * And the parser really is reading `rawStdout`: a runner whose two fields
+   * disagree is answered from the untrimmed one. Without this, a runner that
+   * omits `rawStdout` — every stub in this file — would be the only evidence,
+   * and it exercises the fallback rather than the fix.
+   */
+  it('parses the untrimmed bytes when a runner supplies both', async () => {
+    const SHA = 'd'.repeat(40);
+    const CLEAN = { outcome: 'OK' as const, stdout: '', stderr: '', exitCode: 0 };
+    const asked: string[][] = [];
+    const gitRunner = (async (_cwd, args) => {
+      asked.push([...args]);
+      if (args[0] === 'status') return CLEAN as never;
+      if (args[0] === 'submodule') {
+        return {
+          ...CLEAN,
+          stdout: `-${SHA} vendnb`,
+          rawStdout: `-${SHA} vendnb${NBSP}\n`,
+        } as never;
+      }
+      return CLEAN as never;
+    }) as GitRunner;
+
+    // The untrimmed path is not a safe argument, so the confirmation is never
+    // issued and the whole-index fallback answers instead.
+    expect(await observeWorktreeCleanliness(gitRunner, 'C:/nowhere', () => [])).toBe(true);
+    expect(asked.some((args) => args[0] === 'ls-files' && args.includes('--'))).toBe(false);
+    expect(asked.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(true);
+  });
+});
+
+
+/* ═══ 14. The duplicate guard, now that it is the second line of defence ═══ */
+
+/**
+ * `rawStdout` is **optional** on `GitCommandResult`, so a runner that does not
+ * supply it — every injected one in this suite, and any future caller's — hands
+ * the parser the trimmed reading and can still collapse two paths into one.
+ *
+ * The duplicate guard is what catches that. With the untrimmed read in place it
+ * is unreachable through the production runner, and a mutation run duly reported
+ * it as a survivor: nothing exercised the arm any more. This case does, by
+ * supplying the trimmed shape directly.
+ *
+ * Two `-` lines can never legitimately name one path — an index cannot hold two
+ * gitlinks in one place — so the duplicate is proof, not a heuristic.
+ */
+describe('the duplicate guard still catches a collapse a runner hands it', () => {
+  const CLEAN = { outcome: 'OK' as const, stdout: '', stderr: '', exitCode: 0 };
+  const SHA = 'e'.repeat(40);
+  const NUL = String.fromCharCode(0);
+  const NBSP = '\u00A0';
+
+  /** `<mode> <sha> <stage>\t<path>`, NUL-terminated, as `ls-files -z` prints. */
+  function indexEntries(...paths: readonly string[]): string {
+    return paths.map((path) => `160000 ${SHA} 0\t${path}${NUL}`).join('');
+  }
+
+  function trimmedOnlyRunner(
+    listing: string,
+    indexStdout: string,
+  ): GitRunner & { readonly asked: string[][] } {
+    const asked: string[][] = [];
+    const runner = (async (_cwd, args) => {
+      asked.push([...args]);
+      if (args[0] === 'status') return CLEAN as never;
+      // No `rawStdout`: this is the shape a runner without it produces.
+      if (args[0] === 'submodule') return { ...CLEAN, stdout: listing } as never;
+      if (args[0] === 'ls-files' && !args.includes('--')) {
+        return { ...CLEAN, stdout: indexStdout } as never;
+      }
+      return CLEAN as never;
+    }) as GitRunner;
+    return Object.assign(runner, { asked });
+  }
+
+  it('takes the index when the listing names one path twice', async () => {
+    const git = trimmedOnlyRunner(
+      `-${SHA} vendnb\n-${SHA} vendnb`,
+      indexEntries('vendnb', `vendnb${NBSP}`),
+    );
+
+    // Answered from the index, which carries both real paths...
+    expect(await observeWorktreeCleanliness(git, 'C:/nowhere', () => [])).toBe(true);
+    // ...and the pathspec-bounded confirmation was never issued, because the
+    // duplicate short-circuits before it.
+    expect(git.asked.some((args) => args[0] === 'ls-files' && args.includes('--'))).toBe(false);
+    expect(git.asked.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(true);
+  });
+
+  /**
+   * The control: the same runner shape with two *distinct* paths confirms
+   * normally, so the case above is about the duplicate and not about the stub.
+   */
+  it('confirms normally when the listing names two distinct paths', async () => {
+    const git = trimmedOnlyRunner(`-${SHA} alpha\n-${SHA} beta`, '');
+    const seen: string[][] = [];
+    const withConfirm = (async (cwd, args) => {
+      seen.push([...args]);
+      if (args[0] === 'ls-files' && args.includes('--')) {
+        return { ...CLEAN, stdout: indexEntries('alpha', 'beta') } as never;
+      }
+      return await git(cwd, args);
+    }) as GitRunner;
+
+    expect(await observeWorktreeCleanliness(withConfirm, 'C:/nowhere', () => [])).toBe(true);
+    // Recorded on the wrapper, not on the inner runner: the wrapper answers the
+    // confirmation itself, so the inner one never sees it.
+    expect(seen.some((args) => args[0] === 'ls-files' && args.includes('--'))).toBe(true);
+    expect(seen.some((args) => args[0] === 'ls-files' && !args.includes('--'))).toBe(false);
+  });
+});

@@ -3545,20 +3545,45 @@ its result.
 **A third review then found the same defect again, through a different helper —
 and one this module did not write.** `parseSubmoduleStatus` called
 `line.trimEnd()`, which strips every ECMAScript WhiteSpace, so a path ending in
-U+00A0 collapsed onto its sibling exactly as the describe suffix had. Worse, the
-`trimEnd` was not the only culprit: `runGitCommand` trims a command's whole
-stdout, so a **final** path ending in such a character arrives here already
-shortened, and no parser change can recover it.
+U+00A0 collapsed onto its sibling exactly as the describe suffix had. And
+`trimEnd` was not the only culprit: `runGitCommand` returns `stdout.trim()`, so a
+**final** path ending in such a character arrives already shortened.
 
-So the third guard does not try to prevent the rewrite; it detects it. Two `-`
-lines can never legitimately name one path — an index cannot hold two gitlinks in
-one place — so a duplicate is proof that something upstream rewrote one. The
-probe then takes the index, which is NUL-separated and immune to a trim, and gets
-the right answer rather than merely refusing.
+The answer at that point was a third guard that *detected* the collapse — two `-`
+lines naming one path proves a rewrite, so take the NUL-separated index instead.
+It is a backstop, and a backstop hides what it protects: with it in place,
+mutation runs reported *both* earlier rewrites as survivors.
 
-That guard is a backstop, and a backstop hides what it protects: with it in
-place, mutation runs reported *both* earlier rewrites as survivors. The cases
-that keep them dead are the ones with no collision to fall back on.
+**A fourth review then found the same defect a fifth time**, and this is the one
+that matters, because it shows why three rounds of detectors were the wrong
+shape. The duplicate guard runs on the list **after** the `-`-only filter. When
+the shortened path collides with a **populated** sibling, that sibling's line is
+already gone, no duplicate forms, the index confirms the real gitlink, its `.git`
+makes the loop skip it, and the directory holding the writer's bytes is never
+read. Measured: `vendnb` populated, `vendnb ` unpopulated and holding a
+planted file, `git status` empty, probe **`true`**.
+
+So the cause is fixed instead. `GitCommandResult` now carries `rawStdout` —
+stdout exactly as Git wrote it — and the one reader that parses *paths* out of a
+command's output uses it. The intact `vendnb ` then fails
+`SAFE_ARG_PATTERN`, the confirmation answers `UNUSABLE_PATH`, and the probe takes
+the index. Detecting an upstream rewrite four different ways was never going to
+be as good as not having one.
+
+The duplicate guard stays, because `rawStdout` is optional and a runner that
+omits it can still be handed a collapsed listing — and it is pinned there, which
+a mutation run demanded after reporting it a survivor once the cause was fixed.
+
+**On the shape of all this, because the record is the useful part.** The same
+defect — a gitlink path silently rewritten before the reader sees it — was found
+five times across four independent reviews. Four of those rounds answered it with
+a *detector*: don't strip the suffix; take only `-` lines; catch the duplicate;
+compare exact paths. Each detector was correct about the fixture that produced it
+and blind to the next one, because a detector can only see the collapses it was
+shaped for. The fifth round asked where the characters actually go, found a
+`.trim()` two modules upstream, and read the bytes Git wrote instead. That is the
+first change in the sequence that removed the *class* rather than an instance,
+and it is why the guards above it became hard to kill.
 
 Two things the probe still cannot see are recorded rather than claimed closed:
 a **fabricated** `.git` inside a gitlink (**L-V3-11-13**) and a gitlink nested
@@ -3590,16 +3615,19 @@ reports `M vendor`), and it runs first and produces `approvedPaths`, so the path
 is either refused before any commit exists or was approved anyway. Recorded
 under L-V3-11-5 as an asymmetry, not as a defect.
 
-**Counter-proof: 30 mutants, 30 killed.** Both halves of the transport rule
-(latch and guard) and the latch's *unlatched* variant; three arms of the event
-reader; nineteen arms of the gitlink probe — both of its sources, every
-distinction between "the answer is no" and "the question could not be put", the
-three guards that stop one gitlink answering for another, and the chunking of the
-index confirmation; the probe's wiring into `observeRuntime` **and** into the
+**Counter-proof: 29 mutants, 29 killed**, every one of them re-run against the
+final HEAD rather than carried forward — the set churned four times as the probe
+was rewritten, and a count inherited from an earlier shape says nothing about the
+code that shipped. Both halves of the transport rule (latch and guard) and the
+latch's *unlatched* variant; three arms of the event reader; eighteen arms of the
+gitlink probe — both of its sources, the untrimmed read, every distinction
+between "the answer is no" and "the question could not be put", the guards that
+stop one gitlink answering for another, and the chunking of the index
+confirmation; the probe's wiring into `observeRuntime` **and** into the
 destructive removal gate; and three of the budget split.
 
-**Eight survived their first run**, and they are recorded rather than quietly
-re-run, because what they exposed is the point:
+**Nine survived a first run** across the rounds, and they are recorded rather
+than quietly re-run, because what they exposed is the point:
 
 - treating an unparsed `submodule status` line as "no submodule" — which is why
   the probe's failure arms have cases at all;
@@ -3623,7 +3651,14 @@ re-run, because what they exposed is the point:
   collision (a lone `vendor (old)`, and a `vendnb ` that is not the last
   line) restore the distinction, and both mutants die on them.
 
-Three of the eight are **equivalent for correctness**: the index fallback reaches
+- and the **duplicate guard itself**, once the untrimmed read closed the cause.
+  Nothing exercised that arm any more through the production runner, so the
+  mutation run reported it a survivor — correctly. It is reachable only for a
+  runner that omits `rawStdout`, which is where it is now pinned. A guard whose
+  cause has been fixed is not automatically dead, but it is automatically
+  unpinned, and the difference has to be measured rather than assumed.
+
+Three of the nine are **equivalent for correctness**: the index fallback reaches
 the right answer without any of them. They are kept because what they buy is not the
 answer but the *route* — an ordinary repository with a checked-out submodule
 staying on the bounded pathspec call instead of enumerating the whole index on
@@ -4590,8 +4625,27 @@ and because the failure mode it describes — a command that cannot start is
   `51 + len(path)` bytes, so this repository's own shape (82.7 B/entry) reaches
   it at about 12,700 files. Fail-closed on authority, a permanent stop on
   availability, and narrower than the stall it replaced — the first design
-  stalled that repository at *any* size. **Scope:**
-  `worktree/worktree-cleanliness.ts`.
+  stalled that repository at *any* size.
+
+  A second route into this fallback was measured and **closed**, and is recorded
+  because it is the shape of mistake this register exists for: the index
+  confirmation once put every submodule path on one command line, which the
+  platform refuses past ~32,700 characters, and the refusal sent the probe here.
+  A clean superproject with 1,600 submodules therefore answered "not
+  established". The confirmation is chunked now, so only an unusable
+  `submodule status` reaches the fallback.
+  **Scope:** `worktree/worktree-cleanliness.ts`.
+- **L-V3-11-16 — `rawStdout` is optional, so a runner that omits it reads a
+  trimmed listing.** `GitCommandResult.rawStdout` is what stops a gitlink path
+  ending in whitespace from being silently shortened, and the production runner
+  supplies it. Nothing *requires* it: an injected runner that does not — every
+  stub in the suite, and any future caller — hands the parser the trimmed reading
+  and can still collapse two paths into one. The duplicate guard catches that and
+  is pinned there, so the fallback is correct rather than merely present; but the
+  type does not make the safe reading mandatory, and a caller cannot be told it
+  got the unsafe one. Making it required is a change to a widely-injected seam
+  and is its own decision.
+  **Scope:** `worktree/git-command.ts`, `worktree/worktree-cleanliness.ts`.
 - **L-V3-11-14 — a gitlink nested inside a populated submodule is not
   probed.** `git submodule status` is not recursive, and recursion into
   arbitrary directories is deliberately outside this probe's remit. So the

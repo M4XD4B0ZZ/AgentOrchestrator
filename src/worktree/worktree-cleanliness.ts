@@ -287,7 +287,20 @@ async function gitlinkPaths(
     // takes one per run. Worth knowing before anything adds a second probe.
     if (listing.stdout === '') return [];
 
-    const parsed = parseSubmoduleStatus(listing.stdout);
+    // `rawStdout` when the runner supplies it, because {@link GitCommandResult}
+    // `stdout` is `.trim()`ed and this is the one reader that parses **paths**
+    // out of a command's output. A final gitlink path ending in U+00A0 (or
+    // U+3000, U+2009, U+FEFF) arrives shortened otherwise, and a shortened path
+    // that matches a real sibling gitlink makes the loop below read the wrong
+    // directory entirely. Measured at the previous HEAD: a worktree with
+    // `vendnb` populated and `vendnb ` holding a planted file answered
+    // **clean**, in three calls, having confirmed and skipped `vendnb` twice.
+    //
+    // The intact path is what closes it, and not because this module handles it
+    // specially: `vendnb ` is not a `SAFE_ARG_PATTERN` argument, so the
+    // confirmation answers `UNUSABLE_PATH` and the probe takes the NUL-separated
+    // index, which no trim can shorten.
+    const parsed = parseSubmoduleStatus(listing.rawStdout ?? listing.stdout);
     // Two `-` lines can never legitimately name one path: an index cannot hold
     // two gitlinks at the same place. A duplicate therefore proves a path was
     // **rewritten between Git and here**, and it is not this module that did it —

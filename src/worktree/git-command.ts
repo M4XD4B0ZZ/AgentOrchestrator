@@ -61,6 +61,27 @@ export interface GitCommandResult {
   /** Trimmed stdout on `OK`, the empty string otherwise. */
   readonly stdout: string;
   /**
+   * Stdout **exactly as Git wrote it**, when the runner can supply it.
+   *
+   * Optional, and deliberately so: every caller here wants {@link stdout}, and
+   * the injected runners a test supplies do not have to produce this. One caller
+   * does need it, and the reason is a defect that took four rounds to find.
+   *
+   * {@link stdout} is `.trim()`ed, which removes *every* trailing whitespace
+   * character and not merely the line terminator. `git submodule status` prints
+   * submodule paths verbatim, so a final gitlink whose path ends in U+00A0 —
+   * or U+3000, U+2009, U+FEFF — arrives shortened, and a shortened path that
+   * matches a real sibling gitlink makes a reader answer about the wrong
+   * directory. Measured: a worktree with `vendnb` and `vendnb ` reported
+   * clean over a planted file, and the removal gate behind that reading deletes.
+   *
+   * Detecting the collapse afterwards was tried and is not sufficient — see
+   * `worktree/worktree-cleanliness.ts`. The only reliable answer is to read the
+   * bytes Git wrote, so a reader that parses paths out of a command's output
+   * uses this and states why.
+   */
+  readonly rawStdout?: string;
+  /**
    * The exit code Git returned, or `null` when no process ran to completion.
    *
    * Carried because a handful of Git commands answer a *question* with their
@@ -283,6 +304,8 @@ export const runGitCommand: GitRunner = async (cwd, args) => {
   return Object.freeze({
     outcome: 'OK' as const,
     stdout: result.stdout.trim(),
+    // Carried alongside, never instead of. See {@link GitCommandResult.rawStdout}.
+    rawStdout: result.stdout,
     exitCode: 0,
   });
 };
