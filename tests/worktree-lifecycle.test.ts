@@ -399,18 +399,22 @@ describe('I — a clean, owned workspace is released completely', () => {
  * Adds submodules to the **source repository** and commits them, so a worktree
  * created afterwards receives the gitlinks through `git worktree add`.
  *
- * The provenance is the point, and a review had to measure it because this file
- * first got it wrong. `git worktree remove` refuses — `fatal: working trees
- * containing submodules cannot be moved or removed`, exit 128 — whenever Git
- * keeps a `<super>/.git/worktrees/<task>/modules` directory for that worktree,
- * which it creates when a submodule is added *inside* the worktree, and which
- * survives `submodule deinit`. So:
+ * How the gitlink got there is the point, and a review had to measure it because
+ * this file first got it wrong. `git worktree remove` refuses — `fatal: working
+ * trees containing submodules cannot be moved or removed`, exit 128 — when
+ * **either** of two conditions holds, and neither is necessary:
  *
- *   added inside the worktree, then deinitialised  ->  refuses, exit 128
- *   present in the base commit, never populated    ->  **exit 0, and deletes**
+ *   a `<super>/.git/worktrees/<task>/modules` directory exists for that
+ *     worktree, which Git creates when a submodule is added *inside* it and
+ *     which survives `submodule deinit`         ->  refuses, exit 128
+ *   a gitlink path holds a real repository       ->  refuses, exit 128
+ *   neither                                      ->  **exit 0, and deletes**
  *
- * A destructive case built the first way proves nothing: the payload survives
- * whatever the gate does. These build the second.
+ * A destructive case built either of the first two ways proves nothing: the
+ * payload survives whatever the gate does, so the assertion that it survived is
+ * a tautology. These build the third, which is what `git worktree add` from a
+ * base commit leaves, and each asserts the `modules` directory is absent so the
+ * fixture cannot drift back.
  */
 function withSubmoduleInBase(repository: ResolvedRepository, ...paths: readonly string[]): void {
   const inner = createRepoFixture({ defaultBranch: 'main', profile: null });
@@ -475,8 +479,8 @@ describe('J — a workspace holding work is never destroyed', () => {
     const repository = await freshRepository();
     // The submodule is committed in the **source repository**, before the
     // worktree exists, so the gitlink arrives through `git worktree add`. That
-    // is not a detail — see the docstring above: it is the only provenance in
-    // which `git worktree remove` will actually delete.
+    // is not a detail — see the docstring above: it is the only way of getting a
+    // gitlink here in which `git worktree remove` will actually delete.
     withSubmoduleInBase(repository, 'vendor');
     const workspace = await prepared(repository, 'V1-03');
     const wt = workspace.worktreePath;
@@ -566,7 +570,7 @@ describe('J — a workspace holding work is never destroyed', () => {
     writeFileSync(planted, 'payload\n', 'utf8');
 
     // The premises: Git's own cleanliness reading sees nothing, and Git's own
-    // refusal will not fire for this provenance.
+    // refusal will not fire for a gitlink that arrived this way.
     expect(git(wt, ['status', '--porcelain', '--untracked-files=all']).trim()).toBe('');
     expect(existsSync(join(repository.root, '.git', 'worktrees', 'V1-03', 'modules'))).toBe(false);
 

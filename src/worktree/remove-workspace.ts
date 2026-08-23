@@ -301,19 +301,22 @@ export async function removeTaskWorkspace(
   // to remove a worktree containing a submodule anyway. That reasoning was taken
   // from one fixture and is **false** for the shape AO actually produces.
   //
-  // What the refusal turns on is **provenance** — whether Git keeps a
-  // `<super>/.git/worktrees/<task>/modules` directory for this worktree — and
-  // not population, which the first correction claimed and a later review also
-  // had to measure wrong:
+  // Two attempts to say *why* were also wrong — "it is a property of population",
+  // then "it turns on provenance and not population" — and both failed the same
+  // way, by claiming an exclusive mechanism. So this is stated as sufficiency.
+  // Measured, the unforced remove refuses when **either** holds:
   //
-  //   added inside the worktree, then deinitialised -> fatal: working trees
-  //                          containing submodules cannot be moved or removed,
-  //                          exit 128, nothing lost — *and it is unpopulated*
-  //   present in the base commit, arriving through `git worktree add`
-  //                       -> exit 0, worktree gone, planted files gone
+  //   a `<super>/.git/worktrees/<task>/modules` directory exists for this
+  //     worktree, even an empty hand-made one  -> exit 128, and the gitlink may
+  //                                               be unpopulated
+  //   a gitlink path holds a real repository, with no `modules` directory
+  //     anywhere                               -> exit 128
+  //   neither                                  -> exit 0, worktree gone,
+  //                                               planted files gone
   //
-  // The second row is how a task worktree is made here, so it is the row that
-  // matters, and in it this gate is the only thing standing.
+  // The last row is what `git worktree add` from a base commit leaves, which is
+  // how every task worktree here is made. In it this gate is the only thing
+  // standing, and that has been true under all three explanations.
   //
   // Reproduced end to end: the bare vector reported clean, `removeTaskWorkspace`
   // returned `WORKSPACE_REMOVED`, and two planted files were destroyed. So the

@@ -189,20 +189,23 @@ const GIT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576;
  * not — so this is a detection gap and not data loss". **That was false, and it
  * was the whole justification for not fixing the gate.**
  *
- * The replacement said the refusal is a property of *population*. A later review
- * measured that wrong too, so here is what it actually turns on — **provenance**,
- * meaning whether Git keeps a `<super>/.git/worktrees/<task>/modules` directory
- * for this worktree:
+ * Two replacements were also wrong — "a property of *population*", then "it
+ * turns on *provenance*, not population" — and both failed by asserting an
+ * exclusive mechanism. Stated as sufficiency, which is what was measured: the
+ * unforced remove refuses when **either** condition holds, and neither is
+ * necessary.
  *
- *   submodule added *inside* the worktree, then deinitialised
- *                                      -> exit 128, nothing removed
- *   gitlink present in the base commit, arriving via `git worktree add`
- *                                      -> **exit 0, worktree gone, files gone**
+ *   a `.git/worktrees/<task>/modules` directory exists, even empty
+ *                                      -> exit 128, and the gitlink may be
+ *                                         unpopulated (this killed "population")
+ *   a gitlink path holds a real repository, no `modules` anywhere
+ *                                      -> exit 128 (this killed "provenance")
+ *   neither                            -> **exit 0, worktree gone, files gone**
  *
- * The first row is unpopulated and still refuses, which is what falsified
- * "population". The second is the shape AO actually produces — a task worktree
- * is created by `git worktree add` from a base commit — and it is the shape in
- * which this gate is the only thing between a planted file and deletion. Reproduced end to
+ * The last row is the shape AO produces — `git worktree add` from a base commit
+ * — and it is the shape in which the removal gate is the only thing between a
+ * planted file and deletion. That conclusion held under all three explanations;
+ * only the explanations kept being retracted. Reproduced end to
  * end through the production path: the bare vector reported clean,
  * `removeTaskWorkspace` returned `WORKSPACE_REMOVED`, and two planted files were
  * destroyed. `remove-workspace.ts`'s Proof 3a therefore asks
