@@ -1504,50 +1504,83 @@ describe('recording grants nothing and moves nothing', () => {
   });
 
   /**
-   * Every module this slice adds or changes, and the criterion is the one the
-   * title states.
+   * The delivery surface writes no task state, and the surface is **derived**
+   * rather than listed.
    *
-   * The first version was titled "anywhere in the slice" while scanning four of
-   * the six modules, and a review pointed out that the omission was not
-   * incidental: `cli/delivery-command.ts` imports `loadTaskState`, which the
-   * import ban below would have flagged. So the title was false of the slice,
-   * and the list was hand-written — the exact shape rejected one screen above
-   * for the reachability pin.
+   * Three rounds went on this one test, and each fixed the list instead of the
+   * shape. It began as "anywhere in the slice" over four of six modules; the
+   * repair made it six of nine; and both titles were false of what they
+   * scanned. The recurring defect is not the missing entries — it is an
+   * exhaustive title written over a hand-maintained array, which is the same
+   * thing that cost this repository five rounds on a help paragraph.
    *
-   * The criterion is split instead, because the two halves are different
-   * claims. **No module writes task state** — that holds for all six, and it is
-   * checked as the absence of a *call*. **Only the CLI reads it** — the four
-   * library modules may not import the store at all, and the CLI's read is
-   * admitted by name.
+   * So the set comes from the tree: everything under `src/deliver/`, plus the
+   * two CLI modules that render and drive it. A module added to `src/deliver/`
+   * tomorrow is covered without anybody remembering to add it, and the title
+   * claims exactly that set and no more.
+   *
+   * Two criteria, because they are different claims:
+   *
+   *  - **nothing here writes task state**, checked as the absence of a *call*.
+   *    True of the whole surface;
+   *  - **nothing here imports a task-state writer**, checked as the absence of
+   *    a *value* import. `loadTaskState` in the CLI is admitted by name because
+   *    it reads, and a `type`-only import is admitted anywhere because a type
+   *    is erased and cannot write — `observe-delivery.ts` imports
+   *    `type StateLoadResult`, which the previous version of this ban would
+   *    have flagged as a reach into the store.
    */
-  it('writes no task state and names no pull-request mutation, in every module of the slice', () => {
-    const LIBRARY = [
-      'src/deliver/delivery-evidence.ts',
-      'src/deliver/delivery-evidence-store.ts',
-      'src/deliver/internal/delivery-observation-proof.ts',
-      'src/deliver/delivery-observation-proof.ts',
-    ];
-    const SURFACE = ['src/cli/delivery-command.ts', 'src/cli/render-delivery-observation.ts'];
+  it('writes no task state anywhere in the delivery surface', () => {
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const full = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) return walk(full);
+        return entry.isFile() && full.endsWith('.ts') ? [full] : [];
+      });
+    const SURFACE = [
+      ...walk('src/deliver'),
+      'src/cli/delivery-command.ts',
+      'src/cli/render-delivery-observation.ts',
+    ].sort();
 
-    for (const file of [...LIBRARY, ...SURFACE]) {
+    // Positive controls: the walk found the whole directory, including the
+    // nested `internal/` one, so a scan over an empty set cannot pass.
+    expect(SURFACE.length).toBeGreaterThanOrEqual(8);
+    expect(SURFACE).toContain('src/deliver/internal/delivery-observation-proof.ts');
+    expect(SURFACE).toContain('src/deliver/observe-delivery.ts');
+    expect(SURFACE).toContain('src/deliver/delivery-target.ts');
+
+    for (const file of SURFACE) {
       const code = codeOnly(file);
       // Positive control: the file really was read and the stripper left code.
-      expect(code.length).toBeGreaterThan(200);
-      // No writer *call*, anywhere. Scanned on the code alone, so a header may
-      // go on explaining why the task-state writer is not used here — which is
-      // the load-bearing part of the design and the first thing a reader needs.
+      expect(code.length, file).toBeGreaterThan(200);
+      // No writer *call*, anywhere on the surface. Scanned on the code alone,
+      // so a header may go on explaining why the task-state writer is not used
+      // here — which is the load-bearing part of the design and the first thing
+      // a reader needs.
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bmergePullRequest\b|\bcreatePullRequest\b/);
       expect(code, file).not.toMatch(/\brecordAgentInterruption\s*\(/);
       expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
-    }
 
-    // The library may not reach the store at all.
-    for (const file of LIBRARY) {
-      expect(codeOnly(file), file).not.toMatch(
-        /from '[^']*state\/(advance-state|state-store)\.js'/,
-      );
+      // No *value* import of a task-state writer. A `type` import is erased and
+      // cannot write, so it is not a reach; the one admitted value import is
+      // the CLI's reader, asserted by name below.
+      for (const match of code.matchAll(
+        /import\s+(type\s+)?\{([^}]*)\}\s+from\s+'[^']*state\/(advance-state|state-store)\.js'/g,
+      )) {
+        const typeOnly = match[1] !== undefined;
+        const named = (match[2] ?? '')
+          .split(',')
+          .map((n) => n.trim())
+          .filter((n) => n.length > 0);
+        if (typeOnly) continue;
+        const values = named.filter((n) => !n.startsWith('type '));
+        expect(values, file).toEqual(
+          file === 'src/cli/delivery-command.ts' ? ['loadTaskState'] : [],
+        );
+      }
     }
 
     // The module that owns the ignore contract must name the path this slice
@@ -1559,16 +1592,13 @@ describe('recording grants nothing and moves nothing', () => {
     expect(ignored).toContain('runtime/delivery/<taskId>.json');
     expect(ignored).not.toContain('<taskId>.delivery.json');
 
-    // The CLI surface imports exactly one thing from it, and it reads.
+    // The one admitted value import really is there. Without this the loop
+    // above would be satisfied by a surface that imports nothing at all, which
+    // is a different fact from the one being asserted.
     const cli = codeOnly('src/cli/delivery-command.ts');
     const stateImports = [...cli.matchAll(/import \{([^}]*)\} from '[^']*state\/state-store\.js'/g)]
       .map((m) => (m[1] ?? '').trim());
-    // Positive control: the import really is there, so an empty scan cannot
-    // pass this by finding nothing.
     expect(stateImports).toEqual(['loadTaskState']);
-    expect(codeOnly('src/cli/render-delivery-observation.ts')).not.toMatch(
-      /from '[^']*state\/(advance-state|state-store)\.js'/,
-    );
   });
 
   it('takes no execution lease and dispatches no agent', () => {
