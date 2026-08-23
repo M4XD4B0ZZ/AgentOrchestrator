@@ -446,7 +446,7 @@ describe('the request vector is pinned, not described', () => {
     // file — measured, and it found `"statuses":[]` inside a docstring 25 lines
     // on, captured the empty string and passed. So the shape is required, not
     // searched for.
-    const sites = [...source.matchAll(/\brequest\(\s*subject,\s*[^,]+,\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*)/g)].map((m) =>
+    const sites = [...source.matchAll(/\brequest\(\s*subject,\s*[^,]+,\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*)(?=\s*[,)])/g)].map((m) =>
       (m[1] ?? '').trim(),
     );
     // Positive control: there really are three, so an empty scan is a broken
@@ -465,7 +465,7 @@ describe('the request vector is pinned, not described', () => {
     // claims to prevent. The second is the one the first version of this test
     // let through: a params value that is not a literal at all.
     const scan = (text: string): string[] =>
-      [...text.matchAll(/\brequest\(\s*subject,\s*[^,]+,\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*)/g)].map((m) =>
+      [...text.matchAll(/\brequest\(\s*subject,\s*[^,]+,\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*)(?=\s*[,)])/g)].map((m) =>
         (m[1] ?? '').trim(),
       );
 
@@ -486,6 +486,15 @@ describe('the request vector is pinned, not described', () => {
     );
     expect(threadedVariable).toEqual(['evilParams']);
     expect(threadedVariable[0]?.startsWith('[')).toBe(false);
+
+    // Third: a literal with something appended. The capture is anchored to the
+    // end of the argument (`(?=\s*[,)])`) for this case — without that
+    // lookahead the scan sees `[PER_PAGE_PARAM]`, is satisfied, and never looks
+    // at what follows it.
+    const suffixed = scan(
+      'await request(subject, commitStatusPath(subject), [PER_PAGE_PARAM].concat(evil), deps);',
+    );
+    expect(suffixed).toEqual([]);
 
     // Positive control on the emitted vector: `-F` really is present, its
     // values really are these two, and neither can name a file.
@@ -1342,7 +1351,7 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     expect(Object.keys(SUBJECT_REFUSAL_DETAIL).sort()).toEqual([...SUBJECT_REFUSALS].sort());
   });
 
-  it('says exactly this — every sentence, not a sample of them', () => {
+  it('says exactly this — every sentence, not a sample of them', async () => {
     // Slice 1 shipped a sentence map whose one binding test compared the map
     // with itself, and a README sample drifted away from the code unnoticed.
     //
@@ -1423,6 +1432,28 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     ]) {
       expect(text).not.toContain('and nothing else');
     }
+
+    // The ban reaches one level up too, because that is where it came back.
+    // Correcting three strings on this surface left the *top-level* help saying
+    // "no network access of any kind" — and the replacement for that reused the
+    // banned phrase in a sentence that was itself false, because attended
+    // execution starts agent CLIs that are network clients. A promise about
+    // egress made on the front page is the one most likely to be believed.
+    const { readFileSync } = await import('node:fs');
+    const cliSource = readFileSync('src/cli/index.ts', 'utf8');
+    const description = cliSource.slice(
+      cliSource.indexOf('const DESCRIPTION'),
+      cliSource.indexOf('].join('),
+    );
+    // Positive control: this really is the description block.
+    expect(description).toContain('This build ships:');
+    expect(description.length).toBeGreaterThan(400);
+
+    expect(description).not.toContain('and nothing else');
+    expect(description).not.toContain('no network');
+    // And it must still name the two requests this build makes itself.
+    expect(description).toContain('notify.yaml');
+    expect(description).toContain('delivery --observe');
 
     expect({ ...OBSERVATION_CONCLUSION_DETAIL }).toEqual({
       NOT_OBSERVED:
