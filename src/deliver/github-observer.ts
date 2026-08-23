@@ -13,12 +13,20 @@
  *    before a process is started. A remote URL cannot choose where the
  *    authenticated client points;
  *  - the **environment** is built, not inherited. `createProbeEnv('forge:github', …)`
- *    forwards `PATH`, `PATHEXT` and `APPDATA` and nothing else, so none of
+ *    supplies `PATH`, `PATHEXT` and `APPDATA` and nothing else, so none of
  *    `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GH_HOST`, `GH_REPO`,
  *    `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `GH_DEBUG`, `GH_PAGER` or any proxy
  *    variable reaches the client. Each of those is documented by `gh help
  *    environment` as able to redirect authentication, host selection, the
- *    config location, or — for `GH_DEBUG=api` — to log HTTP traffic;
+ *    config location, or — for `GH_DEBUG=api` — to log HTTP traffic.
+ *
+ *    "Supplies" and not "is the child's environment": on Windows `runCommand`
+ *    merges eleven fixed OS names into every child block — `SYSTEMROOT`,
+ *    `USERPROFILE`, `TEMP` and eight more — so the client really does receive
+ *    those. That back-fill is what makes the property worth stating precisely
+ *    rather than loosely: not one of the eleven can carry a credential, choose
+ *    a host, move the config directory or name a proxy, which is asserted in
+ *    `tests/v4-02-…` against the override list rather than argued here;
  *  - the **credential** is never seen. `gh` reads its own stored login from the
  *    operator's config directory and attaches it itself. No token is passed in,
  *    none is read out, and no code path here handles credential bytes.
@@ -60,9 +68,11 @@
  * full 40-hex object name at the type level, where REST's `{ref}` accepts an
  * abbreviation or a branch name. That guarantee is not given up — it is moved
  * into this build, where `isAddressableSubject` enforces it before a path is
- * built and a counter-proof test removes the check to watch a branch name reach
- * the wire. Owning the check is better than borrowing it, because a borrowed
- * one cannot be mutation-tested.
+ * built, and `tests/v4-02-…` hands the transport a subject whose commit is a
+ * branch name and asserts the client is never started at all. Removing the
+ * check turns that case red — measured by hand against this file, which is the
+ * only place such a mutant can live. Owning the check is better than borrowing
+ * it, because a borrowed one cannot be mutation-tested.
  */
 
 import { tmpdir } from 'node:os';
@@ -123,8 +133,11 @@ export const FORGE_ENV_POLICY = 'forge:github' as const;
  *    "GET normally and POST if any parameters were added", and every request
  *    below adds parameters. Without this pair, a read-only observation becomes
  *    a POST to the same path. It is the single token in this vector whose
- *    removal changes a read into a write, and `tests/v4-02-…` removes it to
- *    prove the vector is pinned rather than described.
+ *    removal changes a read into a write, so `tests/v4-02-…` pins the whole
+ *    vector by exact equality — not that `-X GET` occurs somewhere within it —
+ *    and a second case reads back the token that follows `-X`. A committed test
+ *    cannot delete a production token from this file; that mutant was run by
+ *    hand and killed, and the equality pin is what keeps it killed.
  */
 export const FORGE_REQUEST_PREFIX: readonly string[] = Object.freeze([
   'api',
@@ -217,23 +230,31 @@ export interface ForgeObserverDependencies {
  *     env -i PATH=… PATHEXT=… APPDATA=… gh api --hostname github.com -X GET …
  *     -> exit 0, and  ./.local/state/gh/device-id  now exists
  *
- * The client keeps a telemetry device id under its state directory, and with no
- * `HOME`, `USERPROFILE` or `XDG_STATE_HOME` in the environment this policy
- * builds, that directory resolves **relative to the working directory**. Run in
- * a repository root, a read-only observation would have written an untracked
- * file into the operator's checkout on its first use — a command that promises
- * to write nothing, dirtying a worktree.
+ * The client keeps a telemetry device id under its state directory, and given
+ * only the names this policy supplies — no `HOME`, no `USERPROFILE`, no
+ * `XDG_STATE_HOME` — that directory resolves **relative to the working
+ * directory**.
  *
- * Two fixes were available. Forwarding a profile root would have sent the file
- * where it belongs, at the cost of adding a writable-directory variable to a
- * policy whose whole value is being the smallest measured set. Running
- * elsewhere costs nothing and closes a second hole at the same time: a client
- * started outside any repository has no working directory to infer repository
- * context from, so the last path by which a checkout could influence the
- * request is gone too.
+ * ── How far that goes on the shipped path, measured rather than assumed ────
+ *
+ * Not that far, and the first version of this paragraph did not say so. The
+ * environment above is the block this module *supplies*; on Windows
+ * `runCommand` back-fills `USERPROFILE` into every child, and re-measured with
+ * `USERPROFILE` present the same call wrote **nothing** into the working
+ * directory. So the dirtied checkout is a real property of the policy block
+ * alone and is **not** reproduced by the shipped Windows path.
+ *
+ * The constant stays anyway, on three grounds that survive that correction.
+ * It costs nothing. It is the answer that is still right if the back-fill ever
+ * narrows, and a guarantee that depends on another module's list not changing
+ * is not one this module can make. And it closes a second hole independently of
+ * the first: a client started outside any repository has no working directory
+ * to infer repository context from, so the last path by which a checkout could
+ * influence the request is gone too.
  *
  * It is a constant rather than a parameter because a parameter is something a
- * future caller can get wrong, and the wrong value writes into a repository.
+ * future caller can get wrong, and the wrong value runs an authenticated client
+ * inside an operator's checkout.
  */
 export const FORGE_CLIENT_WORKING_DIRECTORY = tmpdir();
 
@@ -279,13 +300,27 @@ async function request(
     return Object.freeze({ ok: false as const, refusal: 'ENVIRONMENT_UNUSABLE' as const });
   }
 
-  const result = await deps.runner(FORGE_CLIENT_COMMAND, forgeRequestArgs(path, params), {
-    env,
-    cwd: FORGE_CLIENT_WORKING_DIRECTORY,
-    timeoutMs: OBSERVATION_TIMEOUT_MS,
-    maxStdoutBytes: OBSERVATION_MAX_RESPONSE_BYTES,
-    maxStderrBytes: OBSERVATION_MAX_RESPONSE_BYTES,
-  });
+  // The runner is guarded for the same reason `createProbeEnv` is, and the
+  // reason is the sentence two comments above rather than a known throw:
+  // this module reports facts and refusals, and a contract that holds only
+  // while the injected seam behaves is not the contract it claims. `runCommand`
+  // re-throws one condition of its own — a request the boundary's transport
+  // cannot represent — and an injected runner may reject for any reason at all.
+  // Either way nothing was answered, which is what `FORGE_CLIENT_UNUSABLE`
+  // already means. Nothing from the error is read: it may quote an argument
+  // vector or a spawn message, and none of that belongs in a result.
+  let result: CommandResult;
+  try {
+    result = await deps.runner(FORGE_CLIENT_COMMAND, forgeRequestArgs(path, params), {
+      env,
+      cwd: FORGE_CLIENT_WORKING_DIRECTORY,
+      timeoutMs: OBSERVATION_TIMEOUT_MS,
+      maxStdoutBytes: OBSERVATION_MAX_RESPONSE_BYTES,
+      maxStderrBytes: OBSERVATION_MAX_RESPONSE_BYTES,
+    });
+  } catch {
+    return Object.freeze({ ok: false as const, refusal: 'FORGE_CLIENT_UNUSABLE' as const });
+  }
 
   if (result.outcome === 'NOT_FOUND') {
     return Object.freeze({ ok: false as const, refusal: 'FORGE_CLIENT_ABSENT' as const });

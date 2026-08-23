@@ -8317,6 +8317,14 @@ data does not carry would be the same mistake in the other direction.
   read-only investigation may not do, and no documentation sentence was found
   that decides it. The mechanism reports every claimant either way, and
   `AMBIGUOUS` exists for the case, so the answer does not depend on the question.
+- **L-V4-02-8 — truncation on the locator endpoint is detected, not proved.**
+  `commits/{sha}/pulls` returns a bare array with no `total_count`, so unlike the
+  two check endpoints there is nothing to compare a page against. The test is
+  that the page came back full, which means a commit contained in exactly
+  `OBSERVATION_PAGE_SIZE` open pull requests is reported `RESULTS_TRUNCATED`
+  rather than answered. That is the fail-closed direction and it is not reachable
+  on any repository this build has been used on, but it is a heuristic and is
+  recorded as one rather than described as a proof.
 
 ## The delivery observation seam (V4 slice 2)
 
@@ -8339,8 +8347,10 @@ Checks       : SUCCESS  (2 check run(s), 0 commit status(es): 2 succeeded, 0 pen
 Conclusion   : OBSERVED
   Both questions were answered for exactly the commit named above. Nothing was delivered.
 
-Read-only. github.com was asked about one commit and nothing else. No task state was
-written. No pull request was opened, updated, reviewed or merged.
+Read-only. This build asked about no commit but the one named above, and about no other
+repository. No task state was written. No pull request was opened, updated, reviewed or
+merged. The GitHub CLI also makes calls of its own — telemetry, and a periodic update
+check — which this build does not suppress (L-V4-02-6).
 ```
 
 Without `--observe` the same command builds the subject and stops, contacting
@@ -8351,6 +8361,9 @@ Pull request : not observed  (pass --observe to ask the forge about this commit)
 Checks       : not observed  (pass --observe to ask the forge about this commit)
 
 Conclusion   : NOT_OBSERVED
+  The subject is established. Nothing was contacted; pass --observe to ask the forge.
+
+Read-only. No forge was contacted, no task state was written, and nothing was delivered.
 ```
 
 `agent-loop run` gained nothing and still contacts nothing. There is no branch
@@ -8437,10 +8450,16 @@ as a destination:
 - `SUPPORTED_FORGE_HOSTS` is `['github.com']`, a constant in code. Any other host
   is `UNSUPPORTED_HOST`, refused before a process starts;
 - the request carries `--hostname github.com`, written in this build;
-- the client's environment is **built**: `PATH`, `PATHEXT`, `APPDATA` and nothing
-  else. None of `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GH_HOST`,
-  `GH_REPO`, `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `GH_DEBUG`, `GH_PAGER` or any
-  proxy variable reaches it;
+- the client's environment is **built**: the `forge:github` policy supplies
+  `PATH`, `PATHEXT`, `APPDATA` and nothing else, so none of `GH_TOKEN`,
+  `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GH_HOST`, `GH_REPO`, `GH_CONFIG_DIR`,
+  `XDG_CONFIG_HOME`, `GH_DEBUG`, `GH_PAGER` or any proxy variable reaches it.
+  *Supplies*, not "is what the child gets": on Windows `runCommand` back-fills
+  eleven fixed OS names into every child — `SYSTEMROOT`, `USERPROFILE`, `TEMP`
+  and eight more — and the client really does receive those. That is harmless
+  for a precise reason rather than a hopeful one, and the reason is asserted in
+  the suite: not one of the eleven can carry a credential, choose a host, move a
+  config directory or name a proxy;
 - the client is run in the OS temp directory, never in a repository — so it has
   no working directory to infer repository context from.
 
@@ -8475,9 +8494,12 @@ Two of those are worth naming. `SUBJECT_MISMATCH` binds the evidence to the
 question rather than to the request: every check run carries `head_sha` and the
 combined status carries a top-level `sha`, so an answer that names a different
 commit is refused rather than counted. `RESULTS_TRUNCATED` refuses a page that
-might be a prefix — `total_count` is the ref-wide total, not the page length, so
-a disagreement is provable in one round trip and produces a refusal rather than
-a smaller answer.
+might be a prefix. On the two check endpoints that is provable in one round
+trip: `total_count` is the ref-wide total, not the page length, so a
+disagreement with the array beside it produces a refusal rather than a smaller
+answer. The locator endpoint returns a bare array and carries no total, so there
+the test is that the page came back full — a conservative heuristic, recorded as
+`L-V4-02-8` rather than described as a proof.
 
 ### What this slice does not do
 

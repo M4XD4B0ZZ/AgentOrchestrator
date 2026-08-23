@@ -169,8 +169,14 @@ export type ObservedProviderEnvVar = (typeof OBSERVED_PROVIDER_ENV_VARS)[number]
  *    and `XDG_CONFIG_HOME` takes precedence over the Windows app-data path that
  *    `APPDATA` names;
  *  - streams: `GH_DEBUG` set to `api` logs the details of HTTP traffic to
- *    standard error; `GH_FORCE_TTY` and `CLICOLOR_FORCE` make the client emit
- *    terminal formatting into output that is being parsed;
+ *    standard error and `DEBUG` (deprecated) enables verbose output on the same
+ *    stream; `GH_FORCE_TTY` and `CLICOLOR_FORCE` make the client emit terminal
+ *    formatting into output that is being parsed;
+ *  - the client's own traffic: `GH_TELEMETRY` prints telemetry to standard
+ *    error or disables it outright, and `DO_NOT_TRACK` disables it. Neither is
+ *    forwarded, so the client's own calls are left exactly as the operator
+ *    configured them — see residual `L-V4-02-6`, which records that they
+ *    happen rather than suppressing them with a value this build invented;
  *  - other programs: `GH_PAGER`, `PAGER`, `GH_BROWSER`, `BROWSER`, `GH_EDITOR`,
  *    `GIT_EDITOR`, `VISUAL` and `EDITOR` each name a program the client may
  *    start.
@@ -198,6 +204,9 @@ export const FORGE_CLIENT_OVERRIDE_ENV_VARS = [
   'GH_CONFIG_DIR',
   'XDG_CONFIG_HOME',
   'GH_DEBUG',
+  'DEBUG',
+  'GH_TELEMETRY',
+  'DO_NOT_TRACK',
   'GH_FORCE_TTY',
   'CLICOLOR_FORCE',
   'GH_PAGER',
@@ -350,24 +359,47 @@ const POLICY_ALLOWLIST: Readonly<Record<ProbeEnvPolicy, readonly string[]>> = Ob
    *     PATH + PATHEXT + USERPROFILE  -> exit 4
    *     PATH + PATHEXT + LOCALAPPDATA -> exit 4
    *
-   * So this is the smallest set that works, arrived at by measurement rather
-   * than by listing the variables a credential *might* live under — the same
-   * standard `auth:claude` was held to when `APPDATA` and `LOCALAPPDATA` were
-   * removed from it for being carried on a guess.
+   * So this is the smallest set that must be *added* to reach an authenticated
+   * answer, arrived at by measurement rather than by listing the variables a
+   * credential *might* live under — the same standard `auth:claude` was held to
+   * when `APPDATA` and `LOCALAPPDATA` were removed from it for being carried on
+   * a guess.
    *
-   * `SystemRoot` is **not** here, and that is load-bearing rather than
-   * inherited caution. Adding it to the four runs above changed the outcome to
-   * `error connecting to api.github.com`, reproducibly, three times out of
-   * three. The mechanism is not established and is not claimed; the fact is
-   * that this policy's contents change whether the client can reach GitHub at
-   * all, so the contents are the measured ones.
+   * ── What this policy is, and what it is not ────────────────────────────
+   *
+   * It is the block AO *supplies*. It is **not** the environment the client
+   * ends up with, and an earlier version of this comment read the four runs
+   * above as though it were. See the module header: on Windows `runCommand`
+   * hands the boundary `withWindowsPlatformBackfill(env)`, which merges eleven
+   * OS names — `HOMEDRIVE`, `HOMEPATH`, `LOGONSERVER`, `PATH`, `SYSTEMDRIVE`,
+   * `SYSTEMROOT`, `TEMP`, `USERDOMAIN`, `USERNAME`, `USERPROFILE`, `WINDIR` —
+   * out of this process's own environment into every child. The forge client
+   * therefore receives `SYSTEMROOT` and `USERPROFILE` whatever this list says,
+   * and a claim about the child's environment that is measured with `env -i`
+   * in a shell is a claim about a different environment.
+   *
+   * That back-fill is bounded and it is why it does not weaken this policy:
+   * not one of the eleven is a member of {@link FORGE_CLIENT_OVERRIDE_ENV_VARS}
+   * — none carries a credential, selects a host, moves the config directory or
+   * names a proxy. Asserted rather than argued, in
+   * `tests/v4-02-delivery-observation.test.ts`.
+   *
+   * Measured against the shipped path rather than against a shell, same client,
+   * same day: `PATH + PATHEXT + APPDATA + SYSTEMROOT` answers exit 0, the full
+   * back-filled shape answers exit 0, and a real `agent-loop delivery
+   * --observe` returned a graded check state for a real commit. `SYSTEMROOT` is
+   * not in this list because nothing here needs to supply it, which is a
+   * smaller and true statement; it is not withheld from the client, and it does
+   * not decide whether the client can reach GitHub.
    *
    * No credential variable appears, and in particular none of
    * {@link FORGE_CLIENT_OVERRIDE_ENV_VARS}: the client authenticates itself
    * from the operator's own config directory, and this build never handles the
-   * token. On a host where that directory is not under `APPDATA` the client
-   * reports that it needs an authentication, and the observation refuses —
-   * which is the correct closed answer, not a fallback.
+   * token. `APPDATA` is what makes that directory findable here — measured, and
+   * `USERPROFILE` alone does not substitute for it, so the back-filled profile
+   * root does not quietly open a second way in. Where the login is not
+   * reachable the client reports that it needs an authentication and the
+   * observation refuses, which is the correct closed answer.
    */
   'forge:github': Object.freeze([...EXEC_CONTRACT_VARS, 'APPDATA']),
 });

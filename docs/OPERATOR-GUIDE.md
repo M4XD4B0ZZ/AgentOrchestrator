@@ -1032,6 +1032,15 @@ Kein Push, kein PR anlegen, kein Kommentar, kein Review, kein Merge. Kein
 Task-State wird geschrieben, keine Lease genommen, kein Agent gestartet.
 `READY_FOR_PR` bleibt terminal.
 
+### Was trotzdem ins Netz geht
+
+AO fragt **nur** nach dem einen Commit, der unter `Subject` steht. Die GitHub
+CLI selbst telefoniert aber zusätzlich nach Hause: Telemetrie mit einer
+Geräte-ID, und einmal pro 24 Stunden eine Update-Prüfung. AO unterdrückt das
+**nicht** — das würde bedeuten, `gh` Umgebungswerte unterzuschieben, die der
+Operator nie gesetzt hat. Wer das abstellen will, stellt es in der `gh`-eigenen
+Konfiguration ab. Notiert als `L-V4-02-6`.
+
 ---
 
 ## 20. Jetzt speziell: Zera / HealthApp

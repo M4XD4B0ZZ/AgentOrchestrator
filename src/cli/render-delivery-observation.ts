@@ -52,9 +52,25 @@ import {
 export const NOT_CONTACTED_TRAILER =
   'Read-only. No forge was contacted, no task state was written, and nothing was delivered.';
 
+/**
+ * Two corrections are baked into this sentence, and both were over-claims.
+ *
+ * It used to open "github.com was asked about one commit and nothing else",
+ * which is false twice. The GitHub CLI makes calls of its own that this build
+ * does not suppress — telemetry, and a periodic update check — so "nothing
+ * else" was not true of the wire, and the residual that records this
+ * (`L-V4-02-6`) was visible everywhere except in the one place an operator
+ * actually reads. And the trailer is selected on whether an observation was
+ * *requested*, so it also printed when every request refused before a process
+ * existed. The wording below is true in both cases: it is a statement about
+ * what this build asks, which is bounded, rather than about what crossed the
+ * network, which is not this build's alone to promise.
+ */
 export const CONTACTED_TRAILER =
-  'Read-only. github.com was asked about one commit and nothing else. No task state was\n' +
-  'written. No pull request was opened, updated, reviewed or merged.';
+  'Read-only. This build asked about no commit but the one named above, and about no other\n' +
+  'repository. No task state was written. No pull request was opened, updated, reviewed or\n' +
+  'merged. The GitHub CLI also makes calls of its own — telemetry, and a periodic update\n' +
+  'check — which this build does not suppress (L-V4-02-6).';
 
 function line(label: string, value: string): string {
   return `${label.padEnd(13)}: ${value}`;

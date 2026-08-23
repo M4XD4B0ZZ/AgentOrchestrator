@@ -79,7 +79,11 @@ not given up. It is moved into this build, where it can be mutation-tested.
   read out, `gh auth token` is never called, and no result type here has a field
   that could carry one. `stderr` is never read, parsed, rendered or logged.
 - **Which environment overrides are admitted:** none. The policy
-  `forge:github` forwards `PATH`, `PATHEXT`, `APPDATA` and nothing else.
+  `forge:github` supplies `PATH`, `PATHEXT`, `APPDATA` and nothing else. On
+  Windows the child additionally receives the eleven names `runCommand`
+  back-fills — `SYSTEMROOT`, `USERPROFILE`, `TEMP` and eight more — and none of
+  those can carry a credential, choose a host, move a config directory or name a
+  proxy, which is asserted rather than argued.
 - **Which are refused:** everything else, by construction rather than by
   filtering — including `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
   `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`, `GH_REPO`, `GH_CONFIG_DIR`,
@@ -132,13 +136,13 @@ All against `github.com` on 2026-08-23, `gh` 2.97.0, `git 2.55.0.windows.3`.
 | REST `{ref}` accepts an abbreviated object name and a branch name: `commits/10583ee/check-runs` and `commits/main/check-runs` both answer 200. | The 40-hex grammar is enforced in this build before a path is built. Nothing on the far side will insist the subject is an object name. |
 | `gh api` documents its default method as "GET normally and **POST if any parameters were added**", and every request here adds `per_page`. | `-X GET` is in the vector. Its removal turns a read-only observation into a POST. |
 | Every check run carries `head_sha`; the combined status carries a top-level `sha`. | The evidence is bound to the question, not only the request: an answer naming another commit is `SUBJECT_MISMATCH`. |
-| `total_count` is the ref-wide total, not the page length. | Truncation is provable in one round trip: a disagreement is `RESULTS_TRUNCATED`, never a smaller answer. |
+| On both **check** endpoints `total_count` is the ref-wide total, not the page length. The **locator** endpoint returns a bare array and carries no total at all. | Truncation is provable in one round trip for the check endpoints: a disagreement is `RESULTS_TRUNCATED`, never a smaller answer. For the locator there is nothing to compare, so the test is that the page came back full — a conservative heuristic, and a commit contained in exactly a page's worth of open pull requests is reported truncated rather than answered. Carried as `L-V4-02-8`. |
 | A non-2xx still writes GitHub's error document to **stdout**, and exits 1. | The exit code is judged before the body is parsed. |
 | Exit 4 is documented as "a command requires authentication" and is reachable. | `NOT_AUTHENTICATED` is a distinct refusal, not folded into failure. |
 | `env -i PATH … PATHEXT …` → exit 4, unauthenticated. Adding `APPDATA` → exit 0. Adding `USERPROFILE` or `LOCALAPPDATA` instead → still exit 4. | The policy allow-list is exactly `PATH`, `PATHEXT`, `APPDATA` — the smallest measured set, not the variables a credential might live under. |
-| Adding `SystemRoot` to that environment changed the result to `error connecting to api.github.com`, three times out of three. | `SystemRoot` stays out. The mechanism is not established and is not claimed; the contents of this policy are the measured ones. |
+| **The row above measures a shell environment, not the shipped one.** On Windows `runCommand` back-fills eleven OS names — `SYSTEMROOT`, `USERPROFILE`, `TEMP` among them — into every child, so the client always receives them. Re-measured against the shipped path: `PATH + PATHEXT + APPDATA + SYSTEMROOT` → exit 0, the full back-filled shape → exit 0, and a real `agent-loop delivery --observe` returned a graded check state for a real commit. | A policy names what AO **supplies**, never what the child receives. An earlier version of this ADR read one as the other and recorded `SystemRoot` as load-bearing for connectivity; it is not, and the claim is withdrawn. What replaces it is the property that actually matters and is assertable: not one of the eleven back-filled names can carry a credential, choose a host, move a config directory or name a proxy — pinned in `tests/v4-02-…` against `FORGE_CLIENT_OVERRIDE_ENV_VARS`. |
 | `HTTPS_PROXY` redirects every request and `NO_PROXY` undoes it. **Neither appears in `gh help environment`.** | The refused-variable list was built from measurement as well as from the client's own documentation. AO does not forward proxy configuration, so behind a proxy the observation refuses rather than succeeding. |
-| Run with this policy's environment, the client writes `.local/state/gh/device-id` **relative to its working directory** — it has no `HOME`/`XDG_STATE_HOME` to use. | The client is run in the OS temp directory, never in a repository. A read-only observation must not leave an untracked file in an operator's checkout. It also removes the last path by which a checkout could influence the request. |
+| Given only the names this policy supplies, the client writes `.local/state/gh/device-id` **relative to its working directory** — it has no `HOME`/`XDG_STATE_HOME` to use. Re-measured with `USERPROFILE` present — which the back-fill always supplies — it wrote **nothing** there. | The client is run in the OS temp directory, never in a repository. The dirtied checkout is a property of the policy block alone and is **not** reproduced by the shipped Windows path, so this is defence in depth rather than the fix for a live defect. It stays on three grounds: it costs nothing, it is still right if that back-fill ever narrows, and it independently removes the last path by which a checkout could influence the request. |
 
 ## What `SUCCESS` means, exactly
 
@@ -169,7 +173,7 @@ remediation loop driven by CI. No GitLab or Bitbucket abstraction.
 
 | # | Invariant | Status |
 | --- | --- | --- |
-| 1 | A green check for an old head never authorises the current head | `[held]` — evidence binds to a commit object name in both directions: the request names it, and every record is re-checked to name it back |
+| 1 | A green check for an old head never authorises the current head | `[held]` — evidence binds to a commit object name in both directions: the request names it, and every record is re-checked to name it back. Stated exactly, because an empty set has no record to do it with: the check-runs response carries no subject of its own, so a page of *zero* runs binds nothing on its own — the combined-status response, which is always also required, names its subject at the top level and binds the pair in every case including `NO_CHECKS` |
 | 2 | "A pull request exists" is not "mergeable" | `[held]` — no mergeability concept exists here |
 | 3 | "Mergeable" is not "CI passed" | `[held]` — the two answers are separate values and nothing combines them |
 | 4 | "CI passed" is not "review requirements passed" | `[held]` — no review state is read, and none is implied |
@@ -207,6 +211,11 @@ remediation loop driven by CI. No GitLab or Bitbucket abstraction.
 - `L-V4-02-7` — whether two open pull requests can share a head commit was not
   established; the mechanism reports all of them either way, and `AMBIGUOUS`
   exists for the case.
+- `L-V4-02-8` — the locator endpoint returns a bare array with no `total_count`,
+  so truncation there is detected by the page coming back full rather than
+  proved. A commit contained in exactly `OBSERVATION_PAGE_SIZE` open pull
+  requests is reported `RESULTS_TRUNCATED` rather than answered. Fail-closed,
+  and not reachable on any repository this build has been used on.
 
 ## The next slice, named only
 

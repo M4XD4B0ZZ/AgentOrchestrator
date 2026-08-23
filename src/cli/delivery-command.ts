@@ -153,5 +153,12 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
 export function exitCodeFor(conclusion: ReturnType<typeof concludeObservation>): number {
   if (conclusion === 'SUBJECT_NOT_ESTABLISHED') return EXIT_RUN_INPUT_UNUSABLE;
   if (conclusion === 'OBSERVATION_INCOMPLETE') return EXIT_RUN_REFUSED;
-  return EXIT_RUN_OK;
+  // Exhaustive rather than a trailing `return`. A fifth conclusion would
+  // otherwise inherit the success code silently, and this is the ladder that
+  // decides what a caller reads as "settled" — the place a new member must not
+  // be able to arrive at by falling off the end.
+  if (conclusion === 'NOT_OBSERVED' || conclusion === 'OBSERVED') return EXIT_RUN_OK;
+  const unreachable: never = conclusion;
+  void unreachable;
+  return EXIT_RUN_REFUSED;
 }

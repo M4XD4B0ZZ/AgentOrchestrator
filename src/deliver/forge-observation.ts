@@ -165,6 +165,15 @@ export const OBSERVATION_REFUSALS = [
    * The forge returned a full page of records, so a further record cannot be
    * ruled out. An answer computed from a page that may be a prefix would be an
    * answer about a subset, presented as one about the whole.
+   *
+   * Established two different ways, because the two endpoint families offer
+   * different evidence. The check endpoints carry a `total_count` beside the
+   * array, so a disagreement between them proves truncation outright. The
+   * locator endpoint carries no total at all, so the test there is that the
+   * page came back *full* — a heuristic, and deliberately the conservative one:
+   * a commit that really is contained in exactly `OBSERVATION_PAGE_SIZE` open
+   * pull requests is reported as truncated rather than answered. Carried as
+   * `L-V4-02-8`.
    */
   'RESULTS_TRUNCATED',
 ] as const;
@@ -222,13 +231,34 @@ const COMMIT_OBJECT_NAME = /^[0-9a-f]{40}$/;
  *
  * Deliberately restated rather than imported. Slice 1's patterns are the
  * grammar of *parsing a remote URL*; these are the grammar of *what may be
- * placed in a request path*. They agree today, and `tests/v4-02-…` pins that
- * agreement in both directions. Sharing one constant would make a future
- * widening of the parser silently widen what is put on the wire, which is the
- * direction that matters.
+ * placed in a request path*. Sharing one constant would make a future widening
+ * of the parser silently widen what is put on the wire, which is the direction
+ * that matters.
+ *
+ * ── The cost of restating, paid once ───────────────────────────────────────
+ *
+ * A restatement can be an *incomplete* copy, and the first version of this was.
+ * Slice 1 refuses a name in two steps — `NAME_PATTERN`, then a separate
+ * `ALL_DOTS` check, because a leading dot is legitimate (`.github`) while a
+ * name made only of dots is never a repository. Only the first step was
+ * restated here, so `..` and `.` passed this module's grammar, at both the
+ * factory and the re-check the transport makes immediately before building a
+ * path. `..` also satisfies `SAFE_ARG_PATTERN`, so nothing further down would
+ * have refused `repos/{owner}/../commits/{sha}/pulls`.
+ *
+ * It was not reachable from production — slice 1's own `ALL_DOTS` stops it at
+ * the parser — but that is precisely the wrong place for the guarantee to rest:
+ * this module states that a caller who *casts* its way to a subject must still
+ * be refused, and that promise is only as good as the check made here.
+ * {@link isAddressableSubject} therefore refuses an all-dots name too, and
+ * `tests/v4-02-…` drives the same names through slice 1's parser and through
+ * this predicate so the agreement is measured rather than asserted.
  */
 const PATH_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 const PATH_NAME = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/;
+
+/** A name that is only dots — `.`, `..`, `...` — is never a repository. */
+const PATH_NAME_ALL_DOTS = /^\.+$/;
 
 /**
  * A repository and one exact commit, both already judged addressable.
@@ -284,7 +314,12 @@ export function createObservationSubject(
  * the wrong moment; this is the predicate both moments share.
  */
 export function isAddressableSubject(owner: string, name: string, commit: string): boolean {
-  return PATH_OWNER.test(owner) && PATH_NAME.test(name) && COMMIT_OBJECT_NAME.test(commit);
+  return (
+    PATH_OWNER.test(owner) &&
+    PATH_NAME.test(name) &&
+    !PATH_NAME_ALL_DOTS.test(name) &&
+    COMMIT_OBJECT_NAME.test(commit)
+  );
 }
 
 // ── Question 1: is there an open pull request at exactly this head? ────────
@@ -503,6 +538,17 @@ export function checkStateRefusal(refusal: ObservationRefusal): CheckStateOther 
  * endpoint, and a page that is a prefix of the real set would let a failing
  * run sit unread while the visible ones aggregate to `SUCCESS`. A disagreement
  * is `RESULTS_TRUNCATED` — not a smaller answer.
+ *
+ * ── What an empty page binds, stated exactly ───────────────────────────────
+ *
+ * Nothing, on its own. This response carries no subject of its own: only each
+ * record names one, through `head_sha`, so a page of zero records is accepted
+ * for any subject. That is not a hole, because this parser is never the whole
+ * answer — `observeCheckStateAtCommit` also requires `parseCommitStatuses`,
+ * whose response *does* name its subject at the top level and is bound there.
+ * So the pair is bound in every case, including `NO_CHECKS`; this half of it is
+ * not, and saying "every record names the commit back" without that
+ * qualification would be claiming a binding an empty set cannot provide.
  */
 export function parseCheckRuns(
   body: unknown,

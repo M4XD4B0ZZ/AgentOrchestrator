@@ -902,8 +902,15 @@ function usableGrace(value: number | undefined, fallback: number): number {
  * decision and a separate one — the ADR is explicit that a job object bounds
  * process lifetime and nothing else, and is "no argument for widening or
  * narrowing an agent's authority".
+ *
+ * Exported so that the one property that makes it harmless can be *asserted*
+ * rather than argued: no name here carries a credential, selects a host, moves
+ * a config directory or names a proxy. V4 slice 2 needs that, because it runs a
+ * client whose behaviour those four classes of variable would change, and a
+ * policy comment that described only what AO supplies was read — twice, by two
+ * independent reviewers — as a claim about what the child receives.
  */
-const WINDOWS_PLATFORM_BACKFILL = Object.freeze([
+export const WINDOWS_PLATFORM_BACKFILL = Object.freeze([
   'HOMEDRIVE',
   'HOMEPATH',
   'LOGONSERVER',

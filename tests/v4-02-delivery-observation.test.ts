@@ -36,7 +36,10 @@ import {
 } from '../src/cli/render-delivery-observation.js';
 import { TERMINAL_STATES } from '../src/core/states.js';
 import { TRANSITION_TABLE } from '../src/core/transitions.js';
-import type { ResolvedDelivery } from '../src/deliver/delivery-target.js';
+import {
+  parseRemoteUrlIdentity,
+  type ResolvedDelivery,
+} from '../src/deliver/delivery-target.js';
 import {
   aggregateCheckState,
   CHECK_RUN_CONCLUSIONS,
@@ -80,7 +83,11 @@ import {
   SUBJECT_REFUSAL_DETAIL,
   SUBJECT_REFUSALS,
 } from '../src/deliver/observe-delivery.js';
-import { isShellInertArgument, type CommandResult } from '../src/doctor/exec.js';
+import {
+  isShellInertArgument,
+  WINDOWS_PLATFORM_BACKFILL,
+  type CommandResult,
+} from '../src/doctor/exec.js';
 import type { StateLoadResult } from '../src/state/state-store.js';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -161,9 +168,6 @@ function recordingRunner(bodies: Readonly<Record<string, Partial<CommandResult>>
   };
   return { runner, calls };
 }
-
-const NO_CALLS_RUNNER: { readonly runner: ForgeCommandRunner; readonly calls: RecordedCall[] } =
-  recordingRunner({});
 
 function pullsBody(entries: readonly { number: number; state: string; sha: string }[]): string {
   return JSON.stringify(entries.map((e) => ({ number: e.number, state: e.state, head: { sha: e.sha } })));
@@ -274,12 +278,46 @@ describe('the subject grammar', () => {
   it.each([
     ['an ordinary name', 'AgentOrchestrator', true],
     ['a dotted name', 'my.repo', true],
+    // A leading dot is an ordinary repository name, which is exactly why a
+    // name made only of dots needs a check of its own.
+    ['a leading-dot name', '.github', true],
     ['a name starting with a hyphen', '-repo', false],
     ['a name with a slash', 'a/b', false],
     ['a name with a query string', 'repo?x=1', false],
+    ['a single dot', '.', false],
+    ['a dot-dot', '..', false],
+    ['three dots', '...', false],
     ['an empty name', '', false],
   ])('repository name %s: %j -> %s', (_label, name, expected) => {
     expect(isAddressableSubject(IDENTITY.owner, name, HEAD)).toBe(expected);
+  });
+
+  /**
+   * The agreement this module's comment claims, measured in both directions.
+   *
+   * It used to be claimed and not measured, and the claim was false: slice 1
+   * refuses a name in two steps — its pattern, then a separate all-dots check —
+   * and only the first was restated here. `..` therefore passed the guard the
+   * transport makes immediately before building a path, and `..` also satisfies
+   * `SAFE_ARG_PATTERN`, so `repos/{owner}/../commits/{sha}/pulls` would have
+   * been built for a caller that cast its way to such a subject.
+   *
+   * Driving the same names through slice 1's parser and through this predicate
+   * is what turns "they agree today" into something a future widening of either
+   * one has to trip over.
+   */
+  it.each([
+    ['AgentOrchestrator', true],
+    ['.github', true],
+    ['my.repo', true],
+    ['.', false],
+    ['..', false],
+    ['...', false],
+    ['-repo', false],
+  ])('slice 1 and this build agree about the name %j', (name, expected) => {
+    const parsed = parseRemoteUrlIdentity(`https://github.com/M4XD4B0ZZ/${name}.git`);
+    expect(parsed.outcome === 'RESOLVED').toBe(expected);
+    expect(isAddressableSubject('M4XD4B0ZZ', name, HEAD)).toBe(expected);
   });
 
   it('preserves owner and name case in the request path', () => {
@@ -374,6 +412,48 @@ describe('the request vector is pinned, not described', () => {
 
   it('asks for the same page size it uses as the truncation threshold', () => {
     expect(PER_PAGE_PARAM).toBe(`per_page=${String(OBSERVATION_PAGE_SIZE)}`);
+  });
+
+  /**
+   * `-F` is the one flag in the vector whose value could be dangerous, and the
+   * property that it never is deserves an assertion rather than an inspection.
+   *
+   * `gh api --help`: "if the value starts with `@`, the rest of the value is
+   * interpreted as a filename" — and `@` is inside `SAFE_ARG_PATTERN`, so the
+   * process boundary would not refuse `-F body=@C:/secret`. Nothing supplies
+   * such a value today: `forgeRequestArgs` is called from two places, each with
+   * module constants. This pins that, so a future caller that threads a value
+   * through has to trip over it.
+   */
+  it('gives -F only its own constants, never a value from anywhere else', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync('src/deliver/github-observer.ts', 'utf8');
+
+    // Every `-F` the module can emit comes from `forgeRequestArgs`, and every
+    // call to it passes only the two exported constants.
+    const calls = [...source.matchAll(/forgeRequestArgs\(([^)]*)\)/g)].map((m) => m[1] ?? '');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      if (call.includes('path: string')) continue; // the declaration itself
+      for (const token of call.split(',').slice(1)) {
+        const cleaned = token.replace(/[[\]\s]/g, '');
+        if (cleaned === '') continue;
+        expect(['PER_PAGE_PARAM', 'CHECK_RUNS_FILTER_PARAM', 'params']).toContain(cleaned);
+      }
+    }
+
+    // Positive control on the emitted vector: `-F` really is present, its
+    // values really are these two, and neither can name a file.
+    const emitted = forgeRequestArgs('repos/o/r/commits/x/check-runs', [
+      PER_PAGE_PARAM,
+      CHECK_RUNS_FILTER_PARAM,
+    ]);
+    expect(emitted.filter((t) => t === '-F')).toHaveLength(2);
+    for (const value of [PER_PAGE_PARAM, CHECK_RUNS_FILTER_PARAM]) {
+      expect(emitted).toContain(value);
+      expect(value.startsWith('@')).toBe(false);
+      expect(value).not.toContain('@');
+    }
   });
 });
 
@@ -722,6 +802,39 @@ describe('the transport turns every process outcome into a closed refusal', () =
     expect(result).toEqual({ outcome: 'REQUEST_FAILED' });
   });
 
+  /**
+   * The module's stated contract is "it reports facts and refusals; it does not
+   * raise", and that has to hold for the seam as well as for the parsers.
+   *
+   * `createProbeEnv` was guarded and the runner was not, so a rejecting runner
+   * escaped as an exception. `runCommand` re-throws one condition of its own —
+   * a request the boundary's transport cannot represent — and an injected
+   * runner may reject for any reason at all. Neither produced an answer, which
+   * is what `FORGE_CLIENT_UNUSABLE` already means.
+   */
+  it('answers FORGE_CLIENT_UNUSABLE rather than throwing when the runner rejects', async () => {
+    const exploding: ForgeCommandRunner = () => {
+      throw new Error('spawn gh ENOENT /secret/path/token');
+    };
+    const result = await observePullRequestAtHead(subjectOf(), {
+      runner: exploding,
+      envSource: { PATH: '/usr/bin' },
+    });
+    expect(result).toEqual({ outcome: 'FORGE_CLIENT_UNUSABLE' });
+    // Nothing from the error is read: it may quote an argument vector or a path.
+    expect(JSON.stringify(result)).not.toContain('secret');
+    expect(JSON.stringify(result)).not.toContain('ENOENT');
+  });
+
+  it('answers FORGE_CLIENT_UNUSABLE when the runner rejects asynchronously', async () => {
+    const rejecting: ForgeCommandRunner = async () => Promise.reject(new Error('boom'));
+    const checks = await observeCheckStateAtCommit(subjectOf(), {
+      runner: rejecting,
+      envSource: { PATH: '/usr/bin' },
+    });
+    expect(checks).toEqual({ outcome: 'FORGE_CLIENT_UNUSABLE' });
+  });
+
   it('bounds the request in time and in bytes', async () => {
     const { runner, calls } = recordingRunner(greenBodies());
     await observePullRequestAtHead(subjectOf(), { runner, envSource: {} });
@@ -809,10 +922,44 @@ describe('the client environment is built, not inherited', () => {
     }
   });
 
+  /**
+   * The property the policy allow-list on its own does **not** give, and which
+   * two independent reviewers each read the policy comment as claiming.
+   *
+   * `createProbeEnv` decides what AO *supplies*. It does not decide what the
+   * child receives: on Windows `runCommand` merges eleven fixed OS names out of
+   * this process's environment into every child block, so the forge client gets
+   * `SYSTEMROOT`, `USERPROFILE` and `TEMP` whatever the policy says. The
+   * assertions above are therefore true and incomplete, and this is the one
+   * that closes the gap — not by pretending the back-fill is absent, but by
+   * pinning the property that makes it harmless.
+   */
+  it('shares not one name between the platform back-fill and the override class', () => {
+    const backfilled = new Set<string>(WINDOWS_PLATFORM_BACKFILL.map((n) => n.toUpperCase()));
+    const overrides = new Set<string>(FORGE_CLIENT_OVERRIDE_ENV_VARS.map((n) => n.toUpperCase()));
+    const both = [...backfilled].filter((n) => overrides.has(n));
+    expect(both).toEqual([]);
+
+    // Positive control on both sets: they are the sets they are named after, so
+    // an empty intersection is a fact rather than an empty operand. The
+    // back-fill really does carry the two names the corrected comments name,
+    // and the override class really does carry a credential and a destination.
+    expect(backfilled).toContain('SYSTEMROOT');
+    expect(backfilled).toContain('USERPROFILE');
+    expect(overrides).toContain('GH_TOKEN');
+    expect(overrides).toContain('GH_HOST');
+    expect(overrides).toContain('GH_CONFIG_DIR');
+    expect(overrides).toContain('HTTPS_PROXY');
+  });
+
   it('runs the client outside the repository, so an observation writes nothing into it', async () => {
-    // Measured: with this policy's environment the client writes
-    // `.local/state/gh/device-id` relative to its working directory. Run in a
-    // repository root, a read-only observation would dirty a worktree.
+    // Measured with the block this policy supplies: the client writes
+    // `.local/state/gh/device-id` relative to its working directory. Re-measured
+    // with `USERPROFILE` present — which the Windows back-fill always supplies —
+    // it writes nothing there, so the dirtied checkout is a property of the
+    // policy block alone and not of the shipped path. The constant stays because
+    // it costs nothing, survives a narrowing of that back-fill, and independently
+    // denies the client any repository to infer context from.
     const { runner, calls } = recordingRunner(greenBodies());
     await observePullRequestAtHead(subjectOf(), { runner, envSource: HOSTILE });
     expect(calls[0]?.cwd).toBe(FORGE_CLIENT_WORKING_DIRECTORY);
@@ -1145,28 +1292,77 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     expect(Object.keys(SUBJECT_REFUSAL_DETAIL).sort()).toEqual([...SUBJECT_REFUSALS].sort());
   });
 
-  it('says exactly this', () => {
+  it('says exactly this — every sentence, not a sample of them', () => {
     // Slice 1 shipped a sentence map whose one binding test compared the map
     // with itself, and a README sample drifted away from the code unnoticed.
-    // These are literals.
-    expect(OBSERVATION_REFUSAL_DETAIL.UNSUPPORTED_HOST).toBe(
-      'The delivery target is not on a host this build contacts. Nothing was requested.',
+    //
+    // The first version of this case cited that defect and then pinned four of
+    // ten refusals, one of six subject refusals and one of four conclusions —
+    // while `forge-observation.ts` and `observe-delivery.ts` both told the
+    // reader the sentences were "pinned by literal, never by reading the map".
+    // Whole-map equality against object literals is what makes those two
+    // sentences true: every sentence below is written out here, so a drifted
+    // one is red, and no assertion can be satisfied by consulting the source.
+    expect({ ...OBSERVATION_REFUSAL_DETAIL }).toEqual({
+      UNSUPPORTED_HOST:
+        'The delivery target is not on a host this build contacts. Nothing was requested.',
+      SUBJECT_UNUSABLE:
+        'The repository identity or the commit object name is not one this build will put in a request.',
+      FORGE_CLIENT_ABSENT: 'No GitHub CLI was found on this machine, so nothing was asked.',
+      ENVIRONMENT_UNUSABLE:
+        'The environment for the GitHub CLI could not be built unambiguously, so nothing was started.',
+      FORGE_CLIENT_UNUSABLE:
+        'The GitHub CLI started but did not produce a usable answer, so nothing is established.',
+      NOT_AUTHENTICATED:
+        'The GitHub CLI reports that this request needs an authentication it does not have.',
+      REQUEST_FAILED: 'The GitHub CLI ran and the request did not succeed.',
+      RESPONSE_MALFORMED:
+        'The answer was not of a shape this build accepts, so it was not read as evidence.',
+      SUBJECT_MISMATCH:
+        'The answer identifies a different commit than the one asked about, so it was not read as evidence.',
+      RESULTS_TRUNCATED:
+        'The forge returned a full page of records, so a further one cannot be ruled out.',
+    });
+
+    expect({ ...SUBJECT_REFUSAL_DETAIL }).toEqual({
+      DELIVERY_NOT_DECLARED:
+        'This repository declares no delivery target, so there is nothing to observe.',
+      DELIVERY_TARGET_UNRESOLVED:
+        'The declared delivery target did not resolve to a repository identity.',
+      TASK_STATE_UNAVAILABLE: 'No durable record for this task could be read.',
+      NO_CURRENT_COMMIT:
+        'The durable record pins no commit, so there is no subject to ask about.',
+      UNSUPPORTED_HOST:
+        'The delivery target is not on a host this build contacts. Nothing was requested.',
+      SUBJECT_UNUSABLE:
+        'The repository identity or the commit object name is not one this build will put in a request.',
+    });
+
+    // The two trailers are the strongest promises this surface makes, and they
+    // were the one operator-facing string nothing pinned. `CONTACTED_TRAILER`
+    // used to say "github.com was asked about one commit and nothing else",
+    // which the same commit's own residual `L-V4-02-6` contradicts: the client
+    // sends telemetry and runs an update check that this build does not
+    // suppress. A promise that strong needs a literal.
+    expect(NOT_CONTACTED_TRAILER).toBe(
+      'Read-only. No forge was contacted, no task state was written, and nothing was delivered.',
     );
-    expect(OBSERVATION_REFUSAL_DETAIL.NOT_AUTHENTICATED).toBe(
-      'The GitHub CLI reports that this request needs an authentication it does not have.',
+    expect(CONTACTED_TRAILER).toBe(
+      'Read-only. This build asked about no commit but the one named above, and about no other\n' +
+        'repository. No task state was written. No pull request was opened, updated, reviewed or\n' +
+        'merged. The GitHub CLI also makes calls of its own — telemetry, and a periodic update\n' +
+        'check — which this build does not suppress (L-V4-02-6).',
     );
-    expect(OBSERVATION_REFUSAL_DETAIL.SUBJECT_MISMATCH).toBe(
-      'The answer identifies a different commit than the one asked about, so it was not read as evidence.',
-    );
-    expect(OBSERVATION_REFUSAL_DETAIL.RESULTS_TRUNCATED).toBe(
-      'The forge returned a full page of records, so a further one cannot be ruled out.',
-    );
-    expect(SUBJECT_REFUSAL_DETAIL.DELIVERY_NOT_DECLARED).toBe(
-      'This repository declares no delivery target, so there is nothing to observe.',
-    );
-    expect(OBSERVATION_CONCLUSION_DETAIL.OBSERVED).toBe(
-      'Both questions were answered for exactly the commit named above. Nothing was delivered.',
-    );
+
+    expect({ ...OBSERVATION_CONCLUSION_DETAIL }).toEqual({
+      NOT_OBSERVED:
+        'The subject is established. Nothing was contacted; pass --observe to ask the forge.',
+      SUBJECT_NOT_ESTABLISHED: 'There is no subject to ask about, so no request was made.',
+      OBSERVED:
+        'Both questions were answered for exactly the commit named above. Nothing was delivered.',
+      OBSERVATION_INCOMPLETE:
+        'At least one question was not answered, so nothing about it is established.',
+    });
   });
 
   it('interpolates nothing into any sentence', () => {
@@ -1179,6 +1375,42 @@ describe('the operator sentences are pinned by literal, not by reading the map',
       expect(sentence).not.toContain('${');
       expect(sentence).not.toContain('undefined');
     }
+  });
+
+  /**
+   * The slice-1 defect this file's header names, applied to this slice.
+   *
+   * Slice 1's README sample drifted away from the code and nothing noticed,
+   * because nothing compared them. The observation sample is a block of console
+   * output an operator will read as the contract, so it is compared with the
+   * renderer's own constants here rather than maintained by hand.
+   */
+  it('keeps the README sample and the rendered output the same text', async () => {
+    const { readFileSync } = await import('node:fs');
+    const readme = readFileSync('README.md', 'utf8');
+
+    // Positive control: the sample block really is in the file, so a missing
+    // substring below is drift rather than a wrong path.
+    expect(readme).toContain('agent-loop delivery --repository');
+    expect(readme).toContain('Subject      : ');
+
+    expect(readme).toContain(CONTACTED_TRAILER);
+    expect(readme).toContain(NOT_CONTACTED_TRAILER);
+    expect(readme).toContain(OBSERVATION_CONCLUSION_DETAIL.OBSERVED);
+    expect(readme).toContain(
+      renderCheckStateLine({
+        outcome: 'SUCCESS',
+        counts: {
+          checkRuns: 2,
+          commitStatuses: 0,
+          failed: 0,
+          pending: 0,
+          succeeded: 2,
+          neutralOrSkipped: 0,
+        },
+      }),
+    );
+    expect(readme).toContain(renderPullRequestLine({ outcome: 'MATCHED', pullRequest: 55 }));
   });
 
   it('names every enumeration this build accepts from the forge', () => {
@@ -1312,14 +1544,96 @@ describe('the CLI surface', () => {
   });
 
   it('writes no task state on any path', async () => {
-    // The command imports no writer. Proven structurally rather than by
-    // watching a filesystem: there is no save in the module graph it reaches.
-    const source = await import('node:fs').then((fs) =>
-      fs.readFileSync('src/cli/delivery-command.ts', 'utf8'),
+    // The first version of this read one file and claimed the module graph.
+    // It also had no positive control, so a renamed file or a mistyped path
+    // would have produced three vacuous passes.
+    //
+    // Every module the command can reach is named here instead — the command,
+    // the composition, the contract, the transport and the renderer — which is
+    // the whole of `deliver/` plus the two `cli/` files, and the import graph
+    // is asserted separately in 'the observation modules reach no writer'.
+    const { readFileSync } = await import('node:fs');
+    const reachable = [
+      'src/cli/delivery-command.ts',
+      'src/cli/render-delivery-observation.ts',
+      'src/deliver/observe-delivery.ts',
+      'src/deliver/forge-observation.ts',
+      'src/deliver/github-observer.ts',
+    ];
+    for (const file of reachable) {
+      const source = readFileSync(file, 'utf8');
+      // Positive control: this really is the file it is named after, so an
+      // absence below is evidence rather than an unread path.
+      expect(source.length).toBeGreaterThan(200);
+      for (const writer of [
+        'saveTaskState',
+        'advanceTaskState',
+        'recordAgentInterruption',
+        'acquireExecutionLease',
+        'writeFileSync',
+        'mkdirSync',
+        'renameSync',
+      ]) {
+        expect(source).not.toContain(writer);
+      }
+    }
+
+    // And the positive control for the *pattern*: the same search does find a
+    // writer where one exists, so an empty result above is a fact about these
+    // files and not about the search.
+    expect(readFileSync('src/state/state-store.ts', 'utf8')).toContain('saveTaskState');
+  });
+
+  it('the observation modules reach no writer, by import', async () => {
+    // The structural half the case above deliberately does not claim. Every
+    // module specifier imported by the five reachable files is collected, and
+    // none of them may be a state, lease or worktree module. This is what
+    // "there is no save in the module graph it reaches" actually requires.
+    const { readFileSync } = await import('node:fs');
+    const specifier = /(?:^|\n)\s*(?:import|export)[\s\S]*?from\s+'([^']+)'/g;
+    const seen = new Set<string>();
+    for (const file of [
+      'src/cli/delivery-command.ts',
+      'src/cli/render-delivery-observation.ts',
+      'src/deliver/observe-delivery.ts',
+      'src/deliver/forge-observation.ts',
+      'src/deliver/github-observer.ts',
+    ]) {
+      const source = readFileSync(file, 'utf8');
+      for (const match of source.matchAll(specifier)) {
+        const found = match[1];
+        if (found !== undefined) seen.add(found);
+      }
+    }
+
+    // Positive control: the scanner found something at all, and found the two
+    // specifiers that must be there. An empty set would otherwise pass.
+    expect(seen.size).toBeGreaterThan(5);
+    expect(seen).toContain('../doctor/exec.js');
+    expect(seen).toContain('../auth/env-guard.js');
+
+    // Two modules in that class are reachable, and both are named here so that
+    // a third cannot arrive quietly:
+    //
+    //  - `state-store.js`, and only for `loadTaskState`, which reads;
+    //  - `core/task-state.js`, for the `TaskState` *type* alone. A type is
+    //    erased and cannot write; it is admitted because the report prints the
+    //    state a commit belongs to and that name has to come from somewhere.
+    const ADMITTED = ['../core/task-state.js', '../state/state-store.js'];
+    expect([...seen].filter((s) => /state|lease|worktree/.test(s)).sort()).toEqual(ADMITTED);
+    for (const found of seen) {
+      if (ADMITTED.includes(found)) continue;
+      expect(found).not.toMatch(/state-store|execution-lease|worktree|commit-task-work|leased/);
+    }
+    // The type-only exception is type-only. If it ever stops being, this is red.
+    expect(readFileSync('src/deliver/observe-delivery.ts', 'utf8')).toContain(
+      "import type { TaskState } from '../core/task-state.js'",
     );
-    expect(source).not.toContain('saveTaskState');
-    expect(source).not.toContain('advanceTaskState');
-    expect(source).not.toContain('acquireExecutionLease');
+    // The exception is a reader and nothing more: the command names the read
+    // and never the writer that lives in the same module.
+    const command = readFileSync('src/cli/delivery-command.ts', 'utf8');
+    expect(command).toContain('loadTaskState');
+    expect(command).not.toContain('saveTaskState');
   });
 });
 
@@ -1344,12 +1658,48 @@ describe('the product contract is unchanged', () => {
     };
     walk('src');
 
-    // Every argument vector this build can hand a forge client is built by one
-    // function, and that function's prefix is fixed. Nothing else may name a
-    // writing subcommand of the client.
-    const forbidden = /['"](pr|api|repos)\/?['"]\s*,\s*['"](create|merge|edit|close|review)['"]/;
-    const offenders = files.filter((f) => forbidden.test(readFileSync(f, 'utf8')));
+    // The first version of this matched only a literal adjacent pair such as
+    // `'pr', 'merge'`. It was green, and it would have stayed green through the
+    // most likely widening there is: flipping `'GET'` to `'POST'` in the fixed
+    // prefix and adding a merge path built by a template. It also had no
+    // positive control, so a broken pattern was indistinguishable from a clean
+    // source tree. Both are fixed here.
+    const forbidden = [
+      // A writing method, however it is spelled.
+      /['"]-X['"]\s*,\s*['"](POST|PUT|PATCH|DELETE)['"]/,
+      /--method['"]?\s*[,=]?\s*['"](POST|PUT|PATCH|DELETE)['"]/,
+      /['"]-X (POST|PUT|PATCH|DELETE)['"]/,
+      // A writing subcommand of the client, adjacent or templated.
+      /['"](pr|issue|api|repos)\/?['"]\s*,\s*['"](create|merge|edit|close|review|comment)['"]/,
+      /['"]gh (pr|issue) (create|merge|edit|close|review|comment)/,
+      // A path that can only be a mutation, however it is assembled.
+      /\/(merge|merges)['"`]/,
+      /pulls\/\$\{/,
+      // The body channel: a read has none.
+      /['"]--input['"]/,
+    ];
+    const offenders = files.filter((f) => {
+      const source = readFileSync(f, 'utf8');
+      return forbidden.some((pattern) => pattern.test(source));
+    });
     expect(offenders).toEqual([]);
+
+    // Positive control, and the reason the case above is evidence rather than a
+    // broken regex: each pattern is shown to match the thing it is aimed at, on
+    // text written here. Deleting any guard the title names turns this red.
+    const mutants = [
+      `runner('gh', ['api', '-X', 'POST', path])`,
+      `runner('gh', ['api', '--method', 'PATCH', path])`,
+      `const args = ['api', '-X DELETE', path]`,
+      `runner('gh', ['pr', 'merge', String(n)])`,
+      `exec('gh pr merge --squash')`,
+      `const p = \`repos/\${o}/\${r}/pulls/\${n}/merge\``,
+      `runner('gh', ['api', path, '--input', '-'])`,
+    ];
+    for (const mutant of mutants) {
+      expect(forbidden.some((pattern) => pattern.test(mutant))).toBe(true);
+    }
+
     expect([...FORGE_REQUEST_PREFIX]).toEqual(['api', '--hostname', 'github.com', '-X', 'GET']);
   });
 
