@@ -40,6 +40,8 @@ import {
   observePullRequestAtHead,
   type ForgeObserverDependencies,
 } from './github-observer.js';
+import type { DeliveryObservationProof } from './delivery-observation-proof.js';
+import { mintDeliveryObservation } from './internal/delivery-observation-proof.js';
 
 /**
  * Why no subject could be established.
@@ -174,6 +176,54 @@ export async function observeDelivery(
   const pullRequest = await observePullRequestAtHead(subject, deps);
   const checks = await observeCheckStateAtCommit(subject, deps);
   return Object.freeze({ pullRequest, checks });
+}
+
+/**
+ * Turns an observation this process just made into a proof that it made it, or
+ * `null`.
+ *
+ * ── Why this is here and nowhere else ─────────────────────────────────────
+ *
+ * This is the recognised observation boundary, and the mint is reachable from
+ * exactly two modules: its own public wrapper, and this one. That is a property
+ * a test asserts, not a convention — the guarantee the durable record leans on
+ * is "a forge-observation claim cannot be manufactured without going through
+ * here", and it is only worth as much as the number of places that can go
+ * around it.
+ *
+ * It is deliberately **not** folded into {@link observeDelivery}. Slice 2's
+ * contract is that observing is read-only and produces two answers, and that
+ * contract has to stay literally true: a caller that wants only the answers
+ * gets only the answers, and minting is a second, explicit step taken by a
+ * caller that intends to record. Returning a proof from the observation itself
+ * would also mean minting one on every `--observe` run, including the ones that
+ * never record — an artefact made for nobody.
+ *
+ * `null` for an observation that did not settle both questions. The mint
+ * re-derives that itself rather than believing this function, so a change here
+ * cannot widen what may be attested; the check is stated in both places for the
+ * same reason the containment schema and its mint both refuse an unverified
+ * launch.
+ *
+ * `observedAt` is supplied rather than read from a clock inside the mint, so
+ * that the instant recorded is the caller's own and a test can pin it. It is
+ * evidence of *when*, and see `delivery-evidence.ts` for the length of the list
+ * of things it is not.
+ */
+export function attestDeliveryObservation(
+  subject: ObservationSubject,
+  observation: DeliveryObservation,
+  observedAt: string,
+): DeliveryObservationProof | null {
+  return mintDeliveryObservation({
+    host: subject.host,
+    owner: subject.owner,
+    name: subject.name,
+    commit: subject.commit,
+    pullRequest: observation.pullRequest,
+    checks: observation.checks,
+    observedAt,
+  });
 }
 
 // ── What the whole invocation amounts to ───────────────────────────────────

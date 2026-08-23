@@ -93,6 +93,32 @@ async function ask(
 }
 
 /**
+ * Asks Git about **one** repository-relative path.
+ *
+ * Exported so that a caller writing a *different* name into the runtime
+ * directory asks the same question, through the same command, and gets the same
+ * three-way verdict — rather than growing a second opinion about what Git
+ * ignores. V4 slice 3 is the first such caller: it writes
+ * `runtime/delivery/<taskId>.json`, one directory below the task state, and
+ * {@link checkRuntimeIgnored} asks only about the two names the *state* writer
+ * creates — which a rule keyed on the runtime directory's own files need not
+ * cover.
+ *
+ * A caller that writes through `writeFileAtomically` must ask about the staging
+ * shape as well, and must ask in two calls rather than one: `check-ignore` ORs
+ * its arguments and exits 0 if *any* of them is ignored, so a single call
+ * carrying both would report success whenever either passed — the opposite of
+ * the conjunction the check needs.
+ */
+export async function askRuntimeIgnored(
+  git: GitRunner,
+  repositoryRoot: string,
+  relativePath: string,
+): Promise<RuntimeIgnoreVerdict> {
+  return ask(git, repositoryRoot, relativePath);
+}
+
+/**
  * The suffix used for the staging-file probe.
  *
  * `writeFileAtomically` stages at `<fileName>.tmp-<tempSuffix()>`, where the

@@ -40,6 +40,11 @@ import {
   type ObservationConclusion,
   type SubjectResolution,
 } from '../deliver/observe-delivery.js';
+import {
+  DELIVERY_EVIDENCE_READING_DETAIL,
+  REMOTE_FRESHNESS_SENTENCE,
+  type DeliveryEvidenceReading,
+} from '../deliver/delivery-evidence.js';
 
 /**
  * The closing contract sentence, in the two shapes this command has.
@@ -140,6 +145,71 @@ export function renderCheckStateLine(observation: CheckStateObservation): string
   return line('Checks', refusalLine(observation.outcome));
 }
 
+/**
+ * The stored-evidence line, and the sentence that must always follow it.
+ *
+ * ── Why the reading is printed for every outcome, including the refusals ───
+ *
+ * Because "AO has never observed this" and "AO observed something and this
+ * build cannot read it" are different facts, and the second is the one an
+ * operator has to be told about — a `MALFORMED` record reported as silence
+ * looks exactly like a task nobody has looked at.
+ *
+ * ── Why the word HISTORICAL is in the label ───────────────────────────────
+ *
+ * The line sits directly beneath a live `Checks : SUCCESS`, and the two are
+ * about different moments. A label reading `Evidence` beside a stored `SUCCESS`
+ * invites exactly the reading this slice exists to prevent, so the label says
+ * what the value is: history.
+ */
+export const HISTORICAL_LABEL = 'Recorded';
+
+/**
+ * What is printed when a fresh observation and a stored record disagree.
+ *
+ * The disagreement is *reported*, and neither side is preferred. Silently
+ * trusting the fresh one would be right in most cases and would teach an
+ * operator that the record tracks reality; silently trusting the stored one
+ * would be wrong in all of them. Saying both, and saying they differ, is the
+ * only honest option — and the fresh answer is already printed above, so the
+ * line only has to name the stored one and the fact of the difference.
+ */
+export const EVIDENCE_DISAGREEMENT_PREFIX = 'the observation above does not match it';
+
+/**
+ * The agreement half, and it says exactly what was compared.
+ *
+ * ── Both sentences have now been wrong in opposite directions ─────────────
+ *
+ * The first pair read "agrees" / "differs from the observation above". "Agrees"
+ * claimed more than the comparison makes: only the two outcome words and the
+ * pull-request number are compared, so a stored `SUCCESS (2 check runs)` beside
+ * a fresh `SUCCESS (10 check runs, 8 of them new)` was called agreement. Both
+ * sets of counts are printed two lines above, so the operator could see the
+ * difference — but the sentence should not have said there was none.
+ *
+ * The correction replaced them with "reports the same outcome" / "reports a
+ * different outcome", and a second review found the disagreement half was then
+ * false in a case the suite deliberately exercises: a pull request closed and
+ * another opened at the same head gives `MATCHED` on both sides with different
+ * numbers, so the outcome *word* is identical and the sentence said it was not.
+ *
+ * So the two are no longer symmetrical, because the underlying comparison is
+ * not. The agreement half names what was compared and claims only that; the
+ * disagreement half says the two do not match, without naming which of the
+ * three compared values moved — all three are printed above it.
+ */
+export const EVIDENCE_AGREEMENT_SUFFIX =
+  'the observation above reports the same outcome and pull request';
+
+export interface StoredEvidenceView {
+  readonly reading: DeliveryEvidenceReading;
+  readonly observedAt: string | null;
+  readonly pullRequestOutcome: string | null;
+  readonly pullRequestNumber: number | null;
+  readonly checkOutcome: string | null;
+}
+
 export interface DeliveryObservationView {
   readonly repositoryId: string;
   readonly repositoryRoot: string;
@@ -148,6 +218,14 @@ export interface DeliveryObservationView {
   /** `null` when no observation was requested. */
   readonly observation: DeliveryObservation | null;
   readonly conclusion: ObservationConclusion;
+  /** What is already on disk for this task, or `null` when it was not looked for. */
+  readonly stored?: StoredEvidenceView | null;
+  /** What `--record` amounted to, or `null` when it was not asked for. */
+  readonly recording?: {
+    readonly outcome: string;
+    readonly recorded: boolean;
+    readonly detail: string | null;
+  } | null;
 }
 
 /**
@@ -195,14 +273,90 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     );
   }
 
+  const stored = view.stored ?? null;
+  if (stored !== null) {
+    lines.push(renderStoredEvidenceLine(stored, view.observation));
+  }
+
+  const recording = view.recording ?? null;
+  if (recording !== null) {
+    // The code alone when it succeeded, and the code plus its sentence when it
+    // did not. A refusal is the case an operator has to act on, so it is the
+    // one that carries an explanation; `RECORDED — RECORDED`, which the first
+    // version printed, explained nothing twice.
+    lines.push(
+      line(
+        'Record',
+        recording.recorded
+          ? recording.outcome
+          : `${recording.outcome}${recording.detail === null ? '' : ` — ${recording.detail}`}`,
+      ),
+    );
+  }
+
   lines.push(
     '',
     `Conclusion   : ${view.conclusion}`,
     `  ${OBSERVATION_CONCLUSION_DETAIL[view.conclusion]}`,
+  );
+
+  // The freshness sentence follows any historical evidence, always. It is not
+  // conditional on the outcome and it is not conditional on whether a fresh
+  // observation was also made: a record that agrees with a fresh answer is
+  // still not the reason that answer is true.
+  if (stored !== null && stored.reading === 'HISTORICAL_VALID') {
+    lines.push('', REMOTE_FRESHNESS_SENTENCE);
+  }
+
+  lines.push(
     '',
     view.observation === null ? NOT_CONTACTED_TRAILER : CONTACTED_TRAILER,
     '',
   );
 
   return lines.join('\n');
+}
+
+/**
+ * The stored record as one line, and the comparison when there is one to make.
+ *
+ * The stored outcomes are printed as `was MATCHED` / `was SUCCESS`, in the past
+ * tense, deliberately. The same words appear two lines above in the present
+ * tense for the fresh answer, and the tense is the only thing distinguishing
+ * them at a glance — so it is the tense that does the work rather than a
+ * footnote somebody has to reach.
+ */
+export function renderStoredEvidenceLine(
+  stored: StoredEvidenceView,
+  observation: DeliveryObservation | null,
+): string {
+  if (stored.reading !== 'HISTORICAL_VALID') {
+    return line(
+      HISTORICAL_LABEL,
+      `${stored.reading} — ${DELIVERY_EVIDENCE_READING_DETAIL[stored.reading]}`,
+    );
+  }
+
+  const pull =
+    stored.pullRequestNumber === null
+      ? String(stored.pullRequestOutcome)
+      : `${String(stored.pullRequestOutcome)} (#${String(stored.pullRequestNumber)})`;
+  const when = stored.observedAt === null ? 'an unrecorded time' : stored.observedAt;
+  let text = `HISTORICAL — at ${when} this was ${pull}, checks ${String(stored.checkOutcome)}`;
+
+  if (observation !== null) {
+    // Compared on the settled outcome words only. A pull-request number that
+    // moved is a different match and is caught by the outcome comparison below
+    // only when the outcome itself changed, so the number is compared too.
+    const freshPull = observation.pullRequest.outcome;
+    const freshNumber =
+      observation.pullRequest.outcome === 'MATCHED' ? observation.pullRequest.pullRequest : null;
+    const differs =
+      freshPull !== stored.pullRequestOutcome ||
+      freshNumber !== stored.pullRequestNumber ||
+      observation.checks.outcome !== stored.checkOutcome;
+    text += `; ${differs ? EVIDENCE_DISAGREEMENT_PREFIX : EVIDENCE_AGREEMENT_SUFFIX}`;
+  }
+
+  return line(HISTORICAL_LABEL, text);
 }

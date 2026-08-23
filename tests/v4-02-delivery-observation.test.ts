@@ -1878,14 +1878,31 @@ describe('the CLI surface', () => {
     expect(seen).toContain('../doctor/exec.js');
     expect(seen).toContain('../auth/env-guard.js');
 
-    // Two modules in that class are reachable, and both are named here so that
-    // a third cannot arrive quietly:
+    // Four modules in that class are reachable, and all four are named here so
+    // that a fifth cannot arrive quietly:
     //
     //  - `state-store.js`, and only for `loadTaskState`, which reads;
     //  - `core/task-state.js`, for the `TaskState` *type* alone. A type is
     //    erased and cannot write; it is admitted because the report prints the
-    //    state a commit belongs to and that name has to come from somewhere.
-    const ADMITTED = ['../core/task-state.js', '../state/state-store.js'];
+    //    state a commit belongs to and that name has to come from somewhere;
+    //  - `state/runtime-ignored.js`, admitted by V4 slice 3 for
+    //    `askRuntimeIgnored`, which runs `git check-ignore` and writes nothing.
+    //    It is imported rather than reimplemented precisely so that this build
+    //    has one opinion about what Git ignores rather than two;
+    //  - `worktree/git-command.js`, for the runner that check-ignore question
+    //    needs. It is the same read-only Git seam slice 1 already uses.
+    //
+    // What changed with slice 3, stated rather than left to be discovered: this
+    // surface can now cause a durable write, one level down, through
+    // `deliver/delivery-evidence-store.js`. This check is depth-one and does not
+    // follow it — see the comment above — so the writing itself is pinned in
+    // `tests/v4-03-delivery-evidence.test.ts`, where the authority for it lives.
+    const ADMITTED = [
+      '../core/task-state.js',
+      '../state/runtime-ignored.js',
+      '../state/state-store.js',
+      '../worktree/git-command.js',
+    ];
     expect([...seen].filter((s) => /state|lease|worktree/.test(s)).sort()).toEqual(ADMITTED);
     for (const found of seen) {
       if (ADMITTED.includes(found)) continue;
