@@ -8809,6 +8809,158 @@ for the measurements, the rejected state-machine options and the residuals
   registry capture, which is slice 3’s boundary; the prototype forgery driven
   here is refused one step earlier, at the gate.
 
+## Publishing the delivery head (V4 slice 5)
+
+The first thing this build can change outside this machine.
+
+```
+agent-loop delivery --repository D:\Work\my-repo --task T-001 --publish-head --attended
+```
+
+It creates `refs/heads/<workBranch>` on the delivery remote, at exactly the
+task's pinned commit. Nothing else. It opens no pull request, merges nothing,
+writes no task state and takes no lease.
+
+```
+Publication  : PUBLISHED
+  The ref did not exist, and it now holds exactly this commit on the delivery remote.
+  Intended     : refs/heads/ao/T-001 on origin
+  Remote before: ABSENT
+  Attempt      : COMPLETED
+  Remote after : AT_COMMIT 10583ee91a5747d0049f563ffaac64b0cf643aeb
+```
+
+### It was going to be pull-request creation
+
+It is not, because four measurements said a pull-request slice would refuse on
+every real task. Nothing in this repository pushes a branch — the search covers
+`src/`, the scripts and the dist harnesses, and the only hits are prose.
+`CLAUDE.md` and the M1 ADR both document pushing as a **human** step. And a
+pull request is created from a remote ref that already exists: GitHub's
+`POST /repos/{owner}/{repo}/pulls` takes `head` as a branch **name** and creates
+no refs.
+
+The tool that would have hidden that is the one that makes it worse.
+`gh pr create --help`, verbatim: *"When the current branch isn't fully pushed to
+a git remote, a prompt will ask where to push the branch… Use `--head` to
+explicitly skip any forking or pushing behavior."* Its dry run adds *"May still
+push git changes."* Using it would have smuggled a second, unnamed forge
+mutation into a slice named after the first.
+
+So the slice is the prerequisite, named after what it does.
+
+### Exit 0 does not mean it was published
+
+Measured against github.com, with the vector this build uses:
+
+| Remote ref | `--porcelain` | Exit |
+| --- | --- | --- |
+| absent | `*  [new branch]` | 0 |
+| already at the pushed SHA | `=  [up to date]` | 0 |
+| at a different SHA | `!  [rejected] (stale info)` | 1 |
+
+Two different events share exit 0, and one of them changed nothing. So the
+remote is read **before** the attempt and **after** it, and the exit code is
+allowed to decide only between explanations the two readings cannot separate.
+`PUBLISHED` means the ref was absent, one push was made, and the ref now holds
+this commit.
+
+### Create-only, by a compare-and-swap the server evaluates
+
+The push carries `--force-with-lease=<ref>:` — with an **empty** expected value.
+Measured, that means *this ref must not exist*: it creates, and it refuses an
+existing ref with `(stale info)` even when the update would fast-forward
+cleanly. The same flag with a *correct* expected value performs a forced update
+and rewrites the branch, which is why the expected value is not a parameter and
+cannot be supplied by anything — the vector is built with the colon and nothing
+after it, and a test reads the vector for every input to prove it.
+
+The left side of the refspec is the **object name**, never a branch name, so a
+local branch that moves cannot change what is published.
+
+That compare-and-swap is also the whole concurrency story. Two publishers racing
+to create the same ref cannot both win, in any arrival order, on any machine.
+This build takes **no** execution lease to publish: a lease would assert that
+this invocation is the repository's writer — which a publication is not — would
+make a delivery command contend with a running task for the whole repository,
+and would fence nothing across two clones of one remote, which is the race worth
+fencing.
+
+### The authority is a type, and it is spent when it is read
+
+`--publish-head` alone does nothing; it requires `--attended`, the same shape
+`release` uses. When both are given and the task is at `READY_FOR_PR`, one
+opaque `HeadPublicationGrant` is minted, bound to
+`{host, owner, name, remoteName, ref, commit}`.
+
+It is **one-shot, structurally**: there is no accessor that reads what it
+authorises without spending it in the same call, so a grant that could be read
+twice — and therefore publish twice — does not exist. A shape-perfect forgery is
+refused at the registry and contacts nothing.
+
+And `CREATE_AUTHORIZED != MERGE_AUTHORIZED` is a compile error rather than a
+comment: there is no merge grant, no pull-request grant, no widening conversion
+and no common supertype. A later slice must mint its own artefact and say so.
+
+### One attempt, and never a blind retry
+
+The push happens at most once per invocation, on every path, including the ones
+that end uncertain. GitHub offers no idempotency key for this, so idempotency is
+a property of the ladder rather than of the transport: every invocation
+re-derives the state from a reading, and a retry is a human asking again. Run it
+twice and the second answer is `ALREADY_PUBLISHED` with no push at all.
+
+If the transport fails and the ref turns out to hold the commit anyway, that is
+`CONVERGED_AFTER_UNCERTAIN_EFFECT` — the state is established, and this
+invocation does not claim it is what established it. If the transport succeeds
+and the ref is not there, that is `OUTCOME_UNCERTAIN`, and nothing is retried,
+deleted or cleaned up. A compensating action is another mutation, taken at the
+moment least is known.
+
+### The eleven outcomes
+
+`SUBJECT_NOT_ESTABLISHED`, `TASK_NOT_READY`, `OPERATOR_ABSENT`,
+`AUTHORITY_REFUSED`, `SUBJECT_CHANGED`, `REMOTE_STATE_UNKNOWN`,
+`REF_HOLDS_ANOTHER_COMMIT`, `PUBLICATION_REFUSED`, `OUTCOME_UNCERTAIN`,
+`ALREADY_PUBLISHED`, `CONVERGED_AFTER_UNCERTAIN_EFFECT`, `PUBLISHED`.
+
+Three of them mean the remote holds this exact commit under this exact ref —
+one established state with three provenances — and `remoteHeadIsEstablished` is
+the predicate to ask, because comparing against `PUBLISHED` alone would push
+again for no reason.
+
+Nothing reaches the network but identities and object names. The grant carries
+six fields and the vector can only carry what the grant holds, so no task title,
+diff, log, path or URL can leak by this path — enforced by the shape, not by a
+filter somebody has to remember to run.
+
+ADR: [`docs/decisions/2026-08-24-adr-delivery-head-publication.md`](docs/decisions/2026-08-24-adr-delivery-head-publication.md).
+
+### Carried forward from V4 slice 5, deliberately
+
+- **L-V4-05-1 — republishing a moved head is not implemented.** Once the ref
+  exists, a task that advances gets `REF_HOLDS_ANOTHER_COMMIT`. Updating a
+  published head is a different act with a different blast radius.
+- **L-V4-05-2 — the remote race is fenced, not eliminated.** Nothing prevents a
+  human moving the ref a second later, and nothing here would notice.
+- **L-V4-05-3 — push authentication was measured on this machine only.**
+  Windows, HTTPS origin, Git Credential Manager at system scope. A host whose
+  helper needs an environment variable `capability:generic` does not carry would
+  fail as `PUBLICATION_REFUSED` with no diagnosis, because Git's stderr is not
+  read.
+- **L-V4-05-4 — the duplicate-PR and closed-PR endpoint behaviours are
+  unmeasured.** Establishing them requires a POST; they belong to the next
+  slice, beside the still-open `L-V4-02-7`.
+- **L-V4-05-5 — the publication is not recorded.** "AO published this head" is
+  not a durable fact; the remote is the record and slice 2 reads it back.
+- **L-V4-05-6 — the live dogfood exercised the module, not the CLI ladder.** The
+  ladder requires `READY_FOR_PR`, and this repository has no AO task state for
+  its own slices. Fabricating one to make a dogfood possible is exactly what
+  would make the dogfood worthless.
+- **L-V4-05-7 — `--attended` now appears on four commands with four
+  independently worded help strings.** It means the same thing in all four, and
+  nothing proves that.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
@@ -8823,16 +8975,20 @@ exactly one open pull request at this head, and what is this commit’s check
 state. Slice 3: that answer can be **written down**, so a later slice can tell
 “never observed” from “observed at time T”. Slice 4: two fresh answers can be
 **classified** into one word, from an observation this process made and from
-nothing else.
+nothing else. Slice 5 is the first that shortens the list at all: the work
+branch can be **published** to the delivery remote, create-only, under an
+explicit one-shot authority that grants nothing else.
 
 What none of them adds is authority. A stored `SUCCESS` is a historical snapshot
 and never a current one; there is no TTL; `delivery --observe` is still read-only
 on its own; a decision is not merge eligibility and cannot be — the endpoints
 that would prove it answer the same way for "no rules" as for "no permission";
-nothing is pushed, opened or merged; and `READY_FOR_PR` is still terminal, with
+nothing is opened or merged, and publishing a head grants no authority to do
+either; and `READY_FOR_PR` is still terminal, with
 no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1),
 [Durable delivery evidence (V4 slice 3)](#durable-delivery-evidence-v4-slice-3),
-[The delivery decision (V4 slice 4)](#the-delivery-decision-v4-slice-4)
+[The delivery decision (V4 slice 4)](#the-delivery-decision-v4-slice-4),
+[Publishing the delivery head (V4 slice 5)](#publishing-the-delivery-head-v4-slice-5)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on

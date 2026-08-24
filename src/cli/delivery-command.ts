@@ -52,6 +52,13 @@ import {
   type SubjectRevalidation,
 } from '../deliver/delivery-decision.js';
 import type { DeliveryObservationProof } from '../deliver/delivery-observation-proof.js';
+import {
+  mintHeadPublicationGrant,
+  type HeadPublicationSubject,
+} from '../deliver/internal/head-publication-grant.js';
+import { publishDeliveryHead, type PublicationResult } from '../deliver/publish-delivery-head.js';
+import type { GitPublicationRunner } from '../deliver/git-head-publisher.js';
+import type { HeadPublication } from '../deliver/head-publication.js';
 import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
 import { askRuntimeIgnored } from '../state/runtime-ignored.js';
 import {
@@ -73,6 +80,8 @@ interface DeliveryOptions {
   readonly observe?: boolean;
   readonly record?: boolean;
   readonly decide?: boolean;
+  readonly publishHead?: boolean;
+  readonly attended?: boolean;
 }
 
 /**
@@ -128,6 +137,15 @@ export interface DeliveryCommandSeams {
   readonly now?: () => Date;
   /** Asks Git whether one repository-relative path is ignored. */
   readonly checkIgnored?: (relativePath: string) => Promise<IgnoreVerdict>;
+  /**
+   * The runner the two publication vectors go through.
+   *
+   * Separate from {@link DeliveryCommandSeams.runner}, which is the forge client
+   * seam, because these are Git and that one is the GitHub CLI. Keeping them
+   * apart means a test that stubs reading cannot accidentally stub writing, and
+   * a build that stubbed one would still have to say so about the other.
+   */
+  readonly publicationRunner?: GitPublicationRunner;
   /** The Git runner the default ignore probe uses. */
   readonly git?: GitRunner;
 }
@@ -196,15 +214,48 @@ export const DECIDE_OPTION_DESCRIPTION =
   'draft state, mergeability, reviews and branch rules are not observed, and their absence is ' +
   'not provable from what GitHub returns. Writes nothing.';
 
+/**
+ * The flag that names the act, and the only one in this build that can change
+ * something on a forge.
+ *
+ * Spelled after what it does. It is not `--push`, because what is published is
+ * one ref at one object name and never the local branch's current tip; and it
+ * is not `--publish`, because a bare verb would grow to mean whatever the next
+ * slice wants published.
+ */
+export const PUBLISH_HEAD_OPTION_DESCRIPTION =
+  'Create the task\'s work branch on the delivery remote, at exactly its pinned commit. ' +
+  'Requires --attended and a task at READY_FOR_PR. Create-only: the ref is written under a ' +
+  'compare-and-swap that refuses an existing ref, so a branch already there is never moved, ' +
+  'rewritten or deleted — whatever it holds. Idempotent by observation: the remote is read ' +
+  'before and after, a ref already at this commit is reported and not pushed to, and an ' +
+  'attempt whose result was lost is never repeated blindly. This opens no pull request and ' +
+  'grants no authority to open or merge one. It writes no task state.';
+
+/**
+ * Operator presence, in the shape `release` established.
+ *
+ * A second, independent statement rather than a widening of the first: one flag
+ * says which act, and this one says that a person is present for it. Neither
+ * implies the other, and there is no unattended publication.
+ */
+export const ATTENDED_OPTION_DESCRIPTION =
+  'States that an operator is present for this invocation. Required by --publish-head, which ' +
+  'changes a branch on the delivery remote. Not a claim about credentials, and not needed by ' +
+  'any read-only part of this command. There is no unattended publication.';
+
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
   'and — only with --observe — ask github.com two read-only questions about that commit: ' +
   'is there exactly one open pull request whose head is this commit, and what is the check ' +
-  'state of this commit. Contacts nothing without --observe. With --record it stores that ' +
+  'state of this commit. With --record it stores that ' +
   'observation as a historical record beside the task state; without it, nothing is written. ' +
   'With --decide it classifies this invocation\'s own answers into one delivery decision, which ' +
-  'is not merge eligibility and grants nothing. It writes no task state, opens no pull request ' +
-  'and merges nothing, ever.';
+  'is not merge eligibility and grants nothing. With --publish-head and --attended it creates ' +
+  'the work branch on the delivery remote at its pinned commit, create-only — the one thing ' +
+  'this command can change anywhere. Those are the flags that make it contact anything: ' +
+  'without them nothing is read from a network and nothing is written. It writes no task ' +
+  'state, opens no pull request and merges nothing, ever.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
   const resolve = seams.resolveRepository ?? resolveRepository;
@@ -233,6 +284,14 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     .option(
       '--decide',
       DECIDE_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--publish-head',
+      PUBLISH_HEAD_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--attended',
+      ATTENDED_OPTION_DESCRIPTION,
     )
     .action(async (options: DeliveryOptions) => {
       const resolution = await resolve({ repositoryPath: options.repository });
@@ -372,6 +431,34 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
             )
           : null;
 
+      // The mutation, and it is deliberately the last thing that happens.
+      //
+      // Everything above is a read, and every one of those reads is worth
+      // having even on an invocation that goes on to be refused. Putting the
+      // effect after them means a refusal costs nothing extra, and means the
+      // report an operator sees describes the same world the attempt was made
+      // against rather than one observed before it.
+      // The ref and the remote are carried beside the result rather than read
+      // back out of it: the authority that named them is spent by the time the
+      // result exists, deliberately, because an artefact a report could read
+      // twice is an artefact that could publish twice.
+      const publication =
+        options.publishHead === true
+          ? {
+              result: await performPublication(
+                options,
+                repository.root,
+                subject,
+                taskLoad,
+                resolve,
+                load,
+                seams,
+              ),
+              ref: taskLoad.ok ? publishableRef(taskLoad.state.workBranch) : null,
+              remoteName: subject.ok ? subject.remoteName : null,
+            }
+          : null;
+
       process.stdout.write(
         renderDeliveryObservation({
           repositoryId: repository.id,
@@ -383,6 +470,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           stored,
           recording,
           decision: decision === null ? null : { decision, revalidation },
+          publication,
         }),
       );
 
@@ -394,6 +482,106 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       // reads the sentence that comes with it.
       process.exitCode = exitCodeFor(conclusion);
     });
+}
+
+/**
+ * Decides whether one delivery head may be published, and publishes it.
+ *
+ * The refusal ladder here is the one `HEAD_PUBLICATIONS` declares, in the same
+ * order, and that is checked rather than asserted: the suite drives every arm
+ * and pins which member comes out. Two of the three refusals are about the
+ * work and one is about the invocation, and the work is answered first — an
+ * operator whose task is not finished is told that, rather than being told to
+ * pass a flag that would not have helped.
+ *
+ * The mint is called here and nowhere else. That is the reachability property
+ * the whole authority rests on: a tree walk in the suite proves exactly one
+ * module in `src/` imports `internal/head-publication-grant.js`, so "the only
+ * way to obtain the authority is to come through this ladder" is a fact about
+ * the tree rather than a convention.
+ *
+ * Note what is *not* passed to the mint: nothing derived from the task's title,
+ * brief, findings or any other repository-authored prose. The grant carries six
+ * fields, all of them identities or object names, and the push vector can only
+ * carry what the grant holds — so no repository-controlled text can reach the
+ * network by this path, and no filtering step has to remember to run.
+ */
+async function performPublication(
+  options: DeliveryOptions,
+  repositoryRoot: string,
+  subject: ReturnType<typeof resolveObservationSubject>,
+  taskLoad: ReturnType<typeof loadTaskState>,
+  resolve: typeof resolveRepository,
+  load: typeof loadTaskState,
+  seams: DeliveryCommandSeams,
+): Promise<PublicationResult> {
+  const refused = (publication: HeadPublication): PublicationResult =>
+    Object.freeze({
+      publication,
+      before: null,
+      attempt: 'NOT_ATTEMPTED' as const,
+      after: null,
+    });
+
+  if (!subject.ok || !taskLoad.ok) return refused('SUBJECT_NOT_ESTABLISHED');
+  if (taskLoad.state.state !== 'READY_FOR_PR') return refused('TASK_NOT_READY');
+  if (options.attended !== true) return refused('OPERATOR_ABSENT');
+
+  const intended = publishableRef(taskLoad.state.workBranch);
+  if (intended === null) return refused('SUBJECT_NOT_ESTABLISHED');
+
+  const grant = mintHeadPublicationGrant(subject.subject, subject.remoteName, intended);
+  // The mint refuses a remote name, ref or object name it will not put in an
+  // argument vector. Reported as an unestablished subject rather than as its
+  // own member: from an operator's side there is no difference between "there
+  // is no publishable subject" and "the subject there is, is not publishable",
+  // and inventing a second word would imply this build could tell them how to
+  // fix it, which it cannot without naming the value it refused.
+  if (grant === null) return refused('SUBJECT_NOT_ESTABLISHED');
+
+  return publishDeliveryHead(grant, repositoryRoot, {
+    runner: seams.publicationRunner,
+    // A second, independent pass through the whole resolution — repository,
+    // task record, subject, work branch — for the reason
+    // `revalidateLocalSubject` gives: the point is to ask the world, because
+    // what may have moved is the world. Unlike that one, this runs *before* the
+    // effect, because afterwards there would be nothing useful to do with the
+    // answer.
+    recheck: async (): Promise<HeadPublicationSubject | null> => {
+      const again = await resolve({ repositoryPath: options.repository });
+      if (!again.ok) return null;
+      const reloaded = load(again.repository.root, options.task);
+      if (!reloaded.ok) return null;
+      if (reloaded.state.state !== 'READY_FOR_PR') return null;
+      const rebuilt = resolveObservationSubject(again.repository.delivery, reloaded);
+      if (!rebuilt.ok) return null;
+      const ref = publishableRef(reloaded.state.workBranch);
+      if (ref === null) return null;
+      return Object.freeze({
+        host: rebuilt.subject.host,
+        owner: rebuilt.subject.owner,
+        name: rebuilt.subject.name,
+        remoteName: rebuilt.remoteName,
+        ref,
+        commit: rebuilt.subject.commit,
+      });
+    },
+  });
+}
+
+/**
+ * Turns a work branch into the full ref this build is willing to create.
+ *
+ * Full, never partial. A partial ref is resolved by Git against a search order,
+ * so `refs/heads/` is prepended here and not left to the remote to guess. The
+ * grammar is re-checked at the mint as well; this one exists so a branch name
+ * that could not produce a ref is refused before an authority is asked for
+ * rather than after.
+ */
+function publishableRef(workBranch: string): string | null {
+  if (typeof workBranch !== 'string' || workBranch.length === 0) return null;
+  const ref = `refs/heads/${workBranch}`;
+  return /^refs\/heads\/[A-Za-z0-9._+=@/-]+$/.test(ref) ? ref : null;
 }
 
 /**

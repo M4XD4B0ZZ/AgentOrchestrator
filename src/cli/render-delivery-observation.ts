@@ -28,6 +28,11 @@
  */
 
 import {
+  HEAD_PUBLICATION_DETAIL,
+  type RemoteRefReading,
+} from '../deliver/head-publication.js';
+import type { PublicationResult } from '../deliver/publish-delivery-head.js';
+import {
   OBSERVATION_REFUSAL_DETAIL,
   type CheckStateObservation,
   type ObservationRefusal,
@@ -85,6 +90,28 @@ export const CONTACTED_TRAILER =
   'repository. No task state was written. No pull request was opened, updated, reviewed or\n' +
   'merged. The GitHub CLI also makes calls of its own — telemetry, and a periodic update\n' +
   'check — which this build does not suppress (L-V4-02-6).';
+
+/**
+ * The trailer for an invocation that could change something, and did at most
+ * the one thing it is allowed to change.
+ *
+ * The other two both open "Read-only.", and one of them adds "No forge was
+ * contacted". Both were true of every invocation this command could make until
+ * slice 5, and both would be false on a publication — the first always, the
+ * second whenever the remote was read. A third sentence is the honest repair;
+ * widening one of the existing two would have made it vaguer for the runs it
+ * was written for.
+ *
+ * Which trailer is printed is derived from whether a remote reading was taken,
+ * not from which flags were passed: a publication refused before it contacted
+ * anything gets the read-only sentence, because that is what happened.
+ */
+export const PUBLICATION_TRAILER =
+  'Not read-only. This invocation could change exactly one thing and changed at most that:\n' +
+  'one branch on the delivery remote, created at one commit. Create-only — no ref was moved,\n' +
+  'rewritten or deleted, no other ref was touched, and nothing was pushed to any other remote.\n' +
+  'No task state was written. No pull request was opened, updated, reviewed or merged, and\n' +
+  'nothing here grants authority to do any of those.';
 
 function line(label: string, value: string): string {
   return `${label.padEnd(13)}: ${value}`;
@@ -234,6 +261,7 @@ export interface DeliveryObservationView {
   } | null;
   /** What `--decide` amounted to, or `null` when it was not asked for. */
   readonly decision?: DeliveryDecisionView | null;
+  readonly publication?: HeadPublicationView | null;
 }
 
 /**
@@ -253,6 +281,21 @@ export interface DeliveryObservationView {
 export interface DeliveryDecisionView {
   readonly decision: DeliveryDecision;
   readonly revalidation: SubjectRevalidation | null;
+}
+
+/**
+ * What a publication attempt did, and to which ref.
+ *
+ * `ref` and `remoteName` are carried beside the result rather than inside it
+ * because the authority that named them is spent by the time the result exists
+ * — deliberately, since an artefact a report could read twice is an artefact
+ * that could publish twice. The caller still holds them, so it passes them.
+ * Both are `null` on a refusal that never got as far as having a ref.
+ */
+export interface HeadPublicationView {
+  readonly result: PublicationResult;
+  readonly ref: string | null;
+  readonly remoteName: string | null;
 }
 
 /**
@@ -357,13 +400,59 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     );
   }
 
+  const publication = view.publication ?? null;
+  if (publication !== null) {
+    const r = publication.result;
+    lines.push(
+      '',
+      `Publication  : ${r.publication}`,
+      `  ${HEAD_PUBLICATION_DETAIL[r.publication]}`,
+      `  Intended     : ${
+        publication.ref === null || publication.remoteName === null
+          ? 'no publishable ref was established'
+          : `${publication.ref} on ${publication.remoteName}`
+      }`,
+    );
+    // The two readings, and only when one was taken. Printing "before: none"
+    // for a refusal that never contacted the remote would read as a reading
+    // that came back empty, which is a different fact and the more alarming
+    // one.
+    if (r.before !== null) {
+      lines.push(
+        `  Remote before: ${describeReading(r.before)}`,
+        `  Attempt      : ${r.attempt}`,
+        `  Remote after : ${r.after === null ? 'not read' : describeReading(r.after)}`,
+      );
+    }
+  }
+
+  // Derived from what happened, not from which flags were passed. A reading
+  // exists exactly when the remote was contacted by the publication path.
+  const contactedByPublication = publication?.result.before != null;
   lines.push(
     '',
-    view.observation === null ? NOT_CONTACTED_TRAILER : CONTACTED_TRAILER,
+    contactedByPublication
+      ? PUBLICATION_TRAILER
+      : view.observation === null
+        ? NOT_CONTACTED_TRAILER
+        : CONTACTED_TRAILER,
     '',
   );
 
   return lines.join('\n');
+}
+
+/**
+ * One remote reading as one phrase.
+ *
+ * `AT_COMMIT` prints the object name it found, because the whole grading ladder
+ * turns on whether that string equals the intended one and an operator reading
+ * a refusal should be able to see the two side by side. `UNKNOWN` prints no
+ * reason: the reason would be Git's stderr, which this build does not read.
+ */
+function describeReading(reading: RemoteRefReading): string {
+  if (reading.outcome === 'AT_COMMIT') return `AT_COMMIT ${reading.commit ?? ''}`.trim();
+  return reading.outcome;
 }
 
 /**
