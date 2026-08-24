@@ -8836,8 +8836,9 @@ Publication  : PUBLISHED
 ### It was going to be pull-request creation
 
 It is not, because four measurements said a pull-request slice would refuse on
-every real task. Nothing in this repository pushes a branch — the search covers
-`src/`, the scripts and the dist harnesses, and the only hits are prose.
+every real task. Before this slice, nothing in this repository pushed a branch —
+the search covered `src/`, the scripts and the dist harnesses, and every hit was
+prose.
 `CLAUDE.md` and the M1 ADR both document pushing as a **human** step. And a
 pull request is created from a remote ref that already exists: GitHub's
 `POST /repos/{owner}/{repo}/pulls` takes `head` as a branch **name** and creates

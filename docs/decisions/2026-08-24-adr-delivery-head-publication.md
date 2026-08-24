@@ -303,11 +303,15 @@ delivery stack is for.
 
 1. Exactly one module in the delivery surface runs a push, and it runs one
    create-only vector. Derived from the tree.
-1. The effect is bounded by the vector *and* by the config pins, because the
-   vector alone was measured not to bound it.
+1. The **refs touched** are bounded by the vector *and* by the config pins,
+   because the vector alone was measured not to bound them. Not the transport
+   and not the code that runs: see `L-V4-05-10`.
 1. A reading is about the ref that was asked for, established by comparing the
    ref name the remote answered with — never by position in the answer.
-1. One remote name is one repository, or nothing happens.
+1. One remote name reads and writes the same URL list, or nothing happens —
+   and that list is one URL, because slice 1 refuses a remote whose
+   `get-url --push --all` answers with more than one line. The second half of
+   that invariant lives in another module, which is why it is written here.
 2. The lease token always ends at the colon. No expected value, for any input.
 3. The refspec's left side is an object name, never a branch name.
 4. At most one push per invocation, on every path including uncertain ones.
@@ -341,6 +345,16 @@ delivery stack is for.
   dogfood exercised the module and the real transport but not the ladder: this
   repository has no AO task state for its own slices, and fabricating one to
   make a dogfood possible is precisely what the handoff forbids.
+- **`L-V4-05-10`** — the pins bound which refs are touched, not where the
+  bytes go or what code runs. Measured: `remote.<name>.receivepack` runs an
+  arbitrary program during the push and the push still succeeds. Reasoned and
+  not measured, because each needs a real endpoint: `core.sshCommand`,
+  `core.askPass`, `http.proxy` and `push.pushOption` are all reachable from an
+  operator's own config and none is visible to the URL-agreement check.
+  `credential.helper` cannot be pinned off at all — the push needs it. So the
+  honest boundary is that this build bounds the *effect on refs*, and trusts the
+  machine's Git installation for the transport, exactly as every other Git
+  command in the build does.
 - **`L-V4-05-8`** — every publication outcome exits 0. The exit code answers
   only whether the *observation* settled, which is slice 2's contract and is
   pinned, so `PUBLICATION_REFUSED`, `OUTCOME_UNCERTAIN` and

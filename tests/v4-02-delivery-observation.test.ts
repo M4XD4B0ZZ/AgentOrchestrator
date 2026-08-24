@@ -1426,8 +1426,9 @@ describe('the operator sentences are pinned by literal, not by reading the map',
       'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
         'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
         'that this build does not suppress. This is the only flag that makes this command read ' +
-        'a forge; --publish-head is the only one that makes it change anything. Without either, ' +
-        'nothing leaves this machine.',
+        'a forge; --publish-head is the only one that makes it change anything on one. Without ' +
+        'either, nothing leaves this machine — though --record still writes a record beside the ' +
+        'task, here.',
     );
     for (const text of [
       OBSERVE_OPTION_DESCRIPTION,

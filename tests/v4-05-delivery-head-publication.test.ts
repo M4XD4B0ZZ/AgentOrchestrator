@@ -42,6 +42,8 @@ import {
 } from '../src/cli/delivery-command.js';
 import { buildProgram } from '../src/cli/index.js';
 import {
+  CONTACTED_TRAILER,
+  OBSERVED_AND_PUBLISHED_TRAILER,
   PUBLICATION_TRAILER,
   renderDeliveryObservation,
 } from '../src/cli/render-delivery-observation.js';
@@ -666,7 +668,22 @@ describe('nothing mutates without the minted authority', () => {
     // Derived over the classes the vector must never carry, each with a control
     // that proves the refusal is about that class and not about the fixture.
     expect(mintHeadPublicationGrant(subjectOf(), REMOTE, REF)).not.toBeNull();
-    for (const ref of ['', BRANCH, 'refs/heads/', 'refs/heads/a b', 'refs/heads/a;rm', 'refs/tags/x', '--upload-pack=x']) {
+    for (const ref of [
+      '',
+      BRANCH,
+      'refs/heads/',
+      'refs/heads/a b',
+      'refs/heads/a;rm',
+      // A colon would split the refspec into a different push entirely.
+      'refs/heads/a:refs/heads/b',
+      'refs/heads/a\tb',
+      'refs/heads/a\nb',
+      'refs/heads/a?b',
+      'refs/heads/a*b',
+      'refs/heads/a\\b',
+      'refs/tags/x',
+      '--upload-pack=x',
+    ]) {
       expect(mintHeadPublicationGrant(subjectOf(), REMOTE, ref), ref).toBeNull();
     }
     for (const remote of ['', '-origin', 'a b', 'https://github.com/o/r.git', 'o;rm']) {
@@ -763,6 +780,13 @@ describe('nothing mutates without the minted authority', () => {
     expect(await readUrlAgreement('/repo', REMOTE, d.runner)).toBe('DIVERGE');
     const u = fakeRunner({ urls: { exitCode: 128 } });
     expect(await readUrlAgreement('/repo', REMOTE, u.runner)).toBe('UNKNOWN');
+    // Two empty answers are equal and establish nothing. Without this the sole
+    // fail-closed precondition in the transport failed open, and a counter-proof
+    // found it: deleting the guard broke no test.
+    for (const urls of [{ fetch: '', push: '' }, { fetch: '', push: 'u' }, { fetch: 'u', push: '' }]) {
+      const e = fakeRunner({ urls });
+      expect(await readUrlAgreement('/repo', REMOTE, e.runner), JSON.stringify(urls)).toBe('UNKNOWN');
+    }
   });
 
   it('refuses when the local subject cannot be re-established at all', async () => {
@@ -871,9 +895,11 @@ describe('the two Git vectors', () => {
 
   it('emits only shell-inert tokens, for every input the mint admits', () => {
     // Derived over inputs the mint actually accepts, rather than over the one
-    // fixture: a widened grammar that admitted a space or a colon would not
-    // have failed the single-input version. The mint is asked first, so an
-    // input it refuses cannot silently weaken the claim.
+    // fixture the first version used. What this proves is that the emitter is
+    // inert across the shape of every branch, remote and commit a real subject
+    // can carry — not that the grammar itself is narrow enough, because these
+    // inputs are all already inert. The grammar is pinned by the refusal test
+    // above, which is where a widened one dies.
     const remotes = ['origin', 'up-stream', 'o.k', 'a_b', 'X9'];
     const branches = ['ao/T-001', 'a', 'feat/x.y', 'a+b=c', 'v1.2.3-rc.1', 'a@b', 'x/y/z'];
     // Forty hex only: `createObservationSubject` is the boundary every real
@@ -1305,6 +1331,61 @@ describe('the surface states its own limits', () => {
 
     const readme = readFileSync('README.md', 'utf8');
     expect(readme, 'the sample block must be present in the README').toContain(block);
+  });
+
+  it('never opens the trailer with "Read-only." on a run that published', () => {
+    // The arm that had no test, and the defect that got in because of it: the
+    // fix for a dropped disclosure reused a sentence written to be a whole
+    // read-only trailer, so a run that created a branch closed with the word
+    // "Read-only.". Both halves are asserted, because dropping the disclosure
+    // again would be the other half of the same mistake.
+    const rendered = renderDeliveryObservation({
+      repositoryId: 'ao',
+      repositoryRoot: 'D:\\Work\\my-repo',
+      taskId: 'T-001',
+      subject: { ok: false, refusal: 'DELIVERY_NOT_DECLARED' } as never,
+      // A settled observation AND a publication that contacted the remote.
+      observation: { pullRequest: { outcome: 'NO_MATCHING_PULL_REQUEST' }, checks: { outcome: 'NO_CHECKS' } } as never,
+      conclusion: 'OBSERVED' as never,
+      stored: null,
+      recording: null,
+      decision: null,
+      publication: {
+        result: {
+          publication: 'PUBLISHED',
+          before: ABSENT,
+          attempt: 'COMPLETED' as PublicationAttempt,
+          after: at(HEAD),
+        },
+        ref: REF,
+        remoteName: REMOTE,
+      },
+    });
+
+    expect(rendered).toContain(PUBLICATION_TRAILER);
+    expect(rendered).toContain(OBSERVED_AND_PUBLISHED_TRAILER);
+    // The disclosure the fix existed to keep.
+    expect(rendered).toContain('L-V4-02-6');
+    // And the framing that stopped being true.
+    expect(rendered).not.toContain('Read-only.');
+    expect(rendered).not.toContain(CONTACTED_TRAILER);
+
+    // The control: an observation with no publication still gets it, so the
+    // assertion above is about the publication and not about the fixture.
+    const observedOnly = renderDeliveryObservation({
+      repositoryId: 'ao',
+      repositoryRoot: 'D:\\Work\\my-repo',
+      taskId: 'T-001',
+      subject: { ok: false, refusal: 'DELIVERY_NOT_DECLARED' } as never,
+      observation: { pullRequest: { outcome: 'NO_MATCHING_PULL_REQUEST' }, checks: { outcome: 'NO_CHECKS' } } as never,
+      conclusion: 'OBSERVED' as never,
+      stored: null,
+      recording: null,
+      decision: null,
+      publication: null,
+    });
+    expect(observedOnly).toContain(CONTACTED_TRAILER);
+    expect(observedOnly).toContain('Read-only.');
   });
 
   it('states the new network access in the top-level help, and stops claiming there is none', () => {

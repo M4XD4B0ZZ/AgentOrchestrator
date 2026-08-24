@@ -246,7 +246,7 @@ export const HEAD_PUBLICATION_DETAIL: Readonly<Record<HeadPublication, string>> 
   SUBJECT_CHANGED:
     'The pinned commit, the task state or the delivery target changed after this invocation established them, so the authority no longer describes what is in front of it. Nothing was read and nothing was attempted.',
   REMOTE_URLS_DIVERGE:
-    'This remote reads from one repository and writes to another, so nothing read from it would describe what a push would change. Nothing was contacted and nothing was attempted.',
+    'This remote could not be shown to read and write the same repository — either it reads from one and writes to another, or the two questions about it could not be answered. Nothing read from it would describe what a push would change, so nothing was contacted and nothing was attempted.',
   REMOTE_STATE_UNKNOWN:
     'The remote ref could not be read, so nothing was attempted: without knowing what was there first, a success afterwards could not be told from something that was already true.',
   REF_HOLDS_ANOTHER_COMMIT:

@@ -106,6 +106,25 @@ export const CONTACTED_TRAILER =
  * not from which flags were passed: a publication refused before it contacted
  * anything gets the read-only sentence, because that is what happened.
  */
+/**
+ * What an observation is answerable for, with no "Read-only." in front of it.
+ *
+ * `CONTACTED_TRAILER` opens with that word and is the right trailer for a run
+ * that only observed. A run that also published is not read-only, and putting
+ * the two sentences next to each other made the report's closing block open
+ * with a false claim about the most consequential invocation this build
+ * supports — a defect introduced by the fix for the previous one, and found by
+ * the next review.
+ *
+ * So the disclosure that had to survive — `L-V4-02-6`, the client's own
+ * traffic — is carried here without the framing that belongs to a read-only
+ * run, and `PUBLICATION_TRAILER` states what changed.
+ */
+export const OBSERVED_AND_PUBLISHED_TRAILER =
+  'This build asked about no commit but the one named above, and about no other repository.\n' +
+  'The GitHub CLI also makes calls of its own — telemetry, and a periodic update check —\n' +
+  'which this build does not suppress (L-V4-02-6).';
+
 export const PUBLICATION_TRAILER =
   'Not read-only. This invocation could change exactly one thing and changed at most that:\n' +
   'one branch on the delivery remote, created at one commit. Create-only — no ref was moved,\n' +
@@ -437,7 +456,7 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   const trailers = contactedByPublication
     ? view.observation === null
       ? [PUBLICATION_TRAILER]
-      : [CONTACTED_TRAILER, '', PUBLICATION_TRAILER]
+      : [OBSERVED_AND_PUBLISHED_TRAILER, '', PUBLICATION_TRAILER]
     : [view.observation === null ? NOT_CONTACTED_TRAILER : CONTACTED_TRAILER];
   lines.push('', ...trailers, '');
 

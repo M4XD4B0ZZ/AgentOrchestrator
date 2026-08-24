@@ -191,8 +191,9 @@ export const OBSERVE_OPTION_DESCRIPTION =
   'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
   'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
   'that this build does not suppress. This is the only flag that makes this command read ' +
-  'a forge; --publish-head is the only one that makes it change anything. Without either, ' +
-  'nothing leaves this machine.';
+  'a forge; --publish-head is the only one that makes it change anything on one. Without ' +
+  'either, nothing leaves this machine — though --record still writes a record beside the ' +
+  'task, here.';
 
 /**
  * The record flag's own sentence, exported so it can be pinned by literal.
@@ -587,9 +588,9 @@ async function performPublication(
  * Turns a work branch into the full ref this build is willing to create.
  *
  * Full, never partial. A partial ref is resolved by Git against a search order,
- * so `refs/heads/` is prepended here and not left to the remote to guess. The
- * This exists so a branch name that could not produce a ref is refused before
- * an authority is asked for rather than after.
+ * so `refs/heads/` is prepended here and not left to the remote to guess. It
+ * exists so a branch name that could not produce a ref is refused before an
+ * authority is asked for rather than after.
  *
  * The grammar is the mint’s own, imported rather than restated. A second copy
  * was written here first and a review caught it: two regexes that had to agree,

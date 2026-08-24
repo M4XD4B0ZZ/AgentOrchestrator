@@ -282,7 +282,20 @@ export type UrlAgreement = (typeof URL_AGREEMENTS)[number];
  * and any difference at all is a divergence, because a difference this build
  * decided to forgive would be a difference it had to understand.
  *
- * Both questions are local. Nothing is contacted here.
+ * What it establishes is that the two *lists* are the same list — not that
+ * either names one repository. A remote with two fetch URLs and the same two
+ * push URLs agrees here, and a push would write to both. That case cannot reach
+ * this build because slice 1 refuses a remote whose `get-url --push --all`
+ * answers with more than one line (`delivery-target.ts`,
+ * `REMOTE_URL_AMBIGUOUS`), so the delivery target never resolves and no grant
+ * is minted. The dependency is stated because it is load-bearing and lives in
+ * another module.
+ *
+ * Both questions are local. Nothing is contacted here. They are a precondition
+ * read a moment before the push child starts, which is the shape
+ * {@link PUBLICATION_CONFIG_PINS} argues against — and it is unavoidable:
+ * `ls-remote` has no `--push`, so there is no way to fold this into the vector.
+ * The window is small, real, and named rather than hidden.
  */
 export async function readUrlAgreement(
   repositoryRoot: string,
@@ -294,7 +307,13 @@ export async function readUrlAgreement(
   if (fetched.outcome !== 'COMPLETED' || fetched.exitCode !== 0) return 'UNKNOWN';
   const pushed = await runner(remotePushUrlArgs(remoteName), options);
   if (pushed.outcome !== 'COMPLETED' || pushed.exitCode !== 0) return 'UNKNOWN';
-  return fetched.stdout.trim() === pushed.stdout.trim() ? 'AGREE' : 'DIVERGE';
+  const fetchUrls = fetched.stdout.trim();
+  const pushUrls = pushed.stdout.trim();
+  // Two empty answers are equal and establish nothing. `delivery-target.ts`
+  // guards the analogous case explicitly; this one did not, which made the sole
+  // fail-closed precondition in this file fail open.
+  if (fetchUrls.length === 0 || pushUrls.length === 0) return 'UNKNOWN';
+  return fetchUrls === pushUrls ? 'AGREE' : 'DIVERGE';
 }
 
 /**
