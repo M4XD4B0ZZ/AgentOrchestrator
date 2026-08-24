@@ -295,7 +295,7 @@ recorded here instead.
 Run in a scratch copy of the tree, against the seven V4 suites.
 
     BASELINE GREEN
-    49 mutants -> 44 KILLED, 5 EQUIVALENT, 0 HARNESS_FAILURE
+    50 mutants -> 45 KILLED, 5 EQUIVALENT, 0 HARNESS_FAILURE
 
 **The baseline check is load-bearing and it fired.** The first two runs stopped
 on a red baseline: the lab was not copying `README.md`, which two suites read. A
@@ -314,7 +314,17 @@ parse (`merge_commit_sha` read while open, an unknown state word read as open,
 `merged` inferred from `state`, a malformed document read past) and the command
 ladder (the attended gate, the decision gate, the task-state gate) and the
 report (the trailer never printed, the trailer always printed, the resulting
-commit always printed).
+commit always printed), and the four the review round added: a merge at another
+head or another base still called `ALREADY_MERGED`, the early return filling the
+resulting commit from the reading, and a merged reading that cannot describe
+itself being acted on.
+
+One of those exposed a stale mutant rather than a gap. `M18` — "an already-merged
+pull request is sent for again" — was anchored on the single line the fix
+replaced with a block, so it reported `HARNESS_FAILURE`, which is honest and
+measures nothing. It was re-expressed against the code as it now stands (delete
+the whole merged arm, by brace matching) and dies. A campaign that had counted
+that row as a kill would have been counting a syntax failure.
 
 The last three were added after the first campaign, and the middle one is why:
 the case asserting the trailer is **not** printed on a refused run **survived**
