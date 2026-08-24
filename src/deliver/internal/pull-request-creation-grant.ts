@@ -137,7 +137,13 @@ export interface PullRequestCreationSubject {
   readonly remoteName: string;
   /** Full ref name, `refs/heads/<workBranch>`. */
   readonly headRef: string;
-  /** Forty or sixty-four lowercase hex digits. The ref must hold exactly this. */
+  /**
+   * Forty lowercase hex digits. The ref must hold exactly this.
+   *
+   * Forty, not "forty or sixty-four": the mint asks `isAddressableSubject`,
+   * whose object-name grammar is forty-only, and so does the transport. No
+   * value of this type with a sixty-four-digit commit can exist.
+   */
   readonly headCommit: string;
   /** The branch the pull request targets. A name; never an object name. */
   readonly baseRef: string;
@@ -177,12 +183,18 @@ export const DELIVERY_BASE_REF = /^[A-Za-z0-9._+=@][A-Za-z0-9._+=@/-]*$/;
  * no bound at all before it.
  *
  * **It does not refuse everything a reviewer expected it to**, and the
- * difference is stated rather than assumed: `refs/heads/main` and `HEAD` both
+ * difference is stated rather than assumed. `refs/heads/main` and `HEAD` both
  * pass `isValidBranchName` — measured — because Git does allow a branch called
- * `refs/heads/main`, and this build's grammar does not carry `check-ref-format`'s
- * special case for `HEAD`. Sending either as a `base` gets a `422` from GitHub
- * and creates nothing, which is the fail-closed direction; the claim here is
- * only what was measured.
+ * `refs/heads/main`, and this build's grammar carries no special case for
+ * `HEAD`.
+ *
+ * What happens if one is sent as a `base` was then measured too, and only half
+ * of it came back. `base: "HEAD"` answers `422 {"field":"base","code":"invalid"}`
+ * and creates nothing. `base: "refs/heads/main"` **was not established**: the
+ * request answered `422 "A pull request already exists for …"` first, because
+ * GitHub's duplicate check runs before its base check and this repository's
+ * head already had one. So one is measured, one is not, and neither is written
+ * here as though it were the other.
  *
  * It is deliberately stricter than `PUBLISHABLE_REF`, which slice 5 uses and
  * which carries `L-V4-05-9` — a work branch that slice 5 will publish and this

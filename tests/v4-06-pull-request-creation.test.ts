@@ -321,13 +321,22 @@ describe('the creation vocabulary', () => {
     expect([...established].sort()).toEqual(
       ['ALREADY_EXISTS', 'CONVERGED_AFTER_UNCERTAIN_EFFECT', 'CREATED'].sort(),
     );
-    // `filter(p).length + filter(!p).length === length` is true for every
-    // predicate and every input; a review named it as a tautology wearing a
-    // control's clothing. What enforces the set is the sorted equality above
-    // and the round-trip below: every member appears on exactly one side, and
-    // the two sides together are the vocabulary.
-    expect([...established, ...not].sort()).toEqual([...PULL_REQUEST_CREATIONS].sort());
-    expect(established.filter((m) => not.includes(m))).toEqual([]);
+    // The enumerated equality above is the ONLY thing here that enforces the
+    // set, and this comment says so rather than crediting a round-trip. Two
+    // earlier attempts at a "partition control" were tautologies of equal
+    // strength — `filter(p).length + filter(!p).length === length`, then
+    // `[...filter(p), ...filter(!p)].sort() === [...all].sort()` — both true
+    // for every predicate and every input, both asserted to be controls, and
+    // the second was written in the act of removing the first.
+    //
+    // What is worth pinning beside it is the *shape* of the answer: the
+    // predicate and the set must agree member by member, which is a real claim
+    // about two independent expressions of one rule.
+    for (const member of PULL_REQUEST_CREATIONS) {
+      expect(pullRequestIsEstablished(member), member).toBe(
+        ESTABLISHED_PULL_REQUEST_CREATIONS.has(member),
+      );
+    }
     // And the predicate agrees with the set for every member, so a caller can
     // never be right by asking one and wrong by asking the other.
     for (const member of PULL_REQUEST_CREATIONS) {
@@ -635,7 +644,11 @@ describe('the pull-request creation authority', () => {
     // value met and the one claiming to have understood it, so it now also
     // applies `repo/branch-name.ts`, which is where this build decides what a
     // branch name is.
-    expect(DELIVERY_BASE_REF.test(base) || base.length > 255, base).toBe(true);
+    // The character class alone admits every one of these, length included —
+    // it has no length bound at all, which is half of why the branch rules were
+    // added. No disjunct: a disjunct would let this control survive the one
+    // change that falsifies the sentence it exists to support.
+    expect(DELIVERY_BASE_REF.test(base), base).toBe(true);
     expect(mintPullRequestCreationGrant(subjectOf(), intentOf({ baseRef: base })), base).toBeNull();
   });
 
@@ -665,13 +678,19 @@ describe('the pull-request creation authority', () => {
     ).toBeNull();
   });
 
-  it('composes a body under a quarter of its budget at the longest accepted input', () => {
-    const content = composePullRequestContent({
-      taskId: 'T'.repeat(128),
-      headRef: `refs/heads/${'b'.repeat(255)}`,
-      headCommit: HEAD,
-      baseRef: 'r'.repeat(255),
-    });
+  it('composes 991 bytes at the longest input the mint really accepts', () => {
+    const taskId = 'T'.repeat(128);
+    const headRef = `refs/heads/${'b'.repeat(255)}`;
+    const baseRef = 'r'.repeat(255);
+    const content = composePullRequestContent({ taskId, headRef, headCommit: HEAD, baseRef });
+    // "Accepted" is shown, not asserted: the mint takes exactly this triple.
+    // Without this the case pinned 991 for inputs the mint might refuse.
+    expect(
+      mintPullRequestCreationGrant(
+        subjectOf(),
+        intentOf({ taskId, headRef, baseRef, title: content.title, body: content.body }),
+      ),
+    ).not.toBeNull();
     // 991 bytes, measured — a quarter of the budget, and the number the module
     // states. It said "under 700" until this case measured it.
     expect(byteLength(content.body)).toBe(991);
@@ -771,7 +790,7 @@ describe('what AO writes into the pull request', () => {
     expect(/^[\x20-\x7e\n]*$/.test(body)).toBe(true);
   });
 
-  it('fits both budgets at the longest input the mint accepts', () => {
+  it('cuts the title at an input longer than the mint will accept', () => {
     // The two parts are bounded on their own and their sum is not, so a long
     // task id beside a long branch composes an over-budget title. It is cut
     // rather than refused: refusing to open a pull request because a branch
@@ -1450,11 +1469,12 @@ describe('the delivery command creates only when asked, and only when it may', (
         'PULL_REQUEST_MATCHED_CHECKS_SUCCESS',
       ].sort(),
     );
-    // Not a length sum, which is a tautology. The two sides must partition the
-    // vocabulary and the admitted list above is enumerated, so a new decision
-    // member lands in `refusedBy` — which is the fail-closed direction, and is
-    // what this asserts rather than what an earlier comment claimed.
-    expect([...admitted, ...refusedBy].sort()).toEqual([...DELIVERY_DECISIONS].sort());
+    // The enumerated equality above is what enforces this set; a "partition"
+    // assertion over `filter(p)`/`filter(!p)` is a tautology whatever shape it
+    // is written in. What is added instead is the fail-closed direction stated
+    // as a fact about the code: a member this build does not know about is not
+    // admitted, which is checked by asking the set directly.
+    expect(ADMITS_CREATION_LADDER.has('NOT_A_DECISION' as never)).toBe(false);
     // The two kinds that are out, named rather than counted: a failing check
     // (L-V4-06-4) and every decision that means no fresh, subject-matched
     // observation exists.
@@ -1493,6 +1513,47 @@ describe('the delivery command creates only when asked, and only when it may', (
     const second = await run(['--observe', '--create-pr', '--attended']);
     expect(second.out).toContain('Creation     : DECISION_NOT_ESTABLISHED');
     expect(second.mutations.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a space, which the character class catches', 'not a branch name'],
+    ['a double dot, which only the branch rules catch', 'a..b'],
+    ['a .lock component, which only the branch rules catch', 'x.lock'],
+    ['a name over 255 characters, which only the branch rules catch', 'b'.repeat(256)],
+  ])('answers the subject arm for a base with %s, with or without --attended', async (_name, baseBranch) => {
+    // The class this pins, not one instance of it. The first arm used the loose
+    // character class while the mint sent with the branch rules, so a base of
+    // `a..b` reached `OPERATOR_ABSENT` — "Pass --attended to create." — for a
+    // delivery the mint would refuse whatever the operator then passed.
+    const without = await run(['--observe', '--decide', '--create-pr'], {
+      state: taskState({ baseBranch }),
+    });
+    expect(without.out).toContain('Creation     : SUBJECT_NOT_ESTABLISHED');
+    expect(without.out).not.toContain('Creation     : OPERATOR_ABSENT');
+    expect(without.mutations.calls).toHaveLength(0);
+
+    const with_ = await run(['--observe', '--decide', '--create-pr', '--attended'], {
+      state: taskState({ baseBranch }),
+    });
+    expect(with_.out).toContain('Creation     : SUBJECT_NOT_ESTABLISHED');
+    expect(with_.mutations.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a space, which the character class catches', 'not a branch name'],
+    ['a double dot, which only the branch rules catch', 'a..b'],
+    ['a .lock component, which only the branch rules catch', 'x.lock'],
+    ['a name over 255 characters, which only the branch rules catch', 'b'.repeat(256)],
+  ])('answers the subject arm for a work branch with %s too', async (_name, workBranch) => {
+    // The same class on the other name. A counter-proof that pointed only the
+    // head arm back at the loose grammar SURVIVED the base cases above, which
+    // is what this exists to stop: two arms, two names, one rule.
+    const without = await run(['--observe', '--decide', '--create-pr'], {
+      state: taskState({ workBranch }),
+    });
+    expect(without.out).toContain('Creation     : SUBJECT_NOT_ESTABLISHED');
+    expect(without.out).not.toContain('Creation     : OPERATOR_ABSENT');
+    expect(without.mutations.calls).toHaveLength(0);
   });
 
   it('answers the subject arms before the invocation arms', async () => {

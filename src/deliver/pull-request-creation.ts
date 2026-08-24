@@ -454,10 +454,17 @@ export function pullRequestIsEstablished(creation: PullRequestCreation): boolean
  *
  * `intended.baseRef` is compared by exact string equality against what each
  * reading found. There is no normalisation, no `refs/heads/` stripping and no
- * case folding: GitHub reports a pull request's base as a bare branch name, the
- * mint has already refused anything that is not one, and a comparison that
- * "helpfully" massaged either side would be a comparison that could pass on two
+ * case folding: GitHub reports a pull request's base as a bare branch name, and
+ * a comparison that "helpfully" massaged either side could pass on two
  * different branches.
+ *
+ * The mint does not refuse *every* spelling that is not a bare name — measured,
+ * it accepts `refs/heads/main` and `HEAD`, because Git accepts the first as a
+ * branch and this build's grammar has no case for the second. The consequence
+ * is stated rather than assumed: a run intending `refs/heads/main` never
+ * matches GitHub's reported `main`, so it fails closed into
+ * `WRONG_BASE_CONFLICT` or `POSTCONDITION_MISMATCH` rather than converging on
+ * the wrong pull request.
  */
 export function gradePullRequestCreation(
   intended: IntendedPullRequest,

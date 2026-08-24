@@ -64,9 +64,10 @@
  * and a limit counted in JavaScript characters would be a different limit.
  *
  * The body budget is above anything the mint will let through: the branch and
- * the base are capped at 255 characters each and the rest is literal, so the
+ * the base are capped at 255 characters each and the task id at 128, so the
  * longest composable body is 991 bytes — measured, at a 128-character task id,
- * a 255-character branch and a 255-character base. That was **not** true when this
+ * a 255-character branch and a 255-character base, with a 40-byte object name
+ * and the rest literal. That was **not** true when this
  * paragraph first claimed it — the two names had no length bound at all, and a
  * 2500-character branch composed a body the mint then refused, with the
  * rejected value printed in the report. The cap is what makes the sentence
@@ -110,7 +111,16 @@ export function byteLength(value: string): number {
  */
 export const AO_PULL_REQUEST_DRAFT = false;
 
-/** Everything the content is composed from. All four are already validated. */
+/**
+ * Everything the content is composed from.
+ *
+ * **Not yet validated.** `buildCreationIntent` composes first and mints second,
+ * so these four arrive with whatever the task-state schema allowed — which for
+ * the task id and both branch names is only "a non-blank string". The grammars
+ * are applied at the mint, to the values *and* to the text composed from them,
+ * and a composition the mint refuses never becomes a request. This comment said
+ * "already validated" and contradicted the paragraph at the top of this file.
+ */
 export interface PullRequestContentInputs {
   readonly taskId: string;
   /** Full ref name, `refs/heads/<workBranch>`. */

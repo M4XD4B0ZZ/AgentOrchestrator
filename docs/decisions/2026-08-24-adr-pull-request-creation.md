@@ -101,13 +101,25 @@ Every refusal is a non-zero exit. Unlike `git push`, there is no measured case
 where exit 0 means "nothing changed". That does **not** make exit 0 a proof of
 creation, and the ladder does not treat it as one — see below.
 
-**A duplicate is only distinguishable by prose.** GitHub answers a
-`(head, base)` duplicate with `422`, `resource: PullRequest`, `code: "custom"`
-and an English `message` beginning "A pull request already exists for". Its own
-error-code table reserves `already_exists` for other resources and was not
-extended here; a third-party production client matches the message with a
-regular expression. This build parses **nothing** from the response, so the
-question never arises for it.
+**A duplicate is only distinguishable by prose, and this one is measured.** A
+request for a head that already has an open pull request answers, verbatim:
+
+```
+422 {"message":"Validation Failed","errors":[{"resource":"PullRequest",
+     "code":"custom","message":"A pull request already exists for
+     M4XD4B0ZZ:v4-slice-6-pull-request-creation."}]}
+```
+
+exit 1, and nothing was created — the repository's open pull requests were one
+before and one after. There is no structural discriminator: GitHub's own
+error-code table reserves `already_exists` for other resources, and a
+third-party production client matches this message with a regular expression.
+This build parses **nothing** from the response, so the question never arises
+for it.
+
+The measurement also fixed the order of GitHub's own checks: the duplicate check
+runs **before** the base check. A second probe in the same batch, sending
+`base: "refs/heads/main"`, never reached the base validation for that reason.
 
 ### Closed and merged pull requests do not block a new one
 
@@ -256,10 +268,15 @@ them was what a second run answers.
 So the set admits every decision meaning *this invocation freshly observed this
 exact commit's pull-request situation and found no failing check*. Only
 `PULL_REQUEST_REQUIRED` means a pull request is needed; the other four mean one
-already claims this head, and on those the ladder's own reading answers and
-nothing is sent. **A request is issued only when that reading says `NONE`** —
-which is a stronger statement than the decision could make, because the decision
-is one observation older.
+claimed this head at the moment of the observation.
+
+The rule is the same on all five and it is stated once: **a request is issued
+only when the ladder's own fresh reading says `NONE`.** That is stronger than
+any decision could be, because the decision is one observation older — so on
+those four a request normally is not sent, and if the pull request has gone in
+between, sending is correct. An earlier version of this paragraph said "nothing
+is sent" without the condition, and a confirmation pass found the same
+unconditional sentence in three other places.
 
 `CHECKS_FAILED` stays out: a commit whose checks have failed gets no pull
 request from this build. So does every decision meaning no fresh, subject-matched
@@ -298,7 +315,7 @@ rules, capped at 255 characters. That cap is what bounds the body: without it
 the two names were unbounded and a long branch composed a body the mint then
 refused. The title is cut to 256 bytes with a marked `...` when a long task id
 and a long branch compose one over budget; the body budget is 4096 bytes and the
-longest composable body is now under 700.
+longest composable body is 991 bytes, measured.
 
 ### The outcome vocabulary
 

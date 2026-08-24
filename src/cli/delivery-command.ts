@@ -86,7 +86,7 @@ import { publishDeliveryHead, type PublicationResult } from '../deliver/publish-
 import type { GitPublicationRunner } from '../deliver/git-head-publisher.js';
 import type { HeadPublication } from '../deliver/head-publication.js';
 import {
-  DELIVERY_BASE_REF,
+  isSendableBranchName,
   mintPullRequestCreationGrant,
   type PullRequestCreationSubject,
 } from '../deliver/internal/pull-request-creation-grant.js';
@@ -309,7 +309,8 @@ export const CREATE_PR_OPTION_DESCRIPTION =
   'branch. Requires --attended, --observe and --decide, and a task at READY_FOR_PR whose own ' +
   'fresh decision says this commit was observed and no check on it failed — a stored record ' +
   'can never stand in for that. Only PULL_REQUEST_REQUIRED means one is needed; the other ' +
-  'admitted decisions mean one already exists, and on those nothing is sent. The work branch ' +
+  'admitted decisions mean one existed a moment ago, and a request is sent only when the ' +
+  'reading this flag takes immediately before finds none. The work branch ' +
   'must already exist on the delivery remote at exactly this commit: this flag never pushes, ' +
   'and answers HEAD_NOT_PUBLISHED for a ref that is not there, HEAD_SHA_MISMATCH for one ' +
   'holding another commit. Idempotent by observation: the forge is read before and after, an ' +
@@ -761,11 +762,13 @@ export const ADMITS_CREATION_LADDER: ReadonlySet<DeliveryDecision> = Object.free
  * What the decision gates is the *mint*, and the mint gates the act — but the
  * gate is {@link ADMITS_CREATION_LADDER} rather than the single member
  * `PULL_REQUEST_REQUIRED`, for the measured reason set out there. Only that one
- * member means a pull request is *needed*; the other four mean one already
- * claims this head, and on those the ladder's own fresh reading answers and
- * sends nothing. A request is issued only when that reading says `NONE`, which
- * is a stronger statement than the decision could make anyway: the decision is
- * one observation older.
+ * member means a pull request is *needed*; the other four mean one claimed this
+ * head at the moment of the observation. The rule on all five is the same and
+ * it is stated once: **a request is issued only when the ladder's own fresh
+ * reading says `NONE`.** That is a stronger statement than any decision could
+ * make, because the decision is one observation older — so on those four a
+ * request normally is not sent, and if the pull request has gone in between,
+ * sending is correct.
  *
  * The gate is deliberately strict about provenance rather than about wording.
  * `decision` here is `null` unless `--decide` was passed, and `--decide` is
@@ -813,9 +816,18 @@ async function performCreation(
   // type documents them as null on a refusal that never got as far as having an
   // intended pull request, so the computation has to agree with it.
   const established = subject.ok && taskLoad.ok;
-  const intendedHead = established ? publishableRef(taskLoad.state.workBranch) : null;
+  // The same predicate the mint sends with, not the looser character class.
+  // They were different for one commit and a review measured the cost: a task
+  // with `baseBranch: 'a..b'` passed this arm, so a run without `--attended`
+  // was answered `OPERATOR_ABSENT` — "Pass --attended to create." — for a
+  // delivery the mint would refuse whatever the operator then passed. The
+  // ladder's first arm has to refuse everything the last one will.
+  const intendedHead =
+    established && isSendableBranchName(taskLoad.state.workBranch)
+      ? publishableRef(taskLoad.state.workBranch)
+      : null;
   const intendedBase =
-    established && DELIVERY_BASE_REF.test(taskLoad.state.baseBranch)
+    established && isSendableBranchName(taskLoad.state.baseBranch)
       ? taskLoad.state.baseBranch
       : null;
 
@@ -910,7 +922,7 @@ async function performCreation(
       // because the premise is another function's — pinned by the
       // "the base branch changed" case — and a guarantee that depends on a
       // comparison staying where it is, is not one this closure can make.
-      if (!DELIVERY_BASE_REF.test(reloaded.state.baseBranch)) return null;
+      if (!isSendableBranchName(reloaded.state.baseBranch)) return null;
       return Object.freeze({
         host: rebuilt.subject.host,
         owner: rebuilt.subject.owner,

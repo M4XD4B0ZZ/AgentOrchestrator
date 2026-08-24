@@ -9104,8 +9104,9 @@ invocation, the one the idempotency claim is about, was refused before the
 reading was taken and told to pass the flags it had just passed. The gate is now
 the closed set of decisions meaning *this invocation freshly observed this
 commit and found no failing check*; only one of the five means a pull request is
-needed, and a request is issued only when the ladder's own reading says there is
-none.
+needed, and **a request is issued only when the ladder's own reading says there
+is none** — which is the whole rule, on all five, and is stronger than any
+decision could be.
 
 At most **one** request per invocation, on every path, with no retry on any
 outcome. When the answer is lost the outcome is `OUTCOME_UNCERTAIN`, and the
