@@ -306,10 +306,15 @@ is reported to a person. That is the whole product effect.
 - host restriction, credential isolation and scope protections are slice 2's and
   are untouched — every request in this slice's own tests is asserted to begin
   `api --hostname github.com -X GET`;
-- no forge mutation exists. The derived scan over the whole delivery surface
-  bans `-X POST|PATCH|PUT|DELETE`, `gh pr merge`, `--auto`, `spawn(`,
-  `runOwnedCommand(`, `advanceTaskState(`, `saveTaskState(` and
-  `acquire*ExecutionLease(`;
+- no forge mutation exists **as of this slice**. The derived scan over the
+  whole delivery surface bans `-X POST|PATCH|PUT|DELETE`, `gh pr merge`,
+  `--auto`, `spawn(`, `runOwnedCommand(`, `advanceTaskState(`, `saveTaskState(`
+  and `acquire*ExecutionLease(`. **Superseded by V4 slice 5**, which added a
+  `git push` that creates one ref on the delivery remote. Every ban listed here
+  still holds — none of them was what made the sentence true — and the claim
+  that a scan can actually measure now lives in
+  `2026-08-24-adr-delivery-head-publication.md`: one module, one create-only
+  vector;
 - no PR creation exists. `PULL_REQUEST_REQUIRED` is an answer, not a trigger.
 
 ## Residuals

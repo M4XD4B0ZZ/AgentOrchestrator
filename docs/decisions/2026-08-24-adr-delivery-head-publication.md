@@ -86,6 +86,11 @@ evaluated the lease. Re-run with real ref updates:
 | plain push, ref absent (control) | accepted — creates, no CAS at all |
 | plain push, divergent (control) | rejected, non-fast-forward |
 
+The fourth row is a dry run's *report* of what it would do, not an observed
+rewrite: nothing in this repository was rewritten and the remote's branches were
+counted unchanged. It is recorded as the reason the non-empty form is never
+sent, and that reason does not need the rewrite to have happened.
+
 So the empty form is an atomic **create-only** compare-and-swap, evaluated by
 the server during the ref update. The non-empty form is exactly what this build
 must never send, which is why the expected value is not a parameter, not a
@@ -121,10 +126,13 @@ answer with no English in it, so nothing here parses Git's prose — the same ru
 creates `refs/heads/<workBranch>` on the delivery remote at exactly the task's
 `currentCommit`, create-only, or explains why it did not.
 
-Eleven outcomes, closed, ordered weakest claim first:
+The outcomes, closed, ordered weakest claim first — counted nowhere in prose,
+because a number in a sentence goes stale the moment a member is added, and one
+was:
 
 `SUBJECT_NOT_ESTABLISHED`, `TASK_NOT_READY`, `OPERATOR_ABSENT`,
-`AUTHORITY_REFUSED`, `SUBJECT_CHANGED`, `REMOTE_STATE_UNKNOWN`,
+`AUTHORITY_REFUSED`, `SUBJECT_CHANGED`, `REMOTE_URLS_DIVERGE`,
+`REMOTE_STATE_UNKNOWN`,
 `REF_HOLDS_ANOTHER_COMMIT`, `PUBLICATION_REFUSED`, `OUTCOME_UNCERTAIN`,
 `ALREADY_PUBLISHED`, `CONVERGED_AFTER_UNCERTAIN_EFFECT`, `PUBLISHED`.
 
@@ -137,6 +145,49 @@ compared against `PUBLISHED` alone would push again for no reason.
 There is no `NOT_REQUESTED`. Without `--publish-head` there is no publication
 and the report has no publication block, exactly as `--decide` behaves. A member
 that only a test could reach would be a dead enum member.
+
+## What an adversarial review then measured, and changed
+
+Three defects survived into the first candidate, all in the same place: the
+distance between a vector and its effect. None was visible by reading the code.
+
+**The read was a pattern, not a ref.** `git-ls-remote(1)` matches a pattern
+against a ref's *tail*, so `refs/heads/ao/T-001` is answered by a stranger's
+`refs/heads/x/refs/heads/ao/T-001` — measured against a real remote, with the
+intended ref absent. The build read that as `AT_COMMIT` and told the operator
+the intended state was already true. The same instrument grades the
+postcondition, so a genuine create could also have been reported as a failure.
+Fixed by comparing the ref name the remote answered with; a pattern that matched
+only other refs now reads as `ABSENT`, and only an unusable object name on the
+*intended* ref reads as `UNKNOWN`.
+
+**The vector did not bound the effect.** Git reads three config scopes and the
+child sees all of them. Measured, with the exact vector: `push.followTags = true`
+— an ordinary personal setting — made the push create an annotated tag the
+vector never named, and a `pre-push` hook ran, was handed the remote URL, and by
+exiting non-zero **aborted the publication**. So the report's "no other ref was
+touched" was false at the moment it was printed. Fixed with four `-c` pins,
+measured to reduce the effect to the one ref. Two related settings were tried
+and left alone, because they were measured harmless: a configured
+`remote.<name>.push` refspec is superseded by an explicit command-line refspec,
+and `remote.<name>.mirror = true` fails closed.
+
+**The read and the write went to different repositories.** `ls-remote` uses the
+remote's fetch URL; `push` uses its push URL; slice 1 binds the delivery
+identity to the *push* URL, deliberately and with its own measurement. With
+`remote.<name>.pushurl` set elsewhere — a normal split-protocol setup — every
+reading describes one repository and the effect lands on another, producing a
+silent false `ALREADY_PUBLISHED` or a permanent `OUTCOME_UNCERTAIN`. `ls-remote`
+has no `--push` (measured), and passing a URL instead of a remote name would put
+the value most likely to carry a credential into an argument vector. So the
+divergence is detected and refused: two local questions, compared as opaque
+strings, before anything is contacted. `REMOTE_URLS_DIVERGE` is that refusal,
+and an unreadable answer is refused too — it is a precondition, not a diagnosis.
+
+The review also found that the sentence "Without this flag nothing leaves this
+machine", on `--observe`, had been falsified by this slice and was **pinned by
+a literal in a passing test**. That is the shape worth remembering: a literal
+pin proves what a string says and never that the string is true.
 
 ## The authority
 
@@ -252,6 +303,11 @@ delivery stack is for.
 
 1. Exactly one module in the delivery surface runs a push, and it runs one
    create-only vector. Derived from the tree.
+1. The effect is bounded by the vector *and* by the config pins, because the
+   vector alone was measured not to bound it.
+1. A reading is about the ref that was asked for, established by comparing the
+   ref name the remote answered with — never by position in the answer.
+1. One remote name is one repository, or nothing happens.
 2. The lease token always ends at the colon. No expected value, for any input.
 3. The refspec's left side is an object name, never a branch name.
 4. At most one push per invocation, on every path including uncertain ones.
@@ -285,6 +341,20 @@ delivery stack is for.
   dogfood exercised the module and the real transport but not the ladder: this
   repository has no AO task state for its own slices, and fabricating one to
   make a dogfood possible is precisely what the handoff forbids.
+- **`L-V4-05-8`** — every publication outcome exits 0. The exit code answers
+  only whether the *observation* settled, which is slice 2's contract and is
+  pinned, so `PUBLICATION_REFUSED`, `OUTCOME_UNCERTAIN` and
+  `REF_HOLDS_ANOTHER_COMMIT` are indistinguishable from `PUBLISHED` to a script.
+  Deliberate — a machine-readable delivery signal is the thing these slices keep
+  refusing to give — but a *mutating* command whose failure is prose-only
+  deserves to be carried rather than assumed, which `L-V4-04-2` did only for the
+  decision.
+- **`L-V4-05-9`** — a work branch becomes a ref through a character class, not
+  through `isValidBranchName`. Git's own `check-ref-format` refuses the shapes
+  that class admits and this build does not, so the outcome is a wasted push and
+  an undiagnosed `PUBLICATION_REFUSED`. What is admitted and not refused anywhere
+  is an ordinary name like `main`: create-only bounds the damage to a remote that
+  does not already have one, and nothing bounds the name itself.
 - **`L-V4-05-7`** — `--attended` is now registered on `delivery` as well as on
   `run`, `block` and `release`. It means the same thing in all four, but nothing
   proves that: there is no shared constant, and four independently worded help

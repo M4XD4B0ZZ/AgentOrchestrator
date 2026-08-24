@@ -63,7 +63,11 @@ import {
 } from '../src/deliver/head-publication.js';
 import {
   GIT_PUBLICATION_COMMAND,
+  PUBLICATION_CONFIG_PINS,
   publishHeadArgs,
+  readUrlAgreement,
+  remoteFetchUrlArgs,
+  remotePushUrlArgs,
   remoteRefArgs,
   type GitPublicationRunner,
 } from '../src/deliver/git-head-publisher.js';
@@ -145,7 +149,23 @@ function codeOnly(path: string): string {
 interface FakeRunnerOptions {
   readonly lsRemote?: readonly { exitCode: number | null; stdout?: string; outcome?: string }[];
   readonly push?: { exitCode: number | null; outcome?: string };
+  readonly urls?: { fetch?: string; push?: string; exitCode?: number; outcome?: string };
 }
+
+/**
+ * Which of the three vectors a call is, derived rather than positional.
+ *
+ * The push no longer starts with `push` — it starts with the `-c` config pins
+ * — so a check on `args[0]` would have quietly stopped recognising it and every
+ * "pushed once" count would have read zero while passing. Found by a review;
+ * the subcommand is now looked up by name.
+ */
+const vectorOf = (args: readonly string[]): 'push' | 'ls-remote' | 'remote' | 'other' => {
+  for (const token of args) {
+    if (token === 'push' || token === 'ls-remote' || token === 'remote') return token;
+  }
+  return 'other';
+};
 
 function fakeRunner(options: FakeRunnerOptions = {}) {
   const calls: string[][] = [];
@@ -153,9 +173,28 @@ function fakeRunner(options: FakeRunnerOptions = {}) {
   let readIndex = 0;
   const runner: GitPublicationRunner = async (args) => {
     calls.push([...args]);
-    if (args[0] === 'push') {
+    const kind = vectorOf(args);
+    if (kind === 'push') {
       const p = options.push ?? { exitCode: 0 };
       return { outcome: p.outcome ?? 'COMPLETED', exitCode: p.exitCode, stdout: '' };
+    }
+    if (kind === 'remote') {
+      // Both URL questions answer the same thing unless a test says otherwise,
+      // because a remote with no `pushurl` is the ordinary case.
+      const u = options.urls ?? {};
+      const isPush = args.includes('--push');
+      if (u.outcome !== undefined || u.exitCode !== undefined) {
+        return {
+          outcome: u.outcome ?? 'COMPLETED',
+          exitCode: u.exitCode ?? 0,
+          stdout: isPush ? (u.push ?? 'https://example.invalid/o/r.git') : (u.fetch ?? 'https://example.invalid/o/r.git'),
+        };
+      }
+      return {
+        outcome: 'COMPLETED',
+        exitCode: 0,
+        stdout: isPush ? (u.push ?? 'https://example.invalid/o/r.git') : (u.fetch ?? 'https://example.invalid/o/r.git'),
+      };
     }
     const r = reads[Math.min(readIndex, reads.length - 1)] ?? { exitCode: 2 };
     readIndex += 1;
@@ -164,8 +203,11 @@ function fakeRunner(options: FakeRunnerOptions = {}) {
   return {
     runner,
     calls,
-    pushes: () => calls.filter((c) => c[0] === 'push').length,
-    reads: () => calls.filter((c) => c[0] === 'ls-remote').length,
+    pushes: () => calls.filter((c) => vectorOf(c) === 'push').length,
+    reads: () => calls.filter((c) => vectorOf(c) === 'ls-remote').length,
+    urlChecks: () => calls.filter((c) => vectorOf(c) === 'remote').length,
+    /** Everything that leaves the machine. The URL questions are local. */
+    contacts: () => calls.filter((c) => vectorOf(c) !== 'remote').length,
   };
 }
 
@@ -261,6 +303,14 @@ describe('the publication vocabulary', () => {
         })
       ).publication,
     );
+    fromLadder.add(
+      (
+        await publishDeliveryHead(grantFor(), '/repo', {
+          recheck: unchanged(),
+          runner: fakeRunner({ urls: { fetch: 'a', push: 'b' } }).runner,
+        })
+      ).publication,
+    );
     const reachable = new Set([...fromGrader, ...fromLadder]);
     expect([...reachable].sort()).toEqual([...HEAD_PUBLICATIONS].sort());
   });
@@ -341,9 +391,17 @@ describe('the publisher attempts at most one mutation', () => {
     expect(out.publication).toBe('PUBLISHED');
     expect(f.pushes()).toBe(1);
     expect(f.reads()).toBe(2);
-    expect(f.calls[0]?.[0]).toBe('ls-remote');
-    expect(f.calls[1]?.[0]).toBe('push');
-    expect(f.calls[2]?.[0]).toBe('ls-remote');
+    // The order is the contract, so it is asserted as a sequence of vectors
+    // rather than by index into an argv that the config pins have already
+    // shifted once.
+    expect(f.calls.map(vectorOf)).toEqual([
+      'remote',
+      'remote',
+      'ls-remote',
+      'push',
+      'ls-remote',
+    ]);
+    expect(f.urlChecks()).toBe(2);
   });
 
   it('pushes nothing when the ref already holds the commit', async () => {
@@ -428,8 +486,14 @@ describe('the publisher attempts at most one mutation', () => {
     }
   });
 
-  it('reads an unparsable ls-remote answer as UNKNOWN, never as a commit', async () => {
-    for (const stdout of ['', 'not-a-sha\trefs/heads/x\n', `${HEAD.slice(0, 39)}\tref\n`, '\t\t\n']) {
+  it('never turns an unusable answer into a commit', async () => {
+    // Two classes, and they are graded differently on purpose. An answer that
+    // names the intended ref but no object name is UNKNOWN — something is
+    // there and this build cannot say what. An answer that names only other
+    // refs is ABSENT — the intended ref is genuinely not there. Neither ever
+    // produces an AT_COMMIT, which is the property that matters.
+    const unknown = [`not-a-sha\t${REF}\n`, `${HEAD.slice(0, 39)}\t${REF}\n`, `\t${REF}\n`];
+    for (const stdout of unknown) {
       const f = fakeRunner({ lsRemote: [{ exitCode: 0, stdout }] });
       const out = await publishDeliveryHead(grantFor(), '/repo', {
         recheck: unchanged(),
@@ -438,17 +502,63 @@ describe('the publisher attempts at most one mutation', () => {
       expect(out.publication, JSON.stringify(stdout)).toBe('REMOTE_STATE_UNKNOWN');
       expect(f.pushes(), JSON.stringify(stdout)).toBe(0);
     }
+    const absent = ['', 'not-a-sha\trefs/heads/x\n', '\t\t\n', `${HEAD}\trefs/heads/x\n`];
+    for (const stdout of absent) {
+      const f = fakeRunner({
+        lsRemote: [{ exitCode: 0, stdout }, { exitCode: 0, stdout: `${HEAD}\t${REF}\n` }],
+      });
+      const out = await publishDeliveryHead(grantFor(), '/repo', {
+        recheck: unchanged(),
+        runner: f.runner,
+      });
+      expect(out.publication, JSON.stringify(stdout)).toBe('PUBLISHED');
+    }
   });
 
-  it('takes the first line and the first field, and ignores the rest', async () => {
+  it('finds the intended ref wherever it is in the answer', async () => {
     const f = fakeRunner({
-      lsRemote: [{ exitCode: 0, stdout: `${HEAD}\t${REF}\n${OTHER}\trefs/heads/other\n` }],
+      lsRemote: [{ exitCode: 0, stdout: `${OTHER}\trefs/heads/other\n${HEAD}\t${REF}\n` }],
     });
     const out = await publishDeliveryHead(grantFor(), '/repo', {
       recheck: unchanged(),
       runner: f.runner,
     });
     expect(out.publication).toBe('ALREADY_PUBLISHED');
+  });
+
+  it('ignores a ref that merely ends with the one asked about', async () => {
+    // `ls-remote` takes a PATTERN matched against a ref's tail, so
+    // `refs/heads/ao/T-001` is answered by a stranger's
+    // `refs/heads/x/refs/heads/ao/T-001`. Measured against a real remote. Before
+    // this was fixed the build read that as ALREADY_PUBLISHED and told the
+    // operator the intended state was already true, for a ref that did not
+    // exist — and the same instrument grades the postcondition, so a real
+    // create could be reported as a failure.
+    const f = fakeRunner({
+      lsRemote: [
+        { exitCode: 0, stdout: `${HEAD}\trefs/heads/stranger/${REF}\n` },
+        { exitCode: 0, stdout: `${HEAD}\t${REF}\n` },
+      ],
+    });
+    const out = await publishDeliveryHead(grantFor(), '/repo', {
+      recheck: unchanged(),
+      runner: f.runner,
+    });
+    // The intended ref was absent, so it is created — not reported as present.
+    expect(out.publication).toBe('PUBLISHED');
+    expect(f.pushes()).toBe(1);
+  });
+
+  it('reads a bad object name on the intended ref as UNKNOWN, not as an absence', async () => {
+    // The distinction matters in the dangerous direction: an absence would
+    // authorise a push.
+    const f = fakeRunner({ lsRemote: [{ exitCode: 0, stdout: `not-a-sha\t${REF}\n` }] });
+    const out = await publishDeliveryHead(grantFor(), '/repo', {
+      recheck: unchanged(),
+      runner: f.runner,
+    });
+    expect(out.publication).toBe('REMOTE_STATE_UNKNOWN');
+    expect(f.pushes()).toBe(0);
   });
 });
 
@@ -461,9 +571,14 @@ describe('a second invocation converges without a second mutation', () => {
     const calls: string[][] = [];
     const runner: GitPublicationRunner = async (args) => {
       calls.push([...args]);
-      if (args[0] === 'push') {
+      const kind = vectorOf(args);
+      if (kind === 'push') {
         refHolds = HEAD;
         return { outcome: 'COMPLETED', exitCode: 0, stdout: '' };
+      }
+      // One remote, one repository: both URL questions answer the same.
+      if (kind === 'remote') {
+        return { outcome: 'COMPLETED', exitCode: 0, stdout: 'https://example.invalid/o/r.git' };
       }
       return refHolds === null
         ? { outcome: 'COMPLETED', exitCode: 2, stdout: '' }
@@ -477,7 +592,7 @@ describe('a second invocation converges without a second mutation', () => {
     expect(second.publication).toBe('ALREADY_PUBLISHED');
 
     // Exactly one mutation across both invocations. This is the whole claim.
-    expect(calls.filter((c) => c[0] === 'push').length).toBe(1);
+    expect(calls.filter((c) => vectorOf(c) === 'push').length).toBe(1);
     // And both agree the head is established, by different routes.
     expect(remoteHeadIsEstablished(first.publication)).toBe(true);
     expect(remoteHeadIsEstablished(second.publication)).toBe(true);
@@ -506,6 +621,8 @@ describe('nothing mutates without the minted authority', () => {
     const f = fakeRunner();
     const out = await publishDeliveryHead(forged, '/repo', { recheck: unchanged(), runner: f.runner });
     expect(out.publication).toBe('AUTHORITY_REFUSED');
+    // Not one child at all, local or otherwise: an unauthorised caller must not
+    // be able to make this build start a process.
     expect(f.calls.length).toBe(0);
   });
 
@@ -555,6 +672,14 @@ describe('nothing mutates without the minted authority', () => {
     for (const remote of ['', '-origin', 'a b', 'https://github.com/o/r.git', 'o;rm']) {
       expect(mintHeadPublicationGrant(subjectOf(), remote, REF), remote).toBeNull();
     }
+    // The host is re-tested at the mint against the frozen supported list, not
+    // taken on trust from the subject's type. The type is structural, so a
+    // hand-cast walks straight past it — which is how the docblock came to
+    // claim a refusal the code did not perform.
+    for (const host of ['', 'gitlab.com', 'GitHub.com', 'evil.example', 'github.com.evil.example']) {
+      const elsewhere = { ...IDENTITY, host, commit: HEAD } as ObservationSubject;
+      expect(mintHeadPublicationGrant(elsewhere, REMOTE, REF), host).toBeNull();
+    }
   });
 
   it('refuses to mint a subject whose commit is not an object name', () => {
@@ -584,6 +709,7 @@ describe('nothing mutates without the minted authority', () => {
     // A grant for one target cannot be redeemed against another: the recheck
     // returns a different world and the publisher refuses before contacting it.
     for (const moved of [
+      { ...IDENTITY, host: 'gitlab.invalid', commit: HEAD, remoteName: REMOTE, ref: REF },
       { ...IDENTITY, commit: OTHER, remoteName: REMOTE, ref: REF },
       { ...ELSEWHERE, commit: HEAD, remoteName: REMOTE, ref: REF },
       { ...IDENTITY, commit: HEAD, remoteName: 'upstream', ref: REF },
@@ -597,6 +723,46 @@ describe('nothing mutates without the minted authority', () => {
       expect(out.publication, JSON.stringify(moved)).toBe('SUBJECT_CHANGED');
       expect(f.calls.length, JSON.stringify(moved)).toBe(0);
     }
+  });
+
+  it('refuses a remote that reads one repository and writes another', async () => {
+    // Measured: with `remote.<name>.pushurl` set elsewhere, `ls-remote` answers
+    // from the fetch URL while `push` writes to the push URL — and slice 1
+    // binds the delivery identity to the push URL. Every reading would then be
+    // about the wrong repository, so the divergence is refused before anything
+    // is contacted.
+    const f = fakeRunner({ urls: { fetch: 'https://x.invalid/a.git', push: 'https://x.invalid/b.git' } });
+    const out = await publishDeliveryHead(grantFor(), '/repo', {
+      recheck: unchanged(),
+      runner: f.runner,
+    });
+    expect(out.publication).toBe('REMOTE_URLS_DIVERGE');
+    expect(f.urlChecks()).toBe(2);
+    // Two local questions and nothing else: no ref was read and none was pushed.
+    expect(f.contacts()).toBe(0);
+  });
+
+  it('refuses a remote whose URLs cannot be read at all', async () => {
+    for (const urls of [{ exitCode: 1 }, { outcome: 'NOT_FOUND', exitCode: null as never }]) {
+      const f = fakeRunner({ urls });
+      const out = await publishDeliveryHead(grantFor(), '/repo', {
+        recheck: unchanged(),
+        runner: f.runner,
+      });
+      // UNKNOWN is a refusal, not a pass: this is a precondition and not a
+      // diagnosis, so failing to establish it fails closed.
+      expect(out.publication, JSON.stringify(urls)).toBe('REMOTE_URLS_DIVERGE');
+      expect(f.contacts(), JSON.stringify(urls)).toBe(0);
+    }
+  });
+
+  it('agrees when one remote is one repository', async () => {
+    const f = fakeRunner();
+    expect(await readUrlAgreement('/repo', REMOTE, f.runner)).toBe('AGREE');
+    const d = fakeRunner({ urls: { fetch: 'a', push: 'b' } });
+    expect(await readUrlAgreement('/repo', REMOTE, d.runner)).toBe('DIVERGE');
+    const u = fakeRunner({ urls: { exitCode: 128 } });
+    expect(await readUrlAgreement('/repo', REMOTE, u.runner)).toBe('UNKNOWN');
   });
 
   it('refuses when the local subject cannot be re-established at all', async () => {
@@ -619,6 +785,7 @@ describe('the two Git vectors', () => {
 
   it('writes exactly one ref, create-only, with an EMPTY lease', () => {
     expect(publishHeadArgs(REMOTE, REF, HEAD)).toEqual([
+      ...PUBLICATION_CONFIG_PINS.flatMap((pin) => ['-c', pin]),
       'push',
       '--porcelain',
       '--atomic',
@@ -641,6 +808,36 @@ describe('the two Git vectors', () => {
       expect(lease, commit).toBe(`--force-with-lease=${REF}:`);
       expect(lease?.endsWith(':'), commit).toBe(true);
     }
+  });
+
+  it('pins the operator’s own Git config out of the effect', () => {
+    // Measured, both of these change what the vector does: `push.followTags`
+    // added an annotated tag the vector never named, and a `pre-push` hook ran
+    // and aborted the publication. They are part of the contract, not hygiene.
+    const args = publishHeadArgs(REMOTE, REF, HEAD);
+    expect(PUBLICATION_CONFIG_PINS).toContain('push.followTags=false');
+    expect(PUBLICATION_CONFIG_PINS).toContain('core.hooksPath=');
+    for (const pin of PUBLICATION_CONFIG_PINS) {
+      const at = args.indexOf(pin);
+      expect(at, pin).toBeGreaterThan(0);
+      expect(args[at - 1], pin).toBe('-c');
+      // Before the subcommand, or Git reads it as an argument to `push`.
+      expect(at, pin).toBeLessThan(args.indexOf('push'));
+    }
+    // The read vector runs no hooks and pushes nothing, so it carries none.
+    expect(remoteRefArgs(REMOTE, REF)).not.toContain('-c');
+  });
+
+  it('asks two local questions about the remote’s URLs, and no others', () => {
+    expect(remoteFetchUrlArgs(REMOTE)).toEqual(['remote', 'get-url', '--all', '--', REMOTE]);
+    expect(remotePushUrlArgs(REMOTE)).toEqual([
+      'remote',
+      'get-url',
+      '--push',
+      '--all',
+      '--',
+      REMOTE,
+    ]);
   });
 
   it('pushes an object name, never a branch name', () => {
@@ -673,9 +870,31 @@ describe('the two Git vectors', () => {
   });
 
   it('emits only shell-inert tokens, for every input the mint admits', () => {
-    for (const args of [remoteRefArgs(REMOTE, REF), publishHeadArgs(REMOTE, REF, HEAD)]) {
-      for (const token of args) expect(isShellInertArgument(token), token).toBe(true);
+    // Derived over inputs the mint actually accepts, rather than over the one
+    // fixture: a widened grammar that admitted a space or a colon would not
+    // have failed the single-input version. The mint is asked first, so an
+    // input it refuses cannot silently weaken the claim.
+    const remotes = ['origin', 'up-stream', 'o.k', 'a_b', 'X9'];
+    const branches = ['ao/T-001', 'a', 'feat/x.y', 'a+b=c', 'v1.2.3-rc.1', 'a@b', 'x/y/z'];
+    // Forty hex only: `createObservationSubject` is the boundary every real
+    // subject comes through and it admits no other length, so a sixty-four-hex
+    // input could not reach the mint from anywhere in the product.
+    const commits = [HEAD, OTHER, 'f'.repeat(40), 'a1'.repeat(20)];
+    let admitted = 0;
+    for (const remote of remotes) {
+      for (const branch of branches) {
+        for (const commit of commits) {
+          const ref = `refs/heads/${branch}`;
+          if (mintHeadPublicationGrant(subjectOf(commit), remote, ref) === null) continue;
+          admitted += 1;
+          for (const token of [...remoteRefArgs(remote, ref), ...publishHeadArgs(remote, ref, commit)]) {
+            expect(isShellInertArgument(token), token).toBe(true);
+          }
+        }
+      }
     }
+    // The control: the loop must have measured something.
+    expect(admitted).toBe(remotes.length * branches.length * commits.length);
   });
 
   it('carries no local path, no URL, no credential and no free text', () => {
@@ -923,7 +1142,7 @@ describe('the delivery command publishes only when asked, and only when told som
       expect(text).toContain(PUBLICATION_TRAILER);
       expect(h.fake.pushes()).toBe(1);
       // The push carries the exact vector, built from the task's own facts.
-      const push = h.fake.calls.find((c) => c[0] === 'push') ?? [];
+      const push = h.fake.calls.find((c) => vectorOf(c) === 'push') ?? [];
       expect(push).toEqual([...publishHeadArgs(REMOTE, REF, HEAD)]);
     } finally {
       h.restore();

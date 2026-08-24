@@ -150,6 +150,23 @@ export const HEAD_PUBLICATIONS = [
    */
   'SUBJECT_CHANGED',
   /**
+   * One remote name, two repositories: the fetch URL and the push URL differ.
+   *
+   * `git ls-remote` reads the fetch URL and `git push` writes to the push URL,
+   * and slice 1 binds the delivery identity to the push URL. So when
+   * `remote.<name>.pushurl` is set to something else, every reading this build
+   * takes would be about a repository other than the one it would change —
+   * measured, and it produces a silent false `ALREADY_PUBLISHED` or a
+   * permanent `OUTCOME_UNCERTAIN` depending on which side already holds the
+   * ref.
+   *
+   * Refused rather than worked around: `ls-remote` has no `--push` (measured),
+   * and passing the URL instead of the remote name would put the value most
+   * likely to carry a credential into an argument vector. Checked before the
+   * remote is contacted, so a divergent remote costs no request.
+   */
+  'REMOTE_URLS_DIVERGE',
+  /**
    * The remote ref could not be read, so nothing was attempted.
    *
    * Ahead of the attempt members because this build does not push at a remote
@@ -228,6 +245,8 @@ export const HEAD_PUBLICATION_DETAIL: Readonly<Record<HeadPublication, string>> 
     'The authority for this publication was not one this build minted, or it had already been used. Nothing was attempted.',
   SUBJECT_CHANGED:
     'The pinned commit, the task state or the delivery target changed after this invocation established them, so the authority no longer describes what is in front of it. Nothing was read and nothing was attempted.',
+  REMOTE_URLS_DIVERGE:
+    'This remote reads from one repository and writes to another, so nothing read from it would describe what a push would change. Nothing was contacted and nothing was attempted.',
   REMOTE_STATE_UNKNOWN:
     'The remote ref could not be read, so nothing was attempted: without knowing what was there first, a success afterwards could not be told from something that was already true.',
   REF_HOLDS_ANOTHER_COMMIT:

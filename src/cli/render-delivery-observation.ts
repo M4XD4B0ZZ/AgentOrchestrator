@@ -429,15 +429,17 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   // Derived from what happened, not from which flags were passed. A reading
   // exists exactly when the remote was contacted by the publication path.
   const contactedByPublication = publication?.result.before != null;
-  lines.push(
-    '',
-    contactedByPublication
-      ? PUBLICATION_TRAILER
-      : view.observation === null
-        ? NOT_CONTACTED_TRAILER
-        : CONTACTED_TRAILER,
-    '',
-  );
+  // Both, when both happened. The first version printed only the publication
+  // trailer, which silently dropped the `L-V4-02-6` disclosure — the GitHub
+  // CLI's own telemetry and update calls — on exactly the runs that had earned
+  // it. A sentence about one kind of egress does not stand in for a sentence
+  // about another.
+  const trailers = contactedByPublication
+    ? view.observation === null
+      ? [PUBLICATION_TRAILER]
+      : [CONTACTED_TRAILER, '', PUBLICATION_TRAILER]
+    : [view.observation === null ? NOT_CONTACTED_TRAILER : CONTACTED_TRAILER];
+  lines.push('', ...trailers, '');
 
   return lines.join('\n');
 }

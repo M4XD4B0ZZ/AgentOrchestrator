@@ -1,19 +1,23 @@
 /**
- * `agent-loop delivery` — the read-only delivery-observation surface (V4 slice 2).
+ * `agent-loop delivery` — the delivery surface (V4 slices 2 to 5).
  *
  * ── Why a command of its own, and why the network is a flag on it ──────────
  *
  * `run` is read-only by default and executes only when `--attended` says so.
  * This command copies that shape one level down: it is **local** by default and
- * contacts a forge only when `--observe` says so. The two properties that
- * matters are structural rather than documented:
+ * contacts a forge only when a flag says so — `--observe` to read one, and,
+ * since V4 slice 5, `--publish-head` to change one. It stopped being a
+ * read-only surface there, and the sentences on it were corrected then rather
+ * than left to be discovered. The two properties that matter are structural
+ * rather than documented:
  *
  *  - `agent-loop run` gained nothing. It resolves a delivery target — that is
  *    slice 1, and it is local Git — and it has no path to this module at all.
  *    No existing command became a networking command;
- *  - without `--observe` this command builds a subject and stops. There is no
- *    branch on which a client is constructed, so "nothing was contacted" is a
- *    fact about the code rather than a promise in help text.
+ *  - with neither `--observe` nor `--publish-head` this command builds a
+ *    subject and stops. There is no branch on which a client is constructed, so
+ *    "nothing was contacted" is a fact about the code rather than a promise in
+ *    help text.
  *
  * ── What it will not do ────────────────────────────────────────────────────
  *
@@ -53,6 +57,7 @@ import {
 } from '../deliver/delivery-decision.js';
 import type { DeliveryObservationProof } from '../deliver/delivery-observation-proof.js';
 import {
+  PUBLISHABLE_REF,
   mintHeadPublicationGrant,
   type HeadPublicationSubject,
 } from '../deliver/internal/head-publication-grant.js';
@@ -173,12 +178,21 @@ function createRuntimeIgnoreProbe(
  * over-claim that was withdrawn from `CONTACTED_TRAILER`, left standing on the
  * surface an operator reads *before* running the command, and pinned by
  * nothing. Two strings made the same promise and only one was corrected.
+ *
+ * It happened a second time, and the literal pin did not stop it. Slice 5 made
+ * "this is the only way this build contacts a forge" and "without this flag
+ * nothing leaves this machine" both false, and a test asserting the exact
+ * string went on passing — because a literal proves what a sentence says, never
+ * that it is true. The lesson is not that the pin is wrong; it is that a
+ * sentence naming *the* way to do something has to be re-read by any slice that
+ * adds a second way.
  */
 export const OBSERVE_OPTION_DESCRIPTION =
-  'Ask github.com about the commit named above, read-only. This is the only way this ' +
-  'build contacts a forge for delivery, and it asks about no commit but that one. The ' +
-  'GitHub CLI additionally makes calls of its own (telemetry, update check) that this ' +
-  'build does not suppress. Without this flag nothing leaves this machine.';
+  'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
+  'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
+  'that this build does not suppress. This is the only flag that makes this command read ' +
+  'a forge; --publish-head is the only one that makes it change anything. Without either, ' +
+  'nothing leaves this machine.';
 
 /**
  * The record flag's own sentence, exported so it can be pinned by literal.
@@ -574,14 +588,17 @@ async function performPublication(
  *
  * Full, never partial. A partial ref is resolved by Git against a search order,
  * so `refs/heads/` is prepended here and not left to the remote to guess. The
- * grammar is re-checked at the mint as well; this one exists so a branch name
- * that could not produce a ref is refused before an authority is asked for
- * rather than after.
+ * This exists so a branch name that could not produce a ref is refused before
+ * an authority is asked for rather than after.
+ *
+ * The grammar is the mint’s own, imported rather than restated. A second copy
+ * was written here first and a review caught it: two regexes that had to agree,
+ * and nothing that made them.
  */
 function publishableRef(workBranch: string): string | null {
   if (typeof workBranch !== 'string' || workBranch.length === 0) return null;
   const ref = `refs/heads/${workBranch}`;
-  return /^refs\/heads\/[A-Za-z0-9._+=@/-]+$/.test(ref) ? ref : null;
+  return PUBLISHABLE_REF.test(ref) ? ref : null;
 }
 
 /**

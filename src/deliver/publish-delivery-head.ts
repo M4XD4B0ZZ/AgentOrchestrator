@@ -2,8 +2,8 @@
  * Observe, mutate at most once, observe again.
  *
  * This is the only function in the build that can change something on a forge,
- * and the whole of its design is the order of five steps and the refusal to
- * take a sixth.
+ * and the whole of its design is the order of six steps and the refusal to take
+ * a seventh.
  *
  * ── The order, and why each step is where it is ───────────────────────────
  *
@@ -20,24 +20,30 @@
  *    so the facts are read again and compared. This is before the remote is
  *    touched, so a subject that has already moved costs nothing.
  *
- * 3. **Read the remote ref.** Not an optimisation. Measured, `git push` exits 0
+ * 3. **Establish that the remote is one repository.** `ls-remote` reads the
+ *    fetch URL and `push` writes to the push URL. When they differ, every
+ *    reading below would be about the wrong repository. Two local questions,
+ *    no request, and a refusal if they disagree — `UNKNOWN` counts as
+ *    disagreement, because this is a precondition and not a diagnosis.
+ *
+ * 4. **Read the remote ref.** Not an optimisation. Measured, `git push` exits 0
  *    both when it creates a ref and when the ref already held the pushed
  *    object, and those are different events. Only the reading taken *before*
  *    the attempt can tell them apart, so without it this build could not
  *    honestly say whether it changed anything.
  *
- * 4. **Push, at most once.** Only when the ref is absent. There is no retry
+ * 5. **Push, at most once.** Only when the ref is absent. There is no retry
  *    loop, no exponential backoff and no second attempt on any outcome. A
  *    create is not idempotent in the transport, and re-sending one whose result
  *    was lost is how a build ends up having done a thing twice while reporting
  *    it once.
  *
- * 5. **Read the remote ref again, whatever the transport said.** Including
+ * 6. **Read the remote ref again, whatever the transport said.** Including
  *    after an apparent success, and especially after a failure: the case this
  *    exists for is the one where GitHub committed the effect and the answer
  *    never arrived.
  *
- * ── The sixth step this refuses to take ───────────────────────────────────
+ * ── The step this refuses to take ─────────────────────────────────────────
  *
  * There is no compensating action. If the postcondition is not what was
  * intended, nothing is deleted, moved or retried — the outcome is named and
@@ -74,6 +80,7 @@ import {
 import {
   pushDeliveryHead,
   readRemoteRef,
+  readUrlAgreement,
   type GitPublicationRunner,
 } from './git-head-publisher.js';
 
@@ -144,6 +151,16 @@ export async function publishDeliveryHead(
   const still = await seams.recheck();
   if (still === null || !sameSubject(authorised, still)) {
     return result('SUBJECT_CHANGED', null, 'NOT_ATTEMPTED', null);
+  }
+
+  // One remote name must be one repository. `ls-remote` reads the fetch URL
+  // and `push` writes to the push URL, and slice 1's identity comes from the
+  // push URL — so a remote whose two URLs differ would have every reading here
+  // describe a repository other than the one about to change. Both questions
+  // are local, and they are asked before anything is contacted.
+  const agreement = await readUrlAgreement(repositoryRoot, authorised.remoteName, seams.runner);
+  if (agreement !== 'AGREE') {
+    return result('REMOTE_URLS_DIVERGE', null, 'NOT_ATTEMPTED', null);
   }
 
   const before = await readRemoteRef(

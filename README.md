@@ -8381,8 +8381,9 @@ Read-only. No forge was contacted, no task state was written, and nothing was de
 ```
 
 `agent-loop run` gained nothing and still contacts nothing. There is no branch
-in this command on which a client is constructed without `--observe`, so "nothing
-was contacted" is a property of the code rather than a promise in help text.
+in this command on which a client is constructed without `--observe` or
+`--publish-head`, so "nothing was contacted" is a property of the code rather
+than a promise in help text.
 
 ### The subject is a commit, and the endpoint is only a locator
 
@@ -8620,9 +8621,11 @@ Recording for `T-001` would have renamed an evidence blob over another task's
 durable record and destroyed it. An adversarial review reproduced it; a
 directory closes it structurally, since task state can never land one level
 down. **Not** a `TaskState` field: writing one of those needs a held
-execution lease re-proved at the write, and `delivery` is a read-only command
-that holds none. Taking a lease to record an observation would make it an
-executing command.
+execution lease re-proved at the write, and `delivery` holds none. Taking a
+lease to record an observation would make it an executing command. V4 slice 5
+gave the command something it can change — a branch on the delivery remote —
+and still takes no lease, for reasons of its own: see [Publishing the delivery
+head (V4 slice 5)](#publishing-the-delivery-head-v4-slice-5).
 
 Six closed readings, of which exactly one is evidence:
 
@@ -8917,10 +8920,41 @@ and the ref is not there, that is `OUTCOME_UNCERTAIN`, and nothing is retried,
 deleted or cleaned up. A compensating action is another mutation, taken at the
 moment least is known.
 
-### The eleven outcomes
+### Three things a vector does not bound, and one of them is the read
+
+An adversarial review measured three defects in the first candidate, all in the
+gap between what a command *says* and what it *does*.
+
+**`ls-remote` takes a pattern, not a ref.** It matches against a ref's tail, so
+`refs/heads/ao/T-001` is answered by a stranger's
+`refs/heads/x/refs/heads/ao/T-001` — measured, with the intended ref absent. The
+build read that as "already published" and told the operator so. Now the ref
+name in the answer is compared, and a pattern that matched only other refs reads
+as absent.
+
+**Your Git config is part of the effect.** Measured with the exact vector:
+`push.followTags = true` — an ordinary personal setting — made the push create
+an annotated tag the vector never named, and a `pre-push` hook ran, saw the
+remote URL, and **aborted the publication** by exiting non-zero. Four `-c` pins
+now sit in front of the subcommand, measured to reduce the effect back to the
+one ref. Two neighbours were tried and left alone because they were measured
+harmless: a configured `remote.<name>.push` refspec is superseded by an explicit
+one, and `remote.<name>.mirror` fails closed.
+
+**One remote name can be two repositories.** `ls-remote` reads the fetch URL and
+`push` writes to the push URL, and slice 1 binds the delivery identity to the
+push URL. With `remote.<name>.pushurl` set elsewhere every reading is about the
+wrong repository. `ls-remote` has no `--push`, and passing a URL instead of a
+name would put the value most likely to carry a credential into an argument
+vector — so the divergence is detected by two local questions and refused as
+`REMOTE_URLS_DIVERGE`. An unreadable answer is refused too: it is a
+precondition, not a diagnosis.
+
+### The outcomes
 
 `SUBJECT_NOT_ESTABLISHED`, `TASK_NOT_READY`, `OPERATOR_ABSENT`,
-`AUTHORITY_REFUSED`, `SUBJECT_CHANGED`, `REMOTE_STATE_UNKNOWN`,
+`AUTHORITY_REFUSED`, `SUBJECT_CHANGED`, `REMOTE_URLS_DIVERGE`,
+`REMOTE_STATE_UNKNOWN`,
 `REF_HOLDS_ANOTHER_COMMIT`, `PUBLICATION_REFUSED`, `OUTCOME_UNCERTAIN`,
 `ALREADY_PUBLISHED`, `CONVERGED_AFTER_UNCERTAIN_EFFECT`, `PUBLISHED`.
 
@@ -8960,6 +8994,16 @@ ADR: [`docs/decisions/2026-08-24-adr-delivery-head-publication.md`](docs/decisio
 - **L-V4-05-7 — `--attended` now appears on four commands with four
   independently worded help strings.** It means the same thing in all four, and
   nothing proves that.
+- **L-V4-05-8 — every publication outcome exits 0.** The exit code answers only
+  whether the *observation* settled, so a script cannot tell `PUBLISHED` from
+  `PUBLICATION_REFUSED`. Deliberate — a machine-readable delivery signal is what
+  these slices keep refusing to give — but a mutating command whose failure is
+  prose-only is worth carrying explicitly.
+- **L-V4-05-9 — a work branch becomes a ref through a character class, not
+  through `isValidBranchName`.** Git's own `check-ref-format` refuses what that
+  class admits, so the outcome is a wasted push and an undiagnosed refusal. What
+  nothing refuses is an ordinary name like `main`: create-only bounds the damage,
+  nothing bounds the name.
 
 ## Not implemented yet
 

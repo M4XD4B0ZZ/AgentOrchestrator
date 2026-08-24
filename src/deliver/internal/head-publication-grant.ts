@@ -67,7 +67,7 @@
  * accepts it publishes exactly one ref, create-only.
  */
 
-import type { ObservationSubject } from '../forge-observation.js';
+import { SUPPORTED_FORGE_HOSTS, type ObservationSubject } from '../forge-observation.js';
 
 /**
  * The four facts a publication is about, plus the two that say where.
@@ -98,8 +98,13 @@ const COMMIT_OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
  * vector. The character class is `repo/branch-name.ts`'s, narrowed further by
  * `doctor/exec.ts`'s shell-inert grammar: no space, no quote, no metacharacter.
  * A leading `-` is impossible because `refs/heads/` precedes it.
+ *
+ * Exported because the command ladder needs the same rule to decide whether a
+ * work branch can become a ref *before* it asks for an authority. A second copy
+ * there would be free to drift from this one — the argument `doctor/exec.ts`
+ * makes about `SAFE_ARG_PATTERN`, and a review found the second copy.
  */
-const PUBLISHABLE_REF = /^refs\/heads\/[A-Za-z0-9._+=@/-]+$/;
+export const PUBLISHABLE_REF = /^refs\/heads\/[A-Za-z0-9._+=@/-]+$/;
 
 /** Names this build will not put in an argument vector as a remote. */
 const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -186,9 +191,12 @@ export class HeadPublicationGrant {
  *  - a remote name that is not a bare name: the remote is the one place a URL
  *    could enter the vector, and a URL is the value most likely to carry a
  *    credential;
- *  - a subject whose host is not the one the build supports, or whose owner or
+ *  - a subject whose host is not one this build supports, or whose owner or
  *    name is blank: an identity that cannot be checked against the observation
- *    is an identity the postcondition cannot be bound to.
+ *    is an identity the postcondition cannot be bound to. The host is re-tested
+ *    here against the same frozen list `forge-observation.ts` owns, and not
+ *    taken on trust from the subject type — that type is structural, a review
+ *    hand-cast straight past it, and this sentence was false until it did.
  *
  * There is no arm that mints a weaker grant from a partial input. "The operator
  * asked, but the ref is odd" is not a smaller authority — it is not one.
@@ -201,7 +209,12 @@ export function mintHeadPublicationGrant(
   if (typeof remoteName !== 'string' || !REMOTE_NAME.test(remoteName)) return null;
   if (typeof ref !== 'string' || !PUBLISHABLE_REF.test(ref)) return null;
   if (typeof target.commit !== 'string' || !COMMIT_OBJECT_NAME.test(target.commit)) return null;
-  if (typeof target.host !== 'string' || target.host.length === 0) return null;
+  if (
+    typeof target.host !== 'string' ||
+    !(SUPPORTED_FORGE_HOSTS as readonly string[]).includes(target.host)
+  ) {
+    return null;
+  }
   if (typeof target.owner !== 'string' || target.owner.length === 0) return null;
   if (typeof target.name !== 'string' || target.name.length === 0) return null;
 
