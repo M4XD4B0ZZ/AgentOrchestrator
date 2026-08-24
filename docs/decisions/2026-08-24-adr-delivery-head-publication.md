@@ -340,10 +340,11 @@ delivery stack is for.
 
 1. Exactly one module in the delivery surface runs a push, and it runs one
    create-only vector. Derived from the tree.
-1. The **refs touched** are bounded by the vector, by the config pins, and by
-   naming the receive-pack program — because each of the three was measured, in
-   turn, not to be bounded by the ones before it. Not the transport: see
-   `L-V4-05-10`.
+1. This build bounds **the refs its push asks for** — by the vector, by the
+   config pins, and by naming the receive-pack program. It does **not** bound
+   the refs that end up on the destination, and after four attempts at a
+   stronger sentence that is stated as the contract rather than as a caveat:
+   see `L-V4-05-10`.
 1. A reading is about the ref that was asked for, established by comparing the
    ref name the remote answered with — never by position in the answer.
 1. One remote name reads and writes the same URL list, or nothing happens —
@@ -383,17 +384,40 @@ delivery stack is for.
   dogfood exercised the module and the real transport but not the ladder: this
   repository has no AO task state for its own slices, and fabricating one to
   make a dogfood possible is precisely what the handoff forbids.
-- **`L-V4-05-10`** — the refs are bounded; the transport is trusted. A
-  confirmation review measured that `remote.<name>.receivepack` reached past
-  every config pin — a wrapper receive-pack created a second ref and the push
-  reported success — because the receive side is what writes refs. That one is
-  now closed by naming the program on the command line, measured. What remains
-  and cannot be closed here: `core.sshCommand`, `core.askPass`, `http.proxy` and
-  `push.pushOption` are reachable from an operator's own config and invisible to
-  the URL-agreement check, and `credential.helper` cannot be pinned off at all
-  because the push needs it. So this build bounds the refs its push asks for and
-  trusts the machine's Git installation for the transport — exactly as every
-  other Git command in the build already does, and no more than they do.
+- **`L-V4-05-10`** — **this build bounds the refs its push asks for, and not
+  the refs that end up on the destination.** That sentence has been wrong three
+  times in three successive reviews, each time in the same direction, so it is
+  now written to claim the minimum rather than to be narrowed again:
+
+  - "the vector bounds the effect" was false — `push.followTags` added a ref the
+    vector never named;
+  - "the config pins bound the effect" was false — they bound nothing about the
+    transport;
+  - "the pins bound the refs touched" was false — `remote.<name>.receivepack`
+    ran a wrapper on the receive side, which is what actually writes refs. That
+    one is closed, by naming the program on the command line, measured.
+
+  And the fourth measurement is why the claim stops here: **`remote.<name>.vcs`**
+  makes Git run an arbitrary `git-remote-<name>` program as the *entire*
+  transport. Measured with every pin, the empty lease, `--atomic` and the
+  explicit receive-pack all in place: the helper created one ref, deleted
+  another, and `git push` printed `Done` and exited 0. The receive-pack value is
+  never sent down the helper protocol, so the new flag cannot bound it; both URL
+  questions return the unmodified URL, so the agreement check cannot see it; and
+  it cannot be pinned off, because `-c remote.<name>.vcs=` makes Git look for
+  `git-remote-` and abort every push. Alongside it, and weaker:
+  `core.sshCommand`, `core.askPass`, `http.proxy`, `push.pushOption`, and
+  `credential.helper`, which cannot be pinned off because the push needs it.
+
+  The list is not claimed to be complete. What is claimed is the shape: an
+  operator whose Git configuration can run arbitrary programs has a Git that can
+  do anything, and this command is not the boundary for that — every other Git
+  command in this build already runs under the same configuration and has since
+  V1. Naming the remote rather than its URL is what admits the whole
+  `remote.<name>.*` family; pushing by URL would close it and would put the
+  value most likely to carry a credential into an argument vector, which
+  `delivery-target.ts` exists to prevent. That trade is a decision for a later
+  slice, not a defect in this one.
 - **`L-V4-05-8`** — every publication outcome exits 0. The exit code answers
   only whether the *observation* settled, which is slice 2's contract and is
   pinned, so `PUBLICATION_REFUSED`, `OUTCOME_UNCERTAIN` and

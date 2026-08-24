@@ -115,9 +115,9 @@ export const OBSERVED_AND_PUBLISHED_TRAILER =
  * the one thing it is allowed to change.
  *
  * Two of the three other trailers open "Read-only.", and one of those adds "No
- * forge was contacted". Both sentences were true of every invocation this
- * command could make until slice 5, and both are false on a publication — the
- * first always, the second whenever the remote was read. Separate sentences are
+ * forge was contacted". Each was true of the runs it was printed for until
+ * slice 5, and both are false on a publication — the first always, the second
+ * whenever the remote was read. Separate sentences are
  * the honest repair; widening the existing ones would have made them vaguer for
  * the runs they were written for.
  *
