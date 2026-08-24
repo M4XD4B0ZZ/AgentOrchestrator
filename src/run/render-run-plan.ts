@@ -84,9 +84,14 @@ function codes(values: readonly string[]): string {
  * delivers to it. A refusal prints its closed code and the static sentence that
  * describes it — never Git's output, and never the URL.
  *
- * The trailing clause is not decoration. This build pushes nothing, opens
- * nothing and merges nothing, and a line that named a forge repository without
- * saying so would read as a claim that it does.
+ * The trailing clause is not decoration. **A plan** resolves the delivery
+ * identity and delivers nothing — it pushes no branch, opens no pull request and
+ * merges nothing — and a line that named a forge repository without saying so
+ * would read as a claim that it does. The clause is about this command. What
+ * `agent-loop delivery` can change on a forge is that command's own contract,
+ * and it grew at V4 slices 5, 6 and 7; an earlier version of this sentence said
+ * "this build" rather than "a plan", which was already false when slice 5
+ * shipped a push.
  */
 export function renderDeliveryLine(delivery: ResolvedDelivery): string {
   if (!delivery.declared) {

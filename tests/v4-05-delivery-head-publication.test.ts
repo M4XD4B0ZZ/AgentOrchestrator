@@ -1013,7 +1013,16 @@ describe('exactly one module can change anything, and it changes one ref', () =>
     expect(minters).toEqual(['src/cli/delivery-command.ts']);
   });
 
-  it('still names no writer, no lease, no agent and no merge', () => {
+  // The title lost "and no merge" at V4 slice 7, which added one. What that
+  // slice did NOT add is what the surviving lines measure, and they are the
+  // ones that were always the point: this surface still writes no task state,
+  // takes no lease, starts no process of its own, never invokes `gh pr merge`
+  // — the merge goes through `gh api`, whose vector is pinned by exact
+  // equality in the slice-7 file — and never enables auto-merge. The retired
+  // line was `not.toMatch(/\bmergePullRequest\b/)`: it was the name of the
+  // thing that must not exist and is now the name of the thing that does, so
+  // keeping it would have measured a spelling rather than a capability.
+  it('still names no writer, no lease, no agent and no auto-merge', () => {
     for (const file of SURFACE) {
       const code = codeOnly(file);
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
@@ -1021,7 +1030,8 @@ describe('exactly one module can change anything, and it changes one ref', () =>
       expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
       expect(code, file).not.toMatch(/\brunOwnedCommand\s*\(|\bspawn\s*\(/);
       expect(code, file).not.toMatch(/gh pr merge|--auto\b/);
-      expect(code, file).not.toMatch(/\bmergePullRequest\b/);
+      expect(code, file).not.toMatch(/\benableAutoMerge\b|\bauto_merge\b|\bmerge_queue\b/);
+      expect(code, file).not.toMatch(/merge-async/);
     }
   });
 
@@ -1052,13 +1062,20 @@ describe('exactly one module can change anything, and it changes one ref', () =>
     }
   });
 
-  it('names no method other than GET or POST anywhere on the delivery surface', () => {
+  // V4 slice 7 added a PUT, so this narrowed from "no method other than GET or
+  // POST" to what is still true: PATCH and DELETE appear nowhere, and PUT
+  // appears in exactly one module. The one-module half is the part that carries
+  // the guarantee — the slice-7 file pins that module's whole vector, and its
+  // single endpoint, by exact equality.
+  it('names no PATCH or DELETE, and confines PUT to one module', () => {
     for (const file of SURFACE) {
-      expect(codeOnly(file), file).not.toMatch(METHOD('PATCH', 'PUT', 'DELETE'));
+      expect(codeOnly(file), file).not.toMatch(METHOD('PATCH', 'DELETE'));
     }
+    const putters = SURFACE.filter((f) => METHOD('PUT').test(codeOnly(f)));
+    expect(putters).toEqual(['src/deliver/github-pull-request-merger.ts']);
     // False-negative guard: the pattern matches both spellings of a real one.
-    expect("['api', '-X', 'DELETE', p]").toMatch(METHOD('PATCH', 'PUT', 'DELETE'));
-    expect('-X PUT').toMatch(METHOD('PATCH', 'PUT', 'DELETE'));
+    expect("['api', '-X', 'DELETE', p]").toMatch(METHOD('PATCH', 'DELETE'));
+    expect('-X PUT').toMatch(METHOD('PUT'));
   });
 
   it('leaves READY_FOR_PR terminal, with no outgoing transition', () => {
@@ -1326,9 +1343,19 @@ describe('the surface states its own limits', () => {
     expect(DELIVERY_COMMAND_DESCRIPTION).not.toContain('opens no pull request');
     // What replaced it is a narrower claim that is still true, and it is pinned
     // here so removing it is a visible act.
-    expect(DELIVERY_COMMAND_DESCRIPTION).toContain(
+    //
+    // Narrowed once more at V4 slice 7, which merges one: "or merges" had to go
+    // for the reason "opens no pull request" went one slice earlier, and the
+    // clause must be ABSENT rather than merely unpinned. What is left is the
+    // set of things still true, and `--merge-pr` is why "reopens", "comments
+    // on", "labels" and "auto-merge" were spelled out rather than left implied.
+    expect(DELIVERY_COMMAND_DESCRIPTION).not.toContain(
       'never updates, closes, reviews or merges a pull request',
     );
+    expect(DELIVERY_COMMAND_DESCRIPTION).toContain(
+      'never updates, closes, reopens, reviews, comments on or labels a pull request',
+    );
+    expect(DELIVERY_COMMAND_DESCRIPTION).toContain('never enables an auto-merge');
   });
 
   it('registers both flags with the sentences that were pinned, not copies', () => {

@@ -87,6 +87,7 @@ import {
   parseCheckRuns,
   parseCommitStatuses,
   parsePullCandidates,
+  parsePullRequestRecord,
   pullRequestRefusal,
   supportedForgeHost,
   type CheckStateObservation,
@@ -95,6 +96,7 @@ import {
   type PullCandidate,
   type PullRequestObservation,
 } from './forge-observation.js';
+import type { MergeReading, MergeReadingOutcome } from './pull-request-merge.js';
 
 /** The program. Resolved on `PATH` by `exec.ts`; never a path from a variable. */
 export const FORGE_CLIENT_COMMAND = 'gh';
@@ -156,6 +158,18 @@ export function pullCandidatesPath(subject: ObservationSubject): string {
 /** Check runs attached to exactly this commit. */
 export function checkRunsPath(subject: ObservationSubject): string {
   return `repos/${subject.owner}/${subject.name}/commits/${subject.commit}/check-runs`;
+}
+
+/**
+ * One pull request by number. The endpoint the merge path reads.
+ *
+ * The only endpoint in this build addressed by a pull-request number rather
+ * than by an object name, and the reason is in
+ * {@link parsePullRequestRecord}'s header: a merge is addressed by number, so
+ * its postcondition has to be read by number too.
+ */
+export function pullRequestPath(subject: ObservationSubject, pullRequestNumber: number): string {
+  return `repos/${subject.owner}/${subject.name}/pulls/${String(pullRequestNumber)}`;
 }
 
 /** The legacy commit-status mechanism for exactly this commit. */
@@ -419,6 +433,91 @@ export async function readPullCandidatesAtHead(
   if (!parsed.ok) return Object.freeze({ ok: false as const, refusal: parsed.refusal });
 
   return Object.freeze({ ok: true as const, candidates: parsed.candidates });
+}
+
+/**
+ * Reads one pull request by number, and turns it into a merge reading.
+ *
+ * The same request vector, the same environment policy and the same budgets as
+ * every other reading this build takes — `-X GET`, `--hostname github.com`, the
+ * probe environment, the temporary working directory. What is new is the path
+ * and the parse, and nothing else.
+ *
+ * It is deliberately not merge-eligibility logic. It reports what the pull
+ * request *is* — open, closed unmerged, or merged, at which head, into which
+ * base, draft or not, and the resulting commit when there is one — and decides
+ * nothing about whether it may be merged. That decision is the operator's, and
+ * the enforcement is GitHub's.
+ *
+ * The number is re-tested here rather than trusted, for the reason
+ * {@link request} gives about the host and the subject: it is a path segment,
+ * and this is the last moment before a process exists. `SUBJECT_UNUSABLE` is the
+ * vocabulary's name for "an argument this build will not put in a request",
+ * which is what a number that is not a positive safe integer is.
+ *
+ * The mapping from the parsed record to one word is narrow on purpose:
+ *
+ *   merged === true   -> MERGED
+ *   state === 'open'  -> OPEN
+ *   state === 'closed'-> CLOSED_UNMERGED
+ *   anything else     -> UNKNOWN
+ *
+ * The last arm is the fail-closed one and it is not decoration. GitHub's `state`
+ * is documented as `open` or `closed` today, and a third value from a future API
+ * must not be read as either — it arrives as "I could not establish what this
+ * is", which is the only honest reading of a word this build has never seen.
+ */
+export async function readPullRequestByNumber(
+  subject: ObservationSubject,
+  pullRequestNumber: number,
+  deps: ForgeObserverDependencies,
+): Promise<
+  | { readonly ok: true; readonly reading: MergeReading }
+  | { readonly ok: false; readonly refusal: ObservationRefusal }
+> {
+  if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber <= 0) {
+    return Object.freeze({ ok: false as const, refusal: 'SUBJECT_UNUSABLE' as const });
+  }
+
+  // The path is built into a local first, and that is not style. The suite
+  // reads every `request(...)` call site's third argument to prove the `-F`
+  // params are this module's own constants, and it requires that argument to be
+  // an array literal it can see. A path expression carrying its own comma
+  // splits that read and hides the params behind it — measured: the sweep
+  // captured `pullRequestNumber` and refused it.
+  const path = pullRequestPath(subject, pullRequestNumber);
+  // No params at all: this endpoint takes none, so this request carries no `-F`.
+  const response = await request(subject, path, [], deps);
+  if (!response.ok) return Object.freeze({ ok: false as const, refusal: response.refusal });
+
+  const parsed = parsePullRequestRecord(response.body);
+  if (!parsed.ok) return Object.freeze({ ok: false as const, refusal: parsed.refusal });
+
+  const record = parsed.record;
+  const outcome: MergeReadingOutcome = record.merged
+    ? 'MERGED'
+    : record.state === 'open'
+      ? 'OPEN'
+      : record.state === 'closed'
+        ? 'CLOSED_UNMERGED'
+        : 'UNKNOWN';
+  const settled = outcome !== 'UNKNOWN';
+
+  return Object.freeze({
+    ok: true as const,
+    reading: Object.freeze({
+      outcome,
+      // A reading whose state this build does not recognise establishes nothing
+      // about the pull request, so it carries nothing about it either. Handing
+      // back a number and a head under `UNKNOWN` would invite a consumer to use
+      // them.
+      number: settled ? record.number : null,
+      headSha: settled ? record.headSha : null,
+      baseRef: settled ? record.baseRef : null,
+      draft: settled ? record.draft : null,
+      mergeCommit: outcome === 'MERGED' ? record.mergeCommitSha : null,
+    }),
+  });
 }
 
 /**

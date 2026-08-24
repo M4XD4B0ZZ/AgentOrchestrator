@@ -2551,6 +2551,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'deliver', 'git-head-publisher.ts'),
         join('src', 'deliver', 'github-observer.ts'),
         join('src', 'deliver', 'github-pull-request-creator.ts'),
+        join('src', 'deliver', 'github-pull-request-merger.ts'),
         join('src', 'doctor', 'capabilities.ts'),
         join('src', 'repo', 'git-query.ts'),
         join('src', 'verify', 'run-verification.ts'),
@@ -2561,11 +2562,39 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'worktree', 'worktree-cleanliness.ts'),
       ].sort(),
     );
-    // Of those, eight can actually start a process; the rest import
-    // `isShellInertArgument` or a type. The list exists so that a *new*
-    // importer of the execution module has to be classified rather than
-    // appearing silently, and the runner fence itself is asserted in 'lets
-    // exactly one module reach the raw runners' above.
+    // Of those, some can actually start a process and the rest import
+    // `isShellInertArgument` or a type. That split is MEASURED below rather
+    // than stated: this comment said "eight" and V4 slice 7 measured ten, so it
+    // had been wrong by two before the merger was added to it. A count in prose
+    // beside a list the suite enforces is a number nothing enforces, and this
+    // repository has been caught by that shape repeatedly.
+    //
+    // The list exists so that a *new* importer of the execution module has to be
+    // classified rather than appearing silently, and the runner fence itself is
+    // asserted in 'lets exactly one module reach the raw runners' above.
+    const startsAProcess = modulesImporting(/\bexec\.js/, { values: false })
+      .filter((file) => {
+        const code = readFileSync(join(PACKAGE_ROOT, file), 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, ' ')
+          .replace(/(^|[^:])\/\/.*$/gm, '$1');
+        return /\brunCommand\s*\(|\brunOwnedCommand\s*\(/.test(code);
+      })
+      .sort();
+    expect(startsAProcess).toEqual(
+      [
+        join('src', 'agent', 'agent-command.ts'),
+        join('src', 'auth', 'auth-preflight.ts'),
+        join('src', 'boundary', 'owned-command.ts'),
+        join('src', 'deliver', 'git-head-publisher.ts'),
+        join('src', 'deliver', 'github-observer.ts'),
+        join('src', 'deliver', 'github-pull-request-creator.ts'),
+        join('src', 'deliver', 'github-pull-request-merger.ts'),
+        join('src', 'doctor', 'capabilities.ts'),
+        join('src', 'repo', 'git-query.ts'),
+        join('src', 'verify', 'verify-command.ts'),
+        join('src', 'worktree', 'git-command.ts'),
+      ].sort(),
+    );
     //
     // `deliver/git-head-publisher.ts` is the newest, and it is the hardest
     // entry this list has had to classify. It is in the FIRST group — it starts
@@ -2637,6 +2666,46 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // and another after it; and at most one request per invocation, with no
     // retry on any outcome. All of them are asserted in
     // `tests/v4-06-pull-request-creation.test.ts`.
+    //
+    // `deliver/github-pull-request-merger.ts` is the newest, added by V4 slice
+    // 7, and it is in the FIRST group: it starts `gh api` and the request it
+    // sends CHANGES something — it merges a pull request. It is the third module
+    // in this build able to alter anything outside this machine, and the one
+    // with the largest blast radius: the other two are additive, and this one
+    // writes to the base branch.
+    //
+    // It is outside the lease, deliberately, and the argument is the other two's
+    // unchanged: the fence exists so that at most one invocation is a
+    // repository's **writer**, everything the lease protects is local, and this
+    // module touches none of it. It does not run inside a repository at all —
+    // like the observer and the creator it runs in the OS temp directory — and
+    // it asks no local Git question of any kind. `mergePullRequest` takes no
+    // repository root.
+    //
+    // Where its argument is STRONGER than the creator's, and this is the one
+    // place in this list that improves: the effect is fenced at the far side.
+    // The request carries `sha`, the exact authorised head, and — measured —
+    // while the pull request is open GitHub answers
+    // `409 "Head branch was modified"` and merges nothing when it does not
+    // match. That is the same class of guarantee `--force-with-lease` gives the
+    // publisher and the creator had no equivalent of.
+    //
+    // Where it is WEAKER, stated rather than glossed: that fence does not apply
+    // once the pull request is merged. Measured, an already-merged pull request
+    // answers `200 merged=true` whatever `sha` is sent, replaying the original
+    // merge commit. So a concurrent merge is *detected* afterwards rather than
+    // prevented, and it is recorded as `L-V4-07-4`. A lease would not close that
+    // either, for the reason given twice above.
+    //
+    // What it *is* fenced by, in order: an explicit `--merge-pr` and
+    // `--attended`; a fresh decision of this invocation's own that must be
+    // `PULL_REQUEST_MATCHED_CHECKS_SUCCESS` and nothing else; a one-shot opaque
+    // `MergeGrant` whose type the merger's signature demands and which is spent
+    // by the only accessor that reveals it; a re-read of the whole local
+    // subject; a reading of the pull request by number before the request and
+    // another after it; the server-evaluated `sha`; and at most one request per
+    // invocation with no retry on any outcome. All of them are asserted in
+    // `tests/v4-07-explicit-merge-effect.test.ts`.
     //
     // `deliver/github-observer.ts` is in the FIRST group too:
     // it really does start a process — `gh api` — so it has to be classified

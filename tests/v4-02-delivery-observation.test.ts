@@ -449,9 +449,12 @@ describe('the request vector is pinned, not described', () => {
     const sites = [...source.matchAll(/\brequest\(\s*subject,\s*[^,]+,\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*)(?=\s*[,)])/g)].map((m) =>
       (m[1] ?? '').trim(),
     );
-    // Positive control: there really are three, so an empty scan is a broken
-    // regex rather than a module with no requests in it.
-    expect(sites).toHaveLength(3);
+    // Positive control: there really are four, so an empty scan is a broken
+    // regex rather than a module with no requests in it. It was three until V4
+    // slice 7 added the by-number pull-request read, whose params are `[]` —
+    // that endpoint takes none, so it contributes no `-F` at all, which is the
+    // strongest form of this case's claim rather than an exception to it.
+    expect(sites).toHaveLength(4);
     for (const site of sites) {
       expect(site.startsWith('[')).toBe(true);
       for (const token of site.replace(/^\[|\]$/g, '').split(',')) {
@@ -2008,24 +2011,53 @@ describe('the product contract is unchanged', () => {
       /['"]gh (pr|issue) (create|merge|edit|close|review|comment)/,
       // A path that can only be a mutation, however it is assembled.
       /\/(merge|merges)['"`]/,
-      /pulls\/\$\{/,
+      // A SUB-RESOURCE of one numbered pull request: `pulls/${n}/merge`,
+      // `/reviews`, `/comments`. This was the bare prefix `pulls/${` until
+      // V4 slice 7, which reads one pull request BY NUMBER to establish the
+      // postcondition of its merge. That read is a GET at `pulls/${n}` with no
+      // sub-resource and no body, and the old pattern could not tell it from a
+      // mutation. The trailing slash is what distinguishes them, and it is what
+      // the pattern now requires.
+      /pulls\/\$\{[^}]*\}\//,
       // The body channel: a read has none.
       /['"]--input['"]/,
     ];
-    // **V4 slice 6 made this list non-empty on purpose**, and the case is
-    // narrowed rather than deleted: exactly one module in the whole source tree
-    // may name a forge mutation, it is the pull-request creator, and its entire
-    // argument vector is pinned by exact equality in
-    // `tests/v4-06-pull-request-creation.test.ts`. Every pattern below is
-    // unchanged — none of them was ever what made the old claim true — so a
-    // second mutating module, or a mutating spelling appearing anywhere else,
+    // **V4 slice 6 made this list non-empty on purpose, and slice 7 made it
+    // two**, and the case is narrowed rather than deleted: exactly two modules
+    // in the whole source tree may name a forge mutation — the pull-request
+    // creator and the pull-request merger — and each one's entire argument
+    // vector is pinned by exact equality in its own slice's file. One pattern
+    // above was narrowed and the comment beside it says why; every other one is
+    // unchanged, none of them was ever what made the old claim true, and a
+    // third mutating module, or a mutating spelling appearing anywhere else,
     // still turns this red.
+    //
+    // The enumeration is what carries the guarantee. A regex that merely
+    // allowed "any module whose name ends in -merger" would let the next one in
+    // for free, which is the failure this whole case exists to avoid.
     const CREATOR = 'src/deliver/github-pull-request-creator.ts';
-    const offenders = files.filter((f) => {
-      const source = readFileSync(f, 'utf8');
-      return forbidden.some((pattern) => pattern.test(source));
-    });
-    expect(offenders.map((f) => f.split('\\').join('/'))).toEqual([CREATOR]);
+    const MERGER = 'src/deliver/github-pull-request-merger.ts';
+    // Comments are stripped before the sweep, and that is a correction rather
+    // than a convenience. The claim is about what this build *does*; a
+    // docstring naming an endpoint issues no request, and V4 slice 7 made the
+    // difference visible — its grant and its grading module both quote
+    // `PUT .../pulls/{n}/merge` while neither can reach a network. Scanning raw
+    // source called those two modules forge mutations, which is false, and the
+    // only way to keep the old instrument would have been to write the prose
+    // around it. String literals are KEPT, so a vector assembled in a string is
+    // still caught. The stripper's own limit, stated rather than implied: a
+    // `//` inside a string literal truncates that line, and a `/* */` inside one
+    // is eaten. No file in this corpus contains either, and the offender
+    // enumeration below would change if one appeared — which is what would
+    // surface it.
+    const codeOf = (path: string): string =>
+      readFileSync(path, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const offenders = files.filter((f) => forbidden.some((p) => p.test(codeOf(f))));
+    expect(offenders.map((f) => f.split('\\').join('/')).sort()).toEqual(
+      [CREATOR, MERGER].sort(),
+    );
 
     // Positive control, and the reason the case above is evidence rather than a
     // broken regex: each pattern is shown to match the thing it is aimed at, on
@@ -2045,6 +2077,22 @@ describe('the product contract is unchanged', () => {
     ];
     for (const mutant of mutants) {
       expect(forbidden.some((pattern) => pattern.test(mutant))).toBe(true);
+    }
+
+    // The other half of the slice-7 narrowing, and the half a positive control
+    // cannot show: reads that must NOT be caught. Without these the pattern
+    // could be widened back to the bare `pulls/${` prefix and every assertion
+    // above would still pass, while `github-observer.ts` — which only reads —
+    // would be reported as a forge mutation.
+    const reads = [
+      'const p = `repos/${o}/${r}/pulls/${String(n)}`',
+      'const p = `repos/${o}/${r}/commits/${sha}/pulls`',
+    ];
+    for (const read of reads) {
+      expect(
+        forbidden.some((pattern) => pattern.test(read)),
+        read,
+      ).toBe(false);
     }
 
     expect([...FORGE_REQUEST_PREFIX]).toEqual(['api', '--hostname', 'github.com', '-X', 'GET']);

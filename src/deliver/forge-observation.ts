@@ -453,13 +453,125 @@ export function parsePullCandidates(
   return Object.freeze({ ok: true as const, candidates: Object.freeze(candidates) });
 }
 
+/** One pull request, as the single-document endpoint reported it. */
+export interface PullRequestRecord {
+  readonly number: number;
+  readonly state: string;
+  readonly merged: boolean;
+  readonly headSha: string;
+  readonly baseRef: string | null;
+  readonly draft: boolean | null;
+  /** Non-null only when {@link merged}. Forty lowercase hex digits. */
+  readonly mergeCommitSha: string | null;
+}
+
 /**
- * The exact-head test, and the reason this slice exists.
+ * The single pull-request document, parsed into the facts a merge needs.
+ *
+ * A different endpoint from the locator, a different shape, and it is added
+ * rather than folded into {@link parsePullCandidates} because the two answer
+ * different questions. The locator answers "what pull requests carry this
+ * commit as their head" and is keyed on an object name. This one answers "what
+ * is pull request N", and it is the only instrument that can answer the
+ * postcondition of a merge — measured: after a squash merge the head object
+ * name is on no branch, and a pull request merged at *another* head is not
+ * returned for this one at all, so a build that read the postcondition by head
+ * could not see a merge it may itself have caused.
+ *
+ * The `merged` boolean is read rather than inferred from `state`, because the
+ * two are not the same fact: a merged pull request reads `state: "closed"`, and
+ * so does one a human closed. The locator's list representation carries only
+ * `merged_at`; this representation carries the boolean, which is the second
+ * reason the merge path uses this endpoint and not that one.
+ *
+ * `merge_commit_sha` is read **only when `merged` is true**, and that is a
+ * correctness gate rather than tidiness. Measured on github.com: while a pull
+ * request is open, that field holds an ephemeral *test* merge commit with two
+ * parents which is on no branch — for pull request 60 it read `ecae16f…`, whose
+ * parents were the base tip and the head, and `main` was behind it. GitHub's own
+ * description says so: "Before merging a pull request, the `merge_commit_sha`
+ * attribute holds the SHA of the test merge commit." Reading it unconditionally
+ * would report a commit that is on no branch as the result of a merge.
+ *
+ * Total: every branch returns, and any departure from the accepted shape is
+ * `RESPONSE_MALFORMED`. `draft`, `base.ref` and `merge_commit_sha` are read
+ * leniently into `X | null` for the reason {@link parsePullCandidates} gives —
+ * a `draft` of `"yes"` is not `true` — and the consumer refuses a `null` where
+ * it needs one. `number`, `state`, `head.sha` and `merged` are required,
+ * because a response that cannot describe those is not one this build will draw
+ * a conclusion from.
+ */
+export function parsePullRequestRecord(
+  body: unknown,
+):
+  | { readonly ok: true; readonly record: PullRequestRecord }
+  | { readonly ok: false; readonly refusal: ObservationRefusal } {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return refusalOf('RESPONSE_MALFORMED');
+  }
+  const record = body as Record<string, unknown>;
+
+  const number = record['number'];
+  if (!Number.isSafeInteger(number) || (number as number) <= 0) {
+    return refusalOf('RESPONSE_MALFORMED');
+  }
+
+  const state = record['state'];
+  if (typeof state !== 'string') return refusalOf('RESPONSE_MALFORMED');
+
+  const merged = record['merged'];
+  if (typeof merged !== 'boolean') return refusalOf('RESPONSE_MALFORMED');
+
+  const head = record['head'];
+  if (typeof head !== 'object' || head === null) return refusalOf('RESPONSE_MALFORMED');
+  const headSha = (head as Record<string, unknown>)['sha'];
+  if (typeof headSha !== 'string' || !COMMIT_OBJECT_NAME.test(headSha)) {
+    return refusalOf('RESPONSE_MALFORMED');
+  }
+
+  const base = record['base'];
+  const baseRefValue =
+    typeof base === 'object' && base !== null
+      ? (base as Record<string, unknown>)['ref']
+      : undefined;
+  const baseRef = typeof baseRefValue === 'string' && baseRefValue.length > 0 ? baseRefValue : null;
+
+  const draftValue = record['draft'];
+  const draft = typeof draftValue === 'boolean' ? draftValue : null;
+
+  // Only when merged. See the header: on an open pull request this field is a
+  // test-merge commit that is on no branch.
+  const mergeValue = record['merge_commit_sha'];
+  const mergeCommitSha =
+    merged && typeof mergeValue === 'string' && COMMIT_OBJECT_NAME.test(mergeValue)
+      ? mergeValue
+      : null;
+
+  return Object.freeze({
+    ok: true as const,
+    record: Object.freeze({
+      number: number as number,
+      state,
+      merged,
+      headSha,
+      baseRef,
+      draft,
+      mergeCommitSha,
+    }),
+  });
+}
+
+/**
+ * The exact-head test, and the reason slice 2 exists.
  *
  * A candidate counts only when it is open **and** its own reported head object
  * name is byte-for-byte the subject commit. The locator's membership answer is
  * discarded here: being returned for a commit means the commit is somewhere in
  * that pull request, which is not the question.
+ *
+ * This docstring was orphaned onto {@link PullRequestRecord} when V4 slice 7
+ * inserted that interface between the two, and a review found it there —
+ * describing a different function on a symbol that is not one. It is back.
  */
 export function matchExactHead(
   candidates: readonly { readonly number: number; readonly state: string; readonly headSha: string }[],

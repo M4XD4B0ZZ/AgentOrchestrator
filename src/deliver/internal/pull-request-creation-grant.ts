@@ -101,9 +101,8 @@ import {
   supportedForgeHost,
   type ObservationSubject,
 } from '../forge-observation.js';
-import { isValidBranchName } from '../../repo/branch-name.js';
 import { isValidTaskId } from '../../plan/task-id.js';
-import { PUBLISHABLE_REF, REMOTE_NAME } from './delivery-ref-grammar.js';
+import { PUBLISHABLE_REF, REMOTE_NAME, isSendableBranchName } from './delivery-ref-grammar.js';
 // The budgets live with the module that composes the text they bound, so a
 // caller that needs them does not have to import this one. The set of files
 // that can reach a mint is pinned by the suite, and it should stay a set of
@@ -157,67 +156,20 @@ export interface PullRequestCreationSubject {
 }
 
 /**
- * The base branch's grammar: the tail of `PUBLISHABLE_REF`, on its own.
+ * The branch-name grammar, re-exported from where it now lives.
  *
- * The base is sent as a branch **name** — `main`, not `refs/heads/main` — so it
- * cannot reuse the ref pattern directly. The character class is the same one,
- * for the same reason: this value ends up in a JSON body this build composes,
- * and a base that is not a plain branch name is a base this build cannot show
- * it understood. A leading `-` is refused explicitly, because unlike the head
- * ref there is no `refs/heads/` in front of it to make one impossible.
+ * {@link DELIVERY_BASE_REF} and {@link isSendableBranchName} were declared here
+ * until V4 slice 7 needed them for a third authority. They moved to
+ * `internal/delivery-ref-grammar.ts` rather than being imported from here, and
+ * the reason is the property this module's own reachability pin measures: the
+ * set of files that may import a module which declares a **mint** is a fact
+ * worth keeping small, and a merge authority importing this one *for a
+ * predicate* would have widened that set without widening what anybody can do.
+ * The same move, for the same reason, that slice 6 made on `PUBLISHABLE_REF`.
  *
- * The task-state schema constrains `baseBranch` to a non-blank string and no
- * further, so this is the first place the value meets a grammar at all.
+ * They are re-exported so slice 6's callers are unchanged.
  */
-export const DELIVERY_BASE_REF = /^[A-Za-z0-9._+=@][A-Za-z0-9._+=@/-]*$/;
-
-/**
- * The rule the base and the work branch must actually pass.
- *
- * {@link DELIVERY_BASE_REF} is the shell-inert character class and it is not
- * enough on its own: it accepts `@`, `a..b`, `a//b`, `main/`, `main.`, `a/.b`
- * and `x.lock`, and it has no length bound at all. The mint was the loosest
- * gate this value met and the one claiming to have understood it.
- *
- * So both names are additionally put through `repo/branch-name.ts`, which is
- * where this build already decides what a branch name is. Measured, that
- * refuses every value listed above and caps the length at 255, which is what
- * bounds the composed body; the body had no bound at all before it.
- *
- * **That rule is this build's, and it is not Git's**, which is stated here
- * because three review rounds in a row read it as Git's and wrote something
- * false on the strength of that. It implements the `check-ref-format --branch`
- * rules and — measured against real Git — it is not equivalent to them: there
- * is at least one name Git accepts that it refuses, and at least one it accepts
- * that Git refuses. What the rule is, is `repo/branch-name.ts`'s subject. This
- * docblock does not carry a second copy of the answer, because every copy of it
- * here has been wrong.
- *
- * The one difference that matters at this seam is stated, because a later
- * paragraph used to depend on it: `refs/heads/main` and `HEAD` both pass
- * `isValidBranchName` — measured — so both can reach a request.
- *
- * What GitHub would do with either as a `base` is deliberately not stated here,
- * and nothing rests on it. The safety comes from this build's own comparison:
- * `gradePullRequestCreation` compares the base by exact string equality against
- * the bare name GitHub reports, so a run intending `refs/heads/main` or `HEAD`
- * can neither match an existing pull request nor be graded as having created
- * the intended one. It fails closed, whatever the far side answers. That
- * property is readable in this repository; a sentence about the far side's
- * behaviour would not be, and four consecutive batches of this slice broke on
- * one.
- *
- * It is deliberately stricter than `PUBLISHABLE_REF`, which slice 5 uses and
- * which carries `L-V4-05-9` — a work branch that slice 5 will publish and this
- * slice will refuse is a real difference, and it is the safe direction. This
- * paragraph used to close by generalising that into a rule about Git, and the
- * rule was false: measured, Git refuses `HEAD` as a branch and this gate
- * accepts it. The comparison that is true is the one between the two gates in
- * this build, and it stops there.
- */
-export function isSendableBranchName(name: string): boolean {
-  return DELIVERY_BASE_REF.test(name) && isValidBranchName(name);
-}
+export { DELIVERY_BASE_REF, isSendableBranchName } from './delivery-ref-grammar.js';
 
 const REFS_HEADS = 'refs/heads/';
 

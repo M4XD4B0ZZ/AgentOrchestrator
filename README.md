@@ -8099,8 +8099,10 @@ convention is a delivery target chosen by whoever last ran `git remote add`, and
 have. So the repository states it, in the same file in which it states which
 paths may be written and how it is verified.
 
-Declaring it grants nothing. This build pushes nothing, opens nothing, reads no
-forge and merges nothing; `READY_FOR_PR` is still terminal and still hands a
+Declaring it grants nothing. Declaring a target pushes nothing, opens nothing,
+reads no forge and merges nothing — those are acts of `agent-loop delivery`,
+each one separately requested and separately authorised, and V4 slices 5 to 7
+added them one at a time. `READY_FOR_PR` is still terminal and still hands a
 finished task to a human. The declaration makes the target **nameable**, which
 is the half that has to exist first.
 
@@ -8903,8 +8905,10 @@ twice — and therefore publish twice — does not exist. A shape-perfect forger
 refused at the registry and contacts nothing.
 
 And `CREATE_AUTHORIZED != MERGE_AUTHORIZED` is a compile error rather than a
-comment: there is no merge grant, no pull-request grant, no widening conversion
-and no common supertype. A later slice must mint its own artefact and say so.
+comment: there is no widening conversion and no common supertype. That sentence
+predicted the shape of the next slice and V4 slice 7 kept it — merging takes a
+**third** artefact, minted by its own mint, which cannot be passed where either
+of the other two is required and cannot receive either of them.
 
 ### One attempt, and never a blind retry
 
@@ -9147,7 +9151,8 @@ name, head ref, head commit, base ref, draft, title, body.
 **both are compile errors** rather than runtime refusals: each class carries a
 private field, so the types are compared nominally, and the suite pins both
 directions with `@ts-expect-error` inside the canonical gate. There is no
-supertype, no conversion, and no merge authority anywhere in the build.
+supertype and no conversion. V4 slice 7 added a merge authority, and it is a
+third type on the same terms: the suite pins all six directions.
 
 Minting requires all of: `READY_FOR_PR`, a sendable work branch and base
 branch, `--attended`, and *this invocation's own* `--observe --decide` answering
@@ -9213,11 +9218,172 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
   compares the base by exact equality against the bare name GitHub reports, so
   such a run fails closed instead of converging on the wrong pull request.
 
+## Merging the pull request (V4 slice 7)
+
+`delivery --observe --decide --merge-pr --attended` merges **one** pull request
+on github.com, by squash, into the task's base branch — the pull request *this
+invocation just observed*, at exactly the commit it observed it at.
+
+It is the first act in this build that writes to `main`. Both earlier acts are
+additive: `--publish-head` creates a branch and never moves one, `--create-pr`
+opens a request for a human. A merge changes the branch everything else is
+measured against, and its undo is a revert commit rather than a deletion. So it
+takes a third authority, `MergeGrant`, which is a separate opaque type from both
+siblings — passing one where another is required is a **compile error**, and a
+value cast past the compiler is refused again at runtime because each mint owns
+its own registry.
+
+### What authorises it
+
+Five things, all in the same invocation:
+
+1. the task is at `READY_FOR_PR` and its pinned commit resolves;
+2. the delivery target re-resolves to the same `host/owner/name`;
+3. this invocation's **own** decision is `PULL_REQUEST_MATCHED_CHECKS_SUCCESS` —
+   exactly one open pull request whose head is this exact commit, no check on
+   this commit failed or is still running, and this commit carries at least one
+   check record. It does **not** mean a check succeeded: measured, a commit whose
+   only check ran and was skipped reaches this decision with nothing having
+   succeeded, and would be merged;
+4. `--merge-pr`;
+5. `--attended`.
+
+The pull-request number comes from that invocation's own observation proof and
+from nowhere else. There is no flag that names a pull request, no field in the
+task state that holds one, and slice 3's durable store has no path into the mint.
+**You cannot tell it which pull request to merge — only that it may merge the one
+it just looked at.**
+
+### What it does not claim
+
+This is **not** merge eligibility, and `--merge-pr` does not make slice 4's
+decision into a stronger claim. Reviews, branch protection and repository rules
+are not observed at all, and — measured — GitHub's surfaces for them cannot be
+told apart from "you may not read them". The operator is the policy decision and
+GitHub is the policy enforcer; what this build adds is that the commit you
+authorise is the one it just observed, and that the request cannot land on a
+different one.
+
+### The fence, measured
+
+The request carries `sha` — the exact authorised head — and GitHub evaluates it
+server-side. Measured on a disposable pull request whose base was a scratch
+branch, `main` never involved:
+
+| sent | answer |
+| --- | --- |
+| a stale `sha`, pull request open | `409 Head branch was modified…` — nothing merged |
+| a 40-hex `sha` that exists nowhere | the same `409` |
+| an abbreviated or non-hex `sha` | `422 The sha parameter must be exactly 40 characters…` |
+| a `merge_method` outside the three | `422`, naming the set |
+| a draft pull request | `405 Pull Request is still a draft` |
+
+That is the compare-and-swap `--force-with-lease` gives slice 5 and slice 6 had
+no equivalent of. **It is opt-in, and its absence is silent — documented, not
+measured.** No probe here omitted `sha`, because the only way to learn what that
+does is to let a merge happen; what the sibling asynchronous endpoint states in
+words is that without it "the current head of the PR at the time of the request
+will be used". So the head is bound in the authority
+and written into the request from that binding, and a counter-proof that deletes
+the field turns the suite red.
+
+### Two things GitHub does that this build had to be told about
+
+**A closed, unmerged pull request is merged by the endpoint.** Measured: `200
+merged=true`, and the base branch moves. "The pull request is open" is therefore
+*this build's* precondition and not the server's — without it, a merge would
+silently reopen, by merging, a delivery a human had closed. It answers
+`PULL_REQUEST_NOT_OPEN` and sends nothing.
+
+**A `200` is not proof of anything this process did.** Measured: a merge request
+against an already-merged pull request answers `200 {"merged":true}` and replays
+the *original* merge commit, ignoring both the `sha` sent and the
+`merge_method`. So the response body is never parsed, the resulting commit is
+copied out of the reading taken *afterwards*, and `MERGED` and `ALREADY_MERGED`
+are different members of the vocabulary.
+
+### Read, at most one request, read again
+
+Every invocation reads the pull request **by number** before anything is sent,
+and again afterwards whatever the transport said. Reading by number rather than
+by head commit is a correction of instrument: after a squash merge the head
+object name is on no branch, and a pull request merged at *another* head vanishes
+from the commit-keyed locator this build uses everywhere else — so a head-keyed
+reading could not see a merge this build may itself have caused.
+
+There is **no retry** after a timeout, a lost boundary, a malformed answer or an
+unexpected exit. The reason is sharper here than for either sibling: a second
+request against a merged pull request answers success and proves nothing, so a
+blind retry would not even be detectably wrong. A later retry begins with a
+reading.
+
+### `READY_FOR_PR` is still terminal
+
+No transition, no task-state byte, no execution lease, no agent. After a real
+merge GitHub reports the pull request as merged while this build still reports
+the task as `READY_FOR_PR` — the report's own lines being
+`State        : READY_FOR_PR` and `Merge        : MERGED`. A draft of this
+section showed those two as one fenced block, which no command prints; a fenced
+sample in this document is the emitter's output or it is not shown.
+
+That mismatch is deliberate. Repairing it means a durable post-merge state, a
+post-merge verification and a `COMPLETE` — three decisions, none of which belongs
+in the slice that adds the effect.
+
+### Carried forward from V4 slice 7, deliberately
+
+- **L-V4-07-1 — `--create-pr` and `--merge-pr` do not compose on a first
+  delivery.** The observation runs before the creation, so the decision this
+  ladder requires cannot be true in the invocation that creates the pull request.
+  The answer is `DECISION_NOT_SUCCESS` and it costs no request. Two invocations.
+- **L-V4-07-2 — pull requests opened before this slice carry a provenance
+  sentence saying AO will not merge them.** The sentence is corrected for future
+  pull requests; this build does not edit an existing one, so the old bodies keep
+  the old text.
+- **L-V4-07-3 — the base branch is not fenced.** The endpoint takes no expected
+  base commit, and the merge happens against whatever the base ref holds at that
+  moment. This build binds and compares the base *name*, and does not claim to
+  have frozen the branch.
+- **L-V4-07-4 — a concurrent merge is detected, not prevented.** The `sha` fence
+  does not apply once the pull request is merged, so a merge by somebody else at
+  another head between the reading and the request is not refused. It is found
+  afterwards, as `POSTCONDITION_MISMATCH`. An execution lease would not fence it
+  either: the object being raced for is on the far side of the network, and two
+  clones of one remote hold two different leases.
+- **L-V4-07-5 — a merge and its resulting commit are reported and then
+  forgotten.** Nothing durable records that this delivery landed, which is why
+  re-invoking answers `ALREADY_MERGED` from a fresh reading rather than from
+  memory.
+- **L-V4-07-6 — `409` does not distinguish a head that moved from a head that
+  never existed.** This build refuses both from its own reading before it sends,
+  so the ambiguity is not reachable on the ordinary path.
+- **L-V4-07-8 — the resulting merge commit is established from the forge, not
+  confirmed locally.** M1 invariant #7 asks for both. This build reads the commit
+  back from a fresh reading of the pull request and does not fetch the base
+  branch to confirm it is there, because fetching is a local Git act this slice
+  does not perform. The half that is held is the half that matters for
+  attribution; the half that is open is named here rather than folded into
+  `L-V4-07-5`, which is about durability and was cited for it by mistake.
+- **L-V4-07-7 — `repo/branch-name.ts` describes itself as "the `git
+  check-ref-format --branch` rules".** Measured, it is not equivalent to them in
+  either direction: Git accepts `@`, `fü` and `héllo` as branch names and this
+  refuses them; this accepts `HEAD` and Git refuses it. The direction that
+  matters at the delivery seam is stated where it is used. Closing the claim
+  itself means five sites and belongs to whichever slice owns that module.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
-POSIX; and any product-side PR/CI/merge automation. `READY_FOR_PR` remains
-terminal — the orchestrator hands a finished task to a human and stops there.
+POSIX; and any *autonomous* product-side PR/CI/merge decision. V4 slices 5 to 7
+gave this build three forge acts — publish a branch, open a pull request, merge
+one — and every one of them requires an operator to be present for that
+invocation. None of them decides that a merge is warranted; they perform an act
+an operator asked for, on the exact commit that invocation observed.
+
+`READY_FOR_PR` remains terminal. It stays terminal even after a merge, so a
+merged pull request and a task still reported as `READY_FOR_PR` are the expected
+pair — the durable post-merge state, the post-merge verification and `COMPLETE`
+are not built.
 
 V4 slices 1 to 4 do not shorten that list. They add the four things every item
 on it needs first. Slice 1: a repository can **declare** its delivery target, and
@@ -9232,20 +9398,26 @@ branch can be **published** to the delivery remote, create-only, under an
 explicit one-shot authority that grants nothing else. Slice 6 shortens it
 again by exactly one act: one **pull request** can be opened, at one commit,
 under a second authority that cannot substitute for the first and grants
-nothing further.
+nothing further. Slice 7 shortens it once more, by the act with the largest blast
+radius: one pull request can be **merged**, by squash, under a third authority
+that cannot substitute for either — and only the one this invocation just
+observed, at the commit it observed.
 
-What none of them adds is authority. A stored `SUCCESS` is a historical snapshot
-and never a current one; there is no TTL; `delivery --observe` is still read-only
-on its own; a decision is not merge eligibility and cannot be — the endpoints
-that would prove it answer the same way for "no rules" as for "no permission";
-nothing is **merged**, publishing a head grants no authority to open a pull
-request and opening one grants no authority to merge it — each act is
-requested and authorised separately; and `READY_FOR_PR` is still terminal, with
+What none of them adds is **autonomy**. A stored `SUCCESS` is a historical
+snapshot and never a current one; there is no TTL; `delivery --observe` is still
+read-only on its own; a decision is still not merge eligibility and cannot be —
+the endpoints that would prove it answer the same way for "no rules" as for "no
+permission", and slice 7 consuming that decision does not make it a stronger
+claim; publishing a head grants no authority to open a pull request, opening one
+grants no authority to merge it, and merging one is an act an operator asks for
+rather than a conclusion this build reaches — each is requested and authorised
+separately; and `READY_FOR_PR` is still terminal, with
 no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1),
 [Durable delivery evidence (V4 slice 3)](#durable-delivery-evidence-v4-slice-3),
 [The delivery decision (V4 slice 4)](#the-delivery-decision-v4-slice-4),
 [Publishing the delivery head (V4 slice 5)](#publishing-the-delivery-head-v4-slice-5),
-[Creating the pull request (V4 slice 6)](#creating-the-pull-request-v4-slice-6)
+[Creating the pull request (V4 slice 6)](#creating-the-pull-request-v4-slice-6),
+[Merging the pull request (V4 slice 7)](#merging-the-pull-request-v4-slice-7)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on

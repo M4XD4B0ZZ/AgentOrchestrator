@@ -1571,12 +1571,18 @@ describe('recording grants nothing and moves nothing', () => {
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
       // `createPullRequest` was on this line and is not any more: **V4 slice 6
-      // adds it on purpose**. What the sweep still forbids is a merge, which no
-      // slice has taken. The claim that used to be made here — that no module
-      // creates a pull request — is replaced rather than dropped:
+      // adds it on purpose**, and `mergePullRequest` followed it off at slice 7
+      // for the same reason. Each claim is replaced rather than dropped:
       // `tests/v4-06-…` derives the creating surface from the tree and proves it
-      // is one module, one endpoint, one POST, and one caller of the mint.
-      expect(code, file).not.toMatch(/\bmergePullRequest\b/);
+      // is one module, one endpoint, one POST and one caller of the mint, and
+      // `tests/v4-07-…` does the same for the merging surface, one PUT.
+      //
+      // What this line forbids now is the class no slice has taken and none is
+      // planned to: a merge that happens when nobody is watching. Auto-merge and
+      // the merge queue both arm the forge to merge later, on its own schedule,
+      // which is the opposite of the attended one-shot effect slice 7 added.
+      expect(code, file).not.toMatch(/\benableAutoMerge\b|\bauto_merge\b|\bmerge_queue\b/);
+      expect(code, file).not.toMatch(/merge-async/);
       expect(code, file).not.toMatch(/\brecordAgentInterruption\s*\(/);
       expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
 
