@@ -92,21 +92,6 @@ export const CONTACTED_TRAILER =
   'check — which this build does not suppress (L-V4-02-6).';
 
 /**
- * The trailer for an invocation that could change something, and did at most
- * the one thing it is allowed to change.
- *
- * The other two both open "Read-only.", and one of them adds "No forge was
- * contacted". Both were true of every invocation this command could make until
- * slice 5, and both would be false on a publication — the first always, the
- * second whenever the remote was read. A third sentence is the honest repair;
- * widening one of the existing two would have made it vaguer for the runs it
- * was written for.
- *
- * Which trailer is printed is derived from whether a remote reading was taken,
- * not from which flags were passed: a publication refused before it contacted
- * anything gets the read-only sentence, because that is what happened.
- */
-/**
  * What an observation is answerable for, with no "Read-only." in front of it.
  *
  * `CONTACTED_TRAILER` opens with that word and is the right trailer for a run
@@ -125,6 +110,21 @@ export const OBSERVED_AND_PUBLISHED_TRAILER =
   'The GitHub CLI also makes calls of its own — telemetry, and a periodic update check —\n' +
   'which this build does not suppress (L-V4-02-6).';
 
+/**
+ * The trailer for an invocation that could change something, and did at most
+ * the one thing it is allowed to change.
+ *
+ * Two of the three other trailers open "Read-only.", and one of those adds "No
+ * forge was contacted". Both sentences were true of every invocation this
+ * command could make until slice 5, and both are false on a publication — the
+ * first always, the second whenever the remote was read. Separate sentences are
+ * the honest repair; widening the existing ones would have made them vaguer for
+ * the runs they were written for.
+ *
+ * Which trailer is printed is derived from whether a remote reading was taken,
+ * not from which flags were passed: a publication refused before it contacted
+ * anything gets the read-only sentence, because that is what happened.
+ */
 export const PUBLICATION_TRAILER =
   'Not read-only. This invocation could change exactly one thing and changed at most that:\n' +
   'one branch on the delivery remote, created at one commit. Create-only — no ref was moved,\n' +

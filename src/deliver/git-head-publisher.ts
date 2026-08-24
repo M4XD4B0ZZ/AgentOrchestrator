@@ -136,6 +136,26 @@ export const PUBLICATION_CONFIG_PINS: readonly string[] = Object.freeze([
   'core.hooksPath=',
 ]);
 
+/**
+ * The program the push asks the far end to run, stated rather than configured.
+ *
+ * `remote.<name>.receivepack` names it, and the receive side is *what writes the
+ * refs* — so a config setting reaches past every pin above. Measured, with the
+ * full pinned vector against a throwaway destination: a wrapper receive-pack
+ * created `refs/heads/evil-side-effect`, and the push reported `[new branch]`
+ * and exited 0. Naming it on the command line, which supersedes the config,
+ * reduced the destination back to the intended ref alone — measured, with a
+ * control that the same flag changes nothing when no hostile config is present.
+ *
+ * A review had already narrowed the invariant from "the effect" to "the refs
+ * touched"; this is the measurement that showed even that was an over-claim,
+ * and it is closed with a token rather than with another narrowing.
+ *
+ * The literal is Git's own default. This build addresses one host, so there is
+ * no server here that needs a different one.
+ */
+export const PUBLICATION_RECEIVE_PACK = 'git-receive-pack';
+
 const configTokens = (): readonly string[] =>
   PUBLICATION_CONFIG_PINS.flatMap((pin) => ['-c', pin]);
 
@@ -199,6 +219,10 @@ export function remoteRefArgs(remoteName: string, ref: string): readonly string[
  * branch that moves between the grant and the push cannot change what is
  * published.
  *
+ * `--receive-pack=git-receive-pack` — see {@link PUBLICATION_RECEIVE_PACK}. The
+ * pins above bound what *this* side asks for; this bounds what the far side is
+ * asked to run, which is what actually writes the refs.
+ *
  * Note what is absent: no `--force`, no `--delete`, no `--mirror`, no `--all`,
  * no `--tags`, no `--set-upstream`, no second refspec.
  */
@@ -212,6 +236,7 @@ export function publishHeadArgs(
     'push',
     '--porcelain',
     '--atomic',
+    `--receive-pack=${PUBLICATION_RECEIVE_PACK}`,
     `--force-with-lease=${ref}:`,
     '--',
     remoteName,

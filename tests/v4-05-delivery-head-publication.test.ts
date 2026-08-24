@@ -66,6 +66,7 @@ import {
 import {
   GIT_PUBLICATION_COMMAND,
   PUBLICATION_CONFIG_PINS,
+  PUBLICATION_RECEIVE_PACK,
   publishHeadArgs,
   readUrlAgreement,
   remoteFetchUrlArgs,
@@ -813,6 +814,7 @@ describe('the two Git vectors', () => {
       'push',
       '--porcelain',
       '--atomic',
+      `--receive-pack=${PUBLICATION_RECEIVE_PACK}`,
       `--force-with-lease=${REF}:`,
       '--',
       REMOTE,
@@ -881,7 +883,6 @@ describe('the two Git vectors', () => {
       '--tags',
       '--prune',
       '--set-upstream',
-      '--receive-pack',
       '--exec',
       '--upload-pack',
     ]) {
@@ -891,6 +892,26 @@ describe('the two Git vectors', () => {
     // check above would pass for both, so the distinction is made here.
     expect(all).toContain('--force-with-lease=');
     expect(all.split(/\s+/)).not.toContain('--force');
+  });
+
+  it('names the receive-pack program, so config cannot choose it', () => {
+    // `--receive-pack` used to be on the banned list above, and that was the
+    // defect: the receive side is what writes the refs, so leaving it to
+    // `remote.<name>.receivepack` let an operator's config reach past every pin.
+    // Measured with the full pinned vector against a throwaway destination: a
+    // wrapper receive-pack created a second ref and the push reported
+    // `[new branch]`, exit 0. Naming it on the command line reduced the
+    // destination to the intended ref alone.
+    expect(PUBLICATION_RECEIVE_PACK).toBe('git-receive-pack');
+    const args = publishHeadArgs(REMOTE, REF, HEAD);
+    const token = args.find((a) => a.startsWith('--receive-pack'));
+    expect(token).toBe(`--receive-pack=${PUBLICATION_RECEIVE_PACK}`);
+    // Exactly one, and it carries Git's own program rather than a path.
+    expect(args.filter((a) => a.startsWith('--receive-pack')).length).toBe(1);
+    expect(token).not.toContain('/');
+    expect(token).not.toContain('\\');
+    // The read vector asks nothing of a receive side and must not name one.
+    expect(remoteRefArgs(REMOTE, REF).join(' ')).not.toContain('receive-pack');
   });
 
   it('emits only shell-inert tokens, for every input the mint admits', () => {
