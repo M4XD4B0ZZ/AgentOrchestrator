@@ -9,10 +9,15 @@
  * callable from anywhere is a shape, not an authority.
  *
  * The same walk pins the smaller fact underneath: which modules may import the
- * declaring one at all. That set is four, not one, because three of them need
- * the subject type. Slice 6's copy of this sentence said "one" until a review
- * counted them, and the count is written here from the test rather than from
- * the intention.
+ * declaring one at all, and the test's own enumeration is where that set is
+ * written down. It is larger than one because the subject type lives beside the
+ * mint and several modules need it.
+ *
+ * This paragraph carried a count of how many need it "for the type", and a
+ * review measured it wrong — every importer takes the type, and one of them
+ * takes the class as well. Slice 6's copy of the same sentence had already been
+ * corrected once for the same reason. There is no count here now; the test has
+ * the list, and the list is the thing that fails when it changes.
  *
  * The distinction this slice exists to hold is visible in what this file does
  * *not* export. There is no `PullRequestUpdateGrant`, no `AutoMergeGrant`, no

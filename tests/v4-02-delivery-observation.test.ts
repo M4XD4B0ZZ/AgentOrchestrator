@@ -2026,10 +2026,11 @@ describe('the product contract is unchanged', () => {
     // two**, and the case is narrowed rather than deleted: exactly two modules
     // in the whole source tree may name a forge mutation — the pull-request
     // creator and the pull-request merger — and each one's entire argument
-    // vector is pinned by exact equality in its own slice's file. Every pattern
-    // below is unchanged; none of them was ever what made the old claim true,
-    // so a third mutating module, or a mutating spelling appearing anywhere
-    // else, still turns this red.
+    // vector is pinned by exact equality in its own slice's file. One pattern
+    // above was narrowed and the comment beside it says why; every other one is
+    // unchanged, none of them was ever what made the old claim true, and a
+    // third mutating module, or a mutating spelling appearing anywhere else,
+    // still turns this red.
     //
     // The enumeration is what carries the guarantee. A regex that merely
     // allowed "any module whose name ends in -merger" would let the next one in
@@ -2044,7 +2045,11 @@ describe('the product contract is unchanged', () => {
     // source called those two modules forge mutations, which is false, and the
     // only way to keep the old instrument would have been to write the prose
     // around it. String literals are KEPT, so a vector assembled in a string is
-    // still caught: the stripper removes comments and nothing else.
+    // still caught. The stripper's own limit, stated rather than implied: a
+    // `//` inside a string literal truncates that line, and a `/* */` inside one
+    // is eaten. No file in this corpus contains either, and the offender
+    // enumeration below would change if one appeared — which is what would
+    // surface it.
     const codeOf = (path: string): string =>
       readFileSync(path, 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, ' ')

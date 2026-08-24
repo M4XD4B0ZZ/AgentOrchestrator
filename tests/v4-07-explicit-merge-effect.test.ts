@@ -383,13 +383,65 @@ describe('grading a merge', () => {
     expect(gradeMergePrecondition(INTENDED, reading())).toBeNull();
   });
 
-  it('answers a merged pull request before it compares the head', () => {
-    // A pull request that is already merged cannot be brought back to the
-    // authorised head, so "it is merged" is the truthful answer and "the head
-    // moved" is not. The order of the two arms is what makes that so, and this
-    // is the case that holds it there.
-    const merged = reading({ outcome: 'MERGED', headSha: OTHER, mergeCommit: RESULT });
-    expect(gradeMergePrecondition(INTENDED, merged)).toBe('ALREADY_MERGED');
+  it('refuses to call a merge at another head or base ALREADY_MERGED', () => {
+    // **This case asserted the opposite until a review found it.** It said a
+    // merged pull request is answered before the head is compared, on the
+    // argument that it cannot be brought back to the authorised head — which is
+    // true and is not the point. `ALREADY_MERGED` is a member of
+    // `ESTABLISHED_MERGES`, so answering it claims the intended state is true,
+    // and the intended state is not "merged" but "merged at the authorised
+    // head, into the intended base". Somebody else's merge was being reported
+    // as this delivery's, with their commit under a `Merge commit` line.
+    //
+    // It is deliberately NOT `HEAD_MOVED` — that member's sentence says nothing
+    // was attempted and the head moved, and says nothing about a merge. What is
+    // true is that it is merged and not as intended.
+    const otherHead = reading({ outcome: 'MERGED', headSha: OTHER, mergeCommit: RESULT });
+    expect(gradeMergePrecondition(INTENDED, otherHead)).toBe('POSTCONDITION_MISMATCH');
+
+    const otherBase = reading({ outcome: 'MERGED', baseRef: 'release', mergeCommit: RESULT });
+    expect(gradeMergePrecondition(INTENDED, otherBase)).toBe('POSTCONDITION_MISMATCH');
+
+    // A merged reading that cannot describe itself is judged as unreadable
+    // rather than as a mismatch: "I cannot tell" is not "it is wrong".
+    for (const blind of [{ headSha: null }, { baseRef: null }]) {
+      const r = reading({ outcome: 'MERGED', mergeCommit: RESULT, ...blind });
+      expect(gradeMergePrecondition(INTENDED, r), JSON.stringify(blind)).toBe(
+        'PULL_REQUEST_STATE_UNKNOWN',
+      );
+    }
+
+    // And the agreeing case still answers the established member.
+    const agreeing = reading({ outcome: 'MERGED', mergeCommit: RESULT });
+    expect(gradeMergePrecondition(INTENDED, agreeing)).toBe('ALREADY_MERGED');
+  });
+
+  it('never reports a merge commit for a merge it did not authorise', async () => {
+    // The end-to-end half of the same finding: the early return in the
+    // orchestration filled `mergeCommit` from the reading, and that early
+    // return is the ONLY path that can produce `ALREADY_MERGED`. The correction
+    // had reached `result()` and not it.
+    const m = merges();
+    const r = reads([
+      prBody({ state: 'closed', merged: true, sha: OTHER, base: 'release', mergeCommit: RESULT }),
+    ]);
+    const out = await mergePullRequest(grantOf(), seamsOf({ merger: m.runner, reader: r.runner }));
+    expect(out.outcome).toBe('POSTCONDITION_MISMATCH');
+    expect(out.mergeCommit).toBeNull();
+    expect(mergeIsEstablished(out.outcome)).toBe(false);
+    expect(m.calls).toHaveLength(0);
+
+    // The agreeing case still reports it, so the narrowing did not blind the
+    // path a re-run depends on.
+    const agree = await mergePullRequest(
+      grantOf(),
+      seamsOf({
+        merger: merges().runner,
+        reader: reads([prBody({ state: 'closed', merged: true, mergeCommit: RESULT })]).runner,
+      }),
+    );
+    expect(agree.outcome).toBe('ALREADY_MERGED');
+    expect(agree.mergeCommit).toBe(RESULT);
   });
 
   it('decides the postcondition from the reading, not from the attempt', () => {
@@ -1496,6 +1548,28 @@ describe('the delivery command merges only when asked, and only when it may', ()
     expect(openAfter.out).toContain('Forge after  : OPEN at');
   });
 
+  it('writes nothing beside the task, on a run that really merged', async () => {
+    // The BEHAVIOURAL pin for "a merge writes no task state". The code scan in
+    // section 11 proves no module names a writer; this proves a run that took
+    // the whole ladder and sent a real merge request left the task's runtime
+    // directory exactly as it found it.
+    //
+    // `run()` collected this from the start and no case read it — a review found
+    // the evidence gathered and discarded, which is the shape slice 6 recorded
+    // when its own task-state case inspected a directory the harness never
+    // used. It is read here, on the merging path, where it means something.
+    const merged = await run(['--observe', '--decide', '--merge-pr', '--attended']);
+    expect(merged.out).toContain('Merge        : MERGED');
+    expect(merged.merger.calls).toHaveLength(1);
+    expect(merged.runtimeAfter).toEqual([]);
+
+    // And with `--record`, which is the one flag that writes anything at all,
+    // the directory is not empty — so the assertion above is a measurement of
+    // this run rather than of a directory nothing ever writes to.
+    const recorded = await run(['--observe', '--record', '--decide', '--merge-pr', '--attended']);
+    expect(recorded.runtimeAfter.length).toBeGreaterThan(0);
+  });
+
   it('registers the option set exactly, and none of the words this build refuses', () => {
     const program = new Command();
     registerDeliveryCommand(program, {});
@@ -1550,8 +1624,17 @@ describe('the delivery command merges only when asked, and only when it may', ()
 describe('the merge report', () => {
   it('says exactly this about what a merge is not', () => {
     expect(MERGE_TRAILER).toContain('by squash, into the base branch named above');
-    expect(MERGE_TRAILER).toContain('GitHub refuses it when the pull request head is');
-    expect(MERGE_TRAILER).toContain('no auto-merge was');
+    // The qualifier is the finding, not decoration: measured, the `sha` fence
+    // does not apply once the pull request is merged, so an unconditional
+    // sentence is false in exactly the race `L-V4-07-4` carries — and that race
+    // is one of the cases in which this trailer gets printed.
+    expect(MERGE_TRAILER).toContain('while the pull request is open GitHub refuses it');
+    // And the branch-deletion clause is scoped to what this build does, because
+    // `delete_branch_on_merge` is a repository setting that deletes the head
+    // branch as a consequence of this very request. It is false on this
+    // repository today; it is not false everywhere.
+    expect(MERGE_TRAILER).toContain('GitHub may still delete the head branch on its own');
+    expect(MERGE_TRAILER).toContain('it enabled no auto-merge');
     expect(MERGE_TRAILER).toContain('this task is still READY_FOR_PR');
     expect(MERGE_TRAILER).toContain('did not establish that the pull request was eligible to merge');
   });

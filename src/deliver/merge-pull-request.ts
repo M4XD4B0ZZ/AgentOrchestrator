@@ -253,13 +253,22 @@ export async function mergePullRequest(
     // asked for is already true and asking would answer `200` either way.
     //
     // The resulting commit is still reported when the reading found one, so an
-    // operator re-running this gets the commit identity without a mutation.
+    // operator re-running this gets the commit identity without a mutation —
+    // but under the same rule `result()` uses, and NOT from the reading alone.
+    // A review found this line filling the field from `before.outcome` while
+    // `gradeMergePrecondition` answered `ALREADY_MERGED` without comparing the
+    // head or the base: the correction had reached `result()` and not here,
+    // which is the one path that can produce that member. Both halves are fixed
+    // — the ladder now compares, and this line asks the outcome.
     return Object.freeze({
       outcome: refusal,
       before,
       attempt: 'NOT_ATTEMPTED' as const,
       after: null,
-      mergeCommit: before.outcome === 'MERGED' ? before.mergeCommit : null,
+      mergeCommit:
+        mergeIsEstablished(refusal) && before.outcome === 'MERGED'
+          ? before.mergeCommit
+          : null,
     });
   }
 

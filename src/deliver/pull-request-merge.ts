@@ -181,9 +181,15 @@ export const MERGE_OUTCOMES = [
    * Stricter than slice 6's gate, and deliberately so. Creating a pull request
    * admits five decisions, because four of them mean one already exists and the
    * creation ladder's own reading can then answer usefully. A merge admits
-   * exactly one — `PULL_REQUEST_MATCHED_CHECKS_SUCCESS` — because it is the only
-   * one that says *both* that exactly one open pull request had this exact head
-   * and that no check on this commit failed or is still running.
+   * exactly one — `PULL_REQUEST_MATCHED_CHECKS_SUCCESS`.
+   *
+   * What that member says, in full, because a review found this sentence saying
+   * two thirds of it: exactly one open pull request had this exact head, no
+   * check on this commit failed or is still running, **and at least one check on
+   * it succeeded**. The third clause is the one that separates it. `CHECKS_ABSENT`
+   * satisfies the first two — it is only reachable after the head matched, and
+   * it means no check exists at all — so a sentence naming only those two
+   * described a member this ladder refuses.
    *
    * Either `--observe` and `--decide` were not both given, or they were and the
    * answer was another member. A record read back from disk can never reach
@@ -445,7 +451,35 @@ export function gradeMergePrecondition(
   // module is what the transport's answer is graded by.
   if (before.number !== intended.pullRequestNumber) return 'PULL_REQUEST_STATE_UNKNOWN';
 
-  if (before.outcome === 'MERGED') return 'ALREADY_MERGED';
+  if (before.outcome === 'MERGED') {
+    // **A merged pull request is compared before it is called `ALREADY_MERGED`,
+    // and a review found this missing.** The member is in
+    // {@link ESTABLISHED_MERGES}, so answering it says the intended state is
+    // true — and the intended state is not "this pull request is merged", it is
+    // "this pull request is merged at the authorised head, into the intended
+    // base". Without the comparison a merge somebody else made, at a commit
+    // this invocation never observed or into a branch nobody asked for, was
+    // reported as this delivery's, with their merge commit printed under a line
+    // labelled `Merge commit`.
+    //
+    // That is not an exotic race: `L-V4-07-4` names it, the decision this build
+    // gates on never compares the base at all, and the window runs from the
+    // observation through the check reading, the local revalidation and
+    // optionally a publication and a creation.
+    //
+    // The head is compared here even though a merged pull request cannot be
+    // brought back to it — this is deliberately *not* `HEAD_MOVED`, whose
+    // sentence says nothing was attempted and the head moved. What is true is
+    // that it is merged and not as intended, which is what
+    // `POSTCONDITION_MISMATCH` says, and it says it whether the disagreement is
+    // found before an attempt or after one.
+    if (before.headSha === null || before.baseRef === null) {
+      return 'PULL_REQUEST_STATE_UNKNOWN';
+    }
+    if (before.headSha !== intended.expectedHeadCommit) return 'POSTCONDITION_MISMATCH';
+    if (before.baseRef !== intended.baseRef) return 'POSTCONDITION_MISMATCH';
+    return 'ALREADY_MERGED';
+  }
   if (before.outcome === 'CLOSED_UNMERGED') return 'PULL_REQUEST_NOT_OPEN';
 
   if (before.outcome === 'OPEN') {

@@ -376,12 +376,15 @@ export const CREATE_PR_OPTION_DESCRIPTION =
 export const MERGE_PR_OPTION_DESCRIPTION =
   'Merge this task\'s pull request on github.com, by squash, into its base branch. Requires ' +
   '--attended, --observe and --decide, and a task at READY_FOR_PR whose own fresh decision is ' +
-  'PULL_REQUEST_MATCHED_CHECKS_SUCCESS: exactly one open pull request at this commit, and no ' +
-  'check on it failed or is still running. A stored record can never stand in for that. This ' +
+  'PULL_REQUEST_MATCHED_CHECKS_SUCCESS: exactly one open pull request at this commit, no check ' +
+  'on it failed or is still running, and at least one check on it succeeded — so a repository ' +
+  'that runs no checks at all is refused, under CHECKS_ABSENT. A stored record can never stand ' +
+  'in for that. This ' +
   'is not merge eligibility — reviews, branch protection and repository rules are not observed, ' +
   'and GitHub is what enforces them; what authorises the act is you. The pull request is the ' +
   'one this invocation observed, never one you name. The request carries the exact head commit ' +
-  'observed, and GitHub refuses it if the head has moved since. Read before and after: an ' +
+  'observed, and while the pull request is open GitHub refuses it if the head has moved ' +
+  'since. Read before and after: an ' +
   'already-merged pull request is reported and nothing is sent, and one that is closed, a ' +
   'draft, at another commit or targeting another base is refused. At most one request per ' +
   'invocation, and an attempt whose result was lost is never repeated blindly. It opens, ' +

@@ -271,8 +271,15 @@ export interface MergeIntent {
  *    this build did not compose;
  *  - a base that is not a plain branch name under `repo/branch-name.ts`: it is
  *    compared by exact equality against what GitHub reports, and the
- *    shell-inert character class alone accepts `refs/heads/main`, `HEAD`, `@`,
- *    `a..b` and `x.lock`, none of which Git accepts as a branch;
+ *    shell-inert character class alone accepts `@`, `a..b` and `x.lock`, none
+ *    of which `repo/branch-name.ts` accepts — which is the gate this bullet is
+ *    about, and the only one it claims anything for. This sentence listed
+ *    `refs/heads/main` and `HEAD` beside those three and said Git accepts none
+ *    of the five; a review measured both halves false. The mint **accepts**
+ *    those two spellings, exactly as `delivery-ref-grammar.ts` says it does,
+ *    and Git accepts `refs/heads/main` and `@` as branch names. What makes a
+ *    base this mint accepts safe is the comparison in `gradeMerge`, not this
+ *    gate;
  *  - a merge method outside {@link MERGE_METHODS}: measured, GitHub answers
  *    `422` for a method outside its own three, and this build asks for one;
  *  - a subject that is not addressable — an owner or name that is not a path

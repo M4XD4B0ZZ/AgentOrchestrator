@@ -453,14 +453,6 @@ export function parsePullCandidates(
   return Object.freeze({ ok: true as const, candidates: Object.freeze(candidates) });
 }
 
-/**
- * The exact-head test, and the reason this slice exists.
- *
- * A candidate counts only when it is open **and** its own reported head object
- * name is byte-for-byte the subject commit. The locator's membership answer is
- * discarded here: being returned for a commit means the commit is somewhere in
- * that pull request, which is not the question.
- */
 /** One pull request, as the single-document endpoint reported it. */
 export interface PullRequestRecord {
   readonly number: number;
@@ -569,6 +561,18 @@ export function parsePullRequestRecord(
   });
 }
 
+/**
+ * The exact-head test, and the reason slice 2 exists.
+ *
+ * A candidate counts only when it is open **and** its own reported head object
+ * name is byte-for-byte the subject commit. The locator's membership answer is
+ * discarded here: being returned for a commit means the commit is somewhere in
+ * that pull request, which is not the question.
+ *
+ * This docstring was orphaned onto {@link PullRequestRecord} when V4 slice 7
+ * inserted that interface between the two, and a review found it there —
+ * describing a different function on a symbol that is not one. It is back.
+ */
 export function matchExactHead(
   candidates: readonly { readonly number: number; readonly state: string; readonly headSha: string }[],
   subjectCommit: string,

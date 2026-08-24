@@ -23,8 +23,10 @@ Five things, and all five must hold in the same invocation:
 2. the delivery target re-resolves to the same `host/owner/name`;
 3. `--observe` and `--decide` were both given and **this invocation's own**
    decision is `PULL_REQUEST_MATCHED_CHECKS_SUCCESS` — exactly one open pull
-   request whose head is this exact commit, and no check on this commit failed
-   or is still running;
+   request whose head is this exact commit, no check on this commit failed or is
+   still running, and at least one check on it succeeded. That last clause is
+   what separates the member from `CHECKS_ABSENT`, which satisfies the other
+   two, and a repository that runs no checks at all is therefore refused;
 4. `--merge-pr` was given;
 5. `--attended` was given.
 
@@ -43,7 +45,10 @@ Slice 4's decision is not turned into a stronger claim by being consumed here.
 
 So: **the operator is the policy decision, and GitHub is the policy enforcer.**
 What AO adds is that the commit an operator authorises is the one this
-invocation just observed, and that the request cannot land on a different one.
+invocation just observed, and that **while the pull request is open** the request
+cannot land on a different one. The qualifier is not decoration: measured, the
+`sha` fence does not apply once the pull request is merged, which is exactly the
+race `L-V4-07-4` carries.
 
 ## The measurements this slice is built on
 
@@ -234,11 +239,19 @@ next slice's subject.**
 
 ## Which M1 invariants this discharges, and how far
 
-`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md` lists eleven invariants
-that bind every delivery slice. Its `[held]`/`[open]` markers describe **slice
+`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md` lists **twelve**
+invariants that bind every delivery slice — a review counted them, and this
+sentence said eleven. Its `[held]`/`[open]` markers describe **slice
 1** and no later slice has rewritten them, so the state after this slice is
 recorded here instead.
 
+- **#1 a green check for an old head never authorises the current head** — held,
+  and this slice leans on it hardest. Check evidence is bound to the commit
+  object name throughout, the merge request carries that same object name, and
+  while the pull request is open GitHub refuses the request if its head is not
+  that commit. A merge authorised by a check on an older head is unreachable
+  without both the head comparison in `gradeMergePrecondition` and the `sha` in
+  the body, and mutants that remove either are killed.
 - **#2 "a pull request exists" is not "a pull request is mergeable"** — held, and
   this slice is where it would have been easiest to break. `--merge-pr` merges
   because an operator said so, not because a pull request exists; the vocabulary
@@ -266,6 +279,12 @@ recorded here instead.
   point of the slice's shape. The API's answer is never the proof, no task state
   is written, and `READY_FOR_PR` stays terminal. Post-merge verification and
   `COMPLETE` are not built.
+- **#12 delivery state survives a process restart wherever the architecture
+  calls it durable — "do not call it durable"** — held by not arising. This slice
+  writes nothing durable at all: the merge and its resulting commit are reported
+  and forgotten, and a re-invocation re-derives the state from a fresh reading
+  rather than from memory. `L-V4-07-5` records that as the gap, and closing it is
+  where this invariant starts to bind.
 - **#9, #10, #11 delivery authority, declaration, and no widening of execution
   guarantees** — unchanged. A third authority was added and it is narrower than
   either sibling in what it can reach: no local process, no repository root, no
