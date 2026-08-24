@@ -727,9 +727,13 @@ async function performPublication(
  * `OBSERVATION_UNSETTLED`, `SUBJECT_CHANGED`, `SUBJECT_REVALIDATION_FAILED`.
  * Those are the ones `DECISION_NOT_ESTABLISHED` is honestly about.
  *
- * Written as a set rather than as a chain of comparisons so that a new decision
- * member cannot join it by accident; the suite partitions `DELIVERY_DECISIONS`
- * against it and fails on any member neither side claims.
+ * Written as a set rather than as a chain of comparisons so there is one place
+ * to read it from. What pins it is the suite's enumerated equality against
+ * these five names — a sixth member added here fails that, and a member added
+ * to `DELIVERY_DECISIONS` is simply not admitted, which is the fail-closed
+ * direction. Two "partition" assertions were tried beside it and both were
+ * tautologies of the form `filter(p) + filter(!p)`; they are gone, and this
+ * sentence no longer cites them.
  */
 export const ADMITS_CREATION_LADDER: ReadonlySet<DeliveryDecision> = Object.freeze(
   new Set<DeliveryDecision>([
@@ -763,9 +767,9 @@ export const ADMITS_CREATION_LADDER: ReadonlySet<DeliveryDecision> = Object.free
  * gate is {@link ADMITS_CREATION_LADDER} rather than the single member
  * `PULL_REQUEST_REQUIRED`, for the measured reason set out there. Only that one
  * member means a pull request is *needed*; the other four mean one claimed this
- * head at the moment of the observation. The rule on all five is the same and
- * it is stated once: **a request is issued only when the ladder's own fresh
- * reading says `NONE`.** That is a stronger statement than any decision could
+ * head at the moment of the observation. The rule on all five is the same, and
+ * wherever it appears it is this one: **a request is issued only when the
+ * ladder's own fresh reading says `NONE`.** That is a stronger statement than any decision could
  * make, because the decision is one observation older — so on those four a
  * request normally is not sent, and if the pull request has gone in between,
  * sending is correct.
@@ -911,6 +915,11 @@ async function performCreation(
       if (reloaded.state.state !== 'READY_FOR_PR') return null;
       const rebuilt = resolveObservationSubject(again.repository.delivery, reloaded);
       if (!rebuilt.ok) return null;
+      // The strict grammar on both names here too. A divergent head would
+      // reach `SUBJECT_CHANGED` a moment later through `sameSubject`, so this
+      // is a floor — but a commit whose stated rule is "two arms, two names,
+      // one rule" should not leave the third pair asymmetric.
+      if (!isSendableBranchName(reloaded.state.workBranch)) return null;
       const head = publishableRef(reloaded.state.workBranch);
       if (head === null) return null;
       // **A floor, not a live gate, and labelled as one because a counter-proof

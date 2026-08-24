@@ -141,8 +141,11 @@ export interface PullRequestCreationSubject {
    * Forty lowercase hex digits. The ref must hold exactly this.
    *
    * Forty, not "forty or sixty-four": the mint asks `isAddressableSubject`,
-   * whose object-name grammar is forty-only, and so does the transport. No
-   * value of this type with a sixty-four-digit commit can exist.
+   * whose object-name grammar is forty-only, and the transport asks it again
+   * before it starts a process. That bounds what can be *sent*; it is not a
+   * property of the type, which is a plain interface any caller can satisfy —
+   * the command's own re-check hand-builds one, and its commit is forty-hex
+   * because `createObservationSubject` made it so.
    */
   readonly headCommit: string;
   /** The branch the pull request targets. A name; never an object name. */

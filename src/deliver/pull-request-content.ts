@@ -114,12 +114,14 @@ export const AO_PULL_REQUEST_DRAFT = false;
 /**
  * Everything the content is composed from.
  *
- * **Not yet validated.** `buildCreationIntent` composes first and mints second,
- * so these four arrive with whatever the task-state schema allowed — which for
- * the task id and both branch names is only "a non-blank string". The grammars
- * are applied at the mint, to the values *and* to the text composed from them,
- * and a composition the mint refuses never becomes a request. This comment said
- * "already validated" and contradicted the paragraph at the top of this file.
+ * **Not fully validated.** `buildCreationIntent` composes first and mints
+ * second. At the one production caller the two branch names have already passed
+ * `isSendableBranchName` and the commit `isAddressableSubject`; the **task id**
+ * has not, and arrives with whatever the task-state schema allowed, which is "a
+ * non-blank string". Its grammar is applied at the mint, to the value *and* to
+ * the text composed from it, and a composition the mint refuses never becomes a
+ * request. This comment said "already validated", then said both branch names
+ * were unchecked; neither was true of the code beside it.
  */
 export interface PullRequestContentInputs {
   readonly taskId: string;

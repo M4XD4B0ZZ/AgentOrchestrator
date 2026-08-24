@@ -102,12 +102,11 @@ where exit 0 means "nothing changed". That does **not** make exit 0 a proof of
 creation, and the ladder does not treat it as one — see below.
 
 **A duplicate is only distinguishable by prose, and this one is measured.** A
-request for a head that already has an open pull request answers, verbatim:
+request for a head that already has an open pull request answered with this
+body, as `gh` printed it:
 
 ```
-422 {"message":"Validation Failed","errors":[{"resource":"PullRequest",
-     "code":"custom","message":"A pull request already exists for
-     M4XD4B0ZZ:v4-slice-6-pull-request-creation."}]}
+{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"A pull request already exists for M4XD4B0ZZ:v4-slice-6-pull-request-creation."}],"documentation_url":"https://docs.github.com/rest/pulls/pulls#create-a-pull-request","status":"422"}
 ```
 
 exit 1, and nothing was created — the repository's open pull requests were one
@@ -117,9 +116,10 @@ third-party production client matches this message with a regular expression.
 This build parses **nothing** from the response, so the question never arises
 for it.
 
-The measurement also fixed the order of GitHub's own checks: the duplicate check
-runs **before** the base check. A second probe in the same batch, sending
-`base: "refs/heads/main"`, never reached the base validation for that reason.
+That probe also sent `base: "refs/heads/main"`, and the answer it got named the
+duplicate rather than the base. What that says about GitHub's ordering is
+nothing a client can establish, so nothing is claimed: the base behaviour for
+that spelling is simply **unmeasured**.
 
 ### Closed and merged pull requests do not block a new one
 
@@ -270,13 +270,13 @@ exact commit's pull-request situation and found no failing check*. Only
 `PULL_REQUEST_REQUIRED` means a pull request is needed; the other four mean one
 claimed this head at the moment of the observation.
 
-The rule is the same on all five and it is stated once: **a request is issued
-only when the ladder's own fresh reading says `NONE`.** That is stronger than
+The rule is the same on all five, and wherever it appears it is this one: **a
+request is issued only when the ladder's own fresh reading says `NONE`.** That is stronger than
 any decision could be, because the decision is one observation older — so on
 those four a request normally is not sent, and if the pull request has gone in
 between, sending is correct. An earlier version of this paragraph said "nothing
 is sent" without the condition, and a confirmation pass found the same
-unconditional sentence in three other places.
+unconditional sentence in two other places.
 
 `CHECKS_FAILED` stays out: a commit whose checks have failed gets no pull
 request from this build. So does every decision meaning no fresh, subject-matched
@@ -401,8 +401,9 @@ or a body from a caller.
   mint applies `repo/branch-name.ts` to the work branch and the base as well as
   the shell-inert class, so a name slice 5 will publish can be one slice 6
   refuses. The safe direction, and it is what bounds the composed body — but the
-  two gates differ, and `L-V4-05-9` is only half closed. The stricter gate still
-  accepts `refs/heads/main` and `HEAD` as a base; GitHub answers `422` for both.
+  two gates differ, and `L-V4-05-9` is only half closed. The stricter gate is
+  still not Git's whole rule: measured, it accepts `refs/heads/main` and `HEAD`
+  as a base. What GitHub does with either was not established.
 - **L-V4-06-10 — `--publish-head` and `--create-pr` do not compose in one
   invocation on a first delivery.** Measured: the observation runs before the
   publication, so the forge has never seen the commit,

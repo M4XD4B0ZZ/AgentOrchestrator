@@ -427,9 +427,9 @@ export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, 
  * `ALREADY_EXISTS` as a failure will send a second request for no reason.
  *
  * Held as a set rather than as a union of comparisons so there is one place to
- * read the answer from. What stops it widening silently is the suite, which
- * partitions `PULL_REQUEST_CREATIONS` against it and fails on any member
- * neither side claims — see the note under the declaration.
+ * read the answer from. What stops it widening silently is the suite's
+ * enumerated equality against these three names, plus a case that asks the
+ * predicate and the set the same question for every member of the vocabulary.
  */
 export const ESTABLISHED_PULL_REQUEST_CREATIONS: ReadonlySet<PullRequestCreation> = Object.freeze(
   new Set<PullRequestCreation>(['CREATED', 'ALREADY_EXISTS', 'CONVERGED_AFTER_UNCERTAIN_EFFECT']),
@@ -437,8 +437,10 @@ export const ESTABLISHED_PULL_REQUEST_CREATIONS: ReadonlySet<PullRequestCreation
 // `Object.freeze` does not make a `Set` immutable — it does not touch internal
 // slots, so `add` still works on a value cast back to a mutable type. It is
 // applied for the properties it does freeze and is **not** what stops this set
-// widening; the suite's partition against `PULL_REQUEST_CREATIONS` is. A review
-// pointed out that the paragraph above used to claim otherwise.
+// widening; the suite's enumerated equality is. A review pointed out that the
+// paragraph above used to claim otherwise, and a later one that the replacement
+// credited a "partition" assertion that had by then been deleted for being a
+// tautology.
 
 /** Whether the intended pull request is open on the forge. */
 export function pullRequestIsEstablished(creation: PullRequestCreation): boolean {
@@ -462,9 +464,10 @@ export function pullRequestIsEstablished(creation: PullRequestCreation): boolean
  * it accepts `refs/heads/main` and `HEAD`, because Git accepts the first as a
  * branch and this build's grammar has no case for the second. The consequence
  * is stated rather than assumed: a run intending `refs/heads/main` never
- * matches GitHub's reported `main`, so it fails closed into
- * `WRONG_BASE_CONFLICT` or `POSTCONDITION_MISMATCH` rather than converging on
- * the wrong pull request.
+ * matches GitHub's reported `main`, so it fails closed — into
+ * `WRONG_BASE_CONFLICT`, `POSTCONDITION_MISMATCH` or `CREATION_REFUSED`
+ * depending on what the readings find — rather than converging on the wrong
+ * pull request. The list is the reachable set, not a promise of two.
  */
 export function gradePullRequestCreation(
   intended: IntendedPullRequest,

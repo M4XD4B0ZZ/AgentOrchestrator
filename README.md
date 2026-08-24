@@ -9207,9 +9207,10 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
   mint puts the work branch and the base through `repo/branch-name.ts` as well
   as the shell-inert class, so a name slice 5 will publish can be one slice 6
   refuses. That is the safe direction and it bounds the composed body, but the
-  two gates now differ and `L-V4-05-9` is only half closed. Measured limits of
-  the stricter one: it still accepts `refs/heads/main` and `HEAD` as a base,
-  both of which GitHub answers `422` for.
+  two gates now differ and `L-V4-05-9` is only half closed. The stricter gate is
+  still not Git's whole rule: measured, it accepts `refs/heads/main` and `HEAD`
+  as a base. What GitHub does with either was not established, and no sentence
+  in this build says it was.
 
 ## Not implemented yet
 

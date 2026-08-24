@@ -315,28 +315,19 @@ describe('the creation vocabulary', () => {
     }
   });
 
-  it('partitions itself into established and not, with nothing left over', () => {
+  it('names exactly three established members, and the predicate agrees', () => {
     const established = PULL_REQUEST_CREATIONS.filter((m) => ESTABLISHED_PULL_REQUEST_CREATIONS.has(m));
-    const not = PULL_REQUEST_CREATIONS.filter((m) => !ESTABLISHED_PULL_REQUEST_CREATIONS.has(m));
     expect([...established].sort()).toEqual(
       ['ALREADY_EXISTS', 'CONVERGED_AFTER_UNCERTAIN_EFFECT', 'CREATED'].sort(),
     );
     // The enumerated equality above is the ONLY thing here that enforces the
-    // set, and this comment says so rather than crediting a round-trip. Two
-    // earlier attempts at a "partition control" were tautologies of equal
-    // strength — `filter(p).length + filter(!p).length === length`, then
-    // `[...filter(p), ...filter(!p)].sort() === [...all].sort()` — both true
-    // for every predicate and every input, both asserted to be controls, and
-    // the second was written in the act of removing the first.
-    //
-    // What is worth pinning beside it is the *shape* of the answer: the
-    // predicate and the set must agree member by member, which is a real claim
-    // about two independent expressions of one rule.
-    for (const member of PULL_REQUEST_CREATIONS) {
-      expect(pullRequestIsEstablished(member), member).toBe(
-        ESTABLISHED_PULL_REQUEST_CREATIONS.has(member),
-      );
-    }
+    // set. Three "partition controls" were tried beside it and none was one:
+    // `filter(p).length + filter(!p).length === length`, then
+    // `[...filter(p), ...filter(!p)].sort() === [...all].sort()`, both true for
+    // every predicate and every input — and then a member-by-member loop that
+    // was byte-identical to the assertion already three lines below. Each was
+    // added in the act of removing the last, and each was described as a
+    // control. There is no fourth attempt: what pins the set is the list.
     // And the predicate agrees with the set for every member, so a caller can
     // never be right by asking one and wrong by asking the other.
     for (const member of PULL_REQUEST_CREATIONS) {
@@ -659,9 +650,9 @@ describe('the pull-request creation authority', () => {
     // Measured, and recorded because a review asserted the opposite and this
     // case is what caught it: Git does allow a branch called `refs/heads/main`,
     // and this build's `isValidBranchName` carries no special case for `HEAD`.
-    // Both are refused by GitHub with a 422 and create nothing, so the
-    // fail-closed direction holds — but the mint does not refuse them, and no
-    // sentence in this build may say it does.
+    // What GitHub does with either as a `base` was NOT established — a probe
+    // that tried was answered about a duplicate instead — so nothing here says
+    // it was. The mint does not refuse them, and that is the whole claim.
     expect(mintPullRequestCreationGrant(subjectOf(), intentOf({ baseRef: base })), base).not.toBeNull();
   });
 
@@ -790,7 +781,7 @@ describe('what AO writes into the pull request', () => {
     expect(/^[\x20-\x7e\n]*$/.test(body)).toBe(true);
   });
 
-  it('cuts the title at an input longer than the mint will accept', () => {
+  it('cuts the title, and the cut composition is still one the mint accepts', () => {
     // The two parts are bounded on their own and their sum is not, so a long
     // task id beside a long branch composes an over-budget title. It is cut
     // rather than refused: refusing to open a pull request because a branch
@@ -1456,8 +1447,11 @@ describe('the delivery command creates only when asked, and only when it may', (
   }
 
   it('admits exactly the decisions that mean a fresh, unfailed observation', () => {
-    // Partitioned against the whole vocabulary, so a new decision member has to
-    // be put on one side or the other rather than defaulting to refused.
+    // Enumerated, not partitioned. A `filter(p)`/`filter(!p)` assertion over the
+    // vocabulary is a tautology whatever shape it is written in, and two were
+    // tried here before this comment was written. What holds the set is the
+    // sorted equality below; what makes a NEW decision member safe is that it
+    // is simply not in the list, which is the fail-closed direction.
     const admitted = DELIVERY_DECISIONS.filter((d) => ADMITS_CREATION_LADDER.has(d));
     const refusedBy = DELIVERY_DECISIONS.filter((d) => !ADMITS_CREATION_LADDER.has(d));
     expect([...admitted].sort()).toEqual(
@@ -1469,12 +1463,7 @@ describe('the delivery command creates only when asked, and only when it may', (
         'PULL_REQUEST_MATCHED_CHECKS_SUCCESS',
       ].sort(),
     );
-    // The enumerated equality above is what enforces this set; a "partition"
-    // assertion over `filter(p)`/`filter(!p)` is a tautology whatever shape it
-    // is written in. What is added instead is the fail-closed direction stated
-    // as a fact about the code: a member this build does not know about is not
-    // admitted, which is checked by asking the set directly.
-    expect(ADMITS_CREATION_LADDER.has('NOT_A_DECISION' as never)).toBe(false);
+    expect(ADMITS_CREATION_LADDER.size).toBe(5);
     // The two kinds that are out, named rather than counted: a failing check
     // (L-V4-06-4) and every decision that means no fresh, subject-matched
     // observation exists.
