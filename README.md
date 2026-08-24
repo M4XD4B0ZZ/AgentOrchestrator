@@ -9240,8 +9240,11 @@ Five things, all in the same invocation:
 1. the task is at `READY_FOR_PR` and its pinned commit resolves;
 2. the delivery target re-resolves to the same `host/owner/name`;
 3. this invocation's **own** decision is `PULL_REQUEST_MATCHED_CHECKS_SUCCESS` —
-   exactly one open pull request whose head is this exact commit, and no check on
-   this commit failed or is still running;
+   exactly one open pull request whose head is this exact commit, no check on
+   this commit failed or is still running, and this commit carries at least one
+   check record. It does **not** mean a check succeeded: measured, a commit whose
+   only check ran and was skipped reaches this decision with nothing having
+   succeeded, and would be merged;
 4. `--merge-pr`;
 5. `--attended`.
 
@@ -9317,12 +9320,11 @@ reading.
 ### `READY_FOR_PR` is still terminal
 
 No transition, no task-state byte, no execution lease, no agent. After a real
-merge this build reports:
-
-```
-GitHub    : merged
-AO state  : READY_FOR_PR
-```
+merge GitHub reports the pull request as merged while this build still reports
+the task as `READY_FOR_PR` — the report's own lines being
+`State        : READY_FOR_PR` and `Merge        : MERGED`. A draft of this
+section showed those two as one fenced block, which no command prints; a fenced
+sample in this document is the emitter's output or it is not shown.
 
 That mismatch is deliberate. Repairing it means a durable post-merge state, a
 post-merge verification and a `COMPLETE` — three decisions, none of which belongs
@@ -9355,6 +9357,13 @@ in the slice that adds the effect.
 - **L-V4-07-6 — `409` does not distinguish a head that moved from a head that
   never existed.** This build refuses both from its own reading before it sends,
   so the ambiguity is not reachable on the ordinary path.
+- **L-V4-07-8 — the resulting merge commit is established from the forge, not
+  confirmed locally.** M1 invariant #7 asks for both. This build reads the commit
+  back from a fresh reading of the pull request and does not fetch the base
+  branch to confirm it is there, because fetching is a local Git act this slice
+  does not perform. The half that is held is the half that matters for
+  attribution; the half that is open is named here rather than folded into
+  `L-V4-07-5`, which is about durability and was cited for it by mistake.
 - **L-V4-07-7 — `repo/branch-name.ts` describes itself as "the `git
   check-ref-format --branch` rules".** Measured, it is not equivalent to them in
   either direction: Git accepts `@`, `fü` and `héllo` as branch names and this

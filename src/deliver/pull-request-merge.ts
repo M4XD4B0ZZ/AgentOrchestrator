@@ -183,13 +183,22 @@ export const MERGE_OUTCOMES = [
    * creation ladder's own reading can then answer usefully. A merge admits
    * exactly one — `PULL_REQUEST_MATCHED_CHECKS_SUCCESS`.
    *
-   * What that member says, in full, because a review found this sentence saying
-   * two thirds of it: exactly one open pull request had this exact head, no
-   * check on this commit failed or is still running, **and at least one check on
-   * it succeeded**. The third clause is the one that separates it. `CHECKS_ABSENT`
-   * satisfies the first two — it is only reachable after the head matched, and
-   * it means no check exists at all — so a sentence naming only those two
-   * described a member this ladder refuses.
+   * What that member says, in full: exactly one open pull request had this exact
+   * head, no check on this commit failed or is still running, **and this commit
+   * carries at least one check record**. The third clause is what separates it
+   * from `CHECKS_ABSENT`, which satisfies the first two — that member is only
+   * reachable after the head matched, and it means no check exists at all.
+   *
+   * Two review rounds were needed to get this sentence right, and the second one
+   * is worth recording. Round 1 found it naming only the first two clauses.
+   * Round 2 found the repair naming "at least one check **succeeded**", which is
+   * false: measured, a commit whose only check ran and was skipped aggregates to
+   * `SUCCESS` with `succeeded: 0`, reaches this decision, and would be merged.
+   * `DELIVERY_DECISION_DETAIL` has said so all along — "a commit whose only
+   * checks were skipped reaches this decision with nothing having succeeded" —
+   * and a test in slice 4 is named after that case. The repair asserted a
+   * verification gate one clause stronger than the one this build has, on the
+   * command that writes to the base branch.
    *
    * Either `--observe` and `--decide` were not both given, or they were and the
    * answer was another member. A record read back from disk can never reach

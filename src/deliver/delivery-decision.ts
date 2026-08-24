@@ -258,10 +258,14 @@ export const DELIVERY_DECISION_DETAIL: Readonly<Record<DeliveryDecision, string>
  * Note what consuming it there does **not** do. It does not make this member a
  * merge-eligibility finding: it says exactly one open pull request had this
  * exact head, that no check on this commit failed or is still running, and that
- * at least one check on it succeeded — the third clause being what separates it
- * from {@link DELIVERY_DECISIONS}' `CHECKS_ABSENT`, which satisfies the first
- * two. {@link MERGE_ELIGIBILITY_SENTENCE} still governs everything it does not
- * say.
+ * this commit carries at least one check record — the third clause being what
+ * separates it from `CHECKS_ABSENT`, which satisfies the first two.
+ *
+ * It does **not** say anything succeeded, and a review round wrote that it did
+ * before this sentence was measured: a commit whose only check ran and was
+ * skipped aggregates to `SUCCESS` with `succeeded: 0` and reaches this member.
+ * {@link DELIVERY_DECISION_DETAIL}'s own sentence has always said so, and
+ * {@link MERGE_ELIGIBILITY_SENTENCE} still governs everything none of them says.
  */
 export const POSITIVE_DELIVERY_DECISION = 'PULL_REQUEST_MATCHED_CHECKS_SUCCESS' as const;
 

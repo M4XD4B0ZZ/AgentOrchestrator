@@ -371,15 +371,18 @@ export const CREATE_PR_OPTION_DESCRIPTION =
  * registered option name is unchanged. `merge` was in that list too, put there
  * by slice 6 to say this build could not merge. This slice makes that false, so
  * the word leaves the list and the option set is pinned by exact enumeration
- * instead — a sixth mutation flag cannot then arrive unnamed.
+ * instead, so a new mutation flag cannot arrive unnamed whatever it is called.
+ * An earlier draft said "a sixth", which counts nothing: the command registers
+ * nine options, three of which are forge mutations.
  */
 export const MERGE_PR_OPTION_DESCRIPTION =
   'Merge this task\'s pull request on github.com, by squash, into its base branch. Requires ' +
   '--attended, --observe and --decide, and a task at READY_FOR_PR whose own fresh decision is ' +
   'PULL_REQUEST_MATCHED_CHECKS_SUCCESS: exactly one open pull request at this commit, no check ' +
-  'on it failed or is still running, and at least one check on it succeeded — so a repository ' +
-  'that runs no checks at all is refused, under CHECKS_ABSENT. A stored record can never stand ' +
-  'in for that. This ' +
+  'on it failed or is still running, and this commit carries at least one check record — so a ' +
+  'repository that runs no checks at all is refused, under CHECKS_ABSENT. It does NOT mean a ' +
+  'check succeeded: a commit whose only check was skipped reaches this decision with nothing ' +
+  'having succeeded, and would be merged. A stored record can never stand in for it. This ' +
   'is not merge eligibility — reviews, branch protection and repository rules are not observed, ' +
   'and GitHub is what enforces them; what authorises the act is you. The pull request is the ' +
   'one this invocation observed, never one you name. The request carries the exact head commit ' +
@@ -388,8 +391,9 @@ export const MERGE_PR_OPTION_DESCRIPTION =
   'already-merged pull request is reported and nothing is sent, and one that is closed, a ' +
   'draft, at another commit or targeting another base is refused. At most one request per ' +
   'invocation, and an attempt whose result was lost is never repeated blindly. It opens, ' +
-  'updates, closes, reviews and reverts nothing, it pushes and deletes no branch, there is no ' +
-  'auto-merge, and it writes no task state — so after a merge this task is still READY_FOR_PR.';
+  'updates, closes, reviews and reverts nothing, it pushes no branch and deletes none itself — ' +
+  'though a repository with delete_branch_on_merge set will have GitHub remove the head branch ' +
+  'as a consequence — there is no auto-merge, and it writes no task state — so after a merge this task is still READY_FOR_PR.';
 
 /**
  * Operator presence, in the shape `release` established.

@@ -354,8 +354,16 @@ describe('the merge vocabulary', () => {
     for (const member of MERGE_OUTCOMES) {
       expect(member, member).not.toMatch(/ELIGIBLE|APPROVED|PERMITTED|ALLOWED/);
     }
+    // The predicate the case's name describes. It was
+    // `not.toContain('eligible to merge, and')` — a seven-word phrase that
+    // occurs in this build only inside the report's DISCLAIMER, so a sentence
+    // claiming "this pull request was eligible to merge" would have passed it.
+    // Fourteen of the eighteen sentences are covered by nothing else, which is
+    // what made the weak form worth finding.
     for (const member of MERGE_OUTCOMES) {
-      expect(MERGE_OUTCOME_DETAIL[member].toLowerCase(), member).not.toContain('eligible to merge, and');
+      expect(MERGE_OUTCOME_DETAIL[member].toLowerCase(), member).not.toContain('eligible');
+      expect(MERGE_OUTCOME_DETAIL[member].toLowerCase(), member).not.toContain('approved');
+      expect(MERGE_OUTCOME_DETAIL[member].toLowerCase(), member).not.toContain('permitted to');
     }
   });
 });
@@ -1576,8 +1584,9 @@ describe('the delivery command merges only when asked, and only when it may', ()
     const delivery = program.commands.find((c) => c.name() === 'delivery');
     const longs = (delivery?.options ?? []).map((o) => o.long ?? '').sort();
     // Enumerated. This is what replaced the `merge` entry in the sibling files'
-    // word ban: a sixth mutation flag cannot arrive unnamed, whatever it is
-    // called.
+    // word ban: a NEW mutation flag cannot arrive unnamed, whatever it is
+    // called. (An earlier comment said "a sixth", which counted nothing — nine
+    // options are registered and three of them are forge mutations.)
     expect(longs).toEqual(
       [
         '--attended',
@@ -1633,7 +1642,14 @@ describe('the merge report', () => {
     // `delete_branch_on_merge` is a repository setting that deletes the head
     // branch as a consequence of this very request. It is false on this
     // repository today; it is not false everywhere.
-    expect(MERGE_TRAILER).toContain('GitHub may still delete the head branch on its own');
+    expect(MERGE_TRAILER).toContain(
+      'delete_branch_on_merge set will have the head branch removed by this merge',
+    );
+    // And the sentence no longer opens by claiming exactly one thing changed,
+    // which the clause above contradicts on such a repository. It says what this
+    // build ASKED for, which is the bounded claim.
+    expect(MERGE_TRAILER).toContain('This build asked for exactly one change');
+    expect(MERGE_TRAILER).not.toContain('changed exactly one thing');
     expect(MERGE_TRAILER).toContain('it enabled no auto-merge');
     expect(MERGE_TRAILER).toContain('this task is still READY_FOR_PR');
     expect(MERGE_TRAILER).toContain('did not establish that the pull request was eligible to merge');
@@ -1690,9 +1706,11 @@ describe('what the merging surface is', () => {
       .filter((f) => importsTheMint.test(readFileSync(f, 'utf8')))
       .map((f) => f.replace(/\\/g, '/'))
       .sort();
-    // Four, and three of them for the subject type. The count is written from
-    // this assertion rather than from the intention — slice 6's copy of this
-    // sentence claimed one until a review counted them.
+    // The list, and not a count of it. Slice 6's copy of this sentence claimed
+    // "one" until a review counted them; slice 7's first copy said "three of
+    // them for the subject type" and a review counted two. There is no number
+    // here now: the enumeration below is the claim, and it is the thing that
+    // fails when the set changes.
     expect(importers).toEqual(
       [
         'src/cli/delivery-command.ts',

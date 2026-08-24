@@ -202,13 +202,15 @@ export const CREATION_TRAILER =
  * reads must not imply that it did.
  */
 export const MERGE_TRAILER =
-  'Not read-only. The merge could change exactly one thing and changed at most that:\n' +
+  'Not read-only. This build asked for exactly one change and asked for no other:\n' +
   'one pull request, merged once, by squash, into the base branch named above. The request\n' +
   'carried the exact head commit shown, and while the pull request is open GitHub refuses it\n' +
   'when the head is not that commit. This build opened, updated, closed, reopened, reviewed,\n' +
   'commented on, labelled and reverted nothing, it pushed no branch, it deleted no branch, and\n' +
-  'it enabled no auto-merge. GitHub may still delete the head branch on its own, if this\n' +
-  'repository is configured to. It wrote no task state: this task is still READY_FOR_PR, and\n' +
+  'it enabled no auto-merge. What GitHub does in consequence is its own: a repository with\n' +
+  'delete_branch_on_merge set will have the head branch removed by this merge, and that is a\n' +
+  'second change this build asked nothing about and cannot prevent.\n' +
+  'It wrote no task state: this task is still READY_FOR_PR, and\n' +
   'nothing here changes that. Whether the merge was permitted was GitHub\'s decision and the\n' +
   'operator\'s — this build did not establish that the pull request was eligible to merge, and\n' +
   'does not claim to.';

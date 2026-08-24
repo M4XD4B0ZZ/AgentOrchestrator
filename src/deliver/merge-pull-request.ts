@@ -134,11 +134,19 @@ export interface MergeResult {
   /**
    * The commit the merge produced, or `null`.
    *
-   * Non-null only under a member of `ESTABLISHED_MERGES`, and only ever copied
-   * out of the reading taken *afterwards*. It is never taken from the response,
-   * never derived from the head, and never guessed from local history: under a
-   * squash merge it is a commit that exists on the base branch and nowhere this
-   * machine can compute it from.
+   * Non-null only under a member of `ESTABLISHED_MERGES`, and always copied out
+   * of a *reading* — the one taken afterwards, except under `ALREADY_MERGED`,
+   * where nothing was attempted and there is no reading afterwards, so it comes
+   * from the one taken before.
+   *
+   * This sentence said "afterwards" with no exception until a review drove the
+   * `ALREADY_MERGED` path and measured otherwise. The field is what the next
+   * slice is documented as consuming, so its provenance has to be exact rather
+   * than nearly right.
+   *
+   * It is never taken from the response, never derived from the head, and never
+   * guessed from local history: under a squash merge it is a commit that exists
+   * on the base branch and nowhere this machine can compute it from.
    */
   readonly mergeCommit: string | null;
 }

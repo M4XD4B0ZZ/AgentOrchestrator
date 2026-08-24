@@ -24,9 +24,12 @@ Five things, and all five must hold in the same invocation:
 3. `--observe` and `--decide` were both given and **this invocation's own**
    decision is `PULL_REQUEST_MATCHED_CHECKS_SUCCESS` — exactly one open pull
    request whose head is this exact commit, no check on this commit failed or is
-   still running, and at least one check on it succeeded. That last clause is
-   what separates the member from `CHECKS_ABSENT`, which satisfies the other
-   two, and a repository that runs no checks at all is therefore refused;
+   still running, and this commit carries at least one check record. That last
+   clause is what separates the member from `CHECKS_ABSENT`, and a repository
+   that runs no checks at all is therefore refused. It does **not** mean a check
+   succeeded: measured, a commit whose only check ran and was skipped aggregates
+   to `SUCCESS` with `succeeded: 0` and reaches this member. One review round
+   wrote "at least one check succeeded" here and the next measured it false;
 4. `--merge-pr` was given;
 5. `--attended` was given.
 
@@ -177,8 +180,13 @@ a precondition about a question this act does not ask.
   pull request is merged. A merge by somebody else, at another head, between the
   reading and the request is not refused — it is *detected* afterwards as
   `POSTCONDITION_MISMATCH`.
-- **policy**: GitHub's. On a repository with no protection and no rules — which
-  this one has, measured — nothing on the far side refuses.
+- **policy**: GitHub's. On a repository with no protection and no rules,
+  nothing on the far side refuses. Whether *this* repository is such a one is
+  deliberately not claimed: measured, `branches/{b}/protection` answers 404 and
+  `rulesets` answers `200 []` both when there are none and when the caller may
+  not read them, so the negative is not provable and is not asserted. A draft of
+  this line said "which this one has, measured" — the shape this repository
+  already recorded as never naming a state after an absence you cannot measure.
 - **another AO process**: not fenced, and an execution lease would not fence it
   either. The object being raced for is on the far side of the network, and two
   clones of one remote hold two different leases. Recorded as a residual.
@@ -205,10 +213,12 @@ No transition is added, no task-state byte is written, no execution lease is
 taken, no agent is started. The delivery-surface code scan already forbids all
 four and every slice-7 module is inside it.
 
-So after a real merge this build reports:
-
-    GitHub    : merged
-    AO state  : READY_FOR_PR
+So after a real merge GitHub reports the pull request as merged while this build
+still reports the task as `READY_FOR_PR`. A draft of this section showed those
+two words as a fenced block, which was a paraphrase presented as emitter output —
+the report's own lines are `State        : READY_FOR_PR` and
+`Merge        : MERGED`, on different parts of the page, and this repository's
+rule is that a fenced sample is the emitter's or it is not shown.
 
 That is a mismatch and it is left standing on purpose. Repairing it means a
 durable post-merge state, a post-merge verification and a `COMPLETE` — three
@@ -274,7 +284,9 @@ recorded here instead.
   nothing. It comes from a fresh reading of the pull request. It is **not**
   confirmed against a local repository — doing so would mean fetching the base
   branch, which is a local Git act this slice does not perform, and no other
-  invariant requires one. `L-V4-07-5` carries the gap.
+  invariant requires one. That half is carried as `L-V4-07-8` — a review found
+  this sentence citing `L-V4-07-5`, which is about durability and says nothing
+  about local confirmation.
 - **#8 a successful merge API call is not completion** — held, and it is the
   point of the slice's shape. The API's answer is never the proof, no task state
   is written, and `READY_FOR_PR` stays terminal. Post-merge verification and
