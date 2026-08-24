@@ -763,9 +763,18 @@ describe('this slice grants nothing and moves nothing', () => {
    * Slice 3 arrived at this shape after three rounds of a hand-written array
    * outrunning its own title. The set is the same one, re-derived here, and the
    * criteria are this slice's: nothing decides its way into a task-state write,
-   * a lease, an agent, or a forge mutation.
+   * a lease, an agent, or a forge mutation *through an API call*.
+   *
+   * The title used to end "and no forge mutation", and V4 slice 5 made that
+   * false: the surface now contains a `git push` that creates one ref on the
+   * delivery remote. Every regex below still holds — none of them was ever what
+   * made that claim true — so what is narrowed here is the sentence, not the
+   * guard. The claim the sentence used to carry now lives where it can actually
+   * be measured: `tests/v4-05-delivery-head-publication.test.ts` derives the
+   * mutating surface from the tree and proves it is one module running one
+   * create-only vector.
    */
-  it('names no writer, no lease, no agent and no forge mutation, anywhere in the delivery surface', () => {
+  it('names no writer, no lease, no agent and no API mutation, anywhere in the delivery surface', () => {
     const walk = (dir: string): string[] =>
       readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
         const full = `${dir}/${entry.name}`;

@@ -1418,11 +1418,17 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     // so two strings made the same promise and only one was true. Pinned by
     // literal, and both help strings are checked for the phrase itself so a
     // third copy cannot reappear anywhere on this surface.
+    // Updated by V4 slice 5, which made two clauses of the previous sentence
+    // false: `--publish-head` also contacts the forge, and it changes it. The
+    // pin passed throughout, which is the point worth remembering — a literal
+    // proves what a string says and never that the string is true.
     expect(OBSERVE_OPTION_DESCRIPTION).toBe(
-      'Ask github.com about the commit named above, read-only. This is the only way this ' +
-        'build contacts a forge for delivery, and it asks about no commit but that one. The ' +
-        'GitHub CLI additionally makes calls of its own (telemetry, update check) that this ' +
-        'build does not suppress. Without this flag nothing leaves this machine.',
+      'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
+        'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
+        'that this build does not suppress. This is the only flag that makes this command read ' +
+        'a forge; --publish-head is the only one that makes it change anything on one. Without ' +
+        'either, nothing leaves this machine — though --record still writes a record beside the ' +
+        'task, here.',
     );
     for (const text of [
       OBSERVE_OPTION_DESCRIPTION,

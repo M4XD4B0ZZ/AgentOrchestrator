@@ -2548,6 +2548,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'agent', 'codex-reviewer.ts'),
         join('src', 'auth', 'auth-preflight.ts'),
         join('src', 'boundary', 'owned-command.ts'),
+        join('src', 'deliver', 'git-head-publisher.ts'),
         join('src', 'deliver', 'github-observer.ts'),
         join('src', 'doctor', 'capabilities.ts'),
         join('src', 'repo', 'git-query.ts'),
@@ -2565,7 +2566,42 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // appearing silently, and the runner fence itself is asserted in 'lets
     // exactly one module reach the raw runners' above.
     //
-    // `deliver/github-observer.ts` is the newest, and it is in the FIRST group:
+    // `deliver/git-head-publisher.ts` is the newest, and it is the hardest
+    // entry this list has had to classify. It is in the FIRST group — it starts
+    // `git ls-remote` and `git push` — and unlike every other member of that
+    // group it can CHANGE something. V4 slice 5 made it the first module in the
+    // build able to alter anything outside this machine.
+    //
+    // It is outside the lease, deliberately, and the argument is not the
+    // observer's. The observer's argument is "it writes nothing"; this one does
+    // write. The argument here is about *what the lease is for*: the fence
+    // exists so that at most one invocation is a repository's **writer**, and
+    // everything it protects is local — task state, the worktree, the branch,
+    // the ledger, the workspace. This module touches none of them. It runs Git
+    // inside the repository root, which the observer does not, but only to read
+    // the object database and speak to a remote.
+    //
+    // What it changes is on a forge, and the lease neither does nor can fence
+    // that. The lease keys on the Git common directory, so two clones of one
+    // remote are two leases and both would be held at once; the race worth
+    // fencing is two publishers, and they need not share a checkout or a
+    // machine. Taking the lease would therefore claim writer authority it does
+    // not use, make a delivery command contend with a running task for the
+    // whole repository, and still not stop the thing it appeared to stop —
+    // three costs for no guarantee.
+    //
+    // What it *is* fenced by, in order: an explicit `--publish-head` and
+    // `--attended` on the command line; a one-shot opaque
+    // `HeadPublicationGrant` whose type the publisher's signature demands and
+    // which is spent by the only accessor that reveals it; a re-read of the
+    // whole local subject immediately before the remote is contacted; and, for
+    // the effect itself, `--force-with-lease=<ref>:` — a create-only
+    // compare-and-swap the *server* evaluates, which is a stronger guarantee
+    // against a concurrent publisher than any local lock could be. All four are
+    // asserted in `tests/v4-05-delivery-head-publication.test.ts`, the last of
+    // them by reading the emitted vector for every input.
+    //
+    // `deliver/github-observer.ts` is in the FIRST group too:
     // it really does start a process — `gh api` — so it has to be classified
     // here rather than waved through. It is outside the lease, deliberately,
     // and that is not a hole in the fence for one reason: the fence exists so
