@@ -791,17 +791,51 @@ describe('this slice grants nothing and moves nothing', () => {
     expect(SURFACE).toContain('src/deliver/delivery-decision.ts');
     expect(SURFACE).toContain('src/deliver/internal/delivery-observation-proof.ts');
 
+    // The one module V4 slice 6 added that may name a POST, by name. Everything
+    // else on the surface still may not, and no module anywhere may name PATCH,
+    // PUT or DELETE — those are the methods that update, replace and destroy,
+    // and this build performs none of the three.
+    // Both spellings: the token pair a real vector uses, and the single string
+    // a careless one might.
+    const POST_METHOD = /-X\s*POST|['\"]-X['\"]\s*,\s*['\"]POST['\"]/;
+    const WRITING_METHOD =
+      /-X\s*(PATCH|PUT|DELETE)|['\"]-X['\"]\s*,\s*['\"](PATCH|PUT|DELETE)['\"]/;
+    const CREATOR = 'src/deliver/github-pull-request-creator.ts';
+    expect(SURFACE, 'the creator must be on the surface being swept').toContain(CREATOR);
+
     for (const file of SURFACE) {
       const code = codeOnly(file);
-      expect(code.length, file).toBeGreaterThan(200);
+      // Positive control: the stripper left real code, not just whitespace.
+      // It used to be `> 200`, which was a size rule wearing a control's
+      // clothing — `internal/delivery-ref-grammar.ts` is two regular
+      // expressions and a lot of comment, and it turned this red without any
+      // claim here becoming false. It was then `> 0`, which a review showed is
+      // a tautology: `codeOnly` replaces a comment with a space and keeps every
+      // newline, so an all-comment file passes it. Non-whitespace length is the
+      // floor that survives the real case and still catches the empty one.
+      expect(code.replace(/\s+/g, '').length, file).toBeGreaterThan(30);
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
       expect(code, file).not.toMatch(/\brunOwnedCommand\s*\(|\bspawn\s*\(/);
-      // No forge mutation, in any spelling this build could reach one by.
+      // No merge, in any spelling this build could reach one by.
       expect(code, file).not.toMatch(/['"]pr['"]\s*,\s*['"]merge['"]|gh pr merge|--auto\b/);
-      expect(code, file).not.toMatch(/-X\s*(POST|PATCH|PUT|DELETE)/);
+      expect(code, file).not.toMatch(WRITING_METHOD);
+      if (file !== CREATOR) expect(code, file).not.toMatch(POST_METHOD);
     }
+
+    // And the corpus really is source, so the per-file floor above is a control
+    // on stripping rather than a licence for an empty sweep.
+    expect(SURFACE.map((f) => codeOnly(f)).join('').length).toBeGreaterThan(20_000);
+    // False-negative guard, and it caught a real hole. The pattern here used to
+    // be `/-X\s*(POST|PATCH|PUT|DELETE)/`, which reads a *string* `-X POST` and
+    // sees nothing at all in `['api', '-X', 'POST', path]` — which is exactly
+    // how every vector in this build is written. The sweep was blind to the one
+    // spelling it would actually meet. Both forms are matched now, and the guard
+    // below is what proves it, because the creator writes the split form.
+    expect(codeOnly(CREATOR)).toMatch(POST_METHOD);
+    expect("runner('gh', ['api', '-X', 'PATCH', p])").toMatch(WRITING_METHOD);
+    expect("const a = ['api', '-X PUT', p]").toMatch(WRITING_METHOD);
   });
 });
 

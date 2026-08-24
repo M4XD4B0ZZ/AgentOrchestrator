@@ -9024,6 +9024,195 @@ a different commit.
   nothing refuses is an ordinary name like `main`: create-only bounds the damage,
   nothing bounds the name.
 
+## Creating the pull request (V4 slice 6)
+
+`delivery --observe --decide --create-pr --attended` opens **one** pull request
+on github.com, from the task's work branch to its base branch, at exactly the
+task's pinned commit. It is the act slice 5 was supposed to be and could not be,
+because nothing published a branch. That prerequisite now exists.
+
+`--create-pr` does not push — that is `--publish-head`, a separate flag with a
+separate authority, and neither implies the other. Nothing in this build
+updates, closes, reopens, marks ready or draft, comments on, labels, reviews or
+merges a pull request, and there is no flag that would. It writes no task state,
+takes no execution lease, and `READY_FOR_PR` is still terminal.
+
+**The two flags do not compose in one invocation on a first delivery**, and that
+is measured rather than assumed: `--observe` runs before the publication, so the
+forge has never seen the commit, `commits/{sha}/pulls` answers
+`422 "No commit found for SHA"`, and the decision is `OBSERVATION_UNSETTLED`.
+The branch is published and the creation is refused. Publish in one invocation,
+then create in the next — `L-V4-06-10`.
+
+### `head` is a branch name, and that is why slice 5 had to come first
+
+Measured against github.com, each a real request:
+
+| `head` sent | answer |
+| --- | --- |
+| `main`, `M4XD4B0ZZ:main`, `refs/heads/main` | resolved |
+| `someone-else:main` | `422 {"field":"head","code":"invalid"}` |
+| `5874deed…`, a commit that exists | `422 {"field":"head","code":"invalid"}` |
+
+**A full object name is `invalid` in that field, exactly as a missing branch
+is.** The exact commit cannot be sent, so it can only be *checked* — and this
+build checks it, by reading the delivery remote's head ref immediately before
+the request and refusing unless it holds exactly `currentCommit`. `base` is a
+ref name too; a SHA there is `invalid` as well, so nothing here claims to pin
+the base to a commit.
+
+Every probe above was chosen so GitHub provably could not create anything from
+it. The repository's open pull requests were counted before and after and were
+unchanged.
+
+### Not `gh pr create`
+
+Its own help: *"When the current branch isn't fully pushed to a git remote, a
+prompt will ask where to push the branch and offer an option to fork the base
+repository."* Its dry run *"may still push git changes"*. Its flags include an
+editor, a browser and three ways to compose a body out of commit messages this
+build never read. The transport is
+`gh api --hostname github.com -X POST repos/{owner}/{repo}/pulls --input -`,
+with the body as JSON on stdin — so no text enters an argument vector and no
+shell is involved. `-X POST` is written out because `--input` alone switches the
+method to POST, which is the mirror image of why the observation vector pins
+`-X GET`.
+
+### Closed and merged pull requests do not block a new one, and this build refuses anyway
+
+Measured on live third-party data: `withastro/astro` carries **928** pull
+requests on one head branch into `main`, almost all merged, with exactly one
+open at a time. GitHub's uniqueness is scoped to *open* pull requests.
+
+This build still refuses when a closed or merged pull request carries this
+**exact commit** as its head and no open one does — `PRIOR_PULL_REQUEST_CLOSED`.
+Somebody decided about this delivery already. The rule keys on the object name,
+not on the branch, so an ordinary sequence of commits is unaffected.
+
+### What is idempotent, and what is only fenced
+
+Every invocation reads the forge first. An intended pull request that already
+exists is `ALREADY_EXISTS` with nothing sent. A pull request at this head with a
+different base, a different draft state, or more than one of them, is a refusal
+and never a convergence — retargeting and closing are mutations this build does
+not perform.
+
+Reaching those four answers from the command needed a correction a review
+forced. The gate was `decision === PULL_REQUEST_REQUIRED`, and that decision is
+answered only while *no* open pull request has this head — so the second
+invocation, the one the idempotency claim is about, was refused before the
+reading was taken and told to pass the flags it had just passed. The gate is now
+the closed set of decisions meaning *this invocation freshly observed this
+commit and found no failing check*; only one of the five means a pull request is
+needed, and **a request is issued only when the ladder's own reading says there
+is none** — which is the whole rule, on all five, and is stronger than any
+decision could be.
+
+At most **one** request per invocation, on every path, with no retry on any
+outcome. When the answer is lost the outcome is `OUTCOME_UNCERTAIN`, and the
+recovery is an explicit second invocation, which begins with a reading.
+
+What is *not* guaranteed is what slice 5 could guarantee. A ref update is fenced
+by a compare-and-swap the server evaluates; **there is no documented equivalent
+here.** GitHub's duplicate refusal arrives through the validation layer and
+nothing says that layer's read and write are one transaction — and `gh pr create`
+does not rely on it at all, doing its own lookup first. So the idempotency claim
+rests on four things this build can point at — a reading before, one request, a
+reading after, and a later invocation that reads again — and not on a fifth it
+cannot.
+
+### The outcomes
+
+`SUBJECT_NOT_ESTABLISHED`, `TASK_NOT_READY`, `OPERATOR_ABSENT`,
+`DECISION_NOT_ESTABLISHED`, `AUTHORITY_REFUSED`, `SUBJECT_CHANGED`,
+`REMOTE_URLS_DIVERGE`, `REMOTE_STATE_UNKNOWN`, `HEAD_NOT_PUBLISHED`,
+`HEAD_SHA_MISMATCH`, `PULL_REQUEST_STATE_UNKNOWN`, `PULL_REQUEST_AMBIGUOUS`,
+`PRIOR_PULL_REQUEST_CLOSED`, `WRONG_BASE_CONFLICT`, `DRAFT_STATE_CONFLICT`,
+`CREATION_REFUSED`, `OUTCOME_UNCERTAIN`, `POSTCONDITION_MISMATCH`,
+`ALREADY_EXISTS`, `CONVERGED_AFTER_UNCERTAIN_EFFECT`, `CREATED`.
+
+Three of them mean the intended pull request is open — one established state
+with three provenances — and `pullRequestIsEstablished` is the predicate to ask.
+There is no `else => CREATED`: the response body is never parsed, and success
+requires a reading taken afterwards that finds exactly one open pull request at
+this commit, this base and this draft state.
+
+### The authority, and the one it cannot be
+
+`PullRequestCreationGrant`: opaque, one-shot, spent when it is read, minted in
+exactly one place. It binds eleven facts — task, host, owner, repository, remote
+name, head ref, head commit, base ref, draft, title, body.
+
+`HeadPublicationGrant` cannot be used here and this cannot be used there, and
+**both are compile errors** rather than runtime refusals: each class carries a
+private field, so the types are compared nominally, and the suite pins both
+directions with `@ts-expect-error` inside the canonical gate. There is no
+supertype, no conversion, and no merge authority anywhere in the build.
+
+Minting requires all of: `READY_FOR_PR`, a sendable work branch and base
+branch, `--attended`, and *this invocation's own* `--observe --decide` answering
+one of the five admitted decisions — see above; only one of them means a pull
+request is needed, and a request is sent only when the ladder's own reading
+finds none. A stored slice-3 record has no path into the ladder at all.
+
+### What reaches GitHub
+
+Six repository-derived values, and no others. Four are in the text — the task
+id, the work-branch name, the base-branch name and the head object name — and
+two are in the address: the owner and the repository name, which slice 1 parsed
+out of the delivery remote's push URL and which appear in
+`repos/{owner}/{name}/pulls` and in the `head` field as `owner:branch`. This
+paragraph said "four" until a review counted the wire rather than the file.
+
+Everything else in the title and body is a literal in one file. No diff, no log,
+no commit message, no path, no environment, no transcript, no finding, no test
+output — and no task title, because the task-state record has no such field. All
+six are grammar-bounded at the mint, and the branch and base are additionally
+capped at 255 characters by `repo/branch-name.ts`, which is what bounds the
+composed body.
+
+ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2026-08-24-adr-pull-request-creation.md).
+
+### Carried forward from V4 slice 6, deliberately
+
+- **L-V4-06-1 — two AO processes racing is a residual.** Measured uniqueness,
+  undocumented atomicity, and a local fence would not help: two clones of one
+  remote are two execution leases.
+- **L-V4-06-2 — an uncertain effect stays uncertain until somebody asks again.**
+  Timeout, lost boundary and forge index lag are indistinguishable from here.
+- **L-V4-06-3 — the head-ref race can leave a pull request this build did not
+  intend.** It is never reported as success, and it is never closed or edited in
+  response. An operator has to look.
+- **L-V4-06-4 — `CHECKS_FAILED` blocks creation.** A red commit gets no pull
+  request from this build, because checks are graded before the pull-request
+  question and `CHECKS_FAILED` is deliberately outside the set of decisions that
+  admit the creation ladder.
+- **L-V4-06-5 — the creation is not recorded.** "AO opened this" is durable
+  nowhere; it is observable from GitHub, and slice 3's record is a separate act.
+- **L-V4-06-6 — the base is a ref, not a commit.** The API offers nothing else,
+  and the base branch can move a moment later.
+- **L-V4-06-7 — the live dogfood exercised the modules, not the CLI ladder.**
+  The same limit as `L-V4-05-6`: driving the command needs a production
+  `TaskState` for this repository, and fabricating one would prove something
+  about a file rather than about the product.
+- **L-V4-06-8 — every creation outcome exits 0.** The exit code still answers
+  only the observation question.
+- **L-V4-06-9 — draft is now read but still not decided on.** Slice 4's decision
+  does not consider it, so a positive delivery decision can still be true of a
+  draft pull request.
+- **L-V4-06-10 — `--publish-head` and `--create-pr` do not compose on a first
+  delivery.** The observation runs before the publication, so the forge has not
+  seen the commit yet and the decision cannot settle. Two invocations.
+- **L-V4-06-11 — this slice's branch grammar is stricter than slice 5's.** The
+  mint puts the work branch and the base through `repo/branch-name.ts` as well
+  as the shell-inert class, so a name slice 5 will publish can be one slice 6
+  refuses. That is the safe direction and it bounds the composed body, but the
+  two gates now differ and `L-V4-05-9` is only half closed. The stricter gate is
+  still not Git's whole rule: measured, it accepts `refs/heads/main` and `HEAD`
+  as a base. Nothing rests on what GitHub would do with either: the ladder
+  compares the base by exact equality against the bare name GitHub reports, so
+  such a run fails closed instead of converging on the wrong pull request.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
@@ -9040,18 +9229,23 @@ state. Slice 3: that answer can be **written down**, so a later slice can tell
 **classified** into one word, from an observation this process made and from
 nothing else. Slice 5 is the first that shortens the list at all: the work
 branch can be **published** to the delivery remote, create-only, under an
-explicit one-shot authority that grants nothing else.
+explicit one-shot authority that grants nothing else. Slice 6 shortens it
+again by exactly one act: one **pull request** can be opened, at one commit,
+under a second authority that cannot substitute for the first and grants
+nothing further.
 
 What none of them adds is authority. A stored `SUCCESS` is a historical snapshot
 and never a current one; there is no TTL; `delivery --observe` is still read-only
 on its own; a decision is not merge eligibility and cannot be — the endpoints
 that would prove it answer the same way for "no rules" as for "no permission";
-nothing is opened or merged, and publishing a head grants no authority to do
-either; and `READY_FOR_PR` is still terminal, with
+nothing is **merged**, publishing a head grants no authority to open a pull
+request and opening one grants no authority to merge it — each act is
+requested and authorised separately; and `READY_FOR_PR` is still terminal, with
 no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1),
 [Durable delivery evidence (V4 slice 3)](#durable-delivery-evidence-v4-slice-3),
 [The delivery decision (V4 slice 4)](#the-delivery-decision-v4-slice-4),
-[Publishing the delivery head (V4 slice 5)](#publishing-the-delivery-head-v4-slice-5)
+[Publishing the delivery head (V4 slice 5)](#publishing-the-delivery-head-v4-slice-5),
+[Creating the pull request (V4 slice 6)](#creating-the-pull-request-v4-slice-6)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on

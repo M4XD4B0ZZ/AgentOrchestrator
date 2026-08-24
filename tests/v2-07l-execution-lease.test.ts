@@ -2550,6 +2550,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'boundary', 'owned-command.ts'),
         join('src', 'deliver', 'git-head-publisher.ts'),
         join('src', 'deliver', 'github-observer.ts'),
+        join('src', 'deliver', 'github-pull-request-creator.ts'),
         join('src', 'doctor', 'capabilities.ts'),
         join('src', 'repo', 'git-query.ts'),
         join('src', 'verify', 'run-verification.ts'),
@@ -2560,7 +2561,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'worktree', 'worktree-cleanliness.ts'),
       ].sort(),
     );
-    // Of those, seven can actually start a process; the rest import
+    // Of those, eight can actually start a process; the rest import
     // `isShellInertArgument` or a type. The list exists so that a *new*
     // importer of the execution module has to be classified rather than
     // appearing silently, and the runner fence itself is asserted in 'lets
@@ -2600,6 +2601,42 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // against a concurrent publisher than any local lock could be. All four are
     // asserted in `tests/v4-05-delivery-head-publication.test.ts`, the last of
     // them by reading the emitted vector for every input.
+    //
+    // `deliver/github-pull-request-creator.ts` is the newest, added by V4 slice
+    // 6, and it is in the FIRST group: it starts `gh api` and the request it
+    // sends CHANGES something — it opens a pull request. It is the second
+    // module in this build able to alter anything outside this machine.
+    //
+    // It is outside the lease, deliberately, and the argument is
+    // `git-head-publisher.ts`'s, unchanged: the fence exists so that at most
+    // one invocation is a repository's **writer**, and everything the lease
+    // protects is local. This module touches none of it. It does not even run
+    // inside a repository — like the observer it runs in the OS temp directory
+    // — and what it changes is on a forge.
+    //
+    // The one place the argument is *weaker* than slice 5's, and it is stated
+    // rather than glossed: publishing a ref is fenced at the effect by a
+    // server-evaluated compare-and-swap, and **there is no documented
+    // equivalent for creating a pull request**. GitHub does enforce uniqueness
+    // among open pull requests for one head and base — measured on live data,
+    // 928 pull requests on one pair with exactly one open — but nothing
+    // documents that check and the write as one transaction, and the mainstream
+    // client does not rely on it at all. So two AO processes racing here is a
+    // residual, recorded as one, and a lease would not close it either: it keys
+    // on the Git common directory, so two clones of one remote are two leases
+    // and both would be held at once.
+    //
+    // What it *is* fenced by, in order: an explicit `--create-pr` and
+    // `--attended` on the command line; a fresh decision of this invocation's
+    // own, from the closed set that admits the ladder and which excludes a
+    // failing check and every unsettled answer; a one-shot opaque
+    // `PullRequestCreationGrant` whose type the creator's signature demands and
+    // which is spent by the only accessor that reveals it; a re-read of the
+    // whole local subject; proof that the delivery remote's head ref holds
+    // exactly the intended commit; a reading of the forge before the request
+    // and another after it; and at most one request per invocation, with no
+    // retry on any outcome. All of them are asserted in
+    // `tests/v4-06-pull-request-creation.test.ts`.
     //
     // `deliver/github-observer.ts` is in the FIRST group too:
     // it really does start a process — `gh api` — so it has to be classified

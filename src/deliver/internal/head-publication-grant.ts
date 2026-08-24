@@ -53,7 +53,10 @@
  * about a ref; observing is about a commit. Both are bound because a ref alone
  * says nothing about content and a commit alone says nothing about where.
  *
- * `commit` — the exact forty-hex object name. The push is written as
+ * `commit` — the exact object name; the regex below accepts forty or
+ * sixty-four lowercase hex digits, which is wider than `forge-observation.ts`
+ * accepts and wider than github.com uses. This line said "forty-hex" above that
+ * regex until a review read the two together. The push is written as
  * `<commit>:<ref>`, never `<branch>:<ref>`, so a local branch that moves after
  * this grant was minted cannot change what gets published.
  *
@@ -61,13 +64,21 @@
  *
  * Opening a pull request, updating one, closing one, commenting, labelling,
  * requesting review, merging, enabling auto-merge, deleting a ref, moving a ref
- * that already exists, or pushing any other ref. Those are not refused by a
- * check inside the publisher — they are absent from the build. This artefact is
- * the only forge-mutation authority that exists, and the only function that
- * accepts it publishes exactly one ref, create-only.
+ * that already exists, or pushing any other ref.
+ *
+ * The sentence that used to end this paragraph said this was "the only
+ * forge-mutation authority that exists". **V4 slice 6 made that false**, and it
+ * is corrected rather than left standing: there is now a second one,
+ * `internal/pull-request-creation-grant.ts`, which opens exactly one pull
+ * request. What survives — and is the point — is that the two cannot substitute
+ * for one another in either direction, so nothing here became permission to
+ * open anything. The only function that accepts *this* artefact still publishes
+ * exactly one ref, create-only, and a slice that adds a third authority has to
+ * come back and correct this paragraph too.
  */
 
 import { SUPPORTED_FORGE_HOSTS, type ObservationSubject } from '../forge-observation.js';
+import { PUBLISHABLE_REF, REMOTE_NAME } from './delivery-ref-grammar.js';
 
 /**
  * The four facts a publication is about, plus the two that say where.
@@ -94,20 +105,15 @@ export interface HeadPublicationSubject {
 const COMMIT_OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /**
- * `refs/heads/` followed by a branch name this build will put in an argument
- * vector. The character class is `repo/branch-name.ts`'s, narrowed further by
- * `doctor/exec.ts`'s shell-inert grammar: no space, no quote, no metacharacter.
- * A leading `-` is impossible because `refs/heads/` precedes it.
+ * The ref grammar, re-exported so slice 5's callers name one place.
  *
- * Exported because the command ladder needs the same rule to decide whether a
- * work branch can become a ref *before* it asks for an authority. A second copy
- * there would be free to drift from this one — the argument `doctor/exec.ts`
- * makes about `SAFE_ARG_PATTERN`, and a review found the second copy.
+ * It moved to `internal/delivery-ref-grammar.ts` when V4 slice 6 needed the
+ * same rule: a second authority importing *this* module for a regular
+ * expression would have widened the set of files that can reach this mint, and
+ * that set is pinned by the suite because it is what makes the authority an
+ * authority. The rule is one constant either way.
  */
-export const PUBLISHABLE_REF = /^refs\/heads\/[A-Za-z0-9._+=@/-]+$/;
-
-/** Names this build will not put in an argument vector as a remote. */
-const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export { PUBLISHABLE_REF } from './delivery-ref-grammar.js';
 
 const MINTED = new WeakSet<object>();
 const SPENT = new WeakSet<object>();

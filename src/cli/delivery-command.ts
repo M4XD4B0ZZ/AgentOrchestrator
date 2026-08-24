@@ -1,35 +1,56 @@
 /**
- * `agent-loop delivery` — the delivery surface (V4 slices 2 to 5).
+ * `agent-loop delivery` — the delivery surface (V4 slices 2 to 6).
  *
  * ── Why a command of its own, and why the network is a flag on it ──────────
  *
  * `run` is read-only by default and executes only when `--attended` says so.
  * This command copies that shape one level down: it is **local** by default and
- * contacts a forge only when a flag says so — `--observe` to read one, and,
- * since V4 slice 5, `--publish-head` to change one. It stopped being a
- * read-only surface there, and the sentences on it were corrected then rather
- * than left to be discovered. The two properties that matter are structural
- * rather than documented:
+ * contacts a forge only when a flag says so. It stopped being a read-only
+ * surface at V4 slice 5, and the sentences on it were corrected then rather
+ * than left to be discovered — which had to happen again at slice 6. Every
+ * "the only" that survives on this surface is one somebody has to re-read when
+ * a flag is added; a review found one that had not been, and it was wrong for a
+ * second reason as well. The two properties that matter are structural rather
+ * than documented:
  *
  *  - `agent-loop run` gained nothing. It resolves a delivery target — that is
  *    slice 1, and it is local Git — and it has no path to this module at all.
  *    No existing command became a networking command;
- *  - with neither `--observe` nor `--publish-head` this command builds a
- *    subject and stops. There is no branch on which a client is constructed, so
- *    "nothing was contacted" is a fact about the code rather than a promise in
- *    help text.
+ *  - with none of the contacting flags this command builds a subject and stops.
+ *    There is no branch on which a client is constructed, so "nothing was
+ *    contacted" is a fact about the code rather than a promise in help text.
+ *
+ * ── The two acts, and why they are two ─────────────────────────────────────
+ *
+ * `--publish-head` creates one branch on the delivery remote. `--create-pr`
+ * opens one pull request from that branch. Each requires `--attended`, each
+ * takes its own authority, and **neither implies the other**: a published head
+ * is not permission to open a pull request, and the pull-request authority
+ * cannot push.
+ *
+ * They are run in that order when both are asked for, and that is necessary
+ * without being sufficient. **On a first delivery the two do not compose in one
+ * invocation**, measured: `--observe` runs before the publication, the forge has
+ * never seen the commit, `commits/{sha}/pulls` answers `422 "No commit found
+ * for SHA"`, and the decision is `OBSERVATION_UNSETTLED` — so the creation is
+ * refused after the branch has been created. The branch is published and
+ * nothing else happens, which is a correct outcome reached by an unhelpful
+ * route. Publish in one invocation, then create in the next; `L-V4-06-10`
+ * records it.
  *
  * ── What it will not do ────────────────────────────────────────────────────
  *
  * It writes no task state, takes no execution lease, prepares no workspace and
- * starts no agent. It does not open, update, review or merge a pull request,
- * and there is no flag that would. `READY_FOR_PR` is still terminal, and
- * observing a task at that state changes nothing about it.
+ * starts no agent. It never updates, closes, reopens, marks ready or draft,
+ * comments on, labels, reviews or merges a pull request, and there is no flag
+ * that would. `READY_FOR_PR` is still terminal, and delivering a task at that
+ * state changes nothing about the task.
  *
- * It also does not answer "may this be merged". It reports two facts about one
+ * It also does not answer "may this be merged". It reports facts about one
  * commit and stops there, deliberately: a surface that combined them would be
  * making the merge-eligibility decision that a later slice has to take
- * explicitly.
+ * explicitly. Opening a pull request is not that decision — it is the request
+ * for a human to take it.
  */
 
 import type { Command } from 'commander';
@@ -64,6 +85,21 @@ import {
 import { publishDeliveryHead, type PublicationResult } from '../deliver/publish-delivery-head.js';
 import type { GitPublicationRunner } from '../deliver/git-head-publisher.js';
 import type { HeadPublication } from '../deliver/head-publication.js';
+import {
+  isSendableBranchName,
+  mintPullRequestCreationGrant,
+  type PullRequestCreationSubject,
+} from '../deliver/internal/pull-request-creation-grant.js';
+import { createPullRequest, type CreationResult } from '../deliver/create-pull-request.js';
+import type { PullRequestCreation } from '../deliver/pull-request-creation.js';
+import {
+  AO_PULL_REQUEST_DRAFT,
+  composePullRequestContent,
+} from '../deliver/pull-request-content.js';
+import {
+  createForgeMutationRunner,
+  type ForgeMutationRunner,
+} from '../deliver/github-pull-request-creator.js';
 import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
 import { askRuntimeIgnored } from '../state/runtime-ignored.js';
 import {
@@ -86,6 +122,7 @@ interface DeliveryOptions {
   readonly record?: boolean;
   readonly decide?: boolean;
   readonly publishHead?: boolean;
+  readonly createPr?: boolean;
   readonly attended?: boolean;
 }
 
@@ -151,6 +188,16 @@ export interface DeliveryCommandSeams {
    * a build that stubbed one would still have to say so about the other.
    */
   readonly publicationRunner?: GitPublicationRunner;
+  /**
+   * The runner the one pull-request creation vector goes through.
+   *
+   * A third seam, and not a widening of either of the other two. `runner` reads
+   * a forge, `publicationRunner` writes a Git ref, and this one writes to a
+   * forge. Each of the three is a different thing to be allowed to do, so a
+   * test that stubs one cannot silently stand in for another — the argument
+   * slice 5 made when it refused to reuse the observation seam for its push.
+   */
+  readonly creationRunner?: ForgeMutationRunner;
   /** The Git runner the default ignore probe uses. */
   readonly git?: GitRunner;
 }
@@ -190,10 +237,10 @@ function createRuntimeIgnoreProbe(
 export const OBSERVE_OPTION_DESCRIPTION =
   'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
   'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
-  'that this build does not suppress. This is the only flag that makes this command read ' +
-  'a forge; --publish-head is the only one that makes it change anything on one. Without ' +
-  'either, nothing leaves this machine — though --record still writes a record beside the ' +
-  'task, here.';
+  'that this build does not suppress. This flag only reads. The flags that can change ' +
+  'something are --publish-head and --create-pr, and each of those reads as well, because ' +
+  'each establishes what it is about before and after it acts. With none of the three, ' +
+  'nothing leaves this machine — though --record still writes a record beside the task, here.';
 
 /**
  * The record flag's own sentence, exported so it can be pinned by literal.
@@ -248,6 +295,30 @@ export const PUBLISH_HEAD_OPTION_DESCRIPTION =
   'grants no authority to open or merge one. It writes no task state.';
 
 /**
+ * The flag that names the second act this build can perform on a forge.
+ *
+ * Spelled after what it does, and narrowly. It is not `--pr`, which would grow
+ * to mean whatever the next slice wants done to one, and it is not `--deliver`,
+ * which would name an outcome rather than an act. Creating is the whole of it:
+ * there is no flag here that updates, closes, reopens, marks ready, comments,
+ * labels, requests review or merges, and none of those exists anywhere in this
+ * build.
+ */
+export const CREATE_PR_OPTION_DESCRIPTION =
+  'Open one pull request on github.com for this task, from its work branch to its base ' +
+  'branch. Requires --attended, --observe and --decide, and a task at READY_FOR_PR whose own ' +
+  'fresh decision says this commit was observed and no check on it failed — a stored record ' +
+  'can never stand in for that. Only PULL_REQUEST_REQUIRED means one is needed; the other ' +
+  'admitted decisions mean one existed a moment ago, and a request is sent only when the ' +
+  'reading this flag takes immediately before finds none. The work branch ' +
+  'must already exist on the delivery remote at exactly this commit: this flag never pushes, ' +
+  'and answers HEAD_NOT_PUBLISHED for a ref that is not there, HEAD_SHA_MISMATCH for one ' +
+  'holding another commit. Idempotent by observation: the forge is read before and after, an ' +
+  'intended pull request that already exists is reported and not sent for again, and an ' +
+  'attempt whose result was lost is never repeated blindly. It updates, closes, reviews and ' +
+  'merges nothing, and writes no task state.';
+
+/**
  * Operator presence, in the shape `release` established.
  *
  * A second, independent statement rather than a widening of the first: one flag
@@ -255,9 +326,10 @@ export const PUBLISH_HEAD_OPTION_DESCRIPTION =
  * implies the other, and there is no unattended publication.
  */
 export const ATTENDED_OPTION_DESCRIPTION =
-  'States that an operator is present for this invocation. Required by --publish-head, which ' +
-  'changes a branch on the delivery remote. Not a claim about credentials, and not needed by ' +
-  'any read-only part of this command. There is no unattended publication.';
+  'States that an operator is present for this invocation. Required by every flag here that can ' +
+  'change something outside this machine — today --publish-head and --create-pr. Not a claim ' +
+  'about credentials, and not needed by any read-only part of this command. There is no ' +
+  'unattended publication and no unattended pull request.';
 
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
@@ -267,10 +339,14 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'observation as a historical record beside the task state; without it, nothing is written. ' +
   'With --decide it classifies this invocation\'s own answers into one delivery decision, which ' +
   'is not merge eligibility and grants nothing. With --publish-head and --attended it creates ' +
-  'the work branch on the delivery remote at its pinned commit, create-only — the one thing ' +
-  'this command can change anywhere. Those are the flags that make it contact anything: ' +
-  'without them nothing is read from a network and nothing is written. It writes no task ' +
-  'state, opens no pull request and merges nothing, ever.';
+  'the work branch on the delivery remote at its pinned commit, create-only. With --create-pr ' +
+  'and --attended, on top of --observe and --decide, it opens one pull request from that branch ' +
+  'to the base branch. Those two are what it can change on a forge; they are separately ' +
+  'requested and separately authorised, and neither implies the other. Three flags make it ' +
+  'contact a forge — those two and --observe — and with none of the three is anything read from ' +
+  'a network. It writes no task ' +
+  'state — only --record writes anything at all, and that is a record beside the task, here — ' +
+  'and it never updates, closes, reviews or merges a pull request.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
   const resolve = seams.resolveRepository ?? resolveRepository;
@@ -303,6 +379,10 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     .option(
       '--publish-head',
       PUBLISH_HEAD_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--create-pr',
+      CREATE_PR_OPTION_DESCRIPTION,
     )
     .option(
       '--attended',
@@ -474,6 +554,25 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
             }
           : null;
 
+      // The second mutation, and it is after the first on purpose. A pull
+      // request is created from a branch that must already be on the remote, so
+      // an invocation that was asked for both has to publish before it creates
+      // — and one asked only for this finds the ref already there, or answers
+      // `HEAD_NOT_PUBLISHED` and pushes nothing.
+      const creation =
+        options.createPr === true
+          ? await performCreation(
+              options,
+              repository.root,
+              subject,
+              taskLoad,
+              decision,
+              resolve,
+              load,
+              seams,
+            )
+          : null;
+
       process.stdout.write(
         renderDeliveryObservation({
           repositoryId: repository.id,
@@ -486,6 +585,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           recording,
           decision: decision === null ? null : { decision, revalidation },
           publication,
+          creation,
         }),
       );
 
@@ -511,9 +611,12 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
  *
  * The mint is called here and nowhere else. That is the reachability property
  * the whole authority rests on: a tree walk in the suite proves exactly one
- * module in `src/` imports `internal/head-publication-grant.js`, so "the only
- * way to obtain the authority is to come through this ladder" is a fact about
- * the tree rather than a convention.
+ * module in `src/` *calls* `mintHeadPublicationGrant`, so "the only way to
+ * obtain the authority is to come through this ladder" is a fact about the tree
+ * rather than a convention. (The same walk pins which modules may *import* the
+ * declaring one, and that number is three, not one. This sentence said "one
+ * imports" until a review counted them — the test beside it always asserted
+ * three.)
  *
  * Note what is *not* passed to the mint: nothing derived from the task's title,
  * brief, findings or any other repository-authored prose. The grant carries six
@@ -582,6 +685,303 @@ async function performPublication(
       });
     },
   });
+}
+
+/**
+ * The decisions this invocation may take the creation ladder on, and the one of
+ * them that can end in a request.
+ *
+ * ── Why this is a set and not the single member ───────────────────────────
+ *
+ * It was `decision === 'PULL_REQUEST_REQUIRED'`, and a review measured what
+ * that produces: **`ALREADY_EXISTS` became unreachable from the command.**
+ * `decideDelivery` answers `PULL_REQUEST_REQUIRED` only while *no* open pull
+ * request has this head, so the moment one exists — the moment after a
+ * successful creation — the second invocation decides `CHECKS_PENDING`,
+ * `CHECKS_ABSENT` or `PULL_REQUEST_MATCHED_CHECKS_SUCCESS` and the ladder
+ * refused `DECISION_NOT_ESTABLISHED`, whose sentence advises passing the two
+ * flags the operator had just passed. Three operator-facing texts said the
+ * opposite, including the registered help. `WRONG_BASE_CONFLICT`,
+ * `DRAFT_STATE_CONFLICT` and the pre-attempt `PULL_REQUEST_AMBIGUOUS` were
+ * unreachable for the same reason — the three conflict answers that matter
+ * most.
+ *
+ * So the set admits every decision that means *this invocation freshly observed
+ * this exact commit's pull-request situation and found no failing check*. Four
+ * of the five say a pull request already claims this head, and on those the
+ * ladder's own fresh reading normally answers and sends nothing.
+ *
+ * "Normally", not "always", and the difference is the point. The rule is that a
+ * request fires **only** when the fresh reading says `NONE`; it is not that a
+ * request never fires on those four. If the pull request the decision saw has
+ * gone in the moment between, the reading is the newer fact and sending is
+ * correct. A review found this paragraph asserting the unconditional version,
+ * which the sentence below then contradicts by saying the decision is one
+ * observation older.
+ *
+ * ── What is deliberately not in it ────────────────────────────────────────
+ *
+ * `CHECKS_FAILED`, which is `L-V4-06-4`: a red commit gets no pull request from
+ * this build. And every decision that means no fresh, subject-matched
+ * observation exists at all — `SUBJECT_NOT_ESTABLISHED`, `NOT_DECIDED`,
+ * `OBSERVATION_UNSETTLED`, `SUBJECT_CHANGED`, `SUBJECT_REVALIDATION_FAILED`.
+ * Those are the ones `DECISION_NOT_ESTABLISHED` is honestly about.
+ *
+ * Written as a set rather than as a chain of comparisons so there is one place
+ * to read it from. What pins it is the suite's enumerated equality against
+ * these five names — a sixth member added here fails that, and a member added
+ * to `DELIVERY_DECISIONS` is simply not admitted, which is the fail-closed
+ * direction. Two "partition" assertions were tried beside it and both were
+ * tautologies of the form `filter(p) + filter(!p)`; they are gone, and this
+ * sentence no longer cites them.
+ */
+export const ADMITS_CREATION_LADDER: ReadonlySet<DeliveryDecision> = Object.freeze(
+  new Set<DeliveryDecision>([
+    'PULL_REQUEST_REQUIRED',
+    'PULL_REQUEST_AMBIGUOUS',
+    'CHECKS_PENDING',
+    'CHECKS_ABSENT',
+    'PULL_REQUEST_MATCHED_CHECKS_SUCCESS',
+  ]),
+) as ReadonlySet<DeliveryDecision>;
+
+/**
+ * Decides whether one pull request may be created, and creates it.
+ *
+ * The refusal ladder here is the one `PULL_REQUEST_CREATIONS` declares, in the
+ * same order, and that is checked rather than asserted: the suite drives every
+ * arm and pins which member comes out. Two of the four refusals are about the
+ * work and two are about the invocation, and the work is answered first — an
+ * operator whose task is not finished is told that, rather than being told to
+ * pass a flag that would not have helped.
+ *
+ * ── Why the decision is a gate here and not inside the creator ────────────
+ *
+ * A delivery decision is a *finding* about the forge, produced by `--decide`
+ * from this invocation's own answers. It is checked in this module because this
+ * is where the invocation's answers exist: the creator takes a grant and
+ * re-derives everything else for itself, and handing it a decision to trust
+ * would be handing it a fact it could not check.
+ *
+ * What the decision gates is the *mint*, and the mint gates the act — but the
+ * gate is {@link ADMITS_CREATION_LADDER} rather than the single member
+ * `PULL_REQUEST_REQUIRED`, for the measured reason set out there. Only that one
+ * member means a pull request is *needed*; the other four mean one claimed this
+ * head at the moment of the observation. The rule on all five is the same, and
+ * wherever it appears it is this one: **a request is issued only when the
+ * ladder's own fresh reading says `NONE`.** That is a stronger statement than any decision could
+ * make, because the decision is one observation older — so on those four a
+ * request normally is not sent, and if the pull request has gone in between,
+ * sending is correct.
+ *
+ * The gate is deliberately strict about provenance rather than about wording.
+ * `decision` here is `null` unless `--decide` was passed, and `--decide` is
+ * itself refused without `--observe`, so a run that consults nothing cannot
+ * reach the mint. A record read back from `loadDeliveryEvidence` has no path
+ * into this function at all — slice 3's store is read for the report and is
+ * never an input to any authority.
+ *
+ * The mint is called here and nowhere else, and that is the reachability
+ * property the whole authority rests on. What the suite's tree walk proves is
+ * the two halves separately: four modules in `src/` may *import*
+ * `internal/pull-request-creation-grant.js` — this one, the facade, the creator
+ * and the transport, three of them for the subject type — and exactly one of
+ * them *calls* `mintPullRequestCreationGrant`. A review found this sentence
+ * claiming the first number was one, which the test beside it disproves.
+ *
+ * Note what *is* passed to the mint that slice 5's never took: text. The title
+ * and body are composed by `composePullRequestContent` from the task id, the
+ * two branch names and the object name, and nothing else — no task title (the
+ * state record has none), no brief, no findings, no diff, no log, no path. The
+ * grant binds the exact bytes, and the request can carry only what the grant
+ * holds, so the egress is bounded by the artefact rather than by a filter
+ * somebody has to remember to run.
+ */
+async function performCreation(
+  options: DeliveryOptions,
+  repositoryRoot: string,
+  subject: ReturnType<typeof resolveObservationSubject>,
+  taskLoad: ReturnType<typeof loadTaskState>,
+  decision: DeliveryDecision | null,
+  resolve: typeof resolveRepository,
+  load: typeof loadTaskState,
+  seams: DeliveryCommandSeams,
+): Promise<{
+  readonly result: CreationResult;
+  readonly headRef: string | null;
+  readonly baseRef: string | null;
+  readonly draft: boolean | null;
+}> {
+  // Both are `null` unless a *subject* was established as well as a task
+  // record, and that gate is not cosmetic: a review found the report printing
+  // `Intended : refs/heads/x -> main` directly under the sentence "There is no
+  // delivery target, exact commit, publishable head ref and base branch to be
+  // about", because these were computed from `taskLoad` alone. The view's own
+  // type documents them as null on a refusal that never got as far as having an
+  // intended pull request, so the computation has to agree with it.
+  const established = subject.ok && taskLoad.ok;
+  // The same predicate the mint sends with, not the looser character class.
+  // They were different for one commit and a review measured the cost: a task
+  // with `baseBranch: 'a..b'` passed this arm, so a run without `--attended`
+  // was answered `OPERATOR_ABSENT` — "Pass --attended to create." — for a
+  // delivery the mint would refuse whatever the operator then passed. The
+  // ladder's first arm has to refuse everything the last one will.
+  const intendedHead =
+    established && isSendableBranchName(taskLoad.state.workBranch)
+      ? publishableRef(taskLoad.state.workBranch)
+      : null;
+  const intendedBase =
+    established && isSendableBranchName(taskLoad.state.baseBranch)
+      ? taskLoad.state.baseBranch
+      : null;
+
+  const refused = (creation: PullRequestCreation) =>
+    Object.freeze({
+      result: Object.freeze({
+        creation,
+        remoteHead: null,
+        before: null,
+        attempt: 'NOT_ATTEMPTED' as const,
+        after: null,
+      }),
+      headRef: intendedHead,
+      baseRef: intendedBase,
+      draft: null,
+    });
+
+  // The two subject arms come first, together, and that is a correction. The
+  // grammar half used to sit fifth, behind `--attended` and the decision, so a
+  // task whose branch or base this build will not send was told "Pass
+  // --attended to create." — advice that could not have helped, which is the
+  // exact failure the ladder's own docstring claims the order avoids.
+  if (!subject.ok || !taskLoad.ok) return refused('SUBJECT_NOT_ESTABLISHED');
+  if (intendedHead === null || intendedBase === null) return refused('SUBJECT_NOT_ESTABLISHED');
+  if (taskLoad.state.state !== 'READY_FOR_PR') return refused('TASK_NOT_READY');
+  if (options.attended !== true) return refused('OPERATOR_ABSENT');
+  if (decision === null || !ADMITS_CREATION_LADDER.has(decision)) {
+    return refused('DECISION_NOT_ESTABLISHED');
+  }
+
+  const intent = buildCreationIntent(
+    taskLoad.state.taskId,
+    subject.remoteName,
+    intendedHead,
+    intendedBase,
+    subject.subject.commit,
+  );
+  const grant = mintPullRequestCreationGrant(subject.subject, intent);
+  // The mint refuses anything it will not send or will not put in a local Git
+  // argument vector. Reported as an unestablished subject rather than as its
+  // own member, for the reason `performPublication` gives: from an operator's
+  // side there is no difference between "there is no pull request to be about"
+  // and "the one there would be, is not one this build will ask for".
+  //
+  // And it carries NO intended pull request, which the shared `refused` helper
+  // would. The mint refuses for conditions the two checks above do not cover —
+  // a work branch equal to the base, a task id outside the grammar, a remote
+  // name that is not bare — and on those the helper printed a concrete head and
+  // base under the sentence saying there is none. A review found the first fix
+  // for this closing two arms of three.
+  if (grant === null) {
+    return Object.freeze({
+      result: Object.freeze({
+        creation: 'SUBJECT_NOT_ESTABLISHED' as const,
+        remoteHead: null,
+        before: null,
+        attempt: 'NOT_ATTEMPTED' as const,
+        after: null,
+      }),
+      headRef: null,
+      baseRef: null,
+      draft: null,
+    });
+  }
+
+  const result = await createPullRequest(grant, repositoryRoot, {
+    reader: seams.runner ?? createForgeCommandRunner(),
+    mutator: seams.creationRunner ?? createForgeMutationRunner(),
+    envSource: seams.envSource ?? process.env,
+    gitRunner: seams.publicationRunner,
+    // A second, independent pass through the whole resolution — repository,
+    // task record, subject, branches, content — for the reason
+    // `revalidateLocalSubject` gives: the point is to ask the world, because
+    // what may have moved is the world. It runs *before* the effect, because
+    // afterwards there would be nothing useful to do with the answer.
+    recheck: async (): Promise<PullRequestCreationSubject | null> => {
+      const again = await resolve({ repositoryPath: options.repository });
+      if (!again.ok) return null;
+      const reloaded = load(again.repository.root, options.task);
+      if (!reloaded.ok) return null;
+      if (reloaded.state.state !== 'READY_FOR_PR') return null;
+      const rebuilt = resolveObservationSubject(again.repository.delivery, reloaded);
+      if (!rebuilt.ok) return null;
+      // The strict grammar on both names here too. A divergent head would
+      // reach `SUBJECT_CHANGED` a moment later through `sameSubject`, so this
+      // is a floor — but a commit whose stated rule is "two arms, two names,
+      // one rule" should not leave the third pair asymmetric.
+      if (!isSendableBranchName(reloaded.state.workBranch)) return null;
+      const head = publishableRef(reloaded.state.workBranch);
+      if (head === null) return null;
+      // **A floor, not a live gate, and labelled as one because a counter-proof
+      // said so.** Removing it kills no test, and the argument is that it
+      // cannot: the grant was minted from a base that passed this grammar, and
+      // `sameSubject` compares the base by equality. A reloaded base that is
+      // invalid is therefore also unequal, and reaches `SUBJECT_CHANGED` a
+      // moment later by the comparison rather than by this line. It stays
+      // because the premise is another function's — pinned by the
+      // "the base branch changed" case — and a guarantee that depends on a
+      // comparison staying where it is, is not one this closure can make.
+      if (!isSendableBranchName(reloaded.state.baseBranch)) return null;
+      return Object.freeze({
+        host: rebuilt.subject.host,
+        owner: rebuilt.subject.owner,
+        name: rebuilt.subject.name,
+        ...buildCreationIntent(
+          reloaded.state.taskId,
+          rebuilt.remoteName,
+          head,
+          reloaded.state.baseBranch,
+          rebuilt.subject.commit,
+        ),
+        headCommit: rebuilt.subject.commit,
+      });
+    },
+  });
+
+  return Object.freeze({
+    result,
+    headRef: intendedHead,
+    baseRef: intendedBase,
+    draft: AO_PULL_REQUEST_DRAFT,
+  });
+}
+
+/**
+ * The intended pull request, derived from the task and nothing else.
+ *
+ * One function, used by both the mint call and the re-check, so the two cannot
+ * describe different pull requests. Written as a shared derivation rather than
+ * as two spellings of the same rule for the reason a review gave when it found
+ * `publishableRef` duplicated: two expressions that had to agree, and nothing
+ * that made them.
+ */
+function buildCreationIntent(
+  taskId: string,
+  remoteName: string,
+  headRef: string,
+  baseRef: string,
+  headCommit: string,
+) {
+  const content = composePullRequestContent({ taskId, headRef, headCommit, baseRef });
+  return {
+    taskId,
+    remoteName,
+    headRef,
+    baseRef,
+    draft: AO_PULL_REQUEST_DRAFT,
+    title: content.title,
+    body: content.body,
+  } as const;
 }
 
 /**

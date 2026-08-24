@@ -30,13 +30,17 @@
  *
  * ── What this build does not even look at ──────────────────────────────────
  *
- * Draft status, mergeability, merge-state, review verdict and whether the
- * repository is archived are **not observed by this build at all**. Draft is
- * carried on an endpoint slice 2 already calls and is still not read, because
- * reading it would put a new field in the durable evidence record and change
- * that record's version — a slice-3 contract change that belongs to whoever
- * takes it deliberately. The consequence is stated rather than hidden: a
- * positive decision can be true of a **draft** pull request.
+ * Mergeability, merge-state, review verdict and whether the repository is
+ * archived are **not observed by this build at all**.
+ *
+ * Draft used to be on that list and no longer is. V4 slice 6 reads it, because
+ * a pull request it did not open in the draft state it intended is not the pull
+ * request it intended — so `PullCandidate` now carries `draft`, and slice 6's
+ * ladder compares it. Two things did **not** change, and they are the ones this
+ * paragraph was protecting: it is still not in the durable evidence record, so
+ * slice 3's record version is untouched; and **nothing in this module reads
+ * it**. The consequence is therefore unchanged and still stated rather than
+ * hidden: a positive decision can be true of a **draft** pull request.
  *
  * ── Freshness is structural, not documented ────────────────────────────────
  *
@@ -109,6 +113,8 @@ export const MERGE_ELIGIBILITY_SENTENCE =
  *    be talking about and every later answer would be about an unknown one;
  *  - **no pull request** outranks a pending or absent check, because opening
  *    one is the next action and it can be taken while checks are still running.
+ *    Since V4 slice 6 that action is also the one this build can be asked to
+ *    perform, which is why this member and no other gates the creation mint.
  *
  * Every member is reachable, and the suite pins each one by name.
  */
@@ -220,8 +226,9 @@ export const DELIVERY_DECISION_DETAIL: Readonly<Record<DeliveryDecision, string>
     'More than one open pull request claims this exact head, so there is no single one to decide ' +
     'about.',
   PULL_REQUEST_REQUIRED:
-    'No open pull request has this exact commit as its head. Opening one is a human step; this ' +
-    'build opens none.',
+    'No open pull request has this exact commit as its head. Opening one is the next act, and ' +
+    'this decision is not permission to take it: delivery --create-pr --attended asks for it ' +
+    'explicitly, under its own authority, and nothing on this path opens anything.',
   CHECKS_PENDING:
     'The pull request matched and at least one check on this commit is still running.',
   CHECKS_ABSENT:

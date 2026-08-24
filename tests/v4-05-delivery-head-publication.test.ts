@@ -43,7 +43,7 @@ import {
 import { buildProgram } from '../src/cli/index.js';
 import {
   CONTACTED_TRAILER,
-  OBSERVED_AND_PUBLISHED_TRAILER,
+  OBSERVED_AND_CHANGED_TRAILER,
   PUBLICATION_TRAILER,
   renderDeliveryObservation,
 } from '../src/cli/render-delivery-observation.js';
@@ -1013,18 +1013,52 @@ describe('exactly one module can change anything, and it changes one ref', () =>
     expect(minters).toEqual(['src/cli/delivery-command.ts']);
   });
 
-  it('still names no writer, no lease, no agent and no API mutation', () => {
+  it('still names no writer, no lease, no agent and no merge', () => {
     for (const file of SURFACE) {
       const code = codeOnly(file);
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
       expect(code, file).not.toMatch(/\brunOwnedCommand\s*\(|\bspawn\s*\(/);
-      expect(code, file).not.toMatch(/-X\s*(POST|PATCH|PUT|DELETE)/);
       expect(code, file).not.toMatch(/gh pr merge|--auto\b/);
-      // The three acts this slice explicitly does not gain.
-      expect(code, file).not.toMatch(/\bcreatePullRequest\b|\bmergePullRequest\b|\bcreate-pull-request\b/);
+      expect(code, file).not.toMatch(/\bmergePullRequest\b/);
     }
+  });
+
+  // Two assertions used to live in the case above and were true when this slice
+  // shipped: that no module in the delivery surface names `-X POST` (or PATCH,
+  // PUT, DELETE), and that none names `createPullRequest`. **V4 slice 6 made
+  // both false on purpose**, and they are moved rather than deleted — a removed
+  // assertion takes its citations with it, and "this build performs no API
+  // mutation" was one of the things this file measured.
+  //
+  // What survives here is the half that is still slice 5's business: the
+  // publication path is Git, so it must name no HTTP method at all. The other
+  // half — that POST appears in exactly one module, at exactly one endpoint —
+  // is a slice-6 claim and is pinned in `tests/v4-06-…`, where the module it is
+  // about lives.
+  // Both spellings are matched: the token pair a real vector uses, and the
+  // single string a careless one might. The first version of these patterns
+  // looked only for the string, which no vector in this build writes — so it
+  // measured nothing, and slice 6's creator walked straight past it.
+  const METHOD = (...names: string[]): RegExp => {
+    const alt = names.join('|');
+    return new RegExp(`-X\\s*(${alt})|['"]-X['"]\\s*,\\s*['"](${alt})['"]`);
+  };
+
+  it('leaves the publication path free of any HTTP method', () => {
+    for (const file of ['src/deliver/git-head-publisher.ts', 'src/deliver/publish-delivery-head.ts']) {
+      expect(codeOnly(file), file).not.toMatch(METHOD('GET', 'POST', 'PATCH', 'PUT', 'DELETE'));
+    }
+  });
+
+  it('names no method other than GET or POST anywhere on the delivery surface', () => {
+    for (const file of SURFACE) {
+      expect(codeOnly(file), file).not.toMatch(METHOD('PATCH', 'PUT', 'DELETE'));
+    }
+    // False-negative guard: the pattern matches both spellings of a real one.
+    expect("['api', '-X', 'DELETE', p]").toMatch(METHOD('PATCH', 'PUT', 'DELETE'));
+    expect('-X PUT').toMatch(METHOD('PATCH', 'PUT', 'DELETE'));
   });
 
   it('leaves READY_FOR_PR terminal, with no outgoing transition', () => {
@@ -1280,12 +1314,21 @@ describe('the surface states its own limits', () => {
       '--publish-head',
       'create-only',
       'writes no task state',
-      'opens no pull request',
     ]) {
       expect(DELIVERY_COMMAND_DESCRIPTION, clause).toContain(clause);
     }
     // And the clause slice 5 falsified must be gone.
     expect(DELIVERY_COMMAND_DESCRIPTION).not.toContain('Contacts nothing without --observe');
+    // `opens no pull request` was in the list above and is gone from both, for
+    // the same reason and one slice later: V4 slice 6 opens one. The clause is
+    // not merely removed from the pin — it must be absent from the description,
+    // or the description would be claiming something the build no longer does.
+    expect(DELIVERY_COMMAND_DESCRIPTION).not.toContain('opens no pull request');
+    // What replaced it is a narrower claim that is still true, and it is pinned
+    // here so removing it is a visible act.
+    expect(DELIVERY_COMMAND_DESCRIPTION).toContain(
+      'never updates, closes, reviews or merges a pull request',
+    );
   });
 
   it('registers both flags with the sentences that were pinned, not copies', () => {
@@ -1384,7 +1427,7 @@ describe('the surface states its own limits', () => {
     });
 
     expect(rendered).toContain(PUBLICATION_TRAILER);
-    expect(rendered).toContain(OBSERVED_AND_PUBLISHED_TRAILER);
+    expect(rendered).toContain(OBSERVED_AND_CHANGED_TRAILER);
     // The disclosure the fix existed to keep.
     expect(rendered).toContain('L-V4-02-6');
     // And the framing that stopped being true.
