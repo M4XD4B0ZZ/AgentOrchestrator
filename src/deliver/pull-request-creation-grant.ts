@@ -3,10 +3,15 @@
  *
  * Everything outside `internal/` sees a type it cannot construct, a guard, and
  * a single-use accessor. The mint is not re-exported here, and a test walks the
- * tree to prove exactly one module imports it — the same reachability pin slice
- * 3 put on the observation proof and slice 5 put on the publication grant, for
- * the same reason. An artefact whose mint is importable from anywhere is a
- * shape, not an authority.
+ * tree to prove that exactly one module *calls* it — the same reachability pin
+ * slice 3 put on the observation proof and slice 5 put on the publication
+ * grant, for the same reason. An artefact whose mint is callable from anywhere
+ * is a shape, not an authority.
+ *
+ * The same walk pins the smaller fact underneath: which modules may import the
+ * declaring one at all. That set is four, not one, because three of them need
+ * the subject type — and saying "one module imports it" was wrong here and in
+ * slice 5's copy until a review counted them.
  *
  * The distinction this slice exists to hold is visible in what this file does
  * *not* export. There is no `MergeGrant`, no `PullRequestUpdateGrant`, no

@@ -1,10 +1,13 @@
 /**
  * Observe, mutate at most once, observe again — for a pull request this time.
  *
- * The second function in this build that can change something on a forge, and
- * it is the same seven steps as the first, in the same order, for the same
- * reasons. Where it differs from `publish-delivery-head.ts` it differs because
- * the far side does, and each difference is named below.
+ * The second function in this build that can change something on a forge. It is
+ * `publish-delivery-head.ts`'s shape with one step more: that one has six, and
+ * this one has seven, because the act it performs has a precondition a ref
+ * update does not — the head must already be on the remote, at exactly the
+ * intended commit, before a pull request can name it. Where it differs beyond
+ * that, it differs because the far side does, and each difference is named
+ * below.
  *
  * ── The order, and why each step is where it is ───────────────────────────
  *
@@ -157,8 +160,17 @@ function result(
 }
 
 /**
- * Every field, compared. A subject that agrees on nine of ten is a different
- * subject, and the tenth is the one that would have been sent.
+ * Every field, compared. A subject that agrees on ten of eleven is a different
+ * subject, and the eleventh is the one that would have been acted on.
+ *
+ * `remoteName` was missing from this list and a review found it. It is not a
+ * decoration: it is the field the two *local* preconditions below are asked
+ * about — `readUrlAgreement` and `readRemoteRef` both run against
+ * `authorised.remoteName` — so a delivery remote repointed between the mint and
+ * this check would have had the head-ref proof taken against one repository
+ * while the request went to another. That is the hazard `REMOTE_URLS_DIVERGE`
+ * exists to close, reached by the other route. The count in the sentence above
+ * was wrong too, which is how the omission survived being read.
  */
 function sameSubject(a: PullRequestCreationSubject, b: PullRequestCreationSubject): boolean {
   return (
@@ -166,6 +178,7 @@ function sameSubject(a: PullRequestCreationSubject, b: PullRequestCreationSubjec
     a.host === b.host &&
     a.owner === b.owner &&
     a.name === b.name &&
+    a.remoteName === b.remoteName &&
     a.headRef === b.headRef &&
     a.headCommit === b.headCommit &&
     a.baseRef === b.baseRef &&

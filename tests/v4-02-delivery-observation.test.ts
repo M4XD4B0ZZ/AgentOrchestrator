@@ -2003,11 +2003,6 @@ describe('the product contract is unchanged', () => {
       /['"]-X['"]\s*,\s*['"](POST|PUT|PATCH|DELETE)['"]/,
       /--method['"]?\s*[,=]?\s*['"](POST|PUT|PATCH|DELETE)['"]/,
       /['"]-X (POST|PUT|PATCH|DELETE)['"]/,
-      // The split form, which is how every vector in this build is actually
-      // written. Without it the pattern above reads a string nothing here
-      // produces, and the sweep would be blind to the one spelling it will
-      // meet — measured: slice 6's creator was invisible to it.
-      /['"]-X['"]\s*,\s*['"](POST|PUT|PATCH|DELETE)['"]/,
       // A writing subcommand of the client, adjacent or templated.
       /['"](pr|issue|api|repos)\/?['"]\s*,\s*['"](create|merge|edit|close|review|comment)['"]/,
       /['"]gh (pr|issue) (create|merge|edit|close|review|comment)/,

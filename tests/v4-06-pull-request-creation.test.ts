@@ -40,11 +40,13 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  ADMITS_CREATION_LADDER,
   CREATE_PR_OPTION_DESCRIPTION,
   ATTENDED_OPTION_DESCRIPTION,
   DELIVERY_COMMAND_DESCRIPTION,
   registerDeliveryCommand,
 } from '../src/cli/delivery-command.js';
+import { DELIVERY_DECISIONS } from '../src/deliver/delivery-decision.js';
 import {
   CREATION_TRAILER,
   CONTACTED_TRAILER,
@@ -372,7 +374,15 @@ describe('grading a creation', () => {
     ['one open at another base', open({ baseRef: 'release' }), 'NOT_ATTEMPTED', null, 'WRONG_BASE_CONFLICT'],
     ['one open in the wrong draft state', open({ draft: true }), 'NOT_ATTEMPTED', null, 'DRAFT_STATE_CONFLICT'],
     ['an OPEN_ONE carrying nothing', situation('OPEN_ONE', null, [7]), 'NOT_ATTEMPTED', null, 'PULL_REQUEST_STATE_UNKNOWN'],
-    ['nothing, and nothing attempted', situation('NONE'), 'NOT_ATTEMPTED', null, 'CREATION_REFUSED'],
+    // `NOT_ATTEMPTED` goes through the same ladder as the other two attempt
+    // words, and these four rows are why. It used to short-circuit to
+    // CREATION_REFUSED, whose sentence says "The request was refused" — on
+    // paths where no process ever existed, and while discarding a post-reading
+    // the orchestration had already taken.
+    ['nothing attempted and nothing readable after', situation('NONE'), 'NOT_ATTEMPTED', null, 'OUTCOME_UNCERTAIN'],
+    ['nothing attempted and nothing there after', situation('NONE'), 'NOT_ATTEMPTED', situation('NONE'), 'CREATION_REFUSED'],
+    ['nothing attempted and the intended one there after', situation('NONE'), 'NOT_ATTEMPTED', open(), 'CONVERGED_AFTER_UNCERTAIN_EFFECT'],
+    ['nothing attempted and an unreadable after', situation('NONE'), 'NOT_ATTEMPTED', SITUATION_UNKNOWN, 'OUTCOME_UNCERTAIN'],
     ['a completed attempt with no post-reading', situation('NONE'), 'COMPLETED', null, 'OUTCOME_UNCERTAIN'],
     ['a completed attempt and an unreadable after', situation('NONE'), 'COMPLETED', SITUATION_UNKNOWN, 'OUTCOME_UNCERTAIN'],
     ['a completed attempt and nothing after', situation('NONE'), 'COMPLETED', situation('NONE'), 'OUTCOME_UNCERTAIN'],
@@ -382,7 +392,10 @@ describe('grading a creation', () => {
     ['a completed attempt and the wrong base after', situation('NONE'), 'COMPLETED', open({ baseRef: 'release' }), 'POSTCONDITION_MISMATCH'],
     ['a completed attempt and the wrong draft after', situation('NONE'), 'COMPLETED', open({ draft: true }), 'POSTCONDITION_MISMATCH'],
     ['a completed attempt and a closed one after', situation('NONE'), 'COMPLETED', situation('CLOSED_ONLY', null, [7]), 'POSTCONDITION_MISMATCH'],
-    ['a completed attempt and two after', situation('NONE'), 'COMPLETED', situation('OPEN_MANY', null, [7, 8]), 'PULL_REQUEST_AMBIGUOUS'],
+    // Not PULL_REQUEST_AMBIGUOUS: that member's sentence ends "and nothing was
+    // attempted", and a request was sent on this path — very possibly creating
+    // one of the two the reading found.
+    ['a completed attempt and two after', situation('NONE'), 'COMPLETED', situation('OPEN_MANY', null, [7, 8]), 'POSTCONDITION_MISMATCH'],
     ['a completed attempt and an empty OPEN_ONE after', situation('NONE'), 'COMPLETED', situation('OPEN_ONE', null, [7]), 'OUTCOME_UNCERTAIN'],
   ];
 
@@ -852,6 +865,23 @@ describe('the one request vector', () => {
     expect(m.calls).toHaveLength(1);
   });
 
+  it.each([
+    ['an owner that is not a path segment', { owner: 'a/b' }],
+    ['a repository name that is not a path segment', { name: 'a b' }],
+    ['an empty owner', { owner: '' }],
+  ])('does not start a client for %s', async (_name, over) => {
+    // The two values that form the request path, re-tested at the last moment
+    // before a process exists — the argument this module already made for the
+    // host, applied to the rest of `repos/{owner}/{name}/pulls`.
+    const m = mutations();
+    const attempt = await createPullRequestVia(subjectFacts(over), {
+      runner: m.runner,
+      envSource: { PATH: '/x' },
+    });
+    expect(attempt).toBe('NOT_ATTEMPTED');
+    expect(m.calls).toHaveLength(0);
+  });
+
   it('does not start a client for an unsupported host', async () => {
     const m = mutations();
     const attempt = await createPullRequestVia(subjectFacts({ host: 'gitlab.com' }), {
@@ -987,6 +1017,14 @@ describe('creating one pull request', () => {
     ['the work branch changed', subjectFacts({ headRef: 'refs/heads/other' })],
     ['the target moved', subjectFacts({ owner: 'someone-else' })],
     ['the task id changed', subjectFacts({ taskId: 'T-002' })],
+    // The eleventh field, and the one this comparison omitted until a review
+    // counted them. It is the field both local preconditions are asked about,
+    // so a delivery remote repointed here would have the head-ref proof taken
+    // against one repository while the request went to another.
+    ['the delivery remote changed', subjectFacts({ remoteName: 'upstream' })],
+    ['the host changed', subjectFacts({ host: 'gitlab.com' })],
+    ['the repository name changed', subjectFacts({ name: 'AnotherRepo' })],
+    ['the draft policy changed', subjectFacts({ draft: true })],
     ['the title would differ', subjectFacts({ title: 'something else' })],
     ['the body would differ', subjectFacts({ body: 'something else' })],
   ])('refuses when %s between minting and acting', async (_name, still) => {
@@ -1250,6 +1288,7 @@ describe('the delivery command creates only when asked, and only when it may', (
       readonly checkPages?: readonly string[];
       readonly mutator?: Mutations;
       readonly state?: StateLoadResult;
+      readonly delivery?: ResolvedDelivery;
     } = {},
   ): Promise<{ out: string; mutations: Mutations }> {
     const root = mkdtempSync(join(tmpdir(), 'ao-v406-'));
@@ -1294,7 +1333,7 @@ describe('the delivery command creates only when asked, and only when it may', (
         resolveRepository: async () =>
           ({
             ok: true,
-            repository: { id: 'repo', root, delivery: DECLARED },
+            repository: { id: 'repo', root, delivery: over.delivery ?? DECLARED },
           }) as unknown as Awaited<ReturnType<typeof import('../src/repo/resolve-repository.js').resolveRepository>>,
         loadTaskState: () => over.state ?? taskState(),
         runner: reader,
@@ -1311,6 +1350,38 @@ describe('the delivery command creates only when asked, and only when it may', (
     }
     return { out: chunks.join(''), mutations: m };
   }
+
+  it('admits exactly the decisions that mean a fresh, unfailed observation', () => {
+    // Partitioned against the whole vocabulary, so a new decision member has to
+    // be put on one side or the other rather than defaulting to refused.
+    const admitted = DELIVERY_DECISIONS.filter((d) => ADMITS_CREATION_LADDER.has(d));
+    const refusedBy = DELIVERY_DECISIONS.filter((d) => !ADMITS_CREATION_LADDER.has(d));
+    expect([...admitted].sort()).toEqual(
+      [
+        'PULL_REQUEST_REQUIRED',
+        'PULL_REQUEST_AMBIGUOUS',
+        'CHECKS_PENDING',
+        'CHECKS_ABSENT',
+        'PULL_REQUEST_MATCHED_CHECKS_SUCCESS',
+      ].sort(),
+    );
+    expect(admitted.length + refusedBy.length).toBe(DELIVERY_DECISIONS.length);
+    // The two kinds that are out, named rather than counted: a failing check
+    // (L-V4-06-4) and every decision that means no fresh, subject-matched
+    // observation exists.
+    expect(refusedBy).toContain('CHECKS_FAILED');
+    for (const unsettled of [
+      'SUBJECT_NOT_ESTABLISHED',
+      'NOT_DECIDED',
+      'OBSERVATION_UNSETTLED',
+      'SUBJECT_CHANGED',
+      'SUBJECT_REVALIDATION_FAILED',
+    ] as const) {
+      expect(refusedBy, unsettled).toContain(unsettled);
+    }
+    // And only one of the admitted five means a pull request is *needed*.
+    expect(ADMITS_CREATION_LADDER.has('PULL_REQUEST_REQUIRED')).toBe(true);
+  });
 
   it('creates nothing without the flag, and says nothing about creation', async () => {
     const { out, mutations: m } = await run(['--observe', '--decide']);
@@ -1335,6 +1406,33 @@ describe('the delivery command creates only when asked, and only when it may', (
     expect(second.mutations.calls).toHaveLength(0);
   });
 
+  it('answers the subject arms before the invocation arms', async () => {
+    // The ladder order the vocabulary declares. It used to check the branch and
+    // base grammar fifth, behind --attended, so a task whose base this build
+    // will not send was told "Pass --attended to create." — advice that could
+    // not have helped, which is exactly the failure the docstring claims the
+    // order avoids.
+    const { out, mutations: m } = await run(['--observe', '--decide', '--create-pr'], {
+      state: taskState({ baseBranch: 'not a branch name' }),
+    });
+    expect(out).toContain('Creation     : SUBJECT_NOT_ESTABLISHED');
+    expect(out).not.toContain('Creation     : OPERATOR_ABSENT');
+    expect(m.calls).toHaveLength(0);
+  });
+
+  it('prints no intended pull request when there is no subject to have one', async () => {
+    // The `Intended` line used to be computed from the task record alone, so it
+    // printed a concrete head and base directly under the sentence saying there
+    // is no delivery target to be about.
+    const { out, mutations: m } = await run(['--create-pr', '--attended'], {
+      delivery: { declared: false as const },
+    });
+    expect(out).toContain('Creation     : SUBJECT_NOT_ESTABLISHED');
+    expect(out).toContain('Intended     : no intended pull request was established');
+    expect(out).not.toContain(REF);
+    expect(m.calls).toHaveLength(0);
+  });
+
   it('refuses a task that has not finished', async () => {
     const { out, mutations: m } = await run(['--observe', '--decide', '--create-pr', '--attended'], {
       state: taskState({ state: 'REVIEWING' }),
@@ -1357,12 +1455,46 @@ describe('the delivery command creates only when asked, and only when it may', (
     expect(out).not.toContain('not a branch name');
   });
 
-  it('refuses when the decision is not PULL_REQUEST_REQUIRED', async () => {
+  it('answers ALREADY_EXISTS on a second run, and sends nothing', async () => {
+    // The whole idempotency claim, at the surface rather than at the module.
     // A green observation whose pull request already matched decides
-    // PULL_REQUEST_MATCHED_CHECKS_SUCCESS, which is not permission to create.
+    // PULL_REQUEST_MATCHED_CHECKS_SUCCESS, which is *not* PULL_REQUEST_REQUIRED
+    // — and while that single member was the gate, this run answered
+    // DECISION_NOT_ESTABLISHED and advised passing the two flags it had just
+    // been given. Three operator-facing texts said ALREADY_EXISTS was what a
+    // second invocation answers. Now it is.
     const matched = pullsBody([{ number: 7, state: 'open', sha: HEAD }]);
     const { out, mutations: m } = await run(['--observe', '--decide', '--create-pr', '--attended'], {
       forgePages: [matched, matched, matched],
+    });
+    expect(out).toContain('Creation     : ALREADY_EXISTS');
+    expect(out).toContain('Forge before : OPEN_ONE #7  (draft: false)');
+    expect(m.calls).toHaveLength(0);
+    // And it is a read-only run, so it must not carry the mutation trailer.
+    expect(out).not.toContain(CREATION_TRAILER);
+    expect(out).toContain(CONTACTED_TRAILER);
+  });
+
+  it.each([
+    ['a wrong base', 'release', 'WRONG_BASE_CONFLICT'],
+    ['a draft', BASE, 'DRAFT_STATE_CONFLICT'],
+  ])('answers %s as its own conflict, and sends nothing', async (_name, base, expected) => {
+    const conflicting = pullsBody([
+      { number: 7, state: 'open', sha: HEAD, base, draft: expected === 'DRAFT_STATE_CONFLICT' },
+    ]);
+    const { out, mutations: m } = await run(['--observe', '--decide', '--create-pr', '--attended'], {
+      forgePages: [conflicting, conflicting, conflicting],
+    });
+    expect(out).toContain(`Creation     : ${expected}`);
+    expect(m.calls).toHaveLength(0);
+  });
+
+  it('still refuses a decision this build will not create from', async () => {
+    // CHECKS_FAILED is deliberately outside the admissible set — L-V4-06-4 —
+    // and every unsettled decision is too. This drives the second kind: the
+    // forge refuses the pull-request question, so nothing settles.
+    const { out, mutations: m } = await run(['--observe', '--decide', '--create-pr', '--attended'], {
+      forgePages: [null, null, null],
     });
     expect(out).toContain('Creation     : DECISION_NOT_ESTABLISHED');
     expect(m.calls).toHaveLength(0);
@@ -1503,6 +1635,44 @@ describe('the report', () => {
     expect(out).not.toContain('somebody-elses-branch');
   });
 
+  it('calls a run that attempted nothing read-only, whatever it looked at', () => {
+    // The selection used to be "did this path take a reading", which printed
+    // "Not read-only." over runs that published nothing and created nothing.
+    // Both acts below contacted the remote and both refused.
+    const out = renderDeliveryObservation({
+      ...base,
+      observation: { pullRequest: { outcome: 'MATCHED', pullRequest: 7 }, checks: { outcome: 'NO_CHECKS' } },
+      publication: {
+        result: {
+          publication: 'ALREADY_PUBLISHED',
+          before: { outcome: 'AT_COMMIT', commit: HEAD },
+          attempt: 'NOT_ATTEMPTED',
+          after: null,
+        },
+        ref: REF,
+        remoteName: REMOTE,
+      },
+      creation: {
+        result: {
+          creation: 'ALREADY_EXISTS',
+          remoteHead: { outcome: 'AT_COMMIT', commit: HEAD },
+          before: { outcome: 'OPEN_ONE', open: { number: 7, baseRef: BASE, draft: false }, numbers: [7] },
+          attempt: 'NOT_ATTEMPTED',
+          after: null,
+        },
+        headRef: REF,
+        baseRef: BASE,
+        draft: false,
+      },
+    } as never);
+    expect(out).toContain(CONTACTED_TRAILER);
+    expect(out).not.toContain('Not read-only.');
+    // And the readings are still reported: the trailer is about what changed,
+    // not about what was looked at.
+    expect(out).toContain('Remote head  : AT_COMMIT');
+    expect(out).toContain('Forge before : OPEN_ONE #7');
+  });
+
   it('prints both act trailers when one invocation did both', () => {
     const out = renderDeliveryObservation({
       ...base,
@@ -1544,8 +1714,16 @@ describe('the report', () => {
     expect(PUBLICATION_TRAILER).not.toContain('No pull request was opened');
     expect(PUBLICATION_TRAILER).toContain('The publication could change exactly one thing');
     expect(CREATION_TRAILER).toContain('The creation could change exactly one thing');
-    expect(CREATION_TRAILER).toContain('No branch was pushed');
     expect(CREATION_TRAILER).toContain('marked ready or draft');
+    // Every clause after the first is about *the creation*, not about the
+    // invocation. It used to end "No branch was pushed and no ref was changed",
+    // which a review read back on a run that had just published a branch three
+    // lines above — the same defect this file had already repaired in the other
+    // trailer, reintroduced in the new one.
+    const collapse = (t: string): string => t.replace(/\s+/g, ' ');
+    expect(collapse(CREATION_TRAILER)).toContain('it pushed no branch and changed no ref');
+    expect(CREATION_TRAILER).not.toContain('No branch was pushed');
+    expect(PUBLICATION_TRAILER).not.toContain('No task state was written.');
   });
 });
 
@@ -1631,9 +1809,13 @@ describe('what this slice did not gain', () => {
 
   it('imports the creation mint in exactly one module of the whole source tree', () => {
     const all = walk('src');
-    const importers = all.filter((f) =>
-      /from\s+'[^']*internal\/pull-request-creation-grant\.js'/.test(readFileSync(f, 'utf8')),
-    );
+    // Both quote styles and a dynamic import, because nothing in this
+    // repository enforces one: there is no ESLint or Prettier config, so a
+    // single-quote-only pattern would miss a module written the other way and
+    // the pin would pass while a second importer existed.
+    const importsTheMint =
+      /(?:from|import)\s*\(?\s*['"`][^'"`]*internal\/pull-request-creation-grant\.js['"`]/;
+    const importers = all.filter((f) => importsTheMint.test(readFileSync(f, 'utf8')));
     // The public facade re-exports the type; the CLI mints; the creator and the
     // transport name the subject type. Nothing else.
     expect(importers.sort()).toEqual(
@@ -1649,10 +1831,14 @@ describe('what this slice did not gain', () => {
     // module is excluded by name rather than by a cleverer regex.
     const DECLARES = 'src/deliver/internal/pull-request-creation-grant.ts';
     expect(all, 'the declaring module must exist').toContain(DECLARES);
-    const minters = all
-      .filter((f) => f !== DECLARES)
-      .filter((f) => /\bmintPullRequestCreationGrant\s*\(/.test(codeOnly(f)));
+    // The name, however it was bound: a renaming import would defeat a pattern
+    // that only looked for the call site.
+    const namesTheMint = /\bmintPullRequestCreationGrant\b/;
+    const minters = all.filter((f) => f !== DECLARES).filter((f) => namesTheMint.test(codeOnly(f)));
     expect(minters).toEqual(['src/cli/delivery-command.ts']);
+    // False-negative guards: both patterns match the module they are aimed at.
+    expect(importsTheMint.test(readFileSync('src/cli/delivery-command.ts', 'utf8'))).toBe(true);
+    expect(namesTheMint.test(codeOnly('src/cli/delivery-command.ts'))).toBe(true);
   });
 
   it('runs the creation through its own seam, not the reading one', () => {

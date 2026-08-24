@@ -805,13 +805,15 @@ describe('this slice grants nothing and moves nothing', () => {
 
     for (const file of SURFACE) {
       const code = codeOnly(file);
-      // A file whose code stripped to nothing would pass every pattern below
-      // for the wrong reason, so each one is shown to have survived stripping.
+      // Positive control: the stripper left real code, not just whitespace.
       // It used to be `> 200`, which was a size rule wearing a control's
-      // clothing: `internal/delivery-ref-grammar.ts` is two regular expressions
-      // and a lot of comment, and it turned this red without any claim here
-      // becoming false.
-      expect(code.length, file).toBeGreaterThan(0);
+      // clothing — `internal/delivery-ref-grammar.ts` is two regular
+      // expressions and a lot of comment, and it turned this red without any
+      // claim here becoming false. It was then `> 0`, which a review showed is
+      // a tautology: `codeOnly` replaces a comment with a space and keeps every
+      // newline, so an all-comment file passes it. Non-whitespace length is the
+      // floor that survives the real case and still catches the empty one.
+      expect(code.replace(/\s+/g, '').length, file).toBeGreaterThan(30);
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);

@@ -2,11 +2,12 @@
  * Observe, mutate at most once, observe again.
  *
  * This was the only function in the build that could change something on a
- * forge until V4 slice 6 added `create-pull-request.ts`, which does the same six
- * steps in the same order for a different act. The two are separate functions
- * taking separate authorities, and neither can perform the other's effect. The
- * whole of this one's design is still the order of six steps and the refusal to
- * take a seventh.
+ * forge until V4 slice 6 added `create-pull-request.ts`, which does the same
+ * thing in the same order for a different act — with one step more, because a
+ * pull request needs its head to be on the remote already and a ref update does
+ * not. The two are separate functions taking separate authorities, and neither
+ * can perform the other's effect. The whole of this one's design is still the
+ * order of six steps and the refusal to take a seventh.
  *
  * ── The order, and why each step is where it is ───────────────────────────
  *

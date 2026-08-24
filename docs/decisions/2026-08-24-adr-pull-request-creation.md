@@ -114,7 +114,8 @@ question never arises for it.
 Measured on live third-party data, read-only: `withastro/astro` carries **928**
 pull requests on the single head branch `changeset-release/main` into `main`,
 each with a different head commit, almost all merged — and exactly **one** open
-at a time. `renovatebot/renovate` shows the same shape with zero open.
+at a time. `renovatebot/renovate`'s `renovate/lock-file-maintenance` shows the same shape
+with zero open.
 
 So GitHub's uniqueness constraint is scoped to *open* pull requests, and a
 closed or merged one on the same pair does not prevent another.
@@ -172,10 +173,13 @@ draft, so the state chosen at creation is the only one it will ever set.
 
 ### Observe, mutate at most once, observe again
 
-The same seven steps as slice 5, in the same order:
+Slice 5's six steps in the same order, with one more — a pull request needs its
+head on the remote already, and a ref update does not:
 
 1. **spend the authority** — first, before anything is read or contacted;
-2. **re-establish the local subject** — all eleven bound facts, compared;
+2. **re-establish the local subject** — all eleven bound facts, compared. Ten
+   of them were, until a review counted: `remoteName` was missing, and it is the
+   one the two local preconditions are asked about;
 3. **establish that the remote is one repository** — `ls-remote` reads the fetch
    URL and the identity this build POSTs to comes from the push URL;
 4. **read the remote head ref** — it must exist and hold exactly the intended
@@ -230,15 +234,36 @@ merge authority at all.
 
 ### Who may mint it
 
-The decision `PULL_REQUEST_REQUIRED` is **necessary and not sufficient**. The
-mint is reached only after: the task is at `READY_FOR_PR`; `--attended` was
-given; and *this invocation's own* `--observe --decide` produced
-`PULL_REQUEST_REQUIRED`. A stored slice-3 record has no path into the ladder —
-the store is read for the report and is never an input to an authority.
+A fresh delivery decision is **necessary and not sufficient**. The mint is
+reached only after: the task is at `READY_FOR_PR`; a publishable head ref and a
+sendable base branch exist; `--attended` was given; and *this invocation's own*
+`--observe --decide` produced a decision in `ADMITS_CREATION_LADDER`. A stored
+slice-3 record has no path into the ladder — the store is read for the report
+and is never an input to an authority.
 
-Requiring that particular decision has a consequence worth stating: a commit
-whose checks have **failed** decides `CHECKS_FAILED`, so this build will not
-open a pull request for it. That is the smaller rule, and it is deliberate.
+**The gate is a set of five decisions and not the single member
+`PULL_REQUEST_REQUIRED`, and that is a deliberate departure from the slice's own
+brief.** The brief said to mint only on that member; a review measured what it
+produces. `decideDelivery` answers `PULL_REQUEST_REQUIRED` only while no open
+pull request has this head, so the moment one exists — the moment after a
+successful creation — the second invocation is refused `DECISION_NOT_ESTABLISHED`
+and advised to pass the two flags it just passed. `ALREADY_EXISTS`,
+`WRONG_BASE_CONFLICT`, `DRAFT_STATE_CONFLICT` and the pre-attempt
+`PULL_REQUEST_AMBIGUOUS` were all unreachable from the command: the four answers
+an operator most needs, and three operator-facing texts claimed the first of
+them was what a second run answers.
+
+So the set admits every decision meaning *this invocation freshly observed this
+exact commit's pull-request situation and found no failing check*. Only
+`PULL_REQUEST_REQUIRED` means a pull request is needed; the other four mean one
+already claims this head, and on those the ladder's own reading answers and
+nothing is sent. **A request is issued only when that reading says `NONE`** —
+which is a stronger statement than the decision could make, because the decision
+is one observation older.
+
+`CHECKS_FAILED` stays out: a commit whose checks have failed gets no pull
+request from this build. So does every decision meaning no fresh, subject-matched
+observation exists. That is the smaller rule, and it is deliberate.
 
 ### The content
 
@@ -346,3 +371,12 @@ or a body from a caller.
 - **L-V4-06-9 — draft is now read but still not decided on.** Slice 4's decision
   does not consider it, so a positive delivery decision can still be true of a
   draft pull request. Only slice 6's own ladder compares it.
+- **L-V4-06-10 — `--publish-head` and `--create-pr` do not compose in one
+  invocation on a first delivery.** Measured: the observation runs before the
+  publication, so the forge has never seen the commit,
+  `commits/{sha}/pulls` answers `422 "No commit found for SHA"`, the decision is
+  `OBSERVATION_UNSETTLED`, and the creation is refused *after* the branch has
+  been created. The outcome is correct — a branch published and nothing else —
+  and the route to it is unhelpful. Publish in one invocation, create in the
+  next. Making the two compose would mean observing a second time, after the
+  publication, which is a second attestation and a slice-4 contract change.

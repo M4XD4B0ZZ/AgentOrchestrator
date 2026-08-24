@@ -138,16 +138,20 @@ export const OBSERVED_AND_CHANGED_TRAILER =
  * the honest repair; widening the existing ones would have made them vaguer for
  * the runs they were written for.
  *
- * Which trailer is printed is derived from whether a remote reading was taken,
- * not from which flags were passed: a publication refused before it contacted
- * anything gets the read-only sentence, because that is what happened.
+ * Which trailer is printed is derived from whether the act was **attempted**,
+ * not from which flags were passed and not from whether a reading was taken. It
+ * used to be the reading, and a review showed what that prints: "Not
+ * read-only." over a run that answered `REF_HOLDS_ANOTHER_COMMIT` or
+ * `ALREADY_PUBLISHED` — runs which looked at the remote and changed nothing.
+ * A refused act is a read-only run of a flag that could have changed something,
+ * and an attempted one is not read-only even when it failed.
  */
 export const PUBLICATION_TRAILER =
   'Not read-only. The publication could change exactly one thing and changed at most that:\n' +
   'one branch on the delivery remote, created at one commit. Create-only — no ref was moved,\n' +
   'rewritten or deleted, no other ref was touched, and nothing was pushed to any other remote.\n' +
-  'No task state was written, and publishing grants no authority to open, update or merge a\n' +
-  'pull request.';
+  'It wrote no task state, and it grants no authority to open, update or merge a pull\n' +
+  'request.';
 
 /**
  * The trailer for the other invocation that could change something.
@@ -167,10 +171,10 @@ export const PUBLICATION_TRAILER =
  */
 export const CREATION_TRAILER =
   'Not read-only. The creation could change exactly one thing and changed at most that:\n' +
-  'one pull request, opened once, at the commit named above. Nothing was updated, closed,\n' +
-  'reopened, marked ready or draft, commented on, labelled, assigned, reviewed or merged, and\n' +
-  'nothing here grants authority to do any of those. No branch was pushed and no ref was\n' +
-  'changed. No task state was written.';
+  'one pull request, opened once, at the commit named above. It updated, closed, reopened,\n' +
+  'marked ready or draft, commented on, labelled, assigned, reviewed and merged nothing, it\n' +
+  'pushed no branch and changed no ref, and it grants no authority to do any of those. It\n' +
+  'wrote no task state.';
 
 function line(label: string, value: string): string {
   return `${label.padEnd(13)}: ${value}`;
@@ -541,10 +545,21 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     }
   }
 
-  // Derived from what happened, not from which flags were passed. A reading
-  // exists exactly when the remote was contacted by that path — and for the
-  // creation path the first contact is the head-ref reading, which is a network
-  // call to the delivery remote and not a local question.
+  // Derived from what happened, not from which flags were passed — and from
+  // whether the act was *attempted*, not from whether it read anything. A
+  // review found the previous rule printing "Not read-only." over runs that
+  // published nothing and created nothing, because they had taken a reading:
+  // `HEAD_NOT_PUBLISHED`, `ALREADY_EXISTS` and every conflict refusal are
+  // read-only runs of a flag that could have changed something and did not.
+  //
+  // The readings are still what the report shows; they are not what the closing
+  // sentence is about. A run that attempted and failed is still not read-only,
+  // which is why the test is on the attempt word and not on the outcome.
+  const publicationAttempted =
+    publication != null && publication.result.attempt !== 'NOT_ATTEMPTED';
+  const creationAttempted = creation != null && creation.result.attempt !== 'NOT_ATTEMPTED';
+  // Whether anything was contacted at all, which is what the egress disclosure
+  // is about and is a different question from whether anything changed.
   const contactedByPublication = publication?.result.before != null;
   const contactedByCreation = creation?.result.remoteHead != null;
   // One sentence per act, and the observation disclosure once, above them.
@@ -556,13 +571,17 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   // another, and by the same argument a sentence about a publication does not
   // stand in for one about a pull request.
   const trailers: string[] = [];
-  if (!contactedByPublication && !contactedByCreation) {
-    trailers.push(view.observation === null ? NOT_CONTACTED_TRAILER : CONTACTED_TRAILER);
+  if (!publicationAttempted && !creationAttempted) {
+    // Nothing was attempted, so the run was read-only whatever it looked at.
+    // Which of the two read-only sentences applies is still decided by whether
+    // anything was contacted, by any path.
+    const contacted = view.observation !== null || contactedByPublication || contactedByCreation;
+    trailers.push(contacted ? CONTACTED_TRAILER : NOT_CONTACTED_TRAILER);
   } else {
     if (view.observation !== null) trailers.push(OBSERVED_AND_CHANGED_TRAILER, '');
-    if (contactedByPublication) trailers.push(PUBLICATION_TRAILER);
-    if (contactedByPublication && contactedByCreation) trailers.push('');
-    if (contactedByCreation) trailers.push(CREATION_TRAILER);
+    if (publicationAttempted) trailers.push(PUBLICATION_TRAILER);
+    if (publicationAttempted && creationAttempted) trailers.push('');
+    if (creationAttempted) trailers.push(CREATION_TRAILER);
   }
   lines.push('', ...trailers, '');
 

@@ -1555,12 +1555,15 @@ describe('recording grants nothing and moves nothing', () => {
 
     for (const file of SURFACE) {
       const code = codeOnly(file);
-      // Positive control: the file really was read and the stripper left code.
+      // Positive control: the stripper left real code, not just whitespace.
       // It used to be `> 200`, which was a size rule wearing a control's
       // clothing — `internal/delivery-ref-grammar.ts` is two regular
       // expressions and a lot of comment, and it turned this red without any
-      // claim here becoming false. The corpus floor above keeps the control.
-      expect(code.length, file).toBeGreaterThan(0);
+      // claim here becoming false. It was then `> 0`, which a review showed is
+      // a tautology: `codeOnly` replaces a comment with a space and keeps every
+      // newline, so an all-comment file passes it. Non-whitespace length is the
+      // floor that survives the real case and still catches the empty one.
+      expect(code.replace(/\s+/g, '').length, file).toBeGreaterThan(30);
       // No writer *call*, anywhere on the surface. Scanned on the code alone,
       // so a header may go on explaining why the task-state writer is not used
       // here — which is the load-bearing part of the design and the first thing

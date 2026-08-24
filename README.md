@@ -9031,10 +9031,18 @@ on github.com, from the task's work branch to its base branch, at exactly the
 task's pinned commit. It is the act slice 5 was supposed to be and could not be,
 because nothing published a branch. That prerequisite now exists.
 
-It does not push, and there is no flag that would. It never updates, closes,
-reopens, marks ready or draft, comments on, labels, reviews or merges a pull
-request. It writes no task state, takes no execution lease, and `READY_FOR_PR`
-is still terminal.
+`--create-pr` does not push — that is `--publish-head`, a separate flag with a
+separate authority, and neither implies the other. Nothing in this build
+updates, closes, reopens, marks ready or draft, comments on, labels, reviews or
+merges a pull request, and there is no flag that would. It writes no task state,
+takes no execution lease, and `READY_FOR_PR` is still terminal.
+
+**The two flags do not compose in one invocation on a first delivery**, and that
+is measured rather than assumed: `--observe` runs before the publication, so the
+forge has never seen the commit, `commits/{sha}/pulls` answers
+`422 "No commit found for SHA"`, and the decision is `OBSERVATION_UNSETTLED`.
+The branch is published and the creation is refused. Publish in one invocation,
+then create in the next — `L-V4-06-10`.
 
 ### `head` is a branch name, and that is why slice 5 had to come first
 
@@ -9088,6 +9096,16 @@ exists is `ALREADY_EXISTS` with nothing sent. A pull request at this head with a
 different base, a different draft state, or more than one of them, is a refusal
 and never a convergence — retargeting and closing are mutations this build does
 not perform.
+
+Reaching those four answers from the command needed a correction a review
+forced. The gate was `decision === PULL_REQUEST_REQUIRED`, and that decision is
+answered only while *no* open pull request has this head — so the second
+invocation, the one the idempotency claim is about, was refused before the
+reading was taken and told to pass the flags it had just passed. The gate is now
+the closed set of decisions meaning *this invocation freshly observed this
+commit and found no failing check*; only one of the five means a pull request is
+needed, and a request is issued only when the ladder's own reading says there is
+none.
 
 At most **one** request per invocation, on every path, with no retry on any
 outcome. When the answer is lost the outcome is `OUTCOME_UNCERTAIN`, and the
@@ -9170,6 +9188,9 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
 - **L-V4-06-9 — draft is now read but still not decided on.** Slice 4's decision
   does not consider it, so a positive delivery decision can still be true of a
   draft pull request.
+- **L-V4-06-10 — `--publish-head` and `--create-pr` do not compose on a first
+  delivery.** The observation runs before the publication, so the forge has not
+  seen the commit yet and the decision cannot settle. Two invocations.
 
 ## Not implemented yet
 

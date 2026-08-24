@@ -24,7 +24,11 @@
  * this build never read. A command whose *non-creating* mode is documented as
  * possibly pushing is not a command a slice named after one mutation can use.
  *
- * `gh api` performs exactly one HTTP request and touches no Git state.
+ * `gh api` issues one request to the endpoint it is given and touches no Git
+ * state. That is not the same as "exactly one HTTP request": the client makes
+ * calls of its own — telemetry, and a periodic update check — which this build
+ * does not suppress, and which `L-V4-02-6` records and every egress trailer
+ * discloses. The claim that survives is about what *this build asks for*.
  *
  * ── `-X POST` is not decoration ───────────────────────────────────────────
  *
@@ -66,7 +70,7 @@
 
 import { createProbeEnv } from '../auth/env-guard.js';
 import { runCommand, UnsafeArgumentError, type CommandResult } from '../doctor/exec.js';
-import { supportedForgeHost } from './forge-observation.js';
+import { isAddressableSubject, supportedForgeHost } from './forge-observation.js';
 import type { PullRequestAttempt } from './pull-request-creation.js';
 import type { PullRequestCreationSubject } from './internal/pull-request-creation-grant.js';
 
@@ -253,16 +257,25 @@ export interface PullRequestCreatorDependencies {
  * the three points before the child is started, and they are the only ones that
  * carry the guarantee "nothing happened".
  *
- * The host is re-tested here, at the point where the vector is built, rather
- * than trusted from whoever produced the subject. A capability checked at one
- * moment and used at another is checked at the wrong moment: this is the last
- * moment before a process exists.
+ * The host, the owner and the repository name are re-tested here, at the point
+ * where the vector is built, rather than trusted from whoever produced the
+ * subject. A capability checked at one moment and used at another is checked at
+ * the wrong moment: this is the last moment before a process exists, and the
+ * last two of the three are what the request path is made of.
  */
 export async function createPullRequestVia(
   subject: PullRequestCreationSubject,
   deps: PullRequestCreatorDependencies,
 ): Promise<PullRequestAttempt> {
   if (supportedForgeHost(subject.host) === null) return 'NOT_ATTEMPTED';
+  // The owner and the repository name are two thirds of the request path, and
+  // they are re-tested here for the reason the host is: a guard read at another
+  // moment is a guard about another moment, and this is the last one before a
+  // process exists. `createObservationSubject` applies the same predicate
+  // upstream — the point is that this module does not depend on it having.
+  if (!isAddressableSubject(subject.owner, subject.name, subject.headCommit)) {
+    return 'NOT_ATTEMPTED';
+  }
 
   let env: NodeJS.ProcessEnv;
   try {

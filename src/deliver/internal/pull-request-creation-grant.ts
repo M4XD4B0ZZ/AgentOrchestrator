@@ -59,7 +59,10 @@
  * because this build reads that exact ref off the remote before it asks GitHub
  * to open anything, and a partial ref is resolved against a search order.
  *
- * `headCommit` — the exact forty-hex object name the head ref must hold.
+ * `headCommit` — the exact object name the head ref must hold: forty or
+ * sixty-four lowercase hex digits, the grammar `forge-observation.ts` uses
+ * throughout, and not "forty-hex" as this line said until a review read the
+ * regex under it.
  * **Measured, GitHub will not accept an object name as `head`**: a full SHA of a
  * commit that exists answers `422 {"field":"head","code":"invalid"}`, exactly as
  * a missing branch does. So the commit cannot be sent; it can only be *checked*,

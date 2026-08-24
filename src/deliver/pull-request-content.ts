@@ -54,9 +54,12 @@
  * Both are measured in UTF-8 bytes, not code units: the transport writes bytes,
  * and a limit counted in JavaScript characters would be a different limit.
  *
- * Neither budget is close to what this build composes — the longest content it
- * can produce is a few hundred bytes — and that is the point. A generous
- * ceiling on a field nobody fills is a ceiling that invites somebody to fill it.
+ * The body budget is far above anything this build composes — the longest one
+ * it can produce is a few hundred bytes. The **title** budget is not: a task id
+ * at its 128-character limit beside a 255-character branch name composes 385
+ * bytes, which is why {@link boundedTitle} exists and cuts. A generous ceiling
+ * on a field nobody fills is a ceiling that invites somebody to fill it; a
+ * ceiling a legitimate input can reach has to be handled rather than declared.
  */
 export const MAX_TITLE_BYTES = 256;
 export const MAX_BODY_BYTES = 4096;

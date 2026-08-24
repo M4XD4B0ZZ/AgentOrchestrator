@@ -152,18 +152,25 @@ export const PULL_REQUEST_CREATIONS = [
    */
   'OPERATOR_ABSENT',
   /**
-   * This invocation did not produce a fresh `PULL_REQUEST_REQUIRED` decision.
+   * This invocation has no fresh decision that admits the creation ladder.
    *
    * Either `--observe` and `--decide` were not both given, or they were and the
-   * decision came out as something else — the observation did not settle, the
-   * subject moved, a check on this commit failed, more than one open pull
-   * request claims this head, or one already matched.
+   * answer was one this build will not create from: the observation did not
+   * settle, the subject moved, or a check on this commit failed.
    *
-   * Knowing a pull request is needed is not permission to open one, so this is
-   * necessary rather than sufficient; but it is necessary, and it must be
-   * *this* invocation's own. A record read back from disk is a statement about
-   * a past moment and can never reach here — slice 3's store has no path into
-   * this ladder at all.
+   * It is deliberately **not** "the decision was not `PULL_REQUEST_REQUIRED`".
+   * Four other decisions mean a pull request already claims this head, and they
+   * admit the ladder so that its own fresh reading can answer `ALREADY_EXISTS`,
+   * `WRONG_BASE_CONFLICT`, `DRAFT_STATE_CONFLICT` or `PULL_REQUEST_AMBIGUOUS`
+   * — the four answers an operator most needs and which, while this member
+   * covered them all, were unreachable from the command. See
+   * `ADMITS_CREATION_LADDER`.
+   *
+   * Knowing a pull request is needed is not permission to open one, so a
+   * decision is necessary rather than sufficient; and it must be *this*
+   * invocation's own. A record read back from disk is a statement about a past
+   * moment and can never reach here — slice 3's store has no path into this
+   * ladder at all.
    */
   'DECISION_NOT_ESTABLISHED',
   /**
@@ -296,11 +303,17 @@ export const PULL_REQUEST_CREATIONS = [
    * choosing.
    */
   'OUTCOME_UNCERTAIN',
-  /**
+   /**
    * Something exists at this head afterwards, and it is not the intended pull
    * request.
    *
-   * The base is wrong, the draft state is wrong, or what is there is closed.
+   * The base is wrong, the draft state is wrong, what is there is closed, or
+   * there is more than one. **This is the member for every unintended
+   * postcondition**, including ambiguity: a review found the after-reading's
+   * `OPEN_MANY` graded as `PULL_REQUEST_AMBIGUOUS`, whose sentence ends "and
+   * nothing was attempted" — printed two lines under `Attempt : COMPLETED`, on
+   * the run where this build had very likely just created one of the two.
+   *
    * Nothing is edited, retargeted, closed or retried in response: each of those
    * is a further mutation, performed at the moment least is known, and undo
    * paths are where the most destructive defects in this codebase have lived.
@@ -351,7 +364,7 @@ export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, 
     OPERATOR_ABSENT:
       'Creating a pull request asks this repository\'s humans to take the work, so it requires an operator to be present for this invocation. Nothing was read and nothing was attempted. Pass --attended to create.',
     DECISION_NOT_ESTABLISHED:
-      'This invocation did not decide PULL_REQUEST_REQUIRED from its own fresh answers, so there is nothing that says a pull request is the next act. Pass --observe and --decide as well; a stored record can never authorise a mutation. Nothing was attempted.',
+      'This invocation has no fresh decision about this commit that admits the creation ladder. Either --observe and --decide were not both given, or they were and the answer was one this build will not create from: the observation did not settle, the subject moved, or a check on this commit failed. A stored record can never stand in for it. Nothing was read from the forge by this path and nothing was attempted.',
     AUTHORITY_REFUSED:
       'The authority for this creation was not one this build minted, or it had already been used. Nothing was attempted.',
     SUBJECT_CHANGED:
@@ -379,7 +392,7 @@ export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, 
     OUTCOME_UNCERTAIN:
       'Whether the forge created a pull request could not be established. Do not ask again to find out — ask again, and the answer will be read from the forge before anything is attempted.',
     POSTCONDITION_MISMATCH:
-      'A pull request exists at this head afterwards and it is not the intended one — the base, the draft state or the open state is different. Nothing was edited, retargeted, closed or retried in response.',
+      'A request was made, and what is at this head afterwards is not the intended pull request — the base, the draft state or the open state is different, or there is more than one. This build may well have created one of them. Nothing was edited, retargeted, closed or retried in response.',
     ALREADY_EXISTS:
       'Exactly one open pull request already had this head, this base and this draft state. Nothing was sent, because the intended state was already true.',
     CONVERGED_AFTER_UNCERTAIN_EFFECT:
@@ -396,14 +409,19 @@ export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, 
  * three say so without this process having done it — and a caller that treats
  * `ALREADY_EXISTS` as a failure will send a second request for no reason.
  *
- * Held as a set rather than as a union of comparisons so that adding a member
- * to the vocabulary cannot silently widen it: the suite partitions
- * `PULL_REQUEST_CREATIONS` against this set and fails on any member neither
- * side claims.
+ * Held as a set rather than as a union of comparisons so there is one place to
+ * read the answer from. What stops it widening silently is the suite, which
+ * partitions `PULL_REQUEST_CREATIONS` against it and fails on any member
+ * neither side claims — see the note under the declaration.
  */
 export const ESTABLISHED_PULL_REQUEST_CREATIONS: ReadonlySet<PullRequestCreation> = Object.freeze(
   new Set<PullRequestCreation>(['CREATED', 'ALREADY_EXISTS', 'CONVERGED_AFTER_UNCERTAIN_EFFECT']),
 ) as ReadonlySet<PullRequestCreation>;
+// `Object.freeze` does not make a `Set` immutable — it does not touch internal
+// slots, so `add` still works on a value cast back to a mutable type. It is
+// applied for the properties it does freeze and is **not** what stops this set
+// widening; the suite's partition against `PULL_REQUEST_CREATIONS` is. A review
+// pointed out that the paragraph above used to claim otherwise.
 
 /** Whether the intended pull request is open on the forge. */
 export function pullRequestIsEstablished(creation: PullRequestCreation): boolean {
@@ -450,10 +468,33 @@ export function gradePullRequestCreation(
     return 'ALREADY_EXISTS';
   }
 
+  if (before.outcome !== 'NONE') {
+    // Not reachable while `PULL_REQUEST_SITUATIONS` holds five members, and
+    // present for the reason `exitCodeFor` and `decideDelivery` give for
+    // theirs: the strongest claim this build can make is two lines below, and
+    // a sixth situation must not be able to arrive there by falling off the
+    // end. A review found this floor missing and demonstrated the fall-through
+    // with a widened vocabulary, which `tsc` accepted.
+    const unreachable: never = before.outcome;
+    void unreachable;
+    return 'PULL_REQUEST_STATE_UNKNOWN';
+  }
+
   // Nothing had this head. From here the answer depends on what happened next.
-  if (attempt === 'NOT_ATTEMPTED') return 'CREATION_REFUSED';
+  //
+  // `NOT_ATTEMPTED` is deliberately *not* short-circuited here, and that is a
+  // correction. It used to answer `CREATION_REFUSED` immediately, which said
+  // "The request was refused and no pull request with this head exists" on a
+  // path where no request was ever made — the transport reports `NOT_ATTEMPTED`
+  // for an unsupported host, an unusable environment and a refused argument,
+  // all before a process exists — and, worse, it threw away a post-reading the
+  // orchestration had already taken. A reading is the authority in this module;
+  // an attempt word that overrules one is the defect this module exists to
+  // avoid. So all three attempt words now go through the same ladder, and
+  // `attempt` is consulted exactly twice, where the readings cannot separate
+  // the cases on their own.
   if (after === null || after.outcome === 'UNKNOWN') return 'OUTCOME_UNCERTAIN';
-  if (after.outcome === 'OPEN_MANY') return 'PULL_REQUEST_AMBIGUOUS';
+  if (after.outcome === 'OPEN_MANY') return 'POSTCONDITION_MISMATCH';
   if (after.outcome === 'CLOSED_ONLY') return 'POSTCONDITION_MISMATCH';
 
   if (after.outcome === 'NONE') {
