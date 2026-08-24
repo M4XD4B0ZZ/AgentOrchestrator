@@ -97,6 +97,7 @@ import type { MergeSubject } from './internal/merge-grant.js';
 import {
   gradeMerge,
   gradeMergePrecondition,
+  mergeIsEstablished,
   MERGE_READING_UNKNOWN,
   type MergeAttempt,
   type MergeOutcome,
@@ -148,7 +149,20 @@ function result(
   attempt: MergeAttempt,
   after: MergeReading | null,
 ): MergeResult {
-  const mergeCommit = after !== null && after.outcome === 'MERGED' ? after.mergeCommit : null;
+  // Gated on the OUTCOME and not on the reading, which is a correction a case in
+  // the suite found. Reading `after.outcome === 'MERGED'` was enough to fill
+  // this field under `POSTCONDITION_MISMATCH` — a pull request that really is
+  // merged, at a head or into a base this invocation did not authorise — and
+  // the report labels the field `Merge commit`, so it would have offered a
+  // commit for somebody else's merge as this delivery's result.
+  //
+  // Nothing is hidden by the narrowing: the reading is carried whole, and the
+  // renderer prints it as `Forge after : MERGED <sha>`, which is where a commit
+  // this build did not attribute to itself belongs.
+  const mergeCommit =
+    mergeIsEstablished(outcome) && after !== null && after.outcome === 'MERGED'
+      ? after.mergeCommit
+      : null;
   return Object.freeze({ outcome, before, attempt, after, mergeCommit });
 }
 

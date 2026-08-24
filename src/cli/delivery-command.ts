@@ -1115,16 +1115,26 @@ async function performMerge(
   // they can only authorise the one this invocation just looked at.
   const facts = proof === null ? null : deliveryObservationFactsOf(proof);
   if (facts === null || facts.pullRequestNumber === null) return refused('DECISION_NOT_SUCCESS');
-  // The first is a floor, and is labelled as one because a counter-proof will
-  // find it: `decideDelivery` answers the positive member only when the outcome
-  // is `MATCHED`, the number is non-null and the head equals the commit, so a
-  // decision that reached here has already established it. It stays because the
-  // premise belongs to another function, and a guarantee that depends on another
-  // function's ladder staying where it is, is not one this one can make.
+  // **Both are floors, and both are labelled as floors because a counter-proof
+  // measured them.** Removing either kills no test, and this comment claimed
+  // the opposite about the second until the campaign was run.
   //
-  // The second is NOT a floor and is why this block exists: nothing upstream
-  // compares the proof's commit with the subject this invocation resolved, so
-  // without it a proof about one commit could authorise a merge bound to another.
+  // The first: `decideDelivery` answers the positive member only when the
+  // outcome is `MATCHED`, the number is non-null and the head equals the
+  // commit, so a decision that reached here has already established it.
+  //
+  // The second: the proof this reads is minted by `attestDeliveryObservation`
+  // from `subject.subject` — the very value compared against — so within one
+  // invocation the two cannot differ. The sentence here used to argue that
+  // nothing upstream compared them, which was true of the *decision* and false
+  // of the *mint*, and that is the kind of claim this repository keeps getting
+  // wrong by reasoning instead of measuring.
+  //
+  // They stay for the reason `performCreation`'s own floor stays: each premise
+  // belongs to another function, and a guarantee that depends on another
+  // function's wiring staying where it is, is not one this function can make.
+  // A future invocation that obtained a proof from anywhere else would reach a
+  // live gate rather than a silent mismatch.
   if (facts.pullRequestHeadSha !== facts.commit) return refused('DECISION_NOT_SUCCESS');
   if (facts.commit !== subject.subject.commit) return refused('DECISION_NOT_SUCCESS');
 

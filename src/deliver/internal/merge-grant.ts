@@ -213,6 +213,21 @@ export class MergeGrant {
    * The private-field read is guarded because a value can pass the registry
    * gate without carrying the field — a caller who captures the registry itself
    * can add an arbitrary object to it.
+   *
+   * **Which of the two lines actually refuses a forgery was measured, and it is
+   * not the one a reader expects.** Replacing the registry gate below with
+   * `if (false)` kills no case in the suite: every value an outside caller can
+   * construct — a plain object with the right shape, or
+   * `Object.create(prototype)` — has no private field, so the read throws and
+   * the `catch` answers `null` anyway. The registry gate is what refuses a
+   * value that *has* the field and was not minted, which nothing outside this
+   * module can build, since the constructor is deleted and the class frozen.
+   *
+   * Both stay. They refuse different things, the pair is what
+   * {@link isMergeGrant} and this accessor are documented to mean together, and
+   * a gate that is unreachable today is not the same as one that is wrong — the
+   * argument the transport makes about re-testing a capability at the point of
+   * use. What is not claimed is that removing either would be caught.
    */
   static claim(grant: MergeGrant): MergeSubject | null {
     if (!MergeGrant.holds(grant)) return null;
