@@ -180,16 +180,22 @@ export const DELIVERY_BASE_REF = /^[A-Za-z0-9._+=@][A-Za-z0-9._+=@/-]*$/;
  * gate this value met and the one claiming to have understood it.
  *
  * So both names are additionally put through `repo/branch-name.ts`, which is
- * where this build already decides what a branch name is — Git's own
- * `check-ref-format` rules. Measured, that refuses every value listed above and
- * caps the length at 255, which is what bounds the composed body; the body had
- * no bound at all before it.
+ * where this build already decides what a branch name is. Measured, that
+ * refuses every value listed above and caps the length at 255, which is what
+ * bounds the composed body; the body had no bound at all before it.
  *
- * **It does not refuse everything a reviewer expected it to**, and the
- * difference is stated rather than assumed. `refs/heads/main` and `HEAD` both
- * pass `isValidBranchName` — measured — because Git does allow a branch called
- * `refs/heads/main`, and this build's grammar carries no special case for
- * `HEAD`.
+ * **That rule is this build's, and it is not Git's**, which is stated here
+ * because three review rounds in a row read it as Git's and wrote something
+ * false on the strength of that. It implements the `check-ref-format --branch`
+ * rules and — measured against real Git — it is not equivalent to them: there
+ * is at least one name Git accepts that it refuses, and at least one it accepts
+ * that Git refuses. What the rule is, is `repo/branch-name.ts`'s subject. This
+ * docblock does not carry a second copy of the answer, because every copy of it
+ * here has been wrong.
+ *
+ * The one difference that matters at this seam is stated, because a later
+ * paragraph used to depend on it: `refs/heads/main` and `HEAD` both pass
+ * `isValidBranchName` — measured — so both can reach a request.
  *
  * What GitHub would do with either as a `base` is deliberately not stated here,
  * and nothing rests on it. The safety comes from this build's own comparison:
@@ -203,8 +209,11 @@ export const DELIVERY_BASE_REF = /^[A-Za-z0-9._+=@][A-Za-z0-9._+=@/-]*$/;
  *
  * It is deliberately stricter than `PUBLISHABLE_REF`, which slice 5 uses and
  * which carries `L-V4-05-9` — a work branch that slice 5 will publish and this
- * slice will refuse is a real difference, and the safe direction: a name Git
- * would not accept as a branch cannot become a pull request either.
+ * slice will refuse is a real difference, and it is the safe direction. This
+ * paragraph used to close by generalising that into a rule about Git, and the
+ * rule was false: measured, Git refuses `HEAD` as a branch and this gate
+ * accepts it. The comparison that is true is the one between the two gates in
+ * this build, and it stops there.
  */
 export function isSendableBranchName(name: string): boolean {
   return DELIVERY_BASE_REF.test(name) && isValidBranchName(name);
@@ -307,7 +316,8 @@ export interface PullRequestIntent {
  *  - a base, or a work branch, that is not a plain branch name under
  *    `repo/branch-name.ts`: both are sent or compared as branch names, and the
  *    shell-inert character class alone accepts `@`, `a..b` and `x.lock`, none
- *    of which Git accepts as a branch. The
+ *    of which `repo/branch-name.ts` accepts — which is the gate this bullet is
+ *    about, and the only one it claims anything for. The
  *    255-character limit that comes with it is also what bounds the composed
  *    body, which otherwise had no bound at all;
  *  - a head ref whose branch is the base branch: measured, GitHub answers

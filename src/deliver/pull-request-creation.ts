@@ -368,9 +368,14 @@ export const PULL_REQUEST_CREATIONS = [
 export type PullRequestCreation = (typeof PULL_REQUEST_CREATIONS)[number];
 
 /**
- * One static sentence per member, pinned by literal in the suite rather than by
- * reading this map — a completeness check proves a key exists, only a literal
- * proves the sentence an operator reads.
+ * One static sentence per member.
+ *
+ * What the suite proves about them, measured rather than assumed, because this
+ * paragraph claimed more than was there: it checks that a key exists for every
+ * member of the vocabulary, and that no sentence is shorter than a floor.
+ * Neither of those proves the words. The members its own case names as the ones
+ * an operator acts on are additionally pinned by literal; the rest are not, so a
+ * change to one of those is caught by review and not by the gate.
  */
 export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, string>> =
   Object.freeze({
