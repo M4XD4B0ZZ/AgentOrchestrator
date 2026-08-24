@@ -44,6 +44,14 @@ import {
   type DeliveryEvidenceRecordCode,
   type IgnoreVerdict,
 } from '../deliver/delivery-evidence-store.js';
+import {
+  concludeDeliveryDecision,
+  revalidateSubject,
+  type DeliveryDecision,
+  type LocalSubject,
+  type SubjectRevalidation,
+} from '../deliver/delivery-decision.js';
+import type { DeliveryObservationProof } from '../deliver/delivery-observation-proof.js';
 import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
 import { askRuntimeIgnored } from '../state/runtime-ignored.js';
 import {
@@ -64,6 +72,7 @@ interface DeliveryOptions {
   readonly task: string;
   readonly observe?: boolean;
   readonly record?: boolean;
+  readonly decide?: boolean;
 }
 
 /**
@@ -169,13 +178,33 @@ export const RECORD_OPTION_DESCRIPTION =
   'current state, and it grants nothing — no merge, no pull request, no task state change. ' +
   'Replaces any previous record for this task.';
 
+/**
+ * The decide flag's own sentence, exported so it can be pinned by literal.
+ *
+ * "From this invocation's own answers" is the whole freshness contract, stated
+ * on the surface an operator reads before running the command. "Does not
+ * establish merge eligibility" is there because a one-word verdict is exactly
+ * the artefact somebody will later be tempted to read as permission — and
+ * because, measured, this build cannot establish it: the branch-rule endpoints
+ * answer the same way for "there are none" as for "you may not read them".
+ */
+export const DECIDE_OPTION_DESCRIPTION =
+  'Classify this invocation\'s own answers into one delivery decision. Requires --observe: a ' +
+  'stored record can never produce a decision, so once a subject exists and nothing was ' +
+  'contacted the answer is NOT_DECIDED. The local subject is re-read after the answers come ' +
+  'back and the decision is refused if it moved. This does not establish merge eligibility — ' +
+  'draft state, mergeability, reviews and branch rules are not observed, and their absence is ' +
+  'not provable from what GitHub returns. Writes nothing.';
+
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
   'and — only with --observe — ask github.com two read-only questions about that commit: ' +
   'is there exactly one open pull request whose head is this commit, and what is the check ' +
   'state of this commit. Contacts nothing without --observe. With --record it stores that ' +
   'observation as a historical record beside the task state; without it, nothing is written. ' +
-  'It writes no task state, opens no pull request and merges nothing, ever.';
+  'With --decide it classifies this invocation\'s own answers into one delivery decision, which ' +
+  'is not merge eligibility and grants nothing. It writes no task state, opens no pull request ' +
+  'and merges nothing, ever.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
   const resolve = seams.resolveRepository ?? resolveRepository;
@@ -200,6 +229,10 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     .option(
       '--record',
       RECORD_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--decide',
+      DECIDE_OPTION_DESCRIPTION,
     )
     .action(async (options: DeliveryOptions) => {
       const resolution = await resolve({ repositoryPath: options.repository });
@@ -233,6 +266,61 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
 
       const conclusion = concludeObservation(subject, observation);
 
+      // One mint per invocation, and only for an invocation that asked for
+      // something a proof is needed for.
+      //
+      // Hoisted out of the recording path because two callers now want one and
+      // minting twice would stamp two `observedAt` instants on one observation
+      // — a record and a decision that disagree about when the forge answered.
+      // Still not minted on a plain `--observe`, which is the argument
+      // `observe-delivery.ts` makes at its own mint call: an artefact made for
+      // nobody is an artefact somebody will find a use for.
+      const proof: DeliveryObservationProof | null =
+        (options.record === true || options.decide === true) &&
+        subject.ok &&
+        observation !== null &&
+        conclusion === 'OBSERVED'
+          ? attestDeliveryObservation(
+              subject.subject,
+              observation,
+              (seams.now ?? (() => new Date()))().toISOString(),
+            )
+          : null;
+
+      // The second look at the local world, taken *after* the answers came
+      // back and before anything is reported against them.
+      //
+      // Gated on the observation having **settled**, not merely on a request
+      // having been attempted. The first version used `observation !== null`,
+      // and a review drove a refusing forge through it: the report then said
+      // "Local subject re-checked after the answers came back: UNCHANGED" on a
+      // run where no answer came back at all. It also paid a full
+      // `resolveRepository` — several Git children — to learn nothing. There is
+      // no window to protect when nothing was established.
+      const revalidation: SubjectRevalidation | null =
+        options.decide === true && subject.ok && conclusion === 'OBSERVED'
+          ? await revalidateLocalSubject(options, resolve, load, {
+              subject: subject.subject,
+              taskState: subject.taskState,
+            })
+          : null;
+
+      const decision: DeliveryDecision | null =
+        options.decide === true
+          ? concludeDeliveryDecision({
+              subjectEstablished: subject.ok,
+              observed: observation !== null,
+              proof,
+              expected: subject.ok ? subject.subject : null,
+              // Passed as it is, including `null`. There was a `?? 'UNAVAILABLE'`
+              // here and a counter-proof retired it: substituting a verdict the
+              // caller had not obtained was a value no test could reach, so
+              // changing it to `'UNCHANGED'` broke nothing. The refusal lives
+              // where it can be reached by name instead.
+              revalidation,
+            })
+          : null;
+
       // Recording happens BEFORE the record is read back, and the order is the
       // contract rather than an accident.
       //
@@ -255,6 +343,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
               taskLoad,
               observation,
               conclusion,
+              proof,
               seams,
             })
           : null;
@@ -293,11 +382,52 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           conclusion,
           stored,
           recording,
+          decision: decision === null ? null : { decision, revalidation },
         }),
       );
 
+      // Unchanged by `--decide`, and that is the decision rather than an
+      // omission. The exit code answers one question — was the observation
+      // settled — and a caller that could read "deliver this" out of an exit
+      // status would have been handed the machine-consumable merge signal this
+      // slice exists to not give. The decision is in the report, where a person
+      // reads the sentence that comes with it.
       process.exitCode = exitCodeFor(conclusion);
     });
+}
+
+/**
+ * Re-establishes the local subject after the forge has answered.
+ *
+ * A second, independent pass through exactly the resolution the first one used:
+ * resolve the repository again, read the task record again, build the subject
+ * again. Not a cached comparison — the point is to ask the world, because what
+ * may have moved is the world.
+ *
+ * What it protects is stated exactly, because the reassuring reading is wrong.
+ * It closes the *local* window only: the task advancing to a new commit, being
+ * aborted, or the profile's delivery target being repointed while the request
+ * was in flight. It does **not** freeze GitHub, and `UNCHANGED` is not a claim
+ * that the answers are still true — nothing can make that claim. See
+ * `deliver/delivery-decision.ts`.
+ */
+async function revalidateLocalSubject(
+  options: DeliveryOptions,
+  resolve: typeof resolveRepository,
+  load: typeof loadTaskState,
+  before: LocalSubject,
+): Promise<SubjectRevalidation> {
+  const again = await resolve({ repositoryPath: options.repository });
+  if (!again.ok) return 'UNAVAILABLE';
+  const subject = resolveObservationSubject(
+    again.repository.delivery,
+    load(again.repository.root, options.task),
+  );
+  if (!subject.ok) return 'UNAVAILABLE';
+  return revalidateSubject(before, {
+    subject: subject.subject,
+    taskState: subject.taskState,
+  });
 }
 
 /**
@@ -322,6 +452,15 @@ interface RecordingInputs {
   readonly taskLoad: ReturnType<typeof loadTaskState>;
   readonly observation: DeliveryObservation | null;
   readonly conclusion: ReturnType<typeof concludeObservation>;
+  /**
+   * The invocation's one attestation, or `null` if none could be minted.
+   *
+   * Handed in rather than minted here, so that a run which both records and
+   * decides binds both to the same observed instant. The refusal below is
+   * unchanged: `null` still means the observation did not settle after all, and
+   * it is still the mint — not this module — that decided so.
+   */
+  readonly proof: DeliveryObservationProof | null;
   readonly seams: DeliveryCommandSeams;
 }
 
@@ -346,15 +485,11 @@ async function performRecording(inputs: RecordingInputs): Promise<RecordingResul
   }
   if (!inputs.taskLoad.ok) return refuse('RECORD_WITHOUT_TASK_BINDING');
 
-  // The mint. A `null` here means the observation did not settle after all —
-  // the mint re-derives that for itself and does not believe the conclusion
-  // computed above — and it reaches the same refusal, because from the
-  // operator's side the two are one fact.
-  const proof = attestDeliveryObservation(
-    inputs.subject.subject,
-    inputs.observation,
-    (inputs.seams.now ?? (() => new Date()))().toISOString(),
-  );
+  // The mint's verdict. A `null` here means the observation did not settle
+  // after all — the mint re-derives that for itself and does not believe the
+  // conclusion computed above — and it reaches the same refusal, because from
+  // the operator's side the two are one fact.
+  const proof = inputs.proof;
   if (proof === null) return refuse('RECORD_WITHOUT_SETTLED_OBSERVATION');
 
   const result = await recordDeliveryEvidence({
