@@ -9209,8 +9209,9 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
   refuses. That is the safe direction and it bounds the composed body, but the
   two gates now differ and `L-V4-05-9` is only half closed. The stricter gate is
   still not Git's whole rule: measured, it accepts `refs/heads/main` and `HEAD`
-  as a base. What GitHub does with either was not established, and no sentence
-  in this build says it was.
+  as a base. Nothing rests on what GitHub would do with either: the ladder
+  compares the base by exact equality against the bare name GitHub reports, so
+  such a run fails closed instead of converging on the wrong pull request.
 
 ## Not implemented yet
 

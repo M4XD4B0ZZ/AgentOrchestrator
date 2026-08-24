@@ -403,7 +403,9 @@ or a body from a caller.
   refuses. The safe direction, and it is what bounds the composed body — but the
   two gates differ, and `L-V4-05-9` is only half closed. The stricter gate is
   still not Git's whole rule: measured, it accepts `refs/heads/main` and `HEAD`
-  as a base. What GitHub does with either was not established.
+  as a base. Nothing rests on what GitHub would do with either: the ladder
+  compares the base by exact equality against the bare name GitHub reports, so
+  such a run fails closed instead of converging on the wrong pull request.
 - **L-V4-06-10 — `--publish-head` and `--create-pr` do not compose in one
   invocation on a first delivery.** Measured: the observation runs before the
   publication, so the forge has never seen the commit,

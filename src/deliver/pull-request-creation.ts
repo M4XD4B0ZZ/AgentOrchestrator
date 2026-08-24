@@ -428,8 +428,11 @@ export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, 
  *
  * Held as a set rather than as a union of comparisons so there is one place to
  * read the answer from. What stops it widening silently is the suite's
- * enumerated equality against these three names, plus a case that asks the
- * predicate and the set the same question for every member of the vocabulary.
+ * enumerated equality against these three names, and that alone. A second case
+ * asks the predicate and the set the same question for every member; it pins
+ * the two to each other and cannot detect a widening, because both sides of it
+ * move together — the suite says so beside it, and this sentence claimed
+ * otherwise until a review read the two back against each other.
  */
 export const ESTABLISHED_PULL_REQUEST_CREATIONS: ReadonlySet<PullRequestCreation> = Object.freeze(
   new Set<PullRequestCreation>(['CREATED', 'ALREADY_EXISTS', 'CONVERGED_AFTER_UNCERTAIN_EFFECT']),

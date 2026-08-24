@@ -191,13 +191,15 @@ export const DELIVERY_BASE_REF = /^[A-Za-z0-9._+=@][A-Za-z0-9._+=@/-]*$/;
  * `refs/heads/main`, and this build's grammar carries no special case for
  * `HEAD`.
  *
- * What happens if one is sent as a `base` was then measured too, and only half
- * of it came back. `base: "HEAD"` answers `422 {"field":"base","code":"invalid"}`
- * and creates nothing. `base: "refs/heads/main"` **was not established**: the
- * request answered `422 "A pull request already exists for …"` first, because
- * GitHub's duplicate check runs before its base check and this repository's
- * head already had one. So one is measured, one is not, and neither is written
- * here as though it were the other.
+ * What GitHub would do with either as a `base` is deliberately not stated here,
+ * and nothing rests on it. The safety comes from this build's own comparison:
+ * `gradePullRequestCreation` compares the base by exact string equality against
+ * the bare name GitHub reports, so a run intending `refs/heads/main` or `HEAD`
+ * can neither match an existing pull request nor be graded as having created
+ * the intended one. It fails closed, whatever the far side answers. That
+ * property is readable in this repository; a sentence about the far side's
+ * behaviour would not be, and four consecutive batches of this slice broke on
+ * one.
  *
  * It is deliberately stricter than `PUBLISHABLE_REF`, which slice 5 uses and
  * which carries `L-V4-05-9` — a work branch that slice 5 will publish and this

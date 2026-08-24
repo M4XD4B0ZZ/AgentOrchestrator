@@ -650,9 +650,10 @@ describe('the pull-request creation authority', () => {
     // Measured, and recorded because a review asserted the opposite and this
     // case is what caught it: Git does allow a branch called `refs/heads/main`,
     // and this build's `isValidBranchName` carries no special case for `HEAD`.
-    // What GitHub does with either as a `base` was NOT established — a probe
-    // that tried was answered about a duplicate instead — so nothing here says
-    // it was. The mint does not refuse them, and that is the whole claim.
+    // Nothing here says what GitHub would do with either as a `base`. The mint
+    // accepting them is the whole claim, and what makes that safe is another
+    // module's: `gradePullRequestCreation` compares the base by exact equality
+    // against the bare name GitHub reports, so such a run fails closed.
     expect(mintPullRequestCreationGrant(subjectOf(), intentOf({ baseRef: base })), base).not.toBeNull();
   });
 
