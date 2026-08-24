@@ -666,17 +666,30 @@ describe('what AO writes into the pull request', () => {
     );
   });
 
-  it('carries nothing but the four values, and no local detail', () => {
+  it('is exactly these bytes, so anything added to it is visible', () => {
+    // Pinned by whole-string equality, and that is the point rather than
+    // pedantry. The first version of this case listed forbidden substrings —
+    // 'D:\\', '/home/', 'diff --git' — and a counter-proof walked straight past
+    // it: a mutant appending `Root : ${process.cwd()}` to the body SURVIVED,
+    // because the mutation lab runs in a throwaway tree on another drive and
+    // none of the listed prefixes appeared. A blacklist tests the list; an
+    // equality tests the value. The content is deterministic, so equality is
+    // available and a blacklist was never the right instrument.
     const { body, title } = composePullRequestContent({
       taskId: TASK,
       headRef: REF,
       headCommit: HEAD,
       baseRef: BASE,
     });
-    for (const forbidden of ['D:\\', '/home/', 'diff --git', 'node_modules', 'PATH=', 'http']) {
-      expect(body, forbidden).not.toContain(forbidden);
-      expect(title, forbidden).not.toContain(forbidden);
-    }
+    expect(title).toBe(`${TASK}: ${BRANCH}`);
+    expect(body).toBe(
+      `Task        : ${TASK}\n` +
+        `Head ref    : ${REF}\n` +
+        `Head commit : ${HEAD}\n` +
+        `Base ref    : ${BASE}\n` +
+        `\n` +
+        `${PULL_REQUEST_PROVENANCE}\n`,
+    );
     // ASCII by construction: no input the mint accepts can carry anything else.
     expect(/^[\x20-\x7e\n]*$/.test(body)).toBe(true);
   });
@@ -1330,12 +1343,18 @@ describe('the delivery command creates only when asked, and only when it may', (
     expect(m.calls).toHaveLength(0);
   });
 
-  it('refuses a base branch it will not send', async () => {
+  it('refuses a base branch it will not send, and does not print it either', async () => {
     const { out, mutations: m } = await run(['--observe', '--decide', '--create-pr', '--attended'], {
       state: taskState({ baseBranch: 'not a branch name' }),
     });
     expect(out).toContain('Creation     : SUBJECT_NOT_ESTABLISHED');
     expect(m.calls).toHaveLength(0);
+    // The second assertion is what makes the command's own grammar check a
+    // gate rather than a floor. Without it a counter-proof survives: the mint
+    // refuses the same input, so the outcome word is identical either way —
+    // and the difference the mint cannot prevent is that the report would
+    // carry the rejected value on its "Intended" line.
+    expect(out).not.toContain('not a branch name');
   });
 
   it('refuses when the decision is not PULL_REQUEST_REQUIRED', async () => {

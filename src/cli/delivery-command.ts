@@ -783,6 +783,15 @@ async function performCreation(
       if (!rebuilt.ok) return null;
       const head = publishableRef(reloaded.state.workBranch);
       if (head === null) return null;
+      // **A floor, not a live gate, and labelled as one because a counter-proof
+      // said so.** Removing it kills no test, and the argument is that it
+      // cannot: the grant was minted from a base that passed this grammar, and
+      // `sameSubject` compares the base by equality. A reloaded base that is
+      // invalid is therefore also unequal, and reaches `SUBJECT_CHANGED` a
+      // moment later by the comparison rather than by this line. It stays
+      // because the premise is another function's — pinned by the
+      // "the base branch changed" case — and a guarantee that depends on a
+      // comparison staying where it is, is not one this closure can make.
       if (!DELIVERY_BASE_REF.test(reloaded.state.baseBranch)) return null;
       return Object.freeze({
         host: rebuilt.subject.host,
