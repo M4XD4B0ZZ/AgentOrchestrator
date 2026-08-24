@@ -1,5 +1,5 @@
 /**
- * `agent-loop delivery` — the delivery surface (V4 slices 2 to 6).
+ * `agent-loop delivery` — the delivery surface (V4 slices 2 to 7).
  *
  * ── Why a command of its own, and why the network is a flag on it ──────────
  *
@@ -30,15 +30,22 @@
  * three authorities are three separate opaque types, and substituting one for
  * another is a compile error rather than a runtime refusal.
  *
- * They are run in that order when both are asked for, and that is necessary
- * without being sufficient. **On a first delivery the two do not compose in one
- * invocation**, measured: `--observe` runs before the publication, the forge has
- * never seen the commit, `commits/{sha}/pulls` answers `422 "No commit found
- * for SHA"`, and the decision is `OBSERVATION_UNSETTLED` — so the creation is
- * refused after the branch has been created. The branch is published and
- * nothing else happens, which is a correct outcome reached by an unhelpful
- * route. Publish in one invocation, then create in the next; `L-V4-06-10`
- * records it.
+ * They are run in that order when more than one is asked for, and that is
+ * necessary without being sufficient. **On a first delivery they do not compose
+ * in one invocation**, and the reason is the same each time: the observation
+ * runs before any of the acts, so the decision they gate on describes the world
+ * as it was before this invocation changed it.
+ *
+ * Measured for the first pair: `--observe` runs before the publication, the
+ * forge has never seen the commit, `commits/{sha}/pulls` answers `422 "No commit
+ * found for SHA"`, and the decision is `OBSERVATION_UNSETTLED` — so the creation
+ * is refused after the branch has been created. `L-V4-06-10` records it.
+ *
+ * The same shape closes the second pair, and more tightly: `--merge-pr` admits
+ * only `PULL_REQUEST_MATCHED_CHECKS_SUCCESS`, which asserts a pull request
+ * already matched this commit, so it cannot be true in the invocation that opens
+ * one. The merge is refused before anything is contacted. `L-V4-07-1` records
+ * it. Publish, then create, then merge — three invocations.
  *
  * ── What it will not do ────────────────────────────────────────────────────
  *
@@ -1115,9 +1122,9 @@ async function performMerge(
   // they can only authorise the one this invocation just looked at.
   const facts = proof === null ? null : deliveryObservationFactsOf(proof);
   if (facts === null || facts.pullRequestNumber === null) return refused('DECISION_NOT_SUCCESS');
-  // **Both are floors, and both are labelled as floors because a counter-proof
-  // measured them.** Removing either kills no test, and this comment claimed
-  // the opposite about the second until the campaign was run.
+  // **All three of the guards below are floors, and a counter-proof measured
+  // each of them.** Removing any one kills no test, and this comment claimed
+  // the opposite about one of them until the campaign was run.
   //
   // The first: `decideDelivery` answers the positive member only when the
   // outcome is `MATCHED`, the number is non-null and the head equals the
@@ -1130,10 +1137,16 @@ async function performMerge(
   // of the *mint*, and that is the kind of claim this repository keeps getting
   // wrong by reasoning instead of measuring.
   //
-  // They stay for the reason `performCreation`'s own floor stays: each premise
-  // belongs to another function, and a guarantee that depends on another
-  // function's wiring staying where it is, is not one this function can make.
-  // A future invocation that obtained a proof from anywhere else would reach a
+  // And the third, the `pullRequestNumber === null` arm above: the positive
+  // decision is only answered when the number is non-null, so a proof reaching
+  // here always carries one. Without the arm the run would still refuse — the
+  // mint takes `null` and returns `null` — but under `SUBJECT_NOT_ESTABLISHED`
+  // rather than under the member that says which precondition was missing.
+  //
+  // All three stay for the reason `performCreation`'s own floor stays: each
+  // premise belongs to another function, and a guarantee that depends on
+  // another function's wiring staying where it is, is not one this function can
+  // make. An invocation that obtained a proof from anywhere else would reach a
   // live gate rather than a silent mismatch.
   if (facts.pullRequestHeadSha !== facts.commit) return refused('DECISION_NOT_SUCCESS');
   if (facts.commit !== subject.subject.commit) return refused('DECISION_NOT_SUCCESS');

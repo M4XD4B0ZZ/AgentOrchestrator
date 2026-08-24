@@ -266,3 +266,62 @@ recorded here instead.
   guarantees** — unchanged. A third authority was added and it is narrower than
   either sibling in what it can reach: no local process, no repository root, no
   free text.
+
+## The counter-proof
+
+Run in a scratch copy of the tree, against the seven V4 suites.
+
+    BASELINE GREEN
+    46 mutants -> 41 KILLED, 5 EQUIVALENT, 0 HARNESS_FAILURE
+
+**The baseline check is load-bearing and it fired.** The first two runs stopped
+on a red baseline: the lab was not copying `README.md`, which two suites read. A
+red baseline reports every mutant KILLED, so the campaign was worth nothing until
+that was fixed — and it said so rather than producing a number.
+
+The 41 kills cover every guard the slice exists for: the authority (registry,
+one-shot, method binding, number bounds, base grammar, addressability), the fence
+(the `sha` field, the method field, `-X PUT`, the three attempt conditions), the
+pre-reading (head moved, closed-unmerged, draft, wrong base, already merged,
+wrong number), the post-reading (response trusted over reading, missing resulting
+commit, merged at another head, merged into another base, both attempt arms), the
+orchestration (authority not spent, subject not re-checked, either reading
+skipped, a retry added, each field of `sameSubject`, the merge-commit gate), the
+parse (`merge_commit_sha` read while open, an unknown state word read as open,
+`merged` inferred from `state`, a malformed document read past) and the command
+ladder (the attended gate, the decision gate, the task-state gate).
+
+### The five equivalents, and why none is a kill in disguise
+
+**A redundant pair in `MergeGrant.claim`.** Removing the registry gate survives,
+and removing the `try`/`catch` survives — *separately*. Each is what makes the
+other's removal invisible: every forgery constructible outside the module lacks
+the private field, so either line refuses it. In unmutated code the gate is
+first, so the `catch` is not reached at all. Both stay; neither is claimed to be
+covered. Killing either would need a value that has the private field and was not
+minted, or one that passed the registry without carrying the field — the second
+is reachable only by capturing the registry before the first mint, which
+`lease/execution-lease.ts` records a review doing, and which is not reachable
+from this suite.
+
+**Three floors in `performMerge`.** The proof-commit comparison, the head-sha
+comparison and the `pullRequestNumber === null` arm all survive, because
+`decideDelivery` answers the positive member only when the outcome is `MATCHED`,
+the number is non-null and the head equals the commit — and because the proof is
+minted by `attestDeliveryObservation` from the very subject the first of them
+compares against. **A comment beside one of them argued it was not a floor.** That
+was reasoning, not measurement, and the campaign refuted it; the comment now says
+what was measured. All three stay, labelled, because each premise belongs to
+another function's wiring rather than to this one.
+
+### What the campaign found in the product
+
+Two defects, both fixed before this ADR was written:
+
+1. `MergeResult.mergeCommit` was filled whenever the reading afterwards said
+   `MERGED`. Under `POSTCONDITION_MISMATCH` — a pull request merged at a head or
+   into a base this invocation did not authorise — that offered somebody else's
+   merge as this delivery's result, under a report line labelled `Merge commit`.
+   It is now gated on the outcome, and the reading is still printed whole so
+   nothing is hidden.
+2. The floor comment above.
