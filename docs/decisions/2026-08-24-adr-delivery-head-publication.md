@@ -292,6 +292,43 @@ request. The measurement was taken anyway for the next slice: all 58 pull
 requests in this repository are non-draft, and both `gh pr create` and the REST
 endpoint default to ready.
 
+## The live dogfood
+
+This slice's own branch was published by this slice, from the built artefact,
+against the real remote, with the real runner and no injected seam.
+
+```
+before  : (the ref does not exist on the remote)
+
+FIRST invocation
+  publication : PUBLISHED
+  before      : ABSENT
+  attempt     : COMPLETED
+  after       : AT_COMMIT 5effb51c8c9d456d5040c2c480a186bb95e5befd
+
+SECOND invocation
+  publication : ALREADY_PUBLISHED
+  before      : AT_COMMIT 5effb51c8c9d456d5040c2c480a186bb95e5befd
+  attempt     : NOT_ATTEMPTED
+  after       : not read
+```
+
+One branch created, one convergence, one push in total. That is the idempotency
+claim demonstrated as a property of the product rather than of a test double,
+and it is the only way to demonstrate it: no fake can show that a real `git
+push` was not issued the second time.
+
+**What the dogfood did not exercise is the CLI refusal ladder**, which requires
+a task at `READY_FOR_PR`. This repository has no AO task state for its own
+slices, and fabricating one to make a dogfood possible is exactly what would
+make the dogfood worthless. Carried as `L-V4-05-6`.
+
+**And it demonstrated `L-V4-05-1` immediately.** Every commit made after the
+publication had to reach the remote by an ordinary `git push`, because the
+product's vector is create-only and answers `REF_HOLDS_ANOTHER_COMMIT` for a ref
+that already exists at a different object name. That is the designed behaviour
+and it is also the first thing the next slice will want changed.
+
 ## Product state
 
 `READY_FOR_PR` remains terminal. No transition, no state, no schema field, no

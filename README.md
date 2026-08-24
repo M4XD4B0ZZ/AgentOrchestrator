@@ -8971,6 +8971,24 @@ filter somebody has to remember to run.
 
 ADR: [`docs/decisions/2026-08-24-adr-delivery-head-publication.md`](docs/decisions/2026-08-24-adr-delivery-head-publication.md).
 
+### It published its own branch
+
+The slice's branch was created on the real remote by the built artefact, twice
+in a row:
+
+```
+FIRST   publication : PUBLISHED          before : ABSENT     attempt : COMPLETED
+SECOND  publication : ALREADY_PUBLISHED  before : AT_COMMIT  attempt : NOT_ATTEMPTED
+```
+
+One push in total. No test double can show that a second `git push` was not
+issued; only this can.
+
+It also demonstrated `L-V4-05-1` on the spot: every commit after that one had to
+reach the remote by an ordinary `git push`, because the product's vector is
+create-only and answers `REF_HOLDS_ANOTHER_COMMIT` for a ref already sitting at
+a different commit.
+
 ### Carried forward from V4 slice 5, deliberately
 
 - **L-V4-05-1 — republishing a moved head is not implemented.** Once the ref
