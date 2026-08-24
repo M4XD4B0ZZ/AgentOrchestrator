@@ -74,11 +74,15 @@ the one slice 6 had no equivalent of. Without it this slice would have been
 stopped: a pre-request observation alone is a check-then-act race, and this
 build does not simulate atomicity locally.
 
-**The fence is opt-in and its absence is silent.** Omitting `sha` does not weaken
-it, it removes it — the sibling asynchronous endpoint documents the consequence
-in words: "If not provided, the current head of the PR at the time of the request
-will be used." So the field is bound in the authority, written by the transport
-from that binding, and a counter-proof that removes it must fail.
+**The fence is opt-in, and that its absence is silent is DOCUMENTED, NOT
+MEASURED.** No probe omitted `sha`: the only way to learn what that does is to
+let a merge happen, and this campaign merged nothing it did not intend to. What
+is on the record is the sibling asynchronous endpoint's wording — without the
+field, "the current head of the PR at the time of the request will be used" — and
+the absence of any documented condition under which a mismatched `sha` is
+ignored. That is enough to decide the design and not enough to state as
+behaviour, so the field is bound in the authority, written by the transport from
+that binding, and a counter-proof that removes it turns the suite red.
 
 ### 2. GitHub does not refuse a closed pull request
 

@@ -9276,8 +9276,11 @@ branch, `main` never involved:
 | a draft pull request | `405 Pull Request is still a draft` |
 
 That is the compare-and-swap `--force-with-lease` gives slice 5 and slice 6 had
-no equivalent of. **It is opt-in and its absence is silent** — omitting `sha`
-does not weaken the check, it removes it — so the head is bound in the authority
+no equivalent of. **It is opt-in, and its absence is silent — documented, not
+measured.** No probe here omitted `sha`, because the only way to learn what that
+does is to let a merge happen; what the sibling asynchronous endpoint states in
+words is that without it "the current head of the PR at the time of the request
+will be used". So the head is bound in the authority
 and written into the request from that binding, and a counter-proof that deletes
 the field turns the suite red.
 

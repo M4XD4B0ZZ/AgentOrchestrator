@@ -63,7 +63,13 @@
  *
  * It is the server-evaluated compare-and-swap slice 6 had no equivalent of and
  * slice 5 has in `--force-with-lease`. Measured against github.com on a
- * disposable pull request whose base was a scratch branch:
+ * disposable pull request whose base was a scratch branch — and note what is
+ * NOT in this table: no probe omitted `sha`, because the only way to learn what
+ * that does is to let a merge happen. That the field is opt-in is documented
+ * rather than measured here; the sibling asynchronous endpoint states that
+ * without it "the current head of the PR at the time of the request will be
+ * used". This module therefore never omits it, and a counter-proof that deletes
+ * it from the body turns the suite red.
  *
  *   sha != current head, PR open   -> 409 "Head branch was modified. Review and
  *                                     try the merge again."  Nothing merged.
