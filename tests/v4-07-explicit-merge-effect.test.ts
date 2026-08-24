@@ -78,7 +78,10 @@ import {
   MERGE_PR_OPTION_DESCRIPTION,
   registerDeliveryCommand,
 } from '../src/cli/delivery-command.js';
-import { MERGE_TRAILER } from '../src/cli/render-delivery-observation.js';
+import {
+  MERGE_TRAILER,
+  renderDeliveryObservation,
+} from '../src/cli/render-delivery-observation.js';
 import {
   DELIVERY_DECISIONS,
   POSITIVE_DELIVERY_DECISION,
@@ -1403,6 +1406,94 @@ describe('the delivery command merges only when asked, and only when it may', ()
       expect(r.merger.calls, argv.join(' ') || '(no flags)').toHaveLength(0);
       expect(r.out, argv.join(' ') || '(no flags)').not.toContain('Merge        :');
     }
+  });
+
+  it('prints the merge trailer only when a merge was attempted', async () => {
+    // The trailer's TEXT is pinned in section 9. This is the other half, and
+    // the half `render-delivery-observation.ts` records as having shipped false
+    // once already: a sentence about what did not happen has to be printed on
+    // exactly the runs it is about. A refusal that contacted nothing is a
+    // read-only run of a flag that could have changed something and did not.
+    const merged = await run(['--observe', '--decide', '--merge-pr', '--attended']);
+    expect(merged.out).toContain(MERGE_TRAILER);
+
+    const refused = await run(['--observe', '--decide', '--merge-pr']);
+    expect(refused.out).not.toContain(MERGE_TRAILER);
+    expect(refused.merger.calls).toHaveLength(0);
+
+    // And an invocation that never asked prints neither the block nor the
+    // sentence.
+    const other = await run(['--observe', '--decide']);
+    expect(other.out).not.toContain(MERGE_TRAILER);
+    expect(other.out).not.toContain('Merge        :');
+  });
+
+  it('does not print the merge trailer beside another act that was attempted', () => {
+    // The case above cannot reach this, and a counter-proof said so: on a run
+    // that attempted nothing the renderer takes the read-only branch and never
+    // consults `mergeAttempted` at all, so making the push unconditional
+    // survived it. The branch that matters is the one where SOMETHING was
+    // attempted and the merge was not — there, a trailer pushed unconditionally
+    // would tell an operator a merge was made on a run that refused one.
+    //
+    // Driven at the renderer rather than through the command, because reaching
+    // that branch through the ladder needs a publication or creation that
+    // really attempted, and this asserts the renderer's rule rather than the
+    // ladder's.
+    const view = {
+      repositoryId: 'repo',
+      repositoryRoot: ROOT,
+      taskId: TASK,
+      subject: { ok: false as const, refusal: 'NO_DELIVERY_TARGET' },
+      observation: null,
+      conclusion: 'NOT_REQUESTED',
+      publication: {
+        result: {
+          publication: 'PUBLISHED',
+          before: { outcome: 'ABSENT', commit: null },
+          attempt: 'COMPLETED',
+          after: { outcome: 'AT_COMMIT', commit: HEAD },
+        },
+        ref: REF,
+        remoteName: REMOTE,
+      },
+      merge: {
+        result: {
+          outcome: 'OPERATOR_ABSENT',
+          before: null,
+          attempt: 'NOT_ATTEMPTED',
+          after: null,
+          mergeCommit: null,
+        },
+        pullRequestNumber: null,
+        baseRef: BASE,
+      },
+    } as unknown as Parameters<typeof renderDeliveryObservation>[0];
+
+    const out = renderDeliveryObservation(view);
+    // The publication really was attempted, so the report is not read-only...
+    expect(out).toContain('Not read-only.');
+    // ...and the merge block is printed, because the flag was given...
+    expect(out).toContain('Merge        : OPERATOR_ABSENT');
+    // ...but the sentence about a merge having happened is not.
+    expect(out).not.toContain(MERGE_TRAILER);
+  });
+
+  it('prints the resulting commit only where a reading established one', async () => {
+    // `Merge commit` is the line an operator would act on, and the one the next
+    // slice needs. It must not appear under an outcome that did not establish a
+    // merge — the defect a case in section 7 found in the result object.
+    const merged = await run(['--observe', '--decide', '--merge-pr', '--attended']);
+    expect(merged.out).toContain(`Merge commit : ${RESULT}`);
+
+    const openAfter = await run(['--observe', '--decide', '--merge-pr', '--attended'], {
+      prPages: [prBody(), prBody()],
+    });
+    expect(openAfter.out).toContain('Merge        : OUTCOME_AMBIGUOUS');
+    expect(openAfter.out).not.toContain('Merge commit :');
+    // The reading is still shown whole, so the fact is not hidden — only the
+    // line that would attribute it to this delivery is withheld.
+    expect(openAfter.out).toContain('Forge after  : OPEN at');
   });
 
   it('registers the option set exactly, and none of the words this build refuses', () => {

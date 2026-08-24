@@ -272,7 +272,7 @@ recorded here instead.
 Run in a scratch copy of the tree, against the seven V4 suites.
 
     BASELINE GREEN
-    46 mutants -> 41 KILLED, 5 EQUIVALENT, 0 HARNESS_FAILURE
+    49 mutants -> 44 KILLED, 5 EQUIVALENT, 0 HARNESS_FAILURE
 
 **The baseline check is load-bearing and it fired.** The first two runs stopped
 on a red baseline: the lab was not copying `README.md`, which two suites read. A
@@ -289,7 +289,17 @@ orchestration (authority not spent, subject not re-checked, either reading
 skipped, a retry added, each field of `sameSubject`, the merge-commit gate), the
 parse (`merge_commit_sha` read while open, an unknown state word read as open,
 `merged` inferred from `state`, a malformed document read past) and the command
-ladder (the attended gate, the decision gate, the task-state gate).
+ladder (the attended gate, the decision gate, the task-state gate) and the
+report (the trailer never printed, the trailer always printed, the resulting
+commit always printed).
+
+The last three were added after the first campaign, and the middle one is why:
+the case asserting the trailer is **not** printed on a refused run **survived**
+it. On a run that attempted nothing the renderer takes its read-only branch and
+never consults `mergeAttempted`, so the assertion was masked by an earlier gate —
+exactly the class of defect a counter-proof exists to find and a passing test
+cannot. It is now driven at the renderer, on the branch where another act *was*
+attempted and the merge was not, and the mutant dies.
 
 ### The five equivalents, and why none is a kill in disguise
 
@@ -325,3 +335,27 @@ Two defects, both fixed before this ADR was written:
    It is now gated on the outcome, and the reading is still printed whole so
    nothing is hidden.
 2. The floor comment above.
+
+## One live check the suite cannot make
+
+The suite pins `mergeRequestArgs` and `mergeRequestBody` by exact equality
+against literals written in the test file. That proves the emitter agrees with a
+paraphrase; it does not prove the paraphrase is a request GitHub accepts — the
+failure this repository recorded when a probe's assertion turned out to be
+matching its own restatement rather than the emitter's output.
+
+So the emitter's **own** output was sent, aimed at a pull-request number that
+does not exist, where the only possible outcome is `404`:
+
+    EMITTED ARGS: ["api","--hostname","github.com","-X","PUT",
+                   "repos/M4XD4B0ZZ/AgentOrchestrator/pulls/999999/merge",
+                   "--input","-"]
+    EMITTED BODY: {"sha":"b75862a2b20bb123ad5df52451f8166568ae2197",
+                   "merge_method":"squash"}
+    EXIT : 1
+    OUT  : {"message":"Not Found", … "status":"404"}
+
+The vector is routed, the method is accepted, the body is read from stdin, and
+the client exits non-zero — which is what the transport grades as `FAILED`. It
+merges nothing and can merge nothing, and it is not part of the suite: it needs a
+network and a credential, and `verify` requires neither.
