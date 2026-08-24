@@ -306,8 +306,8 @@ export interface PullRequestIntent {
  *    anything, and a partial ref is resolved against a search order;
  *  - a base, or a work branch, that is not a plain branch name under
  *    `repo/branch-name.ts`: both are sent or compared as branch names, and the
- *    shell-inert character class alone accepts `refs/heads/main`, `HEAD`, `@`,
- *    `a..b` and `x.lock`, none of which Git accepts as a branch. The
+ *    shell-inert character class alone accepts `@`, `a..b` and `x.lock`, none
+ *    of which Git accepts as a branch. The
  *    255-character limit that comes with it is also what bounds the composed
  *    body, which otherwise had no bound at all;
  *  - a head ref whose branch is the base branch: measured, GitHub answers
