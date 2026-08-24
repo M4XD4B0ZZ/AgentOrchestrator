@@ -16,11 +16,16 @@
  *     (no head parameter at all)&state=all                    -> 30 results
  *
  * A nonsense unqualified head returns byte-identical results to sending no
- * filter, so a duplicate check written that way would read every pull request
- * in the repository as a match. The failure is silent, not an error. The
- * commit-keyed locator this build already uses has no such mode: it is asked
- * about one object name, and every candidate is re-tested against its own head
- * anyway.
+ * filter, so a duplicate check written that way would read a whole page of
+ * unrelated pull requests as matches. The 30 above was that day's page size,
+ * not a repository total — re-measured at `per_page=100` the three unfiltered
+ * answers are 60, which is every pull request this repository has had. The
+ * defect reproduces either way; the number was a page. The failure is silent,
+ * not an error.
+ *
+ * The commit-keyed locator this build already uses has no such mode: it is
+ * asked about one object name, and every candidate is re-tested against its own
+ * head anyway.
  *
  * ── Why the state split, and why `CLOSED_ONLY` is not `NONE` ──────────────
  *

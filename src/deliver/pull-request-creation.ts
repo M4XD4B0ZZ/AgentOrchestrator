@@ -156,7 +156,9 @@ export const PULL_REQUEST_CREATIONS = [
    *
    * Either `--observe` and `--decide` were not both given, or they were and the
    * answer was one this build will not create from: the observation did not
-   * settle, the subject moved, or a check on this commit failed.
+   * settle, the subject moved, the subject could not be re-read at all, or a
+   * check on this commit failed. A review counted three where there are four —
+   * `SUBJECT_REVALIDATION_FAILED` is its own decision and is outside the set.
    *
    * It is deliberately **not** "the decision was not `PULL_REQUEST_REQUIRED`".
    * Four other decisions mean a pull request already claims this head, and they
@@ -230,7 +232,15 @@ export const PULL_REQUEST_CREATIONS = [
    */
   'HEAD_SHA_MISMATCH',
   /**
-   * The forge could not be asked what pull requests this commit already has.
+   * What pull requests this commit already has could not be established.
+   *
+   * Not only "the forge could not be reached". It also covers a forge that
+   * answered: a full page, which the parse refuses as truncated rather than
+   * concluding from a prefix, and an open pull request at this head whose base
+   * or draft the response did not report, which the classifier refuses rather
+   * than reading past. The distinction the classifier keeps — "I cannot judge
+   * the one that is there" is not "there is none" — was thrown away by the
+   * sentence until a review read it back.
    *
    * Ahead of every attempt member: without a pre-reading, `CREATED` and
    * `ALREADY_EXISTS` are indistinguishable afterwards, and this build would not
@@ -277,11 +287,18 @@ export const PULL_REQUEST_CREATIONS = [
    */
   'DRAFT_STATE_CONFLICT',
   /**
-   * The attempt ran and the intended pull request still does not exist.
+   * Nothing is at this head, and no request of this invocation is known to have
+   * been sent.
    *
-   * The forge refused, and the reading afterwards agrees that nothing was
-   * created. This is the honest failure: an effect that did not happen and is
-   * known not to have happened.
+   * Two provenances, one state: the transport ran and reported failure, or it
+   * never started — an unsupported host, an unusable environment, an argument
+   * the grammar refuses. Either way the reading afterwards agrees that nothing
+   * was created. This is the honest failure: an effect that did not happen and
+   * is known not to have happened.
+   *
+   * The sentence used to open "The request was refused", which a review read
+   * back on the paths where no process ever existed. The `Attempt` line in the
+   * report is what distinguishes the two, and it is printed beside this.
    */
   'CREATION_REFUSED',
   /**
@@ -329,8 +346,8 @@ export const PULL_REQUEST_CREATIONS = [
    */
   'ALREADY_EXISTS',
   /**
-   * The attempt did not report success, and the intended pull request is now
-   * open.
+   * No request of this invocation reported success, and the intended pull
+   * request is now open.
    *
    * The effect reached the forge and the answer did not reach this process, or
    * a concurrent creator won the race. Either way the intended state is
@@ -358,13 +375,13 @@ export type PullRequestCreation = (typeof PULL_REQUEST_CREATIONS)[number];
 export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, string>> =
   Object.freeze({
     SUBJECT_NOT_ESTABLISHED:
-      'There is no delivery target, exact commit, publishable head ref and base branch to be about, so nothing was read and nothing was attempted.',
+      'There is no delivery target, exact commit, sendable work branch and sendable base branch to be about. Nothing was read from the forge by this path and nothing was attempted.',
     TASK_NOT_READY:
-      'The task has not reached READY_FOR_PR. Only a finished task has a delivery head, so nothing was read and nothing was attempted.',
+      'The task has not reached READY_FOR_PR. Only a finished task has a delivery head, so nothing was read from the forge by this path and nothing was attempted.',
     OPERATOR_ABSENT:
-      'Creating a pull request asks this repository\'s humans to take the work, so it requires an operator to be present for this invocation. Nothing was read and nothing was attempted. Pass --attended to create.',
+      'Creating a pull request asks this repository\'s humans to take the work, so it requires an operator to be present for this invocation. Nothing was read from the forge by this path and nothing was attempted. Pass --attended to create.',
     DECISION_NOT_ESTABLISHED:
-      'This invocation has no fresh decision about this commit that admits the creation ladder. Either --observe and --decide were not both given, or they were and the answer was one this build will not create from: the observation did not settle, the subject moved, or a check on this commit failed. A stored record can never stand in for it. Nothing was read from the forge by this path and nothing was attempted.',
+      'This invocation has no fresh decision about this commit that admits the creation ladder. Either --observe and --decide were not both given, or they were and the answer was one this build will not create from: the observation did not settle, the subject moved, the subject could not be re-read, or a check on this commit failed. A stored record can never stand in for it. Nothing was read from the forge by this path and nothing was attempted.',
     AUTHORITY_REFUSED:
       'The authority for this creation was not one this build minted, or it had already been used. Nothing was attempted.',
     SUBJECT_CHANGED:
@@ -378,7 +395,7 @@ export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, 
     HEAD_SHA_MISMATCH:
       'The head ref exists on the delivery remote and holds a different commit, so a pull request from it would be about other work. This build does not move a published ref, and nothing was attempted.',
     PULL_REQUEST_STATE_UNKNOWN:
-      'The forge could not be asked which pull requests this commit already has, so nothing was attempted: without knowing what was there first, a success afterwards could not be told from something that was already true.',
+      'What pull requests this commit already has could not be established — the forge was not reached, or it answered in a shape this build will not draw a conclusion from. Nothing was attempted: without knowing what was there first, a success afterwards could not be told from something that was already true.',
     PULL_REQUEST_AMBIGUOUS:
       'More than one open pull request already claims this exact head. Which of them is the delivery is not a question this build can answer, and nothing was attempted.',
     PRIOR_PULL_REQUEST_CLOSED:
@@ -388,15 +405,15 @@ export const PULL_REQUEST_CREATION_DETAIL: Readonly<Record<PullRequestCreation, 
     DRAFT_STATE_CONFLICT:
       'An open pull request already has this exact head and base, and its draft state is not the intended one. This build never marks a pull request ready or back to draft, so nothing was attempted.',
     CREATION_REFUSED:
-      'The request was refused and no pull request with this head exists. Nothing on the forge changed.',
+      'No pull request with this head exists on the forge, and this invocation did not establish that it sent a request for one — either the request was refused, or none was sent. Nothing on the forge changed.',
     OUTCOME_UNCERTAIN:
       'Whether the forge created a pull request could not be established. Do not ask again to find out — ask again, and the answer will be read from the forge before anything is attempted.',
     POSTCONDITION_MISMATCH:
-      'A request was made, and what is at this head afterwards is not the intended pull request — the base, the draft state or the open state is different, or there is more than one. This build may well have created one of them. Nothing was edited, retargeted, closed or retried in response.',
+      'What is at this head afterwards is not the intended pull request — the base, the draft state or the open state is different, or there is more than one. If a request was sent, this build may have created one of them. Nothing was edited, retargeted, closed or retried in response.',
     ALREADY_EXISTS:
       'Exactly one open pull request already had this head, this base and this draft state. Nothing was sent, because the intended state was already true.',
     CONVERGED_AFTER_UNCERTAIN_EFFECT:
-      'The request did not report success, and the intended pull request is now open. The intended state is established; this invocation cannot claim it is what established it.',
+      'No request of this invocation reported success, and the intended pull request is now open. The intended state is established; this invocation cannot claim it is what established it.',
     CREATED:
       'No pull request had this head, one request was made, and exactly one open pull request now has this head, this base and this draft state.',
   });

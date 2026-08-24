@@ -53,7 +53,10 @@
  * about a ref; observing is about a commit. Both are bound because a ref alone
  * says nothing about content and a commit alone says nothing about where.
  *
- * `commit` — the exact forty-hex object name. The push is written as
+ * `commit` — the exact object name; the regex below accepts forty or
+ * sixty-four lowercase hex digits, which is wider than `forge-observation.ts`
+ * accepts and wider than github.com uses. This line said "forty-hex" above that
+ * regex until a review read the two together. The push is written as
  * `<commit>:<ref>`, never `<branch>:<ref>`, so a local branch that moves after
  * this grant was minted cannot change what gets published.
  *

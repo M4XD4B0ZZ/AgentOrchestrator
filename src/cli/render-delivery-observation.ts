@@ -171,7 +171,7 @@ export const PUBLICATION_TRAILER =
  */
 export const CREATION_TRAILER =
   'Not read-only. The creation could change exactly one thing and changed at most that:\n' +
-  'one pull request, opened once, at the commit named above. It updated, closed, reopened,\n' +
+  'one pull request, opened once, from the branch named above. It updated, closed, reopened,\n' +
   'marked ready or draft, commented on, labelled, assigned, reviewed and merged nothing, it\n' +
   'pushed no branch and changed no ref, and it grants no authority to do any of those. It\n' +
   'wrote no task state.';

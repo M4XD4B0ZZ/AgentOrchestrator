@@ -9148,17 +9148,27 @@ private field, so the types are compared nominally, and the suite pins both
 directions with `@ts-expect-error` inside the canonical gate. There is no
 supertype, no conversion, and no merge authority anywhere in the build.
 
-Minting requires all of: `READY_FOR_PR`, `--attended`, and *this invocation's
-own* `--observe --decide` answering `PULL_REQUEST_REQUIRED`. A stored slice-3
-record has no path into the ladder at all.
+Minting requires all of: `READY_FOR_PR`, a sendable work branch and base
+branch, `--attended`, and *this invocation's own* `--observe --decide` answering
+one of the five admitted decisions — see above; only one of them means a pull
+request is needed, and a request is sent only when the ladder's own reading
+finds none. A stored slice-3 record has no path into the ladder at all.
 
 ### What reaches GitHub
 
-Four repository-derived values: the task id, the work-branch name, the
-base-branch name and the head object name. Everything else in the title and body
-is a literal in one file. No diff, no log, no commit message, no path, no
-environment, no transcript, no finding, no test output — and no task title,
-because the task-state record has no such field.
+Six repository-derived values, and no others. Four are in the text — the task
+id, the work-branch name, the base-branch name and the head object name — and
+two are in the address: the owner and the repository name, which slice 1 parsed
+out of the delivery remote's push URL and which appear in
+`repos/{owner}/{name}/pulls` and in the `head` field as `owner:branch`. This
+paragraph said "four" until a review counted the wire rather than the file.
+
+Everything else in the title and body is a literal in one file. No diff, no log,
+no commit message, no path, no environment, no transcript, no finding, no test
+output — and no task title, because the task-state record has no such field. All
+six are grammar-bounded at the mint, and the branch and base are additionally
+capped at 255 characters by `repo/branch-name.ts`, which is what bounds the
+composed body.
 
 ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2026-08-24-adr-pull-request-creation.md).
 
@@ -9174,7 +9184,8 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
   response. An operator has to look.
 - **L-V4-06-4 — `CHECKS_FAILED` blocks creation.** A red commit gets no pull
   request from this build, because checks are graded before the pull-request
-  question and the required decision is `PULL_REQUEST_REQUIRED`.
+  question and `CHECKS_FAILED` is deliberately outside the set of decisions that
+  admit the creation ladder.
 - **L-V4-06-5 — the creation is not recorded.** "AO opened this" is durable
   nowhere; it is observable from GitHub, and slice 3's record is a separate act.
 - **L-V4-06-6 — the base is a ref, not a commit.** The API offers nothing else,
@@ -9191,6 +9202,13 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
 - **L-V4-06-10 — `--publish-head` and `--create-pr` do not compose on a first
   delivery.** The observation runs before the publication, so the forge has not
   seen the commit yet and the decision cannot settle. Two invocations.
+- **L-V4-06-11 — this slice's branch grammar is stricter than slice 5's.** The
+  mint puts the work branch and the base through `repo/branch-name.ts` as well
+  as the shell-inert class, so a name slice 5 will publish can be one slice 6
+  refuses. That is the safe direction and it bounds the composed body, but the
+  two gates now differ and `L-V4-05-9` is only half closed. Measured limits of
+  the stricter one: it still accepts `refs/heads/main` and `HEAD` as a base,
+  both of which GitHub answers `422` for.
 
 ## Not implemented yet
 

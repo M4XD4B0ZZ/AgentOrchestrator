@@ -11,23 +11,32 @@
  * Slice 5 could promise that no repository-authored text left the machine,
  * because a `git push` vector has nowhere to put any. A pull request has a
  * title and a body, so this slice cannot make that promise and does not. What
- * it makes instead is a smaller, checkable one: **the only repository-derived
- * values that reach GitHub are the task id, the work-branch name, the base-branch
- * name and the head object name.** Every other byte below is a literal in this
- * file.
+ * it makes instead is a smaller, checkable one: **six repository-derived values
+ * reach GitHub on this path and no others.** Every other byte is a literal, in
+ * this file or in the transport.
  *
- * Each of those four is bounded before it gets here:
+ * Four are composed here — the task id, the work-branch name, the base-branch
+ * name and the head object name. The other two are the owner and the repository
+ * name, which slice 1 parsed out of the delivery remote's push URL and which
+ * the transport puts in `repos/{owner}/{name}/pulls` and in the `head` field as
+ * `owner:branch`. This sentence said "the only ... four" until a review counted
+ * the wire rather than this file.
  *
- *  - the task id passes `isValidTaskId` at the mint — letters, digits, `.`, `_`
- *    and `-`, bounded length. The task-state schema itself requires only a
- *    non-blank string, so the mint is where the grammar is actually applied;
- *  - the branch and base names pass the shell-inert grammar at the mint;
- *  - the commit is forty or sixty-four lowercase hex digits.
+ * Every one of the six is bounded, and the bound is applied at the mint —
+ * *after* this function composes, which is the order the code actually has:
  *
- * So the text is ASCII by construction. There is no normalisation step here
- * because there is nothing to normalise: no input can carry a combining mark, a
- * bidirectional control, a zero-width joiner or a non-ASCII digit and still
- * reach this function.
+ *  - the task id passes `isValidTaskId` — letters, digits, `.`, `_` and `-`,
+ *    bounded length. The task-state schema itself requires only a non-blank
+ *    string, so the mint is where the grammar is applied;
+ *  - the branch and base names pass the shell-inert class **and**
+ *    `repo/branch-name.ts`, which caps both at 255 characters — which is what
+ *    bounds the body composed below;
+ *  - the commit, the owner and the repository name pass `isAddressableSubject`.
+ *
+ * So the text is ASCII by construction, once the mint has accepted it. There is
+ * no normalisation step here because there is nothing to normalise: no input
+ * the mint accepts can carry a combining mark, a bidirectional control, a
+ * zero-width joiner or a non-ASCII digit.
  *
  * ── What is deliberately not in it ────────────────────────────────────────
  *
@@ -54,12 +63,20 @@
  * Both are measured in UTF-8 bytes, not code units: the transport writes bytes,
  * and a limit counted in JavaScript characters would be a different limit.
  *
- * The body budget is far above anything this build composes — the longest one
- * it can produce is a few hundred bytes. The **title** budget is not: a task id
- * at its 128-character limit beside a 255-character branch name composes 385
- * bytes, which is why {@link boundedTitle} exists and cuts. A generous ceiling
- * on a field nobody fills is a ceiling that invites somebody to fill it; a
- * ceiling a legitimate input can reach has to be handled rather than declared.
+ * The body budget is above anything the mint will let through: the branch and
+ * the base are capped at 255 characters each and the rest is literal, so the
+ * longest composable body is 991 bytes — measured, at a 128-character task id,
+ * a 255-character branch and a 255-character base. That was **not** true when this
+ * paragraph first claimed it — the two names had no length bound at all, and a
+ * 2500-character branch composed a body the mint then refused, with the
+ * rejected value printed in the report. The cap is what makes the sentence
+ * true, and it was added because the sentence was not.
+ *
+ * The **title** budget is reachable by a legitimate input: a task id at its
+ * 128-character limit beside a 255-character branch composes 385 bytes, which
+ * is why {@link boundedTitle} exists and cuts. A generous ceiling on a field
+ * nobody fills invites somebody to fill it; a ceiling a legitimate input can
+ * reach has to be handled rather than declared.
  */
 export const MAX_TITLE_BYTES = 256;
 export const MAX_BODY_BYTES = 4096;
@@ -74,9 +91,10 @@ export function byteLength(value: string): number {
 /**
  * The draft state AO creates with. Chosen, measured, and never changed after.
  *
- * `false`, because this repository has never had a draft pull request: all 59
- * pull requests it has ever carried report `isDraft: false` — measured, not
- * assumed. A slice-6 default of `true` would have made AO's own delivery the
+ * `false`, because this repository has never had a draft pull request: every
+ * pull request it has ever carried reports `isDraft: false` — measured across
+ * all of them, and re-measured at 60 after this slice's own dogfood opened
+ * one. A slice-6 default of `true` would have made AO's own delivery the
  * first draft in the repository's history.
  *
  * It is written into the request explicitly rather than omitted. GitHub's

@@ -280,17 +280,25 @@ body:  Task        : <taskId>
        update, close, reopen, review, comment on, label or merge it. …
 ```
 
-**The intentional egress is exactly four repository-derived values**: the task
-id, the work-branch name, the base-branch name and the head object name. There
-is no diff, no `git log`, no commit message, no local path, no environment, no
-agent transcript, no finding, no test output. The task-state record has no title
-or description field, which is why this is an identity block rather than a
-summary.
+**The intentional egress is exactly six repository-derived values.** Four are in
+the text — the task id, the work-branch name, the base-branch name and the head
+object name — and two are in the address: the owner and the repository name,
+which slice 1 parsed out of the delivery remote's push URL and which appear in
+`repos/{owner}/{name}/pulls` and in the `head` field as `owner:branch`. This
+paragraph said "exactly four" until a review counted the wire rather than the
+composing module. There is no diff, no `git log`, no commit message, no local
+path, no environment, no agent transcript, no finding, no test output. The
+task-state record has no title or description field, which is why this is an
+identity block rather than a summary.
 
-All four pass a grammar before they get here, so the text is ASCII by
-construction and there is nothing to normalise. The title is cut to 256 bytes
-with a marked `...` if a long task id and a long branch compose one over budget;
-the body budget is 4096 bytes and the longest composable body is a few hundred.
+All six pass a grammar **at the mint**, which runs after the text is composed,
+so the text is ASCII by construction once the grant exists. The branch and the
+base additionally pass `repo/branch-name.ts` — Git's own `check-ref-format`
+rules, capped at 255 characters. That cap is what bounds the body: without it
+the two names were unbounded and a long branch composed a body the mint then
+refused. The title is cut to 256 bytes with a marked `...` when a long task id
+and a long branch compose one over budget; the body budget is 4096 bytes and the
+longest composable body is now under 700.
 
 ### The outcome vocabulary
 
@@ -355,8 +363,9 @@ or a body from a caller.
   intend.** It is never reported as success and it is never closed or edited in
   response. An operator has to look.
 - **L-V4-06-4 — `CHECKS_FAILED` blocks creation.** A red commit cannot get a
-  pull request from this build, because the required decision is
-  `PULL_REQUEST_REQUIRED` and checks are graded first.
+  pull request from this build, because checks are graded before the
+  pull-request question and `CHECKS_FAILED` is deliberately outside
+  `ADMITS_CREATION_LADDER`.
 - **L-V4-06-5 — the creation is not recorded.** "AO opened this pull request" is
   not durable anywhere. It is observable from GitHub, and slice 3's record is a
   separate, explicit act.
@@ -371,6 +380,12 @@ or a body from a caller.
 - **L-V4-06-9 — draft is now read but still not decided on.** Slice 4's decision
   does not consider it, so a positive delivery decision can still be true of a
   draft pull request. Only slice 6's own ladder compares it.
+- **L-V4-06-11 — this slice's branch grammar is stricter than slice 5's.** The
+  mint applies `repo/branch-name.ts` to the work branch and the base as well as
+  the shell-inert class, so a name slice 5 will publish can be one slice 6
+  refuses. The safe direction, and it is what bounds the composed body — but the
+  two gates differ, and `L-V4-05-9` is only half closed. The stricter gate still
+  accepts `refs/heads/main` and `HEAD` as a base; GitHub answers `422` for both.
 - **L-V4-06-10 — `--publish-head` and `--create-pr` do not compose in one
   invocation on a first delivery.** Measured: the observation runs before the
   publication, so the forge has never seen the commit,

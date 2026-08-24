@@ -108,8 +108,9 @@ export const CREATION_TIMEOUT_MS = 30_000;
 /**
  * The output budget.
  *
- * Generous on purpose, and larger than the response needs: a `201` pull-request
- * document measures about 23 KB. Nothing here parses the body, so the budget is
+ * Generous on purpose, and far larger than the response needs: a `201`
+ * pull-request document measures about 17 KB (measured on two repositories; an
+ * earlier sentence here said 23 KB and had not been re-measured). Nothing here parses the body, so the budget is
  * not about reading it — it is about not manufacturing uncertainty. A response
  * that overran its budget would be `OUTPUT_LIMIT_EXCEEDED`, which this module
  * must grade as a failed attempt, which would then make a perfectly successful

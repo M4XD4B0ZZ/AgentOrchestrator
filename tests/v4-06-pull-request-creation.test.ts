@@ -321,7 +321,13 @@ describe('the creation vocabulary', () => {
     expect([...established].sort()).toEqual(
       ['ALREADY_EXISTS', 'CONVERGED_AFTER_UNCERTAIN_EFFECT', 'CREATED'].sort(),
     );
-    expect(established.length + not.length).toBe(PULL_REQUEST_CREATIONS.length);
+    // `filter(p).length + filter(!p).length === length` is true for every
+    // predicate and every input; a review named it as a tautology wearing a
+    // control's clothing. What enforces the set is the sorted equality above
+    // and the round-trip below: every member appears on exactly one side, and
+    // the two sides together are the vocabulary.
+    expect([...established, ...not].sort()).toEqual([...PULL_REQUEST_CREATIONS].sort());
+    expect(established.filter((m) => not.includes(m))).toEqual([]);
     // And the predicate agrees with the set for every member, so a caller can
     // never be right by asking one and wrong by asking the other.
     for (const member of PULL_REQUEST_CREATIONS) {
@@ -614,6 +620,64 @@ describe('the pull-request creation authority', () => {
     expect(mintPullRequestCreationGrant(target, intentOf())).toBeNull();
   });
 
+  it.each([
+    ['a bare at-sign', '@'],
+    ['a double dot', 'a..b'],
+    ['a double slash', 'a//b'],
+    ['a trailing slash', 'main/'],
+    ['a trailing dot', 'main.'],
+    ['a .lock component', 'x.lock'],
+    ['a dot-leading component', 'a/.b'],
+    ['a name over 255 characters', 'b'.repeat(256)],
+  ])('refuses %s as a base, which the character class alone would admit', (_name, base) => {
+    // The shell-inert class accepts every one of these — measured — and Git
+    // accepts none of them as a branch. The mint was the loosest gate this
+    // value met and the one claiming to have understood it, so it now also
+    // applies `repo/branch-name.ts`, which is where this build decides what a
+    // branch name is.
+    expect(DELIVERY_BASE_REF.test(base) || base.length > 255, base).toBe(true);
+    expect(mintPullRequestCreationGrant(subjectOf(), intentOf({ baseRef: base })), base).toBeNull();
+  });
+
+  it.each([
+    ['a base spelled as a full ref', 'refs/heads/main'],
+    ['HEAD', 'HEAD'],
+  ])('does NOT refuse %s, and the comment beside the grammar says so', (_name, base) => {
+    // Measured, and recorded because a review asserted the opposite and this
+    // case is what caught it: Git does allow a branch called `refs/heads/main`,
+    // and this build's `isValidBranchName` carries no special case for `HEAD`.
+    // Both are refused by GitHub with a 422 and create nothing, so the
+    // fail-closed direction holds — but the mint does not refuse them, and no
+    // sentence in this build may say it does.
+    expect(mintPullRequestCreationGrant(subjectOf(), intentOf({ baseRef: base })), base).not.toBeNull();
+  });
+
+  it('refuses a work branch Git would not accept either', () => {
+    expect(
+      mintPullRequestCreationGrant(subjectOf(), intentOf({ headRef: 'refs/heads/a..b' })),
+    ).toBeNull();
+    // And the 255-character cap that comes with it is what bounds the body:
+    // without it a long branch composed a body over MAX_BODY_BYTES, which the
+    // mint then refused for the wrong reason.
+    const long = 'b'.repeat(256);
+    expect(
+      mintPullRequestCreationGrant(subjectOf(), intentOf({ headRef: `refs/heads/${long}` })),
+    ).toBeNull();
+  });
+
+  it('composes a body under a quarter of its budget at the longest accepted input', () => {
+    const content = composePullRequestContent({
+      taskId: 'T'.repeat(128),
+      headRef: `refs/heads/${'b'.repeat(255)}`,
+      headCommit: HEAD,
+      baseRef: 'r'.repeat(255),
+    });
+    // 991 bytes, measured — a quarter of the budget, and the number the module
+    // states. It said "under 700" until this case measured it.
+    expect(byteLength(content.body)).toBe(991);
+    expect(byteLength(content.body)).toBeLessThan(MAX_BODY_BYTES / 4);
+  });
+
   it('accepts a base branch grammar that a real repository can carry', () => {
     for (const base of ['main', 'release/2.0', 'v1.2.3', 'a_b-c.d']) {
       expect(DELIVERY_BASE_REF.test(base), base).toBe(true);
@@ -707,7 +771,7 @@ describe('what AO writes into the pull request', () => {
     expect(/^[\x20-\x7e\n]*$/.test(body)).toBe(true);
   });
 
-  it('fits both budgets for every input the mint accepts', () => {
+  it('fits both budgets at the longest input the mint accepts', () => {
     // The two parts are bounded on their own and their sum is not, so a long
     // task id beside a long branch composes an over-budget title. It is cut
     // rather than refused: refusing to open a pull request because a branch
@@ -1102,7 +1166,7 @@ describe('creating one pull request', () => {
     expect(m.calls).toHaveLength(0);
   });
 
-  it('reports an uncertain effect rather than a failure, and does not ask again', async () => {
+  it('reports a refusal when the transport failed and nothing is there, and does not ask again', async () => {
     const m = mutations({ outcome: 'TIMED_OUT', exitCode: null });
     const reads = forgeReads([pullsBody([]), pullsBody([])]);
     const result = await createPullRequest(
@@ -1186,11 +1250,12 @@ describe('creating one pull request', () => {
     expect(m.calls).toHaveLength(1);
   });
 
-  it('asks at most once on every path there is', async () => {
+  it('asks at most once on every path there is, and at least once on one', async () => {
     // The property stated as a sweep rather than as one case: whatever the
     // readings say and whatever the transport does, the mutation runner is
     // called zero times or one time. A retry anywhere would show up here.
     const pages = [pullsBody([]), pullsBody([{ number: 7, state: 'open', sha: HEAD }]), null];
+    let sent = 0;
     const transports: Partial<CommandResult>[] = [
       {},
       { exitCode: 1 },
@@ -1208,9 +1273,14 @@ describe('creating one pull request', () => {
             seamsOf({ reader: forgeReads([before, after]).runner, mutator: m.runner }),
           );
           expect(m.calls.length, `${String(before)}/${String(after)}`).toBeLessThanOrEqual(1);
+          sent += m.calls.length;
         }
       }
     }
+    // The other half of the claim, and the one that stops this passing against
+    // a transport stubbed to do nothing: some of those combinations must have
+    // sent exactly one. `<= 1` alone is satisfied by never sending at all.
+    expect(sent).toBeGreaterThan(0);
   });
 
   it('converges on a second invocation without a second request', async () => {
@@ -1289,8 +1359,14 @@ describe('the delivery command creates only when asked, and only when it may', (
       readonly mutator?: Mutations;
       readonly state?: StateLoadResult;
       readonly delivery?: ResolvedDelivery;
+      readonly checkConclusion?: string;
     } = {},
-  ): Promise<{ out: string; mutations: Mutations }> {
+  ): Promise<{
+    out: string;
+    mutations: Mutations;
+    root: string;
+    runtimeAfter: readonly string[];
+  }> {
     const root = mkdtempSync(join(tmpdir(), 'ao-v406-'));
     mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
     const m = over.mutator ?? mutations();
@@ -1310,7 +1386,9 @@ describe('the delivery command creates only when asked, and only when it may', (
         return commandResult({
           stdout: JSON.stringify({
             total_count: 1,
-            check_runs: [{ head_sha: HEAD, status: 'completed', conclusion: 'success' }],
+            check_runs: [
+              { head_sha: HEAD, status: 'completed', conclusion: over.checkConclusion ?? 'success' },
+            ],
           }),
         });
       }
@@ -1346,9 +1424,16 @@ describe('the delivery command creates only when asked, and only when it may', (
       await program.parseAsync(['node', 'x', 'delivery', '--repository', root, '--task', TASK, ...argv]);
     } finally {
       write.mockRestore();
-      rmSync(root, { recursive: true, force: true });
     }
-    return { out: chunks.join(''), mutations: m };
+    // Read the runtime directory the command actually used, BEFORE it is
+    // removed. The previous version of the task-state case made its own
+    // temporary root, inspected that, and compared two empty arrays — `run`
+    // never saw it. It passed for every possible implementation, including one
+    // that wrote a task state file on every creation, and it was the only
+    // behavioural pin of a headline claim of the slice.
+    const runtimeAfter = readdirSync(join(root, '.agent-orchestrator', 'runtime'));
+    rmSync(root, { recursive: true, force: true });
+    return { out: chunks.join(''), mutations: m, root, runtimeAfter };
   }
 
   it('admits exactly the decisions that mean a fresh, unfailed observation', () => {
@@ -1365,7 +1450,11 @@ describe('the delivery command creates only when asked, and only when it may', (
         'PULL_REQUEST_MATCHED_CHECKS_SUCCESS',
       ].sort(),
     );
-    expect(admitted.length + refusedBy.length).toBe(DELIVERY_DECISIONS.length);
+    // Not a length sum, which is a tautology. The two sides must partition the
+    // vocabulary and the admitted list above is enumerated, so a new decision
+    // member lands in `refusedBy` — which is the fail-closed direction, and is
+    // what this asserts rather than what an earlier comment claimed.
+    expect([...admitted, ...refusedBy].sort()).toEqual([...DELIVERY_DECISIONS].sort());
     // The two kinds that are out, named rather than counted: a failing check
     // (L-V4-06-4) and every decision that means no fresh, subject-matched
     // observation exists.
@@ -1489,6 +1578,18 @@ describe('the delivery command creates only when asked, and only when it may', (
     expect(m.calls).toHaveLength(0);
   });
 
+  it('refuses a red commit end to end, which is L-V4-06-4', async () => {
+    // The residual driven through the command rather than asserted at the set.
+    // A failing check on this commit decides CHECKS_FAILED, which is outside
+    // ADMITS_CREATION_LADDER, so no pull request is opened for it.
+    const { out, mutations: m } = await run(['--observe', '--decide', '--create-pr', '--attended'], {
+      checkConclusion: 'failure',
+    });
+    expect(out).toContain('Decision     : CHECKS_FAILED');
+    expect(out).toContain('Creation     : DECISION_NOT_ESTABLISHED');
+    expect(m.calls).toHaveLength(0);
+  });
+
   it('still refuses a decision this build will not create from', async () => {
     // CHECKS_FAILED is deliberately outside the admissible set — L-V4-06-4 —
     // and every unsettled decision is too. This drives the second kind: the
@@ -1514,20 +1615,30 @@ describe('the delivery command creates only when asked, and only when it may', (
     expect(out).not.toContain(CONTACTED_TRAILER);
   });
 
-  it('leaves the task state file untouched', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'ao-v406-state-'));
-    try {
-      const runtime = join(root, '.agent-orchestrator', 'runtime');
-      mkdirSync(runtime, { recursive: true });
-      const before = readdirSync(runtime);
-      const created = pullsBody([{ number: 7, state: 'open', sha: HEAD }]);
-      await run(['--observe', '--decide', '--create-pr', '--attended'], {
-        forgePages: [pullsBody([]), pullsBody([]), created],
-      });
-      expect(readdirSync(runtime)).toEqual(before);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+  it('writes nothing beside the task on a successful creation', async () => {
+    // The runtime directory the command really ran against, read before the
+    // harness removes it. A creation that wrote a task state file, a sidecar or
+    // anything else would leave a name here.
+    const created = pullsBody([{ number: 7, state: 'open', sha: HEAD }]);
+    const { out, runtimeAfter } = await run(
+      ['--observe', '--decide', '--create-pr', '--attended'],
+      { forgePages: [pullsBody([]), pullsBody([]), created] },
+    );
+    expect(out).toContain('Creation     : CREATED');
+    expect(runtimeAfter).toEqual([]);
+  });
+
+  it('writes nothing beside the task on a refusal either', async () => {
+    const { runtimeAfter } = await run(['--create-pr', '--attended']);
+    expect(runtimeAfter).toEqual([]);
+  });
+
+  it('is a control on the case above: --record does leave a name there', async () => {
+    // Without this, "the directory is empty" could be true because nothing in
+    // this harness can ever write to it. `--record` is the one flag that does,
+    // through the same command and the same root.
+    const { runtimeAfter } = await run(['--observe', '--record']);
+    expect(runtimeAfter.length).toBeGreaterThan(0);
   });
 
   it('registers the flag with the sentence that was pinned, not a copy', () => {
@@ -1562,11 +1673,22 @@ describe('the delivery command creates only when asked, and only when it may', (
       'Requires --attended, --observe and --decide',
       'never pushes',
       'HEAD_NOT_PUBLISHED',
+      'HEAD_SHA_MISMATCH',
       'updates, closes, reviews and merges nothing',
       'writes no task state',
     ]) {
       expect(CREATE_PR_OPTION_DESCRIPTION, clause).toContain(clause);
     }
+    // The gate this describes is a set of decisions, not one member, and the
+    // sentence said the single member until the gate was widened. A help string
+    // that names a specific outcome the operator will not get is the defect
+    // this pin exists for.
+    expect(CREATE_PR_OPTION_DESCRIPTION).toContain(
+      'Only PULL_REQUEST_REQUIRED means one is needed',
+    );
+    expect(CREATE_PR_OPTION_DESCRIPTION).not.toContain(
+      'own fresh decision is PULL_REQUEST_REQUIRED',
+    );
   });
 });
 

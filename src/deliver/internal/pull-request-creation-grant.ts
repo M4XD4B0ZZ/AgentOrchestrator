@@ -59,10 +59,12 @@
  * because this build reads that exact ref off the remote before it asks GitHub
  * to open anything, and a partial ref is resolved against a search order.
  *
- * `headCommit` — the exact object name the head ref must hold: forty or
- * sixty-four lowercase hex digits, the grammar `forge-observation.ts` uses
- * throughout, and not "forty-hex" as this line said until a review read the
- * regex under it.
+ * `headCommit` — the exact object name the head ref must hold. Forty lowercase
+ * hex digits, because that is what `forge-observation.ts` accepts and every
+ * reading on this path goes through it. This line said "forty-hex", then said
+ * "forty or sixty-four", and both were read off a private regex that this mint
+ * no longer has: it asks `isAddressableSubject` instead, which is the predicate
+ * the observation and the transport already apply.
  * **Measured, GitHub will not accept an object name as `head`**: a full SHA of a
  * commit that exists answers `422 {"field":"head","code":"invalid"}`, exactly as
  * a missing branch does. So the commit cannot be sent; it can only be *checked*,
@@ -94,7 +96,12 @@
  * they are absent from the build.
  */
 
-import { SUPPORTED_FORGE_HOSTS, type ObservationSubject } from '../forge-observation.js';
+import {
+  isAddressableSubject,
+  supportedForgeHost,
+  type ObservationSubject,
+} from '../forge-observation.js';
+import { isValidBranchName } from '../../repo/branch-name.js';
 import { isValidTaskId } from '../../plan/task-id.js';
 import { PUBLISHABLE_REF, REMOTE_NAME } from './delivery-ref-grammar.js';
 // The budgets live with the module that composes the text they bound, so a
@@ -140,9 +147,6 @@ export interface PullRequestCreationSubject {
   readonly body: string;
 }
 
-/** Forty or sixty-four lowercase hex digits, anchored. */
-const COMMIT_OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-
 /**
  * The base branch's grammar: the tail of `PUBLISHABLE_REF`, on its own.
  *
@@ -157,6 +161,39 @@ const COMMIT_OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
  * further, so this is the first place the value meets a grammar at all.
  */
 export const DELIVERY_BASE_REF = /^[A-Za-z0-9._+=@][A-Za-z0-9._+=@/-]*$/;
+
+/**
+ * The rule the base and the work branch must actually pass.
+ *
+ * {@link DELIVERY_BASE_REF} is the shell-inert character class and it is not
+ * enough on its own: it accepts `@`, `a..b`, `a//b`, `main/`, `main.`, `a/.b`
+ * and `x.lock`, and it has no length bound at all. The mint was the loosest
+ * gate this value met and the one claiming to have understood it.
+ *
+ * So both names are additionally put through `repo/branch-name.ts`, which is
+ * where this build already decides what a branch name is — Git's own
+ * `check-ref-format` rules. Measured, that refuses every value listed above and
+ * caps the length at 255, which is what bounds the composed body; the body had
+ * no bound at all before it.
+ *
+ * **It does not refuse everything a reviewer expected it to**, and the
+ * difference is stated rather than assumed: `refs/heads/main` and `HEAD` both
+ * pass `isValidBranchName` — measured — because Git does allow a branch called
+ * `refs/heads/main`, and this build's grammar does not carry `check-ref-format`'s
+ * special case for `HEAD`. Sending either as a `base` gets a `422` from GitHub
+ * and creates nothing, which is the fail-closed direction; the claim here is
+ * only what was measured.
+ *
+ * It is deliberately stricter than `PUBLISHABLE_REF`, which slice 5 uses and
+ * which carries `L-V4-05-9` — a work branch that slice 5 will publish and this
+ * slice will refuse is a real difference, and the safe direction: a name Git
+ * would not accept as a branch cannot become a pull request either.
+ */
+export function isSendableBranchName(name: string): boolean {
+  return DELIVERY_BASE_REF.test(name) && isValidBranchName(name);
+}
+
+const REFS_HEADS = 'refs/heads/';
 
 const MINTED = new WeakSet<object>();
 const SPENT = new WeakSet<object>();
@@ -250,9 +287,12 @@ export interface PullRequestIntent {
  *  - a head ref that is not `refs/heads/<name>` under the shell-inert grammar:
  *    the creator reads that exact ref off the remote before it asks for
  *    anything, and a partial ref is resolved against a search order;
- *  - a base that is not a plain branch name: it is sent to GitHub as `base`,
- *    and a value this build cannot recognise as a branch name is one it cannot
- *    claim to have understood;
+ *  - a base, or a work branch, that is not a plain branch name under
+ *    `repo/branch-name.ts`: both are sent or compared as branch names, and the
+ *    shell-inert character class alone accepts `refs/heads/main`, `HEAD`, `@`,
+ *    `a..b` and `x.lock`, none of which Git accepts as a branch. The
+ *    255-character limit that comes with it is also what bounds the composed
+ *    body, which otherwise had no bound at all;
  *  - a head ref whose branch is the base branch: measured, GitHub answers
  *    `422 "No commits between main and main"`. Asking for something the far
  *    side refuses every time is not a smaller authority, it is a mistake, and
@@ -260,14 +300,14 @@ export interface PullRequestIntent {
  *  - a title or body that is empty or over budget: an unbounded field is the
  *    one place this design could leak, and a pull request with no title is one
  *    nobody can identify;
- *  - a head commit that is not an object name: it is compared byte-for-byte
- *    against what the remote ref holds, and an abbreviation would compare
- *    unequal to the full name the remote answers with;
- *  - a subject whose host is not supported, or whose owner or name is blank:
- *    the host is re-tested here against the same frozen list
- *    `forge-observation.ts` owns rather than trusted from the subject type,
- *    which is structural, and which a review has hand-cast straight past
- *    before.
+ *  - a subject that is not addressable — an owner or name that is not a path
+ *    segment, or a commit that is not a forty-hex object name. One predicate,
+ *    `isAddressableSubject`, and it is `forge-observation.ts`'s: the commit is
+ *    compared byte-for-byte against what the remote ref holds, and the owner
+ *    and name are two thirds of the request path;
+ *  - a subject whose host is not supported: re-tested here through
+ *    `supportedForgeHost` rather than trusted from the subject type, which is
+ *    structural, and which a review has hand-cast straight past before.
  *
  * There is no arm that mints a weaker grant from a partial input.
  */
@@ -278,7 +318,8 @@ export function mintPullRequestCreationGrant(
   if (!isValidTaskId(intent.taskId)) return null;
   if (typeof intent.remoteName !== 'string' || !REMOTE_NAME.test(intent.remoteName)) return null;
   if (typeof intent.headRef !== 'string' || !PUBLISHABLE_REF.test(intent.headRef)) return null;
-  if (typeof intent.baseRef !== 'string' || !DELIVERY_BASE_REF.test(intent.baseRef)) return null;
+  if (!isSendableBranchName(intent.headRef.slice(REFS_HEADS.length))) return null;
+  if (typeof intent.baseRef !== 'string' || !isSendableBranchName(intent.baseRef)) return null;
   if (typeof intent.draft !== 'boolean') return null;
   if (typeof intent.title !== 'string' || intent.title.length === 0) return null;
   if (typeof intent.body !== 'string' || intent.body.length === 0) return null;
@@ -286,15 +327,18 @@ export function mintPullRequestCreationGrant(
   if (byteLength(intent.body) > MAX_BODY_BYTES) return null;
   if (intent.headRef === `refs/heads/${intent.baseRef}`) return null;
 
-  if (typeof target.commit !== 'string' || !COMMIT_OBJECT_NAME.test(target.commit)) return null;
-  if (
-    typeof target.host !== 'string' ||
-    !(SUPPORTED_FORGE_HOSTS as readonly string[]).includes(target.host)
-  ) {
-    return null;
-  }
-  if (typeof target.owner !== 'string' || target.owner.length === 0) return null;
-  if (typeof target.name !== 'string' || target.name.length === 0) return null;
+  // One predicate for the three fields that make the request addressable, and
+  // it is `forge-observation.ts`'s own — the module that decides what this
+  // build will put in a request path. A fourth private copy of the object-name
+  // regex lived here and a review measured what it cost: it admitted a
+  // sixty-four-hex commit that `createObservationSubject` and the transport
+  // both refuse, so the mint could issue a grant that could never be acted on.
+  // `isAddressableSubject` is exported precisely so a guard can be repeated at
+  // the point of use rather than re-spelled.
+  if (typeof target.commit !== 'string') return null;
+  if (typeof target.owner !== 'string' || typeof target.name !== 'string') return null;
+  if (!isAddressableSubject(target.owner, target.name, target.commit)) return null;
+  if (supportedForgeHost(target.host) === null) return null;
 
   const grant = new PullRequestCreationGrant(
     Object.freeze({

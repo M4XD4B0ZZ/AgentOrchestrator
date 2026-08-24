@@ -306,14 +306,16 @@ export const PUBLISH_HEAD_OPTION_DESCRIPTION =
  */
 export const CREATE_PR_OPTION_DESCRIPTION =
   'Open one pull request on github.com for this task, from its work branch to its base ' +
-  'branch. Requires --attended, --observe and --decide, and a task at READY_FOR_PR whose ' +
-  'own fresh decision is PULL_REQUEST_REQUIRED — a stored record can never authorise it. ' +
-  'The work branch must already exist on the delivery remote at exactly this commit; this ' +
-  'flag never pushes, and answers HEAD_NOT_PUBLISHED for a ref that is not there or HEAD_SHA_MISMATCH ' +
-  'for one holding another commit. Idempotent by observation: the ' +
-  'forge is read before and after, an intended pull request that already exists is reported ' +
-  'and not sent for again, and an attempt whose result was lost is never repeated blindly. ' +
-  'It updates, closes, reviews and merges nothing, and writes no task state.';
+  'branch. Requires --attended, --observe and --decide, and a task at READY_FOR_PR whose own ' +
+  'fresh decision says this commit was observed and no check on it failed — a stored record ' +
+  'can never stand in for that. Only PULL_REQUEST_REQUIRED means one is needed; the other ' +
+  'admitted decisions mean one already exists, and on those nothing is sent. The work branch ' +
+  'must already exist on the delivery remote at exactly this commit: this flag never pushes, ' +
+  'and answers HEAD_NOT_PUBLISHED for a ref that is not there, HEAD_SHA_MISMATCH for one ' +
+  'holding another commit. Idempotent by observation: the forge is read before and after, an ' +
+  'intended pull request that already exists is reported and not sent for again, and an ' +
+  'attempt whose result was lost is never repeated blindly. It updates, closes, reviews and ' +
+  'merges nothing, and writes no task state.';
 
 /**
  * Operator presence, in the shape `release` established.
@@ -339,8 +341,9 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'the work branch on the delivery remote at its pinned commit, create-only. With --create-pr ' +
   'and --attended, on top of --observe and --decide, it opens one pull request from that branch ' +
   'to the base branch. Those two are what it can change on a forge; they are separately ' +
-  'requested and separately authorised, and neither implies the other. Those are also the flags ' +
-  'that make it contact one: without them nothing is read from a network. It writes no task ' +
+  'requested and separately authorised, and neither implies the other. Three flags make it ' +
+  'contact a forge — those two and --observe — and with none of the three is anything read from ' +
+  'a network. It writes no task ' +
   'state — only --record writes anything at all, and that is a record beside the task, here — ' +
   'and it never updates, closes, reviews or merges a pull request.';
 
@@ -704,9 +707,16 @@ async function performPublication(
  *
  * So the set admits every decision that means *this invocation freshly observed
  * this exact commit's pull-request situation and found no failing check*. Four
- * of the five say a pull request already claims this head; on those the
- * ladder's own fresh reading answers and **nothing is sent**, because the
- * request fires only when that reading says `NONE`.
+ * of the five say a pull request already claims this head, and on those the
+ * ladder's own fresh reading normally answers and sends nothing.
+ *
+ * "Normally", not "always", and the difference is the point. The rule is that a
+ * request fires **only** when the fresh reading says `NONE`; it is not that a
+ * request never fires on those four. If the pull request the decision saw has
+ * gone in the moment between, the reading is the newer fact and sending is
+ * correct. A review found this paragraph asserting the unconditional version,
+ * which the sentence below then contradicts by saying the decision is one
+ * observation older.
  *
  * ── What is deliberately not in it ────────────────────────────────────────
  *
@@ -849,7 +859,27 @@ async function performCreation(
   // own member, for the reason `performPublication` gives: from an operator's
   // side there is no difference between "there is no pull request to be about"
   // and "the one there would be, is not one this build will ask for".
-  if (grant === null) return refused('SUBJECT_NOT_ESTABLISHED');
+  //
+  // And it carries NO intended pull request, which the shared `refused` helper
+  // would. The mint refuses for conditions the two checks above do not cover —
+  // a work branch equal to the base, a task id outside the grammar, a remote
+  // name that is not bare — and on those the helper printed a concrete head and
+  // base under the sentence saying there is none. A review found the first fix
+  // for this closing two arms of three.
+  if (grant === null) {
+    return Object.freeze({
+      result: Object.freeze({
+        creation: 'SUBJECT_NOT_ESTABLISHED' as const,
+        remoteHead: null,
+        before: null,
+        attempt: 'NOT_ATTEMPTED' as const,
+        after: null,
+      }),
+      headRef: null,
+      baseRef: null,
+      draft: null,
+    });
+  }
 
   const result = await createPullRequest(grant, repositoryRoot, {
     reader: seams.runner ?? createForgeCommandRunner(),

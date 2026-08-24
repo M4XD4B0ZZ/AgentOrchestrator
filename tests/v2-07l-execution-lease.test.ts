@@ -2627,8 +2627,9 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
     // and both would be held at once.
     //
     // What it *is* fenced by, in order: an explicit `--create-pr` and
-    // `--attended` on the command line; this invocation's own fresh
-    // `PULL_REQUEST_REQUIRED` decision; a one-shot opaque
+    // `--attended` on the command line; a fresh decision of this invocation's
+    // own, from the closed set that admits the ladder and which excludes a
+    // failing check and every unsettled answer; a one-shot opaque
     // `PullRequestCreationGrant` whose type the creator's signature demands and
     // which is spent by the only accessor that reveals it; a re-read of the
     // whole local subject; proof that the delivery remote's head ref holds
