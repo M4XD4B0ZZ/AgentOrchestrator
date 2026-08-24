@@ -791,17 +791,27 @@ describe('this slice grants nothing and moves nothing', () => {
     expect(SURFACE).toContain('src/deliver/delivery-decision.ts');
     expect(SURFACE).toContain('src/deliver/internal/delivery-observation-proof.ts');
 
-    // The one module V4 slice 6 added that may name a POST, by name. Everything
-    // else on the surface still may not, and no module anywhere may name PATCH,
-    // PUT or DELETE — those are the methods that update, replace and destroy,
-    // and this build performs none of the three.
+    // One module may name a POST and one may name a PUT, each by name.
+    // Everything else on the surface may name neither, and no module anywhere
+    // may name PATCH or DELETE — those are the methods that replace and
+    // destroy, and this build performs neither.
+    //
+    // PUT left the forbidden set at V4 slice 7, which merges one pull request
+    // with it. It is pinned to one module rather than dropped, which is the
+    // same shape slice 6 gave POST when it added one: the guarantee that
+    // survives is "one module, named here", and a second module acquiring the
+    // method turns this red.
+    //
     // Both spellings: the token pair a real vector uses, and the single string
     // a careless one might.
     const POST_METHOD = /-X\s*POST|['\"]-X['\"]\s*,\s*['\"]POST['\"]/;
+    const PUT_METHOD = /-X\s*PUT|['\"]-X['\"]\s*,\s*['\"]PUT['\"]/;
     const WRITING_METHOD =
-      /-X\s*(PATCH|PUT|DELETE)|['\"]-X['\"]\s*,\s*['\"](PATCH|PUT|DELETE)['\"]/;
+      /-X\s*(PATCH|DELETE)|['\"]-X['\"]\s*,\s*['\"](PATCH|DELETE)['\"]/;
     const CREATOR = 'src/deliver/github-pull-request-creator.ts';
+    const MERGER = 'src/deliver/github-pull-request-merger.ts';
     expect(SURFACE, 'the creator must be on the surface being swept').toContain(CREATOR);
+    expect(SURFACE, 'the merger must be on the surface being swept').toContain(MERGER);
 
     for (const file of SURFACE) {
       const code = codeOnly(file);
@@ -818,10 +828,17 @@ describe('this slice grants nothing and moves nothing', () => {
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
       expect(code, file).not.toMatch(/\brunOwnedCommand\s*\(|\bspawn\s*\(/);
-      // No merge, in any spelling this build could reach one by.
+      // No merge THIS BUILD DOES NOT PERFORM, in any spelling it could reach
+      // one by. V4 slice 7 merges exactly one pull request, through `gh api`
+      // and the module pinned above; what stays forbidden everywhere is the
+      // client's own merge command and every form of deferred or queued merge,
+      // because those are merges that happen when nobody is watching.
       expect(code, file).not.toMatch(/['"]pr['"]\s*,\s*['"]merge['"]|gh pr merge|--auto\b/);
+      expect(code, file).not.toMatch(/\benableAutoMerge\b|\bauto_merge\b|\bmerge_queue\b/);
+      expect(code, file).not.toMatch(/merge-async/);
       expect(code, file).not.toMatch(WRITING_METHOD);
       if (file !== CREATOR) expect(code, file).not.toMatch(POST_METHOD);
+      if (file !== MERGER) expect(code, file).not.toMatch(PUT_METHOD);
     }
 
     // And the corpus really is source, so the per-file floor above is a control
@@ -835,7 +852,12 @@ describe('this slice grants nothing and moves nothing', () => {
     // below is what proves it, because the creator writes the split form.
     expect(codeOnly(CREATOR)).toMatch(POST_METHOD);
     expect("runner('gh', ['api', '-X', 'PATCH', p])").toMatch(WRITING_METHOD);
-    expect("const a = ['api', '-X PUT', p]").toMatch(WRITING_METHOD);
+    expect("const a = ['api', '-X DELETE', p]").toMatch(WRITING_METHOD);
+    // And the method that LEFT the forbidden set at V4 slice 7 has its own
+    // control, so "PUT is confined to one module" is measured rather than a
+    // pattern nobody proved matches anything.
+    expect("['api', '-X', 'PUT', p]").toMatch(PUT_METHOD);
+    expect("const a = ['api', '-X PUT', p]").toMatch(PUT_METHOD);
   });
 });
 

@@ -670,23 +670,27 @@ describe('the pull-request creation authority', () => {
     ).toBeNull();
   });
 
-  it('composes 991 bytes at the longest input the mint really accepts', () => {
+  it('composes 1187 bytes at the longest input the mint really accepts', () => {
     const taskId = 'T'.repeat(128);
     const headRef = `refs/heads/${'b'.repeat(255)}`;
     const baseRef = 'r'.repeat(255);
     const content = composePullRequestContent({ taskId, headRef, headCommit: HEAD, baseRef });
     // "Accepted" is shown, not asserted: the mint takes exactly this triple.
-    // Without this the case pinned 991 for inputs the mint might refuse.
+    // Without this the case pinned the number for inputs the mint might refuse.
     expect(
       mintPullRequestCreationGrant(
         subjectOf(),
         intentOf({ taskId, headRef, baseRef, title: content.title, body: content.body }),
       ),
     ).not.toBeNull();
-    // 991 bytes, measured — a quarter of the budget, and the number the module
-    // states. It said "under 700" until this case measured it.
-    expect(byteLength(content.body)).toBe(991);
-    expect(byteLength(content.body)).toBeLessThan(MAX_BODY_BYTES / 4);
+    // 1187 bytes, measured — and the number the module states. It said "under
+    // 700" until this case measured it, then 991, and V4 slice 7 moved it again
+    // by correcting the provenance sentence: that sentence is part of every
+    // body, so its length is part of this number. Anything that edits it has to
+    // come back here, which is the point of pinning a measured constant rather
+    // than a bound.
+    expect(byteLength(content.body)).toBe(1187);
+    expect(byteLength(content.body)).toBeLessThan(MAX_BODY_BYTES / 3);
   });
 
   it('accepts a base branch grammar that a real repository can carry', () => {
@@ -749,8 +753,11 @@ describe('what AO writes into the pull request', () => {
   it('says who opened it and what that does not mean', () => {
     expect(PULL_REQUEST_PROVENANCE).toBe(
       'Opened by AgentOrchestrator. AO created this pull request and will not update, close, ' +
-        'reopen, review, comment on, label or merge it. Its existence establishes nothing about ' +
-        'the work: no review, no verification result and no merge authority.',
+        'reopen, review, comment on or label it. It merges nothing on its own: a merge happens ' +
+        'only when an operator explicitly asks one invocation to merge this exact pull request, ' +
+        'at the exact commit that invocation has just observed. Its existence establishes ' +
+        'nothing about the work: no review, no verification result, and no finding that it may ' +
+        'be merged.',
     );
   });
 
@@ -1708,15 +1715,22 @@ describe('the delivery command creates only when asked, and only when it may', (
     registerDeliveryCommand(program, {});
     const delivery = program.commands.find((c) => c.name() === 'delivery');
     for (const option of delivery?.options ?? []) {
+      // `merge` left this list at V4 slice 7, which added `--merge-pr`. The
+      // other five stay: each of them names an *override of a refusal*, and
+      // this build has none. `merge` was never that class — it named an act
+      // this build could not perform, and now performs, once, attended. What
+      // replaces the word here is the slice-7 file's exact enumeration of the
+      // registered option set, so a sixth mutation flag cannot arrive unnamed.
       expect(option.long ?? '', option.long ?? '').not.toMatch(
-        /force|unattended|adopt|takeover|steal|merge/i,
+        /force|unattended|adopt|takeover|steal/i,
       );
     }
   });
 
-  it('says what --attended is required by, now that it is two flags', () => {
-    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--publish-head and --create-pr');
+  it('says what --attended is required by, now that it is three flags', () => {
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--publish-head, --create-pr and --merge-pr');
     expect(ATTENDED_OPTION_DESCRIPTION).toContain('no unattended pull request');
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('no unattended merge');
   });
 
   it('says what --create-pr will not do', () => {
@@ -1950,16 +1964,24 @@ describe('what this slice did not gain', () => {
     expect(code).not.toMatch(/pulls\/\$\{|\/merge|\/reviews|\/comments|\/labels|\/requested_reviewers/);
   });
 
-  it('names no update, close, review, label or merge anywhere on the surface', () => {
+  // Retired at V4 slice 7, in the two places it added a way: `-X PUT` is now
+  // permitted in one module (slice 5's file pins which, and the slice-7 file
+  // pins that module's whole vector), and `mergePullRequest` is now a function
+  // this build has. Everything else stands unchanged, and each surviving line
+  // is a capability this build still does not have: it never drives `gh pr`,
+  // never enables auto-merge, never enters a merge queue, and passes no
+  // `--auto` or `--squash` flag — slice 7's method is a JSON field, not a flag.
+  it('names no update, close, review, label or auto-merge anywhere on the surface', () => {
     for (const file of SURFACE) {
       const code = codeOnly(file);
-      expect(code, file).not.toMatch(/['"]-X['"]\s*,\s*['"](PATCH|PUT|DELETE)['"]|-X\s*(PATCH|PUT|DELETE)/);
+      expect(code, file).not.toMatch(/['"]-X['"]\s*,\s*['"](PATCH|DELETE)['"]|-X\s*(PATCH|DELETE)/);
       expect(code, file).not.toMatch(/gh pr (merge|edit|close|review|comment|ready)/);
-      expect(code, file).not.toMatch(/\bmergePullRequest\b|\benableAutoMerge\b/);
+      expect(code, file).not.toMatch(/\benableAutoMerge\b|\bauto_merge\b|\bmerge_queue\b/);
+      expect(code, file).not.toMatch(/merge-async/);
       expect(code, file).not.toMatch(/['"]--auto['"]|--squash\b/);
     }
     // False-negative guard: each pattern matches the thing it is aimed at.
-    expect("['api', '-X', 'PATCH', p]").toMatch(/['"]-X['"]\s*,\s*['"](PATCH|PUT|DELETE)['"]/);
+    expect("['api', '-X', 'PATCH', p]").toMatch(/['"]-X['"]\s*,\s*['"](PATCH|DELETE)['"]/);
     expect('gh pr merge --squash').toMatch(/gh pr (merge|edit|close|review|comment|ready)/);
   });
 

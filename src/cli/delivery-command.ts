@@ -20,13 +20,15 @@
  *    There is no branch on which a client is constructed, so "nothing was
  *    contacted" is a fact about the code rather than a promise in help text.
  *
- * ── The two acts, and why they are two ─────────────────────────────────────
+ * ── The three acts, and why they are three ─────────────────────────────────
  *
  * `--publish-head` creates one branch on the delivery remote. `--create-pr`
- * opens one pull request from that branch. Each requires `--attended`, each
- * takes its own authority, and **neither implies the other**: a published head
- * is not permission to open a pull request, and the pull-request authority
- * cannot push.
+ * opens one pull request from that branch. `--merge-pr` merges that pull
+ * request. Each requires `--attended`, each takes its own authority, and **none
+ * implies another**: a published head is not permission to open a pull request,
+ * the pull-request authority cannot push, and neither of them can merge. The
+ * three authorities are three separate opaque types, and substituting one for
+ * another is a compile error rather than a runtime refusal.
  *
  * They are run in that order when both are asked for, and that is necessary
  * without being sufficient. **On a first delivery the two do not compose in one
@@ -42,15 +44,20 @@
  *
  * It writes no task state, takes no execution lease, prepares no workspace and
  * starts no agent. It never updates, closes, reopens, marks ready or draft,
- * comments on, labels, reviews or merges a pull request, and there is no flag
- * that would. `READY_FOR_PR` is still terminal, and delivering a task at that
- * state changes nothing about the task.
+ * comments on, labels or reviews a pull request, never enables an auto-merge and
+ * never enters a merge queue, and there is no flag that would. `READY_FOR_PR` is
+ * still terminal, and delivering a task at that state — including merging its
+ * pull request — changes nothing about the task. After a merge this build still
+ * reports `READY_FOR_PR` while GitHub reports the pull request as merged; that
+ * mismatch is deliberate and is the next slice's subject.
  *
- * It also does not answer "may this be merged". It reports facts about one
- * commit and stops there, deliberately: a surface that combined them would be
- * making the merge-eligibility decision that a later slice has to take
- * explicitly. Opening a pull request is not that decision — it is the request
- * for a human to take it.
+ * It also does not answer "may this be merged", and `--merge-pr` does not change
+ * that. It reports facts about one commit and stops there: reviews, branch
+ * protection and repository rules are not observed at all, and — measured —
+ * their surfaces cannot be told apart from "you may not read them". What
+ * authorises a merge is an operator saying so for one invocation; what enforces
+ * it is GitHub. Opening a pull request is still not that decision, and neither
+ * is this build's willingness to send the request.
  */
 
 import type { Command } from 'commander';
@@ -71,6 +78,7 @@ import {
 } from '../deliver/delivery-evidence-store.js';
 import {
   concludeDeliveryDecision,
+  isPositiveDeliveryDecision,
   revalidateSubject,
   type DeliveryDecision,
   type LocalSubject,
@@ -100,6 +108,18 @@ import {
   createForgeMutationRunner,
   type ForgeMutationRunner,
 } from '../deliver/github-pull-request-creator.js';
+import {
+  DELIVERY_MERGE_METHOD,
+  mintMergeGrant,
+  type MergeSubject,
+} from '../deliver/internal/merge-grant.js';
+import { mergePullRequest, type MergeResult } from '../deliver/merge-pull-request.js';
+import {
+  createForgeMergeRunner,
+  type ForgeMergeRunner,
+} from '../deliver/github-pull-request-merger.js';
+import type { MergeOutcome } from '../deliver/pull-request-merge.js';
+import { deliveryObservationFactsOf } from '../deliver/delivery-observation-proof.js';
 import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
 import { askRuntimeIgnored } from '../state/runtime-ignored.js';
 import {
@@ -123,6 +143,7 @@ interface DeliveryOptions {
   readonly decide?: boolean;
   readonly publishHead?: boolean;
   readonly createPr?: boolean;
+  readonly mergePr?: boolean;
   readonly attended?: boolean;
 }
 
@@ -198,6 +219,17 @@ export interface DeliveryCommandSeams {
    * slice 5 made when it refused to reuse the observation seam for its push.
    */
   readonly creationRunner?: ForgeMutationRunner;
+  /**
+   * The runner the one merge vector goes through.
+   *
+   * A fourth seam, for the reason the third one exists. `runner` reads a forge,
+   * `publicationRunner` writes a Git ref, `creationRunner` opens a pull request
+   * and this one merges one. Four acts, four seams: a fixture that stubs
+   * opening a pull request must not be able to stand in for one that merges it,
+   * and after this slice that difference is the difference between a request
+   * and the base branch.
+   */
+  readonly mergeRunner?: ForgeMergeRunner;
   /** The Git runner the default ignore probe uses. */
   readonly git?: GitRunner;
 }
@@ -319,6 +351,37 @@ export const CREATE_PR_OPTION_DESCRIPTION =
   'merges nothing, and writes no task state.';
 
 /**
+ * The flag that names the third act this build can perform on a forge, and the
+ * only one that writes to a branch nobody asked it to touch.
+ *
+ * Spelled after what it does and after what it does it to. It is not `--merge`,
+ * which would be a verb with no object and would grow to mean whatever the next
+ * slice wants merged; and it is not `--land` or `--integrate`, which would name
+ * an outcome while hiding the act — a flag whose name hides the act is exactly
+ * the failure the naming rule exists for.
+ *
+ * The rule banning `force`, `unattended`, `adopt`, `takeover` and `steal` in a
+ * registered option name is unchanged. `merge` was in that list too, put there
+ * by slice 6 to say this build could not merge. This slice makes that false, so
+ * the word leaves the list and the option set is pinned by exact enumeration
+ * instead — a sixth mutation flag cannot then arrive unnamed.
+ */
+export const MERGE_PR_OPTION_DESCRIPTION =
+  'Merge this task\'s pull request on github.com, by squash, into its base branch. Requires ' +
+  '--attended, --observe and --decide, and a task at READY_FOR_PR whose own fresh decision is ' +
+  'PULL_REQUEST_MATCHED_CHECKS_SUCCESS: exactly one open pull request at this commit, and no ' +
+  'check on it failed or is still running. A stored record can never stand in for that. This ' +
+  'is not merge eligibility — reviews, branch protection and repository rules are not observed, ' +
+  'and GitHub is what enforces them; what authorises the act is you. The pull request is the ' +
+  'one this invocation observed, never one you name. The request carries the exact head commit ' +
+  'observed, and GitHub refuses it if the head has moved since. Read before and after: an ' +
+  'already-merged pull request is reported and nothing is sent, and one that is closed, a ' +
+  'draft, at another commit or targeting another base is refused. At most one request per ' +
+  'invocation, and an attempt whose result was lost is never repeated blindly. It opens, ' +
+  'updates, closes, reviews and reverts nothing, it pushes and deletes no branch, there is no ' +
+  'auto-merge, and it writes no task state — so after a merge this task is still READY_FOR_PR.';
+
+/**
  * Operator presence, in the shape `release` established.
  *
  * A second, independent statement rather than a widening of the first: one flag
@@ -327,9 +390,10 @@ export const CREATE_PR_OPTION_DESCRIPTION =
  */
 export const ATTENDED_OPTION_DESCRIPTION =
   'States that an operator is present for this invocation. Required by every flag here that can ' +
-  'change something outside this machine — today --publish-head and --create-pr. Not a claim ' +
+  'change something outside this machine — today --publish-head, --create-pr and --merge-pr. ' +
+  'Not a claim ' +
   'about credentials, and not needed by any read-only part of this command. There is no ' +
-  'unattended publication and no unattended pull request.';
+  'unattended publication, no unattended pull request and no unattended merge.';
 
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
@@ -341,12 +405,14 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'is not merge eligibility and grants nothing. With --publish-head and --attended it creates ' +
   'the work branch on the delivery remote at its pinned commit, create-only. With --create-pr ' +
   'and --attended, on top of --observe and --decide, it opens one pull request from that branch ' +
-  'to the base branch. Those two are what it can change on a forge; they are separately ' +
-  'requested and separately authorised, and neither implies the other. Three flags make it ' +
-  'contact a forge — those two and --observe — and with none of the three is anything read from ' +
-  'a network. It writes no task ' +
+  'to the base branch. With --merge-pr and --attended, on the same footing plus a fresh ' +
+  'decision of PULL_REQUEST_MATCHED_CHECKS_SUCCESS, it merges that pull request by squash. ' +
+  'Those three are what it can change on a forge; they are separately requested and separately ' +
+  'authorised, and none implies another. Four flags make it contact a forge — those three and ' +
+  '--observe — and with none of the four is anything read from a network. It writes no task ' +
   'state — only --record writes anything at all, and that is a record beside the task, here — ' +
-  'and it never updates, closes, reviews or merges a pull request.';
+  'and it never updates, closes, reopens, reviews, comments on or labels a pull request, and ' +
+  'never enables an auto-merge.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
   const resolve = seams.resolveRepository ?? resolveRepository;
@@ -383,6 +449,10 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     .option(
       '--create-pr',
       CREATE_PR_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--merge-pr',
+      MERGE_PR_OPTION_DESCRIPTION,
     )
     .option(
       '--attended',
@@ -573,6 +643,16 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
             )
           : null;
 
+      // The third mutation, and it is after the other two on purpose: a pull
+      // request must exist on the forge before it can be merged, so an
+      // invocation asked for all three publishes, creates and then merges. One
+      // asked only for this finds the pull request the observation matched, or
+      // refuses without sending anything.
+      const merge =
+        options.mergePr === true
+          ? await performMerge(options, subject, taskLoad, decision, proof, resolve, load, seams)
+          : null;
+
       process.stdout.write(
         renderDeliveryObservation({
           repositoryId: repository.id,
@@ -586,6 +666,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           decision: decision === null ? null : { decision, revalidation },
           publication,
           creation,
+          merge,
         }),
       );
 
@@ -954,6 +1035,153 @@ async function performCreation(
     baseRef: intendedBase,
     draft: AO_PULL_REQUEST_DRAFT,
   });
+}
+
+/**
+ * The merge ladder.
+ *
+ * Third and last of the three acts, and after the other two on purpose: a pull
+ * request must exist before it can be merged, so an invocation asked for all
+ * three has to publish, create and then merge in that order.
+ *
+ * It cannot in practice reach a merge in the same invocation that creates the
+ * pull request, and that is a consequence rather than a check. The observation
+ * runs before the creation, so on a first delivery the decision this ladder
+ * requires — `PULL_REQUEST_MATCHED_CHECKS_SUCCESS`, which asserts a pull
+ * request already matched this commit — cannot be true. The answer is
+ * `DECISION_NOT_SUCCESS` and it costs no request. Recorded as `L-V4-07-1`.
+ *
+ * The gate is a single member, and not the five-member set the creation ladder
+ * uses. That ladder admits five because four of them mean a pull request
+ * already claims this head and its own fresh reading can then say something
+ * useful about it. Nothing analogous applies here: a merge has one precondition
+ * worth naming, and `isPositiveDeliveryDecision` is the predicate that owns it.
+ * Slice 4 declared that predicate and recorded, accurately, that nothing in
+ * `src/` asked it yet. This is the caller it was kept for.
+ *
+ * There is no `repositoryRoot` argument, and its absence is the point: unlike
+ * both siblings this act asks no local Git question, so there is nowhere for Git
+ * to be run and no remote name to bind.
+ */
+async function performMerge(
+  options: DeliveryOptions,
+  subject: ReturnType<typeof resolveObservationSubject>,
+  taskLoad: ReturnType<typeof loadTaskState>,
+  decision: DeliveryDecision | null,
+  proof: DeliveryObservationProof | null,
+  resolve: typeof resolveRepository,
+  load: typeof loadTaskState,
+  seams: DeliveryCommandSeams,
+): Promise<{
+  readonly result: MergeResult;
+  readonly pullRequestNumber: number | null;
+  readonly baseRef: string | null;
+}> {
+  const established = subject.ok && taskLoad.ok;
+  // The same predicate the mint compares with, not the looser character class.
+  // Slice 6 measured what it costs when a ladder's first arm is laxer than its
+  // last: a task the mint would refuse was told to pass a flag that could not
+  // have helped.
+  const intendedBase =
+    established && isSendableBranchName(taskLoad.state.baseBranch)
+      ? taskLoad.state.baseBranch
+      : null;
+
+  const refused = (outcome: MergeOutcome) =>
+    Object.freeze({
+      result: Object.freeze({
+        outcome,
+        before: null,
+        attempt: 'NOT_ATTEMPTED' as const,
+        after: null,
+        mergeCommit: null,
+      }),
+      pullRequestNumber: null,
+      baseRef: intendedBase,
+    });
+
+  if (!subject.ok || !taskLoad.ok) return refused('SUBJECT_NOT_ESTABLISHED');
+  if (intendedBase === null) return refused('SUBJECT_NOT_ESTABLISHED');
+  if (taskLoad.state.state !== 'READY_FOR_PR') return refused('TASK_NOT_READY');
+  if (options.attended !== true) return refused('OPERATOR_ABSENT');
+  if (decision === null || !isPositiveDeliveryDecision(decision)) {
+    return refused('DECISION_NOT_SUCCESS');
+  }
+
+  // The pull-request number comes from THIS invocation's own proof and from
+  // nowhere else. There is no flag that carries one, no field in the task state
+  // that holds one, and `loadDeliveryEvidence` — slice 3's store — has no path
+  // into this function at all. An operator cannot name a pull request to merge;
+  // they can only authorise the one this invocation just looked at.
+  const facts = proof === null ? null : deliveryObservationFactsOf(proof);
+  if (facts === null || facts.pullRequestNumber === null) return refused('DECISION_NOT_SUCCESS');
+  // The first is a floor, and is labelled as one because a counter-proof will
+  // find it: `decideDelivery` answers the positive member only when the outcome
+  // is `MATCHED`, the number is non-null and the head equals the commit, so a
+  // decision that reached here has already established it. It stays because the
+  // premise belongs to another function, and a guarantee that depends on another
+  // function's ladder staying where it is, is not one this one can make.
+  //
+  // The second is NOT a floor and is why this block exists: nothing upstream
+  // compares the proof's commit with the subject this invocation resolved, so
+  // without it a proof about one commit could authorise a merge bound to another.
+  if (facts.pullRequestHeadSha !== facts.commit) return refused('DECISION_NOT_SUCCESS');
+  if (facts.commit !== subject.subject.commit) return refused('DECISION_NOT_SUCCESS');
+
+  const pullRequestNumber = facts.pullRequestNumber;
+  const grant = mintMergeGrant(subject.subject, {
+    taskId: taskLoad.state.taskId,
+    pullRequestNumber,
+    baseRef: intendedBase,
+    mergeMethod: DELIVERY_MERGE_METHOD,
+  });
+  // The mint refuses anything it will not send or will not put in a request
+  // path. Reported as an unestablished subject rather than as its own member,
+  // for the reason the other two ladders give: from an operator's side there is
+  // no difference between "there is no delivery to be about" and "the one there
+  // would be, is not one this build will ask for".
+  if (grant === null) return refused('SUBJECT_NOT_ESTABLISHED');
+
+  const result = await mergePullRequest(grant, {
+    reader: seams.runner ?? createForgeCommandRunner(),
+    merger: seams.mergeRunner ?? createForgeMergeRunner(),
+    envSource: seams.envSource ?? process.env,
+    // A second, independent pass through the whole local resolution —
+    // repository, task record, subject, base — for the reason
+    // `revalidateLocalSubject` gives: the point is to ask the world, because
+    // what may have moved is the world. It runs *before* the effect, because
+    // afterwards there would be nothing useful to do with the answer.
+    //
+    // The pull-request number is carried through rather than re-derived, so the
+    // comparison `sameSubject` makes on that field is a floor and is said to be
+    // one. Re-deriving it would need a second observation, and a number that
+    // changed between the two is a *remote* fact — which is what the reading
+    // inside the merger is for, and which that reading answers by refusing a
+    // pull request that is no longer open at the authorised head. This closure
+    // answers the local question only.
+    recheck: async (): Promise<MergeSubject | null> => {
+      const again = await resolve({ repositoryPath: options.repository });
+      if (!again.ok) return null;
+      const reloaded = load(again.repository.root, options.task);
+      if (!reloaded.ok) return null;
+      if (reloaded.state.state !== 'READY_FOR_PR') return null;
+      const rebuilt = resolveObservationSubject(again.repository.delivery, reloaded);
+      if (!rebuilt.ok) return null;
+      if (!isSendableBranchName(reloaded.state.baseBranch)) return null;
+      return Object.freeze({
+        taskId: reloaded.state.taskId,
+        host: rebuilt.subject.host,
+        owner: rebuilt.subject.owner,
+        name: rebuilt.subject.name,
+        pullRequestNumber,
+        expectedHeadCommit: rebuilt.subject.commit,
+        baseRef: reloaded.state.baseBranch,
+        mergeMethod: DELIVERY_MERGE_METHOD,
+      });
+    },
+  });
+
+  return Object.freeze({ result, pullRequestNumber, baseRef: intendedBase });
 }
 
 /**

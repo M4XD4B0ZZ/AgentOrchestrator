@@ -65,7 +65,7 @@
  *
  * The body budget is above anything the mint will let through: the branch and
  * the base are capped at 255 characters each and the task id at 128, so the
- * longest composable body is 991 bytes — measured, at a 128-character task id,
+ * longest composable body is 1187 bytes — measured, at a 128-character task id,
  * a 255-character branch and a 255-character base, with a 40-byte object name
  * and the rest literal. That was **not** true when this
  * paragraph first claimed it — the two names had no length bound at all, and a
@@ -148,13 +148,28 @@ export function branchOf(headRef: string): string {
  *
  * Exported so the suite can pin it by literal. It is the one paragraph a human
  * reviewer reads before deciding what the pull request is worth, and every
- * clause is a claim this build has to keep true: it opened this, it will not
- * touch it again, and its existence is not evidence about the work.
+ * clause is a claim this build has to keep true: it opened this, what it will
+ * and will not do to it afterwards, and that its existence is not evidence
+ * about the work.
+ *
+ * V4 slice 7 falsified the previous version, which said AO "will not … merge
+ * it", and it is corrected here rather than left to be discovered — the failure
+ * this file's siblings keep having. Two clauses moved: merging is now something
+ * this build does, under one narrow condition which is stated; and "no merge
+ * authority" became "no finding that it may be merged", because the honest
+ * claim after slice 7 is not that AO lacks the ability but that the pull
+ * request's existence is not evidence of eligibility. `MERGE_ELIGIBILITY_SENTENCE`
+ * is what this defers to, and it is unchanged.
+ *
+ * **Pull requests opened before slice 7 carry the old sentence**, and this build
+ * does not edit a pull request, so they keep it. `L-V4-07-2` records that.
  */
 export const PULL_REQUEST_PROVENANCE =
   'Opened by AgentOrchestrator. AO created this pull request and will not update, close, ' +
-  'reopen, review, comment on, label or merge it. Its existence establishes nothing about the ' +
-  'work: no review, no verification result and no merge authority.';
+  'reopen, review, comment on or label it. It merges nothing on its own: a merge happens only ' +
+  'when an operator explicitly asks one invocation to merge this exact pull request, at the ' +
+  'exact commit that invocation has just observed. Its existence establishes nothing about the ' +
+  'work: no review, no verification result, and no finding that it may be merged.';
 
 /**
  * The title, cut to the budget the mint enforces.

@@ -48,6 +48,11 @@ import {
   PULL_REQUEST_CREATION_DETAIL,
   type PullRequestSituation,
 } from '../deliver/pull-request-creation.js';
+import {
+  MERGE_OUTCOME_DETAIL,
+  type MergeReading,
+} from '../deliver/pull-request-merge.js';
+import type { MergeResult } from '../deliver/merge-pull-request.js';
 import type { CreationResult } from '../deliver/create-pull-request.js';
 import {
   OBSERVATION_REFUSAL_DETAIL,
@@ -175,6 +180,58 @@ export const CREATION_TRAILER =
   'marked ready or draft, commented on, labelled, assigned, reviewed and merged nothing, it\n' +
   'pushed no branch and changed no ref, and it grants no authority to do any of those. It\n' +
   'wrote no task state.';
+
+/**
+ * The trailer for the third act, and the only one that changes a branch nobody
+ * asked this build to touch.
+ *
+ * A third sentence rather than a clause added to either of the others, for the
+ * reason this file already records: `PUBLICATION_TRAILER` once ended "No pull
+ * request was opened, updated, reviewed or merged", which was true of every run
+ * that existed when it was written and became false the moment a flag was added
+ * that opens one. Each act speaks for itself and about nothing else.
+ *
+ * It says "the merge" and not "this invocation" for the reason the creation
+ * trailer does: one invocation can publish, create and merge, and a trailer
+ * claiming the invocation changed exactly one thing would be false while all
+ * three of the things it changed were permitted.
+ *
+ * Note what it does **not** say. It does not say the pull request was eligible,
+ * that its checks were required, that a review was satisfied, or that any rule
+ * allowed it. This build establishes none of those, and a sentence an operator
+ * reads must not imply that it did.
+ */
+export const MERGE_TRAILER =
+  'Not read-only. The merge could change exactly one thing and changed at most that:\n' +
+  'one pull request, merged once, by squash, into the base branch named above. The request\n' +
+  'carried the exact head commit shown, and GitHub refuses it when the pull request head is\n' +
+  'not that commit. It opened, updated, closed, reopened, reviewed, commented on, labelled\n' +
+  'and reverted nothing, it pushed no branch, it deleted no branch, and no auto-merge was\n' +
+  'enabled. It wrote no task state: this task is still READY_FOR_PR, and nothing here changes\n' +
+  'that. Whether the merge was permitted was GitHub\'s decision and the operator\'s — this\n' +
+  'build did not establish that the pull request was eligible to merge, and does not claim to.';
+
+/**
+ * One merge reading as one phrase.
+ *
+ * `MERGED` prints the resulting commit, because the whole ladder turns on
+ * whether that value exists and an operator reading a refusal should see it.
+ * `OPEN` prints the head, because the other thing the ladder turns on is
+ * whether that string equals the authorised one. `UNKNOWN` prints no reason:
+ * the reason would be the client's stderr, which this build does not read.
+ */
+function describeMergeReading(reading: MergeReading): string {
+  if (reading.outcome === 'MERGED') {
+    return `MERGED ${reading.mergeCommit ?? '(no resulting commit reported)'}`;
+  }
+  if (reading.outcome === 'OPEN') {
+    return `OPEN at ${reading.headSha ?? '(no head reported)'}${
+      reading.draft === true ? ' (draft)' : ''
+    }`;
+  }
+  if (reading.outcome === 'CLOSED_UNMERGED') return 'CLOSED_UNMERGED';
+  return 'UNKNOWN';
+}
 
 function line(label: string, value: string): string {
   return `${label.padEnd(13)}: ${value}`;
@@ -327,6 +384,7 @@ export interface DeliveryObservationView {
   readonly publication?: HeadPublicationView | null;
   /** What `--create-pr` amounted to, or `null` when it was not asked for. */
   readonly creation?: PullRequestCreationView | null;
+  readonly merge?: MergeView | null;
 }
 
 /**
@@ -357,6 +415,22 @@ export interface DeliveryDecisionView {
  * that could publish twice. The caller still holds them, so it passes them.
  * Both are `null` on a refusal that never got as far as having a ref.
  */
+/**
+ * What a merge attempt did, and what it was for.
+ *
+ * The pull-request number is carried beside the result rather than read back out
+ * of it, for the reason the publication's ref is: the authority that named it is
+ * spent by the time the result exists, deliberately, because an artefact a
+ * report could read twice is an artefact that could merge twice.
+ */
+export interface MergeView {
+  readonly result: MergeResult;
+  /** The pull request this was about, or `null` if none was established. */
+  readonly pullRequestNumber: number | null;
+  /** The intended base branch, or `null` if none was established. */
+  readonly baseRef: string | null;
+}
+
 /**
  * What a pull-request creation attempt did, and what it was for.
  *
@@ -545,6 +619,42 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     }
   }
 
+  const merge = view.merge ?? null;
+  if (merge !== null) {
+    const m = merge.result;
+    lines.push(
+      '',
+      // Labelled `Merge`, not `Pull request`: slice 2 already prints a
+      // `Pull request` line for what it observed, and two different lines under
+      // one label is how an operator reads the wrong answer.
+      `Merge        : ${m.outcome}`,
+      `  ${MERGE_OUTCOME_DETAIL[m.outcome]}`,
+      `  Intended     : ${
+        merge.pullRequestNumber === null || merge.baseRef === null
+          ? 'no intended merge was established'
+          : `#${String(merge.pullRequestNumber)} -> ${merge.baseRef}`
+      }`,
+    );
+    // Each reading only when it was taken, and in the order they were taken.
+    // Printing "before: unknown" for a refusal that never contacted the forge
+    // would read as a reading that came back empty, which is a different fact
+    // and the more alarming one.
+    if (m.before !== null) {
+      lines.push(
+        `  Forge before : ${describeMergeReading(m.before)}`,
+        `  Attempt      : ${m.attempt}`,
+        `  Forge after  : ${m.after === null ? 'not read' : describeMergeReading(m.after)}`,
+      );
+    }
+    // The resulting commit, and only where a reading established one. It is the
+    // value a caller cannot recompute — under a squash merge it is on the base
+    // branch and reachable from neither the head nor anything local — so it is
+    // printed from the reading, never from the response.
+    if (m.mergeCommit !== null) {
+      lines.push(`  Merge commit : ${m.mergeCommit}`);
+    }
+  }
+
   // Derived from what happened, not from which flags were passed — and from
   // whether the act was *attempted*, not from whether it read anything. A
   // review found the previous rule printing "Not read-only." over runs that
@@ -558,10 +668,12 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   const publicationAttempted =
     publication != null && publication.result.attempt !== 'NOT_ATTEMPTED';
   const creationAttempted = creation != null && creation.result.attempt !== 'NOT_ATTEMPTED';
+  const mergeAttempted = merge != null && merge.result.attempt !== 'NOT_ATTEMPTED';
   // Whether anything was contacted at all, which is what the egress disclosure
   // is about and is a different question from whether anything changed.
   const contactedByPublication = publication?.result.before != null;
   const contactedByCreation = creation?.result.remoteHead != null;
+  const contactedByMerge = merge?.result.before != null;
   // One sentence per act, and the observation disclosure once, above them.
   //
   // The first version of this printed only the publication trailer, which
@@ -571,17 +683,23 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   // another, and by the same argument a sentence about a publication does not
   // stand in for one about a pull request.
   const trailers: string[] = [];
-  if (!publicationAttempted && !creationAttempted) {
+  if (!publicationAttempted && !creationAttempted && !mergeAttempted) {
     // Nothing was attempted, so the run was read-only whatever it looked at.
     // Which of the two read-only sentences applies is still decided by whether
     // anything was contacted, by any path.
-    const contacted = view.observation !== null || contactedByPublication || contactedByCreation;
+    const contacted =
+      view.observation !== null ||
+      contactedByPublication ||
+      contactedByCreation ||
+      contactedByMerge;
     trailers.push(contacted ? CONTACTED_TRAILER : NOT_CONTACTED_TRAILER);
   } else {
     if (view.observation !== null) trailers.push(OBSERVED_AND_CHANGED_TRAILER, '');
     if (publicationAttempted) trailers.push(PUBLICATION_TRAILER);
-    if (publicationAttempted && creationAttempted) trailers.push('');
+    if (publicationAttempted && (creationAttempted || mergeAttempted)) trailers.push('');
     if (creationAttempted) trailers.push(CREATION_TRAILER);
+    if (creationAttempted && mergeAttempted) trailers.push('');
+    if (mergeAttempted) trailers.push(MERGE_TRAILER);
   }
   lines.push('', ...trailers, '');
 

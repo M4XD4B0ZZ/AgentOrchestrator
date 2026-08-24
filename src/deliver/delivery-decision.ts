@@ -249,11 +249,16 @@ export const DELIVERY_DECISION_DETAIL: Readonly<Record<DeliveryDecision, string>
  * vocabulary against it, so a second positive member added and forgotten here
  * turns a test red rather than quietly widening what counts as success.
  *
- * It is **not** yet in use anywhere in `src/`, and the first version of this
- * comment claimed it existed so the question would not be "spelled out wherever
- * it is asked" — nothing asks. The name is kept because the concept needs one
- * owner before the slice that consumes it arrives, and because the partition
- * assertion has to compare against something.
+ * V4 slice 7 is the caller it was kept for: `--merge-pr` admits this one member
+ * and nothing else, and asks this predicate rather than spelling the comparison
+ * out. Until then it was used only by the suite, and the first version of this
+ * comment claimed otherwise — the correction, and now this paragraph, are both
+ * written from what the tree says.
+ *
+ * Note what consuming it there does **not** do. It does not make this member a
+ * merge-eligibility finding: it says exactly one open pull request had this
+ * exact head and that no check on this commit failed or is still running, and
+ * {@link MERGE_ELIGIBILITY_SENTENCE} still governs everything it does not say.
  */
 export const POSITIVE_DELIVERY_DECISION = 'PULL_REQUEST_MATCHED_CHECKS_SUCCESS' as const;
 
