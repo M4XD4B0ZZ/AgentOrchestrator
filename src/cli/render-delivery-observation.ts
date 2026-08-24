@@ -16,15 +16,27 @@
  *
  * What is **not** representable here, and therefore cannot be printed: the
  * remote URL, any part of it, a token, an `Authorization` header, the forge
- * client's `stderr`, a check-run name, a branch name that came back from the
- * forge, or any other string this build did not write itself. The result types
- * in `deliver/forge-observation.ts` have no field that could carry one — the
- * pull-request answer carries a number, and the check answer carries counts.
+ * client's `stderr`, or a check-run name. The result types in
+ * `deliver/forge-observation.ts` have no field that could carry one — the
+ * check answer carries counts, and slice 2's pull-request answer carries a
+ * number.
  *
  * That is deliberate and it is the same discipline as `render-run-plan.ts`. A
  * check-run's name is attacker-influenceable text on a public repository, and a
  * console an operator reads and pastes is not the place to find out what it
  * contains.
+ *
+ * ── One string is now reachable, and is deliberately not printed ───────────
+ *
+ * V4 slice 6 needed to know what base branch an existing pull request targets,
+ * so `PullCandidate` gained a `baseRef` and it reaches this module inside a
+ * `PullRequestSituation`. **That is a branch name that came back from the
+ * forge.** The paragraph above used to say no such string was representable
+ * here, and structural impossibility is worth more than a rule, so the change
+ * is stated rather than absorbed: for that one value the guarantee is now a
+ * discipline in `describeSituation`, which prints the pull request's *number*
+ * and never its base. A slice that prints it would be trading the property
+ * away, and should say so here rather than discover it in a review.
  */
 
 import {
@@ -32,6 +44,11 @@ import {
   type RemoteRefReading,
 } from '../deliver/head-publication.js';
 import type { PublicationResult } from '../deliver/publish-delivery-head.js';
+import {
+  PULL_REQUEST_CREATION_DETAIL,
+  type PullRequestSituation,
+} from '../deliver/pull-request-creation.js';
+import type { CreationResult } from '../deliver/create-pull-request.js';
 import {
   OBSERVATION_REFUSAL_DETAIL,
   type CheckStateObservation,
@@ -95,7 +112,7 @@ export const CONTACTED_TRAILER =
  * What an observation is answerable for, with no "Read-only." in front of it.
  *
  * `CONTACTED_TRAILER` opens with that word and is the right trailer for a run
- * that only observed. A run that also published is not read-only, and putting
+ * that only observed. A run that also changed something is not read-only, and putting
  * the two sentences next to each other made the report's closing block open
  * with a false claim about the most consequential invocation this build
  * supports — a defect introduced by the fix for the previous one, and found by
@@ -105,7 +122,7 @@ export const CONTACTED_TRAILER =
  * traffic — is carried here without the framing that belongs to a read-only
  * run, and `PUBLICATION_TRAILER` states what changed.
  */
-export const OBSERVED_AND_PUBLISHED_TRAILER =
+export const OBSERVED_AND_CHANGED_TRAILER =
   'This build asked about no commit but the one named above, and about no other repository.\n' +
   'The GitHub CLI also makes calls of its own — telemetry, and a periodic update check —\n' +
   'which this build does not suppress (L-V4-02-6).';
@@ -126,11 +143,34 @@ export const OBSERVED_AND_PUBLISHED_TRAILER =
  * anything gets the read-only sentence, because that is what happened.
  */
 export const PUBLICATION_TRAILER =
-  'Not read-only. This invocation could change exactly one thing and changed at most that:\n' +
+  'Not read-only. The publication could change exactly one thing and changed at most that:\n' +
   'one branch on the delivery remote, created at one commit. Create-only — no ref was moved,\n' +
   'rewritten or deleted, no other ref was touched, and nothing was pushed to any other remote.\n' +
-  'No task state was written. No pull request was opened, updated, reviewed or merged, and\n' +
-  'nothing here grants authority to do any of those.';
+  'No task state was written, and publishing grants no authority to open, update or merge a\n' +
+  'pull request.';
+
+/**
+ * The trailer for the other invocation that could change something.
+ *
+ * A second sentence rather than a clause added to the first, and the reason is
+ * a defect this file has already shipped once: `PUBLICATION_TRAILER` used to
+ * end "No pull request was opened, updated, reviewed or merged", which was true
+ * of every run that existed when it was written and became false the moment a
+ * flag was added that opens one. A sentence that enumerates what did not happen
+ * has to be re-read by every slice that adds a way for it to happen, so each
+ * act now speaks for itself and about nothing else.
+ *
+ * It says "the creation" and not "this invocation" for the same reason: one
+ * invocation can publish and create, and a trailer claiming the invocation
+ * changed exactly one thing would then be false while both of the things it
+ * changed were permitted.
+ */
+export const CREATION_TRAILER =
+  'Not read-only. The creation could change exactly one thing and changed at most that:\n' +
+  'one pull request, opened once, at the commit named above. Nothing was updated, closed,\n' +
+  'reopened, marked ready or draft, commented on, labelled, assigned, reviewed or merged, and\n' +
+  'nothing here grants authority to do any of those. No branch was pushed and no ref was\n' +
+  'changed. No task state was written.';
 
 function line(label: string, value: string): string {
   return `${label.padEnd(13)}: ${value}`;
@@ -281,6 +321,8 @@ export interface DeliveryObservationView {
   /** What `--decide` amounted to, or `null` when it was not asked for. */
   readonly decision?: DeliveryDecisionView | null;
   readonly publication?: HeadPublicationView | null;
+  /** What `--create-pr` amounted to, or `null` when it was not asked for. */
+  readonly creation?: PullRequestCreationView | null;
 }
 
 /**
@@ -311,6 +353,26 @@ export interface DeliveryDecisionView {
  * that could publish twice. The caller still holds them, so it passes them.
  * Both are `null` on a refusal that never got as far as having a ref.
  */
+/**
+ * What a pull-request creation attempt did, and what it was for.
+ *
+ * The three intended values are carried beside the result for the reason the
+ * publication view gives: the authority that named them is spent by the time
+ * the result exists, deliberately, because an artefact a report could read
+ * twice is an artefact that could create twice. All three are `null` on a
+ * refusal that never got as far as having an intended pull request.
+ *
+ * The title and body are **not** carried. They are the two values in this slice
+ * that are not identities, they are already on GitHub if anything was created,
+ * and a console an operator pastes is not a second place for them to appear.
+ */
+export interface PullRequestCreationView {
+  readonly result: CreationResult;
+  readonly headRef: string | null;
+  readonly baseRef: string | null;
+  readonly draft: boolean | null;
+}
+
 export interface HeadPublicationView {
   readonly result: PublicationResult;
   readonly ref: string | null;
@@ -445,19 +507,63 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     }
   }
 
+  const creation = view.creation ?? null;
+  if (creation !== null) {
+    const c = creation.result;
+    lines.push(
+      '',
+      // Labelled `Creation`, not `Pull request`: slice 2 already prints a
+      // `Pull request` line for what it observed, and two different lines
+      // under one label is how an operator reads the wrong answer.
+      `Creation     : ${c.creation}`,
+      `  ${PULL_REQUEST_CREATION_DETAIL[c.creation]}`,
+      `  Intended     : ${
+        creation.headRef === null || creation.baseRef === null
+          ? 'no intended pull request was established'
+          : `${creation.headRef} -> ${creation.baseRef}${
+              creation.draft === null ? '' : `  (draft: ${String(creation.draft)})`
+            }`
+      }`,
+    );
+    // Each reading only when it was taken, and in the order they were taken.
+    // Printing "before: none" for a refusal that never contacted the forge
+    // would read as a reading that came back empty, which is a different fact
+    // and the more alarming one.
+    if (c.remoteHead !== null) {
+      lines.push(`  Remote head  : ${describeReading(c.remoteHead)}`);
+    }
+    if (c.before !== null) {
+      lines.push(
+        `  Forge before : ${describeSituation(c.before)}`,
+        `  Attempt      : ${c.attempt}`,
+        `  Forge after  : ${c.after === null ? 'not read' : describeSituation(c.after)}`,
+      );
+    }
+  }
+
   // Derived from what happened, not from which flags were passed. A reading
-  // exists exactly when the remote was contacted by the publication path.
+  // exists exactly when the remote was contacted by that path — and for the
+  // creation path the first contact is the head-ref reading, which is a network
+  // call to the delivery remote and not a local question.
   const contactedByPublication = publication?.result.before != null;
-  // Both, when both happened. The first version printed only the publication
-  // trailer, which silently dropped the `L-V4-02-6` disclosure — the GitHub
-  // CLI's own telemetry and update calls — on exactly the runs that had earned
-  // it. A sentence about one kind of egress does not stand in for a sentence
-  // about another.
-  const trailers = contactedByPublication
-    ? view.observation === null
-      ? [PUBLICATION_TRAILER]
-      : [OBSERVED_AND_PUBLISHED_TRAILER, '', PUBLICATION_TRAILER]
-    : [view.observation === null ? NOT_CONTACTED_TRAILER : CONTACTED_TRAILER];
+  const contactedByCreation = creation?.result.remoteHead != null;
+  // One sentence per act, and the observation disclosure once, above them.
+  //
+  // The first version of this printed only the publication trailer, which
+  // silently dropped the `L-V4-02-6` disclosure — the GitHub CLI's own
+  // telemetry and update calls — on exactly the runs that had earned it. A
+  // sentence about one kind of egress does not stand in for a sentence about
+  // another, and by the same argument a sentence about a publication does not
+  // stand in for one about a pull request.
+  const trailers: string[] = [];
+  if (!contactedByPublication && !contactedByCreation) {
+    trailers.push(view.observation === null ? NOT_CONTACTED_TRAILER : CONTACTED_TRAILER);
+  } else {
+    if (view.observation !== null) trailers.push(OBSERVED_AND_CHANGED_TRAILER, '');
+    if (contactedByPublication) trailers.push(PUBLICATION_TRAILER);
+    if (contactedByPublication && contactedByCreation) trailers.push('');
+    if (contactedByCreation) trailers.push(CREATION_TRAILER);
+  }
   lines.push('', ...trailers, '');
 
   return lines.join('\n');
@@ -474,6 +580,35 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
 function describeReading(reading: RemoteRefReading): string {
   if (reading.outcome === 'AT_COMMIT') return `AT_COMMIT ${reading.commit ?? ''}`.trim();
   return reading.outcome;
+}
+
+/**
+ * One forge reading as one phrase.
+ *
+ * The pull-request numbers are printed because "which ones" is the only
+ * question the plural outcomes leave open, and the draft state because it is a
+ * boolean this build's own parse validated.
+ *
+ * **The base branch the forge reported is deliberately not printed**, and that
+ * costs something: an operator reading `WRONG_BASE_CONFLICT` is told which pull
+ * request is in the way and which base was intended, and has to open the pull
+ * request to see the base it actually targets. The alternative was to print a
+ * branch name that came back from the forge, which is the one thing this file's
+ * header promises never appears here. That promise is worth more than the line
+ * it would save: a base ref is a string this build did not write, and a console
+ * an operator reads and pastes is not where its contents should first be
+ * discovered.
+ */
+function describeSituation(situation: PullRequestSituation): string {
+  if (situation.outcome === 'OPEN_ONE') {
+    const open = situation.open;
+    if (open === null) return 'OPEN_ONE';
+    return `OPEN_ONE #${String(open.number)}  (draft: ${String(open.draft)})`;
+  }
+  if (situation.outcome === 'OPEN_MANY' || situation.outcome === 'CLOSED_ONLY') {
+    return `${situation.outcome} ${situation.numbers.map((n) => `#${String(n)}`).join(', ')}`.trim();
+  }
+  return situation.outcome;
 }
 
 /**

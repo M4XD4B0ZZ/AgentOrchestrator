@@ -581,7 +581,46 @@ describe('the locator response is parsed totally', () => {
       JSON.parse(pullsBody([{ number: 55, state: 'open', sha: HEAD }])),
       OBSERVATION_PAGE_SIZE,
     );
-    expect(parsed).toEqual({ ok: true, candidates: [{ number: 55, state: 'open', headSha: HEAD }] });
+    // `baseRef` and `draft` arrive as `null` here because this fixture does not
+    // send them, and that is the case worth pinning: V4 slice 6 added both
+    // fields to the candidate and they are **nullable on purpose**, so a
+    // response that omits them is still a well-formed answer to question 1.
+    // Question 1 does not read either field; the consumer that does refuses a
+    // `null` rather than assuming a value the forge never stated.
+    expect(parsed).toEqual({
+      ok: true,
+      candidates: [{ number: 55, state: 'open', headSha: HEAD, baseRef: null, draft: null }],
+    });
+  });
+
+  it('carries the base ref and draft state when the forge reports them', () => {
+    const body = JSON.stringify([
+      { number: 55, state: 'open', head: { sha: HEAD }, base: { ref: 'main' }, draft: false },
+    ]);
+    expect(parsePullCandidates(JSON.parse(body), OBSERVATION_PAGE_SIZE)).toEqual({
+      ok: true,
+      candidates: [{ number: 55, state: 'open', headSha: HEAD, baseRef: 'main', draft: false }],
+    });
+  });
+
+  it('reads neither field as a coerced value', () => {
+    // A `draft` that is not a boolean and a `base.ref` that is not a string are
+    // `null`, not `true` and not `"[object Object]"`. The consumer refuses
+    // `null`, so a forge answering in a shape this build does not recognise
+    // fails closed instead of being read past.
+    const body = JSON.stringify([
+      { number: 55, state: 'open', head: { sha: HEAD }, base: { ref: 7 }, draft: 'yes' },
+      { number: 56, state: 'open', head: { sha: HEAD }, base: 'main', draft: null },
+      { number: 57, state: 'open', head: { sha: HEAD }, base: { ref: '' }, draft: false },
+    ]);
+    expect(parsePullCandidates(JSON.parse(body), OBSERVATION_PAGE_SIZE)).toEqual({
+      ok: true,
+      candidates: [
+        { number: 55, state: 'open', headSha: HEAD, baseRef: null, draft: null },
+        { number: 56, state: 'open', headSha: HEAD, baseRef: null, draft: null },
+        { number: 57, state: 'open', headSha: HEAD, baseRef: null, draft: false },
+      ],
+    });
   });
 
   it('refuses a full page rather than answering from a possible prefix', () => {
@@ -1422,13 +1461,19 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     // false: `--publish-head` also contacts the forge, and it changes it. The
     // pin passed throughout, which is the point worth remembering — a literal
     // proves what a string says and never that the string is true.
+    // Updated again by V4 slice 6, which falsified the *replacement*: "this is
+    // the only flag that makes this command read a forge" stopped being true
+    // the moment a second flag was added that reads before and after it acts.
+    // Twice in two slices, on one sentence, and both times because the sentence
+    // named itself "the only". It no longer does: it states what this flag does
+    // and defers the enumeration to a rule about the others.
     expect(OBSERVE_OPTION_DESCRIPTION).toBe(
       'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
         'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
-        'that this build does not suppress. This is the only flag that makes this command read ' +
-        'a forge; --publish-head is the only one that makes it change anything on one. Without ' +
-        'either, nothing leaves this machine — though --record still writes a record beside the ' +
-        'task, here.',
+        'that this build does not suppress. This flag only reads. The flags that can change ' +
+        'something are --publish-head and --create-pr, and each of those reads as well, because ' +
+        'each establishes what it is about before and after it acts. With none of the three, ' +
+        'nothing leaves this machine — though --record still writes a record beside the task, here.',
     );
     for (const text of [
       OBSERVE_OPTION_DESCRIPTION,
@@ -1958,6 +2003,11 @@ describe('the product contract is unchanged', () => {
       /['"]-X['"]\s*,\s*['"](POST|PUT|PATCH|DELETE)['"]/,
       /--method['"]?\s*[,=]?\s*['"](POST|PUT|PATCH|DELETE)['"]/,
       /['"]-X (POST|PUT|PATCH|DELETE)['"]/,
+      // The split form, which is how every vector in this build is actually
+      // written. Without it the pattern above reads a string nothing here
+      // produces, and the sweep would be blind to the one spelling it will
+      // meet — measured: slice 6's creator was invisible to it.
+      /['"]-X['"]\s*,\s*['"](POST|PUT|PATCH|DELETE)['"]/,
       // A writing subcommand of the client, adjacent or templated.
       /['"](pr|issue|api|repos)\/?['"]\s*,\s*['"](create|merge|edit|close|review|comment)['"]/,
       /['"]gh (pr|issue) (create|merge|edit|close|review|comment)/,
@@ -1967,11 +2017,20 @@ describe('the product contract is unchanged', () => {
       // The body channel: a read has none.
       /['"]--input['"]/,
     ];
+    // **V4 slice 6 made this list non-empty on purpose**, and the case is
+    // narrowed rather than deleted: exactly one module in the whole source tree
+    // may name a forge mutation, it is the pull-request creator, and its entire
+    // argument vector is pinned by exact equality in
+    // `tests/v4-06-pull-request-creation.test.ts`. Every pattern below is
+    // unchanged — none of them was ever what made the old claim true — so a
+    // second mutating module, or a mutating spelling appearing anywhere else,
+    // still turns this red.
+    const CREATOR = 'src/deliver/github-pull-request-creator.ts';
     const offenders = files.filter((f) => {
       const source = readFileSync(f, 'utf8');
       return forbidden.some((pattern) => pattern.test(source));
     });
-    expect(offenders).toEqual([]);
+    expect(offenders.map((f) => f.split('\\').join('/'))).toEqual([CREATOR]);
 
     // Positive control, and the reason the case above is evidence rather than a
     // broken regex: each pattern is shown to match the thing it is aimed at, on
@@ -1987,6 +2046,7 @@ describe('the product contract is unchanged', () => {
       `exec('gh pr merge --squash')`,
       `const p = \`repos/\${o}/\${r}/pulls/\${n}/merge\``,
       `runner('gh', ['api', path, '--input', '-'])`,
+      `const prefix = ['api', '--hostname', 'github.com', '-X', 'POST']`,
     ];
     for (const mutant of mutants) {
       expect(forbidden.some((pattern) => pattern.test(mutant))).toBe(true);
@@ -2021,6 +2081,10 @@ describe('the product contract is unchanged', () => {
     const owners = files
       .filter((f) => declaresClient.test(readFileSync(f, 'utf8')))
       .map((f) => relative('src', f).replace(/\\/g, '/'));
+    // Still exactly one. V4 slice 6 added a second module that *starts* the
+    // client, and it imports this name rather than restating it — deliberately,
+    // so that this pin keeps measuring what it was built to measure. A module
+    // that declared its own would be a second, unpinned egress path.
     expect(owners).toEqual(['deliver/github-observer.ts']);
 
     // False-negative guard: the pattern really does match the module it is

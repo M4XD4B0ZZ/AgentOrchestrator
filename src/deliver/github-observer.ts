@@ -92,6 +92,7 @@ import {
   type CheckStateObservation,
   type ObservationRefusal,
   type ObservationSubject,
+  type PullCandidate,
   type PullRequestObservation,
 } from './forge-observation.js';
 
@@ -384,13 +385,40 @@ export async function observePullRequestAtHead(
   subject: ObservationSubject,
   deps: ForgeObserverDependencies,
 ): Promise<PullRequestObservation> {
+  const read = await readPullCandidatesAtHead(subject, deps);
+  if (!read.ok) return pullRequestRefusal(read.refusal);
+
+  return matchExactHead(read.candidates, subject.commit);
+}
+
+/**
+ * The same request and the same parse, stopping one step earlier.
+ *
+ * V4 slice 6 asks a wider question than question 1 does — not "is there exactly
+ * one open pull request at this head" but "what is the whole pull-request
+ * situation at this head, open or not, and what does each one target". It needs
+ * the candidate set rather than the verdict.
+ *
+ * Factored out rather than reimplemented, and {@link observePullRequestAtHead}
+ * now goes through it: one request vector, one parse, one place where the
+ * endpoint's shape is known. Two readers of one endpoint that had to agree, and
+ * nothing that made them, is the defect this avoids — the same argument
+ * `publishableRef` lost when a review found its second copy of a regex.
+ */
+export async function readPullCandidatesAtHead(
+  subject: ObservationSubject,
+  deps: ForgeObserverDependencies,
+): Promise<
+  | { readonly ok: true; readonly candidates: readonly PullCandidate[] }
+  | { readonly ok: false; readonly refusal: ObservationRefusal }
+> {
   const response = await request(subject, pullCandidatesPath(subject), [PER_PAGE_PARAM], deps);
-  if (!response.ok) return pullRequestRefusal(response.refusal);
+  if (!response.ok) return Object.freeze({ ok: false as const, refusal: response.refusal });
 
   const parsed = parsePullCandidates(response.body, OBSERVATION_PAGE_SIZE);
-  if (!parsed.ok) return pullRequestRefusal(parsed.refusal);
+  if (!parsed.ok) return Object.freeze({ ok: false as const, refusal: parsed.refusal });
 
-  return matchExactHead(parsed.candidates, subject.commit);
+  return Object.freeze({ ok: true as const, candidates: parsed.candidates });
 }
 
 /**

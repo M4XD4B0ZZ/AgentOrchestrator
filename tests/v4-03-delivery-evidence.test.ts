@@ -1549,18 +1549,31 @@ describe('recording grants nothing and moves nothing', () => {
     expect(SURFACE).toContain('src/deliver/internal/delivery-observation-proof.ts');
     expect(SURFACE).toContain('src/deliver/observe-delivery.ts');
     expect(SURFACE).toContain('src/deliver/delivery-target.ts');
+    // And the corpus really is source, so the per-file floor below is a
+    // control on stripping rather than a licence for an empty sweep.
+    expect(SURFACE.map((f) => codeOnly(f)).join('').length).toBeGreaterThan(20_000);
 
     for (const file of SURFACE) {
       const code = codeOnly(file);
       // Positive control: the file really was read and the stripper left code.
-      expect(code.length, file).toBeGreaterThan(200);
+      // It used to be `> 200`, which was a size rule wearing a control's
+      // clothing — `internal/delivery-ref-grammar.ts` is two regular
+      // expressions and a lot of comment, and it turned this red without any
+      // claim here becoming false. The corpus floor above keeps the control.
+      expect(code.length, file).toBeGreaterThan(0);
       // No writer *call*, anywhere on the surface. Scanned on the code alone,
       // so a header may go on explaining why the task-state writer is not used
       // here — which is the load-bearing part of the design and the first thing
       // a reader needs.
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
-      expect(code, file).not.toMatch(/\bmergePullRequest\b|\bcreatePullRequest\b/);
+      // `createPullRequest` was on this line and is not any more: **V4 slice 6
+      // adds it on purpose**. What the sweep still forbids is a merge, which no
+      // slice has taken. The claim that used to be made here — that no module
+      // creates a pull request — is replaced rather than dropped:
+      // `tests/v4-06-…` derives the creating surface from the tree and proves it
+      // is one module, one endpoint, one POST, and one caller of the mint.
+      expect(code, file).not.toMatch(/\bmergePullRequest\b/);
       expect(code, file).not.toMatch(/\brecordAgentInterruption\s*\(/);
       expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
 

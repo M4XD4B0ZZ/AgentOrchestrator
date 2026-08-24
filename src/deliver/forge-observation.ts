@@ -369,11 +369,38 @@ export function pullRequestRefusal(refusal: ObservationRefusal): PullRequestOthe
   return Object.freeze({ outcome: refusal });
 }
 
-/** One candidate, after parsing and before the exact-head test. */
-interface PullCandidate {
+/**
+ * One candidate, after parsing and before the exact-head test.
+ *
+ * The first three fields are question 1's own: a pull request is identified by
+ * its number, and it counts only if it is open and its head is exactly this
+ * commit.
+ *
+ * `baseRef` and `draft` are carried for V4 slice 6, which has to decide whether
+ * an existing open pull request is *the intended one* rather than merely one at
+ * this head — two pull requests can share a head commit and target different
+ * branches. They are nullable, and that is deliberate rather than lax:
+ *
+ *  - GitHub's own schema marks `draft` as **not required** on the pull-request
+ *    object, so a reader that defaulted a missing value to `false` would be
+ *    inventing a fact the far side did not state;
+ *  - question 1 does not use either field, and making them mandatory here would
+ *    tighten slice 2's fail-closed threshold for a reason that has nothing to
+ *    do with slice 2. A response that cannot describe a *head* is still refused
+ *    outright, because that is the field question 1 rests on.
+ *
+ * The consumer that needs them refuses a `null`; see
+ * `deliver/pull-request-situation.ts`. Absence therefore fails closed where it
+ * matters and changes nothing where it does not.
+ */
+export interface PullCandidate {
   readonly number: number;
   readonly state: string;
   readonly headSha: string;
+  /** `base.ref` as the forge reported it, or `null` if it did not report one. */
+  readonly baseRef: string | null;
+  /** `draft` as the forge reported it, or `null` if it did not report one. */
+  readonly draft: boolean | null;
 }
 
 /**
@@ -406,7 +433,22 @@ export function parsePullCandidates(
     if (typeof headSha !== 'string' || !COMMIT_OBJECT_NAME.test(headSha)) {
       return refusalOf('RESPONSE_MALFORMED');
     }
-    candidates.push(Object.freeze({ number: number as number, state, headSha }));
+    // Read leniently, and only into `string | null` / `boolean | null`. Anything
+    // that is not the stated type becomes `null` rather than a coerced value: a
+    // `draft` of `"yes"` is not `true`, and the consumer that needs these
+    // refuses `null`. See the note on {@link PullCandidate} for why absence is
+    // not an outright refusal here.
+    const base = record['base'];
+    const baseRefValue =
+      typeof base === 'object' && base !== null
+        ? (base as Record<string, unknown>)['ref']
+        : undefined;
+    const baseRef = typeof baseRefValue === 'string' && baseRefValue.length > 0 ? baseRefValue : null;
+    const draftValue = record['draft'];
+    const draft = typeof draftValue === 'boolean' ? draftValue : null;
+    candidates.push(
+      Object.freeze({ number: number as number, state, headSha, baseRef, draft }),
+    );
   }
   return Object.freeze({ ok: true as const, candidates: Object.freeze(candidates) });
 }

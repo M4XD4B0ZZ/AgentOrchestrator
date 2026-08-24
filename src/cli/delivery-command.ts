@@ -1,35 +1,45 @@
 /**
- * `agent-loop delivery` — the delivery surface (V4 slices 2 to 5).
+ * `agent-loop delivery` — the delivery surface (V4 slices 2 to 6).
  *
  * ── Why a command of its own, and why the network is a flag on it ──────────
  *
  * `run` is read-only by default and executes only when `--attended` says so.
  * This command copies that shape one level down: it is **local** by default and
- * contacts a forge only when a flag says so — `--observe` to read one, and,
- * since V4 slice 5, `--publish-head` to change one. It stopped being a
- * read-only surface there, and the sentences on it were corrected then rather
- * than left to be discovered. The two properties that matter are structural
- * rather than documented:
+ * contacts a forge only when a flag says so. It stopped being a read-only
+ * surface at V4 slice 5, and the sentences on it were corrected then rather
+ * than left to be discovered — which had to happen again at slice 6, and is the
+ * reason no sentence here says "the only". The two properties that matter are
+ * structural rather than documented:
  *
  *  - `agent-loop run` gained nothing. It resolves a delivery target — that is
  *    slice 1, and it is local Git — and it has no path to this module at all.
  *    No existing command became a networking command;
- *  - with neither `--observe` nor `--publish-head` this command builds a
- *    subject and stops. There is no branch on which a client is constructed, so
- *    "nothing was contacted" is a fact about the code rather than a promise in
- *    help text.
+ *  - with none of the contacting flags this command builds a subject and stops.
+ *    There is no branch on which a client is constructed, so "nothing was
+ *    contacted" is a fact about the code rather than a promise in help text.
+ *
+ * ── The two acts, and why they are two ─────────────────────────────────────
+ *
+ * `--publish-head` creates one branch on the delivery remote. `--create-pr`
+ * opens one pull request from that branch. Each requires `--attended`, each
+ * takes its own authority, and **neither implies the other**: a published head
+ * is not permission to open a pull request, and the pull-request authority
+ * cannot push. An operator who wants both asks for both, and this module runs
+ * them in that order because the second needs the first to have happened.
  *
  * ── What it will not do ────────────────────────────────────────────────────
  *
  * It writes no task state, takes no execution lease, prepares no workspace and
- * starts no agent. It does not open, update, review or merge a pull request,
- * and there is no flag that would. `READY_FOR_PR` is still terminal, and
- * observing a task at that state changes nothing about it.
+ * starts no agent. It never updates, closes, reopens, marks ready or draft,
+ * comments on, labels, reviews or merges a pull request, and there is no flag
+ * that would. `READY_FOR_PR` is still terminal, and delivering a task at that
+ * state changes nothing about the task.
  *
- * It also does not answer "may this be merged". It reports two facts about one
+ * It also does not answer "may this be merged". It reports facts about one
  * commit and stops there, deliberately: a surface that combined them would be
  * making the merge-eligibility decision that a later slice has to take
- * explicitly.
+ * explicitly. Opening a pull request is not that decision — it is the request
+ * for a human to take it.
  */
 
 import type { Command } from 'commander';
@@ -64,6 +74,21 @@ import {
 import { publishDeliveryHead, type PublicationResult } from '../deliver/publish-delivery-head.js';
 import type { GitPublicationRunner } from '../deliver/git-head-publisher.js';
 import type { HeadPublication } from '../deliver/head-publication.js';
+import {
+  DELIVERY_BASE_REF,
+  mintPullRequestCreationGrant,
+  type PullRequestCreationSubject,
+} from '../deliver/internal/pull-request-creation-grant.js';
+import { createPullRequest, type CreationResult } from '../deliver/create-pull-request.js';
+import type { PullRequestCreation } from '../deliver/pull-request-creation.js';
+import {
+  AO_PULL_REQUEST_DRAFT,
+  composePullRequestContent,
+} from '../deliver/pull-request-content.js';
+import {
+  createForgeMutationRunner,
+  type ForgeMutationRunner,
+} from '../deliver/github-pull-request-creator.js';
 import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
 import { askRuntimeIgnored } from '../state/runtime-ignored.js';
 import {
@@ -86,6 +111,7 @@ interface DeliveryOptions {
   readonly record?: boolean;
   readonly decide?: boolean;
   readonly publishHead?: boolean;
+  readonly createPr?: boolean;
   readonly attended?: boolean;
 }
 
@@ -151,6 +177,16 @@ export interface DeliveryCommandSeams {
    * a build that stubbed one would still have to say so about the other.
    */
   readonly publicationRunner?: GitPublicationRunner;
+  /**
+   * The runner the one pull-request creation vector goes through.
+   *
+   * A third seam, and not a widening of either of the other two. `runner` reads
+   * a forge, `publicationRunner` writes a Git ref, and this one writes to a
+   * forge. Each of the three is a different thing to be allowed to do, so a
+   * test that stubs one cannot silently stand in for another — the argument
+   * slice 5 made when it refused to reuse the observation seam for its push.
+   */
+  readonly creationRunner?: ForgeMutationRunner;
   /** The Git runner the default ignore probe uses. */
   readonly git?: GitRunner;
 }
@@ -190,10 +226,10 @@ function createRuntimeIgnoreProbe(
 export const OBSERVE_OPTION_DESCRIPTION =
   'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
   'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
-  'that this build does not suppress. This is the only flag that makes this command read ' +
-  'a forge; --publish-head is the only one that makes it change anything on one. Without ' +
-  'either, nothing leaves this machine — though --record still writes a record beside the ' +
-  'task, here.';
+  'that this build does not suppress. This flag only reads. The flags that can change ' +
+  'something are --publish-head and --create-pr, and each of those reads as well, because ' +
+  'each establishes what it is about before and after it acts. With none of the three, ' +
+  'nothing leaves this machine — though --record still writes a record beside the task, here.';
 
 /**
  * The record flag's own sentence, exported so it can be pinned by literal.
@@ -248,6 +284,26 @@ export const PUBLISH_HEAD_OPTION_DESCRIPTION =
   'grants no authority to open or merge one. It writes no task state.';
 
 /**
+ * The flag that names the second act this build can perform on a forge.
+ *
+ * Spelled after what it does, and narrowly. It is not `--pr`, which would grow
+ * to mean whatever the next slice wants done to one, and it is not `--deliver`,
+ * which would name an outcome rather than an act. Creating is the whole of it:
+ * there is no flag here that updates, closes, reopens, marks ready, comments,
+ * labels, requests review or merges, and none of those exists anywhere in this
+ * build.
+ */
+export const CREATE_PR_OPTION_DESCRIPTION =
+  'Open one pull request on github.com for this task, from its work branch to its base ' +
+  'branch. Requires --attended, --observe and --decide, and a task at READY_FOR_PR whose ' +
+  'own fresh decision is PULL_REQUEST_REQUIRED — a stored record can never authorise it. ' +
+  'The work branch must already exist on the delivery remote at exactly this commit; this ' +
+  'flag never pushes, and answers HEAD_NOT_PUBLISHED instead. Idempotent by observation: the ' +
+  'forge is read before and after, an intended pull request that already exists is reported ' +
+  'and not sent for again, and an attempt whose result was lost is never repeated blindly. ' +
+  'It updates, closes, reviews and merges nothing, and writes no task state.';
+
+/**
  * Operator presence, in the shape `release` established.
  *
  * A second, independent statement rather than a widening of the first: one flag
@@ -255,9 +311,10 @@ export const PUBLISH_HEAD_OPTION_DESCRIPTION =
  * implies the other, and there is no unattended publication.
  */
 export const ATTENDED_OPTION_DESCRIPTION =
-  'States that an operator is present for this invocation. Required by --publish-head, which ' +
-  'changes a branch on the delivery remote. Not a claim about credentials, and not needed by ' +
-  'any read-only part of this command. There is no unattended publication.';
+  'States that an operator is present for this invocation. Required by every flag here that can ' +
+  'change something outside this machine — today --publish-head and --create-pr. Not a claim ' +
+  'about credentials, and not needed by any read-only part of this command. There is no ' +
+  'unattended publication and no unattended pull request.';
 
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
@@ -267,10 +324,13 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'observation as a historical record beside the task state; without it, nothing is written. ' +
   'With --decide it classifies this invocation\'s own answers into one delivery decision, which ' +
   'is not merge eligibility and grants nothing. With --publish-head and --attended it creates ' +
-  'the work branch on the delivery remote at its pinned commit, create-only — the one thing ' +
-  'this command can change anywhere. Those are the flags that make it contact anything: ' +
-  'without them nothing is read from a network and nothing is written. It writes no task ' +
-  'state, opens no pull request and merges nothing, ever.';
+  'the work branch on the delivery remote at its pinned commit, create-only. With --create-pr ' +
+  'and --attended, on top of --observe and --decide, it opens one pull request from that branch ' +
+  'to the base branch. Those two are the only things this command can change anywhere, they are ' +
+  'separately requested and separately authorised, and neither implies the other. Those are ' +
+  'also the flags that make it contact anything: without them nothing is read from a network ' +
+  'and nothing is written. It writes no task state, and it never updates, closes, reviews or ' +
+  'merges a pull request.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
   const resolve = seams.resolveRepository ?? resolveRepository;
@@ -303,6 +363,10 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     .option(
       '--publish-head',
       PUBLISH_HEAD_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--create-pr',
+      CREATE_PR_OPTION_DESCRIPTION,
     )
     .option(
       '--attended',
@@ -474,6 +538,25 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
             }
           : null;
 
+      // The second mutation, and it is after the first on purpose. A pull
+      // request is created from a branch that must already be on the remote, so
+      // an invocation that was asked for both has to publish before it creates
+      // — and one asked only for this finds the ref already there, or answers
+      // `HEAD_NOT_PUBLISHED` and pushes nothing.
+      const creation =
+        options.createPr === true
+          ? await performCreation(
+              options,
+              repository.root,
+              subject,
+              taskLoad,
+              decision,
+              resolve,
+              load,
+              seams,
+            )
+          : null;
+
       process.stdout.write(
         renderDeliveryObservation({
           repositoryId: repository.id,
@@ -486,6 +569,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           recording,
           decision: decision === null ? null : { decision, revalidation },
           publication,
+          creation,
         }),
       );
 
@@ -582,6 +666,174 @@ async function performPublication(
       });
     },
   });
+}
+
+/**
+ * Decides whether one pull request may be created, and creates it.
+ *
+ * The refusal ladder here is the one `PULL_REQUEST_CREATIONS` declares, in the
+ * same order, and that is checked rather than asserted: the suite drives every
+ * arm and pins which member comes out. Two of the four refusals are about the
+ * work and two are about the invocation, and the work is answered first — an
+ * operator whose task is not finished is told that, rather than being told to
+ * pass a flag that would not have helped.
+ *
+ * ── Why the decision is a gate here and not inside the creator ────────────
+ *
+ * `PULL_REQUEST_REQUIRED` is a *finding* about the forge, and it is produced by
+ * `--decide` from this invocation's own answers. It is checked in this module
+ * because this is where the invocation's answers exist: the creator takes a
+ * grant and re-derives everything else for itself, and handing it a decision to
+ * trust would be handing it a fact it could not check. What the creator gets
+ * instead is an authority that was only minted because the decision came out
+ * that way — the finding gates the *mint*, and the mint gates the act.
+ *
+ * The gate is deliberately strict about provenance rather than about wording.
+ * `decision` here is `null` unless `--decide` was passed, and `--decide` is
+ * itself refused without `--observe`, so a run that consults nothing cannot
+ * reach the mint. A record read back from `loadDeliveryEvidence` has no path
+ * into this function at all — slice 3's store is read for the report and is
+ * never an input to any authority.
+ *
+ * The mint is called here and nowhere else. That is the reachability property
+ * the whole authority rests on: a tree walk in the suite proves exactly one
+ * module in `src/` imports `internal/pull-request-creation-grant.js`.
+ *
+ * Note what *is* passed to the mint that slice 5's never took: text. The title
+ * and body are composed by `composePullRequestContent` from the task id, the
+ * two branch names and the object name, and nothing else — no task title (the
+ * state record has none), no brief, no findings, no diff, no log, no path. The
+ * grant binds the exact bytes, and the request can carry only what the grant
+ * holds, so the egress is bounded by the artefact rather than by a filter
+ * somebody has to remember to run.
+ */
+async function performCreation(
+  options: DeliveryOptions,
+  repositoryRoot: string,
+  subject: ReturnType<typeof resolveObservationSubject>,
+  taskLoad: ReturnType<typeof loadTaskState>,
+  decision: DeliveryDecision | null,
+  resolve: typeof resolveRepository,
+  load: typeof loadTaskState,
+  seams: DeliveryCommandSeams,
+): Promise<{
+  readonly result: CreationResult;
+  readonly headRef: string | null;
+  readonly baseRef: string | null;
+  readonly draft: boolean | null;
+}> {
+  const intendedHead = taskLoad.ok ? publishableRef(taskLoad.state.workBranch) : null;
+  const intendedBase =
+    taskLoad.ok && DELIVERY_BASE_REF.test(taskLoad.state.baseBranch)
+      ? taskLoad.state.baseBranch
+      : null;
+
+  const refused = (creation: PullRequestCreation) =>
+    Object.freeze({
+      result: Object.freeze({
+        creation,
+        remoteHead: null,
+        before: null,
+        attempt: 'NOT_ATTEMPTED' as const,
+        after: null,
+      }),
+      headRef: intendedHead,
+      baseRef: intendedBase,
+      draft: null,
+    });
+
+  if (!subject.ok || !taskLoad.ok) return refused('SUBJECT_NOT_ESTABLISHED');
+  if (taskLoad.state.state !== 'READY_FOR_PR') return refused('TASK_NOT_READY');
+  if (options.attended !== true) return refused('OPERATOR_ABSENT');
+  if (decision !== 'PULL_REQUEST_REQUIRED') return refused('DECISION_NOT_ESTABLISHED');
+  if (intendedHead === null || intendedBase === null) return refused('SUBJECT_NOT_ESTABLISHED');
+
+  const intent = buildCreationIntent(
+    taskLoad.state.taskId,
+    subject.remoteName,
+    intendedHead,
+    intendedBase,
+    subject.subject.commit,
+  );
+  const grant = mintPullRequestCreationGrant(subject.subject, intent);
+  // The mint refuses anything it will not send or will not put in a local Git
+  // argument vector. Reported as an unestablished subject rather than as its
+  // own member, for the reason `performPublication` gives: from an operator's
+  // side there is no difference between "there is no pull request to be about"
+  // and "the one there would be, is not one this build will ask for".
+  if (grant === null) return refused('SUBJECT_NOT_ESTABLISHED');
+
+  const result = await createPullRequest(grant, repositoryRoot, {
+    reader: seams.runner ?? createForgeCommandRunner(),
+    mutator: seams.creationRunner ?? createForgeMutationRunner(),
+    envSource: seams.envSource ?? process.env,
+    gitRunner: seams.publicationRunner,
+    // A second, independent pass through the whole resolution — repository,
+    // task record, subject, branches, content — for the reason
+    // `revalidateLocalSubject` gives: the point is to ask the world, because
+    // what may have moved is the world. It runs *before* the effect, because
+    // afterwards there would be nothing useful to do with the answer.
+    recheck: async (): Promise<PullRequestCreationSubject | null> => {
+      const again = await resolve({ repositoryPath: options.repository });
+      if (!again.ok) return null;
+      const reloaded = load(again.repository.root, options.task);
+      if (!reloaded.ok) return null;
+      if (reloaded.state.state !== 'READY_FOR_PR') return null;
+      const rebuilt = resolveObservationSubject(again.repository.delivery, reloaded);
+      if (!rebuilt.ok) return null;
+      const head = publishableRef(reloaded.state.workBranch);
+      if (head === null) return null;
+      if (!DELIVERY_BASE_REF.test(reloaded.state.baseBranch)) return null;
+      return Object.freeze({
+        host: rebuilt.subject.host,
+        owner: rebuilt.subject.owner,
+        name: rebuilt.subject.name,
+        ...buildCreationIntent(
+          reloaded.state.taskId,
+          rebuilt.remoteName,
+          head,
+          reloaded.state.baseBranch,
+          rebuilt.subject.commit,
+        ),
+        headCommit: rebuilt.subject.commit,
+      });
+    },
+  });
+
+  return Object.freeze({
+    result,
+    headRef: intendedHead,
+    baseRef: intendedBase,
+    draft: AO_PULL_REQUEST_DRAFT,
+  });
+}
+
+/**
+ * The intended pull request, derived from the task and nothing else.
+ *
+ * One function, used by both the mint call and the re-check, so the two cannot
+ * describe different pull requests. Written as a shared derivation rather than
+ * as two spellings of the same rule for the reason a review gave when it found
+ * `publishableRef` duplicated: two expressions that had to agree, and nothing
+ * that made them.
+ */
+function buildCreationIntent(
+  taskId: string,
+  remoteName: string,
+  headRef: string,
+  baseRef: string,
+  headCommit: string,
+) {
+  const content = composePullRequestContent({ taskId, headRef, headCommit, baseRef });
+  return {
+    taskId,
+    remoteName,
+    headRef,
+    baseRef,
+    draft: AO_PULL_REQUEST_DRAFT,
+    title: content.title,
+    body: content.body,
+  } as const;
 }
 
 /**
