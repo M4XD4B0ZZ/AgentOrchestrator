@@ -9512,12 +9512,13 @@ separate record, redesigning block evidence, and the existing companion pattern
   `state/runtime-ignored.ts` owns `STAGING_PROBE_SUFFIX` and does not export it,
   so slice 3's store and this one each hard-code `tmp-probe`. Three spellings of
   one fact that have to agree, with nothing making them.
-- **L-V4-08-8 — the exit code never reports this flag.** It answers whether the
-  observation settled. On its own, `--reconcile-merge` exits zero however the
-  reconciliation ended — a refused write, including a conflicting receipt, is
-  invisible to `$?`. With `--observe` the code reports that observation and still
-  not this. Slice 7's convention rather than a new one; stated on the flag's own
-  surface and pinned by a case.
+- **L-V4-08-8 — the exit code never reports this flag.** It is computed from the
+  observation conclusion, and the reconciliation result never reaches it, so a
+  refused write — including a conflicting receipt — is not visible in `$?`. It
+  names no number deliberately: two earlier versions of this sentence did, and
+  both were measured false. Slice 7's convention rather than a new one; stated on
+  the flag's own surface and pinned by a case that runs the same fixture with and
+  without `--observe`.
 
 ## Not implemented yet
 

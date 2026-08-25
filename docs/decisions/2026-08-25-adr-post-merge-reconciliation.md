@@ -320,17 +320,22 @@ honest reconcilers of one merge differ in nothing it looks at.)
   slice 3's store and this one each hard-code `tmp-probe`. Three spellings of one
   fact that have to agree, with nothing making them.
 - **L-V4-08-8 — the exit code says nothing about a reconciliation.**
-  The exit code answers whether the *observation* settled and never reports this
-  flag. On its own — no `--observe` — there is no observation, so the run exits
-  zero however the reconciliation ended, and a refused write, including
-  `CONFLICTING_RECEIPT`, is invisible to `$?`. With `--observe` it reports that
-  observation: a subject that cannot be established exits 2, an incomplete
-  observation exits 4, and neither is a statement about the reconciliation
-  either. An earlier version of this residual said the flag "always exits zero",
-  which a review measured false in the second case. This is slice 7's convention
-  rather than a new one, and changing it is a contract change for the whole
-  command. Stated on the flag's own surface and pinned by a case, so it is a
-  decision rather than an oversight.
+  The exit code is computed from the *observation* conclusion and the
+  reconciliation result never reaches it, so a refused write — including
+  `CONFLICTING_RECEIPT`, the case an operator most has to act on — is not visible
+  in `$?`.
+  That is the whole claim, and it names no number on purpose. Two earlier
+  versions did: "always exits zero", then "on its own this exits zero however the
+  reconciliation ended, and with `--observe` it reports that observation". Both
+  were measured false. `--reconcile-merge` alone exits **2** whenever the subject
+  cannot be established, because `concludeObservation` tests `!subject.ok` before
+  it tests whether anything was observed and `exitCodeFor` runs unconditionally —
+  and `--observe` makes no difference to it, which the second version had
+  attributed it to. Three attempts at one sentence is the point at which this
+  repository stops improving the sentence: what is pinned now is the structural
+  property, measured by running the same fixture with and without `--observe` and
+  requiring the two to agree. This is slice 7's convention rather than a new one,
+  and changing it is a contract change for the whole command.
 
 ## The counter-proof
 
@@ -413,6 +418,12 @@ passes. Together they found the following in the product. All are fixed.
    derived from `REPO_PROFILE_DIR_NAME` and `TASK_RUNTIME_DIR_NAME` — two
    independent spellings with nothing making them agree. It is now derived from
    the path that is about to be written.
+
+   Filed here for where the defect *would* have landed, not for a behaviour
+   change: a confirmation measured the derived path byte-identical to the literal
+   on nine Windows root shapes, so the mutant that restores the literal is
+   equivalent and there is deliberately none. It is a drift guard, and calling it
+   a correctness fix would overstate it.
 7. **The egress disclosure was dropped on one combination.** The `L-V4-02-6`
    sentence is owed whenever `gh` runs, and on the acts branch it was gated on an
    observation having run. `--publish-head --attended --reconcile-merge` breaks

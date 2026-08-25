@@ -237,11 +237,13 @@ export const MERGE_TRAILER =
  * The second half of that opening is a **capability**, not an act, and reaching
  * that took two goes. The first repair said "and not read-only here", which
  * claims a write — and of the thirteen report shapes that carry this trailer,
- * twelve wrote nothing, so on each of those it sat beside a `Read-only.` that
- * was perfectly true. An enumeration of every shape found it, after a review had
- * already found the same mistake one clause further along. It now says what a
- * reconciliation *can* change and points at the line that says what this one
- * did, so the two sentences cannot disagree.
+ * eleven write nothing, so on each of those it sat beside a `Read-only.` that
+ * was true. (Twelve under the *old* gate, which called a failed write read-only
+ * as well; a confirmation counted both, and the number that belongs here is the
+ * one this build now produces.) An enumeration of every shape found it, after a
+ * review had already found the same mistake one clause further along. It now
+ * says what a reconciliation *can* change and points at the line that says what
+ * this one did, so the two sentences cannot disagree.
  *
  * The enumeration is `tests/v4-08-…`'s own table over the whole ladder
  * vocabulary, so a third round of this is a failing test rather than a review
@@ -274,8 +276,8 @@ export const MERGE_TRAILER =
  */
 export const RECONCILIATION_TRAILER =
   'Read-only on the forge, and not necessarily read-only here. A reconciliation asks\n' +
-  'github.com about one commit — the task\'s own, and no other — and about no pull request\n' +
-  'but the one that answer names. It changes nothing there: it merges, opens, updates, closes, reopens,\n' +
+  'github.com about no commit but this task\'s own, and about no pull request but the one\n' +
+  'that answer names. It changes nothing there: it merges, opens, updates, closes, reopens,\n' +
   'reviews, comments on, labels and reverts nothing, pushes no branch, deletes no branch and\n' +
   'enables no auto-merge. Here it can create one directory, one receipt beside the task\n' +
   'state, and a staging file beside that receipt which a crash can leave behind — and only\n' +

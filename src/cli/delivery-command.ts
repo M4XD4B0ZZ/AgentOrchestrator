@@ -387,7 +387,7 @@ export const CREATE_PR_OPTION_DESCRIPTION =
  * An earlier draft said "a sixth", which counts nothing: the command registers
  * ten options, three of which are forge mutations. (Nine until V4 slice 8
  * added `--reconcile-merge`, which is not a fourth mutation — it reads
- * github.com and writes one local file — so the second count is unchanged and
+ * github.com and writes locally — so the second count is unchanged and
  * the first is not. A review caught this sentence still saying nine.)
  */
 export const MERGE_PR_OPTION_DESCRIPTION =
@@ -434,7 +434,7 @@ export const MERGE_PR_OPTION_DESCRIPTION =
  * It deliberately does not say "requires --attended", because it does not.
  * `--attended` is this build's marker that a person is present for an
  * irreversible effect *outside this machine*, and this flag has none: it reads
- * github.com and writes one local file. Requiring it would make the marker mean
+ * github.com and writes a receipt here. Requiring it would make the marker mean
  * two different things.
  */
 export const RECONCILE_MERGE_OPTION_DESCRIPTION =
@@ -450,9 +450,8 @@ export const RECONCILE_MERGE_OPTION_DESCRIPTION =
   'overwritten. What is stored is one past event — that this pull request was merged and ' +
   'produced that commit. It is not a claim that the commit is on the base branch now, that it ' +
   'has not been reverted, or that anything was verified against it, and it changes no task ' +
-  'state: the task is still READY_FOR_PR afterwards. The exit code never reports this flag: ' +
-  'it answers whether the observation settled, so on its own this exits zero however the ' +
-  'reconciliation ended, and with --observe it reports that observation and still not this. ' +
+  'state: the task is still READY_FOR_PR afterwards. The exit code answers whether the ' +
+  'observation settled and never reports this flag, so a refused write is not visible in it. ' +
   'Read the Receipt line.';
 
 /**
@@ -486,8 +485,8 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'that this task\'s delivery was merged and stores that one event beside the task state, ' +
   'changing nothing on the forge. Contacting a forge is never implicit: with no flag that says ' +
   'it contacts github.com, nothing is read from a network. It writes no task state, and the ' +
-  'only flags that write anything on THIS machine are --record and --reconcile-merge, each of ' +
-  'which writes one record beside the task, here — and it never updates, closes, reopens, ' +
+  'only flags that write a record here are --record and --reconcile-merge, each of which ' +
+  'writes one beside the task — and it never updates, closes, reopens, ' +
   'reviews, comments on or labels a pull request, and never enables an auto-merge.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {

@@ -125,14 +125,17 @@ const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{
  * No token, no `Authorization` header, no raw `gh` output, no stderr, no exit
  * code, no URL, no environment snapshot, no pull-request title, body, author or
  * diff, no arbitrary GitHub JSON. That is not enforced by a filter — it is
- * enforced by the shape: every field that carries **what the forge said** comes
- * from {@link MergeObservationFacts}, which has no field any of those could
- * travel in — the pull-request number, the head, the base, the resulting commit,
- * and `observedAt`, which is when this process asked. The remaining five are not
- * forge output at all: `taskId`, `repositoryRoot` and `subjectCommit` are local
- * identities the caller already holds, and `reconciliationVersion` and
- * `provider` are constants this build chose. A review counted an earlier version
- * of this paragraph, which split the payload two ways and mislaid three fields.
+ * enforced by the shape: **every field that carries what the forge said comes
+ * from {@link MergeObservationFacts}**, which has no field any of those could
+ * travel in. Everything else in the payload is a local identity the caller
+ * already holds, a local instant, or a constant this build chose — none of which
+ * has been near a response body.
+ *
+ * That is the rule, and it is stated as one because two successive versions of
+ * this paragraph tried instead to *list* which field came from where, and a
+ * review counted three fields missing from the first and four from the second. A
+ * gloss that has to be recounted every time a field is added is worse than no
+ * gloss at all.
  *
  * No head **branch name** either, and that is the same decision slice 3 took
  * about `workBranch`. A branch is a mutable pointer; the head of this merge is

@@ -32,7 +32,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -732,17 +732,20 @@ describe('a merged-pull-request claim can only come from a reading', () => {
         const code = codeOnly(file);
         for (const match of code.matchAll(specifier)) {
           const found = match[1] ?? '';
-          // The public wrapper is a different module and importing *it* is
-          // ordinary. Only the mint's own module is restricted, and it is named
-          // by the last path segment either way it is spelled.
-          const target = found.split('/').slice(-2).join('/');
-          if (target === 'internal/merge-observation-proof.js') return true;
-          if (
-            found === './merge-observation-proof.js' &&
-            file.startsWith('src/deliver/internal/')
-          ) {
-            return true;
-          }
+          // The specifier is RESOLVED against the importing file's directory
+          // before it is judged, rather than compared by its last two segments.
+          //
+          // A confirmation defeated the segment comparison with a `..` inside
+          // the specifier: `'../deliver/internal/x/../merge-observation-proof.js'`
+          // ends in `../merge-observation-proof.js`, which matched neither arm
+          // while resolving to the mint. ESM and TypeScript resolve lexically, so
+          // the `x/` segment need not exist. Normalising first closes the whole
+          // family — `.` segments, redundant separators and any depth of `..` —
+          // rather than the one spelling that was demonstrated.
+          // `walk` builds its paths with forward slashes, so `file` is already
+          // POSIX-shaped and needs no conversion before `posix.dirname`.
+          const resolved = posix.normalize(posix.join(posix.dirname(file), found));
+          if (resolved === 'src/deliver/internal/merge-observation-proof.js') return true;
         }
         return false;
       })
@@ -787,12 +790,37 @@ describe('a merged-pull-request claim can only come from a reading', () => {
       expect(source, `${file}: export *`).not.toMatch(
         /export\s*\*[^;]*merge-observation-proof/,
       );
+      // And no exported ALIAS of the mint, which is the form that walks past
+      // both scans above. `export const mint = mintMergeObservation;` inside an
+      // allowed importer is not an `export {` re-export, and consumers calling
+      // `mint(...)` do not name the mint at all — so the import list stays
+      // exactly right while anything that imports that module can mint. A
+      // confirmation found it; this is the line that closes it.
+      expect(source, `${file}: exported alias`).not.toMatch(
+        /export[^;\n]*=\s*mintMergeObservation/,
+      );
     }
     // And the mint's name may not appear in the public wrapper at all, which
     // would be a re-export in all but name.
     expect(readFileSync('src/deliver/merge-observation-proof.ts', 'utf8')).not.toContain(
       'mintMergeObservation',
     );
+    // The mint's NAME may appear only in the two files allowed to have it.
+    //
+    // The import scan asks which modules name the module; this asks which name
+    // the function. A confirmation walked past both with
+    // `export const mint = mintMergeObservation;` inside an allowed importer —
+    // not an `export {` form, so the re-export ban missed it, and consumers
+    // calling `mint(...)` miss a scan for `mintMergeObservation(`. A bare
+    // identifier ban closes the aliasing family outright.
+    const namers = sources
+      .filter((file) => codeOnly(file).includes('mintMergeObservation'))
+      .sort();
+    expect(namers).toEqual([
+      'src/deliver/internal/merge-observation-proof.ts',
+      'src/deliver/reconcile-merge.ts',
+    ]);
+
     // No dynamic import can route around the static scan either, in either
     // quote style, and no `require` of it.
     for (const file of sources) {
@@ -812,6 +840,25 @@ describe('a merged-pull-request claim can only come from a reading', () => {
         "export * from './internal/merge-observation-proof.js';",
       ),
     ).toBe(true);
+    // And the resolver really does normalise a `..` specifier onto the mint, so
+    // the arm that closes that hole is measured rather than assumed.
+    expect(
+      posix.normalize(
+        posix.join(
+          posix.dirname('src/deliver/pull-request-merge.ts'),
+          './internal/x/../merge-observation-proof.js',
+        ),
+      ),
+    ).toBe('src/deliver/internal/merge-observation-proof.js');
+    // And the alias ban really matches the form it was written for.
+    expect(/export[^;\n]*=\s*mintMergeObservation/.test(
+      'export const mint = mintMergeObservation;',
+    )).toBe(true);
+    // …without matching the ordinary call the one allowed caller makes, which
+    // would make the ban unsatisfiable rather than protective.
+    expect(/export[^;\n]*=\s*mintMergeObservation/.test(
+      '  const proof = mintMergeObservation({',
+    )).toBe(false);
   });
 
   it('answers null rather than throwing for a value that captured the registry', () => {
@@ -1669,6 +1716,15 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     receipt: string | null;
     runtimeAfter: readonly string[];
     gitCalls: string[][];
+    /**
+     * The exit code this invocation set, captured and restored.
+     *
+     * Returned by the harness rather than read from `process.exitCode` at the
+     * call site, so a case cannot accidentally observe a code some earlier run
+     * left behind — which is how the round-2 exit-code assertion came to measure
+     * something other than what it named.
+     */
+    exitCode: number | undefined;
   }> {
     const root = mkdtempSync(join(tmpdir(), 'ao-v408-cli-'));
     mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
@@ -1689,6 +1745,8 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
       return { outcome: 'OK' as const, exitCode: 0, stdout: '', stderr: '' };
     };
     const chunks: string[] = [];
+    const outerExitCode = process.exitCode;
+    process.exitCode = undefined;
     const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
       chunks.push(String(chunk));
       return true;
@@ -1737,6 +1795,8 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     } finally {
       write.mockRestore();
     }
+    const exitCode = process.exitCode;
+    process.exitCode = outerExitCode;
     const path = join(mergeReconciliationDirectory(root), `${TASK}.json`);
     let receipt: string | null = null;
     try {
@@ -1746,7 +1806,7 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     }
     const runtimeAfter = readdirSync(join(root, '.agent-orchestrator', 'runtime'));
     rmSync(root, { recursive: true, force: true });
-    return { out: chunks.join(''), reader, mutations, receipt, runtimeAfter, gitCalls };
+    return { out: chunks.join(''), reader, mutations, receipt, runtimeAfter, gitCalls, exitCode };
   }
 
   it('reconciles when everything holds, and reports the commit the merge produced', async () => {
@@ -1918,8 +1978,11 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     expect(RECONCILIATION_TRAILER).toContain('A reconciliation asks');
     // Not "the one named above": on SUBJECT_NOT_ESTABLISHED the report prints no
     // Subject line at all, so a review found the phrase pointing at nothing.
-    expect(RECONCILIATION_TRAILER).toContain('about one commit');
-    expect(RECONCILIATION_TRAILER).not.toContain('no commit but the one named above');
+    // And not "asks about one commit" either — a confirmation pointed out that
+    // asserts a request the two caller-owned refusals never make. Naming the
+    // referent without asserting the act is what both findings leave standing.
+    expect(RECONCILIATION_TRAILER).toContain("about no commit but this task's own");
+    expect(RECONCILIATION_TRAILER).not.toContain('the one named above');
     expect(RECONCILIATION_TRAILER).toContain('It changes nothing there');
     // The opening is a CAPABILITY, not an act. The first repair here said "and
     // not read-only here", which claims a write on the twelve report shapes
@@ -1986,61 +2049,59 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     expect((await run(['--reconcile-merge'])).out).toContain(MERGE_PRESENCE_SENTENCE);
   });
 
-  it('reports the observation in its exit code, and says so on the surface', async () => {
-    // A deliberate convention, pinned so that it is a decision rather than an
-    // oversight. `--reconcile-merge` on its own always exits zero: the exit code
-    // answers "was the observation settled", and without `--observe` there is no
-    // observation, so it carries no information about the reconciliation. A
-    // review raised it as undocumented and unpinned; both halves are fixed here.
+  it('never reports this flag in its exit code, whatever the reconciliation did', async () => {
+    // Third statement of this, and the first that is not a value claim.
     //
-    // The convention is slice 7's — the merge flag does not move the exit code
-    // either — and changing it would be a contract change for the whole command,
-    // not a slice-8 detail.
+    // Round 1 said "a refusal to write exits zero". Round 2 corrected that to
+    // "on its own this exits zero however the reconciliation ended, and with
+    // --observe it reports that observation" — and a narrow confirmation
+    // MEASURED that false too: `--reconcile-merge` on its own exits 2 whenever
+    // the subject cannot be established, because `concludeObservation` tests
+    // `!subject.ok` BEFORE it tests whether anything was observed, and
+    // `exitCodeFor` runs unconditionally. `--observe` has nothing to do with it.
+    //
+    // The claim that survives is structural rather than numeric: the exit code
+    // is computed from the observation conclusion, and the reconciliation result
+    // never reaches it. That is what this case measures, and it is why the
+    // sentence no longer names a number.
     const before = process.exitCode;
     try {
-      for (const over of [
-        {},
-        { locator: '[]' as string | null },
-        { locator: null as string | null },
-      ]) {
-        process.exitCode = undefined;
-        await run(['--reconcile-merge'], over);
-        expect(process.exitCode).toBe(0);
+      // Same subject failure, with and without `--observe`. Identical, which is
+      // what makes the round-2 assertion a co-occurrence control: it passed
+      // `--observe` and attributed to it an exit code that has another cause.
+      const withoutObserve = await run(['--reconcile-merge'], {
+        delivery: { declared: false } as never,
+      });
+      const withObserve = await run(['--observe', '--reconcile-merge'], {
+        delivery: { declared: false } as never,
+      });
+      expect(withoutObserve.exitCode).toBe(withObserve.exitCode);
+      expect(withoutObserve.exitCode).not.toBe(0);
+
+      // And with a subject that resolves, the exit code is zero across
+      // reconciliation outcomes that differ from each other in every way that
+      // matters to an operator — a merge recorded, no pull request at the head,
+      // and a forge that refused. If the reconciliation reached the exit code at
+      // all, these three could not agree.
+      const recorded = await run(['--reconcile-merge']);
+      const none = await run(['--reconcile-merge'], { locator: '[]' });
+      const refused = await run(['--reconcile-merge'], { locator: null });
+      expect(recorded.receipt).not.toBeNull();
+      expect(none.receipt).toBeNull();
+      expect(refused.receipt).toBeNull();
+      for (const r of [recorded, none, refused]) {
+        expect(r.exitCode).toBe(0);
       }
     } finally {
       process.exitCode = before;
     }
-    // And with `--observe`, the exit code reports THAT — which is not zero when
-    // the observation did not settle. The first version of this claim said "a
-    // refusal to write exits zero" full stop, and a review measured it exiting 2
-    // on a subject that could not be established.
-    const before2 = process.exitCode;
-    try {
-      process.exitCode = undefined;
-      await run(['--observe', '--reconcile-merge'], { delivery: { declared: false } as never });
-      expect(process.exitCode).not.toBe(0);
-    } finally {
-      process.exitCode = before2;
-    }
 
-    // And the operator is told, on the surface they read before running it.
+    // And the operator is told, on the surface they read before running it —
+    // without a number, because the number is not this flag's to promise.
     expect(RECONCILE_MERGE_OPTION_DESCRIPTION).toContain(
-      'The exit code never reports this flag',
+      'never reports this flag, so a refused write is not visible in it',
     );
-    expect(RECONCILE_MERGE_OPTION_DESCRIPTION).toContain(
-      'with --observe it reports that observation and still not this',
-    );
-  });
-
-  it('says nothing was contacted only when nothing was', async () => {
-    // Derived from the ladder's own flag. A locator read that refused leaves
-    // every other field null while a process really ran, so a report deriving
-    // egress from those fields would say nothing was contacted when something
-    // was — and this is the case that measures it.
-    const refused = await run(['--reconcile-merge'], { locator: null });
-    expect(refused.reader.calls).toHaveLength(1);
-    expect(refused.out).toContain('Read-only.');
-    expect(refused.out).not.toContain('No forge was contacted');
+    expect(RECONCILE_MERGE_OPTION_DESCRIPTION).not.toContain('exits zero');
   });
 
   it('starts exactly two forge reads and two Git queries, and nothing else', async () => {
@@ -2104,9 +2165,15 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     // wording said "the flags that write anything at all", which is false of the
     // three flags the same paragraph has just described as changing something on
     // a forge — they write, just not here.
+    // "write a record here", not "write anything". A confirmation pointed out
+    // that the previous repair swapped one unmeasurable absolute for another:
+    // --publish-head pushes, and a push updates a remote-tracking ref and its
+    // reflog inside .git. What this build can stand behind is which flags write
+    // a RECORD, which is what the sentence now says.
     expect(DELIVERY_COMMAND_DESCRIPTION).toContain(
-      'the only flags that write anything on THIS machine are --record and --reconcile-merge',
+      'the only flags that write a record here are --record and --reconcile-merge',
     );
+    expect(DELIVERY_COMMAND_DESCRIPTION).not.toContain('write anything');
     // And the observe sentence no longer enumerates which flags can change
     // something — a list that went stale for a whole slice before this one.
     expect(OBSERVE_OPTION_DESCRIPTION).not.toContain(
@@ -2187,11 +2254,11 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
       ).toBe(true);
     }
 
-    // Positive control: the table really covers the whole vocabulary, so a
-    // member added to the ladder cannot escape this case.
-    expect(shapes.filter(([label]) => label.startsWith('ladder:'))).toHaveLength(
-      MERGE_OBSERVATIONS.length,
-    );
+    // No "positive control" that the table covers the vocabulary, because the
+    // table is BUILT from the vocabulary — such an assertion is tautological, and
+    // a confirmation named it as one. What is a real control is the loop below:
+    // it requires all three write attempts to be present, and they are supplied
+    // by hand rather than derived, so dropping one makes it fail.
 
     for (const [label, outcome, contacted, record] of shapes) {
       const out = shape(outcome, contacted, record);
