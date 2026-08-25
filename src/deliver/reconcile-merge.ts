@@ -9,13 +9,19 @@
  *
  * It performs **no mutation of any kind**. At most two GET requests through
  * slice 2's transport, and nothing else — no push, no pull-request creation, no
- * merge, no comment, no label, no review, no agent. *At most*, because a
- * refusal at the locator stops after one and a subject this build will not
- * address stops before any process exists. It cannot: the only two functions it
- * calls that reach a network are `readPullCandidatesAtHead` and
+ * merge, no comment, no label, no review, no agent. It cannot: the only two
+ * functions it calls that reach a network are `readPullCandidatesAtHead` and
  * `readPullRequestByNumber`, both of which build their argument vector from
  * `FORGE_REQUEST_PREFIX`, whose `-X GET` pair `tests/v4-02-…` pins by exact
  * equality.
+ *
+ * *At most* rather than exactly two, because the second request is only sent
+ * once the first has produced exactly one pull request. A subject this build
+ * will not address sends none at all, and every outcome decided from the
+ * candidate set alone stops after the first: a locator that refused or could not
+ * be classified, no pull request at this head, one still open, or more than one.
+ * An earlier version of this clause named two of those six and a review counted
+ * the rest.
  *
  * ── Why it does not take a MergeGrant, and must not ────────────────────────
  *
@@ -287,17 +293,18 @@ export interface MergeObservationResult {
    * the vocabulary and the ordering of the reads are different things, and an
    * earlier version of this sentence conflated them.
    *
-   * It is non-null on `NOT_MERGED`, `MERGE_NOT_THIS_DELIVERY`,
-   * `BASE_NOT_INTENDED` and `MERGE_OBSERVED` — and **also on the
-   * `FORGE_UNREADABLE` arms reached after the second read**, which a review
-   * measured: a document endpoint that refuses, and one that reports a state
-   * word this build does not recognise, both answer `FORGE_UNREADABLE` carrying
-   * the number they were asked about. Those are ordinary production paths.
+   * The rule, rather than a list, because two successive versions of this
+   * sentence were lists and a review counted both wrong. **It is non-null from
+   * the line that reads a pull request by number onwards, and `null` before
+   * it.** Nothing else decides it, and a member added to either side of that
+   * line inherits the right answer without this paragraph being re-read.
    *
-   * It is `null` on the members decided from the candidate set alone — the
-   * locator-level `FORGE_UNREADABLE`, `NO_PULL_REQUEST_AT_HEAD`,
-   * `PULL_REQUEST_STILL_OPEN`, `PULL_REQUEST_AMBIGUOUS` — and on the two the
-   * caller owns.
+   * What the lists kept getting wrong is worth naming once: `FORGE_UNREADABLE`
+   * sits on *both* sides. Reached from the locator it carries nothing; reached
+   * after the second read — a document endpoint that refuses, one that reports a
+   * state word this build does not recognise, or a reading the mint declines —
+   * it carries the number it asked about. The outcome word is not where the
+   * answer lives.
    */
   readonly pullRequestNumber: number | null;
   /** The reading that came back, or `null` when no pull request was addressed. */
@@ -450,10 +457,16 @@ export async function observeMergeForDelivery(
     observedAt: seams.now().toISOString(),
   });
   // The mint re-derives every one of the checks above and refuses a reading it
-  // cannot vouch for — a merged reading with no resulting commit is the case
-  // that reaches here, because nothing above asks for one. A refusal is graded
-  // `FORGE_UNREADABLE` and not as a merge: the forge said "merged" and could not
-  // name what it produced, which is an answer this build cannot record.
+  // cannot vouch for. Two of its gates are genuinely reachable from here, and a
+  // review found this comment naming only the first: a merged reading with no
+  // resulting commit, or one whose object name is not forty lowercase hex digits
+  // — nothing above asks for one — and a reading whose `number` is not the
+  // number this build addressed, which is the two endpoints disagreeing about
+  // which pull request answered.
+  //
+  // Either way the grade is `FORGE_UNREADABLE` and not a merge: the forge said
+  // "merged" and this build cannot say what it produced, or cannot say which
+  // pull request it is about. Both are answers it will not record.
   if (proof === null) return outcome('FORGE_UNREADABLE', true, number, reading);
 
   return outcome('MERGE_OBSERVED', true, number, reading, proof);

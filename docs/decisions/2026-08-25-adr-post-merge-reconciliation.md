@@ -276,7 +276,10 @@ that rather than as mutual exclusion: two processes that both read `ABSENT` can
 both go on to write, and nothing here stops the second. What is guaranteed is
 that a receipt **already on disk when this process looked** is never silently
 replaced by a different one. Two reconcilers of the same merge converge, because
-they write the same event and differ only in `reconciledAt`.
+they write the same event and differ only in when they asked and when they
+wrote — `observedAt` and `reconciledAt`, neither of which `sameMergeEvent`
+compares. (It does not compare three more; the claim that matters is that two
+honest reconcilers of one merge differ in nothing it looks at.)
 
 ## Residuals
 
@@ -317,12 +320,17 @@ they write the same event and differ only in `reconciledAt`.
   slice 3's store and this one each hard-code `tmp-probe`. Three spellings of one
   fact that have to agree, with nothing making them.
 - **L-V4-08-8 — the exit code says nothing about a reconciliation.**
-  `--reconcile-merge` on its own always exits zero: the exit code answers whether
-  the *observation* settled, and without `--observe` there is none. A refused
-  write — including `CONFLICTING_RECEIPT`, the case an operator most has to act on
-  — is invisible to `$?`. This is slice 7's convention rather than a new one, and
-  changing it is a contract change for the whole command. Stated on the flag's own
-  surface and pinned by a case, so it is a decision rather than an oversight.
+  The exit code answers whether the *observation* settled and never reports this
+  flag. On its own — no `--observe` — there is no observation, so the run exits
+  zero however the reconciliation ended, and a refused write, including
+  `CONFLICTING_RECEIPT`, is invisible to `$?`. With `--observe` it reports that
+  observation: a subject that cannot be established exits 2, an incomplete
+  observation exits 4, and neither is a statement about the reconciliation
+  either. An earlier version of this residual said the flag "always exits zero",
+  which a review measured false in the second case. This is slice 7's convention
+  rather than a new one, and changing it is a contract change for the whole
+  command. Stated on the flag's own surface and pinned by a case, so it is a
+  decision rather than an oversight.
 
 ## The counter-proof
 
@@ -333,7 +341,7 @@ run: without `dist/native/ao-launch.exe` the fixtures that resolve a repository
 answered `GIT_UNAVAILABLE`, and a lab that skipped the baseline would have
 reported thirty free kills.
 
-36 mutants. **34 killed, 2 equivalent, 0 harness failures**, against a baseline
+38 mutants. **36 killed, 2 equivalent, 0 harness failures**, against a baseline
 green on the slice's own suite and on the four neighbouring ones used to tell
 "this slice's mechanism caught it" from "something else did".
 
@@ -362,62 +370,99 @@ scored as a free kill had the lab not verified that the file changed; and one
 disabled a single clause of a nine-clause comparison, so it compiled, ran, and
 did not express the mutation it was named after.
 
-### What the campaign and the review found in the product
+### What the campaign, the reviews and the enumerations found in the product
 
-Six things, all fixed. Three came from the mutation campaign and three from the
-independent adversarial review that followed it.
+Two independent adversarial reviews ran, at the two heads this slice has had, and
+between them an enumeration of every report shape and two further mutation
+passes. Together they found the following in the product. All are fixed.
 
-From the campaign:
+**Correctness**
 
-1. **the registry check in `mergeObservationFactsOf` was doing no work.** Removing
-   it failed no test, because the private-field read independently throws for a
-   value that never went through the constructor. The module's header claims the
-   registry is the gate, so the gate was made measurable: a case now constructs a
-   real `MergeObservationEvidence` directly, reads its facts through the private
-   accessor to prove it is genuine, and requires the public accessor to refuse
-   it.
-2. **the short-read guard was unreachable.** `read !== size` defends against a
-   partial read that no fixture could provoke. A `readChunk` seam makes it
-   reachable, and the case that uses it is one byte short *on purpose*: the
-   receipt is JSON plus a trailing newline, so a read that stops one byte early
-   yields a complete, valid, correctly bound document, and this guard is the only
-   thing between it and `HISTORICAL_MERGE`. Every larger shortfall lands mid-JSON
-   and would be refused anyway — which is why the first version of that case
-   passed over a build with the guard removed.
-3. **an over-claiming comment**, described above.
+1. **A failure after a successful open reported the receipt as absent.**
+   `loadMergeReconciliation`'s inner catch mirrored the outer one and mapped an
+   `ENOENT`-coded throw to `ABSENT`. In the outer catch that is right — the open
+   itself failed. In the inner one it is not: the open has already succeeded, so
+   something is on that path whatever errno arrives afterwards. And `ABSENT` is
+   the single reading that grants the writer permission to write over the path,
+   so the never-overwrite guarantee ran through that line. Now unconditionally
+   `MALFORMED`, and pinned through the `readChunk` seam for three errno values.
+2. **A failed write was reported as a read-only run.** The trailer gate asked
+   `writeAttempt === 'COMPLETED'`, but by the time a replace can fail this build
+   has created the receipt's directory and staged a file beside the target. The
+   gate now asks for an *attempt*.
+3. **The reachability pin was defeatable two ways.** The mint's whole-`src` scan
+   matched single-quoted specifiers only, and banned named re-exports but not
+   `export *` — and an `export *` in the public wrapper would have left the
+   importer list exactly right while opening the mint to every module that
+   imports the wrapper. Both closed, and the scan's own patterns now carry
+   controls, because a regex that matches nothing passes every assertion built
+   on it.
+4. **The registry check in `mergeObservationFactsOf` was doing no work.** The
+   private-field read independently throws for a value that never went through
+   the constructor, so removing the registry gate failed no test. A case now
+   constructs a real `MergeObservationEvidence` directly, reads its facts through
+   the private accessor to prove it is genuine, and requires the public accessor
+   to refuse it.
+5. **The short-read guard was unreachable.** A `readChunk` seam makes it
+   reachable, and the case is one byte short *on purpose*: the receipt is JSON
+   plus a trailing newline, so a read that stops one byte early yields a
+   complete, valid, correctly bound document. Every larger shortfall lands
+   mid-JSON and would be refused anyway.
+6. **The ignore probe asked about a path spelled twice.** Its relative path was a
+   hardcoded `.agent-orchestrator/runtime/…` literal while the write target was
+   derived from `REPO_PROFILE_DIR_NAME` and `TASK_RUNTIME_DIR_NAME` — two
+   independent spellings with nothing making them agree. It is now derived from
+   the path that is about to be written.
+7. **The egress disclosure was dropped on one combination.** The `L-V4-02-6`
+   sentence is owed whenever `gh` runs, and on the acts branch it was gated on an
+   observation having run. `--publish-head --attended --reconcile-merge` breaks
+   that equivalence and the disclosure disappeared. Found by enumeration.
 
-From the review, and the first is the one worth learning from:
+**The reader's size bound, which was classified equivalent and is not**
 
-4. **the reader's size bound was classified "equivalent" and is not.** This ADR
-   previously argued that no schema-valid receipt can exceed the budget, so any
-   oversized file fails a later gate anyway. **Measured false.** The schema bounds
-   fields in *characters*; the budget is in *bytes*. A `repositoryRoot` of 4000
-   characters outside Basic Latin is schema-valid, correctly bound, reads
-   `HISTORICAL_MERGE` when handed to `readMergeReconciliation` directly, and
-   encodes to over 12 kB against an 8 kB budget — so with the gate removed it
-   loads. The equivalence was a claim reasoned from the schema rather than
-   measured against an encoder, which is precisely the mistake this repository
-   keeps paying for. There is now a case, and the mutant is killed.
-5. **the operator trailer stated acts rather than bounds.** `RECONCILIATION_TRAILER`
-   is printed for all ten ladder outcomes, and its first version said the run
-   "asked github.com" and that "this task is still `READY_FOR_PR`". On the
-   `TASK_NOT_READY` refusal the report therefore carried "Read-only. No forge was
-   contacted" and a claim of a conversation four lines apart, and asserted the
-   very state the ladder had just refused the run for not being in. Every clause
-   is now a bound on what a reconciliation *asks* and *can* change, which is true
-   on every path.
-6. **two report contradictions.** A run that wrote a receipt closed with
-   `CONTACTED_TRAILER`'s bare "Read-only." two paragraphs above "not read-only
-   here" — the exact contradiction the new trailer exists to avoid. And
-   `MERGE_PRESENCE_SENTENCE` was printed on every outcome, asserting "this pull
-   request was merged and produced this commit" directly beneath a line saying the
-   opposite. Both are gated now, and both gates are pinned by their own mutant.
+This ADR previously argued that no schema-valid receipt can exceed the budget, so
+any oversized file fails a later gate anyway. **Measured false.** The schema
+bounds fields in *characters*; the budget is in *bytes*. A `repositoryRoot` of
+4000 characters outside Basic Latin is schema-valid, correctly bound, reads
+`HISTORICAL_MERGE` when handed to `readMergeReconciliation` directly, and encodes
+to over 12 kB against an 8 kB budget — so with the gate removed it loads. The
+equivalence was reasoned from the schema rather than measured against an encoder.
+There is a case now, and the mutant is killed.
 
-A further eight factual defects in prose — a wrong clause count, an option count
-left at nine, a docblock quoting a sentence that does not exist, a field contract
-that did not match the code, and four claims that overstated a guard — were found
-by the same review and by an audit of this slice's own writing. They are corrected
-in place. None of them changed behaviour, and all of them would have been read as
+**The operator report, which took three passes**
+
+`RECONCILIATION_TRAILER` is printed on thirteen report shapes, and twelve of them
+write nothing. Its first version said the run "asked github.com" and that "this
+task is still `READY_FOR_PR`" — false on the refusals, and printed four lines
+under "No forge was contacted". The repair rewrote every clause as a bound and
+left the *opening* an act, "and not read-only here", which claims a write. The
+second repair made the opening a capability. A third pass corrected the effects
+clause, which said the run can change "one file … and the directory holding it —
+nothing else" and omitted the staging file the store asks Git about for exactly
+that reason.
+
+Three passes on one paragraph is this repository's signature failure, and the
+thing that ends it is not a better sentence. The enumeration is now a **test**: a
+table over the whole ladder vocabulary plus all three write attempts, asserting
+on every shape that the bare "Read-only." appears exactly where it is true, that
+the egress disclosure survives wherever a forge was contacted, and that the
+merge-presence caveat appears only where there is a merge to caveat. A fourth
+round of this is a failing test rather than a review finding.
+
+**Prose that overstated the code**
+
+Around twenty further factual defects — wrong counts, an option count left at
+nine, a docblock quoting a sentence that does not exist, a docblock pointing at
+"the closing clause" after a clause was appended past it, field contracts that
+did not match the code, an exit-code claim that was false whenever `--observe`
+was also passed, and several enumerations that a review counted — were found by
+the two reviews and by audits of this slice's own writing. Where an enumeration
+kept going stale it was replaced by a rule; where a claim could not be made true
+it was withdrawn. One unused export was deleted rather than given an invented
+use: `MERGE_RECONCILIATION_READING_DETAIL` carried a docblock saying it was "for
+the operator report", and no report consumed it.
+
+None of these changed behaviour, and all of them would have been read as
 guarantees.
 
 ### One thing the campaign did not have to find

@@ -127,9 +127,12 @@ const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{
  * diff, no arbitrary GitHub JSON. That is not enforced by a filter — it is
  * enforced by the shape: every field that carries **what the forge said** comes
  * from {@link MergeObservationFacts}, which has no field any of those could
- * travel in. The rest are local identities the caller already holds — the task,
- * its repository root, its commit and two instants — and none of them has been
- * anywhere near a response body.
+ * travel in — the pull-request number, the head, the base, the resulting commit,
+ * and `observedAt`, which is when this process asked. The remaining five are not
+ * forge output at all: `taskId`, `repositoryRoot` and `subjectCommit` are local
+ * identities the caller already holds, and `reconciliationVersion` and
+ * `provider` are constants this build chose. A review counted an earlier version
+ * of this paragraph, which split the payload two ways and mislaid three fields.
  *
  * No head **branch name** either, and that is the same decision slice 3 took
  * about `workBranch`. A branch is a mutable pointer; the head of this merge is
@@ -225,22 +228,37 @@ export const MergeReconciliationSchema = z
         message: "The merged pull request's head is the task's delivery commit.",
       });
     }
-    // There is deliberately NO second invariant ordering the two instants, and a
-    // review raised its absence: a receipt whose `reconciledAt` precedes its
+    // There is deliberately NO second invariant ordering the two instants. A
+    // review raised its absence — a receipt whose `reconciledAt` precedes its
     // `observedAt` validates, and describes a record written before the forge
-    // was asked.
+    // was asked — and a second review found the first answer to that
+    // contradicting itself. So this is the third statement of it, and it is
+    // written as the marginal call it is rather than as an obvious one.
     //
-    // It stays absent because the check would be the more dangerous of the two.
-    // The two instants come from two separate calls to the same clock in one
-    // invocation, so a backwards step between them — an NTP correction is the
-    // ordinary cause — would refuse a completely honest reconciliation as
-    // `RECEIPT_CONTRACT_VIOLATION`, and go on refusing it until the clock caught
-    // up. What the invariant would buy is refusing a record nothing in this
-    // build can produce and nothing downstream reads: no consumer compares the
-    // two, and both are already reported as what they are. Trading a live
-    // refusal of good input for a stricter refusal of input that does not occur
-    // is the wrong side of that trade, and it is a decision rather than an
-    // omission.
+    // The facts. Both instants come from the same clock seam, two calls apart,
+    // inside one invocation, so in the ordinary case `reconciledAt` is the later
+    // of the two. A backwards step between the two calls — an NTP correction is
+    // the realistic cause — can invert them, so this build *can* produce an
+    // inverted pair, which is exactly what the previous version of this comment
+    // denied two sentences after asserting it.
+    //
+    // What the invariant would cost: that run is refused as
+    // `RECEIPT_CONTRACT_VIOLATION` and writes nothing. It is recoverable — a
+    // re-run mints fresh instants — so the cost is one wasted invocation, not a
+    // permanently unreconcilable task, and the previous claim that it would "go
+    // on refusing until the clock caught up" did not follow from the mechanism.
+    //
+    // What it would buy: refusing a hand-written receipt whose instants are
+    // inverted. Nothing downstream compares them, both are reported as what they
+    // are, and a filesystem author who can write the file can equally write two
+    // ordered instants — so it buys very little, against a mechanism that
+    // catches nothing else.
+    //
+    // Little cost and little benefit is a genuine toss-up. It stays absent
+    // because the shape of the failure decides it: the cost lands on a real
+    // reconciliation of a real merge, and the benefit lands on a record this
+    // build did not write. Refusing good input to inconvenience a forger is the
+    // wrong way round.
   });
 
 export type MergeReconciliation = z.infer<typeof MergeReconciliationSchema>;
@@ -365,20 +383,6 @@ const RECORDED: Readonly<Record<MergeReconciliationReading, boolean>> = Object.f
 export function isRecordedMerge(reading: MergeReconciliationReading): boolean {
   return RECORDED[reading] === true;
 }
-
-/** One static sentence per reading, for the operator report. */
-export const MERGE_RECONCILIATION_READING_DETAIL: Readonly<
-  Record<MergeReconciliationReading, string>
-> = Object.freeze({
-  HISTORICAL_MERGE:
-    'A merge recorded for exactly this task: the pull request, head, base and resulting commit below.',
-  ABSENT: 'No merge has been reconciled for this task.',
-  UNSUPPORTED_VERSION: 'The stored receipt was written by another build, so it was not read.',
-  MALFORMED: 'The stored receipt is not one this build recognises, so it was not read.',
-  NOT_THIS_TASK:
-    'The stored receipt does not belong to this task, has been edited since it was written, ' +
-    'or was written when this repository was at a different path.',
-});
 
 /**
  * The sentence every report carries beside a recorded merge.

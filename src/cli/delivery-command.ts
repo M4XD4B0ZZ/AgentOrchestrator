@@ -418,8 +418,13 @@ export const MERGE_PR_OPTION_DESCRIPTION =
  *
  * The opening one — "reading github.com to establish it and changing nothing
  * there" — separates it from `--merge-pr`, which is the act; this is the
- * bookkeeping afterwards. And the closing one is the distinction the whole
- * slice turns on: a receipt is an event, not a claim about the base branch now.
+ * bookkeeping afterwards. The other is the sentence beginning "It is not a claim
+ * that the commit is on the base branch now", which is the distinction the whole
+ * slice turns on: a receipt is an event, not a statement about the base now.
+ *
+ * It is named by its opening words rather than by its position. A review found
+ * this docblock calling it "the closing clause" after an exit-code clause had
+ * been appended past it — a pointer that a later edit silently invalidated.
  *
  * This docblock previously quoted a phrase, "Records what GitHub already did",
  * that appears nowhere in the string below. A review found it, and it is worth
@@ -445,8 +450,10 @@ export const RECONCILE_MERGE_OPTION_DESCRIPTION =
   'overwritten. What is stored is one past event — that this pull request was merged and ' +
   'produced that commit. It is not a claim that the commit is on the base branch now, that it ' +
   'has not been reverted, or that anything was verified against it, and it changes no task ' +
-  'state: the task is still READY_FOR_PR afterwards. The exit code reports the observation, ' +
-  'not the reconciliation — read the Receipt line, because a refusal to write exits zero.';
+  'state: the task is still READY_FOR_PR afterwards. The exit code never reports this flag: ' +
+  'it answers whether the observation settled, so on its own this exits zero however the ' +
+  'reconciliation ended, and with --observe it reports that observation and still not this. ' +
+  'Read the Receipt line.';
 
 /**
  * Operator presence, in the shape `release` established.
@@ -478,10 +485,10 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'authorised, and none implies another. With --reconcile-merge it reads github.com to establish ' +
   'that this task\'s delivery was merged and stores that one event beside the task state, ' +
   'changing nothing on the forge. Contacting a forge is never implicit: with no flag that says ' +
-  'it contacts github.com, nothing is read from a network. It writes no task state — the flags ' +
-  'that write anything at all are --record and --reconcile-merge, and each writes a record ' +
-  'beside the task, here — and it never updates, closes, reopens, reviews, comments on or ' +
-  'labels a pull request, and never enables an auto-merge.';
+  'it contacts github.com, nothing is read from a network. It writes no task state, and the ' +
+  'only flags that write anything on THIS machine are --record and --reconcile-merge, each of ' +
+  'which writes one record beside the task, here — and it never updates, closes, reopens, ' +
+  'reviews, comments on or labels a pull request, and never enables an auto-merge.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
   const resolve = seams.resolveRepository ?? resolveRepository;

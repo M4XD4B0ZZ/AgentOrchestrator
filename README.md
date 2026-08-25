@@ -9480,9 +9480,11 @@ separate record, redesigning block evidence, and the existing companion pattern
 
 - **L-V4-08-1 — read-before-write is not mutual exclusion.** Two concurrent
   reconcilers of *contradictory* merges for one task could both see "absent".
-  Reaching that needs two pull requests at one delivery head, which the ladder
-  refuses upstream. Named rather than closed: closing it needs a lock, and a lock
-  is a service.
+  The ordinary route to that — two pull requests at one delivery head — is refused
+  upstream, but it is not the only one: two invocations whose profiles resolve to
+  different delivery targets would each establish a real merge, and the ladder
+  cannot refuse what it cannot see. Named rather than closed: closing it needs a
+  lock, and a lock is a service.
 - **L-V4-08-2 — the receipt is not authority.** Anyone who can create a file in
   the runtime directory can write one this build reads as genuine. The mint
   bounds *product code*; it is not filesystem authenticity, and the binding
@@ -9506,6 +9508,16 @@ separate record, redesigning block evidence, and the existing companion pattern
   dropping `--quiet` would reintroduce the disjunction. Corrected in this slice's
   own copy; the two siblings are named here rather than edited, because a
   correct-but-misexplained comment in another slice is not this one's to rewrite.
+- **L-V4-08-7 — the staging-probe suffix is spelled in three places.**
+  `state/runtime-ignored.ts` owns `STAGING_PROBE_SUFFIX` and does not export it,
+  so slice 3's store and this one each hard-code `tmp-probe`. Three spellings of
+  one fact that have to agree, with nothing making them.
+- **L-V4-08-8 — the exit code never reports this flag.** It answers whether the
+  observation settled. On its own, `--reconcile-merge` exits zero however the
+  reconciliation ended — a refused write, including a conflicting receipt, is
+  invisible to `$?`. With `--observe` the code reports that observation and still
+  not this. Slice 7's convention rather than a new one; stated on the flag's own
+  surface and pinned by a case.
 
 ## Not implemented yet
 

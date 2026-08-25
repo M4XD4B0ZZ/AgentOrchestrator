@@ -52,7 +52,6 @@ import {
   readMergeReconciliation,
   MAX_MERGE_RECONCILIATION_BYTES,
   MERGE_PRESENCE_SENTENCE,
-  MERGE_RECONCILIATION_READING_DETAIL,
   MERGE_RECONCILIATION_READINGS,
   MERGE_RECONCILIATION_VERSION,
   MergeReconciliationSchema,
@@ -91,6 +90,7 @@ import {
 } from '../src/cli/delivery-command.js';
 import {
   CONTACTED_TRAILER,
+  MERGE_TRAILER,
   NOT_CONTACTED_TRAILER,
   OBSERVED_AND_CHANGED_TRAILER,
   RECONCILIATION_TRAILER,
@@ -457,9 +457,11 @@ describe('the merge receipt is a versioned, bounded, self-describing document', 
     // case's.
     const recorded = MERGE_RECONCILIATION_READINGS.filter((r) => isRecordedMerge(r));
     expect(recorded).toEqual(['HISTORICAL_MERGE']);
-    for (const r of MERGE_RECONCILIATION_READINGS) {
-      expect(MERGE_RECONCILIATION_READING_DETAIL[r], r).toBeTruthy();
-    }
+    // There is deliberately no per-reading sentence map, and no assertion here
+    // standing in for one. A map was written with a docblock saying it was "for
+    // the operator report"; a review measured that no report consumed it, and it
+    // was deleted rather than given an invented use. A placeholder assertion in
+    // its place would be a vacuous line pretending to be coverage.
 
     // There is deliberately no staleness member. A merge event does not stop
     // having happened because the task moved afterwards, and a reading that
@@ -720,7 +722,11 @@ describe('a merged-pull-request claim can only come from a reading', () => {
     expect(sources.length).toBeGreaterThan(100);
     expect(sources).toContain('src/deliver/reconcile-merge.ts');
 
-    const specifier = /from\s+'([^']*merge-observation-proof\.js)'/g;
+    // BOTH quote styles. A review defeated the first version with a
+    // double-quoted specifier — this file's own style is single quotes and
+    // nothing in the scan enforced that, so `from "./internal/…"` was simply
+    // invisible to it. A pin that a formatting choice can switch off is not one.
+    const specifier = /from\s+['"]([^'"]*merge-observation-proof\.js)['"]/g;
     const importers = sources
       .filter((file) => {
         const code = codeOnly(file);
@@ -766,23 +772,46 @@ describe('a merged-pull-request claim can only come from a reading', () => {
 
     // Nothing anywhere may re-export the mint or the class, which would walk
     // past the import pin entirely.
+    //
+    // `export *` is banned separately and for a different reason, and it is the
+    // second hole a review measured. A named re-export is caught by the pattern
+    // below; `export * from './internal/merge-observation-proof.js'` in the
+    // PUBLIC WRAPPER is not — and the wrapper is already an expected importer,
+    // so the list above would still be exactly right while every module that
+    // imports the wrapper could reach the mint through it.
     for (const file of sources) {
       if (file === 'src/deliver/internal/merge-observation-proof.ts') continue;
       const source = readFileSync(file, 'utf8');
       expect(source, file).not.toMatch(/export\s*\{[^}]*mintMergeObservation/);
       expect(source, file).not.toMatch(/export\s*\{[^}]*MergeObservationEvidence/);
+      expect(source, `${file}: export *`).not.toMatch(
+        /export\s*\*[^;]*merge-observation-proof/,
+      );
     }
     // And the mint's name may not appear in the public wrapper at all, which
     // would be a re-export in all but name.
     expect(readFileSync('src/deliver/merge-observation-proof.ts', 'utf8')).not.toContain(
       'mintMergeObservation',
     );
-    // No dynamic import can route around the static scan either.
+    // No dynamic import can route around the static scan either, in either
+    // quote style, and no `require` of it.
     for (const file of sources) {
-      expect(readFileSync(file, 'utf8'), file).not.toMatch(
-        /import\s*\(\s*[^)]*merge-observation-proof/,
-      );
+      const source = readFileSync(file, 'utf8');
+      expect(source, file).not.toMatch(/import\s*\(\s*[^)]*merge-observation-proof/);
+      expect(source, file).not.toMatch(/require\s*\(\s*[^)]*merge-observation-proof/);
     }
+
+    // The scan's own controls, because a regex that matched nothing would pass
+    // every assertion above. Each pattern is shown to find what it is for.
+    expect(specifier.test("from \"./internal/merge-observation-proof.js\"")).toBe(true);
+    specifier.lastIndex = 0;
+    expect(specifier.test("from './internal/merge-observation-proof.js'")).toBe(true);
+    specifier.lastIndex = 0;
+    expect(
+      /export\s*\*[^;]*merge-observation-proof/.test(
+        "export * from './internal/merge-observation-proof.js';",
+      ),
+    ).toBe(true);
   });
 
   it('answers null rather than throwing for a value that captured the registry', () => {
@@ -1427,6 +1456,33 @@ describe('a receipt is written once, never overwritten, and read back exactly', 
       // supplied at all.
       const full = loadMergeReconciliation(root, TASK, subject, (p) => openSync(p, 'r'), readSync);
       expect(full.reading).toBe('HISTORICAL_MERGE');
+
+      // A FAILURE AFTER A SUCCESSFUL OPEN IS NEVER "NOBODY WROTE ONE".
+      //
+      // This is the guarantee the writer depends on, and the direction of the
+      // failure is what makes it matter: `ABSENT` is the single reading that
+      // grants `recordMergeReconciliation` permission to write over the path, so
+      // a reader that answers it for a file it could not finish reading would
+      // hand a receipt's destruction to a transient error.
+      //
+      // A review found the inner catch mapping an ENOENT-coded throw to
+      // `ABSENT`, mirroring the outer one — where it is correct, because there
+      // the open itself failed. Here the open has already succeeded, so
+      // something IS on that path whatever errno arrives afterwards. The mutant
+      // that restores the errno test survived the suite until this case existed.
+      for (const code of ['ENOENT', 'EACCES', 'EIO']) {
+        const afterOpen = loadMergeReconciliation(
+          root,
+          TASK,
+          subject,
+          (p) => openSync(p, 'r'),
+          () => {
+            throw Object.assign(new Error('late'), { code });
+          },
+        );
+        expect(afterOpen.reading, code).toBe('MALFORMED');
+        expect(afterOpen.reading, code).not.toBe('ABSENT');
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1855,14 +1911,30 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
       'and it changed\nnothing there',
       'this task is still READY_FOR_PR',
       'it changed at most',
+      'and not read-only here',
     ]) {
       expect(RECONCILIATION_TRAILER, act).not.toContain(act);
     }
-    expect(RECONCILIATION_TRAILER).toContain('asks github.com about no');
+    expect(RECONCILIATION_TRAILER).toContain('A reconciliation asks');
+    // Not "the one named above": on SUBJECT_NOT_ESTABLISHED the report prints no
+    // Subject line at all, so a review found the phrase pointing at nothing.
+    expect(RECONCILIATION_TRAILER).toContain('about one commit');
+    expect(RECONCILIATION_TRAILER).not.toContain('no commit but the one named above');
     expect(RECONCILIATION_TRAILER).toContain('It changes nothing there');
+    // The opening is a CAPABILITY, not an act. The first repair here said "and
+    // not read-only here", which claims a write on the twelve report shapes
+    // where nothing was written — the same mistake one clause further along.
+    expect(RECONCILIATION_TRAILER).toContain('not necessarily read-only here');
+    expect(RECONCILIATION_TRAILER).toContain('says whether this run did');
     // The directory the write creates is an effect too, and the first version
     // omitted it while claiming "at most one file".
-    expect(RECONCILIATION_TRAILER).toContain('and the directory');
+    // The effects clause names all three things a write creates. A review found
+    // the previous "one file … and the directory holding it — nothing else"
+    // omitting the staging file — which the store's own comment says a crash can
+    // leave behind, and which it asks Git about for exactly that reason.
+    expect(RECONCILIATION_TRAILER).toContain('one directory, one receipt beside the task');
+    expect(RECONCILIATION_TRAILER).toContain('a staging file');
+    expect(RECONCILIATION_TRAILER).not.toContain('nothing else');
   });
 
   it('never contradicts itself in the trailer block', async () => {
@@ -1938,9 +2010,25 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     } finally {
       process.exitCode = before;
     }
+    // And with `--observe`, the exit code reports THAT — which is not zero when
+    // the observation did not settle. The first version of this claim said "a
+    // refusal to write exits zero" full stop, and a review measured it exiting 2
+    // on a subject that could not be established.
+    const before2 = process.exitCode;
+    try {
+      process.exitCode = undefined;
+      await run(['--observe', '--reconcile-merge'], { delivery: { declared: false } as never });
+      expect(process.exitCode).not.toBe(0);
+    } finally {
+      process.exitCode = before2;
+    }
+
     // And the operator is told, on the surface they read before running it.
     expect(RECONCILE_MERGE_OPTION_DESCRIPTION).toContain(
-      'The exit code reports the observation, not the reconciliation',
+      'The exit code never reports this flag',
+    );
+    expect(RECONCILE_MERGE_OPTION_DESCRIPTION).toContain(
+      'with --observe it reports that observation and still not this',
     );
   });
 
@@ -2012,14 +2100,178 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     // The command's own paragraph names the new flag and stops claiming that
     // one flag is the only thing that writes.
     expect(DELIVERY_COMMAND_DESCRIPTION).toContain('--reconcile-merge');
+    // "on THIS machine" is load-bearing, and a review is why. The previous
+    // wording said "the flags that write anything at all", which is false of the
+    // three flags the same paragraph has just described as changing something on
+    // a forge — they write, just not here.
     expect(DELIVERY_COMMAND_DESCRIPTION).toContain(
-      'the flags that write anything at all are --record and --reconcile-merge',
+      'the only flags that write anything on THIS machine are --record and --reconcile-merge',
     );
     // And the observe sentence no longer enumerates which flags can change
     // something — a list that went stale for a whole slice before this one.
     expect(OBSERVE_OPTION_DESCRIPTION).not.toContain(
       'The flags that can change something are',
     );
+  });
+
+  it('closes every reachable report shape without contradicting itself', () => {
+    // The trailer block, enumerated over the WHOLE ladder vocabulary rather than
+    // sampled. Two review rounds and one hand enumeration all found the same
+    // class of defect here — a sentence stating an act on a path where the act
+    // did not happen — and each time the previous fix had moved the problem one
+    // clause along rather than closing it. A table is what stops that.
+    //
+    // Three properties, checked on every shape:
+    //   1. the bare word "Read-only." appears only where the run really was;
+    //   2. the L-V4-02-6 disclosure — the GitHub CLI's own telemetry and update
+    //      traffic — appears wherever a forge was contacted, and is never lost;
+    //   3. the merge-presence caveat appears only where a merge was established.
+    const shape = (
+      outcome: MergeObservationOutcome,
+      contacted: boolean,
+      record: { code: string; writeAttempt: string } | null,
+    ) =>
+      renderDeliveryObservation({
+        repositoryId: 'repo',
+        repositoryRoot: ROOT,
+        taskId: TASK,
+        subject: { ok: false, refusal: 'DELIVERY_NOT_DECLARED' } as never,
+        observation: null,
+        conclusion: 'SUBJECT_NOT_ESTABLISHED',
+        reconciliation: {
+          result: {
+            outcome,
+            pullRequestNumber: contacted ? PR : null,
+            reading: outcome === 'MERGE_OBSERVED' ? reading() : null,
+            proof: null,
+            contacted,
+          },
+          record:
+            record === null
+              ? null
+              : ({ ...record, recorded: record.code === 'RECORDED', path: 'p', errnoCode: null } as never),
+        },
+      });
+
+    // The two members the caller owns never contact anything; every other member
+    // of the ladder is reached only after a request.
+    const CALLER_OWNED: readonly string[] = ['SUBJECT_NOT_ESTABLISHED', 'TASK_NOT_READY'];
+    type Shape = readonly [
+      string,
+      MergeObservationOutcome,
+      boolean,
+      { readonly code: string; readonly writeAttempt: string } | null,
+    ];
+    const shapes: readonly Shape[] = [
+      ...MERGE_OBSERVATIONS.map(
+        (o): Shape => [
+          `ladder:${o}`,
+          o,
+          !CALLER_OWNED.includes(o),
+          o === 'MERGE_OBSERVED' ? { code: 'RECORDED', writeAttempt: 'COMPLETED' } : null,
+        ],
+      ),
+      // The three ways a merge can be established and the write still not
+      // happen. These are the shapes the first repair got wrong.
+      ['already recorded', 'MERGE_OBSERVED', true, { code: 'ALREADY_RECORDED', writeAttempt: 'NOT_ATTEMPTED' }],
+      ['conflicting receipt', 'MERGE_OBSERVED', true, { code: 'CONFLICTING_RECEIPT', writeAttempt: 'NOT_ATTEMPTED' }],
+      ['write failed', 'MERGE_OBSERVED', true, { code: 'WRITE_FAILED', writeAttempt: 'FAILED' }],
+    ];
+
+    // All three write attempts are represented, so the table measures the
+    // distinction the gate turns on rather than one arm of it.
+    for (const attempt of WRITE_ATTEMPTS) {
+      expect(
+        shapes.some(([, , , record]) => record?.writeAttempt === attempt),
+        attempt,
+      ).toBe(true);
+    }
+
+    // Positive control: the table really covers the whole vocabulary, so a
+    // member added to the ladder cannot escape this case.
+    expect(shapes.filter(([label]) => label.startsWith('ladder:'))).toHaveLength(
+      MERGE_OBSERVATIONS.length,
+    );
+
+    for (const [label, outcome, contacted, record] of shapes) {
+      const out = shape(outcome, contacted, record);
+      // An ATTEMPT, not a success. A write that failed still created the
+      // receipt's directory and staged a file beside the target, so it is not a
+      // read-only run — a review measured the previous `=== 'COMPLETED'`
+      // describing one as though it were.
+      const wrote = record !== null && record.writeAttempt !== 'NOT_ATTEMPTED';
+      const merged = outcome === 'MERGE_OBSERVED';
+
+      // 1. The bare word, and only where it is true.
+      expect(/(^|\n)Read-only\. /.test(out), `${label}: bare Read-only.`).toBe(!wrote);
+      // The trailer never claims a write it did not make. Its opening is a
+      // capability — "not NECESSARILY read-only here" — for exactly this reason.
+      expect(out, label).not.toContain('and not read-only here');
+
+      // 2. The disclosure survives wherever a forge was contacted.
+      expect(out.includes('L-V4-02-6'), `${label}: egress disclosure`).toBe(contacted);
+
+      // 3. The caveat, only where there is a merge to caveat.
+      expect(out.includes(MERGE_PRESENCE_SENTENCE), `${label}: presence sentence`).toBe(merged);
+
+      // And the trailer itself is always there — it is about the run, not about
+      // the outcome.
+      expect(out, label).toContain(RECONCILIATION_TRAILER);
+      // No run of blank lines from the conditional separator.
+      expect(/\n\n\n\n/.test(out), `${label}: blank-line run`).toBe(false);
+    }
+
+    // The shape the table above cannot reach: a run that ALSO attempted a forge
+    // act, which selects the other branch entirely.
+    //
+    // Found by enumeration rather than by review, and it was a real hole. Until
+    // this slice, "an observation ran" and "the GitHub CLI ran" were the same
+    // thing on that branch — the two acts that need `gh` both require
+    // `--observe`, and the publication runs Git. `--publish-head --attended
+    // --reconcile-merge` takes that branch with no observation and runs `gh`
+    // twice, and the L-V4-02-6 egress disclosure was silently dropped.
+    const alsoMerged = renderDeliveryObservation({
+      repositoryId: 'repo',
+      repositoryRoot: ROOT,
+      taskId: TASK,
+      subject: { ok: false, refusal: 'DELIVERY_NOT_DECLARED' } as never,
+      observation: null,
+      conclusion: 'SUBJECT_NOT_ESTABLISHED',
+      merge: {
+        result: {
+          outcome: 'MERGED',
+          before: reading(),
+          attempt: 'COMPLETED',
+          after: reading(),
+          mergeCommit: RESULT,
+        },
+        pullRequestNumber: PR,
+        baseRef: BASE,
+      } as never,
+      reconciliation: {
+        result: {
+          outcome: 'MERGE_OBSERVED',
+          pullRequestNumber: PR,
+          reading: reading(),
+          proof: null,
+          contacted: true,
+        },
+        record: {
+          code: 'RECORDED',
+          recorded: true,
+          writeAttempt: 'COMPLETED',
+          path: 'p',
+          errnoCode: null,
+        },
+      } as never,
+    });
+    expect(alsoMerged).toContain('L-V4-02-6');
+    expect(alsoMerged).toContain(MERGE_TRAILER);
+    expect(alsoMerged).toContain(RECONCILIATION_TRAILER);
+    expect(/(^|\n)Read-only\. /.test(alsoMerged)).toBe(false);
+    expect(/\n\n\n\n/.test(alsoMerged)).toBe(false);
+    // The disclosure appears once, not twice, when both routes would owe it.
+    expect(alsoMerged.split('L-V4-02-6')).toHaveLength(2);
   });
 
   it('renders the two answers separately, because they can disagree', () => {

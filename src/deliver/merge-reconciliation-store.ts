@@ -50,9 +50,14 @@
  * disk when this process looked* is never silently replaced by a different one.
  * Two reconcilers of the same merge converge, because they write the same event
  * and differ only in *when they asked* and *when they wrote* — `observedAt` and
- * `reconciledAt`, which are exactly the two fields {@link sameMergeEvent} does
- * not compare. (An earlier version of this sentence named only the second, and
- * contradicted that function's own docblock sixty lines below.) Two reconcilers
+ * `reconciledAt`. Those two are not compared, and neither are three more:
+ * {@link sameMergeEvent} compares nine of the payload's fourteen fields, and the
+ * other three are refused earlier or are not a fact about the merge. Two earlier
+ * versions of this sentence were wrong in different directions — one named only
+ * `reconciledAt`, and its correction called the two instants "exactly the two
+ * fields" not compared, which a review counted. The claim that matters is the
+ * narrow one: two honest reconcilers of one merge differ in nothing this
+ * function looks at. Two reconcilers
  * of *different* merges for one task is a state `reconcile-merge.ts` refuses
  * upstream in the ordinary case, because a task whose delivery head carries two
  * pull requests is ambiguous there and reaches no write at all.
@@ -77,6 +82,7 @@ import {
   TASK_STATE_FILE_EXTENSION,
 } from '../state/state-location.js';
 import { writeFileAtomically, type ReplaceFn, type TempSuffixFn } from '../state/atomic-file.js';
+import { relativePosix } from '../state/runtime-ignored.js';
 import {
   MERGE_RECONCILIATION_VERSION,
   MAX_MERGE_RECONCILIATION_BYTES,
@@ -229,7 +235,16 @@ export interface MergeReconciliationRecordResult {
    * idempotency claim: a second identical reconciliation performs no write.
    */
   readonly writeAttempt: WriteAttempt;
-  /** The intended path, or `null` when no location could be derived. */
+  /**
+   * The intended path, when this refusal has one to report.
+   *
+   * `null` before a location is derived **and** on the subject-mismatch
+   * refusals, which are decided after the derivation and deliberately report
+   * nothing: a caller that filed a real merge against the wrong task should not
+   * be handed the path it would have written to. A review found the previous
+   * wording — "null when no location could be derived" — describing only the
+   * first of those.
+   */
   readonly path: string | null;
   /** Allow-listed errno identifier, never a message. */
   readonly errnoCode: string | null;
@@ -446,7 +461,16 @@ export async function recordMergeReconciliation(
   }
 
   // ── 5. The ignore question, before any filesystem effect ─────────────────
-  const relativeRecord = `.agent-orchestrator/runtime/${MERGE_RECONCILIATION_DIR_NAME}/${location.fileName}`;
+  //
+  // The relative path is DERIVED from the path that will actually be written,
+  // not spelled out again. A review found a hardcoded
+  // `.agent-orchestrator/runtime/...` literal here while the write target came
+  // from `REPO_PROFILE_DIR_NAME` and `TASK_RUNTIME_DIR_NAME` — two independent
+  // spellings of one path, with nothing making them agree. `relativePosix` is
+  // `state/runtime-ignored.ts`'s own conversion, so the question Git is asked is
+  // about the file this function is about to create.
+  const relativeRecord = relativePosix(request.repositoryRoot, location.path);
+  if (relativeRecord === null) return recordFailure('LOCATION_UNSUITABLE', location.path);
   // `writeFileAtomically` stages `<name>.tmp-<suffix>` beside the target, and a
   // crash can leave one behind, so the staging shape is asked about too.
   //
@@ -644,8 +668,18 @@ export function loadMergeReconciliation(
     if (reading !== 'HISTORICAL_MERGE') return load(reading, location.path);
 
     return load(reading, location.path, raw as MergeReconciliation);
-  } catch (error: unknown) {
-    return load(safeErrnoCode(error) === 'ENOENT' ? 'ABSENT' : 'MALFORMED', location.path);
+  } catch {
+    // MALFORMED unconditionally, and the absence of an errno test here is the
+    // point. The `open` above has already succeeded, so *something* is on that
+    // path; nothing that fails afterwards — an `fstat`, a read, a platform
+    // quirk — can honestly mean "nobody wrote one", whatever errno it carries.
+    //
+    // It used to mirror the outer catch and map `ENOENT` to `ABSENT`. A review
+    // measured that: an ENOENT-coded throw after a successful open reported the
+    // receipt as absent, and at `recordMergeReconciliation` above, `ABSENT` is
+    // the one reading that grants permission to write over the path. The
+    // never-overwrite guarantee ran through this line.
+    return load('MALFORMED', location.path);
   } finally {
     try {
       closeSync(handle);
