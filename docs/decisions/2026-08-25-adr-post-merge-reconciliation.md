@@ -153,8 +153,12 @@ from `origin`: `head.sha`, `head.ref`, `base.ref`, `merge_commit_sha` and
 is documented as identifying the head "even if the ref has been deleted".
 
 That is why the locator can still find a merged pull request from its head
-object name after a squash merge has left that object on no branch at all, and
-why branch names are never used as identity here.
+object name after a squash merge has left that object on no branch at all. The
+**head** is therefore never a branch name here. The **base** is, deliberately: a
+base *is* a branch, the forge reports its name, and the name is what the task
+declares — which is the whole of `BASE_NOT_INTENDED`. An earlier version of this
+paragraph said branch names were never used as identity at all, and a review
+found the base comparison two files away.
 
 ### 2. A merged pull request can be merged and reachable from nothing
 
@@ -175,12 +179,19 @@ gate rather than tidiness.
 
 ### 4. A revert does not unmerge anything
 
-GitHub's revert is documented as *creating a new pull request*. The original
-stays `MERGED`, with the same `merge_commit_sha`. What becomes false is "the
-change is in the base tree" — a claim about the tree now, which this record does
-not make.
+GitHub's revert is documented as *creating a new pull request*
+([docs](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/reverting-a-pull-request)),
+and its GraphQL mutation says the same: `revertPullRequest` — "Create a pull
+request that reverts the changes from a merged pull request." The original stays
+`MERGED`, with the same `merge_commit_sha`. What becomes false is "the change is
+in the base tree" — a claim about the tree now, which this record does not make.
 
-## What `RECONCILED` proves, and the four things it does not
+This section is documentation and schema introspection rather than a measurement,
+and it is labelled as such: establishing it by measurement would require merging
+and then reverting something, which is exactly the live mutation this slice is
+forbidden to perform.
+
+## What `MERGE_OBSERVED` proves, and the four things it does not
 
 It proves: at `observedAt`, this process asked github.com about pull request #N
 through the recognised reading boundary, and was told it is merged, at head H,
@@ -270,10 +281,13 @@ they write the same event and differ only in `reconciledAt`.
 ## Residuals
 
 - **L-V4-08-1 — read-before-write is not mutual exclusion.** Two concurrent
-  reconcilers of *contradictory* merges for one task could both see `ABSENT`.
-  Reaching that state requires two pull requests at one delivery head, which the
-  ladder refuses upstream as `PULL_REQUEST_AMBIGUOUS`. Named rather than closed,
-  because closing it needs a lock and a lock is a service.
+  reconcilers of *contradictory* merges for one task could both see `ABSENT`. The
+  ordinary route to that — two pull requests at one delivery head — is refused
+  upstream as `PULL_REQUEST_AMBIGUOUS`, but a review pointed out that is not the
+  only one: two invocations whose repository profiles resolve to *different
+  delivery targets* would each establish a real merge, and the ladder cannot
+  refuse what it cannot see. Named rather than closed, because closing it needs a
+  lock and a lock is a service.
 - **L-V4-08-2 — the receipt is not authority.** A hand-written file in the
   runtime directory reads as genuine. The mint bounds product code, not the
   filesystem. Unchanged from slice 3 and stated for the same reason.
@@ -291,19 +305,39 @@ they write the same event and differ only in `reconciledAt`.
   removes one. A task whose delivery was reverted and re-merged at a new head
   would be a new task with a new commit, and a receipt naming the old merge stays
   true about the old merge.
+- **L-V4-08-6 — two sibling modules misexplain why Git is asked twice.**
+  `state/runtime-ignored.ts` and `deliver/delivery-evidence-store.ts` both say
+  `check-ignore` ORs its arguments. Measured, the command they run is
+  `check-ignore --quiet`, and `--quiet` refuses a second pathname outright:
+  `fatal: --quiet is only valid with a single pathname`, exit 128. The conclusion
+  — one call per name — is right either way. This slice's own copy is corrected;
+  the siblings are named here rather than edited.
+- **L-V4-08-7 — the staging-probe suffix is spelled in three places.**
+  `runtime-ignored.ts` owns `STAGING_PROBE_SUFFIX` and does not export it, so
+  slice 3's store and this one each hard-code `tmp-probe`. Three spellings of one
+  fact that have to agree, with nothing making them.
+- **L-V4-08-8 — the exit code says nothing about a reconciliation.**
+  `--reconcile-merge` on its own always exits zero: the exit code answers whether
+  the *observation* settled, and without `--observe` there is none. A refused
+  write — including `CONFLICTING_RECEIPT`, the case an operator most has to act on
+  — is invisible to `$?`. This is slice 7's convention rather than a new one, and
+  changing it is a contract change for the whole command. Stated on the flag's own
+  surface and pinned by a case, so it is a decision rather than an oversight.
 
 ## The counter-proof
 
 A mutation lab was built for this slice in a scratch copy of `src/` carrying no
 `.git`, with `node_modules` and `dist` junctioned. **The baseline is run first
 and the lab refuses to report on a red one** — which earned its keep on the first
-run: without `dist/native/ao-launch.exe` every Git-using fixture answered
-`GIT_UNAVAILABLE`, and a lab that skipped the baseline would have reported thirty
-free kills.
+run: without `dist/native/ao-launch.exe` the fixtures that resolve a repository
+answered `GIT_UNAVAILABLE`, and a lab that skipped the baseline would have
+reported thirty free kills.
 
-32 mutants. **29 killed, 3 equivalent, 0 harness failures.**
+36 mutants. **34 killed, 2 equivalent, 0 harness failures**, against a baseline
+green on the slice's own suite and on the four neighbouring ones used to tell
+"this slice's mechanism caught it" from "something else did".
 
-The three equivalents, and why none is a kill in disguise:
+The two equivalents, and why neither is a kill in disguise:
 
 - **the second version gate.** `readMergeReconciliation` refuses an unknown
   version twice: once from the raw value before parsing, once from the parsed
@@ -319,20 +353,21 @@ The three equivalents, and why none is a kill in disguise:
   line earlier and never reaches them. The comment was corrected rather than the
   code deleted: the redundancy is one-directional and cheap, and the digest's
   input list is exactly the kind of thing a refactor edits.
-- **the size bound in the reader.** Every file over the budget also fails a later
-  gate, so removing the check changes no verdict. It is retained as an
-  *allocation* bound rather than a verdict, and the equivalence is now measured
-  rather than argued: a test builds the largest receipt the schema admits — every
-  field at its maximum — and asserts it is smaller than the budget.
 
-Two mutants were found to be defects in the *lab* rather than in the product and
-were repaired rather than counted: one named a variable the source does not use,
-and one disabled a single clause of an eight-clause comparison and therefore did
-not express the mutation it was named after.
+Several mutants turned out to be defects in the **lab** rather than in the
+product, and were repaired rather than counted. Two are worth recording because
+they are the ways a mutation campaign lies to you: one named a local variable the
+source does not use, so the edit never landed and the mutant would have been
+scored as a free kill had the lab not verified that the file changed; and one
+disabled a single clause of a nine-clause comparison, so it compiled, ran, and
+did not express the mutation it was named after.
 
-### What the campaign found in the product
+### What the campaign and the review found in the product
 
-Three things, all fixed:
+Six things, all fixed. Three came from the mutation campaign and three from the
+independent adversarial review that followed it.
+
+From the campaign:
 
 1. **the registry check in `mergeObservationFactsOf` was doing no work.** Removing
    it failed no test, because the private-field read independently throws for a
@@ -340,17 +375,50 @@ Three things, all fixed:
    registry is the gate, so the gate was made measurable: a case now constructs a
    real `MergeObservationEvidence` directly, reads its facts through the private
    accessor to prove it is genuine, and requires the public accessor to refuse
-   it. The mutant is killed.
+   it.
 2. **the short-read guard was unreachable.** `read !== size` defends against a
-   partial read that no fixture could provoke, so it was removable with the suite
-   green — the shape "an absence assertion is vacuous until the mutant dies"
-   describes. A `readChunk` seam makes it reachable, and the case that uses it is
-   one byte short *on purpose*: the receipt is JSON plus a trailing newline, so a
-   read that stops one byte early yields a complete, valid, correctly bound
-   document, and this guard is the only thing between it and `HISTORICAL_MERGE`.
-   Every larger shortfall lands mid-JSON and would be refused anyway — which is
-   why the first version of that case passed over a build with the guard removed.
+   partial read that no fixture could provoke. A `readChunk` seam makes it
+   reachable, and the case that uses it is one byte short *on purpose*: the
+   receipt is JSON plus a trailing newline, so a read that stops one byte early
+   yields a complete, valid, correctly bound document, and this guard is the only
+   thing between it and `HISTORICAL_MERGE`. Every larger shortfall lands mid-JSON
+   and would be refused anyway — which is why the first version of that case
+   passed over a build with the guard removed.
 3. **an over-claiming comment**, described above.
+
+From the review, and the first is the one worth learning from:
+
+4. **the reader's size bound was classified "equivalent" and is not.** This ADR
+   previously argued that no schema-valid receipt can exceed the budget, so any
+   oversized file fails a later gate anyway. **Measured false.** The schema bounds
+   fields in *characters*; the budget is in *bytes*. A `repositoryRoot` of 4000
+   characters outside Basic Latin is schema-valid, correctly bound, reads
+   `HISTORICAL_MERGE` when handed to `readMergeReconciliation` directly, and
+   encodes to over 12 kB against an 8 kB budget — so with the gate removed it
+   loads. The equivalence was a claim reasoned from the schema rather than
+   measured against an encoder, which is precisely the mistake this repository
+   keeps paying for. There is now a case, and the mutant is killed.
+5. **the operator trailer stated acts rather than bounds.** `RECONCILIATION_TRAILER`
+   is printed for all ten ladder outcomes, and its first version said the run
+   "asked github.com" and that "this task is still `READY_FOR_PR`". On the
+   `TASK_NOT_READY` refusal the report therefore carried "Read-only. No forge was
+   contacted" and a claim of a conversation four lines apart, and asserted the
+   very state the ladder had just refused the run for not being in. Every clause
+   is now a bound on what a reconciliation *asks* and *can* change, which is true
+   on every path.
+6. **two report contradictions.** A run that wrote a receipt closed with
+   `CONTACTED_TRAILER`'s bare "Read-only." two paragraphs above "not read-only
+   here" — the exact contradiction the new trailer exists to avoid. And
+   `MERGE_PRESENCE_SENTENCE` was printed on every outcome, asserting "this pull
+   request was merged and produced this commit" directly beneath a line saying the
+   opposite. Both are gated now, and both gates are pinned by their own mutant.
+
+A further eight factual defects in prose — a wrong clause count, an option count
+left at nine, a docblock quoting a sentence that does not exist, a field contract
+that did not match the code, and four claims that overstated a guard — were found
+by the same review and by an audit of this slice's own writing. They are corrected
+in place. None of them changed behaviour, and all of them would have been read as
+guarantees.
 
 ### One thing the campaign did not have to find
 

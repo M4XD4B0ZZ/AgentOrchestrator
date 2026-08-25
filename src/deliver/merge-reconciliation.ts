@@ -125,9 +125,11 @@ const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{
  * No token, no `Authorization` header, no raw `gh` output, no stderr, no exit
  * code, no URL, no environment snapshot, no pull-request title, body, author or
  * diff, no arbitrary GitHub JSON. That is not enforced by a filter — it is
- * enforced by the shape: the only way to build this payload is from
- * {@link MergeObservationFacts}, which has no field any of those could travel
- * in.
+ * enforced by the shape: every field that carries **what the forge said** comes
+ * from {@link MergeObservationFacts}, which has no field any of those could
+ * travel in. The rest are local identities the caller already holds — the task,
+ * its repository root, its commit and two instants — and none of them has been
+ * anywhere near a response body.
  *
  * No head **branch name** either, and that is the same decision slice 3 took
  * about `workBranch`. A branch is a mutable pointer; the head of this merge is
@@ -223,6 +225,22 @@ export const MergeReconciliationSchema = z
         message: "The merged pull request's head is the task's delivery commit.",
       });
     }
+    // There is deliberately NO second invariant ordering the two instants, and a
+    // review raised its absence: a receipt whose `reconciledAt` precedes its
+    // `observedAt` validates, and describes a record written before the forge
+    // was asked.
+    //
+    // It stays absent because the check would be the more dangerous of the two.
+    // The two instants come from two separate calls to the same clock in one
+    // invocation, so a backwards step between them — an NTP correction is the
+    // ordinary cause — would refuse a completely honest reconciliation as
+    // `RECEIPT_CONTRACT_VIOLATION`, and go on refusing it until the clock caught
+    // up. What the invariant would buy is refusing a record nothing in this
+    // build can produce and nothing downstream reads: no consumer compares the
+    // two, and both are already reported as what they are. Trading a live
+    // refusal of good input for a stricter refusal of input that does not occur
+    // is the wrong side of that trade, and it is a decision rather than an
+    // omission.
   });
 
 export type MergeReconciliation = z.infer<typeof MergeReconciliationSchema>;
@@ -358,7 +376,8 @@ export const MERGE_RECONCILIATION_READING_DETAIL: Readonly<
   UNSUPPORTED_VERSION: 'The stored receipt was written by another build, so it was not read.',
   MALFORMED: 'The stored receipt is not one this build recognises, so it was not read.',
   NOT_THIS_TASK:
-    'The stored receipt does not belong to this task, or has been edited since it was written.',
+    'The stored receipt does not belong to this task, has been edited since it was written, ' +
+    'or was written when this repository was at a different path.',
 });
 
 /**

@@ -385,7 +385,10 @@ export const CREATE_PR_OPTION_DESCRIPTION =
  * the word leaves the list and the option set is pinned by exact enumeration
  * instead, so a new mutation flag cannot arrive unnamed whatever it is called.
  * An earlier draft said "a sixth", which counts nothing: the command registers
- * nine options, three of which are forge mutations.
+ * ten options, three of which are forge mutations. (Nine until V4 slice 8
+ * added `--reconcile-merge`, which is not a fourth mutation — it reads
+ * github.com and writes one local file — so the second count is unchanged and
+ * the first is not. A review caught this sentence still saying nine.)
  */
 export const MERGE_PR_OPTION_DESCRIPTION =
   'Merge this task\'s pull request on github.com, by squash, into its base branch. Requires ' +
@@ -412,10 +415,16 @@ export const MERGE_PR_OPTION_DESCRIPTION =
  * literal.
  *
  * Two clauses are load-bearing and both are about what the flag is *not*.
- * "Records what GitHub already did" separates it from `--merge-pr`, which is
- * the act; this one is the bookkeeping afterwards. And the closing clause is
- * the distinction the whole slice turns on — a receipt is an event, not a claim
- * about the base branch now.
+ *
+ * The opening one — "reading github.com to establish it and changing nothing
+ * there" — separates it from `--merge-pr`, which is the act; this is the
+ * bookkeeping afterwards. And the closing one is the distinction the whole
+ * slice turns on: a receipt is an event, not a claim about the base branch now.
+ *
+ * This docblock previously quoted a phrase, "Records what GitHub already did",
+ * that appears nowhere in the string below. A review found it, and it is worth
+ * recording why a quotation in a comment is worse than a paraphrase: it reads
+ * as a pin and is not one.
  *
  * It deliberately does not say "requires --attended", because it does not.
  * `--attended` is this build's marker that a person is present for an
@@ -428,14 +437,16 @@ export const RECONCILE_MERGE_OPTION_DESCRIPTION =
   'to establish it and changing nothing there. It finds the pull request by asking which ones ' +
   'carry this task\'s commit as their head, never from a stored number and never from one you ' +
   'name, then reads that pull request and requires it to be merged, at exactly this commit, ' +
-  'into exactly this task\'s base branch. It works for a merge performed by anyone — this ' +
+  'into exactly this task\'s base branch. Requires a task at READY_FOR_PR: before that its current commit is not a delivery head. ' +
+  'It works for a merge performed by anyone — this ' +
   'build, another invocation, or a person — and it never claims AO did it. Writing needs this ' +
   'flag: without it nothing is stored. A receipt already there for the same merge is left ' +
   'alone and nothing is written; one naming a different merge refuses rather than being ' +
   'overwritten. What is stored is one past event — that this pull request was merged and ' +
   'produced that commit. It is not a claim that the commit is on the base branch now, that it ' +
   'has not been reverted, or that anything was verified against it, and it changes no task ' +
-  'state: the task is still READY_FOR_PR afterwards.';
+  'state: the task is still READY_FOR_PR afterwards. The exit code reports the observation, ' +
+  'not the reconciliation — read the Receipt line, because a refusal to write exits zero.';
 
 /**
  * Operator presence, in the shape `release` established.
@@ -1305,10 +1316,15 @@ async function performMerge(
  * The claim is now true rather than softened, which is the direction this
  * repository has learned to take when a sentence and its code disagree.
  *
- * The three omitted seams are the three forge mutations: `publicationRunner`
- * pushes a Git ref, `creationRunner` opens a pull request, `mergeRunner` merges
- * one. A fixture that stubs any of them cannot stand in for this, and this
- * cannot reach one however the command is wired.
+ * Five of `DeliveryCommandSeams`' fields are omitted, and three of those five
+ * are the forge mutations this exists to exclude: `publicationRunner` pushes a
+ * Git ref, `creationRunner` opens a pull request, `mergeRunner` merges one. A
+ * fixture that stubs any of them cannot stand in for this, and this cannot
+ * reach one however the command is wired. (The other two, `resolveRepository`
+ * and `loadTaskState`, are omitted because this function is handed their
+ * results rather than calling them. An earlier version of this sentence said
+ * "the three omitted seams", which counted the interesting ones rather than
+ * the omitted ones.)
  */
 interface ReconciliationCommandSeams {
   readonly runner?: ForgeCommandRunner | undefined;

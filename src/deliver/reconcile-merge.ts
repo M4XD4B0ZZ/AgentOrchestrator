@@ -7,9 +7,11 @@
  * delivery commit, and did the forge just say it is merged, into the branch this
  * task targets, producing which commit?*
  *
- * It performs **no mutation of any kind**. Two GET requests through slice 2's
- * transport, and nothing else — no push, no pull-request creation, no merge, no
- * comment, no label, no review, no agent. It cannot: the only two functions it
+ * It performs **no mutation of any kind**. At most two GET requests through
+ * slice 2's transport, and nothing else — no push, no pull-request creation, no
+ * merge, no comment, no label, no review, no agent. *At most*, because a
+ * refusal at the locator stops after one and a subject this build will not
+ * address stops before any process exists. It cannot: the only two functions it
  * calls that reach a network are `readPullCandidatesAtHead` and
  * `readPullRequestByNumber`, both of which build their argument vector from
  * `FORGE_REQUEST_PREFIX`, whose `-X GET` pair `tests/v4-02-…` pins by exact
@@ -72,9 +74,15 @@
  * (pull requests 49 and 50, whose head branches are absent from `origin`), and
  * after a squash merge has left that head object on no branch at all. GitHub's
  * schema states the same property — `headRefOid` is documented as identifying
- * the head "even if the ref has been deleted". Branch names are never used as
- * identity here for that reason and for the ordinary one: a branch is a mutable
- * pointer.
+ * the head "even if the ref has been deleted".
+ *
+ * So the **head** is never a branch name here: it is an object name, which is
+ * what survives the branch being deleted and what a mutable pointer could not
+ * give. The **base** is the opposite case and is deliberately compared by name —
+ * a base *is* a branch, the forge reports its name, and the name is what the
+ * task declares. An earlier version of this paragraph said branch names were
+ * never used as identity at all, which is false of the base comparison two
+ * screens down and was the whole of `BASE_NOT_INTENDED`.
  */
 
 import {
@@ -197,10 +205,18 @@ export const MERGE_OBSERVATIONS = [
   /**
    * The one pull request at this head is not merged.
    *
-   * Reached only after addressing it by number, so it distinguishes a pull
-   * request that was closed without being merged from one that is open — a
-   * distinction the candidate list cannot make, because it carries no `merged`
-   * field.
+   * Reached only after addressing it by number, which is what makes it a
+   * statement about *mergedness* rather than about a `state` word: the candidate
+   * list carries no `merged` field, so the earlier members cannot tell a merged
+   * pull request from one a human closed.
+   *
+   * It covers `CLOSED_UNMERGED` **and `OPEN`**. An open reading here means the
+   * two endpoints disagreed, or the pull request was reopened between them — the
+   * candidate set had no open member at this head or the ladder would have
+   * stopped at {@link PULL_REQUEST_STILL_OPEN}. Both are "the forge says this is
+   * not merged", which is the one thing this member claims. An earlier version
+   * of its operator sentence said "closed without being merged", which a review
+   * found false of the open case that reaches it.
    */
   'NOT_MERGED',
   /**
@@ -251,7 +267,7 @@ export const MERGE_OBSERVATION_DETAIL: Readonly<Record<MergeObservationOutcome, 
       'A pull request at this head is still open, so no merge has happened to reconcile.',
     PULL_REQUEST_AMBIGUOUS:
       'More than one pull request carries this commit as its head. Which one is the delivery is not this build’s to choose.',
-    NOT_MERGED: 'The pull request at this head was closed without being merged.',
+    NOT_MERGED: 'The forge reports the pull request at this head as not merged.',
     MERGE_NOT_THIS_DELIVERY:
       'The merged pull request’s head is not this task’s delivery commit, so this merge is not this delivery.',
     BASE_NOT_INTENDED:
@@ -266,9 +282,22 @@ export interface MergeObservationResult {
   /**
    * The pull request that was addressed by number, or `null` when none was.
    *
-   * Non-null from {@link MERGE_OBSERVATIONS} member `NOT_MERGED` onwards: the
-   * earlier members are decided from the candidate set, before any single pull
-   * request has been named.
+   * Non-null from the moment a single pull request has been addressed by number,
+   * which is **not** the same as "from `NOT_MERGED` onwards" — the ordering of
+   * the vocabulary and the ordering of the reads are different things, and an
+   * earlier version of this sentence conflated them.
+   *
+   * It is non-null on `NOT_MERGED`, `MERGE_NOT_THIS_DELIVERY`,
+   * `BASE_NOT_INTENDED` and `MERGE_OBSERVED` — and **also on the
+   * `FORGE_UNREADABLE` arms reached after the second read**, which a review
+   * measured: a document endpoint that refuses, and one that reports a state
+   * word this build does not recognise, both answer `FORGE_UNREADABLE` carrying
+   * the number they were asked about. Those are ordinary production paths.
+   *
+   * It is `null` on the members decided from the candidate set alone — the
+   * locator-level `FORGE_UNREADABLE`, `NO_PULL_REQUEST_AT_HEAD`,
+   * `PULL_REQUEST_STILL_OPEN`, `PULL_REQUEST_AMBIGUOUS` — and on the two the
+   * caller owns.
    */
   readonly pullRequestNumber: number | null;
   /** The reading that came back, or `null` when no pull request was addressed. */
@@ -333,11 +362,16 @@ export function refuseMergeObservation(
  *  2. **the single-document endpoint**, addressed by the number the first read
  *     produced, answering what that pull request *is*.
  *
- * The second read is not redundant. The candidate list carries no `merged`
- * field — a merged pull request and one a human closed both read
- * `state: "closed"` there — so mergedness, the base, and the resulting commit
- * can only come from the document endpoint. Slice 2 records the same finding
- * from the other direction, and slice 7 already depends on it.
+ * The second read is not redundant, and the reason is narrower than it is
+ * tempting to write. **Mergedness** can only come from the document endpoint:
+ * the candidate list carries no `merged` field at all, and a merged pull
+ * request and one a human closed both read `state: "closed"` there. The
+ * resulting commit is likewise only on the document. The **base** is on both,
+ * and this build takes it from the document anyway rather than mixing two
+ * answers about one pull request — which is a consistency choice, not a
+ * necessity, and an earlier version of this sentence claimed it was the latter.
+ * Slice 2 records the mergedness finding from the other direction, and slice 7
+ * already depends on it.
  */
 export async function observeMergeForDelivery(
   subject: ReconciliationSubject,

@@ -49,10 +49,13 @@
  * exclusive create. What the check guarantees is that a receipt *already on
  * disk when this process looked* is never silently replaced by a different one.
  * Two reconcilers of the same merge converge, because they write the same event
- * and differ only in {@link MergeReconciliation.reconciledAt}; two reconcilers
+ * and differ only in *when they asked* and *when they wrote* — `observedAt` and
+ * `reconciledAt`, which are exactly the two fields {@link sameMergeEvent} does
+ * not compare. (An earlier version of this sentence named only the second, and
+ * contradicted that function's own docblock sixty lines below.) Two reconcilers
  * of *different* merges for one task is a state `reconcile-merge.ts` refuses
- * upstream, because a task whose delivery head carries two pull requests is
- * ambiguous there and reaches no write at all.
+ * upstream in the ordinary case, because a task whose delivery head carries two
+ * pull requests is ambiguous there and reaches no write at all.
  *
  * ── One receipt per task ──────────────────────────────────────────────────
  *
@@ -445,10 +448,21 @@ export async function recordMergeReconciliation(
   // ── 5. The ignore question, before any filesystem effect ─────────────────
   const relativeRecord = `.agent-orchestrator/runtime/${MERGE_RECONCILIATION_DIR_NAME}/${location.fileName}`;
   // `writeFileAtomically` stages `<name>.tmp-<suffix>` beside the target, and a
-  // crash can leave one behind, so the staging shape is asked about too. Two
-  // calls rather than two arguments: `check-ignore` ORs its arguments, so one
-  // call carrying both would answer "ignored" whenever either passed — the
-  // opposite of the conjunction this needs.
+  // crash can leave one behind, so the staging shape is asked about too.
+  //
+  // Two calls rather than two arguments, and the reason is measured rather than
+  // inherited. `state/runtime-ignored.ts` runs `check-ignore --quiet -- <path>`,
+  // and measured against this repository's Git, `--quiet` **refuses** a second
+  // pathname outright: `fatal: --quiet is only valid with a single pathname`,
+  // exit 128 — which this build would read as `UNDETERMINED`, not as an answer.
+  // Dropping `--quiet` to batch them would then reintroduce the hazard the
+  // shared module's header names: plain `check-ignore` exits 0 when *any*
+  // argument is ignored, which is the disjunction where this needs a
+  // conjunction. Both routes are closed; one call per name is the only one open.
+  //
+  // This comment previously gave only the second half as the reason, copied from
+  // the shared module, and a review measured it inapplicable to the command this
+  // build actually runs. The sibling copies of it are noted as `L-V4-08-6`.
   const stagingVerdict = await request.checkIgnored(`${relativeRecord}.tmp-probe`);
   if (stagingVerdict === 'UNDETERMINED') {
     return recordFailure('RUNTIME_IGNORE_UNDETERMINED', location.path);

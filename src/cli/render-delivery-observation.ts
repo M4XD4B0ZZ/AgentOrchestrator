@@ -232,21 +232,40 @@ export const MERGE_TRAILER =
  * It opens "Read-only on the forge" and not "Read-only", which is the whole
  * point of having a fourth sentence. Two of the other trailers open with the
  * bare word, and it would be false here in the direction that matters least to
- * an operator and most to an auditor: this run writes a file.
+ * an operator and most to an auditor: this run can write a file.
+ *
+ * ── Every clause is a BOUND, and the first draft's were acts ───────────────
+ *
+ * This trailer is printed for **every** `--reconcile-merge` run, including the
+ * two refusals that never start a process and the four ladder members that
+ * never address a pull request. Its first version said what the run *did* —
+ * "the reconciliation asked github.com about the commit named above and about
+ * the one pull request that answer named", and "this task is still
+ * `READY_FOR_PR`" — and a review rendered both over runs where neither was
+ * true. On `TASK_NOT_READY` the report carried "Read-only. No forge was
+ * contacted" and this sentence claiming a conversation, four lines apart, and
+ * asserted a task state the ladder had just refused the run for *not* being in.
+ *
+ * So every clause is now a statement about what this build **asks** and what it
+ * **can** change, which is bounded and true on every path — the same repair
+ * `CONTACTED_TRAILER`'s docblock records making for the same reason, and the
+ * same one `OBSERVE_OPTION_DESCRIPTION` made twice. What actually happened is
+ * on the `Merge observed` and `Receipt` lines, where a reader can see it.
  *
  * Note what it does **not** say. It does not say the commit is on the base
  * branch, that the merge stands, that anything was verified, or that AO
- * performed it. {@link MERGE_PRESENCE_SENTENCE} states those four in the body of
- * the report; this states what the run itself did.
+ * performed it. {@link MERGE_PRESENCE_SENTENCE} states those four, and it is
+ * printed only where there is a merge to state them about.
  */
 export const RECONCILIATION_TRAILER =
-  'Read-only on the forge, and not read-only here. The reconciliation asked github.com about\n' +
-  'the commit named above and about the one pull request that answer named, and it changed\n' +
-  'nothing there: it merged, opened, updated, closed, reopened, reviewed, commented on,\n' +
-  'labelled and reverted nothing, pushed no branch, deleted no branch and enabled no\n' +
-  'auto-merge. What it can change is one file beside the task state, and it changed at most\n' +
-  'that. It wrote no task state: this task is still READY_FOR_PR, and nothing here changes\n' +
-  'that. It started no agent, and it grants no authority to do any of the above.';
+  'Read-only on the forge, and not read-only here. A reconciliation asks github.com about no\n' +
+  'commit but the one named above, and about no pull request but the one that answer names.\n' +
+  'It changes nothing there: it merges, opens, updates, closes, reopens, reviews, comments\n' +
+  'on, labels and reverts nothing, pushes no branch, deletes no branch and enables no\n' +
+  'auto-merge. What it can change here is one file beside the task state, and the directory\n' +
+  'holding it — nothing else, and only when a merge was established. It writes no task\n' +
+  'state, so the task is in exactly the state it was in before this run. It starts no agent,\n' +
+  'and it grants no authority to do any of the above.';
 
 /**
  * One merge reading as one phrase.
@@ -745,11 +764,18 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
           : `${reconciliation.record.code}  (write: ${reconciliation.record.writeAttempt})`
       }`,
     );
-    // The sentence that keeps the event apart from every claim it is not. It is
-    // printed for every reconciliation and not only for the ones that wrote,
-    // because an operator reading `ALREADY_RECORDED` needs it just as much as
-    // one reading `RECORDED`.
-    lines.push('', MERGE_PRESENCE_SENTENCE);
+    // The sentence that keeps the event apart from every claim it is not.
+    //
+    // Printed where there is a merge to say it about, and nowhere else. It is
+    // NOT gated on the write: an operator reading `ALREADY_RECORDED` needs it
+    // exactly as much as one reading `RECORDED`, and so does one whose write
+    // was refused after the forge had already established the merge.
+    //
+    // It IS gated on the merge, because a review found it printed under
+    // `NO_PULL_REQUEST_AT_HEAD` and `NOT_MERGED` — asserting "this pull request
+    // was merged and produced this commit" directly beneath a line saying the
+    // opposite.
+    if (r.outcome === 'MERGE_OBSERVED') lines.push('', MERGE_PRESENCE_SENTENCE);
   }
 
   // Derived from what happened, not from which flags were passed — and from
@@ -785,8 +811,33 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   // sentence about one kind of egress does not stand in for a sentence about
   // another, and by the same argument a sentence about a publication does not
   // stand in for one about a pull request.
+  // Whether this run put bytes on disk. Not a forge act — so it must not select
+  // the "not read-only" branch, which is about the three acts and says so — but
+  // enough to disqualify the bare word "Read-only.".
+  //
+  // A review found the previous rule printing `CONTACTED_TRAILER` — which opens
+  // "Read-only." — two paragraphs above `RECONCILIATION_TRAILER`'s "not
+  // read-only here", on a run that had just written a receipt. The two
+  // sentences contradicted each other, and the second one's docblock names
+  // avoiding exactly that as its reason for existing.
+  //
+  // Gated on the write having COMPLETED rather than on the flag: a
+  // reconciliation that refused, or that answered `ALREADY_RECORDED` without
+  // touching the path, really is a read-only run and should say so.
+  const reconciliationWrote = reconciliation?.record?.writeAttempt === 'COMPLETED';
   const trailers: string[] = [];
-  if (!publicationAttempted && !creationAttempted && !mergeAttempted) {
+  if (!publicationAttempted && !creationAttempted && !mergeAttempted && reconciliationWrote) {
+    // Contacted or not, this run wrote. `OBSERVED_AND_CHANGED_TRAILER` is the
+    // existing sentence for "the disclosure without the read-only framing", and
+    // it is reached here for the reason it was written: the framing belongs to a
+    // run that changed nothing, and this one changed something.
+    //
+    // It is pushed only when a forge was actually contacted, because its own
+    // text is about what was asked. A write with no contact is not reachable
+    // today — the store refuses without a minted proof, and a proof needs a
+    // reading — so there is deliberately no arm inventing a sentence for it.
+    if (contactedByReconciliation) trailers.push(OBSERVED_AND_CHANGED_TRAILER);
+  } else if (!publicationAttempted && !creationAttempted && !mergeAttempted) {
     // Nothing was attempted, so the run was read-only whatever it looked at.
     // Which of the two read-only sentences applies is still decided by whether
     // anything was contacted, by any path.
@@ -806,12 +857,19 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     if (mergeAttempted) trailers.push(MERGE_TRAILER);
   }
   // Appended to whichever branch ran, rather than placed inside one, because a
-  // reconciliation is orthogonal to both: it never attempts a forge mutation, so
-  // it cannot select the "not read-only" branch, and it writes locally, so the
-  // read-only branch's sentences do not cover it. It is asked for on its own
-  // flag and it speaks for itself — the discipline the publication, creation and
-  // merge trailers each record having learned the hard way.
-  if (reconciliation !== null) trailers.push('', RECONCILIATION_TRAILER);
+  // reconciliation is orthogonal to all three: it never attempts a forge
+  // mutation, so it cannot select the acts branch, and it may write locally, so
+  // the read-only branch's opening word is not always right for it — which is
+  // what the third arm above exists to handle. It is asked for on its own flag
+  // and it speaks for itself, the discipline the publication, creation and merge
+  // trailers each record having learned the hard way.
+  //
+  // The blank line is conditional. Without that, a run that wrote a receipt and
+  // whose egress disclosure was empty would open its trailer block with one.
+  if (reconciliation !== null) {
+    if (trailers.length > 0) trailers.push('');
+    trailers.push(RECONCILIATION_TRAILER);
+  }
   lines.push('', ...trailers, '');
 
   return lines.join('\n');

@@ -90,6 +90,9 @@ import {
   registerDeliveryCommand,
 } from '../src/cli/delivery-command.js';
 import {
+  CONTACTED_TRAILER,
+  NOT_CONTACTED_TRAILER,
+  OBSERVED_AND_CHANGED_TRAILER,
   RECONCILIATION_TRAILER,
   renderDeliveryObservation,
 } from '../src/cli/render-delivery-observation.js';
@@ -694,6 +697,94 @@ describe('a merged-pull-request claim can only come from a reading', () => {
     expect(mergeObservationFactsOf(unminted)).toBeNull();
   });
 
+  /**
+   * The reachability pin. The guarantee is "product code cannot go around the
+   * boundary", and it is worth exactly as much as the number of modules that
+   * can reach the mint.
+   *
+   * Added after a review pointed out that slice 8 was the first opaque artefact
+   * here without one, and that without it the whole claim reduces to "no module
+   * other than the ladder imports the mint" — with nothing measuring that set. A
+   * later slice importing `mintMergeObservation` and minting from a locally
+   * assembled reading would write a receipt for a merge github.com was never
+   * asked about, with the suite green.
+   *
+   * Structured exactly as `tests/v4-03-delivery-evidence.test.ts:405`, including
+   * both holes that file records reopening: a hand-written file list is not a
+   * reachability check, and matching the specifier by an `internal/` segment
+   * cannot see a module placed *inside* that directory.
+   */
+  it('is minted from exactly one module beside its own public wrapper', () => {
+    const sources = walk('src');
+    // Positive control: the walk really found the tree, not an empty directory.
+    expect(sources.length).toBeGreaterThan(100);
+    expect(sources).toContain('src/deliver/reconcile-merge.ts');
+
+    const specifier = /from\s+'([^']*merge-observation-proof\.js)'/g;
+    const importers = sources
+      .filter((file) => {
+        const code = codeOnly(file);
+        for (const match of code.matchAll(specifier)) {
+          const found = match[1] ?? '';
+          // The public wrapper is a different module and importing *it* is
+          // ordinary. Only the mint's own module is restricted, and it is named
+          // by the last path segment either way it is spelled.
+          const target = found.split('/').slice(-2).join('/');
+          if (target === 'internal/merge-observation-proof.js') return true;
+          if (
+            found === './merge-observation-proof.js' &&
+            file.startsWith('src/deliver/internal/')
+          ) {
+            return true;
+          }
+        }
+        return false;
+      })
+      .sort();
+    expect(importers).toEqual([
+      'src/deliver/merge-observation-proof.ts',
+      'src/deliver/reconcile-merge.ts',
+    ]);
+
+    // The call, not just the import: a module could import the class and mint
+    // through it. Exactly one file outside the declaring module calls the mint.
+    const callers = sources
+      .filter(
+        (file) =>
+          file !== 'src/deliver/internal/merge-observation-proof.ts' &&
+          /\bmintMergeObservation\s*\(/.test(codeOnly(file)),
+      )
+      .sort();
+    expect(callers).toEqual(['src/deliver/reconcile-merge.ts']);
+
+    // Positive control on the search itself: it finds the mint's own name where
+    // one exists, so an empty result above would be a fact about the tree and
+    // not about the scan.
+    expect(readFileSync('src/deliver/reconcile-merge.ts', 'utf8')).toContain(
+      'mintMergeObservation',
+    );
+
+    // Nothing anywhere may re-export the mint or the class, which would walk
+    // past the import pin entirely.
+    for (const file of sources) {
+      if (file === 'src/deliver/internal/merge-observation-proof.ts') continue;
+      const source = readFileSync(file, 'utf8');
+      expect(source, file).not.toMatch(/export\s*\{[^}]*mintMergeObservation/);
+      expect(source, file).not.toMatch(/export\s*\{[^}]*MergeObservationEvidence/);
+    }
+    // And the mint's name may not appear in the public wrapper at all, which
+    // would be a re-export in all but name.
+    expect(readFileSync('src/deliver/merge-observation-proof.ts', 'utf8')).not.toContain(
+      'mintMergeObservation',
+    );
+    // No dynamic import can route around the static scan either.
+    for (const file of sources) {
+      expect(readFileSync(file, 'utf8'), file).not.toMatch(
+        /import\s*\(\s*[^)]*merge-observation-proof/,
+      );
+    }
+  });
+
   it('answers null rather than throwing for a value that captured the registry', () => {
     // Registry capture is reachable, and this is how: hook
     // `WeakSet.prototype.add` and ride the mint's own call to smuggle a second
@@ -833,6 +924,43 @@ describe('a merge is established from the delivery commit, and bound to it', () 
       expect(out.outcome, label).toBe(expected);
       // Not one of these mints anything. A refusal is not a weaker merge.
       expect(out.proof, label).toBeNull();
+    }
+  });
+
+  it('carries the pull-request number from the moment one is addressed, and not before', async () => {
+    // The field's contract, pinned. A review measured the docblock wrong: it
+    // said the number is non-null only from `NOT_MERGED` onwards, and two
+    // ordinary `FORGE_UNREADABLE` paths carry one — both reached AFTER a single
+    // pull request has been addressed by number. The vocabulary's order and the
+    // reads' order are different things.
+    const addressed: readonly [string, Parameters<typeof reads>[0], MergeObservationOutcome][] = [
+      ['the document refused', { document: null }, 'FORGE_UNREADABLE'],
+      [
+        'an unrecognised state',
+        { document: prBody({ state: 'archived', merged: false }) },
+        'FORGE_UNREADABLE',
+      ],
+      ['closed, not merged', { document: prBody({ merged: false }) }, 'NOT_MERGED'],
+      ['merged at another head', { document: prBody({ sha: OTHER }) }, 'MERGE_NOT_THIS_DELIVERY'],
+      ['merged into another base', { document: prBody({ base: 'release' }) }, 'BASE_NOT_INTENDED'],
+    ];
+    for (const [label, over, expected] of addressed) {
+      const out = await observeMergeForDelivery(subjectOf(), seamsOf(reads(over).runner));
+      expect(out.outcome, label).toBe(expected);
+      expect(out.pullRequestNumber, label).toBe(PR);
+    }
+
+    // And null on every member decided from the candidate set alone, including
+    // the locator-level refusal that shares the outcome word with two above.
+    const unaddressed: readonly [string, Parameters<typeof reads>[0]][] = [
+      ['the locator refused', { locator: null }],
+      ['no pull request at this head', { locator: '[]' }],
+      ['still open', { locator: candidates([{ state: 'open' }]) }],
+      ['two closed candidates', { locator: candidates([{}, { number: 63 }]) }],
+    ];
+    for (const [label, over] of unaddressed) {
+      const out = await observeMergeForDelivery(subjectOf(), seamsOf(reads(over).runner));
+      expect(out.pullRequestNumber, label).toBeNull();
     }
   });
 
@@ -1304,30 +1432,61 @@ describe('a receipt is written once, never overwritten, and read back exactly', 
     }
   });
 
-  it('cannot produce a schema-valid receipt that exceeds its own budget', () => {
-    // Measured, not reasoned. A counter-proof found the size check in the READER
-    // removable with no test failing, and the tempting conclusion — "so it is
-    // dead code" — is the wrong one. What is true is narrower and worth pinning:
-    // every field this schema admits is bounded, so the LARGEST receipt this
-    // build can accept back is smaller than the budget, and any file over it is
-    // therefore something else. The check is an allocation bound rather than a
-    // verdict, and that is the honest description of it.
-    const maximal = receiptOf({
-      taskId: 'T'.repeat(128),
-      repositoryRoot: 'D'.repeat(4096),
-      host: 'h'.repeat(253),
-      owner: 'o'.repeat(128),
-      name: 'n'.repeat(128),
-      baseRef: 'b'.repeat(255),
-      pullRequestNumber: Number.MAX_SAFE_INTEGER,
-      observedAt: '2026-08-25T00:00:00.123456789+02:00',
-      reconciledAt: '2026-08-25T00:00:00.123456789+02:00',
-    });
-    // It really is one this build accepts — otherwise the size below would be of
-    // a document nothing would read anyway.
-    expect(MergeReconciliationSchema.safeParse(maximal).success).toBe(true);
-    const bytes = Buffer.from(`${JSON.stringify(maximal, null, 2)}\n`, 'utf8').byteLength;
-    expect(bytes).toBeLessThan(MAX_MERGE_RECONCILIATION_BYTES);
+  it('refuses an oversized receipt that is otherwise perfectly well formed', () => {
+    // The reader's size gate, reached by the one input that isolates it.
+    //
+    // This case replaces one that asserted the gate was EQUIVALENT — "no
+    // schema-valid receipt can exceed the budget, so any file over it fails a
+    // later gate anyway". A review measured that false, and the measurement is
+    // worth keeping: the schema bounds fields in CHARACTERS and the budget is in
+    // BYTES. A `repositoryRoot` of 4096 non-ASCII characters, or of 4096
+    // backslashes (each of which JSON-escapes to two), is schema-valid and
+    // encodes to well over 8192 bytes. Insignificant JSON whitespace does it
+    // too, and is the easiest to reach.
+    //
+    // So the gate is not equivalent, it is load-bearing, and the previous
+    // classification of the mutant that removes it was wrong.
+    // A repository root of 4000 characters outside the Basic Latin range. Each
+    // is three bytes in UTF-8 and JSON keeps it literal, so the field is
+    // comfortably inside the schema's 4096-CHARACTER bound and the encoded
+    // document is comfortably over the 8192-BYTE budget. That gap is the whole
+    // finding.
+    const longRoot = `D:\\${'\u4e2d'.repeat(4000)}`;
+    const subject = { taskId: TASK, repositoryRoot: longRoot };
+    const oversized = receiptOf({ repositoryRoot: longRoot }, subject);
+
+    // It really is a receipt this build would otherwise accept: strict-valid,
+    // current version, correctly bound to the subject it names.
+    expect(MergeReconciliationSchema.safeParse(oversized).success).toBe(true);
+    expect(readMergeReconciliation(oversized, subject)).toBe('HISTORICAL_MERGE');
+
+    const encoded = `${JSON.stringify(oversized, null, 2)}\n`;
+    expect(Buffer.byteLength(encoded, 'utf8')).toBeGreaterThan(MAX_MERGE_RECONCILIATION_BYTES);
+    // And under the budget as CHARACTERS, which is what makes this a byte/char
+    // confusion rather than an oversized document by any measure.
+    expect(oversized['repositoryRoot']).toHaveLength(4003);
+
+    const root = scratch();
+    try {
+      mkdirSync(mergeReconciliationDirectory(root), { recursive: true });
+      writeFileSync(receiptPath(root), encoded, 'utf8');
+      // The path comes from the real scratch root; the binding from the long one.
+      // Only the size gate stands between this file and HISTORICAL_MERGE, which
+      // the line above proved it reads as when handed the same bytes directly.
+      expect(loadMergeReconciliation(root, TASK, subject).reading).toBe('MALFORMED');
+
+      // The control: the same document with an ordinary root reads back, so the
+      // refusal above is about the size and not about the fixture.
+      const ordinary = { taskId: TASK, repositoryRoot: root };
+      writeFileSync(
+        receiptPath(root),
+        `${JSON.stringify(receiptOf({ repositoryRoot: root }, ordinary), null, 2)}\n`,
+        'utf8',
+      );
+      expect(loadMergeReconciliation(root, TASK, ordinary).reading).toBe('HISTORICAL_MERGE');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('produces a receipt inside its own size budget', async () => {
@@ -1437,6 +1596,15 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
       readonly document?: string | null;
       readonly state?: StateLoadResult;
       readonly delivery?: ResolvedDelivery;
+      /**
+       * Drive the REAL ignore probe instead of stubbing its verdict.
+       *
+       * Every other case supplies `checkIgnored`, which is the right seam for
+       * the store's own refusals and the wrong one for measuring what the
+       * command layer actually starts. With this set, `checkIgnored` is left
+       * absent and a counting `git` seam is supplied in its place.
+       */
+      readonly countGit?: boolean;
     } = {},
   ): Promise<{
     out: string;
@@ -1444,6 +1612,7 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     mutations: number;
     receipt: string | null;
     runtimeAfter: readonly string[];
+    gitCalls: string[][];
   }> {
     const root = mkdtempSync(join(tmpdir(), 'ao-v408-cli-'));
     mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
@@ -1455,6 +1624,14 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     // that reached any of them would be visible as a number rather than argued
     // about in a comment.
     let mutations = 0;
+    const gitCalls: string[][] = [];
+    const countingGit = async (_cwd: string, args: readonly string[]) => {
+      gitCalls.push([...args]);
+      // `check-ignore --quiet` exits 0 for an ignored path. Answering that keeps
+      // the write path reachable, so the count below is of a run that completed
+      // rather than one that stopped at the probe.
+      return { outcome: 'OK' as const, exitCode: 0, stdout: '', stderr: '' };
+    };
     const chunks: string[] = [];
     const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
       chunks.push(String(chunk));
@@ -1487,7 +1664,9 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
         }) as unknown as GitPublicationRunner,
         envSource: ENV,
         now: () => new Date(AT),
-        checkIgnored: async () => 'IGNORED' as never,
+        ...(over.countGit === true
+          ? { git: countingGit as never }
+          : { checkIgnored: async () => 'IGNORED' as never }),
       });
       await program.parseAsync([
         'node',
@@ -1511,7 +1690,7 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     }
     const runtimeAfter = readdirSync(join(root, '.agent-orchestrator', 'runtime'));
     rmSync(root, { recursive: true, force: true });
-    return { out: chunks.join(''), reader, mutations, receipt, runtimeAfter };
+    return { out: chunks.join(''), reader, mutations, receipt, runtimeAfter, gitCalls };
   }
 
   it('reconciles when everything holds, and reports the commit the merge produced', async () => {
@@ -1664,7 +1843,105 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     // with the bare word would be false in the direction that matters to an
     // auditor.
     expect(RECONCILIATION_TRAILER.startsWith('Read-only on the forge')).toBe(true);
-    expect(RECONCILIATION_TRAILER).toContain('this task is still READY_FOR_PR');
+
+    // Every clause is a BOUND, not an act. The trailer is printed for all ten
+    // ladder outcomes, including two that start no process and four that never
+    // address a pull request, so a sentence saying what the run *did* is false
+    // on most of them — which a review measured on the first version of this
+    // string. Pinned as an absence, because the failure mode is a past tense
+    // creeping back in.
+    for (const act of [
+      'The reconciliation asked github.com',
+      'and it changed\nnothing there',
+      'this task is still READY_FOR_PR',
+      'it changed at most',
+    ]) {
+      expect(RECONCILIATION_TRAILER, act).not.toContain(act);
+    }
+    expect(RECONCILIATION_TRAILER).toContain('asks github.com about no');
+    expect(RECONCILIATION_TRAILER).toContain('It changes nothing there');
+    // The directory the write creates is an effect too, and the first version
+    // omitted it while claiming "at most one file".
+    expect(RECONCILIATION_TRAILER).toContain('and the directory');
+  });
+
+  it('never contradicts itself in the trailer block', async () => {
+    // A run that wrote must not open its trailers with the bare word
+    // "Read-only." two paragraphs above "not read-only here". A review found
+    // exactly that, and the new trailer's own docblock names avoiding it as its
+    // reason for existing.
+    const wrote = await run(['--reconcile-merge']);
+    expect(wrote.receipt).not.toBeNull();
+    expect(wrote.out).toContain(RECONCILIATION_TRAILER);
+    expect(wrote.out).not.toContain(CONTACTED_TRAILER);
+    expect(wrote.out).not.toContain('Read-only. ');
+    // The L-V4-02-6 disclosure — the GitHub CLI's own telemetry and update
+    // calls — still has to survive, which is what that branch previously
+    // carried. It is the one sentence that must not be lost by dropping the
+    // read-only framing.
+    expect(wrote.out).toContain(OBSERVED_AND_CHANGED_TRAILER);
+
+    // A run that established nothing and wrote nothing IS read-only, and says
+    // so — so the rule above is about the write and not about the flag.
+    const refused = await run(['--reconcile-merge'], { state: taskState({ state: 'REVIEWING' }) });
+    expect(refused.receipt).toBeNull();
+    expect(refused.out).toContain(NOT_CONTACTED_TRAILER);
+  });
+
+  it('claims a merge only where one was established', async () => {
+    // MERGE_PRESENCE_SENTENCE caveats a merge. A review found it printed under
+    // NO_PULL_REQUEST_AT_HEAD and NOT_MERGED, asserting "this pull request was
+    // merged and produced this commit" directly beneath a line saying the
+    // opposite.
+    for (const [label, over] of [
+      ['no pull request', { locator: '[]' }],
+      ['still open', { locator: candidates([{ state: 'open' }]) }],
+      ['closed, not merged', { document: prBody({ merged: false }) }],
+      ['the forge refused', { locator: null }],
+    ] as readonly [string, { locator?: string | null; document?: string | null }][]) {
+      const r = await run(['--reconcile-merge'], over);
+      expect(r.out, label).not.toContain(MERGE_PRESENCE_SENTENCE);
+      // The trailer still prints — it is about the run, not about a merge.
+      expect(r.out, label).toContain(RECONCILIATION_TRAILER);
+    }
+    // And on a refusal that never reached the forge at all.
+    const notReady = await run(['--reconcile-merge'], { state: taskState({ state: 'REVIEWING' }) });
+    expect(notReady.out).not.toContain(MERGE_PRESENCE_SENTENCE);
+
+    // The positive control: where a merge WAS established, the sentence is
+    // there — including on the repeat run, which writes nothing and needs the
+    // caveat exactly as much.
+    expect((await run(['--reconcile-merge'])).out).toContain(MERGE_PRESENCE_SENTENCE);
+  });
+
+  it('reports the observation in its exit code, and says so on the surface', async () => {
+    // A deliberate convention, pinned so that it is a decision rather than an
+    // oversight. `--reconcile-merge` on its own always exits zero: the exit code
+    // answers "was the observation settled", and without `--observe` there is no
+    // observation, so it carries no information about the reconciliation. A
+    // review raised it as undocumented and unpinned; both halves are fixed here.
+    //
+    // The convention is slice 7's — the merge flag does not move the exit code
+    // either — and changing it would be a contract change for the whole command,
+    // not a slice-8 detail.
+    const before = process.exitCode;
+    try {
+      for (const over of [
+        {},
+        { locator: '[]' as string | null },
+        { locator: null as string | null },
+      ]) {
+        process.exitCode = undefined;
+        await run(['--reconcile-merge'], over);
+        expect(process.exitCode).toBe(0);
+      }
+    } finally {
+      process.exitCode = before;
+    }
+    // And the operator is told, on the surface they read before running it.
+    expect(RECONCILE_MERGE_OPTION_DESCRIPTION).toContain(
+      'The exit code reports the observation, not the reconciliation',
+    );
   });
 
   it('says nothing was contacted only when nothing was', async () => {
@@ -1676,6 +1953,38 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     expect(refused.reader.calls).toHaveLength(1);
     expect(refused.out).toContain('Read-only.');
     expect(refused.out).not.toContain('No forge was contacted');
+  });
+
+  it('starts exactly two forge reads and two Git queries, and nothing else', async () => {
+    // The command-layer measurement, and the reason the source scan below is no
+    // longer named as though it were one.
+    //
+    // A review pointed out that a token scan of two `src/deliver` modules cannot
+    // see what the CLI starts — and that the write path really does launch two
+    // `git check-ignore` processes against the operator's checkout, through a
+    // seam every other case here stubs out. Both are read-only and harmless; the
+    // defect was a test whose name asserted a property it never measured.
+    const r = await run(['--reconcile-merge'], { countGit: true });
+    expect(r.receipt).not.toBeNull();
+
+    // Two reads of the forge, and no mutation on any of the three seams.
+    expect(r.reader.calls).toHaveLength(2);
+    expect(r.mutations).toBe(0);
+
+    // Two Git queries, both read-only, both `check-ignore`, and both about the
+    // two names this write creates. No other Git command runs at all.
+    expect(r.gitCalls).toHaveLength(2);
+    for (const args of r.gitCalls) {
+      expect(args[0]).toBe('check-ignore');
+      expect(args).toContain('--quiet');
+      expect(args.some((a) => a.includes(MERGE_RECONCILIATION_DIR_NAME))).toBe(true);
+    }
+    // One asks about the staging shape and one about the record itself — the
+    // conjunction the store's header explains, measured rather than assumed.
+    expect(r.gitCalls.filter((a) => a.some((x) => x.endsWith('.tmp-probe')))).toHaveLength(1);
+    expect(
+      r.gitCalls.filter((a) => a.some((x) => x.endsWith(`${TASK}.json`))),
+    ).toHaveLength(1);
   });
 
   it('registers exactly the sentence that was pinned, not a copy', () => {
@@ -1924,7 +2233,7 @@ describe('the execution lifecycle is untouched, and the block ledger with it', (
     }
   });
 
-  it('starts no agent and runs no command but the forge reader', () => {
+  it('the reconciliation modules name no agent, no mutation runner and no spawn', () => {
     for (const file of [
       'src/deliver/reconcile-merge.ts',
       'src/deliver/merge-reconciliation-store.ts',

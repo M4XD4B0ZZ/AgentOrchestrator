@@ -9417,15 +9417,21 @@ names:
 3. read *that* pull request by number and require it to be merged, at exactly
    this commit, into exactly this task's base branch.
 
-Step 3 is not redundant. The candidate list carries no `merged` field — a merged
-pull request and one a human closed both read `state: "closed"` there — so
-mergedness, the base and the resulting commit can only come from the document
-endpoint.
+Step 3 is not redundant, and the reason is narrower than it looks. **Mergedness**
+can only come from the document endpoint: the candidate list carries no `merged`
+field at all, and a merged pull request and one a human closed both read
+`state: "closed"` there. The resulting commit is likewise only on the document.
+The base is on both, and this build takes it from the document anyway rather than
+mixing two answers about one pull request.
 
 Measured, read-only: the locator still resolves a merged pull request from its
 head object name **after the head branch has been deleted**, and after a squash
-merge has left that head object on no branch at all. Branch names are never used
-as identity.
+merge has left that head object on no branch at all.
+
+So the **head** is never a branch name — it is an object name, which is what
+survives the branch being deleted. The **base** is the opposite case and is
+compared by name on purpose: a base *is* a branch, the forge reports its name,
+and the name is what the task declares.
 
 ### Why it needs no `--attended`, and no grant
 
@@ -9459,9 +9465,10 @@ This slice writes **no task state**. Not a transition, not a checkpoint, not a
 field.
 
 The reason is a measured invariant rather than a preference. A block-ledger
-entry's `SETTLED` disposition is re-proved on every ledger write against the
-task's live record, and one of its conditions compares a SHA-256 **over the raw
-bytes of the task-state file**. So "the state did not change" is not the bar —
+entry's `SETTLED` disposition is re-proved against the task's live record on
+every ledger write that moves a disposition or newly records a progress-claiming
+stop reason — which includes the `COMPLETE` that ends a block — and one of its
+conditions compares a SHA-256 **over the raw bytes of the task-state file**. So "the state did not change" is not the bar —
 "the file did not change" is. Any post-delivery write to it would make every
 settled entry for that task unprovable, and the ledger has no repair path.
 
@@ -9490,6 +9497,15 @@ separate record, redesigning block evidence, and the existing companion pattern
   from `L-V4-07-8`: it is established from the forge, not by fetching the base.
 - **L-V4-08-5 — a receipt is never deleted or superseded.** There is no path that
   removes one.
+- **L-V4-08-6 — two sibling modules justify asking Git twice with a reason that
+  does not apply to the command they run.** `state/runtime-ignored.ts` and
+  `deliver/delivery-evidence-store.ts` both say `check-ignore` ORs its arguments.
+  Measured, the command this build runs is `check-ignore --quiet`, and `--quiet`
+  refuses a second pathname outright — `fatal: --quiet is only valid with a single
+  pathname`, exit 128. Two calls is still right, for that reason and because
+  dropping `--quiet` would reintroduce the disjunction. Corrected in this slice's
+  own copy; the two siblings are named here rather than edited, because a
+  correct-but-misexplained comment in another slice is not this one's to rewrite.
 
 ## Not implemented yet
 
