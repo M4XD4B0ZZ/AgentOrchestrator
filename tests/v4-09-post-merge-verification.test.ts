@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -222,8 +223,38 @@ function codeOnly(path: string): string {
     .replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
+/**
+ * A temporary directory whose path this build will accept as a Git argument.
+ *
+ * `realpathSync.native` is not decoration, and CI is what proved it. On the
+ * GitHub Windows runner `os.tmpdir()` answers with an 8.3 short path —
+ * `C:\Users\RUNNER~1\AppData\Local\Temp` — and `~` is outside `SAFE_ARG_PATTERN`,
+ * so every path derived from it is refused as `WORKSPACE_PATH_UNSAFE`. Fourteen
+ * real-Git cases passed on a developer machine and failed on CI with
+ * `IDENTITY_UNDERIVABLE`, which is the product behaving exactly as
+ * `workspace-identity.ts` documents ("a repository checked out under
+ * `C:\Users\Ada Lovelace\src` cannot be given a workspace, and says so") and the
+ * fixture standing in the wrong place.
+ *
+ * Resolving to the long form fixes it. The assertion below is the part that
+ * matters for the next environment: if a host ever hands back a temporary path
+ * this build will not accept, these cases must fail as a fixture problem rather
+ * than as fourteen confusing assertion failures about workspaces.
+ */
+function scratchRoot(prefix: string): string {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
+  const derived = deriveVerificationWorkspaceIdentity(root, TASK);
+  if (!derived.ok) {
+    throw new Error(
+      `fixture root is not usable by this build (${derived.code}): ${root}. ` +
+        'The host temporary directory is not shell-inert; see scratchRoot.',
+    );
+  }
+  return root;
+}
+
 function scratch(prefix = 'ao-v409-'): string {
-  const root = mkdtempSync(join(tmpdir(), prefix));
+  const root = scratchRoot(prefix);
   mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
   return root;
 }
@@ -286,7 +317,7 @@ interface RealRepo {
  * shape this repository has repeatedly measured as a test that pins nothing.
  */
 function realRepo(): RealRepo {
-  const root = mkdtempSync(join(tmpdir(), 'ao-v409-git-'));
+  const root = scratchRoot('ao-v409-git-');
   mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
   git(root, 'init', '--quiet', '-b', BASE, '.');
   git(root, 'config', 'user.email', 'fixture@example.invalid');
@@ -1054,7 +1085,7 @@ describe('a verification runs in an owned, detached checkout at exactly one comm
     // derived path. Two worktrees of one repository share a common directory;
     // no two repositories do.
     const repo = realRepo();
-    const foreign = mkdtempSync(join(tmpdir(), 'ao-v409-foreign-'));
+    const foreign = realpathSync.native(mkdtempSync(join(tmpdir(), 'ao-v409-foreign-')));
     try {
       const derived = deriveVerificationWorkspaceIdentity(repo.root, TASK);
       if (!derived.ok) throw new Error('unreachable');
@@ -2138,7 +2169,7 @@ describe('the delivery command verifies only when asked, and takes the lease to 
    * starting `npm run verify`.
    */
   function unleasedRepo(): { root: string; mergeCommit: string; gitCommonDir: string; dispose: () => void } {
-    const root = mkdtempSync(join(tmpdir(), 'ao-v409-cli-'));
+    const root = scratchRoot('ao-v409-cli-');
     mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
     git(root, 'init', '--quiet', '-b', BASE, '.');
     git(root, 'config', 'user.email', 'fixture@example.invalid');

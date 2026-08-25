@@ -438,3 +438,13 @@ measurement of the CI model above is a read.
   for a question it refused to evaluate. This build reports one member for both,
   because what follows is the same either way; it deliberately does not assert
   the object is absent.
+- **L-V4-09-12 — a repository whose path is not shell-inert cannot be verified.**
+  The derived workspace path is handed to Git as an argument, so it must satisfy
+  `doctor/exec.ts`'s allow-list — the same rule `workspace-identity.ts` already
+  applies to task workspaces. A root containing a space, or a Windows 8.3 short
+  name, yields `IDENTITY_UNDERIVABLE` and no verification is possible. Measured
+  rather than reasoned about: `C:/Users/RUNNER~1/AppData/Local/Temp/…` — what
+  `os.tmpdir()` answers on the GitHub Windows runner — is refused, and its long
+  form `C:/Users/runneradmin/…` is accepted. It is inherited and consistent, not
+  new, and it is named here because it is invisible until a host hands back a
+  short path.
