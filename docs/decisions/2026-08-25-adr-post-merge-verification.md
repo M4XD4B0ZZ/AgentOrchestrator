@@ -397,6 +397,56 @@ was written.
 **Zero GitHub mutations were performed for this slice's research.** Every
 measurement of the CI model above is a read.
 
+## The counter-proof, and why fifteen mutants survive
+
+67 mutants against a baseline the lab proves green before applying anything —
+a red baseline reports every mutant killed and measures nothing. 52 killed, 15
+survived, **0 harness failures**, and every survivor is classified rather than
+counted.
+
+Nothing here is an unkilled defect. Each survivor is a guard that is unreachable
+while something else stands, and five of them are **demonstrated** to be pairs by
+a companion mutant that removes both halves and dies:
+
+| survivors | why unreachable alone | companion that dies |
+| --- | --- | --- |
+| `M05`, `M06` — the store's two subject comparisons | the mint guarantees `workspaceHeadCommit === mergeCommit`, so either line refuses everything the other would | `M05b` removes both |
+| `M27`, `M27b` — the two version gates | the parse-time gate refuses a foreign contract before the post-parse one is reached | `M27c` removes both |
+| `M34`, `M34b` — the two `check-ignore` gates | the staging-name gate fires first and hides the record-name gate | `M34c` removes both |
+| `M38` — the lease read before the destructive spawn | the classifying read one line earlier already refused | `M38c` removes both |
+| `M57`, `M58`, `M59` — the workspace and ladder passing `observedHead` | on the success path the proof has *already* established equality, so substituting the expectation is unobservable | `M59b` — the same substitution on the **mismatch** path, where the two differ, and it dies |
+
+The last row is the one worth reading twice, because it is the fix three review
+lenses found. The mint's refusal is not decoration and is not a tautology: the
+value it compares is Git's own `rev-parse` answer, and `M59b` proves that by
+substituting the expectation on the one path where the two are different. What
+is *unobservable* is the substitution on a path the proof has already gated —
+which is what defence in depth looks like from a mutation harness.
+
+The rest are unreachable by construction, and each says so in place:
+
+- **`M09`** — the ladder's `stored.reading !== 'HISTORICAL_MERGE'` test.
+  `loadMergeReconciliation` returns a non-null receipt on that reading and no
+  other, so the `receipt === null` half already refuses everything;
+- **`M36`** — the store's read-back-before-write. The document is assembled from
+  values that have just been validated, so this build cannot construct one it
+  would refuse;
+- **`M48`** — the containment test on the derived workspace path. The path is
+  `<parent>/<basename>.verification/<taskId>`, a sibling of the repository by
+  construction, so it is never inside it;
+- **`M46`, `M60`** — the ownership and lease re-proofs in front of the *forced*
+  removal. Both exist for a window between two subprocesses, and no fixture can
+  change the world inside it.
+
+Two things the lab does that a count alone would not:
+
+- it proves **each edit landed** before running the suite, so a mutation that did
+  not take cannot score a free kill;
+- it runs a **wider control set** on every survivor, so a mutant caught only by
+  an unrelated gate is reported as `KILLED_ELSEWHERE` rather than as this
+  slice's mechanism working. That column is zero here.
+
+
 ## Residuals
 
 - **L-V4-09-1** — the store is read-before-write, not a transaction. Two
