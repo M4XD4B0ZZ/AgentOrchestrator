@@ -9353,7 +9353,12 @@ in the slice that adds the effect.
 - **L-V4-07-5 — a merge and its resulting commit are reported and then
   forgotten.** Nothing durable records that this delivery landed, which is why
   re-invoking answers `ALREADY_MERGED` from a fresh reading rather than from
-  memory.
+  memory. **Closed by V4 slice 8**, and not quite the way this sentence
+  anticipated: the receipt slice 8 writes is not a memory of what *this build*
+  did, because a reading cannot establish an actor. It records that the pull
+  request *is merged*, which is the fact a later slice needs and the only one a
+  reading can carry. `--merge-pr` still answers `ALREADY_MERGED` from a fresh
+  reading and still consults nothing stored.
 - **L-V4-07-6 — `409` does not distinguish a head that moved from a head that
   never existed.** This build refuses both from its own reading before it sends,
   so the ambiguity is not reachable on the ordinary path.
@@ -9371,6 +9376,150 @@ in the slice that adds the effect.
   matters at the delivery seam is stated where it is used. Closing the claim
   itself means five sites and belongs to whichever slice owns that module.
 
+## Reconciling the merge (V4 slice 8)
+
+`delivery --reconcile-merge` reads github.com to establish that this task's
+delivery was merged, and writes **one** durable receipt beside the task state:
+
+```
+.agent-orchestrator/runtime/delivery-merge/<taskId>.json
+```
+
+It changes nothing on the forge. It is the bookkeeping *after* a merge, not the
+merge — and it is deliberately usable when this build did not perform the merge
+at all.
+
+### The one sentence a receipt carries
+
+> Pull request #N was observed merged, from head H, into base B, producing
+> commit M.
+
+That is an **event**. It is not, and the report says so in the operator's own
+words every time:
+
+- **not** a claim that commit M is on the base branch now;
+- **not** a claim that M passed any verification — nothing was run against it;
+- **not** a claim that the merge has not been reverted;
+- **not** a claim that AO performed the merge.
+
+The second of those is the next slice's question. The first is not a pedantic
+distinction: pull request 61 in this very repository is merged forever, its base
+branch no longer exists, and its merge commit is an ancestor of nothing.
+
+### How the pull request is found
+
+From the **commit**, never from a stored number and never from one an operator
+names:
+
+1. ask which pull requests carry this task's `currentCommit` as their head —
+   slice 2's locator endpoint, keyed on an object name;
+2. require exactly one, and that none at that head is still open;
+3. read *that* pull request by number and require it to be merged, at exactly
+   this commit, into exactly this task's base branch.
+
+Step 3 is not redundant, and the reason is narrower than it looks. **Mergedness**
+can only come from the document endpoint: the candidate list carries no `merged`
+field at all, and a merged pull request and one a human closed both read
+`state: "closed"` there. The resulting commit is likewise only on the document.
+The base is on both, and this build takes it from the document anyway rather than
+mixing two answers about one pull request.
+
+Measured, read-only: the locator still resolves a merged pull request from its
+head object name **after the head branch has been deleted**, and after a squash
+merge has left that head object on no branch at all.
+
+So the **head** is never a branch name — it is an object name, which is what
+survives the branch being deleted. The **base** is the opposite case and is
+compared by name on purpose: a base *is* a branch, the forge reports its name,
+and the name is what the task declares.
+
+### Why it needs no `--attended`, and no grant
+
+`--attended` marks a person present for an irreversible effect **outside this
+machine**. This has none. What authorises the write is the explicit
+`--reconcile-merge` and a minted observation proof — the same footing `--record`
+has stood on since slice 3.
+
+It takes no `MergeGrant`, and could not: a grant authorises one merge attempt
+and is spent by being claimed. AO may crash after GitHub merges; a human may
+merge in the web UI; another invocation may merge. Those are exactly the cases a
+reconciliation exists for, and none of them has a grant.
+
+### Repeat runs, and contradictions
+
+| what is on disk | what happens |
+| --- | --- |
+| nothing | `RECORDED` |
+| the same merge | `ALREADY_RECORDED`, and **no write is attempted** |
+| a different merge | `CONFLICTING_RECEIPT` — refused, bytes untouched |
+| something unreadable | `EXISTING_RECEIPT_UNREADABLE` — refused, bytes untouched |
+
+There is no last-writer-wins rule for contradictory merge identities. The limit
+is stated exactly: this is read-before-write, **not** a transaction. Two
+processes that both read "absent" can both write, and the guarantee is that a
+receipt already on disk when a process looked is never silently replaced.
+
+### `READY_FOR_PR` is still terminal, and that is the architecture
+
+This slice writes **no task state**. Not a transition, not a checkpoint, not a
+field.
+
+The reason is a measured invariant rather than a preference. A block-ledger
+entry's `SETTLED` disposition is re-proved against the task's live record on
+every ledger write that moves a disposition or newly records a progress-claiming
+stop reason — which includes the `COMPLETE` that ends a block — and one of its
+conditions compares a SHA-256 **over the raw bytes of the task-state file**. So "the state did not change" is not the bar —
+"the file did not change" is. Any post-delivery write to it would make every
+settled entry for that task unprovable, and the ledger has no repair path.
+
+The full comparison of the four architectures — extending `TaskState`, a
+separate record, redesigning block evidence, and the existing companion pattern
+— is in `docs/decisions/2026-08-25-adr-post-merge-reconciliation.md`.
+
+### Carried forward from V4 slice 8, deliberately
+
+- **L-V4-08-1 — read-before-write is not mutual exclusion.** Two concurrent
+  reconcilers of *contradictory* merges for one task could both see "absent".
+  The ordinary route to that — two pull requests at one delivery head — is refused
+  upstream, but it is not the only one: two invocations whose profiles resolve to
+  different delivery targets would each establish a real merge, and the ladder
+  cannot refuse what it cannot see. Named rather than closed: closing it needs a
+  lock, and a lock is a service.
+- **L-V4-08-2 — the receipt is not authority.** Anyone who can create a file in
+  the runtime directory can write one this build reads as genuine. The mint
+  bounds *product code*; it is not filesystem authenticity, and the binding
+  digest does not withstand an author who can recompute it.
+- **L-V4-08-3 — `advanceTaskState` permits `from === to`.** A same-state
+  `READY_FOR_PR` checkpoint that rewrote `currentCommit` is refused only by the
+  upstream terminal gates, not by the write primitive, and no test asserts that
+  refusal. This slice writes no task state at all, so it takes that door nowhere
+  — but it is open for a future slice that reaches for "just update
+  `currentCommit`".
+- **L-V4-08-4 — the merge commit is not confirmed locally.** Inherited unchanged
+  from `L-V4-07-8`: it is established from the forge, not by fetching the base.
+- **L-V4-08-5 — a receipt is never deleted or superseded.** There is no path that
+  removes one.
+- **L-V4-08-6 — two sibling modules justify asking Git twice with a reason that
+  does not apply to the command they run.** `state/runtime-ignored.ts` and
+  `deliver/delivery-evidence-store.ts` both say `check-ignore` ORs its arguments.
+  Measured, the command this build runs is `check-ignore --quiet`, and `--quiet`
+  refuses a second pathname outright — `fatal: --quiet is only valid with a single
+  pathname`, exit 128. Two calls is still right, for that reason and because
+  dropping `--quiet` would reintroduce the disjunction. Corrected in this slice's
+  own copy; the two siblings are named here rather than edited, because a
+  correct-but-misexplained comment in another slice is not this one's to rewrite.
+- **L-V4-08-7 — the staging-probe suffix is spelled in three places.**
+  `state/runtime-ignored.ts` owns `STAGING_PROBE_SUFFIX` and does not export it,
+  so slice 3's store and this one each hard-code `tmp-probe`. Three spellings of
+  one fact that have to agree, with nothing making them.
+- **L-V4-08-8 — the exit code never reports this flag.** It is computed from the
+  observation conclusion, and the reconciliation result never reaches it, so a
+  refused write — including a conflicting receipt — is not visible in `$?`. It
+  names no number deliberately: two earlier versions of this sentence did, and
+  both were measured false. Slice 7's convention rather than a new one; stated on
+  the flag's own surface and pinned by a case that runs the same fixture with and
+  without `--observe`.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
@@ -9378,12 +9527,15 @@ POSIX; and any *autonomous* product-side PR/CI/merge decision. V4 slices 5 to 7
 gave this build three forge acts — publish a branch, open a pull request, merge
 one — and every one of them requires an operator to be present for that
 invocation. None of them decides that a merge is warranted; they perform an act
-an operator asked for, on the exact commit that invocation observed.
+an operator asked for, on the exact commit that invocation observed. Slice 8 adds
+no fourth act: it reads, and writes locally.
 
 `READY_FOR_PR` remains terminal. It stays terminal even after a merge, so a
 merged pull request and a task still reported as `READY_FOR_PR` are the expected
-pair — the durable post-merge state, the post-merge verification and `COMPLETE`
-are not built.
+pair. What slice 8 changes is that the *delivery* side is now answerable: the
+merge and its resulting commit are durable, beside the task rather than inside
+it. The post-merge verification of that commit and `COMPLETE` are still not
+built.
 
 V4 slices 1 to 4 do not shorten that list. They add the four things every item
 on it needs first. Slice 1: a repository can **declare** its delivery target, and
@@ -9401,7 +9553,10 @@ under a second authority that cannot substitute for the first and grants
 nothing further. Slice 7 shortens it once more, by the act with the largest blast
 radius: one pull request can be **merged**, by squash, under a third authority
 that cannot substitute for either — and only the one this invocation just
-observed, at the commit it observed.
+observed, at the commit it observed. Slice 8 shortens nothing on that list and
+is not meant to: it adds no forge act at all. What it adds is that the result of
+one — the merge, and the exact commit it produced — stops being forgotten when
+the process ends, and it does that beside the task rather than inside it.
 
 What none of them adds is **autonomy**. A stored `SUCCESS` is a historical
 snapshot and never a current one; there is no TTL; `delivery --observe` is still
@@ -9417,7 +9572,8 @@ no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-
 [The delivery decision (V4 slice 4)](#the-delivery-decision-v4-slice-4),
 [Publishing the delivery head (V4 slice 5)](#publishing-the-delivery-head-v4-slice-5),
 [Creating the pull request (V4 slice 6)](#creating-the-pull-request-v4-slice-6),
-[Merging the pull request (V4 slice 7)](#merging-the-pull-request-v4-slice-7)
+[Merging the pull request (V4 slice 7)](#merging-the-pull-request-v4-slice-7),
+[Reconciling the merge (V4 slice 8)](#reconciling-the-merge-v4-slice-8)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on

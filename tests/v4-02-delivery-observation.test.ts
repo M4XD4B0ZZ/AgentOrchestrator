@@ -1470,13 +1470,27 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     // Twice in two slices, on one sentence, and both times because the sentence
     // named itself "the only". It no longer does: it states what this flag does
     // and defers the enumeration to a rule about the others.
+    //
+    // A THIRD time, and this one is the most instructive of the three, because
+    // the sentence was already false before slice 8 touched it. The slice-6
+    // repair replaced "the only" with a LIST — "the flags that can change
+    // something are --publish-head and --create-pr" — and slice 7 then added
+    // `--merge-pr` without re-reading it. So the pin sat green over a sentence
+    // that omitted the most consequential flag this build has, for a whole
+    // slice. A list is the same defect as "the only" wearing a longer coat:
+    // both go stale when a flag is added, and neither fails a literal pin when
+    // it does. The replacement states a RULE — every flag that can change
+    // something on a forge also reads — which a new flag cannot falsify by
+    // existing, and it stops promising that a count of flags is complete.
     expect(OBSERVE_OPTION_DESCRIPTION).toBe(
       'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
         'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
-        'that this build does not suppress. This flag only reads. The flags that can change ' +
-        'something are --publish-head and --create-pr, and each of those reads as well, because ' +
-        'each establishes what it is about before and after it acts. With none of the three, ' +
-        'nothing leaves this machine — though --record still writes a record beside the task, here.',
+        'that this build does not suppress. This flag only reads, and it is not the only flag ' +
+        'here that reads: every flag that can change something on a forge reads as well, because ' +
+        'each establishes what it is about before and after it acts, and --reconcile-merge reads ' +
+        'without changing anything there. Contacting a forge is never implicit — with no flag ' +
+        'that says it contacts github.com, nothing leaves this machine, though a flag that ' +
+        'stores something still writes a record beside the task, here.',
     );
     for (const text of [
       OBSERVE_OPTION_DESCRIPTION,

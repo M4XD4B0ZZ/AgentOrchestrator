@@ -53,6 +53,12 @@ import {
   type MergeReading,
 } from '../deliver/pull-request-merge.js';
 import type { MergeResult } from '../deliver/merge-pull-request.js';
+import {
+  MERGE_OBSERVATION_DETAIL,
+  type MergeObservationResult,
+} from '../deliver/reconcile-merge.js';
+import { MERGE_PRESENCE_SENTENCE } from '../deliver/merge-reconciliation.js';
+import type { MergeReconciliationRecordResult } from '../deliver/merge-reconciliation-store.js';
 import type { CreationResult } from '../deliver/create-pull-request.js';
 import {
   OBSERVATION_REFUSAL_DETAIL,
@@ -214,6 +220,70 @@ export const MERGE_TRAILER =
   'nothing here changes that. Whether the merge was permitted was GitHub\'s decision and the\n' +
   'operator\'s — this build did not establish that the pull request was eligible to merge, and\n' +
   'does not claim to.';
+
+/**
+ * The trailer for the one act that changes something here and nothing there.
+ *
+ * A fourth sentence rather than a clause added to any of the others, for the
+ * reason this file already records three times over: a sentence that enumerates
+ * what did not happen has to be re-read by every slice that adds a way for it to
+ * happen, so each act speaks for itself and about nothing else.
+ *
+ * It opens "Read-only on the forge" and not "Read-only", which is the whole
+ * point of having a fourth sentence. Two of the other trailers open with the
+ * bare word, and it would be false in the direction that matters least to an
+ * operator and most to an auditor whenever this run writes a file.
+ *
+ * The second half of that opening is a **capability**, not an act, and reaching
+ * that took two goes. The first repair said "and not read-only here", which
+ * claims a write — and of the thirteen report shapes that carry this trailer,
+ * eleven write nothing, so on each of those it sat beside a `Read-only.` that
+ * was true. (Twelve under the *old* gate, which called a failed write read-only
+ * as well; a confirmation counted both, and the number that belongs here is the
+ * one this build now produces.) An enumeration of every shape found it, after a
+ * review had already found the same mistake one clause further along. It now
+ * says what a reconciliation *can* change and points at the line that says what
+ * this one did, so the two sentences cannot disagree.
+ *
+ * The enumeration is `tests/v4-08-…`'s own table over the whole ladder
+ * vocabulary, so a third round of this is a failing test rather than a review
+ * finding.
+ *
+ * ── Every clause is a BOUND, and the first draft's were acts ───────────────
+ *
+ * This trailer is printed for **every** `--reconcile-merge` run, including the
+ * two refusals that never start a process and the three ladder members that
+ * contact the forge and still never address a pull request. (This said four,
+ * counting `FORGE_UNREADABLE` — which sits on both sides of the second read and
+ * carries a number on the far side of it. A review counted.) Its first version said what the run *did* —
+ * "the reconciliation asked github.com about the commit named above and about
+ * the one pull request that answer named", and "this task is still
+ * `READY_FOR_PR`" — and a review rendered both over runs where neither was
+ * true. On `TASK_NOT_READY` the report carried "Read-only. No forge was
+ * contacted" and this sentence claiming a conversation, four lines apart, and
+ * asserted a task state the ladder had just refused the run for *not* being in.
+ *
+ * So every clause is now a statement about what this build **asks** and what it
+ * **can** change, which is bounded and true on every path — the same repair
+ * `CONTACTED_TRAILER`'s docblock records making for the same reason, and the
+ * same one `OBSERVE_OPTION_DESCRIPTION` made twice. What actually happened is
+ * on the `Merge observed` and `Receipt` lines, where a reader can see it.
+ *
+ * Note what it does **not** say. It does not say the commit is on the base
+ * branch, that the merge stands, that anything was verified, or that AO
+ * performed it. {@link MERGE_PRESENCE_SENTENCE} states those four, and it is
+ * printed only where there is a merge to state them about.
+ */
+export const RECONCILIATION_TRAILER =
+  'Read-only on the forge, and not necessarily read-only here. A reconciliation asks\n' +
+  'github.com about no commit but this task\'s own, and about no pull request but the one\n' +
+  'that answer names. It changes nothing there: it merges, opens, updates, closes, reopens,\n' +
+  'reviews, comments on, labels and reverts nothing, pushes no branch, deletes no branch and\n' +
+  'enables no auto-merge. Here it can create one directory, one receipt beside the task\n' +
+  'state, and a staging file beside that receipt which a crash can leave behind — and only\n' +
+  'when a merge was established. The Receipt line above says whether this run did. It writes\n' +
+  'no task state, so the task is in exactly the state it was in before this run. It starts\n' +
+  'no agent, and it grants no authority to do any of the above.';
 
 /**
  * One merge reading as one phrase.
@@ -389,6 +459,29 @@ export interface DeliveryObservationView {
   /** What `--create-pr` amounted to, or `null` when it was not asked for. */
   readonly creation?: PullRequestCreationView | null;
   readonly merge?: MergeView | null;
+  /** What `--reconcile-merge` amounted to, or `null` when it was not asked for. */
+  readonly reconciliation?: ReconciliationView | null;
+}
+
+/**
+ * What a reconciliation established, and what it wrote.
+ *
+ * Two fields because they are two questions with two answers, and a run can
+ * answer the first yes and the second no: the forge may report the delivery
+ * merged while the local write refuses — a receipt already on disk naming a
+ * different merge, a runtime path Git does not ignore, a directory that cannot
+ * be created. A single word for both would hide exactly the case an operator
+ * has to act on.
+ *
+ * `record` is `null` when no write was reached at all, which is every outcome
+ * short of `MERGE_OBSERVED`. That is a different thing from a write that was
+ * reached and declined to touch the path, which is `ALREADY_RECORDED` with a
+ * `writeAttempt` of `NOT_ATTEMPTED` — and the report prints them differently.
+ */
+export interface ReconciliationView {
+  readonly result: MergeObservationResult;
+  /** The store's verdict, or `null` when the store was never reached. */
+  readonly record: MergeReconciliationRecordResult | null;
 }
 
 /**
@@ -659,6 +752,50 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     }
   }
 
+  const reconciliation = view.reconciliation ?? null;
+  if (reconciliation !== null) {
+    const r = reconciliation.result;
+    lines.push(
+      '',
+      // Two labelled lines, never one. `Merge observed` is what github.com said;
+      // `Receipt` is what this machine now holds. A single `Reconciliation: OK`
+      // would be the report claiming the two always agree, and the whole reason
+      // the view carries both fields is that they can differ.
+      `Merge observed: ${r.outcome}`,
+      `  ${MERGE_OBSERVATION_DETAIL[r.outcome]}`,
+      `  Pull request : ${
+        r.pullRequestNumber === null
+          ? 'none was addressed'
+          : `#${String(r.pullRequestNumber)}`
+      }`,
+    );
+    // The reading only when a pull request was addressed by number. Printing a
+    // reading for a refusal decided from the candidate set would read as an
+    // answer about a pull request nobody asked about.
+    if (r.reading !== null) {
+      lines.push(`  Forge        : ${describeMergeReading(r.reading)}`);
+    }
+    lines.push(
+      `  Receipt      : ${
+        reconciliation.record === null
+          ? 'not written — no merge was established to record'
+          : `${reconciliation.record.code}  (write: ${reconciliation.record.writeAttempt})`
+      }`,
+    );
+    // The sentence that keeps the event apart from every claim it is not.
+    //
+    // Printed where there is a merge to say it about, and nowhere else. It is
+    // NOT gated on the write: an operator reading `ALREADY_RECORDED` needs it
+    // exactly as much as one reading `RECORDED`, and so does one whose write
+    // was refused after the forge had already established the merge.
+    //
+    // It IS gated on the merge, because a review found it printed under
+    // `NO_PULL_REQUEST_AT_HEAD` and `NOT_MERGED` — asserting "this pull request
+    // was merged and produced this commit" directly beneath a line saying the
+    // opposite.
+    if (r.outcome === 'MERGE_OBSERVED') lines.push('', MERGE_PRESENCE_SENTENCE);
+  }
+
   // Derived from what happened, not from which flags were passed — and from
   // whether the act was *attempted*, not from whether it read anything. A
   // review found the previous rule printing "Not read-only." over runs that
@@ -678,6 +815,12 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   const contactedByPublication = publication?.result.before != null;
   const contactedByCreation = creation?.result.remoteHead != null;
   const contactedByMerge = merge?.result.before != null;
+  // Read from the ladder's own flag rather than derived from its fields. A
+  // locator read that refused leaves the number and the reading `null` while a
+  // process really ran, and a subject this build will not address refuses before
+  // any process exists — the two are indistinguishable from the fields and are
+  // opposite answers to this question.
+  const contactedByReconciliation = reconciliation?.result.contacted === true;
   // One sentence per act, and the observation disclosure once, above them.
   //
   // The first version of this printed only the publication trailer, which
@@ -686,8 +829,43 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   // sentence about one kind of egress does not stand in for a sentence about
   // another, and by the same argument a sentence about a publication does not
   // stand in for one about a pull request.
+  // Whether this run put bytes on disk. Not a forge act — so it must not select
+  // the "not read-only" branch, which is about the three acts and says so — but
+  // enough to disqualify the bare word "Read-only.".
+  //
+  // A review found the previous rule printing `CONTACTED_TRAILER` — which opens
+  // "Read-only." — two paragraphs above `RECONCILIATION_TRAILER`'s "not
+  // read-only here", on a run that had just written a receipt. The two
+  // sentences contradicted each other, and the second one's docblock names
+  // avoiding exactly that as its reason for existing.
+  //
+  // Gated on an ATTEMPT rather than on success, and that distinction was a
+  // finding. A reconciliation that refused, or that answered `ALREADY_RECORDED`
+  // without touching the path, really is a read-only run and should say so. One
+  // that tried and failed is not: by the time the replace can fail, this build
+  // has created the receipt's directory and staged a file beside the target —
+  // the staging file is unlinked on the way out, best effort, and the directory
+  // stays. `=== 'COMPLETED'` described such a run as read-only.
+  const reconciliationTouchedDisk =
+    reconciliation?.record != null && reconciliation.record.writeAttempt !== 'NOT_ATTEMPTED';
   const trailers: string[] = [];
-  if (!publicationAttempted && !creationAttempted && !mergeAttempted) {
+  if (
+    !publicationAttempted &&
+    !creationAttempted &&
+    !mergeAttempted &&
+    reconciliationTouchedDisk
+  ) {
+    // Contacted or not, this run wrote. `OBSERVED_AND_CHANGED_TRAILER` is the
+    // existing sentence for "the disclosure without the read-only framing", and
+    // it is reached here for the reason it was written: the framing belongs to a
+    // run that changed nothing, and this one changed something.
+    //
+    // It is pushed only when a forge was actually contacted, because its own
+    // text is about what was asked. A write with no contact is not reachable
+    // today — the store refuses without a minted proof, and a proof needs a
+    // reading — so there is deliberately no arm inventing a sentence for it.
+    if (contactedByReconciliation) trailers.push(OBSERVED_AND_CHANGED_TRAILER);
+  } else if (!publicationAttempted && !creationAttempted && !mergeAttempted) {
     // Nothing was attempted, so the run was read-only whatever it looked at.
     // Which of the two read-only sentences applies is still decided by whether
     // anything was contacted, by any path.
@@ -695,15 +873,42 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
       view.observation !== null ||
       contactedByPublication ||
       contactedByCreation ||
-      contactedByMerge;
+      contactedByMerge ||
+      contactedByReconciliation;
     trailers.push(contacted ? CONTACTED_TRAILER : NOT_CONTACTED_TRAILER);
   } else {
-    if (view.observation !== null) trailers.push(OBSERVED_AND_CHANGED_TRAILER, '');
+    // The egress disclosure is owed whenever the GitHub CLI ran, and until this
+    // slice `view.observation !== null` was the whole of that: the three acts
+    // that select this branch either require `--observe` or, in the publication's
+    // case, run Git rather than `gh`.
+    //
+    // `--reconcile-merge` breaks that equivalence, and an enumeration found the
+    // hole rather than a review: `--publish-head --attended --reconcile-merge`
+    // takes this branch with no observation, and really does run `gh` twice. The
+    // condition is now what it always meant — was a forge client started — and
+    // the `||` keeps it to one push when both are true.
+    if (view.observation !== null || contactedByReconciliation) {
+      trailers.push(OBSERVED_AND_CHANGED_TRAILER, '');
+    }
     if (publicationAttempted) trailers.push(PUBLICATION_TRAILER);
     if (publicationAttempted && (creationAttempted || mergeAttempted)) trailers.push('');
     if (creationAttempted) trailers.push(CREATION_TRAILER);
     if (creationAttempted && mergeAttempted) trailers.push('');
     if (mergeAttempted) trailers.push(MERGE_TRAILER);
+  }
+  // Appended to whichever branch ran, rather than placed inside one, because a
+  // reconciliation is orthogonal to all three: it never attempts a forge
+  // mutation, so it cannot select the acts branch, and it may write locally, so
+  // the read-only branch's opening word is not always right for it — which is
+  // what the third arm above exists to handle. It is asked for on its own flag
+  // and it speaks for itself, the discipline the publication, creation and merge
+  // trailers each record having learned the hard way.
+  //
+  // The blank line is conditional. Without that, a run that wrote a receipt and
+  // whose egress disclosure was empty would open its trailer block with one.
+  if (reconciliation !== null) {
+    if (trailers.length > 0) trailers.push('');
+    trailers.push(RECONCILIATION_TRAILER);
   }
   lines.push('', ...trailers, '');
 
