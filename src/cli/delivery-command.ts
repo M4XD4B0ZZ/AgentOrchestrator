@@ -122,6 +122,12 @@ import {
 } from '../deliver/internal/merge-grant.js';
 import { mergePullRequest, type MergeResult } from '../deliver/merge-pull-request.js';
 import {
+  observeMergeForDelivery,
+  refuseMergeObservation,
+  type MergeObservationResult,
+} from '../deliver/reconcile-merge.js';
+import { recordMergeReconciliation } from '../deliver/merge-reconciliation-store.js';
+import {
   createForgeMergeRunner,
   type ForgeMergeRunner,
 } from '../deliver/github-pull-request-merger.js';
@@ -135,7 +141,10 @@ import {
 } from '../deliver/github-observer.js';
 import { resolveRepository } from '../repo/resolve-repository.js';
 import { loadTaskState } from '../state/state-store.js';
-import { renderDeliveryObservation } from './render-delivery-observation.js';
+import {
+  renderDeliveryObservation,
+  type ReconciliationView,
+} from './render-delivery-observation.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_OK,
@@ -151,6 +160,7 @@ interface DeliveryOptions {
   readonly publishHead?: boolean;
   readonly createPr?: boolean;
   readonly mergePr?: boolean;
+  readonly reconcileMerge?: boolean;
   readonly attended?: boolean;
 }
 
@@ -276,10 +286,12 @@ function createRuntimeIgnoreProbe(
 export const OBSERVE_OPTION_DESCRIPTION =
   'Ask github.com about the commit named above, read-only. It asks about no commit but ' +
   'that one. The GitHub CLI additionally makes calls of its own (telemetry, update check) ' +
-  'that this build does not suppress. This flag only reads. The flags that can change ' +
-  'something are --publish-head and --create-pr, and each of those reads as well, because ' +
-  'each establishes what it is about before and after it acts. With none of the three, ' +
-  'nothing leaves this machine — though --record still writes a record beside the task, here.';
+  'that this build does not suppress. This flag only reads, and it is not the only flag here ' +
+  'that reads: every flag that can change something on a forge reads as well, because each ' +
+  'establishes what it is about before and after it acts, and --reconcile-merge reads without ' +
+  'changing anything there. Contacting a forge is never implicit — with no flag that says it ' +
+  'contacts github.com, nothing leaves this machine, though a flag that stores something still ' +
+  'writes a record beside the task, here.';
 
 /**
  * The record flag's own sentence, exported so it can be pinned by literal.
@@ -396,6 +408,36 @@ export const MERGE_PR_OPTION_DESCRIPTION =
   'as a consequence — there is no auto-merge, and it writes no task state — so after a merge this task is still READY_FOR_PR.';
 
 /**
+ * The reconciliation flag's own sentence, exported so it can be pinned by
+ * literal.
+ *
+ * Two clauses are load-bearing and both are about what the flag is *not*.
+ * "Records what GitHub already did" separates it from `--merge-pr`, which is
+ * the act; this one is the bookkeeping afterwards. And the closing clause is
+ * the distinction the whole slice turns on — a receipt is an event, not a claim
+ * about the base branch now.
+ *
+ * It deliberately does not say "requires --attended", because it does not.
+ * `--attended` is this build's marker that a person is present for an
+ * irreversible effect *outside this machine*, and this flag has none: it reads
+ * github.com and writes one local file. Requiring it would make the marker mean
+ * two different things.
+ */
+export const RECONCILE_MERGE_OPTION_DESCRIPTION =
+  'Record, beside the task state, that this task\'s delivery was merged — reading github.com ' +
+  'to establish it and changing nothing there. It finds the pull request by asking which ones ' +
+  'carry this task\'s commit as their head, never from a stored number and never from one you ' +
+  'name, then reads that pull request and requires it to be merged, at exactly this commit, ' +
+  'into exactly this task\'s base branch. It works for a merge performed by anyone — this ' +
+  'build, another invocation, or a person — and it never claims AO did it. Writing needs this ' +
+  'flag: without it nothing is stored. A receipt already there for the same merge is left ' +
+  'alone and nothing is written; one naming a different merge refuses rather than being ' +
+  'overwritten. What is stored is one past event — that this pull request was merged and ' +
+  'produced that commit. It is not a claim that the commit is on the base branch now, that it ' +
+  'has not been reverted, or that anything was verified against it, and it changes no task ' +
+  'state: the task is still READY_FOR_PR afterwards.';
+
+/**
  * Operator presence, in the shape `release` established.
  *
  * A second, independent statement rather than a widening of the first: one flag
@@ -422,11 +464,13 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'to the base branch. With --merge-pr and --attended, on the same footing plus a fresh ' +
   'decision of PULL_REQUEST_MATCHED_CHECKS_SUCCESS, it merges that pull request by squash. ' +
   'Those three are what it can change on a forge; they are separately requested and separately ' +
-  'authorised, and none implies another. Four flags make it contact a forge — those three and ' +
-  '--observe — and with none of the four is anything read from a network. It writes no task ' +
-  'state — only --record writes anything at all, and that is a record beside the task, here — ' +
-  'and it never updates, closes, reopens, reviews, comments on or labels a pull request, and ' +
-  'never enables an auto-merge.';
+  'authorised, and none implies another. With --reconcile-merge it reads github.com to establish ' +
+  'that this task\'s delivery was merged and stores that one event beside the task state, ' +
+  'changing nothing on the forge. Contacting a forge is never implicit: with no flag that says ' +
+  'it contacts github.com, nothing is read from a network. It writes no task state — the flags ' +
+  'that write anything at all are --record and --reconcile-merge, and each writes a record ' +
+  'beside the task, here — and it never updates, closes, reopens, reviews, comments on or ' +
+  'labels a pull request, and never enables an auto-merge.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
   const resolve = seams.resolveRepository ?? resolveRepository;
@@ -467,6 +511,10 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     .option(
       '--merge-pr',
       MERGE_PR_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--reconcile-merge',
+      RECONCILE_MERGE_OPTION_DESCRIPTION,
     )
     .option(
       '--attended',
@@ -667,6 +715,33 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           ? await performMerge(options, subject, taskLoad, decision, proof, resolve, load, seams)
           : null;
 
+      // Last, and after the merge on purpose. An invocation asked for both
+      // merges and then records what the merge did; one asked only for this
+      // reconciles a merge somebody else performed. It is deliberately not a
+      // forge mutation and takes no authority from the one above it: the merge
+      // grant is spent, and this path could not use it if it were not.
+      //
+      // Reached on its own flag alone. It does not require `--observe`, because
+      // it asks the forge its own two questions about its own subject rather
+      // than reading the observation above — an observation looks for an *open*
+      // pull request at this head, and after a merge there is none.
+      const reconciliation =
+        options.reconcileMerge === true
+          ? await performReconciliation(options, repository.root, subject, taskLoad, {
+              // A fresh object of exactly the five named seams, not `seams`
+              // itself. See `ReconciliationCommandSeams`: a wider value is
+              // assignable to a narrower parameter type, so passing `seams`
+              // would leave the three forge-mutation runners on the value at
+              // runtime and the "it cannot reach one" claim would be about the
+              // type only.
+              runner: seams.runner,
+              envSource: seams.envSource,
+              now: seams.now,
+              checkIgnored: seams.checkIgnored,
+              git: seams.git,
+            })
+          : null;
+
       process.stdout.write(
         renderDeliveryObservation({
           repositoryId: repository.id,
@@ -681,6 +756,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           publication,
           creation,
           merge,
+          reconciliation,
         }),
       );
 
@@ -1212,6 +1288,126 @@ async function performMerge(
   });
 
   return Object.freeze({ result, pullRequestNumber, baseRef: intendedBase });
+}
+
+/**
+ * Exactly the seams a reconciliation may reach, and deliberately not one more.
+ *
+ * A narrowed type rather than `DeliveryCommandSeams`, and the call site builds a
+ * fresh object out of the named fields rather than passing the wider one along.
+ * Both halves are needed for the guarantee to be real: the type stops the
+ * function *naming* a mutation runner, and the fresh object stops one *arriving*
+ * — a wider object is assignable to a narrower parameter type, so the type alone
+ * would leave `mergeRunner` sitting on the value at runtime.
+ *
+ * This was written the lax way first, with a docblock claiming the absence was
+ * "in the parameter list". It was not: the function took the whole seam object.
+ * The claim is now true rather than softened, which is the direction this
+ * repository has learned to take when a sentence and its code disagree.
+ *
+ * The three omitted seams are the three forge mutations: `publicationRunner`
+ * pushes a Git ref, `creationRunner` opens a pull request, `mergeRunner` merges
+ * one. A fixture that stubs any of them cannot stand in for this, and this
+ * cannot reach one however the command is wired.
+ */
+interface ReconciliationCommandSeams {
+  readonly runner?: ForgeCommandRunner | undefined;
+  readonly envSource?: NodeJS.ProcessEnv | undefined;
+  readonly now?: (() => Date) | undefined;
+  readonly checkIgnored?: ((relativePath: string) => Promise<IgnoreVerdict>) | undefined;
+  readonly git?: GitRunner | undefined;
+}
+
+/**
+ * Establishes the merge of this task's delivery, and records it.
+ *
+ * Two halves, and they are reported separately because they can disagree: the
+ * forge may say the delivery is merged while the local write refuses — a
+ * receipt already there for a different merge, a runtime path Git does not
+ * ignore, a directory that cannot be made. Collapsing them into one word would
+ * lose exactly the case an operator has to act on.
+ *
+ * What it cannot do is stated by {@link ReconciliationCommandSeams} rather than
+ * here, because that is where it is enforced.
+ *
+ * It likewise takes no grant. See `deliver/reconcile-merge.ts` for why a
+ * `MergeGrant` here would be wrong three times over, and why requiring one
+ * would make the recovery case — a merge AO did not perform — impossible.
+ */
+async function performReconciliation(
+  options: DeliveryOptions,
+  repositoryRoot: string,
+  subject: ReturnType<typeof resolveObservationSubject>,
+  taskLoad: ReturnType<typeof loadTaskState>,
+  seams: ReconciliationCommandSeams,
+): Promise<ReconciliationView> {
+  const refused = (result: MergeObservationResult): ReconciliationView =>
+    Object.freeze({ result, record: null });
+
+  // The two members the ladder does not produce for itself. Their order is the
+  // order the ladder declares: a subject that does not exist is ahead of a task
+  // that is not ready, because a refusal about a subject that could not be
+  // established would be describing nothing.
+  if (!subject.ok || !taskLoad.ok) {
+    return refused(refuseMergeObservation('SUBJECT_NOT_ESTABLISHED'));
+  }
+  // The same predicate the merge path compares with, not the looser character
+  // class. A base this build would not compare by exact equality is a base it
+  // cannot decide `BASE_NOT_INTENDED` against.
+  if (!isSendableBranchName(taskLoad.state.baseBranch)) {
+    return refused(refuseMergeObservation('SUBJECT_NOT_ESTABLISHED'));
+  }
+  if (taskLoad.state.state !== 'READY_FOR_PR') {
+    return refused(refuseMergeObservation('TASK_NOT_READY'));
+  }
+
+  const now = seams.now ?? (() => new Date());
+  const result = await observeMergeForDelivery(
+    {
+      taskId: options.task,
+      host: subject.subject.host,
+      owner: subject.subject.owner,
+      name: subject.subject.name,
+      // The subject's commit is the task's `currentCommit`, resolved once at the
+      // top of the action. Taken from there rather than re-read, so the receipt
+      // and the report cannot describe two different delivery heads.
+      deliveryCommit: subject.subject.commit,
+      baseRef: taskLoad.state.baseBranch,
+    },
+    {
+      reader: seams.runner ?? createForgeCommandRunner(),
+      envSource: seams.envSource ?? process.env,
+      now,
+    },
+  );
+
+  // No merge established, no receipt. There is deliberately no arm that writes
+  // a weaker record — "the forge did not say it is merged" is not a merge with a
+  // caveat, and a file recording it would be a durable statement about a
+  // question that was never answered.
+  if (result.outcome !== 'MERGE_OBSERVED' || result.proof === null) {
+    return refused(result);
+  }
+
+  const record = await recordMergeReconciliation({
+    repositoryRoot,
+    taskId: options.task,
+    // Every expectation comes from the task and the repository's own profile,
+    // and none of it from the proof. The store compares the two; handing it the
+    // proof's own facts as the expectation would make that comparison a
+    // tautology.
+    expectedSubjectCommit: subject.subject.commit,
+    expectedHost: subject.subject.host,
+    expectedOwner: subject.subject.owner,
+    expectedName: subject.subject.name,
+    expectedBaseRef: taskLoad.state.baseBranch,
+    proof: result.proof,
+    reconciledAt: now().toISOString(),
+    checkIgnored:
+      seams.checkIgnored ?? createRuntimeIgnoreProbe(repositoryRoot, seams.git ?? runGitCommand),
+  });
+
+  return Object.freeze({ result, record });
 }
 
 /**

@@ -53,6 +53,12 @@ import {
   type MergeReading,
 } from '../deliver/pull-request-merge.js';
 import type { MergeResult } from '../deliver/merge-pull-request.js';
+import {
+  MERGE_OBSERVATION_DETAIL,
+  type MergeObservationResult,
+} from '../deliver/reconcile-merge.js';
+import { MERGE_PRESENCE_SENTENCE } from '../deliver/merge-reconciliation.js';
+import type { MergeReconciliationRecordResult } from '../deliver/merge-reconciliation-store.js';
 import type { CreationResult } from '../deliver/create-pull-request.js';
 import {
   OBSERVATION_REFUSAL_DETAIL,
@@ -214,6 +220,33 @@ export const MERGE_TRAILER =
   'nothing here changes that. Whether the merge was permitted was GitHub\'s decision and the\n' +
   'operator\'s — this build did not establish that the pull request was eligible to merge, and\n' +
   'does not claim to.';
+
+/**
+ * The trailer for the one act that changes something here and nothing there.
+ *
+ * A fourth sentence rather than a clause added to any of the others, for the
+ * reason this file already records three times over: a sentence that enumerates
+ * what did not happen has to be re-read by every slice that adds a way for it to
+ * happen, so each act speaks for itself and about nothing else.
+ *
+ * It opens "Read-only on the forge" and not "Read-only", which is the whole
+ * point of having a fourth sentence. Two of the other trailers open with the
+ * bare word, and it would be false here in the direction that matters least to
+ * an operator and most to an auditor: this run writes a file.
+ *
+ * Note what it does **not** say. It does not say the commit is on the base
+ * branch, that the merge stands, that anything was verified, or that AO
+ * performed it. {@link MERGE_PRESENCE_SENTENCE} states those four in the body of
+ * the report; this states what the run itself did.
+ */
+export const RECONCILIATION_TRAILER =
+  'Read-only on the forge, and not read-only here. The reconciliation asked github.com about\n' +
+  'the commit named above and about the one pull request that answer named, and it changed\n' +
+  'nothing there: it merged, opened, updated, closed, reopened, reviewed, commented on,\n' +
+  'labelled and reverted nothing, pushed no branch, deleted no branch and enabled no\n' +
+  'auto-merge. What it can change is one file beside the task state, and it changed at most\n' +
+  'that. It wrote no task state: this task is still READY_FOR_PR, and nothing here changes\n' +
+  'that. It started no agent, and it grants no authority to do any of the above.';
 
 /**
  * One merge reading as one phrase.
@@ -389,6 +422,29 @@ export interface DeliveryObservationView {
   /** What `--create-pr` amounted to, or `null` when it was not asked for. */
   readonly creation?: PullRequestCreationView | null;
   readonly merge?: MergeView | null;
+  /** What `--reconcile-merge` amounted to, or `null` when it was not asked for. */
+  readonly reconciliation?: ReconciliationView | null;
+}
+
+/**
+ * What a reconciliation established, and what it wrote.
+ *
+ * Two fields because they are two questions with two answers, and a run can
+ * answer the first yes and the second no: the forge may report the delivery
+ * merged while the local write refuses — a receipt already on disk naming a
+ * different merge, a runtime path Git does not ignore, a directory that cannot
+ * be created. A single word for both would hide exactly the case an operator
+ * has to act on.
+ *
+ * `record` is `null` when no write was reached at all, which is every outcome
+ * short of `MERGE_OBSERVED`. That is a different thing from a write that was
+ * reached and declined to touch the path, which is `ALREADY_RECORDED` with a
+ * `writeAttempt` of `NOT_ATTEMPTED` — and the report prints them differently.
+ */
+export interface ReconciliationView {
+  readonly result: MergeObservationResult;
+  /** The store's verdict, or `null` when the store was never reached. */
+  readonly record: MergeReconciliationRecordResult | null;
 }
 
 /**
@@ -659,6 +715,43 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     }
   }
 
+  const reconciliation = view.reconciliation ?? null;
+  if (reconciliation !== null) {
+    const r = reconciliation.result;
+    lines.push(
+      '',
+      // Two labelled lines, never one. `Merge observed` is what github.com said;
+      // `Receipt` is what this machine now holds. A single `Reconciliation: OK`
+      // would be the report claiming the two always agree, and the whole reason
+      // the view carries both fields is that they can differ.
+      `Merge observed: ${r.outcome}`,
+      `  ${MERGE_OBSERVATION_DETAIL[r.outcome]}`,
+      `  Pull request : ${
+        r.pullRequestNumber === null
+          ? 'none was addressed'
+          : `#${String(r.pullRequestNumber)}`
+      }`,
+    );
+    // The reading only when a pull request was addressed by number. Printing a
+    // reading for a refusal decided from the candidate set would read as an
+    // answer about a pull request nobody asked about.
+    if (r.reading !== null) {
+      lines.push(`  Forge        : ${describeMergeReading(r.reading)}`);
+    }
+    lines.push(
+      `  Receipt      : ${
+        reconciliation.record === null
+          ? 'not written — no merge was established to record'
+          : `${reconciliation.record.code}  (write: ${reconciliation.record.writeAttempt})`
+      }`,
+    );
+    // The sentence that keeps the event apart from every claim it is not. It is
+    // printed for every reconciliation and not only for the ones that wrote,
+    // because an operator reading `ALREADY_RECORDED` needs it just as much as
+    // one reading `RECORDED`.
+    lines.push('', MERGE_PRESENCE_SENTENCE);
+  }
+
   // Derived from what happened, not from which flags were passed — and from
   // whether the act was *attempted*, not from whether it read anything. A
   // review found the previous rule printing "Not read-only." over runs that
@@ -678,6 +771,12 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   const contactedByPublication = publication?.result.before != null;
   const contactedByCreation = creation?.result.remoteHead != null;
   const contactedByMerge = merge?.result.before != null;
+  // Read from the ladder's own flag rather than derived from its fields. A
+  // locator read that refused leaves the number and the reading `null` while a
+  // process really ran, and a subject this build will not address refuses before
+  // any process exists — the two are indistinguishable from the fields and are
+  // opposite answers to this question.
+  const contactedByReconciliation = reconciliation?.result.contacted === true;
   // One sentence per act, and the observation disclosure once, above them.
   //
   // The first version of this printed only the publication trailer, which
@@ -695,7 +794,8 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
       view.observation !== null ||
       contactedByPublication ||
       contactedByCreation ||
-      contactedByMerge;
+      contactedByMerge ||
+      contactedByReconciliation;
     trailers.push(contacted ? CONTACTED_TRAILER : NOT_CONTACTED_TRAILER);
   } else {
     if (view.observation !== null) trailers.push(OBSERVED_AND_CHANGED_TRAILER, '');
@@ -705,6 +805,13 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     if (creationAttempted && mergeAttempted) trailers.push('');
     if (mergeAttempted) trailers.push(MERGE_TRAILER);
   }
+  // Appended to whichever branch ran, rather than placed inside one, because a
+  // reconciliation is orthogonal to both: it never attempts a forge mutation, so
+  // it cannot select the "not read-only" branch, and it writes locally, so the
+  // read-only branch's sentences do not cover it. It is asked for on its own
+  // flag and it speaks for itself — the discipline the publication, creation and
+  // merge trailers each record having learned the hard way.
+  if (reconciliation !== null) trailers.push('', RECONCILIATION_TRAILER);
   lines.push('', ...trailers, '');
 
   return lines.join('\n');

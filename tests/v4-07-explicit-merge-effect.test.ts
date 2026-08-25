@@ -1585,8 +1585,16 @@ describe('the delivery command merges only when asked, and only when it may', ()
     const longs = (delivery?.options ?? []).map((o) => o.long ?? '').sort();
     // Enumerated. This is what replaced the `merge` entry in the sibling files'
     // word ban: a NEW mutation flag cannot arrive unnamed, whatever it is
-    // called. (An earlier comment said "a sixth", which counted nothing — nine
+    // called. (An earlier comment said "a sixth", which counted nothing — ten
     // options are registered and three of them are forge mutations.)
+    //
+    // V4 slice 8 added `--reconcile-merge`, and this pin is what made it be
+    // declared rather than slipped in. It is deliberately NOT a fourth forge
+    // mutation: it reads github.com and writes one local file, so the count of
+    // mutations above is still three. The two counts are stated separately for
+    // that reason — a flag arriving here is not evidence about what it does,
+    // which is why the effect-boundary cases in `tests/v4-08-…` measure that
+    // separately rather than inferring it from this list.
     expect(longs).toEqual(
       [
         '--attended',
@@ -1595,6 +1603,7 @@ describe('the delivery command merges only when asked, and only when it may', ()
         '--merge-pr',
         '--observe',
         '--publish-head',
+        '--reconcile-merge',
         '--record',
         '--repository',
         '--task',
