@@ -76,6 +76,7 @@ import {
   deriveVerificationWorkspaceIdentity,
   removeVerificationWorkspace,
   workspaceIsGone,
+  type VerificationWorkspaceCreationCode,
   type VerificationWorkspaceRemovalCode,
 } from '../worktree/verification-workspace.js';
 import { loadMergeReconciliation } from './merge-reconciliation-store.js';
@@ -196,10 +197,16 @@ export const MERGE_VERIFICATIONS = [
    * operator sentence here asserted absence, and a review measured it as saying
    * more than the probe establishes.
    *
-   * This build does **not** fetch it. See the module note in the command: a
-   * network fetch is a new egress surface with its own authority question, and
-   * the smallest honest answer here is to say the object is absent rather than
-   * to reach for it. `git fetch` in the repository, then run this again.
+   * This build does **not** go and get it. A network fetch is a new egress
+   * surface with its own authority question, and the smallest honest answer
+   * here is to stop and say the object could not be confirmed rather than to
+   * reach for it. `git fetch` in the repository, then run this again.
+   *
+   * The previous sentence said "the smallest honest answer here is to say the
+   * object is absent" — eight lines below the paragraph explaining that this
+   * build deliberately does not say that. A review found the two halves of one
+   * docblock contradicting each other, which is what a correction applied to
+   * one half looks like.
    */
   'MERGE_COMMIT_UNAVAILABLE',
   /**
@@ -296,6 +303,17 @@ export interface MergeVerificationResult {
    * would leave them to find it.
    */
   readonly workspaceRemoval: VerificationWorkspaceRemovalCode | null;
+  /**
+   * Why an isolated workspace could not be established, or `null`.
+   *
+   * Carried because the operator documentation says it is. README and the ADR
+   * both tell a reader that something already at the derived path "is reported
+   * as `WORKSPACE_PATH_OCCUPIED` and left alone", and a review measured that
+   * this result had no field for it: every creation failure collapsed into one
+   * ladder member and the code was discarded. "Could not make a workspace" and
+   * "something of yours is already there" send an operator to different places.
+   */
+  readonly workspaceFailure: VerificationWorkspaceCreationCode | null;
 }
 
 function outcome(
@@ -305,6 +323,7 @@ function outcome(
   report: VerificationReport | null = null,
   proof: PostMergeVerificationProof | null = null,
   workspaceRemoval: VerificationWorkspaceRemovalCode | null = null,
+  workspaceFailure: VerificationWorkspaceCreationCode | null = null,
 ): MergeVerificationResult {
   return Object.freeze({
     outcome: code,
@@ -313,6 +332,7 @@ function outcome(
     report,
     proof,
     workspaceRemoval,
+    workspaceFailure,
   });
 }
 
@@ -320,16 +340,30 @@ function outcome(
  * The refusal shape for the two members the caller owns.
  *
  * Exported so the two members the ladder cannot produce for itself have one
- * spelling. It is **not** the only place a `MergeVerificationResult` is built
- * outside this module — `delivery-command.ts` builds one for a lease it could
- * not take, because that refusal is the command's own and this module has no
- * member for it. An earlier version of this sentence claimed otherwise and a
- * review measured it false.
+ * spelling, and so this module is the only place a `MergeVerificationResult` is
+ * built at all. Two places that construct one type is two places that can
+ * disagree about which fields a refusal carries — which is exactly what
+ * happened: the command grew its own literal for a lease it could not take, and
+ * then did not gain the field this result grew afterwards.
+ * {@link refuseMergeVerificationUnleased} is that one, moved here.
  */
 export function refuseMergeVerification(
   code: Extract<MergeVerificationOutcome, 'SUBJECT_NOT_ESTABLISHED' | 'TASK_NOT_READY'>,
 ): MergeVerificationResult {
   return outcome(code);
+}
+
+/**
+ * The refusal for a run that never became this repository's writer.
+ *
+ * Built here rather than in the command, so that every `MergeVerificationResult`
+ * with a `WORKSPACE_NOT_ESTABLISHED` outcome comes from one place and cannot
+ * disagree with another about which fields a refusal carries. A review found
+ * the command constructing this shape by hand while this module's own docblock
+ * claimed it did not.
+ */
+export function refuseMergeVerificationUnleased(): MergeVerificationResult {
+  return outcome('WORKSPACE_NOT_ESTABLISHED');
 }
 
 /**
@@ -444,7 +478,10 @@ export async function verifyMergeForDelivery(
       profileDigest,
       null,
       null,
+      // Every arm past `worktree add` undoes itself now, so `residue` means a
+      // removal was attempted and did not clear a worktree Git had registered.
       created.residue ? 'REMOVAL_FAILED' : null,
+      created.code,
     );
   }
 
@@ -478,9 +515,15 @@ export async function verifyMergeForDelivery(
   // ── 7. The canonical gate, in that directory and no other ────────────────
   //
   // `runVerification` is the repository's declared phase list, run in order,
-  // once, with no retry. The path it is given is the workspace's own canonical
-  // spelling, taken from the proof above rather than from anything this
-  // function assembled.
+  // once, with no retry.
+  //
+  // The path is the canonical spelling from the **creation** proof, not from
+  // step 6's — an earlier comment said "the proof above", which reads as the
+  // one immediately preceding it. They denote the same directory: step 6 runs
+  // Git *inside* the derived path and its first probe refuses unless Git's own
+  // `--show-toplevel` agrees with it, so a directory that answered step 6 is
+  // the directory this path names. What matters for the gate is that neither
+  // spelling was assembled by this function.
   const report = await runVerification(
     { worktreePath: created.workspace.workspacePath, verification: repo.verification },
     { verify: seams.verify },

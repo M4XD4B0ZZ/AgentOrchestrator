@@ -59,6 +59,8 @@ import {
 } from '../deliver/reconcile-merge.js';
 import { MERGE_PRESENCE_SENTENCE } from '../deliver/merge-reconciliation.js';
 import type { MergeReconciliationRecordResult } from '../deliver/merge-reconciliation-store.js';
+import { renderLeaseRelease } from './render-lease.js';
+import type { LeaseReleaseResult } from '../lease/execution-lease.js';
 import { VERIFICATION_EVENT_SENTENCE } from '../deliver/post-merge-verification.js';
 import type { PostMergeVerificationRecordResult } from '../deliver/post-merge-verification-store.js';
 import { postMergeVerificationFactsOf } from '../deliver/post-merge-verification-proof.js';
@@ -294,6 +296,33 @@ export const RECONCILIATION_TRAILER =
   'no agent, and it grants no authority to do any of the above.';
 
 /**
+ * What a verification run is answerable for, and the one thing it is not.
+ *
+ * The only act on this command that starts a process **the repository chose**,
+ * so it is the only trailer that has to disclose a boundary rather than a list
+ * of things not done. What `npm run verify` — or whatever a profile declares —
+ * does once it is running is that repository's business; this build states the
+ * fence it is run behind and stops.
+ *
+ * It exists because a review found a `--verify-merge` run closing with
+ * "Read-only. No forge was contacted, no task state was written, and nothing was
+ * delivered." after taking the repository's lease, creating and destroying a
+ * checkout, running the declared commands and writing a record. The trailer
+ * block had no term for verification at all.
+ */
+export const VERIFICATION_TRAILER =
+  'Read-only on the forge, and emphatically not read-only here. Verification contacted\n' +
+  'github.com not at all. On this machine it took this repository\'s execution lease and gave\n' +
+  'it back — the Lease line says how — and it can create and remove one detached checkout in\n' +
+  'a directory beside the repository, and write one verification record beside the task\n' +
+  'state. The Verification and Record lines above say what this run did. Your own working\n' +
+  'tree is not touched. It writes no task state and no block-ledger entry, so the task is in\n' +
+  'exactly the state it was in before this run, and it starts no agent and reverts nothing\n' +
+  'whatever the result was. What it does start is the commands this repository\'s own profile\n' +
+  'declares: what those do, and whether they reach a network, is the profile\'s to answer for\n' +
+  'and not this build\'s.';
+
+/**
  * One merge reading as one phrase.
  *
  * `MERGED` prints the resulting commit, because the whole ladder turns on
@@ -490,15 +519,25 @@ export interface VerificationView {
   /** The store's verdict, or `null` when the store was never reached. */
   readonly record: PostMergeVerificationRecordResult | null;
   /**
-   * How the execution lease was given back, or `null` when no release outcome
-   * was observed — which includes every refusal that never took one.
+   * Whether this invocation took the repository's execution lease at all.
+   *
+   * Separate from {@link leaseRelease}, and both are needed. `null` release on
+   * a run that never took a lease means "nothing to report"; `null` on a run
+   * that did means "the release threw and this invocation does not know what is
+   * in the repository" — and those must not print the same, which is the
+   * confusion `render-lease.ts` introduced `LEASE_RELEASE_UNREPORTED` for.
+   */
+  readonly leaseTaken: boolean;
+  /**
+   * The whole release result, not just its code.
    *
    * Carried because a lease that was not handed back is the one thing on this
-   * path an operator has to act on, and it used to be discarded: the release
-   * result was a bare expression, so a quarantined or unowned lease was
-   * invisible in the report and in the exit code alike.
+   * path an operator has to act on. It was a bare expression once — a
+   * quarantined or unowned lease was invisible in the report and in the exit
+   * code alike — and then briefly only `.code`, which dropped the detail that
+   * distinguishes a quarantined record from a plain refusal.
    */
-  readonly leaseRelease: string | null;
+  readonly leaseRelease: LeaseReleaseResult | null;
 }
 
 /**
@@ -850,6 +889,13 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
       `  Merge commit : ${v.mergeCommit ?? 'none was established'}`,
       `  Profile      : ${v.profileDigest ?? 'not resolved'}`,
     );
+    // Why no workspace, where there is a reason. The ladder has one member for
+    // every way a checkout could not be established, and collapsing them cost
+    // an operator the difference between "something of yours is already there"
+    // and "Git would not make one" — which send them to different places.
+    if (v.workspaceFailure !== null) {
+      lines.push(`  Workspace    : ${v.workspaceFailure}`);
+    }
     // The gate's own verdict, only where a gate ran. Printing a verdict for a
     // refusal decided before the workspace existed would read as an answer
     // about a commit nothing was run against.
@@ -876,24 +922,31 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     );
     // Residue is the operator's problem and is never folded into the verdict.
     if (verificationWorkspaceResidue(v.workspaceRemoval)) {
+      // The suffix is deliberately about what is UNKNOWN rather than about what
+      // is there. `NOTHING_REGISTERED` means Git does not register the derived
+      // path, which says nothing about whether a directory is sitting on it —
+      // `workspaceIsGone` refuses to call that gone for exactly that reason, and
+      // an earlier version of this line asserted "a checkout is left on disk"
+      // for it.
       lines.push(
-        `  Workspace    : NOT REMOVED (${v.workspaceRemoval ?? 'unknown'}) — a checkout is left on disk`,
+        `  Workspace    : NOT REMOVED (${v.workspaceRemoval ?? 'unknown'}) — this run did not clear it`,
       );
     } else if (v.workspaceRemoval === 'REMOVED_FORCED') {
       lines.push(
         '  Workspace    : removed, but only with --force — the gate dirtied the tree it ran in',
       );
     }
-    // The repository is handed back, or the operator is told it was not.
+    // The repository is handed back, or the operator is told what happened
+    // instead — through the **same renderer** the other two lease-taking
+    // commands use, rather than a wording invented here.
     //
-    // Printed only when something went wrong. A clean release is the ordinary
-    // case and a line for it would be noise; `null` means no release outcome
-    // was observed at all, which on this path is every refusal that never took
-    // a lease — and claiming a release there would be worse than saying
-    // nothing.
-    const release = verification.leaseRelease;
-    if (release !== null && release !== 'RELEASED') {
-      lines.push(`  Lease        : NOT RELEASED (${release}) — the repository is still claimed`);
+    // Printed on every run that took a lease, including the clean ones. An
+    // earlier version printed only failures, which made "the release was fine"
+    // and "the release threw and this invocation does not know" identical from
+    // the console; `render-lease.ts` records that as the one thing such a report
+    // may never be, and `renderLeaseRelease` is what it added to prevent it.
+    if (verification.leaseTaken) {
+      lines.push(renderLeaseRelease('Lease', verification.leaseRelease).replace(/\n+$/, ''));
     }
     // The sentence that keeps the event apart from every standing it is not.
     //
@@ -958,6 +1011,13 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   // stays. `=== 'COMPLETED'` described such a run as read-only.
   const reconciliationTouchedDisk =
     reconciliation?.record != null && reconciliation.record.writeAttempt !== 'NOT_ATTEMPTED';
+  // Whether this run changed anything **on this machine** through verification.
+  //
+  // The predicate is the lease, not the record. A run that took the lease has
+  // already written and removed a lease document, and may have made and removed
+  // a checkout, whatever its verdict came to — so every one of those runs owes
+  // the disclosure below, including the ones that recorded nothing.
+  const verificationTouchedMachine = view.verification?.leaseTaken === true;
   const trailers: string[] = [];
   if (
     !publicationAttempted &&
@@ -976,16 +1036,26 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     // reading — so there is deliberately no arm inventing a sentence for it.
     if (contactedByReconciliation) trailers.push(OBSERVED_AND_CHANGED_TRAILER);
   } else if (!publicationAttempted && !creationAttempted && !mergeAttempted) {
-    // Nothing was attempted, so the run was read-only whatever it looked at.
-    // Which of the two read-only sentences applies is still decided by whether
-    // anything was contacted, by any path.
+    // Nothing was attempted on a forge, so the run changed nothing *there*
+    // whatever it looked at. Which of the two read-only sentences applies is
+    // still decided by whether anything was contacted, by any path.
     const contacted =
       view.observation !== null ||
       contactedByPublication ||
       contactedByCreation ||
       contactedByMerge ||
       contactedByReconciliation;
-    trailers.push(contacted ? CONTACTED_TRAILER : NOT_CONTACTED_TRAILER);
+    // …but "read-only" is a claim about this machine too, and a verification
+    // run is not read-only on it: it takes the execution lease, makes and
+    // destroys a checkout, and starts the repository's own commands. A review
+    // found `delivery --verify-merge` closing with "Read-only. No forge was
+    // contacted, no task state was written, and nothing was delivered." after
+    // doing all three, because this block had no term for verification at all.
+    if (!verificationTouchedMachine) {
+      trailers.push(contacted ? CONTACTED_TRAILER : NOT_CONTACTED_TRAILER);
+    } else if (contacted) {
+      trailers.push(OBSERVED_AND_CHANGED_TRAILER);
+    }
   } else {
     // The egress disclosure is owed whenever the GitHub CLI ran, and until this
     // slice `view.observation !== null` was the whole of that: the three acts
@@ -1019,6 +1089,14 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   if (reconciliation !== null) {
     if (trailers.length > 0) trailers.push('');
     trailers.push(RECONCILIATION_TRAILER);
+  }
+  // The same discipline, one flag later, and for a stronger reason: this is the
+  // only act on this command that starts a process the repository chose, so it
+  // is the only one whose disclosure has to say what this build does *not*
+  // answer for.
+  if (verificationTouchedMachine) {
+    if (trailers.length > 0) trailers.push('');
+    trailers.push(VERIFICATION_TRAILER);
   }
   lines.push('', ...trailers, '');
 

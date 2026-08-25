@@ -9556,9 +9556,10 @@ merged, `refs/pull/63/merge` stopped resolving, so S cannot even be fetched back
 The general rule the code depends on: **`head_sha` is what a forge attached to a
 run, and nothing AO reads reports what a runner checked out.** So this build runs
 the gate itself. The verification modules read no check state at all, and a test
-asserts they contain no `statusCheckRollup`, `check-runs`, `workflow`,
-`conclusion` or `head_sha` — with a length control so an emptied file cannot pass
-by silence.
+asserts their **code** contains no `statusCheckRollup`, `check-runs`,
+`workflow`, `conclusion` or `head_sha` — the scan strips comments first, which is
+what lets the measurement above be written down inside those files. A length
+control stops an emptied file passing by silence.
 
 ### The subject cannot be substituted
 

@@ -168,7 +168,16 @@ export interface PostMergeVerificationFacts {
   readonly outcome: PostMergeVerificationOutcome;
   /** The phase that failed or could not be run, or `null` on a pass. */
   readonly stoppedAt: string | null;
-  /** The stopping phase's exit code, or `null` when no process completed. */
+  /**
+   * The stopping phase's exit code, and `null` whenever there is no stopping
+   * phase to have one.
+   *
+   * `null` on **every pass** — a run that stopped nowhere has no stopping phase
+   * — and on a non-pass whose phase never reached its own end. The reading a
+   * durable-record reader would otherwise take, "null means nothing
+   * completed", is therefore false of the commonest case; the outcome is what
+   * says whether anything ran, and this field only qualifies it.
+   */
   readonly exitCode: number | null;
   /** The signal that killed the stopping phase, when one did. */
   readonly signal: string | null;

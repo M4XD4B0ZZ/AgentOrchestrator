@@ -73,8 +73,9 @@ Two consequences are written into the code rather than into this document:
 - `deliver/verify-merge.ts` runs the gate itself and reads no check state. A
   test asserts that it, and every module beside it, contains none of
   `statusCheckRollup`, `check-runs`, `workflow`, `conclusion`, `head_sha` or a
-  forge runner type — with a positive control on file length so an emptied file
-  cannot pass by silence;
+  forge runner type **in its code** — the scan strips comments first, which is
+  what lets this document's own measurement be quoted inside those files. A
+  positive control on file length stops an emptied file passing by silence;
 - the proof artefact cannot be minted unless the **proved workspace HEAD equals
   the commit being attested**, so a verdict produced anywhere else has no
   representation.
@@ -339,8 +340,9 @@ There is no `git fetch` anywhere in `src/` today. Introducing the first one woul
 be a new network egress surface with its own authority question — this command
 already has an explicit gate saying that contacting a forge is never implicit —
 and it is a slice of its own rather than a step inside this one. The smallest
-honest answer is to say the object is absent. The operator fetches and runs
-again.
+honest answer is to stop and say the object could not be confirmed — not that it
+is absent, which is more than the probe establishes and is what `L-V4-09-11`
+records. The operator fetches and runs again.
 
 What it must never do, and does not: substitute `origin/main`, the latest remote
 head, or anything else for the object it was asked about.
@@ -417,6 +419,12 @@ measurement of the CI model above is a read.
 - **L-V4-09-6** — `ATTEMPT_HISTORY_FULL` is terminal for a task. There is no
   archive and no rotation.
 - **L-V4-09-7** — no live product dogfood was possible; see above.
+- **L-V4-09-8 — the exit code does not report the verification verdict.** It is
+  computed from the observation conclusion, so a `VERIFIED_FAIL`, a refused
+  write and a leaked workspace are none of them visible in `$?`. The one thing
+  that *can* override it is the execution lease, under the repository-wide rule
+  in `run-exit-codes.ts`. This entry was missing from this list while
+  `README.md` carried it — a numbering gap a review found.
 - **L-V4-09-9 — on Windows a verification killed from outside is recorded as
   `VERIFIED_FAIL`.** The classification follows `runVerification` exactly, and
   that reaches `UNAVAILABLE` for a termination only when the runner reports a

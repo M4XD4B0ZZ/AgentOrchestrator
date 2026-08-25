@@ -204,7 +204,15 @@ export const VERIFICATION_WORKSPACE_CREATION_CODES = [
   'WORKSPACE_PATH_OCCUPIED',
   /** The parent directory could not be created. */
   'WORKSPACE_PARENT_UNUSABLE',
-  /** `git worktree add` did not succeed. Git leaves nothing behind when it refuses. */
+  /**
+   * `git worktree add` did not succeed.
+   *
+   * Deliberately says nothing about what is left behind. Measured: Git can exit
+   * non-zero **after** it has created, checked out and registered the worktree —
+   * a failing `post-checkout` hook is enough — so "Git leaves nothing behind
+   * when it refuses", which this comment used to say, is false. The arm undoes
+   * itself and reports what that removal found, in `residue`.
+   */
   'WORKSPACE_CREATE_FAILED',
   /**
    * The workspace was created and is not what was asked for. Includes a HEAD
@@ -245,11 +253,18 @@ export interface VerificationWorkspaceCreationFailure {
   readonly ok: false;
   readonly code: Exclude<VerificationWorkspaceCreationCode, 'WORKSPACE_READY'>;
   /**
-   * Whether anything was created before the failure.
+   * Whether a checkout of **this call's** making is still on disk.
    *
-   * `false` for every refusal that never reached `worktree add`, and for a
-   * `worktree add` Git itself declined. `true` only when a workspace was made
-   * and its removal did not complete — the one case an operator has to act on.
+   * `false` for every refusal that never reached `worktree add`. Past that
+   * point it is derived from an attempted removal rather than from the exit
+   * status or from the filesystem: every arm that got as far as spawning
+   * `worktree add` undoes itself, and this is `true` only when that removal did
+   * not clear a worktree Git had registered — the one case an operator has to
+   * act on.
+   *
+   * It is deliberately not `pathExists`. A competitor's plain directory at the
+   * derived path makes that true while this call created nothing, and reporting
+   * it as residue would send an operator after somebody else's leftovers.
    */
   readonly residue: boolean;
 }
@@ -466,17 +481,29 @@ export async function createVerificationWorkspace(
     commit,
   ]);
   if (created.outcome !== 'OK') {
-    // Includes every lost race and every unavailable object: a competitor that
-    // took the path between the check above and here makes Git refuse, and a
-    // Git that *refuses* leaves nothing behind.
+    // A failed `worktree add` is **not** the same as one that left nothing
+    // behind, and two earlier versions of this arm assumed it was.
     //
-    // A Git that was **killed** is a different case, and the residue is read
-    // rather than assumed. `git-command.ts` maps a timeout or an outside kill
-    // to `UNAVAILABLE`, and a terminated process never runs its own junk
-    // cleanup — so the directory can be there. An earlier version returned
-    // `residue: false` for every non-OK outcome, which told an operator nothing
-    // was left in exactly the case something was.
-    return creationFailure('WORKSPACE_CREATE_FAILED', pathExists(identity.workspacePath));
+    // The first returned `residue: false` unconditionally, on the stated ground
+    // that "Git leaves nothing behind when it refuses". The second read
+    // `pathExists`, which is worse in the other direction: a competitor's plain
+    // directory at the path makes it `true` although this call created nothing.
+    //
+    // Both were measured false. A review reproduced `git worktree add --detach`
+    // exiting non-zero **after** it had created, checked out and REGISTERED the
+    // worktree — a `post-checkout` hook that fails is enough — and neither
+    // version cleaned it up. That registration then survives, and every later
+    // run for this task dies at the `pathExists` gate above with
+    // `WORKSPACE_PATH_OCCUPIED`, which this module declares terminal. One
+    // partially-failed creation permanently disabled verification for a task.
+    //
+    // So this arm undoes itself, exactly as the `WORKSPACE_NOT_AS_REQUESTED`
+    // arm below does, through the same owned removal with the same three-part
+    // proof. `NOTHING_REGISTERED` is the answer when Git registered nothing —
+    // whatever is at the path is not ours and is not this call's residue.
+    const undone = await removeVerificationWorkspace(repository, taskId, options);
+    const leaked = !workspaceIsGone(undone.code) && undone.code !== 'NOTHING_REGISTERED';
+    return creationFailure('WORKSPACE_CREATE_FAILED', leaked);
   }
 
   const proved = await proveVerificationWorkspaceAt(git, identity, commit);
@@ -636,14 +663,24 @@ export async function removeVerificationWorkspace(
   if (!derived.ok) return Object.freeze({ code: 'IDENTITY_UNDERIVABLE' as const });
   const identity = derived.identity;
 
-  // Ownership first, then the lease **immediately before the spawn**.
+  // The lease is read **twice**, and both readings earn their place.
   //
-  // The order is the correction a review measured. It used to read the lease
-  // first and then spend a whole `git worktree list` subprocess — tens to
-  // hundreds of milliseconds on Windows — before the destructive command, which
-  // is precisely the distance this module elsewhere argues is unacceptable. The
-  // lease read is a file read; putting it last costs nothing and puts the gate
-  // at the effect.
+  // The second one is the gate: it sits immediately before the spawn, because a
+  // proof taken before a `git worktree list` subprocess — tens to hundreds of
+  // milliseconds on Windows — is a proof about a moment that has passed, which
+  // is the distance this module argues against everywhere else. A round of
+  // review moved it there, correctly.
+  //
+  // The first one is the *classification*, and a second round measured why it
+  // has to come back. In production the seam is `leasedGit`, which proves the
+  // lease per call: a run that has already lost it gets `GIT_NOT_AUTHORISED`
+  // from `worktree list`, `listWorktrees` folds every non-OK outcome into
+  // `{ok: false}`, and the operator is told `REGISTRY_UNREADABLE` — "the
+  // registry could not be read" — for what is actually "this run is no longer
+  // the writer". Asking first costs one file read and gives the true answer.
+  if (!leaseHeld(repository, options.lease)) {
+    return Object.freeze({ code: 'EXECUTION_LEASE_NOT_HELD' as const });
+  }
   const refusal = await proveOwnedForRemoval(git, identity);
   if (refusal !== null) return Object.freeze({ code: refusal });
   if (!leaseHeld(repository, options.lease)) {

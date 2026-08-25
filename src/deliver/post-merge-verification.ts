@@ -403,14 +403,16 @@ export function readPostMergeVerification(
     return Object.freeze({ reading: 'NOT_THIS_TASK' as const, record: null });
   }
 
-  // Belt and braces against the binding above, and stated as exactly that.
-  // `postMergeVerificationBinding` takes the subject's `taskId` and
-  // `repositoryRoot` as inputs alongside the payload's, so a record bound for
-  // another task fails the digest comparison above and never reaches here.
-  // These two lines are what would keep a foreign record out if that input list
-  // ever stopped covering the subject — which is the kind of thing a refactor
-  // edits. Their honest status is "unreachable today, load-bearing if the
-  // comparison above changes".
+  // Belt and braces against the binding above — and, unlike the sibling pair
+  // in `merge-reconciliation.ts`, these two are **reachable**, which is stated
+  // here because an earlier version of this comment copied that file's
+  // "unreachable today" and a review measured it false.
+  //
+  // The digest takes the subject's ids alongside the payload's, so a record
+  // bound for a *different* subject fails one line up. But a record whose
+  // payload names another task, with a binding computed for THAT payload
+  // against THIS subject, matches the digest and arrives here — and these two
+  // lines are what refuse it. The test file constructs exactly that document.
   if (record.taskId !== subject.taskId) {
     return Object.freeze({ reading: 'NOT_THIS_TASK' as const, record: null });
   }

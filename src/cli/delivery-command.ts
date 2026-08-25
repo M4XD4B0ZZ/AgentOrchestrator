@@ -133,6 +133,7 @@ import {
 import {
   verifyMergeForDelivery,
   refuseMergeVerification,
+  refuseMergeVerificationUnleased,
   type MergeVerificationResult,
 } from '../deliver/verify-merge.js';
 import {
@@ -142,7 +143,7 @@ import {
 import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
-  type LeaseReleaseCode,
+  type LeaseReleaseResult,
 } from '../lease/execution-lease.js';
 import { leasedGit, leasedVerify } from '../loop/leased-spawns.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
@@ -166,9 +167,11 @@ import {
   type VerificationView,
 } from './render-delivery-observation.js';
 import {
+  exitCodeWithLeaseRelease,
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_OK,
   EXIT_RUN_REFUSED,
+  type CliExitCode,
 } from './run-exit-codes.js';
 
 interface DeliveryOptions {
@@ -513,7 +516,8 @@ export const VERIFY_MERGE_OPTION_DESCRIPTION =
   'the base branch, and never from whatever that branch has since become. Requires a receipt ' +
   '— run --reconcile-merge first — whose recorded head is still this task\'s current commit. ' +
   'It takes this repository\'s execution lease, because it creates and destroys a detached ' +
-  'checkout here; this act contacts no network of its own, and it will not fetch a merge ' +
+  'checkout here; this act opens no network connection of its own — though the commands it ' +
+  'starts are this repository\'s and may do anything they like — and it will not fetch a merge ' +
   'commit this repository does not already have. The checkout is made in a directory beside ' +
   'the repository, proved to be at exactly that commit before anything runs, and removed ' +
   'afterwards — and if that removal is refused you are told rather than left to find the ' +
@@ -559,11 +563,13 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'that this task\'s delivery was merged and stores that one event beside the task state, ' +
   'changing nothing on the forge. With --verify-merge it runs this repository\'s own declared ' +
   'verification commands against the exact merge commit that receipt names, in a detached ' +
-  'checkout beside the repository, and stores the result beside the task state — contacting no ' +
-  'network at all. Contacting a forge is never implicit: with no flag that says ' +
+  'checkout beside the repository, and stores the result beside the task state. It contacts no ' +
+  'forge and opens no network connection of its own; the commands it starts are the ' +
+  "repository's, and what those do is the profile's to answer for. " +
+  'Contacting a forge is never implicit: with no flag that says ' +
   'it contacts github.com, nothing is read from a network. It writes no task state, and every ' +
   'flag here that writes a record — --record, --reconcile-merge and --verify-merge — writes ' +
-  'exactly one beside the task; nothing else here writes anything. It never updates, closes, ' +
+  'exactly one beside the task; no other flag here writes a record. It never updates, closes, ' +
   'reopens, reviews, comments on or labels a pull request, and never enables an auto-merge.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
@@ -889,7 +895,26 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       // status would have been handed the machine-consumable merge signal this
       // slice exists to not give. The decision is in the report, where a person
       // reads the sentence that comes with it.
-      process.exitCode = exitCodeFor(conclusion);
+      //
+      // The one thing that CAN override it is the execution lease, and that is
+      // a rule about authority rather than about severity.
+      // `run-exit-codes.ts` states it for this repository — "an invocation that
+      // took this repository's only writer slot and cannot prove it gave the
+      // slot back has left something behind, and it may not exit nominal
+      // however well its own work went", and "**No primary code is exempt**" —
+      // and `block --attended` and `release --attended` both apply it.
+      // `--verify-merge` is the third path that takes a lease, and a review
+      // found it exiting 0 with a stuck one. It applies the same rule now.
+      //
+      // Gated on `leaseTaken` rather than on the flag: a run that asked for
+      // verification and could not acquire the lease took no slot, and owes
+      // nothing back. `exitCodeWithLeaseRelease(primary, null)` would refuse it,
+      // which would be punishing a run for a lease it never held.
+      const verdict = exitCodeFor(conclusion);
+      process.exitCode =
+        verification !== null && verification.leaseTaken
+          ? exitCodeWithLeaseRelease(verdict, verification.leaseRelease)
+          : verdict;
     });
 }
 
@@ -1596,7 +1621,7 @@ async function performVerification(
   // Captured by the `finally` below and read after it, so the report can say
   // whether the repository was handed back. `null` means no release outcome was
   // observed at all, which is not the same as a clean one.
-  let leaseRelease: LeaseReleaseCode | null = null;
+  let leaseRelease: LeaseReleaseResult | null = null;
   // What the verification itself came to, kept apart from what the release came
   // to. The view is assembled **after** the `finally` has run, because a
   // `return` inside the `try` evaluates its expression before the `finally`
@@ -1604,7 +1629,7 @@ async function performVerification(
   // started with rather than the one it ended with, which is `null` every time.
   let settled: { result: MergeVerificationResult; record: PostMergeVerificationRecordResult | null } | null = null;
   const refused = (result: MergeVerificationResult): VerificationView =>
-    Object.freeze({ result, record: null, leaseRelease: null });
+    Object.freeze({ result, record: null, leaseTaken: false, leaseRelease: null });
 
   // The two members the ladder does not produce for itself, in the order it
   // declares them: a subject that could not be established is ahead of a task
@@ -1708,7 +1733,7 @@ async function performVerification(
     // act on, so it is reported. It does not change the verification result —
     // the gate ran or it did not, and the release is a different fact.
     try {
-      leaseRelease = releaseRepositoryExecutionLease(acquired.evidence).code;
+      leaseRelease = releaseRepositoryExecutionLease(acquired.evidence);
     } catch {
       // `releaseRepositoryExecutionLease` refuses rather than throws for every
       // value that is not evidence, so this arm is not the ordinary path. It is
@@ -1722,27 +1747,19 @@ async function performVerification(
   // chosen rather than asserted — if an edit ever does make it reachable, a
   // refusal is the right thing for this command to volunteer about a path that
   // returned nothing.
-  if (settled === null) return refused(refuseMergeVerificationUnleased());
-  return Object.freeze({ result: settled.result, record: settled.record, leaseRelease });
-}
-
-/**
- * The refusal for a run that never became this repository's writer.
- *
- * Its own function so the mapping is stated once. `WORKSPACE_NOT_ESTABLISHED`
- * is the right member because it is the truthful one: no checkout was made and
- * no process was started, so nothing was learned about the commit. Reporting a
- * lease refusal as any kind of verification result would be the infrastructure
- * failure masquerading as a code verdict that this slice exists to prevent.
- */
-function refuseMergeVerificationUnleased(): MergeVerificationResult {
+  if (settled === null) {
+    return Object.freeze({
+      result: refuseMergeVerificationUnleased(),
+      record: null,
+      leaseTaken: true,
+      leaseRelease,
+    });
+  }
   return Object.freeze({
-    outcome: 'WORKSPACE_NOT_ESTABLISHED' as const,
-    mergeCommit: null,
-    profileDigest: null,
-    report: null,
-    proof: null,
-    workspaceRemoval: null,
+    result: settled.result,
+    record: settled.record,
+    leaseTaken: true,
+    leaseRelease,
   });
 }
 
@@ -1927,7 +1944,7 @@ async function performRecording(inputs: RecordingInputs): Promise<RecordingResul
  * a successfully obtained fact teaches a caller to retry a question that has
  * already been settled.
  */
-export function exitCodeFor(conclusion: ReturnType<typeof concludeObservation>): number {
+export function exitCodeFor(conclusion: ReturnType<typeof concludeObservation>): CliExitCode {
   if (conclusion === 'SUBJECT_NOT_ESTABLISHED') return EXIT_RUN_INPUT_UNUSABLE;
   if (conclusion === 'OBSERVATION_INCOMPLETE') return EXIT_RUN_REFUSED;
   // Exhaustive rather than a trailing `return`. A fifth conclusion would

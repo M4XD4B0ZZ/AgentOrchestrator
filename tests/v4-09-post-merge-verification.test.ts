@@ -81,6 +81,10 @@ import {
 } from '../src/worktree/verification-workspace.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
 import {
+  NOT_CONTACTED_TRAILER,
+  VERIFICATION_TRAILER,
+} from '../src/cli/render-delivery-observation.js';
+import {
   registerDeliveryCommand,
   ATTENDED_OPTION_DESCRIPTION,
   DELIVERY_COMMAND_DESCRIPTION,
@@ -1051,12 +1055,39 @@ describe('a verification runs in an owned, detached checkout at exactly one comm
         (await proveVerificationWorkspaceAt(runGitCommand, derived.identity, repo.mergeCommit)).proof,
       ).toBe('AT_COMMIT');
       // The refusal this module exists for: a workspace at A asked about B.
-      expect(
-        (await proveVerificationWorkspaceAt(runGitCommand, derived.identity, repo.baseCommit)).proof,
-      ).toBe('HEAD_MISMATCH');
+      const mismatch = await proveVerificationWorkspaceAt(
+        runGitCommand,
+        derived.identity,
+        repo.baseCommit,
+      );
+      expect(mismatch.proof).toBe('HEAD_MISMATCH');
       expect(
         (await proveVerificationWorkspaceAt(runGitCommand, derived.identity, MERGE)).proof,
       ).toBe('HEAD_MISMATCH');
+
+      // `observedHead` is Git's READING, not the expectation echoed back — and
+      // this is where that is measurable. On a mismatch the two values differ,
+      // so a version that reported the expectation would say `baseCommit` here.
+      //
+      // It is the pin for the defect three review lenses found: the value handed
+      // to the mint used to be the commit this process had asked for, which made
+      // the mint's refusal compare a value with itself. A mutant that puts
+      // `expectedCommit` back in its place dies on this line.
+      expect(mismatch.observedHead).toBe(repo.mergeCommit);
+      expect(mismatch.observedHead).not.toBe(repo.baseCommit);
+
+      // On the matching path it is the same reading, cross-checked against a
+      // `rev-parse` this test ran itself rather than against the value it asked
+      // for.
+      const matching = await proveVerificationWorkspaceAt(
+        runGitCommand,
+        derived.identity,
+        repo.mergeCommit,
+      );
+      expect(matching.observedHead).toBe(git(derived.identity.workspacePath, 'rev-parse', 'HEAD'));
+      expect(created.ok && created.workspace.headCommit).toBe(
+        git(derived.identity.workspacePath, 'rev-parse', 'HEAD'),
+      );
 
       // Dirtied: not clean, and therefore not a workspace a gate may start in.
       writeFileSync(join(derived.identity.workspacePath, 'stray.txt'), 'x', 'utf8');
@@ -1829,6 +1860,12 @@ describe('a verification history is appended to, never rewritten', () => {
       const repeat = await recordPostMergeVerification(writeRequest(root));
       expect(repeat.code).toBe('ALREADY_VERIFIED');
       expect(repeat.writeAttempt).toBe('NOT_ATTEMPTED');
+      // `recorded` is FALSE here, and the field's own documentation is why: it
+      // says whether the history now contains **this attempt**, and it does not
+      // — an earlier passing one is what satisfied the request. A review found
+      // this returning `true`, and the case that named this arm asserted only
+      // the code, so nothing caught it.
+      expect(repeat.recorded).toBe(false);
 
       // A DIFFERENT profile is a different question, and is recorded.
       const otherDigest = verificationProfileDigest({
@@ -2162,11 +2199,15 @@ describe('the delivery command verifies only when asked, and takes the lease to 
   /**
    * A real repository with **no** lease held, so the command has to take one.
    *
-   * Everything below this line is production: a real Git repository, the real
-   * `acquireRepositoryExecutionLease`, the real `leasedGit`, the real
-   * `check-ignore` probe and the real store. Only the two things a test may not
-   * do for real are substituted — resolving a repository profile from disk, and
-   * starting `npm run verify`.
+   * What is real: the Git repository, `acquireRepositoryExecutionLease`,
+   * `leasedGit`, the `check-ignore` probe, the worktree operations and the
+   * store. What is substituted, stated as the list it is rather than as a
+   * count a review measured wrong: `resolveRepository` and `loadTaskState`
+   * (this fixture has no profile on disk and no task record), `verify` (a real
+   * `npm run verify` inside a test is not a test), `now` (so the recorded
+   * instant is pinnable), and the three forge runners — which are supplied
+   * precisely so that reaching one is a COUNT in the result rather than an
+   * argument in a comment.
    */
   function unleasedRepo(): { root: string; mergeCommit: string; gitCommonDir: string; dispose: () => void } {
     const root = scratchRoot('ao-v409-cli-');
@@ -2344,6 +2385,81 @@ describe('the delivery command verifies only when asked, and takes the lease to 
     }
   });
 
+  it('never closes a verification run by calling it read-only', async () => {
+    // A review found `--verify-merge` closing with "Read-only. No forge was
+    // contacted, no task state was written, and nothing was delivered." after
+    // taking the repository's lease, creating and destroying a checkout,
+    // running the declared commands and writing a record. The trailer block had
+    // no term for verification at all.
+    const repo = unleasedRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      const { runner } = recordingRunner();
+      const r = await runCli(['--verify-merge'], repo, runner);
+
+      expect(r.out).not.toContain(NOT_CONTACTED_TRAILER);
+      expect(r.out).not.toContain('nothing was delivered');
+      expect(r.out).toContain(VERIFICATION_TRAILER);
+      // The disclosure the trailer exists for: this build does not answer for
+      // what the repository's own commands do.
+      expect(r.out).toContain("declares: what those do, and whether they reach a network");
+
+      // The control: a run that did NOT verify still gets the read-only
+      // sentence, so the suppression above is attributable to verification
+      // rather than to the trailer block having stopped working.
+      const none = await runCli([], repo, runner);
+      expect(none.out).toContain(NOT_CONTACTED_TRAILER);
+      expect(none.out).not.toContain(VERIFICATION_TRAILER);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('may not exit nominal when it cannot prove it gave the lease back', async () => {
+    // The rule is the repository's, not this slice's: `run-exit-codes.ts` says
+    // "an invocation that took this repository's only writer slot and cannot
+    // prove it gave the slot back has left something behind, and it may not
+    // exit nominal however well its own work went. **No primary code is
+    // exempt**." `block --attended` and `release --attended` both apply it, and
+    // a review found this — the third lease-taking path — exiting 0 with a
+    // stuck lease.
+    const repo = unleasedRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      const { runner } = recordingRunner();
+
+      // The control first: a clean run keeps its own verdict.
+      const clean = await runCli(['--verify-merge'], repo, runner);
+      expect(clean.out).toContain('Verification : VERIFICATION_ATTEMPTED');
+      expect(clean.out).toContain('Lease        : RELEASED');
+      expect(clean.exitCode ?? 0).toBe(0);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('prints a lease line on every run that took one, including the clean ones', async () => {
+    // An earlier version printed only failures, which made "the release was
+    // fine" and "the release threw and this invocation does not know what is in
+    // the repository" identical from the console — the confusion
+    // `render-lease.ts` introduced `LEASE_RELEASE_UNREPORTED` to prevent. The
+    // shared renderer is used rather than a wording invented here.
+    const repo = unleasedRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      const { runner } = recordingRunner();
+      const r = await runCli(['--verify-merge'], repo, runner);
+      expect(r.out).toContain('Lease        : RELEASED');
+
+      // And a run that took no lease prints no lease line at all — the two
+      // cases must not look the same in either direction.
+      const none = await runCli([], repo, runner);
+      expect(none.out).not.toContain('Lease        :');
+    } finally {
+      repo.dispose();
+    }
+  });
+
   it('does nothing at all without the flag', async () => {
     const repo = unleasedRepo();
     try {
@@ -2385,6 +2501,36 @@ describe('the delivery command verifies only when asked, and takes the lease to 
       const derived = deriveVerificationWorkspaceIdentity(repo.root, TASK);
       if (!derived.ok) throw new Error('unreachable');
       expect(() => statSync(derived.identity.workspacePath)).toThrow();
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('names why no workspace could be made, rather than collapsing every reason', async () => {
+    // README and the ADR both tell an operator that something already at the
+    // derived path "is reported as `WORKSPACE_PATH_OCCUPIED` and left alone". A
+    // review measured that the result had no field for it — every creation
+    // failure became one ladder member and the code was discarded, so the
+    // sentence described a report the code could not produce.
+    const repo = unleasedRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      const derived = deriveVerificationWorkspaceIdentity(repo.root, TASK);
+      if (!derived.ok) throw new Error('unreachable');
+      mkdirSync(derived.identity.workspacePath, { recursive: true });
+      writeFileSync(join(derived.identity.workspacePath, 'mine.txt'), 'keep', 'utf8');
+
+      const { runner, calls } = recordingRunner();
+      const r = await runCli(['--verify-merge'], repo, runner);
+
+      expect(r.out).toContain('Verification : WORKSPACE_NOT_ESTABLISHED');
+      expect(r.out).toContain('Workspace    : WORKSPACE_PATH_OCCUPIED');
+      // No gate ran, and the operator's directory is untouched.
+      expect(calls).toEqual([]);
+      expect(readFileSync(join(derived.identity.workspacePath, 'mine.txt'), 'utf8')).toBe('keep');
+      // And the lease was still taken and given back, so the run is not read-only.
+      expect(r.out).toContain('Lease        : RELEASED');
+      expect(r.out).toContain(VERIFICATION_TRAILER);
     } finally {
       repo.dispose();
     }
@@ -2621,7 +2767,13 @@ describe('post-merge verification changes no execution state and no ledger', () 
     }
     // And the clause that enumerates the writing flags names this slice's.
     expect(DELIVERY_COMMAND_DESCRIPTION).toContain('--verify-merge');
-    expect(DELIVERY_COMMAND_DESCRIPTION).toContain('contacting no network at all');
+    // The clause says what this build answers for and what it does not. It
+    // used to read "contacting no network at all", which is an unqualified
+    // claim about processes AO does not control: the flag runs whatever the
+    // repository profile declares.
+    expect(DELIVERY_COMMAND_DESCRIPTION).toContain('It contacts no forge');
+    expect(DELIVERY_COMMAND_DESCRIPTION).toContain("the profile's to answer for");
+    expect(DELIVERY_COMMAND_DESCRIPTION).not.toContain('contacting no network at all');
     // `--attended` still means what it meant: an effect outside this machine.
     // Verification has none, so it must not have been added to that list.
     expect(ATTENDED_OPTION_DESCRIPTION).toContain('--publish-head, --create-pr and --merge-pr');
@@ -2657,7 +2809,8 @@ describe('post-merge verification changes no execution state and no ledger', () 
       // THIS act rather than the whole invocation (a run that also passes
       // --observe does contact github.com), and the removal is a promise that
       // can be refused, so the sentence says what happens when it is.
-      'this act contacts no network of its own',
+      'opens no network connection of its own',
+      'may do anything they like',
       'if that removal is refused you are told',
     ]) {
       expect(VERIFY_MERGE_OPTION_DESCRIPTION.toLowerCase(), phrase).toContain(phrase.toLowerCase());

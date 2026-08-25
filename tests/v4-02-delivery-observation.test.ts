@@ -1977,6 +1977,13 @@ describe('the CLI surface', () => {
     // What that does NOT admit is a task-state writer, an agent, or a second
     // acquisition — the exact scope of the lease exception is asserted once, in
     // `tests/v4-09-post-merge-verification.test.ts`.
+    // `./render-lease.js` is on this list because the filter matches on the
+    // word "lease", and it is a **renderer**: `render-delivery-observation.ts`
+    // prints the execution-lease release through the same function
+    // `block --attended` and `release --attended` use, rather than inventing a
+    // second wording for the same fact. A module that turns a result into text
+    // cannot write anything, and reusing it is what stops "the release was
+    // fine" and "the release was not reported" printing the same.
     const ADMITTED = [
       '../core/task-state.js',
       '../lease/execution-lease.js',
@@ -1984,6 +1991,7 @@ describe('the CLI surface', () => {
       '../state/runtime-ignored.js',
       '../state/state-store.js',
       '../worktree/git-command.js',
+      './render-lease.js',
     ];
     expect([...seen].filter((s) => /state|lease|worktree/.test(s)).sort()).toEqual(ADMITTED);
     for (const found of seen) {
