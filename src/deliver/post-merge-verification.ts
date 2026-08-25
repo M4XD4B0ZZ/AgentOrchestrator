@@ -81,21 +81,32 @@ export const POST_MERGE_VERIFICATION_VERSION = 1;
 /**
  * The largest verification record this build will read or write.
  *
- * Sized against the worst record this schema can represent, and that worst case
- * is **computed rather than estimated**: {@link MAX_VERIFICATION_ATTEMPTS}
- * attempts at their maxima (334 bytes each) plus a header whose
- * `repositoryRoot` alone may be 4096 characters — **11,083 bytes**, measured
- * directly rather than reasoned about.
+ * A **byte** budget, checked against the file's size on disk, and it is
+ * **load-bearing rather than redundant with the schema** — the same property
+ * `merge-reconciliation.ts` documents and pins for its own 8 KiB gate.
  *
- * That measurement is here because a review claimed 19,271 and asked for the
- * budget to be raised. Recomputing it from the schema's own bounds refuted the
- * claim, and the budget is unchanged. It is written down so the next reader
- * does not have to repeat the arithmetic to find out which of the two numbers
- * was real — and the test file recomputes it, so a field added to either shape
- * moves the measurement rather than the prose.
+ * The numbers, measured rather than reasoned about, because two reviewers
+ * computed different ones and the difference is the whole point:
  *
- * A **byte** budget, checked against the file's size on disk. A schema `.max()`
- * bounds characters, and a character is not a byte.
+ * | worst-case `repositoryRoot` (4096 chars) | record size |
+ * | --- | --- |
+ * | ASCII | 11,083 bytes — inside |
+ * | CJK (U+4E00) | 19,275 bytes — **over** |
+ * | U+0001 (escapes to ``) | 31,563 bytes — **over** |
+ *
+ * A schema `.max()` bounds UTF-16 code units, and a code unit is not a byte. So
+ * a schema-legal record CAN exceed this budget, and is then refused —
+ * `RECORD_TOO_LARGE` on write, `MALFORMED` on read. That is what the gate is
+ * for; a byte budget a schema already implied would be decoration.
+ *
+ * The product path reaches it a slice earlier in any case. A CJK root crosses
+ * this budget at 3,133 characters and crosses slice 8's receipt budget at
+ * **2,243** — so `verify-merge.ts` refuses with `RECEIPT_UNREADABLE` before a
+ * verification record is ever built for such a repository.
+ *
+ * An earlier version of this comment said the ASCII figure was the worst case
+ * and that a review claiming 19,271 had been refuted. Half of that was right
+ * and the half that was not is why the table is here.
  */
 export const MAX_POST_MERGE_VERIFICATION_BYTES = 16_384;
 

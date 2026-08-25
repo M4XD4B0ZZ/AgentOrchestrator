@@ -60,6 +60,7 @@ import {
 } from '../src/deliver/verify-merge.js';
 import {
   mergeReconciliationBinding,
+  MAX_MERGE_RECONCILIATION_BYTES,
   MERGE_RECONCILIATION_VERSION,
   type MergeReconciliationPayload,
 } from '../src/deliver/merge-reconciliation.js';
@@ -782,6 +783,80 @@ describe('the verification record is a versioned, bounded, self-describing docum
     // And it round-trips: the budget is enforced on the file's stat size, so a
     // record inside it must be one this build reads back.
     expect(readPostMergeVerification(worst, subject).reading).toBe('VERIFICATION_HISTORY');
+  });
+
+  it('refuses a schema-legal record whose bytes exceed the budget', () => {
+    // The byte gate is **load-bearing, not redundant with the schema**, and
+    // this is what proves it. A schema `.max()` bounds UTF-16 code units; a
+    // code unit is not a byte, so a perfectly valid record built from
+    // non-Latin characters is larger than the budget.
+    //
+    // Two reviewers computed different worst cases — 11,083 and 19,271 — and
+    // both were right about their own alphabet. The gap is this case.
+    const cjkRoot = '一'.repeat(4096);
+    const subject = subjectOf({ repositoryRoot: cjkRoot });
+    const oversized = recordOf(
+      {
+        repositoryRoot: cjkRoot,
+        attempts: Array.from({ length: MAX_VERIFICATION_ATTEMPTS }, () =>
+          attemptOf({
+            attemptedAt: '2026-12-31T23:59:59.999999999+01:00',
+            outcome: 'VERIFICATION_NOT_ESTABLISHED',
+            stoppedAt: 'V'.repeat(32),
+            exitCode: -2_147_483_648,
+            signal: 'S'.repeat(32),
+            phasesRun: 8,
+          }),
+        ),
+      },
+      subject,
+    );
+
+    // It really is legal, and really does read in memory — so the refusal below
+    // is attributable to the byte gate and to nothing else.
+    expect(PostMergeVerificationSchema.safeParse(oversized).success).toBe(true);
+    expect(readPostMergeVerification(oversized, subject).reading).toBe('VERIFICATION_HISTORY');
+
+    const bytes = Buffer.byteLength(`${JSON.stringify(oversized, null, 2)}\n`, 'utf8');
+    expect(bytes).toBeGreaterThan(MAX_POST_MERGE_VERIFICATION_BYTES);
+
+    // And the product path never gets here: slice 8's receipt budget is
+    // tighter, so a repository with a root this long is refused one slice
+    // earlier. Measured, not asserted — the two thresholds are computed.
+    const crossesAt = (limit: number, build: (root: string) => unknown): number => {
+      for (let n = 1; n <= 4096; n += 1) {
+        const size = Buffer.byteLength(
+          `${JSON.stringify(build('一'.repeat(n)), null, 2)}\n`,
+          'utf8',
+        );
+        if (size > limit) return n;
+      }
+      return Number.POSITIVE_INFINITY;
+    };
+    const verificationThreshold = crossesAt(MAX_POST_MERGE_VERIFICATION_BYTES, (root) =>
+      recordOf({ repositoryRoot: root }, subjectOf({ repositoryRoot: root })),
+    );
+    const receiptThreshold = crossesAt(MAX_MERGE_RECONCILIATION_BYTES, (root) => {
+      const payload: MergeReconciliationPayload = {
+        reconciliationVersion: MERGE_RECONCILIATION_VERSION,
+        taskId: TASK,
+        repositoryRoot: root,
+        subjectCommit: HEAD,
+        provider: 'github',
+        ...IDENTITY,
+        pullRequestNumber: PR,
+        mergedHeadSha: HEAD,
+        baseRef: BASE,
+        mergeCommit: MERGE,
+        observedAt: AT,
+        reconciledAt: AT,
+      };
+      return {
+        ...payload,
+        binding: mergeReconciliationBinding({ taskId: TASK, repositoryRoot: root }, payload),
+      };
+    });
+    expect(receiptThreshold).toBeLessThan(verificationThreshold);
   });
 
   it('binds every field, including every field of every attempt', () => {
@@ -2618,6 +2693,29 @@ describe('post-merge verification changes no execution state and no ledger', () 
       // And none of them still asserts the retired blanket ban.
       expect(source, file).not.toMatch(/not\.toMatch\(\/\\bacquire\\w\*ExecutionLease/);
     }
+  });
+
+  it('introduces no Git fetch anywhere in the product', () => {
+    // `L-V4-09-3` and the `--verify-merge` help text both say this build will
+    // not fetch a merge commit it does not have, and both are claims about the
+    // whole of `src/` rather than about this slice's modules. So they are
+    // measured over the whole of `src/`.
+    //
+    // Matched on the argument literal a Git invocation would have to carry.
+    // Prose about a remote's "fetch URL" is not a fetch, and several modules
+    // discuss one; a `'fetch'` token is what a `git(cwd, ['fetch', …])` needs.
+    const sources = walk('src');
+    expect(sources.length).toBeGreaterThan(50);
+    const fetchers = sources.filter((file) => /['"]fetch['"]/.test(codeOnly(file)));
+    expect(fetchers).toEqual([]);
+    // The control: the same shape does find the Git verbs this build DOES run,
+    // so an empty result above is an absence rather than a broken pattern.
+    expect(sources.filter((file) => /['"]worktree['"]/.test(codeOnly(file))).length).toBeGreaterThan(
+      0,
+    );
+    expect(sources.filter((file) => /['"]rev-parse['"]/.test(codeOnly(file))).length).toBeGreaterThan(
+      0,
+    );
   });
 
   it('runs Git only through the seam it was handed', () => {
