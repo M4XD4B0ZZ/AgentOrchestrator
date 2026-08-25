@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
 import {
+  cpSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -320,21 +321,63 @@ interface RealRepo {
  * only prove how the *classification* of Git's answers works, which is the
  * shape this repository has repeatedly measured as a test that pins nothing.
  */
-function realRepo(): RealRepo {
-  const root = scratchRoot('ao-v409-git-');
+/**
+ * One repository, built once, and copied for every fixture that needs one.
+ *
+ * ── Why this is not eight `git` calls per fixture ──────────────────────────
+ *
+ * It was, and CI measured the cost. This file makes 27 real repositories; at
+ * ~8 processes each that is over 200 `git` invocations, and on the Windows
+ * runner the file took 107 seconds against 41 here. A solo run flatters a new
+ * slice — the gate runs files in parallel, and the extra load pushed a 10-second
+ * hook in `tests/v2-09-dependent-commit-chain.test.ts`, a 190-second file this
+ * slice never touched, over its limit. Three of its cases were skipped and the
+ * whole gate failed.
+ *
+ * So the template is built once and `cpSync`-ed. A plain repository's `.git`
+ * holds no absolute paths, so a copy is a working repository with the same two
+ * commits — which also makes `baseCommit` and `mergeCommit` constants rather
+ * than something each fixture has to ask Git for.
+ *
+ * Only `--git-common-dir` is still read per fixture: it is the execution
+ * lease's key, and deriving it here rather than asking Git would be this file
+ * inventing the one value the lease is identified by.
+ */
+let templateRepo: { path: string; baseCommit: string; mergeCommit: string } | null = null;
+
+function repositoryTemplate(): { path: string; baseCommit: string; mergeCommit: string } {
+  if (templateRepo !== null) return templateRepo;
+  const path = scratchRoot('ao-v409-template-');
+  git(path, 'init', '--quiet', '-b', BASE, '.');
+  git(path, 'config', 'user.email', 'fixture@example.invalid');
+  git(path, 'config', 'user.name', 'fixture');
+  writeFileSync(join(path, '.gitignore'), 'node_modules/\ndist/\n.agent-orchestrator/\n', 'utf8');
+  writeFileSync(join(path, 'tracked.txt'), 'base\n', 'utf8');
+  git(path, 'add', '-A');
+  git(path, 'commit', '--quiet', '-m', 'base');
+  writeFileSync(join(path, 'tracked.txt'), 'merged\n', 'utf8');
+  git(path, 'add', '-A');
+  git(path, 'commit', '--quiet', '-m', 'the merge');
+  // Both object names in one process rather than two `rev-parse` calls.
+  const [mergeCommit, baseCommit] = git(path, 'log', '--format=%H', '-2').split('\n');
+  if (mergeCommit === undefined || baseCommit === undefined) {
+    throw new Error('fixture template has fewer than two commits');
+  }
+  templateRepo = { path, baseCommit, mergeCommit };
+  return templateRepo;
+}
+
+/** A working copy of the template, at a fresh scratch root. */
+function copyTemplate(prefix: string): { root: string; baseCommit: string; mergeCommit: string } {
+  const template = repositoryTemplate();
+  const root = scratchRoot(prefix);
+  cpSync(template.path, root, { recursive: true });
   mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
-  git(root, 'init', '--quiet', '-b', BASE, '.');
-  git(root, 'config', 'user.email', 'fixture@example.invalid');
-  git(root, 'config', 'user.name', 'fixture');
-  writeFileSync(join(root, '.gitignore'), 'node_modules/\ndist/\n.agent-orchestrator/\n', 'utf8');
-  writeFileSync(join(root, 'tracked.txt'), 'base\n', 'utf8');
-  git(root, 'add', '-A');
-  git(root, 'commit', '--quiet', '-m', 'base');
-  const baseCommit = git(root, 'rev-parse', 'HEAD');
-  writeFileSync(join(root, 'tracked.txt'), 'merged\n', 'utf8');
-  git(root, 'add', '-A');
-  git(root, 'commit', '--quiet', '-m', 'the merge');
-  const mergeCommit = git(root, 'rev-parse', 'HEAD');
+  return { root, baseCommit: template.baseCommit, mergeCommit: template.mergeCommit };
+}
+
+function realRepo(): RealRepo {
+  const { root, baseCommit, mergeCommit } = copyTemplate('ao-v409-git-');
   const gitCommonDir = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir');
 
   const repository: VerificationRepository = Object.freeze({
@@ -2185,6 +2228,19 @@ ${' '.repeat(MAX_POST_MERGE_VERIFICATION_BYTES)}`, 'utf8');
       ).toBe('VERIFICATION_HISTORY');
       // A reader that stops early is a torn file, not a smaller record.
       let calls = 0;
+      // The reader fills the buffer COMPLETELY and then under-reports by one
+      // byte, which is what makes this case kill the guard rather than pass by
+      // coincidence.
+      //
+      // The obvious fixture — read ten bytes, then stop — is measured to prove
+      // nothing: without the `read !== size` check the ten-byte prefix is not
+      // valid JSON either, so both the guarded and the unguarded build answer
+      // MALFORMED and the mutant survives. Here the bytes ARE the whole
+      // document; only the count is short. Drop the guard and
+      // `buffer.subarray(0, size - 1)` is the record minus its trailing
+      // newline — valid JSON, a valid record, and read as VERIFICATION_HISTORY.
+      // That is a torn file accepted as a whole one, which is exactly what the
+      // guard exists to refuse.
       const stops = (
         handle: number,
         buffer: Buffer,
@@ -2193,7 +2249,9 @@ ${' '.repeat(MAX_POST_MERGE_VERIFICATION_BYTES)}`, 'utf8');
         position: number,
       ): number => {
         calls += 1;
-        return calls === 1 ? readSync(handle, buffer, offset, 10, position) : 0;
+        if (calls > 1) return 0;
+        const read = readSync(handle, buffer, offset, length, position);
+        return read > 0 ? read - 1 : read;
       };
       expect(
         loadPostMergeVerification(
@@ -2304,19 +2362,7 @@ describe('the delivery command verifies only when asked, and takes the lease to 
    * argument in a comment.
    */
   function unleasedRepo(): { root: string; mergeCommit: string; gitCommonDir: string; dispose: () => void } {
-    const root = scratchRoot('ao-v409-cli-');
-    mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
-    git(root, 'init', '--quiet', '-b', BASE, '.');
-    git(root, 'config', 'user.email', 'fixture@example.invalid');
-    git(root, 'config', 'user.name', 'fixture');
-    writeFileSync(join(root, '.gitignore'), 'node_modules/\ndist/\n.agent-orchestrator/\n', 'utf8');
-    writeFileSync(join(root, 'tracked.txt'), 'base\n', 'utf8');
-    git(root, 'add', '-A');
-    git(root, 'commit', '--quiet', '-m', 'base');
-    writeFileSync(join(root, 'tracked.txt'), 'merged\n', 'utf8');
-    git(root, 'add', '-A');
-    git(root, 'commit', '--quiet', '-m', 'the merge');
-    const mergeCommit = git(root, 'rev-parse', 'HEAD');
+    const { root, mergeCommit } = copyTemplate('ao-v409-cli-');
     const gitCommonDir = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir');
     return {
       root,
