@@ -1268,6 +1268,65 @@ describe('a verification runs in an owned, detached checkout at exactly one comm
     }
   });
 
+  it('does not let another commit’s recorded pass suppress this commit’s run', async () => {
+    // The ladder skips the gate when a pass for **this** commit under **this**
+    // profile is already on disk. A counter-proof measured the commit half of
+    // that as unpinned: dropping `history.record.mergeCommit === mergeCommit`
+    // left the whole suite green, so a history about an entirely different
+    // merge would have suppressed this one.
+    const repo = realRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+
+      // A history that passed — for a DIFFERENT commit, under this profile.
+      const other = await recordPostMergeVerification({
+        repositoryRoot: repo.root,
+        taskId: TASK,
+        proof: mintedProof({ mergeCommit: OTHER, workspaceHeadCommit: OTHER }),
+        expectedSubjectCommit: HEAD,
+        expectedMergeCommit: OTHER,
+        expectedHost: IDENTITY.host,
+        expectedOwner: IDENTITY.owner,
+        expectedName: IDENTITY.name,
+        expectedPullRequestNumber: PR,
+        checkIgnored: async () => 'IGNORED',
+      });
+      expect(other.code).toBe('HISTORY_STARTED');
+
+      const { runner, calls } = recordingRunner();
+      const result = await verifyMergeForDelivery(
+        repo.repository,
+        { taskId: TASK, ...IDENTITY, deliveryCommit: HEAD },
+        { git: runGitCommand, verify: runner, lease: repo.lease, now: () => new Date(AT) },
+      );
+
+      // The gate ran. A pass about another object is not about this one.
+      expect(result.outcome).toBe('VERIFICATION_ATTEMPTED');
+      expect(calls).toHaveLength(1);
+      expect(result.mergeCommit).toBe(repo.mergeCommit);
+
+      // The control: with the history about THIS commit, it is not run again.
+      const mine = await recordPostMergeVerification({
+        repositoryRoot: repo.root,
+        taskId: TASK,
+        proof: result.proof,
+        expectedSubjectCommit: HEAD,
+        expectedMergeCommit: repo.mergeCommit,
+        expectedHost: IDENTITY.host,
+        expectedOwner: IDENTITY.owner,
+        expectedName: IDENTITY.name,
+        expectedPullRequestNumber: PR,
+        checkIgnored: async () => 'IGNORED',
+      });
+      // The stored history is about `OTHER`, so this is refused rather than
+      // appended — which is the store's own guard, and is why the second run
+      // below still reaches the gate.
+      expect(mine.code).toBe('CONFLICTING_HISTORY');
+    } finally {
+      repo.dispose();
+    }
+  });
+
   it('refuses to create or remove without the execution lease, at the effect', async () => {
     const repo = realRepo();
     try {
@@ -2044,6 +2103,41 @@ describe('a verification history is appended to, never rewritten', () => {
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
+    }
+  });
+
+  it('refuses a file larger than the budget, from its size on disk', () => {
+    // The byte gate on the READ side, driven against a real file. A
+    // counter-proof measured it unpinned: nothing in this suite ever put an
+    // oversized document on disk, so removing the check changed no outcome.
+    const root = scratch();
+    try {
+      mkdirSync(postMergeVerificationDirectory(root), { recursive: true });
+      const path = join(postMergeVerificationDirectory(root), `${TASK}.json`);
+      const subject = { taskId: TASK, repositoryRoot: root };
+      // Valid in every other respect: this build wrote the shape, and the
+      // binding is genuine. Only its size is wrong.
+      const padded = recordOf(
+        {
+          repositoryRoot: root,
+          attempts: Array.from({ length: MAX_VERIFICATION_ATTEMPTS }, () =>
+            attemptOf({ stoppedAt: null }),
+          ),
+        },
+        subject,
+      );
+      writeFileSync(path, `${JSON.stringify(padded, null, 2)}
+${' '.repeat(MAX_POST_MERGE_VERIFICATION_BYTES)}`, 'utf8');
+      expect(statSync(path).size).toBeGreaterThan(MAX_POST_MERGE_VERIFICATION_BYTES);
+      expect(loadPostMergeVerification(root, TASK, subject).reading).toBe('MALFORMED');
+
+      // The control: the same document inside the budget reads back.
+      writeFileSync(path, `${JSON.stringify(padded, null, 2)}
+`, 'utf8');
+      expect(statSync(path).size).toBeLessThanOrEqual(MAX_POST_MERGE_VERIFICATION_BYTES);
+      expect(loadPostMergeVerification(root, TASK, subject).reading).toBe('VERIFICATION_HISTORY');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
