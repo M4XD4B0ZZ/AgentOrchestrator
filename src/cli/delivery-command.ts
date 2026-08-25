@@ -135,10 +135,14 @@ import {
   refuseMergeVerification,
   type MergeVerificationResult,
 } from '../deliver/verify-merge.js';
-import { recordPostMergeVerification } from '../deliver/post-merge-verification-store.js';
+import {
+  recordPostMergeVerification,
+  type PostMergeVerificationRecordResult,
+} from '../deliver/post-merge-verification-store.js';
 import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
+  type LeaseReleaseCode,
 } from '../lease/execution-lease.js';
 import { leasedGit, leasedVerify } from '../loop/leased-spawns.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
@@ -414,11 +418,14 @@ export const CREATE_PR_OPTION_DESCRIPTION =
  * by slice 6 to say this build could not merge. This slice makes that false, so
  * the word leaves the list and the option set is pinned by exact enumeration
  * instead, so a new mutation flag cannot arrive unnamed whatever it is called.
- * An earlier draft said "a sixth", which counts nothing: the command registers
- * ten options, three of which are forge mutations. (Nine until V4 slice 8
- * added `--reconcile-merge`, which is not a fourth mutation — it reads
- * github.com and writes locally — so the second count is unchanged and
- * the first is not. A review caught this sentence still saying nine.)
+ * An earlier draft said "a sixth", which counts nothing. Two later drafts said
+ * "nine options" and then "ten options", and each went stale at the next slice
+ * — the third time a review caught this same sentence. So it states **no count
+ * at all** now: the registered set is pinned by exact enumeration in
+ * `tests/v4-07-…`, and how many of them are forge mutations is measured by the
+ * effect-boundary cases in each slice's own file rather than tallied here. A
+ * number written beside a list a test already enforces is a number nothing
+ * enforces.
  */
 export const MERGE_PR_OPTION_DESCRIPTION =
   'Merge this task\'s pull request on github.com, by squash, into its base branch. Requires ' +
@@ -506,10 +513,11 @@ export const VERIFY_MERGE_OPTION_DESCRIPTION =
   'the base branch, and never from whatever that branch has since become. Requires a receipt ' +
   '— run --reconcile-merge first — whose recorded head is still this task\'s current commit. ' +
   'It takes this repository\'s execution lease, because it creates and destroys a detached ' +
-  'checkout here; it contacts no network, and it will not fetch a merge commit this ' +
-  'repository does not already have. The checkout is made in a directory beside the ' +
-  'repository, proved to be at exactly that commit before anything runs, and removed ' +
-  'afterwards; your own working tree is never touched. A run that could not be started is ' +
+  'checkout here; this act contacts no network of its own, and it will not fetch a merge ' +
+  'commit this repository does not already have. The checkout is made in a directory beside ' +
+  'the repository, proved to be at exactly that commit before anything runs, and removed ' +
+  'afterwards — and if that removal is refused you are told rather than left to find the ' +
+  'leftovers; your own working tree is never touched. A run that could not be started is ' +
   'reported as such and never as a failure of the code. Nothing is changed on github.com, no ' +
   'agent is started, no task state and no block ledger is written, and a failing result ' +
   'triggers no revert, no branch and no follow-up. What is stored is one past event — that ' +
@@ -549,11 +557,14 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'Those three are what it can change on a forge; they are separately requested and separately ' +
   'authorised, and none implies another. With --reconcile-merge it reads github.com to establish ' +
   'that this task\'s delivery was merged and stores that one event beside the task state, ' +
-  'changing nothing on the forge. Contacting a forge is never implicit: with no flag that says ' +
-  'it contacts github.com, nothing is read from a network. It writes no task state, and the ' +
-  'only flags that write a record here are --record and --reconcile-merge, each of which ' +
-  'writes one beside the task — and it never updates, closes, reopens, ' +
-  'reviews, comments on or labels a pull request, and never enables an auto-merge.';
+  'changing nothing on the forge. With --verify-merge it runs this repository\'s own declared ' +
+  'verification commands against the exact merge commit that receipt names, in a detached ' +
+  'checkout beside the repository, and stores the result beside the task state — contacting no ' +
+  'network at all. Contacting a forge is never implicit: with no flag that says ' +
+  'it contacts github.com, nothing is read from a network. It writes no task state, and every ' +
+  'flag here that writes a record — --record, --reconcile-merge and --verify-merge — writes ' +
+  'exactly one beside the task; nothing else here writes anything. It never updates, closes, ' +
+  'reopens, reviews, comments on or labels a pull request, and never enables an auto-merge.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
   const resolve = seams.resolveRepository ?? resolveRepository;
@@ -1582,8 +1593,18 @@ async function performVerification(
   taskLoad: ReturnType<typeof loadTaskState>,
   seams: VerificationCommandSeams,
 ): Promise<VerificationView> {
+  // Captured by the `finally` below and read after it, so the report can say
+  // whether the repository was handed back. `null` means no release outcome was
+  // observed at all, which is not the same as a clean one.
+  let leaseRelease: LeaseReleaseCode | null = null;
+  // What the verification itself came to, kept apart from what the release came
+  // to. The view is assembled **after** the `finally` has run, because a
+  // `return` inside the `try` evaluates its expression before the `finally`
+  // executes — so a view built there would report the release outcome the run
+  // started with rather than the one it ended with, which is `null` every time.
+  let settled: { result: MergeVerificationResult; record: PostMergeVerificationRecordResult | null } | null = null;
   const refused = (result: MergeVerificationResult): VerificationView =>
-    Object.freeze({ result, record: null });
+    Object.freeze({ result, record: null, leaseRelease: null });
 
   // The two members the ladder does not produce for itself, in the order it
   // declares them: a subject that could not be established is ahead of a task
@@ -1612,6 +1633,10 @@ async function performVerification(
   }
 
   try {
+    // The attempt is an inner function so that its three exits are ordinary
+    // returns rather than assignments-and-fall-through, and so the view is
+    // still assembled after the release below.
+    settled = await (async (): Promise<{ result: MergeVerificationResult; record: PostMergeVerificationRecordResult | null }> => {
     const git = leasedGit({
       lease: { repository, evidence: acquired.evidence },
       ...(seams.git === undefined ? {} : { git: seams.git }),
@@ -1635,7 +1660,7 @@ async function performVerification(
     );
 
     if (result.outcome !== 'VERIFICATION_ATTEMPTED' || result.proof === null) {
-      return Object.freeze({ result, record: null });
+      return { result, record: null };
     }
 
     // Every expectation comes from the receipt the ladder read and from the
@@ -1649,7 +1674,7 @@ async function performVerification(
       // if the receipt is not readable. It is here because the receipt is read
       // twice — once there and once here — and a build in which those two
       // readings could disagree must not write a record from the second.
-      return Object.freeze({ result, record: null });
+      return { result, record: null };
     }
 
     const record = await recordPostMergeVerification({
@@ -1667,20 +1692,38 @@ async function performVerification(
         createRuntimeIgnoreProbe(repository.root, seams.git ?? runGitCommand),
     });
 
-    return Object.freeze({ result, record });
+    return { result, record };
+    })();
   } finally {
     // Given back on every path out, including a throw. Wrapped, because a
     // `finally` that throws **replaces** the exception that entered it — so an
     // exception here would hand the operator the release's failure in place of
     // the one that actually stopped the run.
+    //
+    // The RESULT is kept, and a review is why. This stood here as a bare
+    // expression: the release can come back `NOT_OWNER`, `LEASE_REMOVE_FAILED`
+    // or quarantined, and the command reported the verification's own verdict
+    // and exited on it as though the repository had been handed back cleanly.
+    // A lease that was not given back is the one thing here an operator has to
+    // act on, so it is reported. It does not change the verification result —
+    // the gate ran or it did not, and the release is a different fact.
     try {
-      releaseRepositoryExecutionLease(acquired.evidence);
+      leaseRelease = releaseRepositoryExecutionLease(acquired.evidence).code;
     } catch {
-      // A lease that cannot be given back is the `lease` command's subject, not
-      // this one's. Swallowing it here loses nothing the operator can act on
-      // from this report, and re-throwing would lose the verification result.
+      // `releaseRepositoryExecutionLease` refuses rather than throws for every
+      // value that is not evidence, so this arm is not the ordinary path. It is
+      // left null rather than reported as released: nothing is claimed about a
+      // release whose outcome this process never saw.
     }
   }
+
+  // Unreachable with `settled` null: every path through the `try` either
+  // assigns it or throws, and a throw propagates past this line. The floor is
+  // chosen rather than asserted — if an edit ever does make it reachable, a
+  // refusal is the right thing for this command to volunteer about a path that
+  // returned nothing.
+  if (settled === null) return refused(refuseMergeVerificationUnleased());
+  return Object.freeze({ result: settled.result, record: settled.record, leaseRelease });
 }
 
 /**

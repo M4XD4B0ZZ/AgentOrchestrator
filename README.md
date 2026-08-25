@@ -9605,10 +9605,16 @@ follows, after the whole ownership proof is re-run, and it is reported as
 | `VERIFICATION_NOT_ESTABLISHED` | no phase reached a verdict |
 
 **An infrastructure failure is not a code failure.** A process that could not
-start, a timeout, a flooded output budget, a kill from outside, a workspace that
-could not be made, a lease that could not be taken — every one of them is
-`VERIFICATION_NOT_ESTABLISHED`. Nothing was learned about the code, and saying
-otherwise sends an operator to fix a merge when what broke was the machine.
+start, a timeout, a flooded output budget, a kill from outside — every one of
+them is `VERIFICATION_NOT_ESTABLISHED`. Nothing was learned about the code, and
+saying otherwise sends an operator to fix a merge when what broke was the
+machine.
+
+The two failures that stop *before* the gate — a workspace that could not be
+made, a lease that could not be taken — are deliberately **not** in that list,
+and an earlier version of this paragraph put them there. They produce no durable
+record at all: the run reports `WORKSPACE_NOT_ESTABLISHED` and writes nothing,
+because a record needs a run to be about.
 
 A `VERIFIED_FAIL` does nothing else. No revert, no reopened pull request, no
 repair branch, no agent, no issue, no follow-up task.
@@ -9682,6 +9688,27 @@ nothing is overwritten, and when it is full the next attempt is refused with
   workspace are none of them visible in `$?`. Slice 7's convention rather than a
   new one, stated on the flag's own surface. Read the `Verification` and `Record`
   lines.
+- **L-V4-09-9 — on Windows a verification killed from outside is recorded as
+  `VERIFIED_FAIL`.** The classification follows `runVerification` exactly, and
+  that reaches `UNAVAILABLE` for a termination only when the runner reports a
+  *signal*. A review measured a `taskkill /F`-ed phase arriving as `COMPLETED`
+  with `exitCode: 1` and `signal: null` — indistinguishable from a suite that
+  ran and said no. It is an accepted limit of what the platform reports, not a
+  choice this slice made, and it is not papered over: a heuristic that guessed
+  "exit 1 might be a kill" would misread real failures as infrastructure, which
+  is the more expensive mistake.
+- **L-V4-09-10 — the workspace ownership proof establishes shape and location,
+  not authorship.** Re-derived path, registered by Git, detached. A detached
+  worktree an operator registered at `<repo>.verification/<taskId>` themselves
+  satisfies all three and would be removed. Nothing outside that reserved,
+  derived path is reachable — there is no path parameter — which is the
+  guarantee that matters; establishing authorship would need a marker inside a
+  directory the removal is about to delete.
+- **L-V4-09-11 — `MERGE_COMMIT_UNAVAILABLE` covers "could not tell".**
+  `commitObjectPresent` answers `null` both for an object Git says is gone and
+  for a question it refused to evaluate. This build reports one member for both,
+  because what follows is the same either way; it deliberately does not assert
+  the object is absent.
 
 ## Not implemented yet
 

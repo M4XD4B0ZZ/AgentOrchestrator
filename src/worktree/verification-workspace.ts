@@ -46,8 +46,18 @@
  *     branch is not one this module made, and is refused rather than removed.
  *
  * Part 3 is the replacement for the branch test, not a relaxation of it: it
- * fails closed in the same direction. Anything at the derived path that this
- * module would not have produced is left exactly where it is.
+ * fails closed in the same direction.
+ *
+ * What the three parts establish, stated exactly, because the obvious summary
+ * overclaims and a review said so: they establish **shape and location**, not
+ * **authorship**. A detached worktree that an operator registered at
+ * `<root>.verification/<taskId>` themselves satisfies all three and would be
+ * removed. That is accepted rather than closed: the directory is a reserved
+ * namespace derived from the repository root and the task id, there is no path
+ * parameter for a caller to aim, and nothing outside it is reachable — which is
+ * the guarantee that actually matters. Establishing authorship would need a
+ * marker written into the worktree, and a marker in a directory the removal is
+ * about to delete is not authority.
  *
  * ── Never reused ───────────────────────────────────────────────────────────
  *
@@ -212,7 +222,16 @@ export interface VerificationWorkspace {
   readonly taskId: string;
   /** Canonical absolute path, as the filesystem spells it. */
   readonly workspacePath: string;
-  /** The object name HEAD was **proved** to be, inside the workspace. */
+  /**
+   * The object name **Git reported** for HEAD inside the workspace.
+   *
+   * Git's reading, never the value this call asked for. The two are equal on
+   * every path that returns a workspace — that is what `AT_COMMIT` means — but
+   * they are different *facts*, and a consumer that compares this against an
+   * expectation is comparing a measurement rather than restating an argument.
+   * An earlier version stored the requested commit here, which made exactly
+   * that comparison vacuous downstream.
+   */
   readonly headCommit: string;
 }
 
@@ -261,6 +280,11 @@ function pathExists(path: string): boolean {
   }
 }
 
+/** Whether this process is the repository's writer, right now. */
+function leaseHeld(repository: LeaseRepository, lease: ExecutionLeaseEvidence): boolean {
+  return verifyExecutionLeaseHeldFor(repository, lease).code === 'HELD';
+}
+
 export interface VerificationWorkspaceOptions {
   /** The Git seam. Must be lease-fenced in production; see `leased-spawns.ts`. */
   readonly git: GitRunner;
@@ -300,13 +324,29 @@ export interface VerificationWorkspaceProofResult {
   readonly proof: VerificationWorkspaceProof;
   /** Canonical path as the filesystem spells it. Only on `AT_COMMIT`. */
   readonly canonicalWorkspacePath: string | null;
+  /**
+   * The object name **Git reported** for HEAD inside the workspace, or `null`
+   * when the probe was never reached.
+   *
+   * Carried rather than reduced to the boolean it was compared against, and the
+   * reason is a defect two independent reviews measured. The value handed
+   * downstream used to be the commit this process had *asked for*, so the
+   * comparison that is supposed to be this slice's second, independent
+   * guarantee — "the verdict is about the commit the tree was really at" —
+   * compared a value with itself and could never fire on the production path.
+   *
+   * This field is Git's own answer. Anything that consumes it is comparing a
+   * reading against an expectation rather than an expectation against itself.
+   */
+  readonly observedHead: string | null;
 }
 
 function proofResult(
   proof: VerificationWorkspaceProof,
   canonicalWorkspacePath: string | null = null,
+  observedHead: string | null = null,
 ): VerificationWorkspaceProofResult {
-  return Object.freeze({ proof, canonicalWorkspacePath });
+  return Object.freeze({ proof, canonicalWorkspacePath, observedHead });
 }
 
 /**
@@ -356,22 +396,23 @@ export async function proveVerificationWorkspaceAt(
 
   const head = await git(path, ['rev-parse', '--verify', '--end-of-options', 'HEAD']);
   if (head.outcome !== 'OK') return proofResult('UNREADABLE');
-  if (head.stdout !== expectedCommit) return proofResult('HEAD_MISMATCH');
+  const observedHead = head.stdout;
+  if (observedHead !== expectedCommit) return proofResult('HEAD_MISMATCH', null, observedHead);
 
   const status = await git(path, ['status', '--porcelain', '--untracked-files=all']);
-  if (status.outcome !== 'OK') return proofResult('UNREADABLE');
+  if (status.outcome !== 'OK') return proofResult('UNREADABLE', null, observedHead);
   if (status.stdout.split('\n').some((line) => line.trim().length > 0)) {
-    return proofResult('NOT_CLEAN');
+    return proofResult('NOT_CLEAN', null, observedHead);
   }
 
   let canonical: string;
   try {
     canonical = realpathSync.native(path);
   } catch {
-    return proofResult('UNREADABLE');
+    return proofResult('UNREADABLE', null, observedHead);
   }
 
-  return proofResult('AT_COMMIT', canonical);
+  return proofResult('AT_COMMIT', canonical, observedHead);
 }
 
 /**
@@ -426,15 +467,38 @@ export async function createVerificationWorkspace(
   ]);
   if (created.outcome !== 'OK') {
     // Includes every lost race and every unavailable object: a competitor that
-    // took the path between the check above and here makes Git refuse, and
-    // Git's refusal leaves nothing behind.
-    return creationFailure('WORKSPACE_CREATE_FAILED');
+    // took the path between the check above and here makes Git refuse, and a
+    // Git that *refuses* leaves nothing behind.
+    //
+    // A Git that was **killed** is a different case, and the residue is read
+    // rather than assumed. `git-command.ts` maps a timeout or an outside kill
+    // to `UNAVAILABLE`, and a terminated process never runs its own junk
+    // cleanup — so the directory can be there. An earlier version returned
+    // `residue: false` for every non-OK outcome, which told an operator nothing
+    // was left in exactly the case something was.
+    return creationFailure('WORKSPACE_CREATE_FAILED', pathExists(identity.workspacePath));
   }
 
   const proved = await proveVerificationWorkspaceAt(git, identity, commit);
   if (proved.proof !== 'AT_COMMIT' || proved.canonicalWorkspacePath === null) {
-    // Created and wrong. Undo it through the same owned removal an ordinary
-    // teardown uses — never a bare `rm`, and never `--force`.
+    // Created and wrong. Undone through the same owned removal an ordinary
+    // teardown uses — never a bare `rm`, and never a path this function chose:
+    // there is no path parameter, so the delete can only ever reach what
+    // `deriveVerificationWorkspaceIdentity` names.
+    //
+    // It CAN escalate to `--force`, because that is what the teardown does when
+    // the tree it is deleting has been dirtied. An earlier version of this
+    // comment said "never `--force`" and a review measured it false against the
+    // very case that reaches here most often: a workspace refused as `NOT_CLEAN`
+    // is by definition one the plain removal will decline.
+    const undone = await removeVerificationWorkspace(repository, taskId, options);
+    return creationFailure('WORKSPACE_NOT_AS_REQUESTED', !workspaceIsGone(undone.code));
+  }
+  // `observedHead` is non-null on `AT_COMMIT` by construction — the probe that
+  // produces that verdict is the one that reads it. The guard is here so a
+  // future change to the proof result cannot make this line store the argument
+  // again, which is the defect it was written to close.
+  if (proved.observedHead === null) {
     const undone = await removeVerificationWorkspace(repository, taskId, options);
     return creationFailure('WORKSPACE_NOT_AS_REQUESTED', !workspaceIsGone(undone.code));
   }
@@ -446,7 +510,8 @@ export async function createVerificationWorkspace(
       repositoryRoot: identity.repositoryRoot,
       taskId,
       workspacePath: proved.canonicalWorkspacePath,
-      headCommit: commit,
+      // Git's answer, not the argument. See {@link VerificationWorkspace}.
+      headCommit: proved.observedHead,
     }),
   });
 }
@@ -511,13 +576,8 @@ export function workspaceIsGone(code: VerificationWorkspaceRemovalCode): boolean
  */
 async function proveOwnedForRemoval(
   git: GitRunner,
-  repository: LeaseRepository,
   identity: VerificationWorkspaceIdentity,
-  lease: ExecutionLeaseEvidence,
 ): Promise<VerificationWorkspaceRemovalCode | null> {
-  if (verifyExecutionLeaseHeldFor(repository, lease).code !== 'HELD') {
-    return 'EXECUTION_LEASE_NOT_HELD';
-  }
   const registry = await listWorktrees(git, identity.repositoryRoot);
   if (!registry.ok) return 'REGISTRY_UNREADABLE';
 
@@ -533,7 +593,8 @@ async function proveOwnedForRemoval(
 }
 
 /**
- * Removes a verification workspace this module made, and nothing else.
+ * Removes what is registered, detached, at this task's derived path — and
+ * nothing else.
  *
  * ── Why `--force` is here, when `remove-workspace.ts` refuses it ───────────
  *
@@ -575,8 +636,19 @@ export async function removeVerificationWorkspace(
   if (!derived.ok) return Object.freeze({ code: 'IDENTITY_UNDERIVABLE' as const });
   const identity = derived.identity;
 
-  const refusal = await proveOwnedForRemoval(git, repository, identity, options.lease);
+  // Ownership first, then the lease **immediately before the spawn**.
+  //
+  // The order is the correction a review measured. It used to read the lease
+  // first and then spend a whole `git worktree list` subprocess — tens to
+  // hundreds of milliseconds on Windows — before the destructive command, which
+  // is precisely the distance this module elsewhere argues is unacceptable. The
+  // lease read is a file read; putting it last costs nothing and puts the gate
+  // at the effect.
+  const refusal = await proveOwnedForRemoval(git, identity);
   if (refusal !== null) return Object.freeze({ code: refusal });
+  if (!leaseHeld(repository, options.lease)) {
+    return Object.freeze({ code: 'EXECUTION_LEASE_NOT_HELD' as const });
+  }
 
   const removed = await git(identity.repositoryRoot, [
     'worktree',
@@ -588,8 +660,11 @@ export async function removeVerificationWorkspace(
   // Re-proved in full, not inherited: `worktree remove` was a subprocess, and
   // what is at the path now is a different question from what was there before
   // it ran.
-  const stillOwned = await proveOwnedForRemoval(git, repository, identity, options.lease);
+  const stillOwned = await proveOwnedForRemoval(git, identity);
   if (stillOwned !== null) return Object.freeze({ code: stillOwned });
+  if (!leaseHeld(repository, options.lease)) {
+    return Object.freeze({ code: 'EXECUTION_LEASE_NOT_HELD' as const });
+  }
 
   const forced = await git(identity.repositoryRoot, [
     'worktree',

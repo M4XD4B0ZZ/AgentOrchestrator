@@ -63,7 +63,7 @@
  */
 
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
-import type { LeaseRepository } from '../lease/execution-lease.js';
+import { snapshotRepositoryRecord, type LeaseRepository } from '../lease/execution-lease.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { runVerification, type VerificationReport } from '../verify/run-verification.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
@@ -184,8 +184,17 @@ export const MERGE_VERIFICATIONS = [
    */
   'ALREADY_VERIFIED',
   /**
-   * The merge commit is not in this repository's object database, so there is
+   * This repository could not confirm it holds the merge commit, so there is
    * nothing to check out.
+   *
+   * Deliberately **not** spelled "the object is absent". `commitObjectPresent`
+   * answers `null` both for an object Git says is gone and for a question Git
+   * refused to evaluate — an unreadable repository, or an object whose type it
+   * would not name — and its own header says neither of those is "it is gone".
+   * This member covers all of them, because the only thing that follows for
+   * this ladder is the same in every case: no checkout can be made. An earlier
+   * operator sentence here asserted absence, and a review measured it as saying
+   * more than the probe establishes.
    *
    * This build does **not** fetch it. See the module note in the command: a
    * network fetch is a new egress surface with its own authority question, and
@@ -201,11 +210,17 @@ export const MERGE_VERIFICATIONS = [
   /**
    * The gate ran and this build declined to attest to the result.
    *
-   * Unreachable through this ladder — the workspace HEAD is proved equal to M
-   * one line before the mint is asked, and the mint's other refusals are all
-   * shapes `runVerification` cannot produce. It exists so that a future change
-   * which broke that agreement would surface as a refusal rather than as a
-   * record nobody minted.
+   * Reached when the mint declines what the gate produced. It is not claimed
+   * to be unreachable, and an earlier version of this comment did claim that on
+   * two grounds a review measured false: the HEAD proof is not "one line
+   * before" — the whole declared gate runs between them, which on this
+   * repository is minutes — and `runVerification` **can** produce a shape the
+   * mint refuses, because an empty phase list yields `UNAVAILABLE` with
+   * `stoppedAt: null`, which the mint reads as a non-pass that stopped nowhere.
+   *
+   * That shape is unrepresentable through `VerificationPolicySchema`, so it is
+   * not expected in practice. This member is what an operator is told if it
+   * arrives anyway: the gate ran, and this build declined to attest to it.
    */
   'VERIFICATION_NOT_ATTESTED',
   /**
@@ -233,7 +248,7 @@ export const MERGE_VERIFICATION_DETAIL: Readonly<Record<MergeVerificationOutcome
     ALREADY_VERIFIED:
       'A successful verification of this exact commit under this exact profile is already recorded.',
     MERGE_COMMIT_UNAVAILABLE:
-      "The merge commit is not in this repository's object database.",
+      "This repository could not confirm it has the merge commit.",
     WORKSPACE_NOT_ESTABLISHED:
       'An isolated checkout at the exact merge commit could not be established.',
     VERIFICATION_NOT_ATTESTED:
@@ -304,9 +319,12 @@ function outcome(
 /**
  * The refusal shape for the two members the caller owns.
  *
- * Exported so the command does not build a result object of its own: two places
- * that construct the same type is two places that can disagree about which
- * fields a refusal carries.
+ * Exported so the two members the ladder cannot produce for itself have one
+ * spelling. It is **not** the only place a `MergeVerificationResult` is built
+ * outside this module — `delivery-command.ts` builds one for a lease it could
+ * not take, because that refusal is the command's own and this module has no
+ * member for it. An earlier version of this sentence claimed otherwise and a
+ * review measured it false.
  */
 export function refuseMergeVerification(
   code: Extract<MergeVerificationOutcome, 'SUBJECT_NOT_ESTABLISHED' | 'TASK_NOT_READY'>,
@@ -326,14 +344,38 @@ export async function verifyMergeForDelivery(
   subject: VerificationSubject,
   seams: VerificationSeams,
 ): Promise<MergeVerificationResult> {
+  // ONE reading of the record, and everything below uses it.
+  //
+  // `VerificationRepository` is a bare structural type, so nothing says its
+  // fields are values. A record whose `root` is an accessor answers about
+  // repository A when the workspace is derived and B when the receipt is
+  // loaded; a `verification` getter answers policy P when the digest is
+  // computed and Q when the gate runs — and the durable record would then name
+  // a contract other than the one that ran. That is LF-2, which
+  // `lease/execution-lease.ts` records as reproduced against
+  // `prepareTaskWorkspace`, `removeTaskWorkspace` and `advanceTaskState` with
+  // nothing forged anywhere. A review found this function reading `root` six
+  // times and `verification` twice without it.
+  const repo = snapshotRepositoryRecord(repository);
+
   const receiptSubject: MergeReconciliationSubject = Object.freeze({
     taskId: subject.taskId,
-    repositoryRoot: repository.root,
+    repositoryRoot: repo.root,
   });
 
   // ── 1. The receipt is the only authority for the subject ─────────────────
-  const stored = loadMergeReconciliation(repository.root, subject.taskId, receiptSubject);
+  const stored = loadMergeReconciliation(repo.root, subject.taskId, receiptSubject);
   if (stored.reading === 'ABSENT') return outcome('RECEIPT_ABSENT');
+  // Two conditions, and the second is redundant **today**, which is stated
+  // rather than left to be discovered. `loadMergeReconciliation` returns a
+  // non-null `receipt` on `HISTORICAL_MERGE` and on no other reading, so
+  // dropping the reading test changes nothing this build can observe — a
+  // counter-proof measured exactly that mutant surviving the whole suite.
+  //
+  // It stays because the redundancy is one-directional and free: if that load
+  // result ever started handing back facts from a record it had refused, this
+  // is the line that would keep them out. Its honest status is "unreachable
+  // today, load-bearing if the loader changes".
   if (stored.reading !== 'HISTORICAL_MERGE' || stored.receipt === null) {
     return outcome('RECEIPT_UNREADABLE');
   }
@@ -359,7 +401,7 @@ export async function verifyMergeForDelivery(
   }
 
   const mergeCommit = receipt.mergeCommit;
-  const profileDigest = verificationProfileDigest(repository.verification);
+  const profileDigest = verificationProfileDigest(repo.verification);
 
   // ── 3. A historical pass under this exact profile is not re-run ──────────
   //
@@ -367,9 +409,9 @@ export async function verifyMergeForDelivery(
   // answer this profile's question and is run again; a pass under this one is
   // not made truer or falser by the passage of time, so there is no TTL here
   // and no age at which a record is discarded.
-  const history = loadPostMergeVerification(repository.root, subject.taskId, {
+  const history = loadPostMergeVerification(repo.root, subject.taskId, {
     taskId: subject.taskId,
-    repositoryRoot: repository.root,
+    repositoryRoot: repo.root,
   });
   if (
     history.reading === 'VERIFICATION_HISTORY' &&
@@ -381,17 +423,30 @@ export async function verifyMergeForDelivery(
   }
 
   // ── 4. The object has to be here. This build does not go and get it ──────
-  const present = await commitObjectPresent(seams.git, repository.root, mergeCommit);
+  const present = await commitObjectPresent(seams.git, repo.root, mergeCommit);
   if (present !== true) return outcome('MERGE_COMMIT_UNAVAILABLE', mergeCommit, profileDigest);
 
   // ── 5. An isolated, detached checkout at exactly M ───────────────────────
   const created = await createVerificationWorkspace(
-    repository,
+    repo,
     subject.taskId,
     mergeCommit,
     { git: seams.git, lease: seams.lease },
   );
-  if (!created.ok) return outcome('WORKSPACE_NOT_ESTABLISHED', mergeCommit, profileDigest);
+  if (!created.ok) {
+    // The residue is carried, not discarded. A creation that made a checkout,
+    // failed to prove it and then failed to undo it leaves a full tree on the
+    // operator's disk, and an earlier version of this line reported that as
+    // `workspaceRemoval: null` — whose own documentation says "none was made".
+    return outcome(
+      'WORKSPACE_NOT_ESTABLISHED',
+      mergeCommit,
+      profileDigest,
+      null,
+      null,
+      created.residue ? 'REMOVAL_FAILED' : null,
+    );
+  }
 
   const attemptedAt = seams.now().toISOString();
 
@@ -403,9 +458,9 @@ export async function verifyMergeForDelivery(
   // them take. The same reasoning `prepare-workspace.ts` and
   // `remove-workspace.ts` both record after a review moved an effect out from
   // under its gate.
-  const identity = deriveVerificationWorkspaceIdentity(repository.root, subject.taskId);
+  const identity = deriveVerificationWorkspaceIdentity(repo.root, subject.taskId);
   if (!identity.ok) {
-    const removal = await removeVerificationWorkspace(repository, subject.taskId, {
+    const removal = await removeVerificationWorkspace(repo, subject.taskId, {
       git: seams.git,
       lease: seams.lease,
     });
@@ -413,7 +468,7 @@ export async function verifyMergeForDelivery(
   }
   const atCommit = await proveVerificationWorkspaceAt(seams.git, identity.identity, mergeCommit);
   if (atCommit.proof !== 'AT_COMMIT') {
-    const removal = await removeVerificationWorkspace(repository, subject.taskId, {
+    const removal = await removeVerificationWorkspace(repo, subject.taskId, {
       git: seams.git,
       lease: seams.lease,
     });
@@ -427,23 +482,34 @@ export async function verifyMergeForDelivery(
   // spelling, taken from the proof above rather than from anything this
   // function assembled.
   const report = await runVerification(
-    { worktreePath: created.workspace.workspacePath, verification: repository.verification },
+    { worktreePath: created.workspace.workspacePath, verification: repo.verification },
     { verify: seams.verify },
   );
 
-  // ── 8. Attest, binding the verdict to the commit that was proved ─────────
-  const proof = mintPostMergeVerification({
-    mergeCommit,
-    // From the proof, not from the variable above. Handing the same value in
-    // twice would make the mint's comparison compare a value with itself.
-    workspaceHeadCommit: created.workspace.headCommit,
-    profileDigest,
-    report,
-    attemptedAt,
-  });
+  // ── 8. Attest, binding the verdict to what Git said the tree was at ──────
+  //
+  // `atCommit.observedHead` is **Git's own reading**, taken by the probe in
+  // step 6 — not the commit this function asked for, and not a value derived
+  // from `mergeCommit`. That distinction is the whole of the mint's refusal:
+  // two independent reviews measured an earlier version handing the requested
+  // commit in for both fields, which made the comparison compare a value with
+  // itself and could never fire on the production path.
+  //
+  // Non-null on `AT_COMMIT` by construction; the guard keeps a future change to
+  // the proof result from silently reintroducing the argument.
+  const proof =
+    atCommit.observedHead === null
+      ? null
+      : mintPostMergeVerification({
+          mergeCommit,
+          workspaceHeadCommit: atCommit.observedHead,
+          profileDigest,
+          report,
+          attemptedAt,
+        });
 
   // ── 9. The workspace goes, on every path that made one ───────────────────
-  const removal = await removeVerificationWorkspace(repository, subject.taskId, {
+  const removal = await removeVerificationWorkspace(repo, subject.taskId, {
     git: seams.git,
     lease: seams.lease,
   });

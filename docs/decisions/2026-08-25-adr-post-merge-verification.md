@@ -100,8 +100,11 @@ calls the existing one with a different directory. Likewise
 **Built, because it did not exist.** Three things, and each was checked against
 the existing primitive before being written:
 
-1. **a detached, exact-SHA workspace.** `git worktree add` appears once in
-   `src/`, with `-b`, and `--detach` appears nowhere. `prepareTaskWorkspace`
+1. **a detached, exact-SHA workspace.** Before this slice, `git worktree add`
+   appeared once in `src/`, with `-b`, and `--detach` appeared nowhere. (Stated
+   in the past tense on purpose: in the tree that ships this document both are
+   false, because this slice is what changed them. A review caught an earlier
+   version asserting it in the present.) `prepareTaskWorkspace`
    cannot be borrowed: it aims at `ao/task/<taskId>` and
    `<root>.worktrees/<taskId>` — the branch and directory the delivered task
    already occupies — and requires the source checkout to be on the default
@@ -206,12 +209,19 @@ a durable record rather than a second opinion about them:
 | `VERIFICATION_NOT_ESTABLISHED` | `UNAVAILABLE` | no phase reached a verdict |
 
 **An infrastructure failure is not a code failure.** A process that could not
-start, a timeout, a flooded output budget, a kill from outside, a refused argv, a
-workspace that could not be created, a lease that could not be taken — all of
-them are `VERIFICATION_NOT_ESTABLISHED`. Reporting any of them as `VERIFIED_FAIL`
-would tell an operator their merge is broken when what broke was the machine, and
-this repository has measured that failure mode more than once: a busy workstation
-produces timeouts with zero assertion failures.
+start, a timeout, a flooded output budget, a kill from outside, a refused argv —
+all of them are `VERIFICATION_NOT_ESTABLISHED`. Reporting any of them as
+`VERIFIED_FAIL` would tell an operator their merge is broken when what broke was
+the machine, and this repository has measured that failure mode more than once: a
+busy workstation produces timeouts with zero assertion failures.
+
+That list is exactly `runVerification`'s `UNAVAILABLE`, because that is the only
+thing the outcome is derived from. A workspace that could not be created and a
+lease that could not be taken are **not** on it: they never reach the mint, so
+no record with any outcome is written for them. The run reports the ladder's
+`WORKSPACE_NOT_ESTABLISHED` and writes nothing — a review measured an earlier
+version of this paragraph describing a value the code cannot produce for those
+two causes.
 
 The timeout is the existing one — `VERIFICATION_COMMAND_TIMEOUT_MS`, 30 minutes
 per command, sized for a cold `npm run verify` on Windows. Nothing here loosens
@@ -407,3 +417,24 @@ measurement of the CI model above is a read.
 - **L-V4-09-6** — `ATTEMPT_HISTORY_FULL` is terminal for a task. There is no
   archive and no rotation.
 - **L-V4-09-7** — no live product dogfood was possible; see above.
+- **L-V4-09-9 — on Windows a verification killed from outside is recorded as
+  `VERIFIED_FAIL`.** The classification follows `runVerification` exactly, and
+  that reaches `UNAVAILABLE` for a termination only when the runner reports a
+  *signal*. A review measured a `taskkill /F`-ed phase arriving as `COMPLETED`
+  with `exitCode: 1` and `signal: null` — indistinguishable from a suite that
+  ran and said no. It is an accepted limit of what the platform reports, not a
+  choice this slice made, and it is not papered over: a heuristic that guessed
+  "exit 1 might be a kill" would misread real failures as infrastructure, which
+  is the more expensive mistake.
+- **L-V4-09-10 — the workspace ownership proof establishes shape and location,
+  not authorship.** Re-derived path, registered by Git, detached. A detached
+  worktree an operator registered at `<repo>.verification/<taskId>` themselves
+  satisfies all three and would be removed. Nothing outside that reserved,
+  derived path is reachable — there is no path parameter — which is the
+  guarantee that matters; establishing authorship would need a marker inside a
+  directory the removal is about to delete.
+- **L-V4-09-11 — `MERGE_COMMIT_UNAVAILABLE` covers "could not tell".**
+  `commitObjectPresent` answers `null` both for an object Git says is gone and
+  for a question it refused to evaluate. This build reports one member for both,
+  because what follows is the same either way; it deliberately does not assert
+  the object is absent.

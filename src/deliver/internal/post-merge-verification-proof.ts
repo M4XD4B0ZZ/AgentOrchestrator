@@ -105,14 +105,34 @@ export const POST_MERGE_VERIFICATION_OUTCOMES = [
   'VERIFIED_FAIL',
   /**
    * No phase reached a verdict: a process that could not start, a timeout, an
-   * output budget flooded, a kill from outside, an argv refused, or a
-   * workspace that could not be established.
+   * output budget flooded, a termination the platform reports as a signal, or
+   * an argv refused.
    *
    * **Nothing was learned about the code.** Reporting this as `VERIFIED_FAIL`
    * would tell an operator their merge is broken when what broke was the
    * machine — the fail-*wrong* direction, and the one this repository has
    * measured most often (a busy workstation produces timeouts with zero
    * assertion failures).
+   *
+   * This value is exactly `runVerification`'s `UNAVAILABLE` and nothing else,
+   * because that verdict is the only thing it is derived from. Two consequences
+   * are worth stating rather than leaving to be discovered:
+   *
+   *  - a workspace that could not be created and a lease that could not be
+   *    taken are **not** here. They never reach the mint, so no record with any
+   *    outcome is written for them; an operator sees the ladder's
+   *    `WORKSPACE_NOT_ESTABLISHED` and nothing durable. An earlier version of
+   *    this comment listed the workspace case, and a review measured it as
+   *    naming a value the code cannot produce for that cause;
+   *  - **"killed from outside" is platform-dependent, and on Windows it is
+   *    usually not this.** `verify-command.ts` reaches `UNAVAILABLE` for a
+   *    termination only when the runner reports a *signal*; a review measured a
+   *    `taskkill /F`-ed phase arriving as `COMPLETED` with `exitCode: 1` and
+   *    `signal: null`, which is indistinguishable from a test suite that ran
+   *    and said no — and is therefore recorded as `VERIFIED_FAIL`. That is a
+   *    limit of what the platform reports, not a classification this slice
+   *    chose, and it is carried as an accepted limit rather than papered over
+   *    with a heuristic that would misread real failures as infrastructure.
    */
   'VERIFICATION_NOT_ESTABLISHED',
 ] as const;
@@ -152,7 +172,14 @@ export interface PostMergeVerificationFacts {
   readonly exitCode: number | null;
   /** The signal that killed the stopping phase, when one did. */
   readonly signal: string | null;
-  /** How many phases were actually run, in order, before the run ended. */
+  /**
+   * How many phase reports the run produced, in order, before it ended.
+   *
+   * Named for what it counts. It is **not** "how many processes started": a
+   * phase whose argv or worktree path is refused produces a report without
+   * anything being spawned, and a review measured an earlier docstring saying
+   * "actually run" against exactly that case.
+   */
   readonly phasesRun: number;
   /** When this process started the attempt. ISO-8601 with an explicit offset. */
   readonly attemptedAt: string;
@@ -227,9 +254,13 @@ const OUTCOME_OF: Readonly<Record<VerificationReport['verdict'], PostMergeVerifi
  *  - the profile digest is not a digest;
  *  - the attempt instant is not ISO-8601;
  *  - the report claims a `PASSED` verdict while naming a phase it stopped at,
- *    or a non-`PASSED` verdict naming none. Those two shapes are unreachable
- *    through `runVerification` and are refused here rather than trusted,
- *    because this is the boundary at which a hand-built report would arrive.
+ *    or a non-`PASSED` verdict naming none. The first is unreachable through
+ *    `runVerification`; the second is **not**, and an earlier version of this
+ *    sentence claimed both were — an empty phase list yields `UNAVAILABLE` with
+ *    `stoppedAt: null`, which lands here. That input is unrepresentable through
+ *    `VerificationPolicySchema`, so it is not expected in practice, and
+ *    refusing it is the right answer either way: a run of no phases is not a
+ *    measurement of anything.
  */
 export function mintPostMergeVerification(
   attempt: AttemptedVerification,

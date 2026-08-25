@@ -81,11 +81,21 @@ export const POST_MERGE_VERIFICATION_VERSION = 1;
 /**
  * The largest verification record this build will read or write.
  *
- * Sized against the worst representable record rather than against a typical
- * one: {@link MAX_VERIFICATION_ATTEMPTS} attempts, each carrying a 64-character
- * digest, an outcome, a phase name, an exit code and a signal name, plus the
- * header. A **byte** budget, checked against the file's size on disk — a schema
- * `.max()` bounds characters, and a character is not a byte.
+ * Sized against the worst record this schema can represent, and that worst case
+ * is **computed rather than estimated**: {@link MAX_VERIFICATION_ATTEMPTS}
+ * attempts at their maxima (334 bytes each) plus a header whose
+ * `repositoryRoot` alone may be 4096 characters — **11,083 bytes**, measured
+ * directly rather than reasoned about.
+ *
+ * That measurement is here because a review claimed 19,271 and asked for the
+ * budget to be raised. Recomputing it from the schema's own bounds refuted the
+ * claim, and the budget is unchanged. It is written down so the next reader
+ * does not have to repeat the arithmetic to find out which of the two numbers
+ * was real — and the test file recomputes it, so a field added to either shape
+ * moves the measurement rather than the prose.
+ *
+ * A **byte** budget, checked against the file's size on disk. A schema `.max()`
+ * bounds characters, and a character is not a byte.
  */
 export const MAX_POST_MERGE_VERIFICATION_BYTES = 16_384;
 
@@ -146,7 +156,12 @@ export const VerificationAttemptSchema = z
     exitCode: z.int().min(MIN_EXIT_CODE).max(MAX_EXIT_CODE).nullable(),
     /** The signal that killed the stopping phase, when one did. */
     signal: z.string().min(1).max(32).nullable(),
-    /** How many phases actually ran before the run ended. At most the profile's 8. */
+    /**
+     * How many phase reports the run produced. At most the profile's 8.
+     *
+     * Not "how many processes started" — a refused argv produces a report
+     * without a spawn. See the mint, which is where the value comes from.
+     */
     phasesRun: z.int().min(0).max(8),
   })
   .strict()
@@ -301,7 +316,15 @@ export const POST_MERGE_VERIFICATION_READINGS = [
   'MALFORMED',
   /** A well-formed record this build's contract version does not cover. */
   'UNSUPPORTED_VERSION',
-  /** A record that is about another task, or another repository. */
+  /**
+   * A record about another task or another repository — **or one that has been
+   * edited since it was written.**
+   *
+   * The last clause is not decoration. The binding digest covers every field of
+   * every attempt, so a stored verdict changed in place fails the same
+   * comparison a foreign record does, and lands here. Slice 8's sibling member
+   * says so; a review found this one had dropped the clause.
+   */
   'NOT_THIS_TASK',
 ] as const;
 

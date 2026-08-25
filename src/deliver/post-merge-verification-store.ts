@@ -284,12 +284,21 @@ export async function recordPostMergeVerification(
   // merge commit — that a run happened against *some* exact commit. It cannot
   // guarantee that commit is the one the task's receipt names, because it never
   // saw the receipt. This is where those two meet.
+  // Two comparisons, and they are a **pair** rather than two gates. The mint
+  // guarantees `facts.workspaceHeadCommit === facts.mergeCommit`, so against a
+  // genuinely minted proof either line alone refuses everything the other one
+  // would — and a counter-proof measured exactly that: each mutant survives the
+  // whole suite on its own, and removing *both* together is killed.
+  //
+  // They stay as a pair because they fail in opposite directions if the mint
+  // changes. The first is the one that matters if the mint's equality check
+  // were ever removed and a proof arrived naming one commit while having been
+  // run against another; the second is the one that matters if the proof's
+  // `mergeCommit` field were ever set from something other than the run. Their
+  // honest status is "each redundant while the mint holds, together not".
   if (facts.mergeCommit !== request.expectedMergeCommit) {
     return recordFailure('SUBJECT_MISMATCH', null);
   }
-  // Belt and braces against the mint's own refusal: if the mint ever stopped
-  // requiring the proved HEAD to equal the attested commit, this is the line
-  // that would keep a run against another tree out of the record.
   if (facts.workspaceHeadCommit !== request.expectedMergeCommit) {
     return recordFailure('SUBJECT_MISMATCH', null);
   }
@@ -348,9 +357,18 @@ export async function recordPostMergeVerification(
       return recordFailure('CONFLICTING_HISTORY', location.path);
     }
     if (hasPassFor(existing.record, attempt.profileDigest)) {
+      // `recorded: false`, and the field's own documentation is why: it says
+      // whether the history now contains **this attempt**, and it does not —
+      // the attempt handed in was discarded in favour of an earlier passing
+      // one. A review found this returning `true`, which would have told a
+      // caller a verdict was durable when the file had not been touched.
+      //
+      // The code is what carries the good news. `ALREADY_VERIFIED` means a
+      // historical successful verification exists for this exact commit and
+      // profile; it does not mean this run was filed.
       return Object.freeze({
         code: 'ALREADY_VERIFIED' as const,
-        recorded: true as const,
+        recorded: false as const,
         writeAttempt: 'NOT_ATTEMPTED' as const,
         path: location.path,
         errnoCode: null,

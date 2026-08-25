@@ -1,3 +1,4 @@
+import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -12,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   mintPostMergeVerification,
@@ -77,6 +78,12 @@ import {
   VERIFICATION_DIRECTORY_SUFFIX,
 } from '../src/worktree/verification-workspace.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
+import {
+  registerDeliveryCommand,
+  ATTENDED_OPTION_DESCRIPTION,
+  DELIVERY_COMMAND_DESCRIPTION,
+  VERIFY_MERGE_OPTION_DESCRIPTION,
+} from '../src/cli/delivery-command.js';
 import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
@@ -196,10 +203,17 @@ function walk(dir: string): string[] {
 /**
  * Source with comments removed.
  *
- * The same stripper the sibling files use, and the same stated limit: a `//`
- * inside a string literal would be read as a comment. No file scanned here
- * contains one, and the positive controls beside each use would fail if a file
- * ever emptied out.
+ * The same stripper the sibling files use, and the same limit — stated
+ * accurately, because a review measured the usual wording as false here. A `//`
+ * inside a string literal IS read as a comment, and `walk('src')` scans one
+ * file that contains one: `src/repo/branch-name.ts`, whose
+ * `name.includes('//')` loses its tail.
+ *
+ * That costs nothing for what this file asks. Every use is an *absence*
+ * assertion — "this source does not name X" — and over-stripping can only make
+ * a forbidden name harder to find, never invent one; the file it affects is not
+ * one any of those assertions is about. The positive controls beside each use
+ * would fail if a file emptied out entirely.
  */
 function codeOnly(path: string): string {
   return readFileSync(path, 'utf8')
@@ -551,17 +565,35 @@ describe('a verification verdict cannot be minted for a run against another comm
     expect(isPostMergeVerificationProof('VERIFIED_PASS')).toBe(false);
   });
 
-  it('answers null rather than throwing for a value that beat the registry', () => {
-    // Reachable, as the lease proof records: a review captured a registry by
-    // hooking `WeakSet.prototype.add` before the first mint. A check that
-    // answers by throwing is not answering.
+  it('reads facts only through an accessor that cannot answer by throwing', () => {
+    // A correction, and the limit is stated rather than dressed up.
+    //
+    // This case used to build an "impostor", add it to a WeakSet of its own,
+    // and claim to be measuring the try/catch inside
+    // `postMergeVerificationFactsOf`. A review measured that the impostor never
+    // entered the module-private registry, so `holds` refused it and the
+    // function returned `null` at its guard clause — the catch was never
+    // entered, and deleting it left the case green.
+    //
+    // The honest position: the catch is **unreachable from outside this
+    // module**. Reaching it needs a value the registry accepts whose private
+    // field was never installed, and the only route to that is capturing
+    // `WeakSet.prototype.add` before the first mint — which a test importing
+    // the module cannot do, because the module is already loaded. It stays for
+    // the reason `lease/execution-lease.ts` records: that capture has been
+    // performed against this codebase's other opaque artefacts, and a check
+    // that answers by throwing is not answering.
+    //
+    // What IS measured here is the part that is reachable, with both halves.
     const impostor = Object.create(PostMergeVerificationEvidence.prototype) as object;
-    const captured = new WeakSet<object>();
-    captured.add(impostor);
-    // Simulate the captured-registry outcome directly: `holds` would say yes and
-    // `factsOf` would throw. The safe accessor must report `null`.
+    // `factsOf` really does throw for such a value — so the catch is guarding
+    // something real, even though nothing outside can drive it.
     expect(() => PostMergeVerificationEvidence.factsOf(impostor as never)).toThrow();
+    // And the safe accessor refuses it without throwing.
     expect(postMergeVerificationFactsOf(impostor)).toBeNull();
+    expect(isPostMergeVerificationProof(impostor)).toBe(false);
+    // The positive control: a genuine artefact reads.
+    expect(postMergeVerificationFactsOf(mintedProof())).not.toBeNull();
   });
 
   it('carries no repository output of any kind', () => {
@@ -701,24 +733,55 @@ describe('the verification record is a versioned, bounded, self-describing docum
     ).toBe(false);
   });
 
-  it('holds a maximal history inside the byte budget', () => {
-    // A budget sized against the worst representable record rather than a
-    // typical one — and measured against it, in bytes, because a schema `.max()`
-    // bounds characters and a character is not a byte.
-    const worst = recordOf({
-      repositoryRoot: 'D:/'.padEnd(200, 'x'),
-      attempts: Array.from({ length: MAX_VERIFICATION_ATTEMPTS }, () =>
-        attemptOf({
-          outcome: 'VERIFIED_FAIL',
-          stoppedAt: 'V'.repeat(32),
-          exitCode: -2_147_483_648,
-          signal: 'S'.repeat(32),
-          phasesRun: 8,
-        }),
-      ),
-    });
+  it('holds the worst record the schema can represent inside the byte budget', () => {
+    // Recomputed from the schema's OWN maxima, not from a plausible-looking
+    // fixture. Two things made this case worth rewriting:
+    //
+    //  - the first version used a 200-character `repositoryRoot` where the
+    //    schema admits 4,096, so it measured a comfortable record rather than
+    //    the worst one;
+    //  - a review then claimed the true worst case was 19,271 bytes and asked
+    //    for the budget to be raised. Measuring it refuted that — it is 11,083
+    //    — and the budget was left alone. A finding is a claim; this is the
+    //    measurement.
+    const root = `D:/${'x'.repeat(4093)}`;
+    const taskId = 't'.repeat(128);
+    const subject = subjectOf({ taskId, repositoryRoot: root });
+    const worst = recordOf(
+      {
+        taskId,
+        repositoryRoot: root,
+        host: 'h'.repeat(253),
+        owner: 'o'.repeat(128),
+        name: 'n'.repeat(128),
+        pullRequestNumber: 2_147_483_647,
+        attempts: Array.from({ length: MAX_VERIFICATION_ATTEMPTS }, () =>
+          attemptOf({
+            // The longest instant this build's ISO grammar admits, the longest
+            // outcome member, and both bounded strings at 32.
+            attemptedAt: '2026-12-31T23:59:59.999999999+01:00',
+            outcome: 'VERIFICATION_NOT_ESTABLISHED',
+            stoppedAt: 'V'.repeat(32),
+            exitCode: -2_147_483_648,
+            signal: 'S'.repeat(32),
+            phasesRun: 8,
+          }),
+        ),
+      },
+      subject,
+    );
+    // The fixture really is at the maxima, so what follows measures the worst
+    // case rather than whatever this test happened to build.
+    expect(PostMergeVerificationSchema.safeParse(worst).success).toBe(true);
     const bytes = Buffer.byteLength(`${JSON.stringify(worst, null, 2)}\n`, 'utf8');
+    // A floor as well as a ceiling. Without the floor a future edit that made
+    // the fixture smaller would keep passing while measuring nothing — which is
+    // exactly how the first version of this case survived.
+    expect(bytes).toBeGreaterThan(10_000);
     expect(bytes).toBeLessThanOrEqual(MAX_POST_MERGE_VERIFICATION_BYTES);
+    // And it round-trips: the budget is enforced on the file's stat size, so a
+    // record inside it must be one this build reads back.
+    expect(readPostMergeVerification(worst, subject).reading).toBe('VERIFICATION_HISTORY');
   });
 
   it('binds every field, including every field of every attempt', () => {
@@ -904,6 +967,74 @@ describe('a verification runs in an owned, detached checkout at exactly one comm
     }
   });
 
+  it('refuses a checkout of a different repository parked at the derived path', async () => {
+    // The `--git-common-dir` test, which the module's own header calls "not
+    // optional and not a formality" — and which a review measured as killed by
+    // no test at all. Without it every other probe here can be satisfied by a
+    // checkout of a *different* repository sitting at this path: same shape,
+    // same detached HEAD, same clean status, and a commit that is not ours.
+    //
+    // The fixture is exactly that. A second repository is built whose HEAD
+    // commit has the same content, and one of ITS worktrees is placed at our
+    // derived path. Two worktrees of one repository share a common directory;
+    // no two repositories do.
+    const repo = realRepo();
+    const foreign = mkdtempSync(join(tmpdir(), 'ao-v409-foreign-'));
+    try {
+      const derived = deriveVerificationWorkspaceIdentity(repo.root, TASK);
+      if (!derived.ok) throw new Error('unreachable');
+
+      git(foreign, 'init', '--quiet', '-b', BASE, '.');
+      git(foreign, 'config', 'user.email', 'other@example.invalid');
+      git(foreign, 'config', 'user.name', 'other');
+      writeFileSync(join(foreign, 'tracked.txt'), 'merged\n', 'utf8');
+      git(foreign, 'add', '-A');
+      git(foreign, 'commit', '--quiet', '-m', 'the merge');
+      const foreignHead = git(foreign, 'rev-parse', 'HEAD');
+      mkdirSync(derived.identity.workspaceParent, { recursive: true });
+      git(foreign, 'worktree', 'add', '--quiet', '--detach', derived.identity.workspacePath, foreignHead);
+
+      // Every other probe is satisfied: the path is right, it is detached, it
+      // is clean, and HEAD is the commit we are about to ask about.
+      expect(git(derived.identity.workspacePath, 'rev-parse', 'HEAD')).toBe(foreignHead);
+      expect(git(derived.identity.workspacePath, 'status', '--porcelain')).toBe('');
+
+      const proved = await proveVerificationWorkspaceAt(
+        runGitCommand,
+        derived.identity,
+        foreignHead,
+      );
+      expect(proved.proof).toBe('FOREIGN_REPOSITORY');
+      expect(proved.canonicalWorkspacePath).toBeNull();
+
+      // The positive control, so the refusal above is attributable to the
+      // common-directory test rather than to the fixture being broken: one of
+      // OUR worktrees at the same path proves.
+      git(foreign, 'worktree', 'remove', '--force', derived.identity.workspacePath);
+      const ours = await createVerificationWorkspace(repo.repository, TASK, repo.mergeCommit, {
+        git: runGitCommand,
+        lease: repo.lease,
+      });
+      expect(ours.code).toBe('WORKSPACE_READY');
+      expect(
+        (await proveVerificationWorkspaceAt(runGitCommand, derived.identity, repo.mergeCommit))
+          .proof,
+      ).toBe('AT_COMMIT');
+      await removeVerificationWorkspace(repo.repository, TASK, {
+        git: runGitCommand,
+        lease: repo.lease,
+      });
+    } finally {
+      try {
+        git(foreign, 'worktree', 'prune');
+      } catch {
+        /* teardown only */
+      }
+      rmSync(foreign, { recursive: true, force: true });
+      repo.dispose();
+    }
+  });
+
   it('refuses a workspace on a branch, because it never makes one', async () => {
     const repo = realRepo();
     try {
@@ -1003,24 +1134,42 @@ describe('a verification runs in an owned, detached checkout at exactly one comm
   it('refuses to create or remove without the execution lease, at the effect', async () => {
     const repo = realRepo();
     try {
-      // A released lease is not held. The gate is inside the function, not in a
-      // caller, so a lease lost between a caller's check and here is caught.
-      releaseRepositoryExecutionLease(repo.lease);
-
-      const created = await createVerificationWorkspace(repo.repository, TASK, repo.mergeCommit, {
+      // A workspace that really exists, so the removal below has a real effect
+      // to be refused. Without this the removal stops at `NOTHING_REGISTERED`
+      // and the case would measure the ownership proof rather than the lease —
+      // which is what an earlier version of it did.
+      const first = await createVerificationWorkspace(repo.repository, TASK, repo.mergeCommit, {
         git: runGitCommand,
         lease: repo.lease,
       });
-      expect(created.code).toBe('EXECUTION_LEASE_NOT_HELD');
+      expect(first.code).toBe('WORKSPACE_READY');
       const derived = deriveVerificationWorkspaceIdentity(repo.root, TASK);
       if (!derived.ok) throw new Error('unreachable');
-      expect(() => statSync(derived.identity.workspacePath)).toThrow();
+
+      // A released lease is not held. The gate is inside each function, not in
+      // a caller, so a lease lost between a caller's check and the effect is
+      // still caught.
+      releaseRepositoryExecutionLease(repo.lease);
 
       const removal = await removeVerificationWorkspace(repo.repository, TASK, {
         git: runGitCommand,
         lease: repo.lease,
       });
       expect(removal.code).toBe('EXECUTION_LEASE_NOT_HELD');
+      // And nothing was deleted.
+      expect(statSync(derived.identity.workspacePath).isDirectory()).toBe(true);
+
+      // Creation is refused for the same reason, and creates nothing.
+      git(repo.root, 'worktree', 'remove', '--force', derived.identity.workspacePath);
+      const created = await createVerificationWorkspace(repo.repository, TASK, repo.mergeCommit, {
+        git: runGitCommand,
+        lease: repo.lease,
+      });
+      expect(created.code).toBe('EXECUTION_LEASE_NOT_HELD');
+      expect(created.ok).toBe(false);
+      if (created.ok) throw new Error('unreachable');
+      expect(created.residue).toBe(false);
+      expect(() => statSync(derived.identity.workspacePath)).toThrow();
     } finally {
       repo.dispose();
     }
@@ -1294,6 +1443,57 @@ describe('the subject is the receipt’s merge commit and nothing else', () => {
     }
   });
 
+  it('re-proves HEAD immediately before the gate, and refuses if it moved', async () => {
+    // The window this exists for, made reachable.
+    //
+    // The first proof describes the moment the worktree was made; this one
+    // describes the moment before a process is started in it, and the two are
+    // separated by however long the steps between them take. A counter-proof
+    // measured the second proof as UNKILLED without this case: nothing changes
+    // between them in an ordinary fixture, so removing it was unobservable —
+    // the "an absence assertion is vacuous until the mutant dies" shape.
+    //
+    // The seam answers the SECOND `rev-parse --verify HEAD` with a different
+    // commit, which is what a concurrent actor moving the checkout would look
+    // like from here.
+    const repo = realRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      let headReads = 0;
+      const movingHead = async (cwd: string, args: readonly string[]) => {
+        const result = await runGitCommand(cwd, args);
+        const isHeadRead =
+          args[0] === 'rev-parse' && args.includes('--verify') && args.includes('HEAD');
+        if (!isHeadRead) return result;
+        headReads += 1;
+        if (headReads !== 2) return result;
+        return { ...result, stdout: repo.baseCommit };
+      };
+
+      const { runner, calls } = recordingRunner();
+      const result = await verifyMergeForDelivery(repo.repository, subject(), {
+        git: movingHead,
+        verify: runner,
+        lease: repo.lease,
+        now: () => new Date(AT),
+      });
+
+      // The first proof really happened, so this is a measurement of the second
+      // one rather than of a run that fell over earlier.
+      expect(headReads).toBe(2);
+      expect(result.outcome).toBe('WORKSPACE_NOT_ESTABLISHED');
+      expect(result.mergeCommit).toBe(repo.mergeCommit);
+      // Nothing was started. This is the assertion that matters: the gate must
+      // not run in a tree whose HEAD is no longer the subject.
+      expect(calls).toEqual([]);
+      expect(result.proof).toBeNull();
+      // And the workspace was still cleaned up.
+      expect(workspaceIsGone(result.workspaceRemoval ?? 'REMOVAL_FAILED')).toBe(true);
+    } finally {
+      repo.dispose();
+    }
+  });
+
   it('reports a gate that could not run as unestablished, never as a code failure', async () => {
     const repo = realRepo();
     try {
@@ -1403,12 +1603,37 @@ describe('a workflow result associated with the head cannot stand in for the mer
     }
   });
 
-  it('cannot be satisfied by a proof whose workspace was never proved', () => {
-    // The store's own belt-and-braces line: even if the mint ever stopped
-    // requiring the proved HEAD to equal the attested commit, a record naming a
-    // run against another tree is refused.
-    const facts = postMergeVerificationFactsOf(mintedProof());
-    expect(facts?.workspaceHeadCommit).toBe(facts?.mergeCommit);
+  it('states honestly which of the two subject guards can be reached', () => {
+    // A correction. This case used to assert
+    // `facts.workspaceHeadCommit === facts.mergeCommit` on a minted proof and
+    // call itself a test of the store's belt-and-braces line. It reached no
+    // store, and its assertion restated the invariant the mint had just
+    // enforced — it could not fail while the mint was intact, which is the
+    // definition of a test that pins nothing. A review measured that, and a
+    // counter-proof measured the same thing from the other side: each of the
+    // store's two subject comparisons survives on its own.
+    //
+    // The truthful statement is that they are a PAIR. Through the mint — the
+    // only route by which a proof exists — the two fields are equal by
+    // construction, so either comparison alone refuses everything the other
+    // would. What can be measured is that removing *both* is caught, and that
+    // is what the store's own cases below do.
+    //
+    // What this case pins is the property that makes the pair redundant, so
+    // that a change which broke it would land here rather than silently make
+    // the store's second line load-bearing without anyone noticing.
+    for (const over of [
+      {},
+      { report: reportOf({ verdict: 'FAILED' as const, stoppedAt: 'VERIFY' }) },
+      { attemptedAt: '2026-12-31T23:59:59.999999999+01:00' },
+    ]) {
+      const facts = postMergeVerificationFactsOf(mintedProof(over));
+      expect(facts, JSON.stringify(over)).not.toBeNull();
+      expect(facts?.workspaceHeadCommit).toBe(facts?.mergeCommit);
+    }
+    // And the mint really is the only route: a proof for a differing pair does
+    // not exist, so no fixture can drive the store's two comparisons apart.
+    expect(mintPostMergeVerification(attemptedOf({ workspaceHeadCommit: OTHER }))).toBeNull();
   });
 });
 
@@ -1520,25 +1745,55 @@ describe('a verification history is appended to, never rewritten', () => {
   it('refuses a history that is about a different merge, and rewrites nothing', async () => {
     const root = scratch();
     try {
-      await recordPostMergeVerification(writeRequest(root));
+      // The seeded attempt is a FAILURE, deliberately.
+      //
+      // An earlier version of this case seeded a pass and then accepted either
+      // `CONFLICTING_HISTORY` or `ALREADY_VERIFIED`. A review built the mutant
+      // that deletes the `sameDelivery` refusal and watched the suite stay
+      // green: without that guard the run falls through to `hasPassFor` and
+      // answers `ALREADY_VERIFIED`, which the assertion allowed. An assertion
+      // that accepts the mutant's answer is not a test of the guard.
+      //
+      // With a failing attempt on disk, `hasPassFor` is false for every
+      // profile, so `CONFLICTING_HISTORY` is the only correct answer and the
+      // mutant produces `ATTEMPT_RECORDED` instead — which this fails on.
+      const failing = mintedProof({
+        report: reportOf({
+          verdict: 'FAILED',
+          stoppedAt: 'VERIFY',
+          phases: [
+            { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, durationMs: 1 },
+          ],
+        }),
+      });
+      expect((await recordPostMergeVerification(writeRequest(root, { proof: failing }))).code).toBe(
+        'HISTORY_STARTED',
+      );
       const before = readFileSync(recordPath(root));
 
       for (const over of [
-        { expectedMergeCommit: OTHER, proof: mintedProof({ mergeCommit: OTHER, workspaceHeadCommit: OTHER }) },
+        {
+          expectedMergeCommit: OTHER,
+          proof: mintedProof({ mergeCommit: OTHER, workspaceHeadCommit: OTHER }),
+        },
         { expectedSubjectCommit: OTHER },
         { expectedPullRequestNumber: 64 },
         { expectedOwner: 'someone' },
+        { expectedHost: 'github.example' },
+        { expectedName: 'other' },
       ]) {
         const result = await recordPostMergeVerification(writeRequest(root, over));
-        expect(
-          ['CONFLICTING_HISTORY', 'ALREADY_VERIFIED'].includes(result.code),
-          `${JSON.stringify(Object.keys(over))} -> ${result.code}`,
-        ).toBe(true);
-        if (result.code === 'CONFLICTING_HISTORY') expect(result.recorded).toBe(false);
+        expect(result.code, `${JSON.stringify(Object.keys(over))}`).toBe('CONFLICTING_HISTORY');
+        expect(result.recorded).toBe(false);
+        expect(result.writeAttempt).toBe('NOT_ATTEMPTED');
       }
-      // The conflicting cases must leave the bytes alone; ALREADY_VERIFIED
-      // writes nothing either, so the file is untouched on every path above.
+      // Every one of them left the bytes alone.
       expect(readFileSync(recordPath(root))).toEqual(before);
+
+      // The positive control: with the header agreeing, the same request is
+      // recorded — so the refusals above are attributable to the header rather
+      // than to the run stopping somewhere earlier.
+      expect((await recordPostMergeVerification(writeRequest(root))).code).toBe('ATTEMPT_RECORDED');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1795,6 +2050,259 @@ describe('a verification history is appended to, never rewritten', () => {
   });
 });
 
+/* ── 7b. The command, end to end, with a real repository and a real lease ── */
+
+describe('the delivery command verifies only when asked, and takes the lease to do it', () => {
+  /**
+   * A real repository with **no** lease held, so the command has to take one.
+   *
+   * Everything below this line is production: a real Git repository, the real
+   * `acquireRepositoryExecutionLease`, the real `leasedGit`, the real
+   * `check-ignore` probe and the real store. Only the two things a test may not
+   * do for real are substituted — resolving a repository profile from disk, and
+   * starting `npm run verify`.
+   */
+  function unleasedRepo(): { root: string; mergeCommit: string; gitCommonDir: string; dispose: () => void } {
+    const root = mkdtempSync(join(tmpdir(), 'ao-v409-cli-'));
+    mkdirSync(join(root, '.agent-orchestrator', 'runtime'), { recursive: true });
+    git(root, 'init', '--quiet', '-b', BASE, '.');
+    git(root, 'config', 'user.email', 'fixture@example.invalid');
+    git(root, 'config', 'user.name', 'fixture');
+    writeFileSync(join(root, '.gitignore'), 'node_modules/\ndist/\n.agent-orchestrator/\n', 'utf8');
+    writeFileSync(join(root, 'tracked.txt'), 'base\n', 'utf8');
+    git(root, 'add', '-A');
+    git(root, 'commit', '--quiet', '-m', 'base');
+    writeFileSync(join(root, 'tracked.txt'), 'merged\n', 'utf8');
+    git(root, 'add', '-A');
+    git(root, 'commit', '--quiet', '-m', 'the merge');
+    const mergeCommit = git(root, 'rev-parse', 'HEAD');
+    const gitCommonDir = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+    return {
+      root,
+      mergeCommit,
+      gitCommonDir,
+      dispose: () => {
+        const derived = deriveVerificationWorkspaceIdentity(root, TASK);
+        if (derived.ok) rmSync(derived.identity.workspaceParent, { recursive: true, force: true });
+        rmSync(root, { recursive: true, force: true });
+      },
+    };
+  }
+
+  async function runCli(
+    argv: readonly string[],
+    repo: ReturnType<typeof unleasedRepo>,
+    verify: VerificationRunner,
+  ): Promise<{ out: string; forgeReads: number; forgeMutations: number; exitCode: number | undefined }> {
+    let forgeReads = 0;
+    let forgeMutations = 0;
+    const chunks: string[] = [];
+    const outerExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    try {
+      const program = new Command();
+      program.exitOverride();
+      registerDeliveryCommand(program, {
+        resolveRepository: async () =>
+          ({
+            ok: true,
+            repository: {
+              id: 'fixture-repo',
+              root: repo.root,
+              gitCommonDir: repo.gitCommonDir,
+              verification: PROFILE,
+              delivery: {
+                declared: true,
+                remoteName: 'origin',
+                result: { outcome: 'RESOLVED', target: { provider: 'github', ...IDENTITY } },
+              },
+            },
+          }) as never,
+        loadTaskState: () =>
+          ({
+            ok: true,
+            revision: 'a'.repeat(64),
+            state: {
+              schemaVersion: 1,
+              taskId: TASK,
+              repositoryId: 'fixture-repo',
+              repositoryRoot: repo.root,
+              worktreePath: repo.root,
+              state: 'READY_FOR_PR',
+              stateEnteredAt: AT,
+              baseBranch: BASE,
+              basePinnedCommit: OTHER,
+              scopeAuthorityCommit: null,
+              workBranch: BRANCH,
+              currentCommit: HEAD,
+              reviewRound: 1,
+              maxReviewRounds: 3,
+              blockedAgent: null,
+              resumeFrom: null,
+              reportedResetAt: null,
+              worktreeCleanAtCheckpoint: true,
+              findingHistory: [],
+            },
+          }) as never,
+        // Every forge seam is supplied and counted. A verification that reached
+        // any of them is a number here rather than an argument in a comment.
+        runner: (async () => {
+          forgeReads += 1;
+          return { outcome: 'COMPLETED', exitCode: 0, stdout: '{}', stderr: '' } as never;
+        }) as never,
+        creationRunner: (async () => {
+          forgeMutations += 1;
+          return {} as never;
+        }) as never,
+        mergeRunner: (async () => {
+          forgeMutations += 1;
+          return {} as never;
+        }) as never,
+        publicationRunner: (async () => {
+          forgeMutations += 1;
+          return {} as never;
+        }) as never,
+        // Real Git, so the worktree really appears and really goes; real
+        // check-ignore, so the store's own gate is exercised rather than stubbed.
+        git: runGitCommand,
+        verify,
+        now: () => new Date(AT),
+      });
+      await program.parseAsync(['node', 'x', 'delivery', '--repository', repo.root, '--task', TASK, ...argv]);
+    } finally {
+      write.mockRestore();
+    }
+    const exitCode = process.exitCode;
+    process.exitCode = outerExitCode;
+    return { out: chunks.join(''), forgeReads, forgeMutations, exitCode };
+  }
+
+  it('runs the gate, records the attempt, and gives the lease back', async () => {
+    const repo = unleasedRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      const { runner, calls } = recordingRunner();
+      const r = await runCli(['--verify-merge'], repo, runner);
+
+      expect(r.out, r.out).toContain('Verification : VERIFICATION_ATTEMPTED');
+      expect(r.out).toContain(`Merge commit : ${repo.mergeCommit}`);
+      expect(r.out).toContain('Result       : VERIFIED_PASS');
+      expect(r.out).toContain('Record       : HISTORY_STARTED  (write: COMPLETED)');
+      // The sentence that keeps the event apart from every standing it is not.
+      expect(r.out).toContain('It is not a claim that the commit is on the base');
+
+      // The gate ran in the workspace, at the merge commit, and not in the
+      // developer's checkout.
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.cwd).not.toBe(repo.root);
+      expect(calls[0]?.headAtRun).toBe(repo.mergeCommit);
+
+      // Nothing was asked of a forge, and nothing was changed on one.
+      expect(r.forgeReads).toBe(0);
+      expect(r.forgeMutations).toBe(0);
+
+      // The record is on disk and reads back.
+      const loaded = loadPostMergeVerification(repo.root, TASK, {
+        taskId: TASK,
+        repositoryRoot: repo.root,
+      });
+      expect(loaded.reading).toBe('VERIFICATION_HISTORY');
+      expect(loaded.record?.mergeCommit).toBe(repo.mergeCommit);
+      expect(loaded.record?.subjectCommit).toBe(HEAD);
+      expect(loaded.record?.attempts).toHaveLength(1);
+      expect(loaded.record?.attempts[0]?.outcome).toBe('VERIFIED_PASS');
+
+      // The lease was given back: nothing holds the repository afterwards, and
+      // a fresh acquisition succeeds. This is the assertion that would fail if
+      // the `finally` were removed.
+      const after = acquireRepositoryExecutionLease(
+        { id: 'fixture-repo', root: repo.root, gitCommonDir: repo.gitCommonDir },
+        { runId: null, blockId: null },
+        { now: () => new Date().toISOString() },
+      );
+      expect(after.ok, JSON.stringify(after)).toBe(true);
+      if (after.ok) releaseRepositoryExecutionLease(after.evidence);
+
+      // The temporary workspace is gone and the developer's tree is untouched.
+      const derived = deriveVerificationWorkspaceIdentity(repo.root, TASK);
+      if (!derived.ok) throw new Error('unreachable');
+      expect(() => statSync(derived.identity.workspacePath)).toThrow();
+      expect(git(repo.root, 'status', '--porcelain')).toBe('');
+      expect(git(repo.root, 'rev-parse', 'HEAD')).toBe(repo.mergeCommit);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('does nothing at all without the flag', async () => {
+    const repo = unleasedRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      const { runner, calls } = recordingRunner();
+      const r = await runCli([], repo, runner);
+      expect(r.out).not.toContain('Verification :');
+      expect(calls).toEqual([]);
+      expect(
+        loadPostMergeVerification(repo.root, TASK, { taskId: TASK, repositoryRoot: repo.root })
+          .reading,
+      ).toBe('ABSENT');
+      // And no lease was taken, so one is free.
+      const after = acquireRepositoryExecutionLease(
+        { id: 'fixture-repo', root: repo.root, gitCommonDir: repo.gitCommonDir },
+        { runId: null, blockId: null },
+        { now: () => new Date().toISOString() },
+      );
+      expect(after.ok).toBe(true);
+      if (after.ok) releaseRepositoryExecutionLease(after.evidence);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('reports a semantic failure without doing anything about it', async () => {
+    const repo = unleasedRepo();
+    try {
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      const { runner } = recordingRunner({ exitCode: 1 });
+      const r = await runCli(['--verify-merge'], repo, runner);
+      expect(r.out).toContain('Result       : VERIFIED_FAIL');
+      expect(r.out).toContain('Stopped at   : VERIFY');
+      expect(r.out).toContain('Record       : HISTORY_STARTED');
+      // No remediation of any kind: no forge call, and the task's own record is
+      // not even loaded for writing — the state seam is a reader.
+      expect(r.forgeMutations).toBe(0);
+      expect(r.forgeReads).toBe(0);
+      const derived = deriveVerificationWorkspaceIdentity(repo.root, TASK);
+      if (!derived.ok) throw new Error('unreachable');
+      expect(() => statSync(derived.identity.workspacePath)).toThrow();
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('refuses without a receipt, and runs nothing', async () => {
+    const repo = unleasedRepo();
+    try {
+      const { runner, calls } = recordingRunner();
+      const r = await runCli(['--verify-merge'], repo, runner);
+      expect(r.out).toContain('Verification : RECEIPT_ABSENT');
+      expect(r.out).toContain('Merge commit : none was established');
+      expect(calls).toEqual([]);
+      // No record, and no history started for a run that did not happen.
+      expect(
+        loadPostMergeVerification(repo.root, TASK, { taskId: TASK, repositoryRoot: repo.root })
+          .reading,
+      ).toBe('ABSENT');
+    } finally {
+      repo.dispose();
+    }
+  });
+});
+
 /* ── 8. What this slice must not touch ───────────────────────────────────── */
 
 describe('post-merge verification changes no execution state and no ledger', () => {
@@ -1916,11 +2424,43 @@ describe('post-merge verification changes no execution state and no ledger', () 
       }
       // A whole word, because `COMPLETED` is the store's own write-attempt
       // vocabulary and a substring match reported it as the task state.
-      expect(source, `${file} must not name the COMPLETE state`).not.toMatch(/COMPLETE/);
+      //
+      // Built with `new RegExp` from a raw string, and given its own controls.
+      // The previous version of this line was written through a shell-quoted
+      // script and its word-boundary escapes arrived as literal U+0008
+      // BACKSPACE bytes — a pattern that cannot match any source file, so the
+      // assertion was incapable of failing. A review measured that. The two
+      // controls below are what stop it happening again: a dead regex fails
+      // them before it ever reaches the file it is supposed to judge.
+      const COMPLETE_STATE = /\bCOMPLETE\b/;
+      expect(COMPLETE_STATE.test("state === 'COMPLETE'")).toBe(true);
+      expect(COMPLETE_STATE.test("writeAttempt: 'COMPLETED'")).toBe(false);
+      expect(source, `${file} must not name the COMPLETE state`).not.toMatch(COMPLETE_STATE);
     }
     // Positive controls: the modules that DO write those still do.
     expect(codeOnly('src/state/state-store.ts')).toContain('saveTaskState');
     expect(codeOnly('src/state/advance-state.ts')).toContain('advanceTaskState');
+
+    // And the CLI, which the six above deliberately exclude because it is the
+    // whole delivery surface rather than this slice's modules.
+    //
+    // It is here because of what the lease widening opened: `delivery-command.ts`
+    // now imports `loop/leased-spawns.js`, and that module exports `leasedAgent`
+    // beside `leasedGit` and `leasedVerify`. Before this slice, `tests/v4-02-…`
+    // refused the whole import; its ADMITTED list now lets it in and says the
+    // "no agent" half is asserted here — which a review found was true of no
+    // file. It is true of this line.
+    const cli = codeOnly('src/cli/delivery-command.ts');
+    expect(cli.replace(/\s+/g, '').length).toBeGreaterThan(1000);
+    for (const forbidden of ['leasedAgent', 'runClaudeWriter', 'runCodexReviewer', 'startTask']) {
+      expect(cli, `src/cli/delivery-command.ts must not reach ${forbidden}`).not.toContain(
+        forbidden,
+      );
+    }
+    // The two it MAY reach, named so the exclusion above is a boundary rather
+    // than a blanket ban that would go stale the moment the file changes.
+    expect(cli).toContain('leasedGit');
+    expect(cli).toContain('leasedVerify');
   });
 
   it('performs no forge mutation and creates no grant', () => {
@@ -1954,6 +2494,68 @@ describe('post-merge verification changes no execution state and no ledger', () 
     expect(source).toContain('loadMergeReconciliation');
     // …and never written. Slice 8's record stays immutable.
     expect(source).not.toContain('recordMergeReconciliation');
+  });
+
+  it('describes every act flag it registers, so an enumeration cannot go stale', () => {
+    // The command description is a list of clauses, one per flag, and a list
+    // beside a registered surface is a number nothing enforces — the shape this
+    // repository has been caught by repeatedly. So the rule is asserted rather
+    // than the list: **every optional flag the command registers must be named
+    // in the description.** The two required options are excluded because they
+    // are not acts.
+    const program = new Command();
+    registerDeliveryCommand(program, {});
+    const delivery = program.commands.find((c) => c.name() === 'delivery');
+    const optional = (delivery?.options ?? []).filter((o) => !o.mandatory).map((o) => o.long ?? '');
+    // Positive control: the surface really has flags, so a registry that
+    // returned nothing could not pass this by silence.
+    expect(optional.length).toBeGreaterThanOrEqual(8);
+    for (const long of optional) {
+      expect(DELIVERY_COMMAND_DESCRIPTION, long).toContain(long);
+    }
+    // And the clause that enumerates the writing flags names this slice's.
+    expect(DELIVERY_COMMAND_DESCRIPTION).toContain('--verify-merge');
+    expect(DELIVERY_COMMAND_DESCRIPTION).toContain('contacting no network at all');
+    // `--attended` still means what it meant: an effect outside this machine.
+    // Verification has none, so it must not have been added to that list.
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--publish-head, --create-pr and --merge-pr');
+    expect(ATTENDED_OPTION_DESCRIPTION).not.toContain('--verify-merge');
+  });
+
+  it('registers the sentence that was pinned, not a copy', () => {
+    const program = new Command();
+    registerDeliveryCommand(program, {});
+    const delivery = program.commands.find((c) => c.name() === 'delivery');
+    const option = (delivery?.options ?? []).find((o) => o.long === '--verify-merge');
+    expect(option?.description).toBe(VERIFY_MERGE_OPTION_DESCRIPTION);
+    // The five words that name an override of a refusal stay forbidden.
+    expect('--verify-merge').not.toMatch(/force|unattended|adopt|takeover|steal/i);
+  });
+
+  it('says what it does and does not establish', () => {
+    for (const phrase of [
+      'the exact merge commit',
+      'named by this task',
+      'not from a commit you name',
+      "execution lease",
+      'will not fetch a merge commit',
+      'your own working tree is never touched'.replace('your', 'your'),
+      'no agent is started',
+      'no task state and no block ledger is written',
+      'is not a claim',
+      'still reachable from it',
+      'has not been reverted',
+      'passes today',
+      'is not run again',
+      // The two clauses a self-review tightened: the network claim is about
+      // THIS act rather than the whole invocation (a run that also passes
+      // --observe does contact github.com), and the removal is a promise that
+      // can be refused, so the sentence says what happens when it is.
+      'this act contacts no network of its own',
+      'if that removal is refused you are told',
+    ]) {
+      expect(VERIFY_MERGE_OPTION_DESCRIPTION.toLowerCase(), phrase).toContain(phrase.toLowerCase());
+    }
   });
 
   it('takes the execution lease in exactly one place, for exactly one act', () => {
@@ -2000,7 +2602,7 @@ describe('post-merge verification changes no execution state and no ledger', () 
     // Given back in a `finally`, so no path out — including a throw — keeps it.
     expect(cli).toMatch(/finally\s*\{[\s\S]{0,600}?releaseRepositoryExecutionLease/);
 
-    // And the four sibling files carry a pointer here rather than a copy, so a
+    // And the five sibling files carry a pointer here rather than a copy, so a
     // reader who looks where the clause used to be is sent to one place. The
     // pointer names this case by its title; if the title changes, this fails.
     for (const file of [

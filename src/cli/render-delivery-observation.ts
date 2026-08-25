@@ -489,6 +489,16 @@ export interface VerificationView {
   readonly result: MergeVerificationResult;
   /** The store's verdict, or `null` when the store was never reached. */
   readonly record: PostMergeVerificationRecordResult | null;
+  /**
+   * How the execution lease was given back, or `null` when no release outcome
+   * was observed — which includes every refusal that never took one.
+   *
+   * Carried because a lease that was not handed back is the one thing on this
+   * path an operator has to act on, and it used to be discarded: the release
+   * result was a bare expression, so a quarantined or unowned lease was
+   * invisible in the report and in the exit code alike.
+   */
+  readonly leaseRelease: string | null;
 }
 
 /**
@@ -873,6 +883,17 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
       lines.push(
         '  Workspace    : removed, but only with --force — the gate dirtied the tree it ran in',
       );
+    }
+    // The repository is handed back, or the operator is told it was not.
+    //
+    // Printed only when something went wrong. A clean release is the ordinary
+    // case and a line for it would be noise; `null` means no release outcome
+    // was observed at all, which on this path is every refusal that never took
+    // a lease — and claiming a release there would be worse than saying
+    // nothing.
+    const release = verification.leaseRelease;
+    if (release !== null && release !== 'RELEASED') {
+      lines.push(`  Lease        : NOT RELEASED (${release}) — the repository is still claimed`);
     }
     // The sentence that keeps the event apart from every standing it is not.
     //
