@@ -9684,11 +9684,14 @@ nothing is overwritten, and when it is full the next attempt is refused with
   request #63 was merged by a human under the repository's own policy, from no AO
   task. Fabricating a `TaskState` and a receipt to enable a demonstration would
   manufacture exactly the evidence this slice exists to require.
-- **L-V4-09-8 — the exit code never reports this flag.** It is computed from the
-  observation conclusion, so a `VERIFIED_FAIL`, a refused write and a leaked
-  workspace are none of them visible in `$?`. Slice 7's convention rather than a
-  new one, stated on the flag's own surface. Read the `Verification` and `Record`
-  lines.
+- **L-V4-09-8 — the exit code does not report the verification verdict.** It is
+  computed from the observation conclusion, so a `VERIFIED_FAIL`, a refused write
+  and a leaked workspace are none of them visible in `$?`. Slice 7's convention
+  rather than a new one, stated on the flag's own surface. The **one** thing that
+  can override it is the execution lease: under the repository-wide rule in
+  `run-exit-codes.ts`, a run that took the writer slot and cannot prove it gave
+  the slot back may not exit nominal. Read the `Verification`, `Record` and
+  `Lease` lines.
 - **L-V4-09-9 — on Windows a verification killed from outside is recorded as
   `VERIFIED_FAIL`.** The classification follows `runVerification` exactly, and
   that reaches `UNAVAILABLE` for a termination only when the runner reports a

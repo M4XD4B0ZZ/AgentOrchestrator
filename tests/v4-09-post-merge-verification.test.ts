@@ -2945,6 +2945,12 @@ describe('post-merge verification changes no execution state and no ledger', () 
       'has not been reverted',
       'passes today',
       'is not run again',
+      // The exit-code clause. It used to say the code "never reports this
+      // flag", which stopped being true when the repository-wide lease rule was
+      // applied here: a run that cannot prove it gave the writer slot back may
+      // not exit nominal. The sentence and the residual both say so now.
+      'may not exit nominal',
+      'Verification, Record and Lease lines',
       // The two clauses a self-review tightened: the network claim is about
       // THIS act rather than the whole invocation (a run that also passes
       // --observe does contact github.com), and the removal is a promise that

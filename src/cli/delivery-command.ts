@@ -529,8 +529,9 @@ export const VERIFY_MERGE_OPTION_DESCRIPTION =
   'that the commit is on the base branch now, that it is still reachable from it, that the ' +
   'merge has not been reverted, or that the base branch passes today. A commit already ' +
   'recorded as passing under the same profile is not run again; a different profile is. The ' +
-  'exit code answers whether the observation settled and never reports this flag. Read the ' +
-  'Verification and Record lines.';
+  'exit code answers whether the observation settled and never carries the verification ' +
+  'verdict — but a run that took the lease and cannot prove it gave it back may not exit ' +
+  'nominal, whatever its own work came to. Read the Verification, Record and Lease lines.';
 
 /**
  * Operator presence, in the shape `release` established.
