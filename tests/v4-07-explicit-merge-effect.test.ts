@@ -1590,7 +1590,7 @@ describe('the delivery command merges only when asked, and only when it may', ()
     //
     // V4 slice 8 added `--reconcile-merge`, and this pin is what made it be
     // declared rather than slipped in. It is deliberately NOT a fourth forge
-    // mutation: it reads github.com and writes one local file, so the count of
+    // mutation: it reads github.com and writes locally, so the count of
     // mutations above is still three. The two counts are stated separately for
     // that reason — a flag arriving here is not evidence about what it does,
     // which is why the effect-boundary cases in `tests/v4-08-…` measure that

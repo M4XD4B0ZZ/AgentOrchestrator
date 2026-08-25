@@ -794,10 +794,19 @@ describe('a merged-pull-request claim can only come from a reading', () => {
       // both scans above. `export const mint = mintMergeObservation;` inside an
       // allowed importer is not an `export {` re-export, and consumers calling
       // `mint(...)` do not name the mint at all — so the import list stays
-      // exactly right while anything that imports that module can mint. A
-      // confirmation found it; this is the line that closes it.
+      // exactly right while anything that imports that module can mint.
+      //
+      // TWO bans, and the second is the general one. A confirmation measured the
+      // first — a single `=` pattern — and got four spellings past it:
+      // `export default mintMergeObservation;`, a member of an exported object
+      // literal, a wrapping arrow function, and a namespace import re-exported
+      // from the public wrapper. Any line that both exports and names the mint
+      // is refused now, which covers the first three.
       expect(source, `${file}: exported alias`).not.toMatch(
         /export[^;\n]*=\s*mintMergeObservation/,
+      );
+      expect(source, `${file}: export naming the mint`).not.toMatch(
+        /^\s*export\b.*mintMergeObservation/m,
       );
     }
     // And the mint's name may not appear in the public wrapper at all, which
@@ -850,15 +859,30 @@ describe('a merged-pull-request claim can only come from a reading', () => {
         ),
       ),
     ).toBe('src/deliver/internal/merge-observation-proof.js');
-    // And the alias ban really matches the form it was written for.
-    expect(/export[^;\n]*=\s*mintMergeObservation/.test(
+    // And the two alias bans really match the forms they were written for —
+    // including the three a confirmation got past the first of them.
+    const anyExport = /^\s*export\b.*mintMergeObservation/m;
+    for (const form of [
       'export const mint = mintMergeObservation;',
-    )).toBe(true);
+      'export default mintMergeObservation;',
+      'export const proofApi = { mint: mintMergeObservation };',
+      'export const mintAnything = (f: X) => mintMergeObservation(f);',
+    ]) {
+      expect(anyExport.test(form), form).toBe(true);
+    }
     // …without matching the ordinary call the one allowed caller makes, which
     // would make the ban unsatisfiable rather than protective.
-    expect(/export[^;\n]*=\s*mintMergeObservation/.test(
+    for (const ordinary of [
       '  const proof = mintMergeObservation({',
-    )).toBe(false);
+      'import { mintMergeObservation } from ',
+    ]) {
+      expect(anyExport.test(ordinary), ordinary).toBe(false);
+    }
+    // The narrower `=` ban is kept beside it and still matches its own form: two
+    // patterns whose failure modes differ is the point, not redundancy.
+    expect(
+      /export[^;\n]*=\s*mintMergeObservation/.test('export const mint = mintMergeObservation;'),
+    ).toBe(true);
   });
 
   it('answers null rather than throwing for a value that captured the registry', () => {
@@ -1985,7 +2009,7 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     expect(RECONCILIATION_TRAILER).not.toContain('the one named above');
     expect(RECONCILIATION_TRAILER).toContain('It changes nothing there');
     // The opening is a CAPABILITY, not an act. The first repair here said "and
-    // not read-only here", which claims a write on the twelve report shapes
+    // not read-only here", which claims a write on the eleven report shapes
     // where nothing was written — the same mistake one clause further along.
     expect(RECONCILIATION_TRAILER).toContain('not necessarily read-only here');
     expect(RECONCILIATION_TRAILER).toContain('says whether this run did');
@@ -2102,6 +2126,29 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
       'never reports this flag, so a refused write is not visible in it',
     );
     expect(RECONCILE_MERGE_OPTION_DESCRIPTION).not.toContain('exits zero');
+  });
+
+  it('says nothing was contacted only when nothing was', async () => {
+    // Derived from the ladder's own flag. A locator read that refused leaves
+    // every other field null while a process really ran, so a report deriving
+    // egress from those fields would say nothing was contacted when something
+    // was — and this is the case that measures it.
+    //
+    // RESTORED after a confirmation found it silently deleted by an edit that
+    // rewrote the case above it. The deletion changed no behaviour and broke no
+    // test, which is exactly why it was invisible: what it cost was a KILL.
+    // Mutating `reconcile-merge.ts`'s locator-refusal arm from
+    // `outcome('FORGE_UNREADABLE', true)` to `false` survives the whole suite
+    // without this case, and with it the report prints "No forge was contacted"
+    // over a run that started a process and drops the L-V4-02-6 disclosure
+    // entirely — the class review round 1 is named after.
+    const refused = await run(['--reconcile-merge'], { locator: null });
+    expect(refused.reader.calls).toHaveLength(1);
+    expect(refused.out).toContain('Read-only.');
+    expect(refused.out).not.toContain('No forge was contacted');
+    // And the disclosure that a contacting run owes is present, which is the
+    // half of the mutant's damage the three assertions above do not name.
+    expect(refused.out).toContain('L-V4-02-6');
   });
 
   it('starts exactly two forge reads and two Git queries, and nothing else', async () => {
@@ -2254,11 +2301,20 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
       ).toBe(true);
     }
 
-    // No "positive control" that the table covers the vocabulary, because the
-    // table is BUILT from the vocabulary — such an assertion is tautological, and
-    // a confirmation named it as one. What is a real control is the loop below:
-    // it requires all three write attempts to be present, and they are supplied
-    // by hand rather than derived, so dropping one makes it fail.
+    // The table is BUILT from the vocabulary, so an assertion that it merely
+    // covers the vocabulary is tautological and a confirmation named the old one
+    // as such. What replaces it is a control that can actually fail: the outcomes
+    // the table carries are compared against the vocabulary itself, so building
+    // it from a SLICE — the drift the tautological assertion did incidentally
+    // guard, measured — is refused here.
+    expect(
+      shapes.filter(([label]) => label.startsWith('ladder:')).map(([, outcome]) => outcome),
+    ).toEqual([...MERGE_OBSERVATIONS]);
+
+    // The loop below is a second control, and a narrower one than its first
+    // description claimed: `NOT_ATTEMPTED` is carried by two shapes, so dropping
+    // either of those leaves it green. Dropping the `write failed` shape is what
+    // makes it fail — and that is the shape the corrected gate turns on.
 
     for (const [label, outcome, contacted, record] of shapes) {
       const out = shape(outcome, contacted, record);

@@ -236,7 +236,7 @@ Two things gate the write, and neither is `--attended`:
 
 `--attended` is this build's marker that a person is present for an irreversible
 effect **outside this machine**. This has none: it reads github.com and writes
-one local file. Requiring it would make the marker mean two different things,
+locally. Requiring it would make the marker mean two different things,
 and would put a reconciliation — the thing you reach for *after* a crash — behind
 the same gate as the merge that caused it.
 
@@ -346,7 +346,7 @@ run: without `dist/native/ao-launch.exe` the fixtures that resolve a repository
 answered `GIT_UNAVAILABLE`, and a lab that skipped the baseline would have
 reported thirty free kills.
 
-38 mutants. **36 killed, 2 equivalent, 0 harness failures**, against a baseline
+40 mutants. **38 killed, 2 equivalent, 0 harness failures**, against a baseline
 green on the slice's own suite and on the four neighbouring ones used to tell
 "this slice's mechanism caught it" from "something else did".
 
@@ -395,13 +395,26 @@ passes. Together they found the following in the product. All are fixed.
    `writeAttempt === 'COMPLETED'`, but by the time a replace can fail this build
    has created the receipt's directory and staged a file beside the target. The
    gate now asks for an *attempt*.
-3. **The reachability pin was defeatable two ways.** The mint's whole-`src` scan
-   matched single-quoted specifiers only, and banned named re-exports but not
-   `export *` — and an `export *` in the public wrapper would have left the
-   importer list exactly right while opening the mint to every module that
-   imports the wrapper. Both closed, and the scan's own patterns now carry
-   controls, because a regex that matches nothing passes every assertion built
-   on it.
+3. **The reachability pin was defeatable, and stayed defeatable through two
+   repairs.** The mint's whole-`src` scan first matched single-quoted specifiers
+   only and banned named re-exports but not `export *`. Closing those, a
+   confirmation got past it with a `..` segment inside the specifier, which
+   resolved to the mint while matching neither arm of a last-two-segments
+   comparison. Closing *that* — specifiers are now resolved and normalised — a
+   second confirmation got four more spellings past the alias ban:
+   `export default`, a member of an exported object literal, a wrapping arrow
+   function, and a namespace import re-exported from the public wrapper.
+
+   Every line that both exports and names the mint is now refused, which covers
+   the first three; the fourth names nothing and is caught by the wrapper's own
+   assertion. The scan's patterns carry controls proving each matches the form it
+   is for and not the one ordinary call — because a regex that matches nothing
+   passes every assertion built on it, and one of these silently became a literal
+   backspace character on the way in.
+
+   Three attempts to close one scan is worth recording as a limit rather than a
+   victory: a text scan bounds what *this* tree spells, and a determined importer
+   of the mint's own module was never what it was for.
 4. **The registry check in `mergeObservationFactsOf` was doing no work.** The
    private-field read independently throws for a value that never went through
    the constructor, so removing the registry gate failed no test. A case now
@@ -459,6 +472,19 @@ on every shape that the bare "Read-only." appears exactly where it is true, that
 the egress disclosure survives wherever a forge was contacted, and that the
 merge-presence caveat appears only where there is a merge to caveat. A fourth
 round of this is a failing test rather than a review finding.
+
+**A test that a fix deleted**
+
+The narrow confirmation of the round-2 delta found that the delta had silently
+removed a case — `says nothing was contacted only when nothing was` — swallowed
+by an edit that rewrote the case above it. Nothing failed, which is exactly why
+it was invisible: what it cost was a *kill*. Mutating the ladder's
+locator-refusal arm from `outcome('FORGE_UNREADABLE', true)` to `false` survives
+the whole suite without that case, and with the mutant applied the report prints
+"No forge was contacted" over a run that started a process and drops the
+`L-V4-02-6` disclosure entirely — the class round 1 is named after. The case is
+restored, with the disclosure assertion it was missing, and there is now a mutant
+for it so its absence is loud.
 
 **Prose that overstated the code**
 
