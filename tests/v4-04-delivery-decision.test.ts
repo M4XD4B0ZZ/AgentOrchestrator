@@ -826,7 +826,15 @@ describe('this slice grants nothing and moves nothing', () => {
       expect(code.replace(/\s+/g, '').length, file).toBeGreaterThan(30);
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
-      expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
+      // The lease clause that used to sit here moved, once, when V4 slice 9
+      // gave `--verify-merge` the execution lease — the first delivery act that
+      // starts the repository's own build and test commands. It is not dropped:
+      // the whole delivery surface still acquires a lease in exactly one file,
+      // exactly once, released in a `finally`, and nowhere under `src/deliver/`.
+      // That is asserted in `tests/v4-09-post-merge-verification.test.ts`, in
+      // 'takes the execution lease in exactly one place'. Restating it here would
+      // be five copies of one fact with nothing making them agree — the shape
+      // `L-V4-08-7` already names.
       expect(code, file).not.toMatch(/\brunOwnedCommand\s*\(|\bspawn\s*\(/);
       // No merge THIS BUILD DOES NOT PERFORM, in any spelling it could reach
       // one by. V4 slice 7 merges exactly one pull request, through `gh api`

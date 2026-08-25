@@ -128,6 +128,21 @@ import {
 } from '../deliver/reconcile-merge.js';
 import { recordMergeReconciliation } from '../deliver/merge-reconciliation-store.js';
 import {
+  loadMergeReconciliation,
+} from '../deliver/merge-reconciliation-store.js';
+import {
+  verifyMergeForDelivery,
+  refuseMergeVerification,
+  type MergeVerificationResult,
+} from '../deliver/verify-merge.js';
+import { recordPostMergeVerification } from '../deliver/post-merge-verification-store.js';
+import {
+  acquireRepositoryExecutionLease,
+  releaseRepositoryExecutionLease,
+} from '../lease/execution-lease.js';
+import { leasedGit, leasedVerify } from '../loop/leased-spawns.js';
+import type { VerificationRunner } from '../verify/verify-command.js';
+import {
   createForgeMergeRunner,
   type ForgeMergeRunner,
 } from '../deliver/github-pull-request-merger.js';
@@ -139,11 +154,12 @@ import {
   createForgeCommandRunner,
   type ForgeCommandRunner,
 } from '../deliver/github-observer.js';
-import { resolveRepository } from '../repo/resolve-repository.js';
+import { resolveRepository, type ResolvedRepository } from '../repo/resolve-repository.js';
 import { loadTaskState } from '../state/state-store.js';
 import {
   renderDeliveryObservation,
   type ReconciliationView,
+  type VerificationView,
 } from './render-delivery-observation.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
@@ -161,6 +177,7 @@ interface DeliveryOptions {
   readonly createPr?: boolean;
   readonly mergePr?: boolean;
   readonly reconcileMerge?: boolean;
+  readonly verifyMerge?: boolean;
   readonly attended?: boolean;
 }
 
@@ -247,6 +264,19 @@ export interface DeliveryCommandSeams {
    * and the base branch.
    */
   readonly mergeRunner?: ForgeMergeRunner;
+  /**
+   * The runner the one verification vector goes through.
+   *
+   * A fifth seam, and the first that is not about a forge or a ref at all: it
+   * starts the repository's own declared commands. Kept separate for the reason
+   * the other four are — a fixture that stubs reading github.com must not be
+   * able to stand in for one that runs a build, and after this slice that
+   * difference is the difference between a question and a process.
+   *
+   * Production never supplies one. Absent, the verification path builds its
+   * runner from `leasedVerify` against the lease it has just taken.
+   */
+  readonly verify?: VerificationRunner;
   /** The Git runner the default ignore probe uses. */
   readonly git?: GitRunner;
 }
@@ -455,6 +485,42 @@ export const RECONCILE_MERGE_OPTION_DESCRIPTION =
   'Read the Receipt line.';
 
 /**
+ * The verification flag's help text.
+ *
+ * Like `--reconcile-merge` it deliberately does not say "requires --attended".
+ * `--attended` marks a person present for an irreversible effect **outside this
+ * machine**, and this flag has none: it reads a receipt, checks out a commit
+ * locally and runs the repository's own declared commands. What it does require
+ * is the **execution lease**, and that is a different statement — it is about
+ * being this repository's writer while a checkout appears and disappears in it,
+ * not about somebody watching.
+ *
+ * It says what it does not claim, at length, because that is the sentence an
+ * operator is most likely to over-read: a pass is about a commit at an instant,
+ * never about a branch today.
+ */
+export const VERIFY_MERGE_OPTION_DESCRIPTION =
+  "Run this repository's own declared verification commands against the exact merge commit " +
+  "named by this task's merge receipt, and record the result beside the task state. The " +
+  'subject comes from the receipt and from nowhere else: not from a commit you name, not from ' +
+  'the base branch, and never from whatever that branch has since become. Requires a receipt ' +
+  '— run --reconcile-merge first — whose recorded head is still this task\'s current commit. ' +
+  'It takes this repository\'s execution lease, because it creates and destroys a detached ' +
+  'checkout here; it contacts no network, and it will not fetch a merge commit this ' +
+  'repository does not already have. The checkout is made in a directory beside the ' +
+  'repository, proved to be at exactly that commit before anything runs, and removed ' +
+  'afterwards; your own working tree is never touched. A run that could not be started is ' +
+  'reported as such and never as a failure of the code. Nothing is changed on github.com, no ' +
+  'agent is started, no task state and no block ledger is written, and a failing result ' +
+  'triggers no revert, no branch and no follow-up. What is stored is one past event — that ' +
+  'this commit completed this profile with this result at that instant. It is not a claim ' +
+  'that the commit is on the base branch now, that it is still reachable from it, that the ' +
+  'merge has not been reverted, or that the base branch passes today. A commit already ' +
+  'recorded as passing under the same profile is not run again; a different profile is. The ' +
+  'exit code answers whether the observation settled and never reports this flag. Read the ' +
+  'Verification and Record lines.';
+
+/**
  * Operator presence, in the shape `release` established.
  *
  * A second, independent statement rather than a widening of the first: one flag
@@ -532,6 +598,10 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     .option(
       '--reconcile-merge',
       RECONCILE_MERGE_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--verify-merge',
+      VERIFY_MERGE_OPTION_DESCRIPTION,
     )
     .option(
       '--attended',
@@ -759,6 +829,30 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
             })
           : null;
 
+      // After the reconciliation on purpose, and for the same reason that one
+      // is after the merge: an invocation asked for both records the merge and
+      // then verifies the commit that record names. One asked only for this
+      // finds the receipt already there, or refuses with `RECEIPT_ABSENT`.
+      //
+      // It is the only act here that starts a process from the repository under
+      // test, so it is the only one that takes the execution lease. It takes no
+      // grant: a grant authorises one irreversible effect and is spent by
+      // claiming it, and running a gate is neither irreversible nor something a
+      // second run would duplicate.
+      const verification =
+        options.verifyMerge === true
+          ? await performVerification(options, repository, subject, taskLoad, {
+              // A fresh object of exactly the named seams, not `seams` itself.
+              // A wider value is assignable to a narrower parameter type, so
+              // passing `seams` would leave the forge runners on the value at
+              // runtime and "it cannot reach one" would be about the type only.
+              now: seams.now,
+              checkIgnored: seams.checkIgnored,
+              git: seams.git,
+              verify: seams.verify,
+            })
+          : null;
+
       process.stdout.write(
         renderDeliveryObservation({
           repositoryId: repository.id,
@@ -774,6 +868,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           creation,
           merge,
           reconciliation,
+          verification,
         }),
       );
 
@@ -1430,6 +1525,182 @@ async function performReconciliation(
   });
 
   return Object.freeze({ result, record });
+}
+
+/**
+ * What the verification path may reach.
+ *
+ * There is deliberately **no forge seam of any kind here** — not the reader,
+ * not the three mutation runners. Post-merge verification asks github.com
+ * nothing: its subject comes from a receipt already on disk and its verdict
+ * from a process started here. A seam it does not hold is a capability the
+ * whole path provably does not have, which is a stronger statement than a
+ * comment saying it does not use one.
+ */
+interface VerificationCommandSeams {
+  readonly now?: (() => Date) | undefined;
+  readonly checkIgnored?: ((relativePath: string) => Promise<IgnoreVerdict>) | undefined;
+  readonly git?: GitRunner | undefined;
+  /**
+   * The verification runner, for tests only.
+   *
+   * Production never supplies one: the runner is built here from `leasedVerify`
+   * against the lease this function has just taken, and it is the only way to
+   * get a production verification runner at all — a static test makes
+   * `loop/leased-spawns.ts` the single value importer of `verify-command.js`.
+   */
+  readonly verify?: VerificationRunner | undefined;
+}
+
+/**
+ * Runs the canonical gate against this task's reconciled merge commit, and
+ * records the attempt.
+ *
+ * ── Why this one takes the lease when no other delivery act does ───────────
+ *
+ * Every other flag on this command either reads, or writes one small file, or
+ * sends one request to a forge. This one **starts the repository's own build
+ * and test commands** and makes a Git worktree appear and disappear beside the
+ * repository while it does. Both halves are already leased effects everywhere
+ * else in this build: `loop/leased-spawns.ts` names `git worktree add` and
+ * `git worktree remove` as productive spawns fenced immediately before the
+ * effect, and it is the only module allowed to reach the raw verification
+ * runner at all.
+ *
+ * So the lease is not a precaution chosen here. It is the existing contract for
+ * what this path does, and running without one would mean amending a structural
+ * pin rather than skipping a formality.
+ *
+ * It is taken for the whole attempt and given back once, in a `finally` that
+ * covers every path out including a throw — never per step, which would leave
+ * windows between them that a second writer fits into perfectly.
+ */
+async function performVerification(
+  options: DeliveryOptions,
+  repository: ResolvedRepository,
+  subject: ReturnType<typeof resolveObservationSubject>,
+  taskLoad: ReturnType<typeof loadTaskState>,
+  seams: VerificationCommandSeams,
+): Promise<VerificationView> {
+  const refused = (result: MergeVerificationResult): VerificationView =>
+    Object.freeze({ result, record: null });
+
+  // The two members the ladder does not produce for itself, in the order it
+  // declares them: a subject that could not be established is ahead of a task
+  // that is not ready, because a refusal about a subject that does not exist
+  // would be describing nothing.
+  if (!subject.ok || !taskLoad.ok) {
+    return refused(refuseMergeVerification('SUBJECT_NOT_ESTABLISHED'));
+  }
+  if (taskLoad.state.state !== 'READY_FOR_PR') {
+    return refused(refuseMergeVerification('TASK_NOT_READY'));
+  }
+
+  const now = seams.now ?? (() => new Date());
+
+  const acquired = acquireRepositoryExecutionLease(
+    repository,
+    { runId: null, blockId: null },
+    { now: () => now().toISOString() },
+  );
+  if (!acquired.ok) {
+    // Reported as a workspace that could not be established, because that is
+    // exactly what it is: without the lease no checkout is made, no process is
+    // started and nothing is learned about the commit. It is emphatically not a
+    // verification failure — see the ladder's own note on the difference.
+    return refused(refuseMergeVerificationUnleased());
+  }
+
+  try {
+    const git = leasedGit({
+      lease: { repository, evidence: acquired.evidence },
+      ...(seams.git === undefined ? {} : { git: seams.git }),
+    });
+    const verify =
+      seams.verify ?? leasedVerify({ lease: { repository, evidence: acquired.evidence } });
+
+    const result = await verifyMergeForDelivery(
+      repository,
+      {
+        taskId: options.task,
+        host: subject.subject.host,
+        owner: subject.subject.owner,
+        name: subject.subject.name,
+        // The task's `currentCommit`, resolved once at the top of the action.
+        // Taken from there rather than re-read, so the receipt check and the
+        // report cannot be about two different delivery heads.
+        deliveryCommit: subject.subject.commit,
+      },
+      { git, verify, lease: acquired.evidence, now },
+    );
+
+    if (result.outcome !== 'VERIFICATION_ATTEMPTED' || result.proof === null) {
+      return Object.freeze({ result, record: null });
+    }
+
+    // Every expectation comes from the receipt the ladder read and from the
+    // task, never from the proof. The store compares the two; handing it the
+    // proof's own facts as the expectation would make that comparison a
+    // tautology.
+    const receiptSubject = { taskId: options.task, repositoryRoot: repository.root };
+    const stored = loadMergeReconciliation(repository.root, options.task, receiptSubject);
+    if (stored.reading !== 'HISTORICAL_MERGE' || stored.receipt === null) {
+      // Unreachable through the ladder, which refuses long before a gate runs
+      // if the receipt is not readable. It is here because the receipt is read
+      // twice — once there and once here — and a build in which those two
+      // readings could disagree must not write a record from the second.
+      return Object.freeze({ result, record: null });
+    }
+
+    const record = await recordPostMergeVerification({
+      repositoryRoot: repository.root,
+      taskId: options.task,
+      proof: result.proof,
+      expectedSubjectCommit: stored.receipt.subjectCommit,
+      expectedMergeCommit: stored.receipt.mergeCommit,
+      expectedHost: stored.receipt.host,
+      expectedOwner: stored.receipt.owner,
+      expectedName: stored.receipt.name,
+      expectedPullRequestNumber: stored.receipt.pullRequestNumber,
+      checkIgnored:
+        seams.checkIgnored ??
+        createRuntimeIgnoreProbe(repository.root, seams.git ?? runGitCommand),
+    });
+
+    return Object.freeze({ result, record });
+  } finally {
+    // Given back on every path out, including a throw. Wrapped, because a
+    // `finally` that throws **replaces** the exception that entered it — so an
+    // exception here would hand the operator the release's failure in place of
+    // the one that actually stopped the run.
+    try {
+      releaseRepositoryExecutionLease(acquired.evidence);
+    } catch {
+      // A lease that cannot be given back is the `lease` command's subject, not
+      // this one's. Swallowing it here loses nothing the operator can act on
+      // from this report, and re-throwing would lose the verification result.
+    }
+  }
+}
+
+/**
+ * The refusal for a run that never became this repository's writer.
+ *
+ * Its own function so the mapping is stated once. `WORKSPACE_NOT_ESTABLISHED`
+ * is the right member because it is the truthful one: no checkout was made and
+ * no process was started, so nothing was learned about the commit. Reporting a
+ * lease refusal as any kind of verification result would be the infrastructure
+ * failure masquerading as a code verdict that this slice exists to prevent.
+ */
+function refuseMergeVerificationUnleased(): MergeVerificationResult {
+  return Object.freeze({
+    outcome: 'WORKSPACE_NOT_ESTABLISHED' as const,
+    mergeCommit: null,
+    profileDigest: null,
+    report: null,
+    proof: null,
+    workspaceRemoval: null,
+  });
 }
 
 /**

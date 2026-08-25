@@ -1584,17 +1584,21 @@ describe('the delivery command merges only when asked, and only when it may', ()
     const delivery = program.commands.find((c) => c.name() === 'delivery');
     const longs = (delivery?.options ?? []).map((o) => o.long ?? '').sort();
     // Enumerated. This is what replaced the `merge` entry in the sibling files'
-    // word ban: a NEW mutation flag cannot arrive unnamed, whatever it is
-    // called. (An earlier comment said "a sixth", which counted nothing — ten
-    // options are registered and three of them are forge mutations.)
+    // word ban: a NEW flag cannot arrive unnamed, whatever it is called.
     //
-    // V4 slice 8 added `--reconcile-merge`, and this pin is what made it be
-    // declared rather than slipped in. It is deliberately NOT a fourth forge
-    // mutation: it reads github.com and writes locally, so the count of
-    // mutations above is still three. The two counts are stated separately for
-    // that reason — a flag arriving here is not evidence about what it does,
-    // which is why the effect-boundary cases in `tests/v4-08-…` measure that
-    // separately rather than inferring it from this list.
+    // The list is the whole statement, and it states **no count in prose**.
+    // Two earlier versions of this comment did — "a sixth", then "ten options
+    // … three of them are forge mutations" — and both went stale the moment a
+    // flag was added, which is the shape a number beside an enforced list
+    // always has. V4 slice 8 added `--reconcile-merge` and V4 slice 9 added
+    // `--verify-merge`; each had to be declared here rather than slipped in,
+    // which is the property this case exists for.
+    //
+    // A flag arriving here is not evidence about what it *does*. Neither of
+    // the two additions is a forge mutation — one reads github.com and writes
+    // locally, the other contacts nothing — and that is measured by the
+    // effect-boundary cases in `tests/v4-08-…` and `tests/v4-09-…` rather than
+    // inferred from this list.
     expect(longs).toEqual(
       [
         '--attended',
@@ -1607,6 +1611,7 @@ describe('the delivery command merges only when asked, and only when it may', ()
         '--record',
         '--repository',
         '--task',
+        '--verify-merge',
       ].sort(),
     );
     // And the five words that name an override of a refusal stay forbidden.
@@ -1791,7 +1796,7 @@ describe('the product contract is unchanged where it must be', () => {
     }
   });
 
-  it('names no writer, no lease and no agent on the whole delivery surface', () => {
+  it('names no writer and no agent on the whole delivery surface', () => {
     const SURFACE = [
       ...walk('src/deliver'),
       'src/cli/delivery-command.ts',
@@ -1802,9 +1807,18 @@ describe('the product contract is unchanged where it must be', () => {
       const code = codeOnly(file);
       expect(code, file).not.toMatch(/\badvanceTaskState\s*\(/);
       expect(code, file).not.toMatch(/\bsaveTaskState\s*\(/);
-      expect(code, file).not.toMatch(/\bacquire\w*ExecutionLease\s*\(/);
+      // The lease clause that used to sit here moved, once, when V4 slice 9
+      // gave `--verify-merge` the execution lease — the first delivery act that
+      // starts the repository's own build and test commands. It is not dropped:
+      // the whole delivery surface still acquires a lease in exactly one file,
+      // exactly once, released in a `finally`, and nowhere under `src/deliver/`.
+      // That is asserted in `tests/v4-09-post-merge-verification.test.ts`, in
+      // 'takes the execution lease in exactly one place'. Restating it here would
+      // be five copies of one fact with nothing making them agree — the shape
+      // `L-V4-08-7` already names.
       expect(code, file).not.toMatch(/\brunOwnedCommand\s*\(|\bspawn\s*\(/);
       expect(code, file).not.toMatch(/\bstartTask\s*\(/);
     }
   });
+
 });

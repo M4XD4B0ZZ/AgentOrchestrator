@@ -1965,8 +1965,22 @@ describe('the CLI surface', () => {
     // `deliver/delivery-evidence-store.js`. This check is depth-one and does not
     // follow it — see the comment above — so the writing itself is pinned in
     // `tests/v4-03-delivery-evidence.test.ts`, where the authority for it lives.
+    // V4 slice 9 admitted the last two, and they are the first entries on this
+    // list that can *write*. `--verify-merge` creates and destroys a detached
+    // checkout beside the repository and starts the repository's own build and
+    // test commands, and both are leased effects everywhere else in this build:
+    // `loop/leased-spawns.ts` fences `git worktree add` and `git worktree
+    // remove`, and a static test makes it the only value importer of the raw
+    // verification runner. So the command acquires the lease and builds its two
+    // seams from `leasedGit` and `leasedVerify`.
+    //
+    // What that does NOT admit is a task-state writer, an agent, or a second
+    // acquisition — the exact scope of the lease exception is asserted once, in
+    // `tests/v4-09-post-merge-verification.test.ts`.
     const ADMITTED = [
       '../core/task-state.js',
+      '../lease/execution-lease.js',
+      '../loop/leased-spawns.js',
       '../state/runtime-ignored.js',
       '../state/state-store.js',
       '../worktree/git-command.js',

@@ -59,6 +59,14 @@ import {
 } from '../deliver/reconcile-merge.js';
 import { MERGE_PRESENCE_SENTENCE } from '../deliver/merge-reconciliation.js';
 import type { MergeReconciliationRecordResult } from '../deliver/merge-reconciliation-store.js';
+import { VERIFICATION_EVENT_SENTENCE } from '../deliver/post-merge-verification.js';
+import type { PostMergeVerificationRecordResult } from '../deliver/post-merge-verification-store.js';
+import { postMergeVerificationFactsOf } from '../deliver/post-merge-verification-proof.js';
+import {
+  MERGE_VERIFICATION_DETAIL,
+  verificationWorkspaceResidue,
+  type MergeVerificationResult,
+} from '../deliver/verify-merge.js';
 import type { CreationResult } from '../deliver/create-pull-request.js';
 import {
   OBSERVATION_REFUSAL_DETAIL,
@@ -461,6 +469,26 @@ export interface DeliveryObservationView {
   readonly merge?: MergeView | null;
   /** What `--reconcile-merge` amounted to, or `null` when it was not asked for. */
   readonly reconciliation?: ReconciliationView | null;
+  /** What `--verify-merge` amounted to, or `null` when it was not asked for. */
+  readonly verification?: VerificationView | null;
+}
+
+/**
+ * What a post-merge verification established, and what it wrote.
+ *
+ * Three fields because they are three questions, and a run can answer them
+ * differently: the gate may pass while the local write refuses, and the
+ * temporary workspace may fail to clear whatever the verdict was. A single word
+ * for all three would hide exactly the cases an operator has to act on.
+ *
+ * `record` is `null` when no write was reached, which is every outcome short of
+ * `VERIFICATION_ATTEMPTED`. That is a different thing from a write that was
+ * reached and declined to touch the path.
+ */
+export interface VerificationView {
+  readonly result: MergeVerificationResult;
+  /** The store's verdict, or `null` when the store was never reached. */
+  readonly record: PostMergeVerificationRecordResult | null;
 }
 
 /**
@@ -794,6 +822,67 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     // was merged and produced this commit" directly beneath a line saying the
     // opposite.
     if (r.outcome === 'MERGE_OBSERVED') lines.push('', MERGE_PRESENCE_SENTENCE);
+  }
+
+  const verification = view.verification ?? null;
+  if (verification !== null) {
+    const v = verification.result;
+    lines.push(
+      '',
+      // Two labelled lines, never one, for the reason the reconciliation block
+      // gives: `Verification` is what the gate did, `Record` is what this
+      // machine now holds, and they can differ.
+      `Verification : ${v.outcome}`,
+      `  ${MERGE_VERIFICATION_DETAIL[v.outcome]}`,
+      // The subject, printed on every outcome that has one. It is the commit
+      // the whole slice is about, and a report that named only the task would
+      // leave a reader unable to tell which object was measured.
+      `  Merge commit : ${v.mergeCommit ?? 'none was established'}`,
+      `  Profile      : ${v.profileDigest ?? 'not resolved'}`,
+    );
+    // The gate's own verdict, only where a gate ran. Printing a verdict for a
+    // refusal decided before the workspace existed would read as an answer
+    // about a commit nothing was run against.
+    const facts = postMergeVerificationFactsOf(v.proof);
+    if (facts !== null) {
+      lines.push(
+        `  Result       : ${facts.outcome}`,
+        `  Ran in       : a detached checkout proved to be at ${facts.workspaceHeadCommit}`,
+      );
+      if (facts.outcome !== 'VERIFIED_PASS') {
+        lines.push(
+          `  Stopped at   : ${facts.stoppedAt ?? 'no phase'}` +
+            `  (exit ${facts.exitCode === null ? 'none' : String(facts.exitCode)}` +
+            `${facts.signal === null ? '' : `, signal ${facts.signal}`})`,
+        );
+      }
+    }
+    lines.push(
+      `  Record       : ${
+        verification.record === null
+          ? 'not written — no attempt was made to record'
+          : `${verification.record.code}  (write: ${verification.record.writeAttempt})`
+      }`,
+    );
+    // Residue is the operator's problem and is never folded into the verdict.
+    if (verificationWorkspaceResidue(v.workspaceRemoval)) {
+      lines.push(
+        `  Workspace    : NOT REMOVED (${v.workspaceRemoval ?? 'unknown'}) — a checkout is left on disk`,
+      );
+    } else if (v.workspaceRemoval === 'REMOVED_FORCED') {
+      lines.push(
+        '  Workspace    : removed, but only with --force — the gate dirtied the tree it ran in',
+      );
+    }
+    // The sentence that keeps the event apart from every standing it is not.
+    //
+    // Gated on there being a verification result to say it about — the two
+    // outcomes that report one — and not on whether it passed: an operator
+    // reading `VERIFIED_FAIL` needs the same warning against reading a verdict
+    // about a commit as a verdict about a branch.
+    if (v.outcome === 'VERIFICATION_ATTEMPTED' || v.outcome === 'ALREADY_VERIFIED') {
+      lines.push('', VERIFICATION_EVENT_SENTENCE);
+    }
   }
 
   // Derived from what happened, not from which flags were passed — and from
