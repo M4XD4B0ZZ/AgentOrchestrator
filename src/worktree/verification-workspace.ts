@@ -69,9 +69,10 @@
  */
 
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 
 import { isShellInertArgument } from '../doctor/exec.js';
+import { isContained } from '../doctor/safe-write.js';
 import { isValidTaskId } from '../plan/task-id.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import {
@@ -129,12 +130,17 @@ export type VerificationWorkspaceIdentityResult =
   | VerificationWorkspaceIdentitySuccess
   | VerificationWorkspaceIdentityFailure;
 
-/** `true` when `candidate` is `root` itself or lies beneath it. */
-function isContained(root: string, candidate: string): boolean {
-  const rel = relative(root, candidate);
-  if (rel === '') return true;
-  return !rel.startsWith('..') && !isAbsolute(rel);
-}
+// The containment predicate is IMPORTED, not restated.
+//
+// An earlier version of this module carried its own four-line copy, and
+// `tests/v2-02-remediation.test.ts` caught it: that file pins the safety chain
+// as having exactly one implementation and lists the copies that already exist
+// so a fifth cannot arrive quietly. Adding this module to that list would have
+// been the wrong repair — the list is a record of debt, not a place to file
+// more of it — and the two implementations were not even equivalent. This one
+// answered from `path.relative`; `doctor/safe-write.ts` resolves both sides
+// first and compares case-insensitively on Windows, which is the behaviour the
+// rest of this build's containment decisions are made with.
 
 /**
  * Derives where one task's verification workspace belongs.
