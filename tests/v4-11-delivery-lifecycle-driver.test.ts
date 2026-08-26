@@ -1669,20 +1669,20 @@ describe('the driver adds no capability', () => {
     const repo = fixture();
     try {
       saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
-      const statePath = join(repo.root, '.agent-orchestrator', 'runtime', 'tasks', `${TASK}.json`);
+      // `<runtime>/<taskId>.json`, with no `tasks/` segment — the path
+      // `state-location.ts` derives. The first version of this line inserted
+      // one, so every read threw, the `try` swallowed it, `bytes` was always
+      // `null`, and the guarded comparison below never ran: half of what this
+      // case is titled for was measuring nothing. Read unguarded now, because
+      // `saveTaskState` two lines up either wrote that file or threw.
+      const statePath = join(repo.root, '.agent-orchestrator', 'runtime', `${TASK}.json`);
       writeReceipt(repo.root);
       writeVerification(repo.root);
       const before = readdirSync(join(repo.root, '.agent-orchestrator', 'runtime'));
-      const bytes = (() => {
-        try {
-          return readFileSync(statePath, 'utf8');
-        } catch {
-          return null;
-        }
-      })();
+      const bytes = readFileSync(statePath, 'utf8');
       const r = await drive(['--drive', '--merge-pr', '--attended'], repo);
       expect(driven(r)).toBe('DELIVERY_CONCLUDED');
-      if (bytes !== null) expect(readFileSync(statePath, 'utf8')).toBe(bytes);
+      expect(readFileSync(statePath, 'utf8')).toBe(bytes);
       // The runtime directory gained the conclusion and nothing else.
       const after = readdirSync(join(repo.root, '.agent-orchestrator', 'runtime'));
       expect(after.filter((d) => !before.includes(d)).sort()).toEqual(['delivery-conclusion']);

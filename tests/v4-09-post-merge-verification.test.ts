@@ -2942,8 +2942,17 @@ describe('post-merge verification changes no execution state and no ledger', () 
     // beside a registered surface is a number nothing enforces — the shape this
     // repository has been caught by repeatedly. So the rule is asserted rather
     // than the list: **every optional flag the command registers must be named
-    // in the description.** The two required options are excluded because they
-    // are not acts.
+    // in the description.**
+    //
+    // The excluded set is "whatever commander still marks mandatory", not a
+    // list, and it is **one** option now: `--repository`. V4 slice 12 turned
+    // `--task` into a plain `.option()` so that `--drive --select-task` could
+    // answer the same question, which moved it inside this rule — correctly,
+    // and the description gained a clause naming it. The earlier wording here
+    // said "the two required options … because they are not acts", which is
+    // now wrong twice: there is one, and `--task` sits inside the rule while
+    // being no more an act than `--repository` is. Mandatory-or-not is the
+    // criterion; being an act never was.
     const program = new Command();
     registerDeliveryCommand(program, {});
     const delivery = program.commands.find((c) => c.name() === 'delivery');

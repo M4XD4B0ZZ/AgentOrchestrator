@@ -50,6 +50,15 @@ import {
   type DeliveryEffect,
 } from './delivery-driver.js';
 import type { DeliveryConclusionOutcome } from '../deliver/conclude-delivery.js';
+import {
+  DELIVERY_CANDIDATE_POSITIONS,
+  DELIVERY_TASK_SELECTION_DETAIL,
+  type DeliveryCandidate,
+  type DeliveryCandidatePosition,
+  type DeliveryTaskSelection,
+  type DeliveryTaskSelectionResult,
+} from '../deliver/select-delivery-task.js';
+import type { TaskPlanningFailure } from '../plan/plan-next-task.js';
 import type { PublicationResult } from '../deliver/publish-delivery-head.js';
 import {
   PULL_REQUEST_CREATION_DETAIL,
@@ -400,6 +409,24 @@ export const DRIVE_TRAILER =
   'needs them, fresh answers from github.com. It writes no task state and no block-ledger entry,\n' +
   'starts no agent, and READY_FOR_PR stays terminal however far the delivery got.';
 
+export const SELECTION_TRAILER =
+  'Selecting a task chooses WHICH delivery is driven and authorises nothing about it. The three\n' +
+  'acts that reach github.com still need their own flag and --attended, separately, exactly as\n' +
+  'they do under --task. The candidates are the tasks this repository DECLARES, walked in the\n' +
+  "plan's own dependency order with ties broken by the smallest id, so the answer does not\n" +
+  'depend on the order the filesystem listed anything. A task is passed over only when its\n' +
+  'delivery is already concluded, when AO has never run it, or when its state is not the one a\n' +
+  'delivery is driven from. A task whose conclusion or state cannot be READ is not passed over:\n' +
+  'the walk stops there and says so, because delivering a later task instead would step over a\n' +
+  'record nobody has looked at. Whether the chosen task CAN be delivered is not asked here — a\n' +
+  'missing delivery target or an unresolvable subject is reported by the driver, about that\n' +
+  'task, by name. CHOOSING costs two file reads per candidate and nothing else: it writes no\n' +
+  'record, contacts no forge, takes no execution lease and is not remembered, so the next\n' +
+  'invocation walks the plan again. That is a statement about the choice ALONE — what the\n' +
+  'driver then does to the chosen delivery is the Drive block above, and it may well write\n' +
+  'records, ask github.com and take this repository\'s execution lease. Name --task <id>\n' +
+  'instead to drive one delivery regardless of where it sits in that order.';
+
 
 /**
  * One merge reading as one phrase.
@@ -425,6 +452,81 @@ function describeMergeReading(reading: MergeReading): string {
 
 function line(label: string, value: string): string {
   return `${label.padEnd(13)}: ${value}`;
+}
+
+/**
+ * What the walk looked at, as a count per position and never as a list of ids.
+ *
+ * A count rather than an enumeration because the walk may have examined every
+ * task in a 512-task plan, and a report that pasted 511 ids above the one line
+ * an operator came for is a report nobody reads to the end. The one id that
+ * always appears is the one the walk stopped at, and it appears on its own line
+ * — `Task` above, or `Blocked at` in the refusal — because it is the only one a
+ * decision was made about.
+ *
+ * The order is {@link DELIVERY_CANDIDATE_POSITIONS}', so two reports of the same
+ * walk read the same way, and a position nothing was found at is omitted rather
+ * than printed as zero.
+ */
+function examinedLines(examined: readonly DeliveryCandidate[]): readonly string[] {
+  const counts = new Map<DeliveryCandidatePosition, number>();
+  for (const entry of examined) {
+    counts.set(entry.position, (counts.get(entry.position) ?? 0) + 1);
+  }
+  const parts = DELIVERY_CANDIDATE_POSITIONS.filter((position) => counts.has(position)).map(
+    (position) => `${counts.get(position) ?? 0} ${position}`,
+  );
+  return [
+    `  Examined     : ${examined.length} of the plan’s tasks, in its dependency order` +
+      `${parts.length === 0 ? '' : ` — ${parts.join(', ')}`}`,
+  ];
+}
+
+/**
+ * The report for a selection that produced no task, and for a plan that could
+ * not be read at all.
+ *
+ * Separate from {@link renderDeliveryObservation} rather than a mode of it,
+ * because that function's whole shape is a report *about a task*: it opens with
+ * the task id, then the delivery target and the subject resolved from it. There
+ * is no task here, and filling those lines with a placeholder would be inventing
+ * a subject for a delivery nobody identified.
+ */
+export function renderDeliverySelectionRefusal(view: {
+  readonly repositoryId: string;
+  readonly repositoryRoot: string;
+  /** The selection, or `null` when the plan itself could not be read. */
+  readonly selection: DeliveryTaskSelectionResult | null;
+  /** The planning failure, or `null` when the plan was read. */
+  readonly planning: TaskPlanningFailure | null;
+}): string {
+  const lines: string[] = [
+    '',
+    line('Repository', `${view.repositoryId}  (${view.repositoryRoot})`),
+  ];
+
+  if (view.planning !== null) {
+    lines.push(
+      line('Selection', 'the plan could not be read, so there are no candidates'),
+      line('Failure', `${view.planning.code} — ${view.planning.detail}`),
+      // The offending task where the planner named one. It is a validated id
+      // and nothing else from the file, which is the planner's own rule about
+      // what a failure may say.
+      ...(view.planning.taskId === null ? [] : [line('Task', view.planning.taskId)]),
+    );
+  } else if (view.selection !== null) {
+    lines.push(
+      line('Selection', view.selection.outcome),
+      `  ${DELIVERY_TASK_SELECTION_DETAIL[view.selection.outcome]}`,
+      ...examinedLines(view.selection.examined),
+      ...(view.selection.blockedTaskId === null
+        ? []
+        : [line('Blocked at', view.selection.blockedTaskId)]),
+    );
+  }
+
+  lines.push('', SELECTION_TRAILER, '');
+  return lines.join('\n');
 }
 
 function refusalLine(code: ObservationRefusal): string {
@@ -553,10 +655,27 @@ export interface StoredEvidenceView {
   readonly checkOutcome: string | null;
 }
 
+/**
+ * How the task under `Task` was arrived at, when this build chose it.
+ *
+ * `null` — the ordinary case — means an operator named it with `--task`, and
+ * nothing about selection is printed. There is no member for "chosen by the
+ * operator": a report that said so would be describing the absence of this
+ * whole mechanism.
+ */
+export interface DeliverySelectionView {
+  /** Always `DELIVERY_TASK_SELECTED` here; a refusal has no task to report on. */
+  readonly outcome: DeliveryTaskSelection;
+  /** Every candidate examined, in the order they were examined. */
+  readonly examined: readonly DeliveryCandidate[];
+}
+
 export interface DeliveryObservationView {
   readonly repositoryId: string;
   readonly repositoryRoot: string;
   readonly taskId: string;
+  /** How this task was chosen, or `null` when `--task` named it. */
+  readonly selection?: DeliverySelectionView | null;
   readonly subject: SubjectResolution;
   /** `null` when no observation was requested. */
   readonly observation: DeliveryObservation | null;
@@ -769,6 +888,17 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     line('Repository', `${view.repositoryId}  (${view.repositoryRoot})`),
     line('Task', view.taskId),
   ];
+
+  // Directly under the task, because it is the answer to "why this one?" and
+  // an operator reading a report about a task they did not name needs that
+  // before anything else in it.
+  const selection = view.selection ?? null;
+  if (selection !== null) {
+    lines.push(
+      line('Selected', `${selection.outcome}  (this build chose the task; --task was not given)`),
+      ...examinedLines(selection.examined),
+    );
+  }
 
   if (view.subject.ok) {
     const { subject, taskState, remoteName } = view.subject;
@@ -1344,6 +1474,14 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   if (view.drive != null) {
     if (trailers.length > 0) trailers.push('');
     trailers.push(DRIVE_TRAILER);
+  }
+  // Last of all, because it is the sentence about which delivery this whole
+  // report is of — and gated on the selection having happened, not on how it
+  // came out: a run that chose a task owes the operator the rule it chose by,
+  // whatever the driver then made of that task.
+  if (view.selection != null) {
+    if (trailers.length > 0) trailers.push('');
+    trailers.push(SELECTION_TRAILER);
   }
   lines.push('', ...trailers, '');
 

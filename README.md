@@ -10274,6 +10274,199 @@ conclusion and a task still reported as `READY_FOR_PR` remain the expected set.
   carrying a delivery target, a merge receipt and a verification history, and
   fabricating one would fabricate the evidence the driver exists to read.
 
+
+## Choosing the delivery (V4 slice 12)
+
+`delivery --drive --select-task` works out **which** delivery to drive, so an
+operator no longer has to know that either.
+
+It adds **no act and no authority**. Everything it can do, an invocation naming
+`--task <id>` could already do. What it removes is the last piece of manual
+sequencing the driver left behind.
+
+```
+agent-loop delivery --repository <path> --drive --select-task
+agent-loop delivery --repository <path> --drive --select-task --publish-head --attended
+agent-loop delivery --repository <path> --drive --select-task --create-pr   --attended
+agent-loop delivery --repository <path> --drive --select-task --merge-pr    --attended
+```
+
+`--task <id>` is unchanged and is still the direct way to name a delivery. It is
+no longer a `requiredOption`, and it did not become optional in meaning:
+omitting it is still refused — by this command rather than by commander — unless
+`--select-task` asked for a choice. **An omitted `--task` never selects on its
+own.** A script that dropped the flag would otherwise start choosing deliveries,
+and under `--merge-pr --attended` that is a merge on a task nobody named.
+
+What did change is where the refusal comes from and what it looks like:
+commander used to write `error: required option '--task <id>' not specified` to
+stderr and exit **1**; the command now writes `Selection    : TASK_NOT_NAMED` to
+stdout and exits **2**, which is this binary's code for an invocation that has to
+be edited. A caller reading stderr or matching on exit 1 sees something
+different. `L-V4-12-7`.
+
+### The candidates are the tasks the repository declares
+
+`discoverTasks` is the only task enumerator in this build, and the runtime
+directory is never listed — readers open the target by name, which is what makes
+a crashed run's staging file invisible rather than a candidate. So the candidate
+set is the plan, and each candidate is then probed by name: its delivery
+conclusion, and then its task state.
+
+### The order is the plan's own, and it is load-bearing
+
+`NormalizedTaskGraph.topologicalOrder`: dependency-respecting, every tie broken
+by the smallest id, covering every task whatever its `status`. It is reused, not
+invented, and this slice is its first production consumer.
+
+It is deliberately **not** `selectNextTask`'s ranking tuple. That tuple ranks
+only *eligible* tasks — `status: OPEN` with every dependency `DONE` — so a task a
+human marked `DONE` in the markdown while its pull request was never merged is
+`ALREADY_DONE`, absent from the ranking, and invisible to it for ever. Selecting
+deliveries that way would starve exactly the delivery that needs attention. Its
+`unlockCount` element is also a statement about releasing blocked *work*, which
+a finished task does not do.
+
+Dependency order is not decoration here. `F-C4` records that a block produces a
+stack — `B`'s branch contains `A`'s commits, so a pull request for `B` carries
+`A`'s work. Walking the topological order means the selector never hands `B` to
+the driver while `A`'s delivery is still pending. That **narrows** `F-C4`; it
+does not close it, and both limits are recorded below.
+
+### A concluded delivery is over, and stays over after its evidence is gone
+
+`READY_FOR_PR` is terminal and stays terminal after a merge, so a scan for that
+state alone would hand the same concluded task to the driver for ever. The
+distinguishing read is one call, and its subject is `{ taskId, repositoryRoot }`
+and nothing else: no delivery target, no profile digest, no merge receipt, no
+verification history.
+
+That is why slice 10's guarantee holds here without being restated. A conclusion
+survives the deletion **and** the corruption of the receipt and the verification
+history, because this read does not touch either. The conclusion is read
+*before* the task state, so a concluded task is skipped without its state file
+being opened — and a concluded task whose state has since become unreadable does
+not block the walk.
+
+### A candidate nobody can read stops the walk
+
+A malformed conclusion, a record written by a newer build, an unreadable task
+state: the walk stops there and names the task. It does **not** carry on to a
+later, healthy delivery. Skipping would turn a visible evidence failure into an
+invisible bypass — the repository would deliver something and never say what it
+stepped over — and it is the same answer `discoverTasks` already gives one
+directory up, where a single malformed task file refuses the whole discovery.
+`--task <id>` remains the way past a blocker, which is the other half of why
+that refusal is affordable.
+
+### Whether the chosen task *can* be delivered is not asked here
+
+No delivery target is resolved, no subject reconstructed, no profile read. A task
+with no declared target is still selected, and the driver answers
+`SUBJECT_NOT_ESTABLISHED` about it, by name. Pre-screening would force one of two
+bad choices: skip the tasks that fail — the bypass above — or duplicate the
+driver's ladder, which is a second opinion about what a deliverable task is.
+
+### Selecting is not permission
+
+`--publish-head`, `--create-pr`, `--merge-pr` and `--attended` mean exactly what
+they meant. `delivery --drive --select-task --attended` changes nothing on
+github.com. There is no `SelectionProof`: an opaque artefact exists in this build
+to force proof over assertion where an *authority* is granted, and a router
+grants none — adding one would imply a permission the selection does not carry.
+The driver cannot even tell a selected task from a named one; the word does not
+appear in it.
+
+What *does* change in substance, and it is the one real shift: the **subject** of
+an authorised mutation becomes implicit. An operator authorises an act without
+naming the task it lands on. That is why the choice has to be asked for by name
+in the invocation rather than falling out of an omitted flag.
+
+### Nothing durable, and nothing remembered
+
+No record is written, no forge contacted, no execution lease taken, no process
+started. Two file reads per candidate at most, and the walk stops at the first
+answer. The next invocation walks the plan again.
+
+### The exit code, under this flag only
+
+| outcome | code |
+| --- | --- |
+| a task was selected | the driver's own member decides |
+| `NO_DELIVERY_PENDING` | 0 — an answer, not a failure |
+| `DELIVERY_EVIDENCE_UNREADABLE` | 3 — durable state a person must look at |
+| the plan could not be read | 2 |
+
+A repository whose task source is missing or empty does **not** reach
+`NO_DELIVERY_PENDING`. `discoverTasks` refuses first, with the right code for the
+right world: `TASK_SOURCE_NOT_FOUND` when nothing exists at the declared path —
+the mistyped-path case — and `TASK_SOURCE_EMPTY` when the directory is there and
+holds no task files. Both grade 2, exactly so that neither can arrive as a
+confident report that there is nothing to deliver.
+
+### `READY_FOR_PR` is still terminal
+
+Selection writes no task state, no markdown, and no block-ledger entry. It reads
+no block ledger at all — blocks are keyed by `runId` and nothing enumerates them,
+so the plan's own order is the only in-build proxy for a block's ordering.
+
+### Carried forward from V4 slice 12, deliberately
+
+- **L-V4-12-1 — selection is not re-established before the driver acts.** The
+  driver re-derives the subject, the task state and the conclusion for itself, so
+  a task that left `READY_FOR_PR` or was concluded in the window is caught. What
+  is not re-established is the **order**: the driver takes one task id and has no
+  cross-task concept, so it cannot know a canonically earlier task became pending
+  meanwhile. Not closed with a lock, for the reason
+  `delivery-conclusion-store.ts` gives about its own read-before-write — a window
+  that cannot be closed without a lock is narrowed and stated, never described as
+  closed. The consequence is bounded: a later delivery advanced before an earlier
+  one, which the earlier one's next invocation still finds waiting.
+- **L-V4-12-2 — one malformed task file makes every delivery unselectable.**
+  `discoverTasks` is all-or-nothing, and selection inherits it. Accepted rather
+  than repaired: it is the same rule the run path lives under, and `--task <id>`
+  reaches a delivery past it.
+- **L-V4-12-3 — a task is passed over when the record that would place it is
+  gone.** Two shapes, and `ENOENT` cannot tell "never written" from "written and
+  removed" in either. If the *markdown* file is deleted the task leaves the plan
+  and selection cannot see it at all — `--task <id>` still reaches it. If the
+  *task state* is deleted the task reads `NOT_ORCHESTRATED` and the walk goes
+  past it, which passes over a delivery that may well be outstanding.
+- **L-V4-12-4 — the examined list is a prefix, not a survey.** The walk stops at
+  the first pending or unreadable candidate, so the report cannot say how many
+  deliveries are waiting in total. It does not claim to.
+- **L-V4-12-5 — `F-C4` is narrowed, not closed.** The selector will not hand a
+  dependent's delivery to the driver while its dependency's delivery is still
+  *pending*, but three things limit that. The order is read from the plan **as it
+  is now**, which is not the frozen relation a block run was started against;
+  `--task <id>` still delivers in any order an operator asks for; and a
+  dependency with no task state at all is `NOT_ORCHESTRATED`, so the walk goes
+  past it and a dependent stacked over it can still be handed over first.
+- **L-V4-12-6 — a refusal about flags prints in two shapes.** A naming refusal
+  and a `DRIVE_NOT_COMBINABLE` on the `--select-task` path print the selection
+  block with no subject, because there is no task to report about; the same
+  condition under `--task <id>` still prints the full report for the task it was
+  given. Both refuse, and — the property that matters — neither depends on what
+  is in the repository.
+- **L-V4-12-7 — omitting `--task` changed channel and exit code.** From
+  commander's stderr and exit 1 to this command's stdout and exit 2. Stated
+  above; no invocation that used to succeed now fails, and none that used to
+  fail now succeeds.
+- **L-V4-12-8 — two false sentences on the CLI front page, corrected here.**
+  `agent-loop --help` said "Opening pull requests is not in this build" (false
+  since slice 6) and called `--publish-head` "the one thing any command in this
+  build can change outside this machine" (false since slices 6 and 7). Both
+  predate this slice and were found by its sweep; both are fixed, and named here
+  rather than folded silently into the diff. A test **pinned** the first of
+  those sentences (`tests/v4-05-…`, "still not in this build, and must still say
+  so"), so from slice 6 onward the suite held a false claim in place — a pin
+  guarding a lie, which is worse than no pin. That pin now asserts the rule
+  instead: what this build refuses is *deciding* a merge is warranted.
+- **L-V4-12-9 — no live product dogfood was possible.** Unchanged from
+  `L-V4-11-8`. What *is* measured against real bytes is the selection itself:
+  real task markdown read by the real `discoverTasks`, real task-state files
+  written by the real store, and real conclusion records with real bindings.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
@@ -10286,8 +10479,11 @@ and 10 add no fourth act: they read, and write locally. Slice 11 adds none
 either, and adds no authority: `--drive` works out which of the existing acts a
 delivery still needs and runs those, but each of the three that reach github.com
 still requires its own flag and `--attended`, separately, and at most one of them
-is attempted per invocation. Deciding that a merge is *warranted* is still not
-something this build does.
+is attempted per invocation. Slice 12 adds no act and no authority either: it
+answers *which* delivery `--drive` is about, from the plan the repository already
+declares, and every act it hands that delivery to still needs its own flag and
+`--attended`. Deciding that a merge is *warranted* is still not something this
+build does — and choosing a subject is not deciding it.
 
 `READY_FOR_PR` remains terminal, and there is **no `COMPLETE` task state**. It
 stays terminal even after a merge, after that merge commit has been verified, and

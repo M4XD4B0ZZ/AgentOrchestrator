@@ -33,6 +33,7 @@
 import type { BlockStopReason } from '../block/block-ledger.js';
 import type { DeliveryConclusionRecordCode } from '../deliver/delivery-conclusion-store.js';
 import type { MergeReconciliationRecordCode } from '../deliver/merge-reconciliation-store.js';
+import type { DeliveryTaskSelection } from '../deliver/select-delivery-task.js';
 import type { DeliveryDrive } from './delivery-driver.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
@@ -701,6 +702,60 @@ const RECEIPT_RECORD_EXIT_CODES = Object.freeze({
   MERGE_NOT_PROVEN: EXIT_RUN_UNEXPECTED,
   SUBJECT_MISMATCH: EXIT_RUN_UNEXPECTED,
 }) satisfies Record<MergeReconciliationRecordCode, CliExitCode | null>;
+
+/**
+ * Exit code for each delivery-selection outcome. Total; pinned by test.
+ *
+ * Total over the vocabulary, which is what `satisfies Record<…>` buys and why
+ * all three members are here — a member left out would be a member nobody
+ * classified. Only two of the three are ever an exit: `DELIVERY_TASK_SELECTED`
+ * does not end the invocation, because the run goes on to the driver and the
+ * driver's own member decides the code. It is graded `EXIT_RUN_OK` anyway, which
+ * is the honest grade: it is not a stop, and if it ever became the last word it
+ * would be one about a selection that succeeded.
+ */
+const DELIVERY_SELECTION_EXIT_CODES = Object.freeze({
+  DELIVERY_TASK_SELECTED: EXIT_RUN_OK,
+  /**
+   * Nominal. The plan was read, every declared task was examined, and none is
+   * waiting for a delivery act — which is what a repository whose deliveries
+   * are all concluded looks like, and equally what one whose tasks have not run
+   * yet looks like. Graded 0 for the reason `ALL_TASKS_COMPLETE` is: an
+   * operator asking "is there anything to deliver?" and being told "no"
+   * received an answer, not a failure.
+   *
+   * The trade-off is stated rather than absorbed. A caller that loops on
+   * exit 0 learns nothing new here, and a repository whose task source is
+   * missing or empty does **not** reach this member: `discoverTasks` refuses
+   * first — `TASK_SOURCE_NOT_FOUND` for a path with nothing at it, and
+   * `TASK_SOURCE_EMPTY` for a directory holding no task files — and the command
+   * grades every planning failure `EXIT_RUN_INPUT_UNUSABLE` itself, at
+   * `delivery-command.ts`. Not in a table here, and deliberately: see the note
+   * on {@link exitCodeForDeliverySelection} directly below. The point of the
+   * split is that a mistyped path cannot arrive as "nothing to deliver".
+   */
+  NO_DELIVERY_PENDING: EXIT_RUN_OK,
+  /**
+   * A record beside an earlier task could not be read, so the walk stopped
+   * there. Durable state a person has to look at, graded like every sibling
+   * unreadable record on this surface — `DELIVERY_EVIDENCE_UNUSABLE` is 3, and
+   * this is the same condition one layer earlier.
+   */
+  DELIVERY_EVIDENCE_UNREADABLE: EXIT_RUN_NEEDS_OPERATOR,
+}) satisfies Record<DeliveryTaskSelection, CliExitCode>;
+
+/**
+ * The exit code for one delivery-selection outcome.
+ *
+ * A planning failure is deliberately **not** routed through here: it belongs to
+ * the planner's vocabulary, not to selection's, and the two are kept apart for
+ * the reason `plan-next-task.ts` gives about its own upstream sets. The command
+ * grades it `EXIT_RUN_INPUT_UNUSABLE` directly, as every other caller of the
+ * planner does.
+ */
+export function exitCodeForDeliverySelection(outcome: DeliveryTaskSelection): CliExitCode {
+  return DELIVERY_SELECTION_EXIT_CODES[outcome];
+}
 
 /**
  * The store codes one driver result reached, or `null` where it reached none.

@@ -80,9 +80,15 @@ import { runGitCommand } from '../worktree/git-command.js';
 import { createForgeCommandRunner } from '../deliver/github-observer.js';
 import { resolveRepository } from '../repo/resolve-repository.js';
 import { loadTaskState } from '../state/state-store.js';
-import { renderDeliveryObservation } from './render-delivery-observation.js';
-import { exitCodeForConclusionRecord, exitCodeForDrive, exitCodeWithLeaseRelease, EXIT_RUN_INPUT_UNUSABLE, EXIT_RUN_OK, EXIT_RUN_REFUSED, type CliExitCode } from './run-exit-codes.js';
-import { driveDelivery, refuseDeliveryDrive } from './delivery-driver.js';
+import { planNextTask } from '../plan/plan-next-task.js';
+import { selectDeliveryTask } from '../deliver/select-delivery-task.js';
+import {
+  renderDeliveryObservation,
+  renderDeliverySelectionRefusal,
+  type DeliverySelectionView,
+} from './render-delivery-observation.js';
+import { exitCodeForConclusionRecord, exitCodeForDeliverySelection, exitCodeForDrive, exitCodeWithLeaseRelease, EXIT_RUN_INPUT_UNUSABLE, EXIT_RUN_OK, EXIT_RUN_REFUSED, type CliExitCode } from './run-exit-codes.js';
+import { driveDelivery, refuseDeliveryDrive, DELIVERY_DRIVE_DETAIL } from './delivery-driver.js';
 import {
   createRuntimeIgnoreProbe,
   performObservation,
@@ -124,6 +130,89 @@ export const RECORD_REFUSALS = [
 ] as const;
 
 export type RecordRefusal = (typeof RECORD_REFUSALS)[number];
+
+/**
+ * Every way the *naming of the task* can be unusable, decided before anything
+ * is resolved, read or contacted.
+ *
+ * They are the command's own, not the selector's and not the driver's: each is
+ * a statement about the invocation as written, and each is fixed by editing it.
+ * Nothing is opened, no repository is resolved and no plan is read when one of
+ * these is produced — an argument that cannot be acted on should not first cost
+ * a Git subprocess.
+ *
+ * The first is the one that keeps `--task`'s meaning intact after this slice
+ * made it optional. Omitting it is still refused; what changed is that there is
+ * now a second, explicit way to answer the same question. **An omitted `--task`
+ * never selects on its own** — a script that dropped the flag would otherwise
+ * start choosing deliveries for itself, and under `--merge-pr --attended` that
+ * is a merge on a task nobody named.
+ */
+export const TASK_NAMING_REFUSALS = [
+  /** Neither `--task <id>` nor `--select-task`. Nothing says which delivery. */
+  'TASK_NOT_NAMED',
+  /** Both. Two answers to one question, and this build will not rank them. */
+  'TASK_NAMED_AND_SELECTED',
+  /**
+   * `--select-task` without `--drive`.
+   *
+   * Selection exists to decide which delivery the *driver* drives. The act
+   * flags name one act on one delivery an operator has in mind, and a selected
+   * subject for `--observe` or `--conclude-delivery` would be a second, weaker
+   * way of naming a task with none of `--task`'s directness.
+   */
+  'SELECTION_REQUIRES_DRIVE',
+] as const;
+
+export type TaskNamingRefusal = (typeof TASK_NAMING_REFUSALS)[number];
+
+/**
+ * What commander hands the action, which is not yet {@link DeliveryOptions}.
+ *
+ * The one difference is `task`, and it is deliberate: `DeliveryOptions.task`
+ * stays a plain `string` so that **nothing downstream** — no act ladder, no
+ * driver, no store, no renderer — has to consider a delivery with no task. A
+ * count of the ladders is deliberately not written here: a number beside a set
+ * nothing enforces is the shape this repository has been caught by more than
+ * once, and the property wanted is "all of them", not "six" or "seven". The
+ * optionality lives in this type, for the few lines it takes the action to
+ * resolve it into a definite id, and it does not escape them.
+ */
+export interface DeliveryCommandInput extends Omit<DeliveryOptions, 'task'> {
+  readonly task?: string;
+  readonly selectTask?: boolean;
+}
+
+/**
+ * The naming refusal this invocation earns, or `null` when it names exactly one
+ * delivery in exactly one way.
+ *
+ * Ordered most-specific first, and the order is a judgement rather than an
+ * accident: an invocation that gave both `--task` and `--select-task` is told
+ * about the contradiction rather than about `--drive`, because resolving the
+ * contradiction is what it has to do first whichever way it resolves it.
+ */
+export function refuseTaskNaming(invoked: DeliveryCommandInput): TaskNamingRefusal | null {
+  const named = invoked.task !== undefined;
+  const selecting = invoked.selectTask === true;
+  if (named && selecting) return 'TASK_NAMED_AND_SELECTED';
+  if (selecting && invoked.drive !== true) return 'SELECTION_REQUIRES_DRIVE';
+  if (!named && !selecting) return 'TASK_NOT_NAMED';
+  return null;
+}
+
+export const TASK_NAMING_REFUSAL_DETAIL: Readonly<Record<TaskNamingRefusal, string>> =
+  Object.freeze({
+    TASK_NOT_NAMED:
+      'Nothing says which delivery this is about. Name one with --task <id>, or pass ' +
+      '--drive --select-task to have this build choose the next one from the plan.',
+    TASK_NAMED_AND_SELECTED:
+      '--task names a delivery and --select-task asks this build to choose one. They are two ' +
+      'answers to the same question, and this build will not decide between them.',
+    SELECTION_REQUIRES_DRIVE:
+      '--select-task chooses which delivery the driver drives, so it needs --drive. The flags ' +
+      'that name one act take the delivery an operator names with --task.',
+  });
 
 export const RECORD_REFUSAL_DETAIL: Readonly<Record<RecordRefusal, string>> = Object.freeze({
   RECORD_REQUIRES_OBSERVATION:
@@ -426,12 +515,39 @@ export const DRIVE_OPTION_DESCRIPTION =
   '--verify-merge or --conclude-delivery, which name the acts one at a time.';
 
 /**
+ * The selection flag's own sentence, exported so it can be pinned by literal.
+ *
+ * Two clauses are load-bearing and neither is decoration. "Authorises nothing"
+ * is there because a build that picks its own subject is exactly where an
+ * operator will assume it also picked its own permission — and it did not:
+ * `--select-task --drive --attended` still changes nothing on github.com.
+ * "Stops at a task whose records cannot be read" is there because the
+ * alternative behaviour — carry on to a later task — is the one an operator
+ * would otherwise reasonably expect, and it is the one this build refuses.
+ */
+export const SELECT_TASK_OPTION_DESCRIPTION =
+  'Choose the delivery to drive instead of naming one: the first task in the plan’s own ' +
+  'dependency order, ties broken by the smallest id, that is at READY_FOR_PR and has no ' +
+  'delivery conclusion recorded beside it. Requires --drive, and does not combine with --task. ' +
+  'It authorises nothing: each of the three acts that change github.com still needs its own ' +
+  'flag and --attended, exactly as under --task. The candidates are the tasks this repository ' +
+  'declares, so the answer never depends on the order a directory was listed in. A task is ' +
+  'passed over only when its delivery is concluded, when it has no task state at all, or when ' +
+  'that state is not READY_FOR_PR; a task whose conclusion or state cannot be READ stops the ' +
+  'walk and is reported, rather than being stepped over. Whether the chosen delivery can be ' +
+  'carried out is not asked here — the driver answers that, about that task, by name. Nothing ' +
+  'is written, no forge is contacted, no execution lease is taken and the choice is not ' +
+  'remembered between invocations.';
+
+/**
  * Operator presence, in the shape `release` established.
  *
  * A second, independent statement rather than a widening of the first: one flag
  * says which act, and this one says that a person is present for it. Neither
  * implies the other, and there is no unattended publication — which `--drive`
- * does not change, because it names no act of its own.
+ * does not change, because it names no act of its own, and which
+ * `--select-task` does not change either, because choosing a subject is not
+ * authorising anything to be done to it.
  */
 export const ATTENDED_OPTION_DESCRIPTION =
   'States that an operator is present for this invocation. Required by every flag here that can ' +
@@ -473,6 +589,12 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'every flag here that writes a record — --record, --reconcile-merge, --verify-merge and ' +
   '--conclude-delivery — writes exactly one beside the task; --drive writes whichever of those ' +
   'the delivery still needs, which in one invocation can be three. ' +
+  'Which delivery it is about comes from --task <id>, or — with --drive and --select-task — ' +
+  'from the plan: the first task in its dependency order that is at READY_FOR_PR and has no ' +
+  'conclusion recorded beside it, except that a task whose conclusion or state cannot be READ ' +
+  'stops the walk and is reported instead of being passed over. Omitting --task is refused ' +
+  'unless --select-task asked for a choice. Selecting a task authorises nothing that naming ' +
+  'one does not. ' +
   'It never updates, closes, ' +
   'reopens, reviews, comments on or labels a pull request, and never enables an auto-merge.';
 
@@ -487,10 +609,20 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       '--repository <path>',
       'Absolute path of the repository root. Required; never defaulted from the working directory.',
     )
-    .requiredOption(
+    // Not a `requiredOption` since V4 slice 12, and the meaning did not soften
+    // with the registration. Commander no longer refuses the omission, and this
+    // command's own `TASK_NOT_NAMED` does — unless `--drive --select-task` said
+    // to choose one. The change is that there are now two ways to answer "which
+    // delivery", not that there is a way to leave it unanswered.
+    .option(
       '--task <id>',
-      'The task whose pinned commit is the subject. Required: an observation with no exact ' +
-        'commit to be about is not an observation this build makes.',
+      'The task whose pinned commit is the subject. Required unless --drive --select-task is ' +
+        'given: an observation with no exact commit to be about is not an observation this ' +
+        'build makes, and an omitted --task never selects one on its own.',
+    )
+    .option(
+      '--select-task',
+      SELECT_TASK_OPTION_DESCRIPTION,
     )
     .option(
       '--observe',
@@ -536,8 +668,57 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       '--attended',
       ATTENDED_OPTION_DESCRIPTION,
     )
-    .action(async (options: DeliveryOptions) => {
-      const resolution = await resolve({ repositoryPath: options.repository });
+    .action(async (invoked: DeliveryCommandInput) => {
+      // ── How this invocation names its delivery ───────────────────────────
+      //
+      // Above the resolver, because none of the three needs a repository and an
+      // invocation that cannot say which delivery it is about should not cost a
+      // Git subprocess to find that out. `block-command.ts` makes the same
+      // argument about its own argument checks and its lease.
+      const naming = refuseTaskNaming(invoked);
+      if (naming !== null) {
+        process.stdout.write(
+          `\nSelection    : ${naming}\n  ${TASK_NAMING_REFUSAL_DETAIL[naming]}\n\n`,
+        );
+        process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+        return;
+      }
+
+      // Whether `--drive` was given flags it does not compose with. Computed
+      // here, once, and read twice below — because **whether an invocation is
+      // refused for its flags must not depend on what is in the repository.**
+      //
+      // A review measured the version that computed it only inside the drive
+      // branch: on the selection path the walk ran first, and a plan with
+      // nothing pending returned `NO_DELIVERY_PENDING` and exit 0 for a command
+      // line this build refuses. The same flags in a repository that did have a
+      // pending delivery were refused with exit 2. One invocation, two answers,
+      // decided by state it should never have consulted.
+      const driveNotCombinable =
+        invoked.drive === true &&
+        (invoked.observe === true ||
+          invoked.record === true ||
+          invoked.decide === true ||
+          invoked.reconcileMerge === true ||
+          invoked.verifyMerge === true ||
+          invoked.concludeDelivery === true);
+
+      // On the selection path it is answered before anything is resolved, read
+      // or walked. There is no task to report about — this invocation never
+      // named one and is not going to be allowed to choose one — so it prints
+      // the selection-shaped refusal rather than the full report the `--task`
+      // path still produces from the task it was given.
+      if (driveNotCombinable && invoked.selectTask === true) {
+        const refusal = refuseDeliveryDrive('DRIVE_NOT_COMBINABLE');
+        process.stdout.write(
+          `\nSelection    : not made\n` +
+            `Drive        : ${refusal.outcome}\n  ${DELIVERY_DRIVE_DETAIL[refusal.outcome]}\n\n`,
+        );
+        process.exitCode = exitCodeForDrive(refusal.outcome);
+        return;
+      }
+
+      const resolution = await resolve({ repositoryPath: invoked.repository });
       if (!resolution.ok) {
         process.stdout.write(
           `\nRepository   : could not be resolved\n` +
@@ -548,6 +729,67 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       }
 
       const repository = resolution.repository;
+
+      // ── The selection, when one was asked for ────────────────────────────
+      //
+      // Immediately before the task is read, and never stored: a selection is
+      // routing, and the only freshness it can honestly claim is that nothing
+      // this process did came between the walk and the load below. What it
+      // cannot claim is that the ORDER has not moved under it — `L-V4-12-1`.
+      let selection: DeliverySelectionView | null = null;
+      let selectedTask: string | null = null;
+      if (invoked.selectTask === true) {
+        const planning = planNextTask(repository);
+        if (!planning.ok) {
+          process.stdout.write(
+            renderDeliverySelectionRefusal({
+              repositoryId: repository.id,
+              repositoryRoot: repository.root,
+              selection: null,
+              planning,
+            }),
+          );
+          process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+          return;
+        }
+        // `loadTaskState` is handed in rather than reached for: the selector
+        // lives under `src/deliver/`, where a value import of the state store is
+        // pinned shut, and this command is the one admitted reader.
+        const chosen = selectDeliveryTask(repository.root, planning.graph, { loadState: load });
+        if (chosen.outcome !== 'DELIVERY_TASK_SELECTED' || chosen.taskId === null) {
+          process.stdout.write(
+            renderDeliverySelectionRefusal({
+              repositoryId: repository.id,
+              repositoryRoot: repository.root,
+              selection: chosen,
+              planning: null,
+            }),
+          );
+          process.exitCode = exitCodeForDeliverySelection(chosen.outcome);
+          return;
+        }
+        selectedTask = chosen.taskId;
+        selection = Object.freeze({ outcome: chosen.outcome, examined: chosen.examined });
+      }
+
+      // One `task` from here down, whichever way it was named, so that no act
+      // has to ask which way — and so none can acquire a second meaning by
+      // having been selected into.
+      //
+      // Stated exactly, because a review measured the overstatement: this is
+      // **not** a claim that the selection is invisible downstream. The spread
+      // copies commander's own object, so `options.selectTask === true` is
+      // readable at runtime anywhere `options` reaches, and the report prints a
+      // `Selected` line besides. What holds is the narrower and load-bearing
+      // property: `mayPerform` reads `attended` and the act's own flag and
+      // nothing else, and `src/cli/delivery-driver.ts` contains no occurrence
+      // of `select` at all — pinned in `tests/v4-12-…`, so a driver that began
+      // to read the marker would fail there rather than quietly gate on it.
+      const options: DeliveryOptions = Object.freeze({
+        ...invoked,
+        task: selectedTask ?? (invoked.task as string),
+      });
+
       // Read once and keep it. The same load supplies the subject and the
       // revision the evidence is bound to, so the two cannot describe different
       // bytes — reading twice would open a window in which the task advanced
@@ -567,14 +809,12 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       // under its own flag. The `Drive` block adds the one sentence those
       // blocks cannot say between them.
       if (options.drive === true) {
-        const alsoNamed =
-          options.observe === true ||
-          options.record === true ||
-          options.decide === true ||
-          options.reconcileMerge === true ||
-          options.verifyMerge === true ||
-          options.concludeDelivery === true;
-        const driven = alsoNamed
+        // The same value computed above the resolver, read rather than
+        // recomputed: two expressions for one refusal is two things that can
+        // come to disagree, and this one already answered on the selection
+        // path. Reaching here with it `true` means `--task` named the delivery,
+        // so there is a task to render the full report about.
+        const driven = driveNotCombinable
           ? refuseDeliveryDrive('DRIVE_NOT_COMBINABLE')
           : await driveDelivery(repository, options, subject, taskLoad, resolve, load, seams);
         process.stdout.write(
@@ -582,6 +822,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
             repositoryId: repository.id,
             repositoryRoot: repository.root,
             taskId: options.task,
+            selection,
             subject,
             observation: driven.observation,
             // The same function the flag path uses, asked about the same two
@@ -839,6 +1080,11 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           repositoryId: repository.id,
           repositoryRoot: repository.root,
           taskId: options.task,
+          // Always `null` on this path — `--select-task` requires `--drive`, so
+          // control cannot reach here with a selection. Passed rather than
+          // omitted so that the day that changes, the report says so instead of
+          // quietly dropping the one line explaining which task this is about.
+          selection,
           subject,
           observation,
           conclusion,
