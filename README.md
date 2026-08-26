@@ -9520,6 +9520,210 @@ separate record, redesigning block evidence, and the existing companion pattern
   the flag's own surface and pinned by a case that runs the same fixture with and
   without `--observe`.
 
+## Verifying the merge commit (V4 slice 9)
+
+`delivery --verify-merge` runs this repository's own declared verification
+commands against **the exact merge commit the task's merge receipt names**, and
+records the result beside the task state:
+
+```
+.agent-orchestrator/runtime/delivery-verification/<taskId>.json
+```
+
+It is the first delivery act that starts the repository's own build and test
+commands, and the only one that takes the execution lease. It contacts no
+network, writes no task state, touches no block ledger, starts no agent, and
+changes nothing on github.com.
+
+### H, S and M are three different commits
+
+This is the distinction the slice exists for, and it was measured on this
+repository rather than argued. On pull request #63:
+
+| | object name | what it is |
+| --- | --- | --- |
+| **H** | `735eab7…` | the implementation head |
+| **S** | `c51d442…` | GitHub's synthetic pull-request merge commit |
+| **M** | `e203143…` | the squash merge commit the merge produced |
+
+`.github/workflows/verify.yml` checks out with no `ref:`, and the runner's log
+for the run *associated with head H* reads
+`HEAD is now at c51d442 Merge 735eab7… into 309e5e6…` — while the check-run API
+reports `head_sha` = `735eab7…` for the very same jobs. The forge **attached**
+the run to H; the runner **built** S. Neither is M. And once the pull request
+merged, `refs/pull/63/merge` stopped resolving, so S cannot even be fetched back.
+
+The general rule the code depends on: **`head_sha` is what a forge attached to a
+run, and nothing AO reads reports what a runner checked out.** So this build runs
+the gate itself. The verification modules read no check state at all, and a test
+asserts their **code** contains no `statusCheckRollup`, `check-runs`,
+`workflow`, `conclusion` or `head_sha` — the scan strips comments first, which is
+what lets the measurement above be written down inside those files. A length
+control stops an emptied file passing by silence.
+
+### The subject cannot be substituted
+
+`M = receipt.mergeCommit`, and there is no other route to it. There is no
+`--commit` flag: accepting one would change the contract from *verify this task's
+reconciled delivery* into *execute an arbitrary commit an operator supplied*.
+
+Before anything runs, the ladder proves the receipt is readable, that its
+recorded head is still the task's `currentCommit`, and that it names this
+repository. Then the workspace is proved to be at exactly M — and the proof
+artefact **cannot be minted** unless the proved HEAD equals the commit being
+attested. A run against another commit therefore produces no record at all,
+rather than a weaker one.
+
+The base branch is never the subject. After the receipt records M the base may
+advance to X and then Y, or be force-pushed away from M entirely; `main` passing
+is a fact about `main`.
+
+### Where it runs
+
+A **detached** checkout at M, in `<repo>.verification/<taskId>` — a sibling of
+the repository, deliberately not inside `.worktrees`, where the task's own
+workspace lives. Your working tree is never touched, and the workspace is
+destroyed afterwards.
+
+It is never adopted or cleaned: anything already at the derived path is reported
+as `WORKSPACE_PATH_OCCUPIED` and left alone. Removal proves ownership three ways
+at the effect — the path is re-derived (there is no path parameter), Git's
+registry lists it, and the registration is detached. A worktree there holding a
+branch is refused, not removed.
+
+Plain removal is tried first. Measured: it succeeds over ignored build output and
+is refused for a modified tracked file — and this repository's own `npm run
+verify` regenerates into the tracked `schemas/` directory. So a forced removal
+follows, after the whole ownership proof is re-run, and it is reported as
+`REMOVED_FORCED` so an operator learns their gate dirties the tree it runs in.
+
+### Three results, and the line between two of them
+
+| outcome | means |
+| --- | --- |
+| `VERIFIED_PASS` | every declared phase ran and exited 0 |
+| `VERIFIED_FAIL` | a phase ran to its own end and said no |
+| `VERIFICATION_NOT_ESTABLISHED` | no phase reached a verdict |
+
+**An infrastructure failure is not a code failure.** A process that could not
+start, a timeout, a flooded output budget, a kill from outside — every one of
+them is `VERIFICATION_NOT_ESTABLISHED`. Nothing was learned about the code, and
+saying otherwise sends an operator to fix a merge when what broke was the
+machine.
+
+The two failures that stop *before* the gate — a workspace that could not be
+made, a lease that could not be taken — are deliberately **not** in that list,
+and an earlier version of this paragraph put them there. They produce no durable
+record at all: the run reports `WORKSPACE_NOT_ESTABLISHED` and writes nothing,
+because a record needs a run to be about.
+
+A `VERIFIED_FAIL` does nothing else. No revert, no reopened pull request, no
+repair branch, no agent, no issue, no follow-up task.
+
+### What a pass says, and the five things it does not
+
+> At time T, commit M completed verification profile P, with result R.
+
+It is **not** a claim that M is on the base branch now, that it is still
+reachable from it, that the merge has not been reverted, that the base branch
+passes today, or that the task is complete. `currentCommit` stays H,
+`resultCommit` stays H, and the verification attaches to M — three distinct
+concepts, pinned in tests against a real task-state file and a really settled
+ledger entry, byte for byte.
+
+### The profile is named, and time is not a reason
+
+Each attempt records a digest over the resolved verification policy — the ordered
+phases, their names and their argument vectors. A later reader compares it
+against the profile resolved *now*: equal means the stored verdict is about this
+contract, different means it is about one this build no longer has.
+
+That is the only reason a stored result is ever set aside. There is **no TTL**. A
+verification does not become wrong by getting old, and a result already recorded
+as passing for this exact commit under this exact profile is reported as
+`ALREADY_VERIFIED` without running the gate again — meaning *a historical
+successful verification exists*, never *M is verified now*.
+
+### A history, not a fact
+
+A merge is monotonic; a verification verdict is a measurement of a run, and the
+same gate at the same commit can answer differently under different load. So the
+record is a **bounded append-only history**: every attempt is kept in order,
+nothing is overwritten, and when it is full the next attempt is refused with
+`ATTEMPT_HISTORY_FULL` rather than pushing the oldest evidence out of the back.
+
+### Carried forward from V4 slice 9, deliberately
+
+- **L-V4-09-1 — read-before-write is not a transaction.** Two invocations racing
+  on one task can each read the history and each append; the second replace wins
+  and loses a record of a run. Bounded by the lease both must hold to have run
+  anything, and stated rather than fixed — fixing it needs a lock, and a lock is
+  a service.
+- **L-V4-09-2 — `ALREADY_VERIFIED` is terminal for a commit/profile pair.** There
+  is no way to force a fresh run of something already recorded as passing. Adding
+  one is a flag with its own authority question.
+- **L-V4-09-3 — `MERGE_COMMIT_UNAVAILABLE` is terminal.** AO will not fetch the
+  object. There is no `git fetch` anywhere in `src/`, and adding the first one is
+  a new network egress surface with its own decision. Fetch in the repository and
+  run again.
+- **L-V4-09-4 — the profile digest identifies the contract, not the toolchain.**
+  It covers the declared phases and their argument vectors. It says nothing about
+  the Node version, `node_modules`, `dist/` or `PATH`, and two runs of one
+  profile on differently-provisioned machines are indistinguishable in the
+  record. A digest claiming otherwise would be a promise this process cannot
+  keep.
+- **L-V4-09-5 — a gate that needs an install step reports `VERIFIED_FAIL` in a
+  fresh workspace.** That is truthful under this contract — the gate really ran
+  and really exited non-zero — and it is a property of the *profile*, which
+  should declare the step it needs. This repository's own single `VERIFY` phase
+  presupposes an installed `node_modules`.
+- **L-V4-09-6 — `ATTEMPT_HISTORY_FULL` is terminal for a task.** No archive, no
+  rotation, no pruning.
+- **L-V4-09-7 — no live product dogfood was possible.** The subject must come
+  from a legitimate merge receipt, and none exists in this repository: pull
+  request #63 was merged by a human under the repository's own policy, from no AO
+  task. Fabricating a `TaskState` and a receipt to enable a demonstration would
+  manufacture exactly the evidence this slice exists to require.
+- **L-V4-09-8 — the exit code does not report the verification verdict.** It is
+  computed from the observation conclusion, so a `VERIFIED_FAIL`, a refused write
+  and a leaked workspace are none of them visible in `$?`. Slice 7's convention
+  rather than a new one, stated on the flag's own surface. The **one** thing that
+  can override it is the execution lease: under the repository-wide rule in
+  `run-exit-codes.ts`, a run that took the writer slot and cannot prove it gave
+  the slot back may not exit nominal. Read the `Verification`, `Record` and
+  `Lease` lines.
+- **L-V4-09-9 — on Windows a verification killed from outside is recorded as
+  `VERIFIED_FAIL`.** The classification follows `runVerification` exactly, and
+  that reaches `UNAVAILABLE` for a termination only when the runner reports a
+  *signal*. A review measured a `taskkill /F`-ed phase arriving as `COMPLETED`
+  with `exitCode: 1` and `signal: null` — indistinguishable from a suite that
+  ran and said no. It is an accepted limit of what the platform reports, not a
+  choice this slice made, and it is not papered over: a heuristic that guessed
+  "exit 1 might be a kill" would misread real failures as infrastructure, which
+  is the more expensive mistake.
+- **L-V4-09-10 — the workspace ownership proof establishes shape and location,
+  not authorship.** Re-derived path, registered by Git, detached. A detached
+  worktree an operator registered at `<repo>.verification/<taskId>` themselves
+  satisfies all three and would be removed. Nothing outside that reserved,
+  derived path is reachable — there is no path parameter — which is the
+  guarantee that matters; establishing authorship would need a marker inside a
+  directory the removal is about to delete.
+- **L-V4-09-11 — `MERGE_COMMIT_UNAVAILABLE` covers "could not tell".**
+  `commitObjectPresent` answers `null` both for an object Git says is gone and
+  for a question it refused to evaluate. This build reports one member for both,
+  because what follows is the same either way; it deliberately does not assert
+  the object is absent.
+- **L-V4-09-12 — a repository whose path is not shell-inert cannot be verified.**
+  The derived workspace path is handed to Git as an argument, so it must satisfy
+  `doctor/exec.ts`'s allow-list — the same rule `workspace-identity.ts` already
+  applies to task workspaces. A root containing a space, or a Windows 8.3 short
+  name, yields `IDENTITY_UNDERIVABLE` and no verification is possible. Measured
+  rather than reasoned about: `C:/Users/RUNNER~1/AppData/Local/Temp/…` — what
+  `os.tmpdir()` answers on the GitHub Windows runner — is refused, and its long
+  form `C:/Users/runneradmin/…` is accepted. It is inherited and consistent, not
+  new, and it is named here because it is invisible until a host hands back a
+  short path.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on

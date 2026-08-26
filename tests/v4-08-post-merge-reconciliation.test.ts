@@ -2217,8 +2217,20 @@ describe('the delivery command reconciles only when asked, and mutates nothing r
     // --publish-head pushes, and a push updates a remote-tracking ref and its
     // reflog inside .git. What this build can stand behind is which flags write
     // a RECORD, which is what the sentence now says.
-    expect(DELIVERY_COMMAND_DESCRIPTION).toContain(
-      'the only flags that write a record here are --record and --reconcile-merge',
+    // Third rewording of this one sentence, and the first that is not about
+    // accuracy: V4 slice 9 added `--verify-merge`, which writes a record here
+    // too, so an enumeration naming two was simply out of date.
+    //
+    // What is pinned is therefore the PROPERTY rather than the spelling. The
+    // exact string used to be asserted, and the cost of that showed up
+    // immediately — a new flag broke *this case* rather than the sentence it
+    // had invalidated, which is a pin measuring a wording. The clause must name
+    // this slice's flag among the record-writers; how many others it names is
+    // not slice 8's business, and that the paragraph names **every** registered
+    // act flag is asserted once, in
+    // `tests/v4-09-post-merge-verification.test.ts`.
+    expect(DELIVERY_COMMAND_DESCRIPTION).toMatch(
+      /flag here that writes a record[^.]*--reconcile-merge/,
     );
     expect(DELIVERY_COMMAND_DESCRIPTION).not.toContain('write anything');
     // And the observe sentence no longer enumerates which flags can change

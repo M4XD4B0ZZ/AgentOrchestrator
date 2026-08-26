@@ -2558,6 +2558,7 @@ describe('a subprocess cannot be started from anywhere that lacks the lease', ()
         join('src', 'verify', 'verify-command.ts'),
         join('src', 'worktree', 'commit-task-work.ts'),
         join('src', 'worktree', 'git-command.ts'),
+        join('src', 'worktree', 'verification-workspace.ts'),
         join('src', 'worktree', 'workspace-identity.ts'),
         join('src', 'worktree', 'worktree-cleanliness.ts'),
       ].sort(),
