@@ -770,12 +770,15 @@ export async function driveDelivery(
       return settle('FORGE_STATE_UNKNOWN', stage);
     }
     if (merged === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
-    // What is left is states somebody put this delivery in —
+    // What is left is mostly states somebody put this delivery in —
     // `PULL_REQUEST_NOT_OPEN`, `DRAFT_REFUSED`, `WRONG_BASE`, `HEAD_MOVED`,
-    // `POSTCONDITION_MISMATCH` and `ALREADY_MERGED` — plus the four floors this
-    // path cannot reach. The last of those is a race with the reconciliation
-    // two steps above, which said otherwise a moment ago, and two readings that
-    // disagree is not a state to act on either.
+    // `POSTCONDITION_MISMATCH`, `ALREADY_MERGED` — plus `AUTHORITY_REFUSED`,
+    // the four floors this path cannot reach, and the three members the
+    // transport can answer before a process exists. **Not every one of them is
+    // a person's doing**, and the sentence this member carries says one is:
+    // that is `L-V4-11-10`, widened. `ALREADY_MERGED` is the race worth naming
+    // — the reconciliation two steps above said otherwise a moment ago, and two
+    // readings that disagree is not a state to act on either.
     return settle('HUMAN_DECISION_REQUIRED', stage);
   }
 
@@ -813,13 +816,16 @@ export async function driveDelivery(
       return settle('FORGE_STATE_UNKNOWN', stage);
     }
     if (published === 'REMOTE_URLS_DIVERGE') {
-      // **Not** a reading that failed. `readUrlAgreement` is two local
-      // `git remote get-url` calls and both answered; what they answered is
-      // that this remote fetches from one place and pushes to another. A person
-      // configured that, no invocation clears it, and nothing was contacted —
-      // a review measured the earlier version telling an operator that a
-      // reading "could not be taken from github.com" when github.com had not
-      // been asked anything.
+      // **Nothing was asked of github.com.** `readUrlAgreement` is two local
+      // `git remote get-url` calls, and this member covers both of its
+      // not-`AGREE` answers: they answered and disagreed, or neither could be
+      // answered. `head-publication.ts` says exactly that, and this build does
+      // not tell the two apart — so the member is right about the act (nothing
+      // sent, nothing attempted, no invocation clears it) while the sentence
+      // beside it, "a person put it there", is true of the first half only.
+      // That is `L-V4-11-13`. A review measured the earlier version, which told
+      // an operator a reading "could not be taken from github.com" about a host
+      // this run had not asked anything.
       return settle('HUMAN_DECISION_REQUIRED', stage);
     }
     if (published === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
@@ -898,8 +904,8 @@ export async function driveDelivery(
     return settle('FORGE_STATE_UNKNOWN', stage);
   }
   if (created === 'REMOTE_URLS_DIVERGE') {
-    // Local, answered, and a person's configuration — the same argument the
-    // publication path makes about the same reading.
+    // Local, and nothing was asked of github.com — the same argument the
+    // publication path makes about the same reading, `L-V4-11-13` included.
     return settle('HUMAN_DECISION_REQUIRED', stage);
   }
   if (created === 'SUBJECT_NOT_ESTABLISHED' || created === 'AUTHORITY_REFUSED') {

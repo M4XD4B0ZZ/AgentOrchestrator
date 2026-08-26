@@ -9023,9 +9023,10 @@ a different commit.
   delivery signal is what these slices keep refusing to give — but a mutating
   command whose failure is prose-only is worth carrying explicitly. **Narrowed
   to this flag by V4 slice 11**: under `--drive` the code grades the driver's own
-  member instead, so the same worlds can exit 0, 2, 3, 4 or 5. Which one is a
-  question for that member's own grade and not for this entry — an earlier
-  version of this sentence enumerated two codes and a review measured both wrong.
+  member instead, and which code that is belongs to that member's own grade
+  rather than to this entry. Two earlier versions of this sentence enumerated
+  the codes and two reviews measured both enumerations wrong, which is why there
+  is no list here.
 - **L-V4-05-9 — a work branch becomes a ref through a character class, not
   through `isValidBranchName`.** Git's own `check-ref-format` refuses what that
   class admits, so the outcome is a wasted push and an undiagnosed refusal. What
@@ -9206,8 +9207,8 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
   about a file rather than about the product.
 - **L-V4-06-8 — under `--create-pr`, every creation outcome exits 0.** The exit
   code still answers only the observation question. **Narrowed to this flag by
-  V4 slice 11**, which grades its own member instead: the same worlds reached
-  through `--drive` can exit 2, 3, 4 or 5.
+  V4 slice 11**, which grades its own member instead. Which code that is belongs
+  to that member's grade, not to this entry.
 - **L-V4-06-9 — draft is now read but still not decided on.** Slice 4's decision
   does not consider it, so a positive delivery decision can still be true of a
   draft pull request.
@@ -10246,12 +10247,22 @@ conclusion and a task still reported as `READY_FOR_PR` remain the expected set.
   remote ref, the pull request or the situation at this head could not be taken.
   Which one is in the block above it; the driver's member says only that nothing
   was sent and the next invocation begins with the same reading.
-- **L-V4-11-10 — `HUMAN_DECISION_REQUIRED` includes one race.** `ALREADY_MERGED`
-  from the merge ladder reaches it, and that is the reconciliation two steps
-  earlier disagreeing with the merge ladder's own reading a moment later. Two
-  readings that disagree is not a state this build acts on, so it stops — but a
-  person did not necessarily put it there, and the member's sentence says one
-  did.
+- **L-V4-11-10 — `HUMAN_DECISION_REQUIRED` is not always a person's doing.** Its
+  sentence says one put this delivery where it is, and for most of its producers
+  that is true. Three kinds reach it where it is not: `ALREADY_MERGED` from the
+  merge ladder, which is the reconciliation two steps earlier disagreeing with a
+  reading taken a moment later; the members the merge transport can answer before
+  a process exists; and the half of `REMOTE_URLS_DIVERGE` that means the two
+  local questions could not be answered (`L-V4-11-13`). In every one of them
+  nothing was sent, nothing is durable-wrong, and the act's own block above says
+  which it was — so the stop is right and the sentence is broader than the
+  member.
+- **L-V4-11-13 — `REMOTE_URLS_DIVERGE` covers "could not tell".**
+  `readUrlAgreement` answers `AGREE`, `DIVERGE` or `UNKNOWN`, and both act
+  ladders collapse the last two into one member, which `head-publication.ts`
+  states in its own text. The driver inherits that: it can say the remote's two
+  URLs are not one, and it cannot say whether that is a configuration or a
+  question Git would not answer. Inherited from slice 5 rather than new.
 - **L-V4-11-11 — the receipt and the conclusion have durability grades; the
   verification history does not.** A gate that ran and whose verdict could not be
   written reads back as `VERIFICATION_ABSENT` on the next ladder pass, and the
