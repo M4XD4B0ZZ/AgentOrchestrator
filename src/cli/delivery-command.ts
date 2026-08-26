@@ -179,7 +179,6 @@ import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_OK,
   EXIT_RUN_REFUSED,
-  EXIT_RUN_UNEXPECTED,
   type CliExitCode,
 } from './run-exit-codes.js';
 
@@ -929,8 +928,8 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       // `VERIFICATION_ABSENT`.
       //
       // It takes no execution lease. Every act on this command that takes one
-      // starts a process from the repository under test; this one reads three
-      // files and writes a fourth, which is exactly what `--record` and
+      // starts a process from the repository under test; this one reads
+      // documents already on disk and writes one, which is exactly what `--record` and
       // `--reconcile-merge` do without a lease. Taking a repository-wide writer
       // slot to file a judgement would make bookkeeping contend with runs of
       // other tasks.
@@ -1012,20 +1011,41 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       // `EXIT_RUN_NEEDS_OPERATOR`, including two this repository's own tables
       // grade 4 and 2 for the identical condition. `null` there means "keep the
       // primary", which is what the two durable codes answer.
-      const leaseAdjusted =
-        verification !== null && verification.leaseTaken
-          ? exitCodeWithLeaseRelease(exitCodeFor(conclusion), verification.leaseRelease)
-          : exitCodeFor(conclusion);
-      // `record === null` is a floor: `performConclusion` returns it only on a
-      // path its own comment marks unreachable through the ladder. It is graded
-      // as the tool's own defect rather than left to fall through to nominal.
+      // `record === null` on a concluded run is the second receipt read
+      // disagreeing with the ladder's — a **race**, not a floor. An earlier
+      // version graded it `EXIT_RUN_UNEXPECTED` and called it unreachable; a
+      // review read `performConclusion`'s own comment, which says it exists
+      // because "a build in which those two readings could disagree must not
+      // write a record from the second". It is the same class of event as
+      // `EVIDENCE_MOVED` one function deeper, and it gets the same code:
+      // nothing is wrong, and the next invocation may well succeed.
       const concludedNotDurable =
         deliveryConclusion !== null && deliveryConclusion.result.outcome === 'DELIVERY_CONCLUDED'
           ? deliveryConclusion.record === null
-            ? EXIT_RUN_UNEXPECTED
+            ? EXIT_RUN_REFUSED
             : exitCodeForConclusionRecord(deliveryConclusion.record.code)
           : null;
-      process.exitCode = concludedNotDurable ?? leaseAdjusted;
+
+      // The lease rule is applied **last**, over the conclusion override rather
+      // than beside it, and that ordering was a correction.
+      //
+      // While the override was the single constant `EXIT_RUN_NEEDS_OPERATOR` it
+      // happened to equal what `exitCodeWithLeaseRelease` forces, so `?? ` over
+      // an already-lease-adjusted code was indistinguishable from the right
+      // answer. Grading the store's codes one by one made the override able to
+      // return 2 or 4 — and a review measured the consequence: a run with
+      // `--verify-merge --conclude-delivery` whose lease could not be given back
+      // and whose conclusion write was refused would have exited 4, telling a
+      // caller "nothing is wrong, try again" about a repository with the writer
+      // slot still held. `run-exit-codes.ts` states the precedence: **no primary
+      // code is exempt**, and the conclusion override is a primary code like any
+      // other.
+      const primary = exitCodeFor(conclusion) as CliExitCode;
+      const afterConclusion = concludedNotDurable ?? primary;
+      process.exitCode =
+        verification !== null && verification.leaseTaken
+          ? exitCodeWithLeaseRelease(afterConclusion, verification.leaseRelease)
+          : afterConclusion;
     });
 }
 
@@ -1879,7 +1899,7 @@ async function performVerification(
  *
  * There is deliberately **no forge seam of any kind** and **no verification
  * runner**. Concluding a delivery asks github.com nothing and runs no gate: it
- * reads three documents already on disk. The `git` seam here is not a way to
+ * reads documents already on disk. The `git` seam here is not a way to
  * read history — it is the runtime-ignore probe every record writer on this
  * command uses before it writes, and `checkIgnored` is the injectable form of
  * exactly that question. A seam this path does not hold is a capability it
@@ -1899,8 +1919,9 @@ interface ConclusionCommandSeams {
  *
  * `--verify-merge` takes the execution lease because it starts the repository's
  * own build and test commands and makes a Git worktree appear and disappear
- * beside the repository. This starts nothing of the sort. It reads three files,
- * asks Git twice whether a path is ignored — the same probe `--record` and
+ * beside the repository. This starts nothing of the sort. It reads up to four
+ * documents beside the task and asks Git twice whether a path is ignored — the
+ * same probe `--record` and
  * `--reconcile-merge` run — and replaces one file atomically. Those two flags
  * write their records without a lease, and the rule they follow is the one that
  * applies here: the lease is the repository's *writer slot for productive

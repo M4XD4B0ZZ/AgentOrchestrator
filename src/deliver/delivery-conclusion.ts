@@ -131,8 +131,14 @@ export const DELIVERY_CONCLUSION_VERSION = 1;
  * A **byte** budget, checked against the bytes that would be written, because a
  * schema `.max()` bounds UTF-16 code units and a code unit is not a byte.
  *
- * It is, honestly, a **floor rather than a gate on the product path**, and the
- * measurement that makes it one is a measurement rather than an argument.
+ * It is reachable on **both** sides, and an earlier version of this comment
+ * said the write side was a floor. A review refuted that by reaching
+ * `RECORD_TOO_LARGE` through the exported `recordDeliveryConclusion` with no
+ * injected seam: `deriveDeliveryConclusionLocation` requires only that the root
+ * be **absolute**, and the budget is checked long before `mkdirSync` — so the
+ * directory never has to be creatable at the moment the size is judged. What is
+ * a floor is the narrower thing: the *ladder* cannot reach it, because the
+ * merge receipt it reads first has a smaller budget of its own.
  *
  * The relationship to slice 8's receipt is *not* a constant, and an earlier
  * version of this comment said it was — "exactly 200 bytes more", from a table
@@ -153,10 +159,13 @@ export const DELIVERY_CONCLUSION_VERSION = 1;
  * | this budget | 16,384 |
  * | headroom | 7,964 |
  *
- * The worst case is a CJK root of 2,252 characters with the receipt's instants
- * short and this record's long. `conclude-delivery.ts` reads the receipt first
- * — a receipt over 8,192 bytes is `RECEIPT_UNREADABLE` and no conclusion is
- * built at all — so this budget cannot be what refuses a run.
+ * The worst case **through the ladder** is a CJK root of 2,252 characters with
+ * the receipt's instants short and this record's long. `conclude-delivery.ts`
+ * reads the receipt first — a receipt over 8,192 bytes is `RECEIPT_UNREADABLE`
+ * and no conclusion is built at all — so no run that goes through the ladder can
+ * be refused by this budget. A caller that assembles a request directly can,
+ * and both gates are driven by the test file with documents that really are over
+ * the budget.
  *
  * It is set at 16,384, the figure the verification record uses, rather than at
  * something snug: a budget tuned to the current field list starts refusing
@@ -390,14 +399,20 @@ export function isDeliveryConcluded(reading: DeliveryConclusionReading): boolean
  *
  * Structural rather than `DeliveryConclusion`, because the two things compared
  * are never both conclusions: the store compares a stored conclusion against
- * the payload it is about to write. That is its **one** call site today.
+ * the payload it is about to write. It does so **twice** — once when it reads
+ * the target before deciding, and once when it re-reads the target as the last
+ * thing before the write. (A previous version of this sentence said "one call
+ * site today", in the commit that made it two.)
  *
  * The ladder in `conclude-delivery.ts` deliberately does not use it. It asks a
  * narrower question — is this stored conclusion about the *task's current*
  * delivery — which it can answer from the task's subject alone, without reading
  * the merge receipt first. That ordering is what makes a concluded delivery
  * survive its receipt going missing, and the price is that the ladder cannot
- * compare `baseRef` or the pull-request number, which only the receipt carries.
+ * compare the **merge commit**, `baseRef` or the pull-request number against the
+ * receipt — it has not read one. It reports the stored record's merge commit
+ * instead, so a disagreement is visible without being flagged. That is
+ * `L-V4-10-11`; an earlier version of this sentence listed only the last two.
  */
 export interface ConcludedDeliveryIdentity {
   readonly subjectCommit: string;

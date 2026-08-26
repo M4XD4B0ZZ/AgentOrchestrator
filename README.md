@@ -9855,8 +9855,13 @@ have baked in the assumption that one never will.
 
 ### A concluded delivery stays concluded
 
-`ALREADY_CONCLUDED` is decided **before every other document is read** — before
-the merge receipt as well as before any verification question. Edit the profile,
+`ALREADY_CONCLUDED` is decided **before every document the ladder reads** —
+before the merge receipt as well as before any verification question. Two
+readings come earlier and belong to the caller: the delivery target and the task
+state, which together *are* the subject. Without them there is no "this task's
+current delivery" for a conclusion to be about, so those two refuse first and the
+conclusion is not consulted. A review found the earlier wording — "before every
+other document" — false for exactly that reason, and it is `L-V4-10-14`. Edit the profile,
 make the history unreadable, delete the receipt, let a newer build rewrite either
 of them: the conclusion still stands. It is a statement about an instant that has
 passed, and re-deriving it is not what makes it true.
@@ -9964,11 +9969,14 @@ no ladder refusal *changes* the exit code.
 - **L-V4-10-6 — `CONCLUSION_CONFLICT` and `CONCLUSION_UNREADABLE` are terminal.**
   No repair path, no supersession. Clearing one means deleting a file by hand,
   which is the out-of-band editing the binding exists to detect.
-- **L-V4-10-7 — the byte budget is a floor the product path cannot reach.**
-  Measured: for any `repositoryRoot` this record is exactly 200 bytes larger than
-  the merge receipt for the same root, and the receipt is read first — so a
-  receipt small enough to be read at all leaves this record at most 8,392 bytes
-  against a 16,384 budget. `RECORD_TOO_LARGE` exists for a hand-written document.
+- **L-V4-10-7 — the byte budget cannot refuse a run that went through the
+  ladder.** Measured over the shortest, production and longest ISO-8601 instants
+  both records admit: this record is **189 to 230** bytes larger than the merge
+  receipt for the same root, and the receipt is read first — so a receipt small
+  enough to be read at all leaves this record at most **8,420** bytes against a
+  16,384 budget. Two earlier drafts said "exactly 200" and "8,392"; both were
+  measured false by review. The budget is not unreachable in general — a caller
+  assembling a request directly can cross it — and both gates are driven.
 - **L-V4-10-8 — the profile digest identifies the contract, not the toolchain.**
   Inherited unchanged from `L-V4-09-4`, and it bounds what "under profile P"
   means here too.
@@ -9985,12 +9993,22 @@ no ladder refusal *changes* the exit code.
   the stored merge commit, so the discrepancy is visible, and this build does not
   flag it. Slice 8's receipt is written-once and never superseded, so the shape
   does not arise through the product.
-- **L-V4-10-12 — the write-side byte budget is unreachable, and stays.** The read
-  side is reachable and is driven with a document that really is over the budget;
-  the write side builds its payload from a `repositoryRoot` that must be a
-  directory this process can create, so no callable path can cross it. A
-  companion mutant lowers the threshold and dies, which is what shows the gate is
-  live rather than dead.
+- **L-V4-10-12 — the byte budget is unreachable through the *ladder* only.** An
+  earlier draft called the write side unreachable "through any callable path". A
+  review refuted it by measurement: the location derivation requires only that
+  the root be absolute, and the size is judged long before the directory is
+  created, so a request assembled directly reaches `RECORD_TOO_LARGE` with no
+  injected seam. The true claim is narrower — no run that goes through the ladder
+  reaches it, because the receipt read first has the smaller budget. Both gates
+  are driven, and both mutants die.
+- **L-V4-10-14 — a conclusion is not consulted when there is no subject.** The
+  delivery target and the task state are read by the command, before the ladder,
+  and together they ARE the subject: without them there is no "this task's
+  current delivery" for a conclusion to be about. So a task whose delivery target
+  stops resolving, or whose state file becomes unreadable, is refused with
+  `SUBJECT_NOT_ESTABLISHED` and its conclusion is never mentioned. A review found
+  an earlier draft claiming the conclusion was read "before every other
+  document", which is false of exactly those two. Driven by a test.
 - **L-V4-10-13 — the "not a file" guard is not observable.** Measured on Windows,
   opening a directory succeeds and reports size 0, so without the guard the empty
   read decodes to `MALFORMED` anyway. It is kept as a statement of intent, and

@@ -412,79 +412,70 @@ What is measured instead: real repositories, real Git, real task-state files
 saved through the production writer, and a really settled block-ledger entry
 re-proved before and after — with negative controls beside each.
 
-## The counter-proof, and why one mutant survives
+## The counter-proof
 
-66 mutants against a baseline the lab proves green before applying anything — a
-red baseline reports every mutant killed and measures nothing, and this campaign
-hit exactly that on its first run (an unsupported reporter flag) and refused to
-continue. **65 killed, 1 survived, 0 harness failures, 0 `NOT_APPLIED`, and 0
-`KILLED_ELSEWHERE`**: no mutant here is caught only by an unrelated gate.
+**74 mutants, 74 killed. 0 survived, 0 harness failures, 0 `NOT_APPLIED`, 0
+`KILLED_ELSEWHERE`** — no mutant here is caught only by an unrelated gate.
 
-The `NOT_APPLIED` column earned its place mid-slice. After the review fixes
-moved seven guards, seven mutants stopped matching their target text and the
-harness reported them as *not applied* rather than as killed — which is exactly
-what a campaign that scored them as kills would have hidden. They were repointed
-at the new code and all seven die.
+The lab works on a copy of the tree with no `.git`, proves its baseline green
+before applying anything, proves each edit landed by reading the file back, and
+re-runs every survivor against a wider control set.
 
-The lab works on a copy of the tree with no `.git` and a junction to
-`node_modules`. It proves each edit landed by reading the file back, and re-runs
-every survivor against a wider control set.
+Three of those disciplines each caught something real, which is the argument for
+having them:
 
-Mutants that found **genuine coverage gaps** rather than confirming the design.
-All are now killed by tests written because of them:
+- **the green-baseline gate** stopped the first run outright — an unsupported
+  reporter flag made the baseline red, and a campaign without the gate would have
+  reported all 57 mutants killed and measured nothing;
+- **the "edit must land" gate** caught seven mutants after the review-1 fixes
+  moved their target text. They reported `NOT_APPLIED` rather than `KILLED`,
+  were repointed, and all seven die;
+- **the baseline gate again**, on the last run: the lab had not been copying
+  `dist/`, and without it the command runner cannot resolve the Windows launch
+  boundary, so every `git` child in a real-repository fixture is refused and the
+  repository reads as having no objects. The baseline went red and said so.
+
+### The mutants that found gaps rather than confirming the design
+
+Six, and every one is now killed by a test written because of it:
 
 - **`M35`** removed the binding comparison in `readDeliveryConclusion` and
   survived. Every existing case reached that reading through a *recomputed*
   binding, so the comparison against the stored one was never the line that
-  fired. The missing case is the naive tamper — flip a field, leave the digest —
-  and it is the one an operator is most likely to attempt;
+  fired. The missing case is the naive tamper — flip a field, leave the digest;
 - **`M40`** removed the read-back-before-write and survived. The obvious
   classification was "unreachable: the document is assembled from values that
-  have just been validated", which is what the sibling slice says about its own.
-  It is **false here**. The merge receipt's schema requires
+  have just been validated". **False here**: the merge receipt's schema requires
   `mergedHeadSha === subjectCommit` and says nothing about `mergeCommit`, so a
   hand-written receipt whose merge commit *is* its own head validates, passes the
-  ladder and mints a proof — and the conclusion's own `superRefine` is what
-  refuses it. The test drives exactly that, with a positive control asserting the
-  ladder really did get all the way through first.
+  ladder and mints a proof — and the conclusion's own `superRefine` refuses it;
+- **`M41`** removed the byte budget on the **write** side and survived two runs.
+  It was classified as unreachable, on the reasoning that the payload's
+  `repositoryRoot` must be a directory this process can create. A review refuted
+  that by measurement: `deriveDeliveryConclusionLocation` requires only that the
+  root be **absolute**, and the size is judged 83 lines before `mkdirSync`. A
+  request assembled directly reaches `RECORD_TOO_LARGE` with no injected seam,
+  and the test now does exactly that — with a control using a 3-byte character
+  that passes the budget and is refused later, so the case measures the budget
+  rather than the fabricated root;
+- **`M54`** removed the budget on the **read** side, which the first campaign had
+  no mutant for at all;
+- **`M60`** deleted the report line naming the profile the *stored* conclusion
+  was drawn under. The result field was asserted and the rendered line was not —
+  and the rendered line is what an operator reads;
+- **`M64`** made the lease rule stop overriding the conclusion's own exit code,
+  and survived: no test combined `--verify-merge` with `--conclude-delivery`. It
+  is the defect review 2 raised, and the case that kills it needs both flags, a
+  lease removed from under the run, and a refused conclusion write.
 
-Three more came out of the review round rather than the first campaign:
+### The three reorderings
 
-- **`M54`** removes the byte budget on the **read** side. The first campaign had
-  no mutant for it, and it is not the same as the write side: `repositoryRoot` is
-  a plain `.min(1).max(4096)` string, so 4,096 characters that JSON escapes to
-  six bytes each is schema-legal and far over 16,384. Without the guard such a
-  file reads as a conclusion. It dies;
-- **`M55`/`M56`** remove the target's own re-read before the write — the gate the
-  review's second finding added. Both die;
-- **`M60`** deletes the report line that names the profile the *stored*
-  conclusion was drawn under, and it **survived** the first re-run: the result
-  field was asserted and the rendered line was not, which is not what an operator
-  reads. It dies now.
-
-The one survivor is classified rather than counted:
-
-| survivor | why it is not reachable | companion that dies |
-| --- | --- | --- |
-| `M41` — the byte budget **on write** | the write path builds the payload from a `repositoryRoot` that must be an absolute path this process can create a directory under, and the ladder reads the merge receipt first; measured over every combination of the shortest, production and longest ISO-8601 instants both records admit, this record is **189 to 230** bytes larger than the receipt and can reach **8,420** against a 16,384 budget — 7,964 of headroom | `M41b` lowers the budget to 400 and **dies** |
-
-`M41b` is the point of that row. The gate is live — it refuses the moment
-anything reaches it — and what makes `M41` unobservable is the *threshold*, not
-a dead branch. The 189-to-230 range and the 8,420 worst case are recomputed by
-the test file over three encodings and three instant lengths rather than
-asserted.
-
-An earlier version of this row said the delta was "exactly 200 bytes". A review
-measured that it is not: both records carry two ISO-8601 instants, the regex
-admits 20 to 35 characters, and the two documents' instants are independent —
-the 200 came from a table in which all four happened to be the same length. The
-operational conclusion survived; the stated measurement did not.
-
-The **read** side of the same budget is a different matter, and the first
-campaign did not have a mutant for it. It is reachable: `repositoryRoot` is a
-plain `.min(1).max(4096)` string, so 4,096 characters that JSON escapes to six
-bytes each is schema-legal and far over 16,384. Without the guard such a file
-reads as a conclusion. `M54` removes it and dies.
+`M67`, `M68` and `M69` remove one rung of the ladder each, so the next rung
+answers instead. All three used to survive: the vocabulary array pinned the
+*list* of members and nothing pinned the *decisions*. Each is now killed by a
+case whose two documents are arranged so that two rungs could both fire, with a
+control showing the later one really does fire once the earlier condition is
+removed.
 
 ## Residuals
 
@@ -513,12 +504,15 @@ reads as a conclusion. `M54` removes it and dies.
   There is no repair path and no way to supersede a conclusion. Clearing one is
   deleting a file by hand, which is exactly the out-of-band editing the binding
   exists to detect.
-- **L-V4-10-7 — the record's byte budget is a floor the product path cannot
-  reach.** Measured: for any `repositoryRoot` this record is exactly 200 bytes
-  larger than slice 8's receipt for the same root, and the ladder reads the
-  receipt first — so a receipt small enough to be read leaves this record at most
-  8,392 bytes against a 16,384 budget. `RECORD_TOO_LARGE` exists for a
-  hand-written document.
+- **L-V4-10-7 — the byte budget cannot refuse a run that went through the
+  ladder.** Measured over every combination of the shortest (20-char), production
+  (24-char) and longest (35-char) ISO-8601 instants both records admit: this
+  record is **189 to 230** bytes larger than slice 8's receipt for the same root,
+  and the ladder reads the receipt first — so a receipt small enough to be read
+  leaves this record at most **8,420** bytes against a 16,384 budget, 7,964 of
+  headroom. Two earlier drafts said "exactly 200 bytes" and "at most 8,392", both
+  measured false by review. The budget is **not** unreachable in general: a
+  caller assembling a request directly can cross it, and both gates are driven.
 - **L-V4-10-8 — the profile digest identifies the contract, not the toolchain.**
   Inherited unchanged from `L-V4-09-4`, and it bounds what "under profile P"
   means here too.
@@ -538,11 +532,24 @@ reads as a conclusion. `M54` removes it and dies.
   the discrepancy is visible; this build does not flag it. Slice 8's receipt is
   written-once and never superseded, so the shape does not arise through the
   product.
-- **L-V4-10-12 — the write-side byte budget is unreachable, and stays.** The
-  read side is reachable and is driven; the write side builds its payload from a
-  `repositoryRoot` that must be a directory this process can create, so no
-  callable path can cross it. It is kept as a floor, with a companion mutant that
-  lowers the threshold and dies to show the gate is live.
+- **L-V4-10-12 — the byte budget is unreachable through the *ladder* only.** An
+  earlier draft called the write side unreachable "through any callable path",
+  reasoning that the payload's `repositoryRoot` must be a directory this process
+  can create. A review refuted it by measurement:
+  `deriveDeliveryConclusionLocation` requires only that the root be **absolute**,
+  and the size is judged 83 lines before `mkdirSync`, so a request assembled
+  directly reaches `RECORD_TOO_LARGE` with no injected seam. The true claim is
+  narrower — no run that goes through `concludeDeliveryForTask` can reach it,
+  because the receipt it reads first has the smaller budget. Both gates now have
+  a mutant and a test, and both mutants die.
+- **L-V4-10-14 — a conclusion is not consulted when there is no subject.** The
+  delivery target and the task state are read by the command, before the ladder,
+  and together they *are* the subject: without them there is no "this task's
+  current delivery" for a conclusion to be about. A task whose delivery target
+  stops resolving, or whose state file becomes unreadable, is therefore refused
+  with `SUBJECT_NOT_ESTABLISHED` and its conclusion is never mentioned. A review
+  found an earlier draft claiming the conclusion was read "before every other
+  document", which is false of exactly those two. Driven by a test.
 - **L-V4-10-13 — the `!stat.isFile()` guard is not observable.** Measured on
   Windows, opening a directory succeeds and reports size 0, so without the guard
   the empty read decodes to `MALFORMED` anyway. It is kept as a statement of

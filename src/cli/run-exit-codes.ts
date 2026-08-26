@@ -506,10 +506,13 @@ export function exitCodeWithLeaseRelease(
  * rather than collapsed onto one number. A review measured the first version
  * doing exactly that and named two codes it mis-classified: an honest
  * concurrent `--verify-merge` that moves the history is `EVIDENCE_MOVED`, where
- * the next invocation may well succeed — the definition of code 4 — and
- * `RUNTIME_IGNORE_UNDETERMINED` is graded 4 twelve lines above for the
- * identical condition, while a path Git says is not ignored is a repository
- * defect fixed by editing it, which `RUNTIME_NOT_IGNORED` is graded 2 for.
+ * the next invocation may well succeed — the definition of code 4. The
+ * identical condition is already graded in this file: `START_TASK_EXIT_CODES`
+ * gives `RUNTIME_IGNORE_UNDETERMINED` a 4 and `RUNTIME_NOT_IGNORED` a 2, three
+ * lines apart, with the comment "Git could not answer … the next invocation may
+ * well succeed: the definition of code 4". (An earlier version of this
+ * paragraph said "twelve lines above", which a review measured as pointing at
+ * this table's own entry rather than at that one.)
  * "Does not exit nominal" does not require "needs an operator".
  */
 const CONCLUSION_RECORD_EXIT_CODES = Object.freeze({

@@ -39,8 +39,12 @@
  * What that is worth, stated rather than implied. It closes the window between
  * the assessment and this function, which on this path is the long one — several
  * file reads, a digest, and two awaited Git subprocesses. It does **not** close
- * the window between the last compare and the `rename`, which is microseconds
- * and cannot be closed without a lock, and a lock is a service. So this is a
+ * the window between the last compare and the `rename`. That window is not
+ * negligible and an earlier version of this paragraph called it "microseconds":
+ * a review counted what is in it — `mkdirSync`, an `lstat` per path component,
+ * an exclusive `open`, the write loop and an **`fsync`**, which is a durability
+ * barrier and routinely milliseconds. It cannot be closed without a lock, and a
+ * lock is a service. So this is a
  * *narrowing*, not mutual exclusion, and it is the same honest position
  * `merge-reconciliation-store.ts` takes about its own read-before-write.
  *
@@ -209,8 +213,13 @@ export type ConclusionWriteAttempt = (typeof CONCLUSION_WRITE_ATTEMPTS)[number];
  * which asks whether *this invocation* wrote: `ALREADY_CONCLUDED` filed nothing
  * and the claim is durable all the same.
  *
- * The exit-code rule in `cli/delivery-command.ts` is the consumer, and it is the
- * reason this is a named export rather than a comparison at the call site.
+ * It has **no production consumer today**, and that is stated rather than
+ * quietly true: the exit-code rule in `cli/delivery-command.ts` used to call it
+ * and now grades each code individually through
+ * `run-exit-codes.ts`'s own table. The two must agree — a code graded `null`
+ * there is exactly a code that is durable here — and nothing in the types says
+ * so, which is why the test file asserts the correspondence over the whole
+ * vocabulary rather than trusting it. A review found the pair unbound.
  */
 const DURABLE_BY_CODE: Readonly<Record<DeliveryConclusionRecordCode, boolean>> = Object.freeze({
   CONCLUSION_RECORDED: true,
@@ -508,6 +517,12 @@ export async function recordDeliveryConclusion(
     ...(request.open === undefined ? [] : ([request.open] as const)),
   );
   if (targetNow.reading === 'DELIVERY_CONCLUDED') {
+    // The `conclusion === null` floor is folded in here rather than given its
+    // own arm, unlike step 4's. Both grade to the same exit code and neither is
+    // reachable — the reading implies a non-null record — so the difference is
+    // which word a report prints for a state this build cannot produce. Named
+    // rather than made symmetrical, because symmetry here would be two more
+    // lines nothing can reach.
     return targetNow.conclusion !== null && sameConcludedDelivery(targetNow.conclusion, payload)
       ? Object.freeze({
           code: 'ALREADY_CONCLUDED' as const,

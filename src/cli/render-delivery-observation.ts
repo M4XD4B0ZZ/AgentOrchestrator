@@ -360,7 +360,8 @@ export const CONCLUSION_TRAILER =
   'is one directory, one conclusion beside the task state, and a staging file beside that\n' +
   'conclusion which a crash can leave behind. The Completion and Record lines above say what\n' +
   'this run did. It takes no execution lease, starts no agent and runs no verification, and\n' +
-  'the only process this act starts is git check-ignore, twice, before it writes. It writes\n' +
+  'the only process it can start is git check-ignore, twice, immediately before it writes —\n' +
+  'a run that refused starts none at all. It writes\n' +
   'no task state and no block-ledger entry, so the task is in exactly the state it was in\n' +
   'before this run: READY_FOR_PR is terminal, and the task\'s current commit is still the\n' +
   'implementation head rather than the merge commit.';

@@ -140,13 +140,21 @@ export const DELIVERY_CONCLUSIONS = [
   /**
    * This delivery is already concluded, and this run changed nothing.
    *
-   * Decided **before every other document is read** — before the merge receipt
-   * as well as before any verification question — and that ordering is the
-   * contract rather than an accident: a delivery that was concluded stays
+   * Decided **before every document this ladder reads** — before the merge
+   * receipt as well as before any verification question — and that ordering is
+   * the contract rather than an accident: a delivery that was concluded stays
    * concluded. Edit the profile, make the verification history unreadable,
    * delete the merge receipt, or let a newer build rewrite either of them: the
    * conclusion still stands, because it is a statement about an instant that
    * has passed and re-deriving it is not what makes it true.
+   *
+   * **Two readings come earlier and are not this ladder's**: the delivery target
+   * and the task state, which the caller resolves into the subject. Without them
+   * there is no "this task's current delivery" for a conclusion to be about,
+   * so the caller's `SUBJECT_NOT_ESTABLISHED` and `TASK_NOT_READY` refuse first
+   * and this member is never reached. A review measured an earlier version of
+   * this note claiming "before every other document is read", which is false of
+   * exactly those two. It is `L-V4-10-14`.
    *
    * An earlier version asked the receipt first, and a review measured the cost:
    * a task whose conclusion sat readable on disk answered `RECEIPT_ABSENT` and

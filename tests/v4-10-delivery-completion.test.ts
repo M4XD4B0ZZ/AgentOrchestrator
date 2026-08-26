@@ -97,6 +97,7 @@ import type { ResolvedVerificationPolicy } from '../src/repo/resolve-repository.
 import {
   CONCLUSION_TRAILER,
   VERIFICATION_TRAILER,
+  renderDeliveryObservation,
 } from '../src/cli/render-delivery-observation.js';
 import {
   CONCLUDE_DELIVERY_OPTION_DESCRIPTION,
@@ -108,7 +109,11 @@ import { proveBlockTaskEntry } from '../src/block/block-evidence.js';
 import type { BlockTaskEntry } from '../src/block/block-ledger.js';
 import { ALL_STATES, TERMINAL_STATES } from '../src/core/states.js';
 import { TRANSITION_TABLE } from '../src/core/transitions.js';
-import { acquireRepositoryExecutionLease, releaseRepositoryExecutionLease } from '../src/lease/execution-lease.js';
+import {
+  acquireRepositoryExecutionLease,
+  releaseRepositoryExecutionLease,
+  EXECUTION_LEASE_FILE_NAME,
+} from '../src/lease/execution-lease.js';
 import {
   exitCodeForConclusionRecord,
   EXIT_RUN_INPUT_UNUSABLE,
@@ -2494,7 +2499,7 @@ describe('the conclusion record refuses what a hand and a schema can each produc
 
 /* ── 10. What an independent review measured as unpinned ─────────────────── */
 
-describe('a concluded delivery survives every one of its own sources', () => {
+describe('a concluded delivery survives every source the ladder reads', () => {
   /**
    * The ordering finding, driven.
    *
@@ -2666,17 +2671,30 @@ describe('the write refuses a conclusion that appears while it is deciding', () 
       const root = scratch();
       try {
         const result = provenConclusion(root);
+        let arrived: Buffer | null = null;
         const wrote = await recordDeliveryConclusion(
-          writeRequest(root, result.proof, { checkIgnored: movingProbe(() => place(root)) }),
+          writeRequest(root, result.proof, {
+            checkIgnored: movingProbe(() => {
+              place(root);
+              // The exact bytes that landed, captured at the moment they landed,
+              // so the assertion below compares against them rather than against
+              // a shape the winner would also have.
+              arrived = readFileSync(conclusionPath(root));
+            }),
+          }),
         );
+        if (arrived === null) throw new Error('fixture never placed a document');
         expect(wrote.code, label).toBe(expected);
         expect(wrote.recorded, label).toBe(false);
         expect(wrote.writeAttempt, label).toBe('NOT_ATTEMPTED');
-        // The document that arrived is exactly as it arrived.
-        const after = readFileSync(conclusionPath(root), 'utf8');
-        expect(after.includes('"concludedAt"') || after.includes('conclusionVersion'), label).toBe(
-          true,
-        );
+        // The document that arrived is BYTE-IDENTICAL to what arrived.
+        //
+        // The first version of this line asked whether the file still contained
+        // `"concludedAt"` or `conclusionVersion` — which the record this build
+        // would have written contains too, so it passed whether or not the gate
+        // refused. A review measured it as an assertion incapable of failing for
+        // the defect it names.
+        expect(readFileSync(conclusionPath(root)), label).toEqual(arrived);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -3295,6 +3313,489 @@ describe('an edited record is refused, for both of the records this reads', () =
       expect(conclude(root).outcome).toBe('VERIFICATION_UNREADABLE');
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/* ── 13. What review 2 measured as unpinned ──────────────────────────────── */
+
+describe('the ladder decides in the order it declares, measured by outcome', () => {
+  /**
+   * The vocabulary array pins the *list*; nothing pinned the *decisions*.
+   *
+   * A review reordered three steps of `concludeDeliveryForTask` and stayed green
+   * on 95 tests and on 852, each reordering producing a different answer for a
+   * real input. Each case below is one of those inputs: the two documents are
+   * arranged so that two different rungs could both fire, and only the earlier
+   * one may.
+   */
+  it('reports an unreadable conclusion before it notices the receipt is gone', () => {
+    // The F1 defect class, for the conclusion readings F1's fix did not cover.
+    // A readable conclusion survives its receipt; so must an unreadable one,
+    // because "something is there and this build cannot read it" is a stronger
+    // reason to stop than "there is no receipt".
+    for (const [label, bytes] of [
+      ['corrupted', 'nonsense'],
+      ['written by a newer build', JSON.stringify({ conclusionVersion: DELIVERY_CONCLUSION_VERSION + 1 })],
+    ] as const) {
+      const root = scratch();
+      try {
+        // No receipt at all, and no verification history.
+        mkdirSync(deliveryConclusionDirectory(root), { recursive: true });
+        writeFileSync(conclusionPath(root), bytes, 'utf8');
+        // The control: with no conclusion on the path, this repository answers
+        // about the receipt — so the assertion below is about the ordering.
+        rmSync(conclusionPath(root));
+        expect(conclude(root).outcome, `${label} (control)`).toBe('RECEIPT_ABSENT');
+        writeFileSync(conclusionPath(root), bytes, 'utf8');
+
+        expect(conclude(root).outcome, label).toBe('CONCLUSION_UNREADABLE');
+        // …and the document is not repaired or replaced on the way out.
+        expect(readFileSync(conclusionPath(root), 'utf8'), label).toBe(bytes);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('reports a receipt about another commit before it notices the history is gone', () => {
+    const root = scratch();
+    try {
+      writeReceipt(root, { subjectCommit: OTHER, mergedHeadSha: OTHER });
+      // No verification history: the later rung would answer VERIFICATION_ABSENT.
+      expect(conclude(root).outcome).toBe('RECEIPT_NOT_THIS_DELIVERY');
+      // The control: with a receipt that IS about this delivery, the same
+      // repository answers about the missing history — so the assertion above
+      // is about which rung fired.
+      writeReceipt(root);
+      expect(conclude(root).outcome).toBe('VERIFICATION_ABSENT');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a history about another delivery before it asks about the profile', () => {
+    const root = scratch();
+    try {
+      writeReceipt(root);
+      // Both wrong at once: a different pull request AND a verdict recorded
+      // under a profile this repository no longer declares.
+      writeVerification(root, {
+        pullRequestNumber: PR + 1,
+        attempts: [attemptOf({ profileDigest: OTHER_DIGEST })],
+      });
+      expect(conclude(root).outcome).toBe('VERIFICATION_NOT_THIS_DELIVERY');
+      // The control: fix only the join, and the profile rung fires.
+      writeVerification(root, { attempts: [attemptOf({ profileDigest: OTHER_DIGEST })] });
+      expect(conclude(root).outcome).toBe('PROFILE_NOT_VERIFIED');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses before the conclusion is consulted when there is no subject at all', () => {
+    // The honest limit of "a concluded delivery stays concluded", driven rather
+    // than asserted. The delivery target and the task state ARE the subject;
+    // without them there is nothing for a conclusion to be about, so the
+    // caller's two refusals come first and the record is never read. That is
+    // L-V4-10-14, and the module's own note says so.
+    const repo = realRepo('ao-v410-nosubject-');
+    try {
+      writeReceipt(repo.root);
+      writeVerification(repo.root);
+      writeConclusion(repo.root);
+      // The control: the record really is readable.
+      expect(
+        loadDeliveryConclusion(repo.root, TASK, { taskId: TASK, repositoryRoot: repo.root })
+          .reading,
+      ).toBe('DELIVERY_CONCLUDED');
+
+      const refusal = refuseDeliveryConclusion('SUBJECT_NOT_ESTABLISHED');
+      expect(refusal.outcome).toBe('SUBJECT_NOT_ESTABLISHED');
+      expect(refusal.mergeCommit).toBeNull();
+      // The point: the refusal carries nothing about the conclusion, because the
+      // conclusion was never consulted. It is a limit, not a defect, and it is
+      // in the register.
+      expect(refusal.concludedUnderProfile).toBeNull();
+    } finally {
+      rmSync(repo.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the two durability tables agree, and the report says which profile', () => {
+  it('grades a code durable exactly when the exit table keeps the primary', () => {
+    // Durability is stated twice — `DURABLE_BY_CODE` in the store and the
+    // null-versus-code split in `CONCLUSION_RECORD_EXIT_CODES` — by two
+    // hand-written tables in two modules, neither derived from the other. A
+    // review found nothing making them agree. This is what makes them agree.
+    const codes: DeliveryConclusionRecordCode[] = [
+      'CONCLUSION_RECORDED',
+      'ALREADY_CONCLUDED',
+      'CONCLUSION_NOT_PROVEN',
+      'SUBJECT_MISMATCH',
+      'CONFLICTING_CONCLUSION',
+      'EXISTING_CONCLUSION_UNREADABLE',
+      'EVIDENCE_MOVED',
+      'LOCATION_UNSUITABLE',
+      'RUNTIME_PATH_NOT_IGNORED',
+      'RUNTIME_IGNORE_UNDETERMINED',
+      'RECORD_CONTRACT_VIOLATION',
+      'RECORD_TOO_LARGE',
+      'DIRECTORY_CREATE_FAILED',
+      'WRITE_FAILED',
+    ];
+    // The control: the list is the whole vocabulary, not a sample. Both tables
+    // are total by type, so a missing member would be a build error there and a
+    // silent gap here.
+    expect(codes.length).toBe(14);
+    expect(new Set(codes).size).toBe(14);
+    for (const code of codes) {
+      expect(
+        exitCodeForConclusionRecord(code) === null,
+        `${code}: durable=${String(conclusionIsDurable(code))} but exit=${String(
+          exitCodeForConclusionRecord(code),
+        )}`,
+      ).toBe(conclusionIsDurable(code));
+    }
+  });
+
+  it('says when a conclusion was drawn under a different profile', () => {
+    // The operator-facing half of the fix. Deleting the "(a DIFFERENT profile)"
+    // literal — or inverting it — left the suite green: the same-profile
+    // spelling was asserted and this one was not, and it is the only signal that
+    // distinguishes a conclusion drawn under a contract this repository no
+    // longer declares.
+    const view = renderDeliveryObservation({
+      repositoryId: 'fixture-repo',
+      repositoryRoot: 'D:/fixture',
+      taskId: TASK,
+      subject: { ok: false, refusal: 'DELIVERY_NOT_DECLARED' } as never,
+      observation: null,
+      conclusion: 'NOT_OBSERVED' as never,
+      stored: null,
+      recording: null,
+      deliveryConclusion: {
+        result: {
+          outcome: 'ALREADY_CONCLUDED',
+          mergeCommit: MERGE,
+          subjectCommit: HEAD,
+          profileDigest: OTHER_DIGEST,
+          standingOutcome: null,
+          proof: null,
+          concludedUnderProfile: DIGEST,
+        },
+        record: null,
+      },
+    } as never);
+    expect(view).toContain(`Concluded on : ${DIGEST}  (a DIFFERENT profile)`);
+    expect(view).not.toContain('(the same profile)');
+    // The control: the same renderer, same shape, one digest changed.
+    const same = renderDeliveryObservation({
+      repositoryId: 'fixture-repo',
+      repositoryRoot: 'D:/fixture',
+      taskId: TASK,
+      subject: { ok: false, refusal: 'DELIVERY_NOT_DECLARED' } as never,
+      observation: null,
+      conclusion: 'NOT_OBSERVED' as never,
+      stored: null,
+      recording: null,
+      deliveryConclusion: {
+        result: {
+          outcome: 'ALREADY_CONCLUDED',
+          mergeCommit: MERGE,
+          subjectCommit: HEAD,
+          profileDigest: DIGEST,
+          standingOutcome: null,
+          proof: null,
+          concludedUnderProfile: DIGEST,
+        },
+        record: null,
+      },
+    } as never);
+    expect(same).toContain(`Concluded on : ${DIGEST}  (the same profile)`);
+    expect(same).not.toContain('(a DIFFERENT profile)');
+  });
+});
+
+describe('the byte budget is reachable on the write side too', () => {
+  it('refuses an oversized payload through the exported writer, with no injected seam', async () => {
+    // A review refuted the "unreachable through any callable path" claim by
+    // measurement, and this is that measurement. `deriveDeliveryConclusionLocation`
+    // requires only that the root be ABSOLUTE, and the size is judged long
+    // before `mkdirSync` — so the directory never has to be creatable at the
+    // moment the budget is evaluated.
+    const root = scratch();
+    try {
+      const result = provenConclusion(root);
+      // 4,094 characters that JSON escapes to six bytes each, on an absolute
+      // root. Schema-legal (`.max(4096)`), and far over 16,384 once serialised.
+      const huge = `C:\\${'\u0001'.repeat(4090)}`;
+      expect(huge.length).toBeLessThanOrEqual(4096);
+      const wrote = await recordDeliveryConclusion(
+        writeRequest(root, result.proof, { repositoryRoot: huge }),
+      );
+      expect(wrote.code).toBe('RECORD_TOO_LARGE');
+      expect(wrote.recorded).toBe(false);
+      expect(wrote.writeAttempt).toBe('NOT_ATTEMPTED');
+
+      // The control that makes this a measurement of the BUDGET rather than of
+      // the fabricated root: the same shape with a 3-byte character passes the
+      // budget and is refused later, by the freshness gate.
+      const smaller = `C:\\${'\u4e00'.repeat(4090)}`;
+      const past = await recordDeliveryConclusion(
+        writeRequest(root, result.proof, { repositoryRoot: smaller }),
+      );
+      expect(past.code).not.toBe('RECORD_TOO_LARGE');
+      expect(past.recorded).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the command hands the store two independently-read operands', () => {
+  it('takes the store expectations from its own receipt read, not from the ladder result', () => {
+    // Three anti-tautology properties the docblocks name and a review measured
+    // unpinned: replacing any of the four `expected*` values with the ladder's
+    // own result, or the subject's, leaves the store comparing values that both
+    // trace to one read.
+    //
+    // Pinned structurally, because the defect is *which expression is written*
+    // rather than a behaviour any fixture can separate: the two reads agree on
+    // every input an in-process test can construct.
+    const source = readFileSync('src/cli/delivery-command.ts', 'utf8');
+    const opens = source.indexOf('const record = await recordDeliveryConclusion({');
+    expect(opens).toBeGreaterThan(0);
+    // Searched FORWARD from the call, not from the top of the file: the same
+    // `return` line appears in an earlier helper, so a plain `indexOf` produced
+    // an empty slice and every assertion below passed vacuously. Caught by the
+    // length floor, which is why it is here.
+    const call = source.slice(opens, source.indexOf('return Object.freeze({ result, record });', opens));
+    expect(call.length).toBeGreaterThan(200);
+    for (const field of [
+      'expectedSubjectCommit: stored.receipt.subjectCommit',
+      'expectedMergeCommit: stored.receipt.mergeCommit',
+      'expectedHost: stored.receipt.host',
+      'expectedOwner: stored.receipt.owner',
+      'expectedName: stored.receipt.name',
+      'expectedPullRequestNumber: stored.receipt.pullRequestNumber',
+    ]) {
+      expect(call, field).toContain(field);
+    }
+    // …and none of them comes from the ladder's result or from the subject,
+    // which is what would make the store's comparison a tautology.
+    for (const forbidden of [
+      'expectedSubjectCommit: result.',
+      'expectedMergeCommit: result.',
+      'expectedHost: subject.',
+      'expectedOwner: subject.',
+      'expectedName: subject.',
+    ]) {
+      expect(call, forbidden).not.toContain(forbidden);
+    }
+    // The assessed revision is the one from the single load at the top of the
+    // action, not a fresh read taken here — re-reading would move the window the
+    // gate exists to close rather than closing it.
+    expect(call).toContain('assessedStateRevision: taskLoad.revision');
+    expect(call).not.toContain('assessedStateRevision: load(');
+    // The control: the two forbidden spellings really are spellings this file
+    // could have, so the loop above is a boundary rather than a list of words
+    // nothing resembles.
+    expect(source).toContain('taskLoad.revision');
+    expect(source).toContain('stored.receipt.subjectCommit');
+  });
+});
+
+/* ── 14. The lease rule outranks the conclusion's own code ───────────────── */
+
+describe('a stuck lease outranks whatever the conclusion came to', () => {
+  /**
+   * The precedence a review found broken by this slice's own fix.
+   *
+   * While the conclusion override was the single constant
+   * `EXIT_RUN_NEEDS_OPERATOR` it happened to equal what
+   * `exitCodeWithLeaseRelease` forces, so applying it *over* an already
+   * lease-adjusted code was indistinguishable from the right answer. Grading the
+   * store's codes one by one made the override able to return 2 or 4 — and a run
+   * holding the repository's writer slot it could not give back would then have
+   * told a caller "nothing is wrong, try again".
+   *
+   * `run-exit-codes.ts` states the rule: **no primary code is exempt**. So the
+   * lease rule is applied last, and this is the case that separates the two
+   * orderings. It needs both flags, which is why nothing else in this file
+   * reaches it.
+   */
+  it('exits 3 when the lease is stuck and the conclusion write was refused', async () => {
+    const repo = realRepo('ao-v410-both-');
+    const gitCommonDir = git(repo.root, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+    try {
+      saveTaskState(
+        {
+          schemaVersion: 1,
+          taskId: TASK,
+          repositoryId: 'fixture-repo',
+          repositoryRoot: repo.root,
+          worktreePath: repo.root,
+          state: 'READY_FOR_PR',
+          stateEnteredAt: AT,
+          baseBranch: BASE,
+          basePinnedCommit: OTHER,
+          scopeAuthorityCommit: null,
+          workBranch: BRANCH,
+          currentCommit: HEAD,
+          reviewRound: 1,
+          maxReviewRounds: 3,
+          blockedAgent: null,
+          resumeFrom: null,
+          reportedResetAt: null,
+          worktreeCleanAtCheckpoint: true,
+          findingHistory: [],
+        },
+        { repositoryRoot: repo.root },
+      );
+      writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
+      // A standing FAILURE, deliberately. With a pass on disk `--verify-merge`
+      // converges to `ALREADY_VERIFIED` and calls no seam at all between taking
+      // the lease and giving it back, so there is no moment at which the lease
+      // can be removed from under the run. A failure makes the gate really run,
+      // which is what opens that window.
+      writeVerification(repo.root, {
+        mergeCommit: repo.mergeCommit,
+        attempts: [failedAttempt('VERIFIED_FAIL')],
+      });
+
+      const leasePath = join(gitCommonDir, EXECUTION_LEASE_FILE_NAME);
+
+      async function run(
+        argv: readonly string[],
+        opts: { steal?: boolean; ignored?: ConclusionIgnoreVerdict } = {},
+      ): Promise<{ out: string; exitCode: number | undefined; stolen: boolean }> {
+        const chunks: string[] = [];
+        const outer = process.exitCode;
+        process.exitCode = undefined;
+        let stolen = false;
+        const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+          chunks.push(String(chunk));
+          return true;
+        });
+        try {
+          const program = new Command();
+          program.exitOverride();
+          registerDeliveryCommand(program, {
+            resolveRepository: async () =>
+              ({
+                ok: true,
+                repository: {
+                  id: 'fixture-repo',
+                  root: repo.root,
+                  gitCommonDir,
+                  verification: PROFILE,
+                  delivery: {
+                    declared: true,
+                    remoteName: 'origin',
+                    result: { outcome: 'RESOLVED', target: { provider: 'github', ...IDENTITY } },
+                  },
+                },
+              }) as never,
+            // The verification gate itself: it answers immediately, and — when
+            // asked to — removes the lease document from under the run, so the
+            // release afterwards cannot answer RELEASED.
+            verify: (async () => {
+              if (opts.steal === true && !stolen) {
+                stolen = true;
+                rmSync(leasePath, { force: true });
+              }
+              return {
+                outcome: 'RAN',
+                exitCode: 0,
+                signal: null,
+                stdout: '',
+                stderr: '',
+                outputTruncated: false,
+                failureCode: null,
+                errnoCode: null,
+                durationMs: 1,
+              };
+            }) as never,
+            // Path-aware on purpose: the verification's own record must be
+            // allowed to land — its pass is what the conclusion then reads —
+            // while the conclusion's write is the one being refused.
+            checkIgnored: async (relative: string) =>
+              relative.includes(DELIVERY_CONCLUSION_DIR_NAME)
+                ? (opts.ignored ?? 'IGNORED')
+                : 'IGNORED',
+            now: () => new Date(LATER),
+          });
+          await program.parseAsync(
+            [
+              'node',
+              'agent-loop',
+              'delivery',
+              '--repository',
+              repo.root,
+              '--task',
+              TASK,
+              ...argv,
+            ],
+            { from: 'node' },
+          );
+          return { out: chunks.join(''), exitCode: process.exitCode as number | undefined, stolen };
+        } finally {
+          write.mockRestore();
+          process.exitCode = outer;
+        }
+      }
+
+      // ── control 1: both flags, everything clean ───────────────────────────
+      // The gate runs, records a pass, and the conclusion then reads it.
+      const clean = await run(['--verify-merge', '--conclude-delivery']);
+      expect(clean.out, clean.out).toContain('Lease        : RELEASED');
+      expect(clean.out, clean.out).toContain('Completion   : DELIVERY_CONCLUDED');
+      expect(clean.exitCode ?? EXIT_RUN_OK).toBe(EXIT_RUN_OK);
+      expect(
+        loadDeliveryConclusion(repo.root, TASK, { taskId: TASK, repositoryRoot: repo.root })
+          .reading,
+      ).toBe('DELIVERY_CONCLUDED');
+      rmSync(conclusionPath(repo.root));
+
+      // ── control 2: the conclusion write is refused, the lease is fine ─────
+      // The store's own grade for this code is 2, not 3 — which is the whole
+      // reason the case below can tell the two orderings apart.
+      const refusedWrite = await run(['--conclude-delivery'], { ignored: 'NOT_IGNORED' });
+      expect(refusedWrite.out).toContain('Completion   : DELIVERY_CONCLUDED');
+      expect(refusedWrite.out).toContain('Record       : RUNTIME_PATH_NOT_IGNORED');
+      expect(refusedWrite.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+
+      // ── the case: both wrong at once ──────────────────────────────────────
+      //
+      // The history is put back to a standing failure first. Control 1 recorded
+      // a pass, and with one on disk `--verify-merge` converges before it calls
+      // any seam — so without this the lease could not be removed from under the
+      // run, and the case would measure nothing. (It measured exactly nothing
+      // once, which is why this comment is here.)
+      writeVerification(repo.root, {
+        mergeCommit: repo.mergeCommit,
+        attempts: [failedAttempt('VERIFIED_FAIL')],
+      });
+      const both = await run(['--verify-merge', '--conclude-delivery'], {
+        steal: true,
+        ignored: 'NOT_IGNORED',
+      });
+      // The lease really was taken and really is gone.
+      expect(both.stolen).toBe(true);
+      expect(() => statSync(leasePath)).toThrow();
+      expect(both.out).toContain('Lease        :');
+      expect(both.out).not.toContain('Lease        : RELEASED');
+      expect(both.out).toContain('Completion   : DELIVERY_CONCLUDED');
+      expect(both.out).toContain('Record       : RUNTIME_PATH_NOT_IGNORED');
+      // The lease wins. Not 2 — which is what the conclusion's own grade would
+      // have made it, and what the first ordering of this rule produced — and
+      // emphatically not nominal.
+      expect(both.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
+      expect(both.exitCode).not.toBe(EXIT_RUN_INPUT_UNUSABLE);
+    } finally {
+      rmSync(repo.root, { recursive: true, force: true });
     }
   });
 });
