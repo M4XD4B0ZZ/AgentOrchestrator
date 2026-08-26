@@ -4,12 +4,21 @@
 **Status** accepted
 **Slice** V4 slice 13
 **Supersedes** nothing. **Superseded by** nothing.
-**Amends** `2026-08-23-adr-delivery-head-publication.md`, which stated that a
-head publication requires an operator to be present for the invocation. That
-stops being unconditionally true here, in one bounded way and for one act. It
-amends nothing else: the mechanism, the create-only fence, the one-shot grant
-and the no-retry rule are all unchanged, and the other two forge acts still
-require `--attended` with no alternative.
+**Amends** two.
+
+`2026-08-24-adr-delivery-head-publication.md`, which stated that a head
+publication requires an operator to be present for the invocation. That stops
+being unconditionally true here, in one bounded way and for one act. It amends
+nothing else in that decision: the mechanism, the create-only fence, the
+one-shot grant and the no-retry rule are all unchanged.
+
+`2026-08-26-adr-delivery-lifecycle-driver.md`, whose second load-bearing
+sentence reads "**Every act still requires its own flag and `--attended`,
+separately.**" The rule survives with one word replaced — every act still
+requires its own flag and *a grant that names that act*, separately — and the
+driver is unchanged: it adds no act, grants none, and still attempts at most one
+forge mutation per invocation. Two of the three acts still have exactly one
+grant, and it is `--attended`.
 
 ## The decision
 

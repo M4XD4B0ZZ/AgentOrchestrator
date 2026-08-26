@@ -104,6 +104,17 @@ import { taskRuntimeDirectory } from '../src/state/state-location.js';
 import { saveTaskState } from '../src/state/state-store.js';
 import { validCreatedState, validReadyForPrState } from './fixtures.js';
 
+/** Every `.ts` file under a directory, in POSIX-separated repository-relative form. */
+function walkSource(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...walkSource(path));
+    else if (entry.name.endsWith('.ts')) out.push(path);
+  }
+  return out.sort();
+}
+
 /**
  * Source with comments blanked, so a sweep measures code rather than prose.
  *
@@ -905,6 +916,29 @@ describe('the grant is refused on the command line before anything is resolved',
     for (const sentence of sentences) {
       expect(sentence).toContain('--automatic-publish-head-only');
     }
+    // The one sentence that has to explain an ASYMMETRY rather than a rule:
+    // `--attended` with no act flag is accepted and exits 0, and this grant with
+    // no act flag is refused with exit 2. It said the two were alike until a
+    // review drove both.
+    expect(PUBLICATION_GRANT_REFUSAL_DETAIL.AUTOMATIC_PUBLICATION_WITHOUT_ACT).toContain(
+      '--attended is a grant for three acts and says nothing about which',
+    );
+  });
+
+  it('leaves no module claiming this build has one unattended path', () => {
+    // Two module headers said AO has "exactly one unattended execution path"
+    // and were left standing by the first fix round. A sweep rather than two
+    // literals: the next slice that adds an unattended act should fail here
+    // rather than ship the sentence a third time.
+    const claims: string[] = [];
+    for (const file of walkSource('src')) {
+      const text = readFileSync(file, 'utf8');
+      if (/(only|exactly one) unattended execution path/.test(text)) claims.push(file);
+    }
+    expect(claims).toEqual([]);
+    // Positive control: the sweep really reads the two files that carried it.
+    expect(walkSource('src')).toContain('src/core/automatic-resume.ts');
+    expect(walkSource('src')).toContain('src/run/unattended-resume.ts');
   });
 
   it('answers before the repository is resolved, for every refused combination', async () => {
