@@ -33,8 +33,17 @@
  * only where this function answered `allowed`: an in-flight task the invocation
  * did not itself resume classifies `ATTENDED_ONLY` and is refused, and the layers
  * above refuse to start a task or remove a lease under it. AO therefore has
- * exactly one unattended execution path, and this decision is the gate on the
- * way in.
+ * exactly one unattended path on which it RUNS AN AGENT, and this decision is
+ * the gate on the way in.
+ *
+ * The qualifier is written down because V4 slice 13 made the unqualified version
+ * false, and a review measured the difference rather than arguing it. That slice
+ * added a second unattended path — `delivery --drive --publish-head
+ * --automatic-publish-head-only` — which starts no agent and writes no task
+ * state, but which is a `--drive`, and a drive writes local records, takes this
+ * repository's execution lease and runs the verification commands the target
+ * repository's own profile declares. So "no agent" is the property that
+ * survives; "no execution" and "no lease" are not.
  *
  * It is not a gate on every step afterwards, and saying so was a review finding
  * against this very paragraph. Once the resume this function allowed has been

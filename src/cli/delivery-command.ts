@@ -316,8 +316,10 @@ export const PUBLICATION_GRANT_REFUSAL_DETAIL: Readonly<
     'the merge receipt and the verification history are read, and the pull-request situation ' +
     'is observed fresh. A bare publication would skip all of that.',
   AUTOMATIC_PUBLICATION_WITHOUT_ACT:
-    '--automatic-publish-head-only is a grant and not an act. Name the act with --publish-head, ' +
-    'exactly as --attended requires.',
+    '--automatic-publish-head-only is a grant and not an act, and it grants exactly one. Name ' +
+    'that act with --publish-head. It is refused rather than left inert, which is where this ' +
+    'grant differs from --attended: --attended is a grant for three acts and says nothing about ' +
+    'which, so an invocation carrying it and naming none is a report and not a mistake.',
   AUTOMATIC_PUBLICATION_WITH_OTHER_ACT:
     '--automatic-publish-head-only grants the publication and nothing else. --create-pr and ' +
     '--merge-pr require --attended, which this invocation cannot also give, so the combination ' +
@@ -606,7 +608,8 @@ export const CONCLUDE_DELIVERY_OPTION_DESCRIPTION =
  * command's help already cost bought: a sentence that enumerates goes stale, a
  * sentence that states a rule does not. What the suite checks is that this text
  * says the three things true of every drive — each act still needs its own flag
- * and `--attended`, at most one act is attempted, nothing waits — and that it
+ * and a grant that names that act, at most one act is attempted, nothing waits —
+ * and that it
  * names the flags it will not compose with, because that refusal is otherwise a
  * surprise.
  */

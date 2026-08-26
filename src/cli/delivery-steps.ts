@@ -284,8 +284,11 @@ function resolvePublicationAuthority(
  * invocation, or this machine's operator having declared, outside every
  * repository, that this exact delivery target may be published with nobody
  * present. {@link resolvePublicationAuthority} is where that is decided and it
- * is decided once — and then again, against a freshly resolved identity,
- * immediately before the remote is contacted.
+ * is decided once — and then again, against a freshly resolved identity, at the
+ * last point this build reads anything of its own before the remote is
+ * contacted. Not "immediately before": `publishDeliveryHead` asks Git for the
+ * remote's two URLs and then reads the ref itself after that, and the second of
+ * those is a network round trip. `L-V4-13-4`.
  *
  * The mint is called here and nowhere else. That is the reachability property
  * the whole authority rests on: a tree walk in the suite proves exactly one
@@ -364,9 +367,10 @@ export async function performPublication(
       if (ref === null) return null;
       // The authority again, against the identity *this* pass resolved rather
       // than the one the ladder resolved a moment ago. `recheck` is the last
-      // thing this build reads before the remote is contacted, so this is where
-      // a permission that stopped standing is caught: an operator who edited
-      // the declaration is answered here with nothing sent.
+      // point at which this build reads anything of its own — two `git remote
+      // get-url` calls and one `ls-remote` follow it — so this is where a
+      // permission that stopped standing is caught: an operator who edited the
+      // declaration is answered here with nothing sent.
       //
       // It is a second reading and not a cached one. On the attended path it is
       // the same constant-time arm the ladder took and reads no file at all.

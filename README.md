@@ -10513,9 +10513,12 @@ argument and the same loader.
 can commit, and it can put a `delivery-automation.yaml` anywhere inside the
 repository it likes; none of those is the path above, and the module that reads
 the declaration names no repository path, no Git subcommand and no environment
-variable at all — which the suite measures by sweeping its source, so the
-property is "there is no code that could read one" rather than "the code that
-could does not".
+variable at all — which the suite measures by sweeping its source for the names
+those things go by. That is an instrument with a stated reach: it names ten
+tokens, so it catches a module that reached for the repository under any of them
+and would not catch one that built a path from parts under names nobody thought
+of. What it is, is a tripwire on the shape of the defect, placed there because
+the property it guards is the one the whole slice rests on.
 
 ### Why not the repository profile, pinned to a commit
 
@@ -10709,6 +10712,12 @@ ledger, or gives it an outgoing transition.
   invocation nobody is watching, and the two cannot be separated because the
   grant requires the drive. Measured only for the publishing shape; the other
   shapes are `tests/v4-11-…`'s.
+- **L-V4-13-10 — the racing interleaving is observed, not required.** The
+  concurrent case pins the invariant that holds in every interleaving and
+  classifies the loser into the two known shapes; it does not require that any
+  round actually raced, because that would be requiring a scheduler. On a runner
+  where the two children always serialise, the server's own ref transaction is
+  exercised by nothing in this suite and the case is still green.
 - **L-V4-13-8 — no live product dogfood was possible.** Unchanged from
   `L-V4-12-9`: this repository has no orchestrated task and no runtime state, so
   no legitimate delivery could exercise the automatic path end to end. What is

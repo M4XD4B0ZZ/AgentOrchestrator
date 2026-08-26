@@ -21,7 +21,7 @@
  *     to have been selected. Skipping would turn a visible evidence failure into
  *     an invisible bypass;
  *  4. **letting a choice become a permission.** A selection is routing. Every
- *     act still needs its own flag and `--attended`, and a drive that chose its
+ *     act still needs its own flag and a grant naming it, and a drive that chose its
  *     own subject is measured to send nothing through any of the **three**
  *     mutation seams — the publication, the creation and the merge. The fourth
  *     seam the harness counts is the forge *reader*, and it is deliberately not

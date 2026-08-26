@@ -642,7 +642,7 @@ describe('the declaration contract is closed, and every refusal fails closed', (
     expect(permission(home)).toBe('DENIED');
   });
 
-  it('cannot be satisfied by another repository, in any of the three parts', () => {
+  it('cannot be satisfied by another owner or another repository name', () => {
     const home = scratchHome();
     declare(home, [
       { ...IDENTITY, owner: 'someone-else', headPublication: 'AUTOMATIC_ALLOWED' },
@@ -729,8 +729,14 @@ describe('the declaration contract is closed, and every refusal fails closed', (
     const home = scratchHome();
     writeRaw(home, 'schemaVersion: 1\nrepositories: [\n');
     expect(load(home)).toEqual({ state: 'UNUSABLE', code: 'DECLARATION_MALFORMED' });
-    writeRaw(home, 'schemaVersion: 1\n---\nschemaVersion: 1\n');
-    expect(load(home).state).toBe('UNUSABLE');
+    // The CODE and not only the state. Deleting the document-count guard in
+    // `yaml/safe-yaml.ts` leaves the first document standing, which then fails
+    // the contract instead - still `UNUSABLE`, and no longer this refusal.
+    writeRaw(
+      home,
+      'schemaVersion: 1\nrepositories: []\n---\nschemaVersion: 1\nrepositories: []\n',
+    );
+    expect(load(home)).toEqual({ state: 'UNUSABLE', code: 'DECLARATION_MALFORMED' });
   });
 
   it('refuses a mapping key this build will not put in an object', () => {
@@ -1118,7 +1124,7 @@ describe('the subject and the target are established freshly, and bound exactly'
     expect(run.counts.forge).toBe(0);
   });
 
-  it('re-reads the declaration immediately before the remote is contacted', async () => {
+  it('re-reads the declaration at the last point it reads anything of its own', async () => {
     const root = repositoryRoot();
     const home = scratchHome();
     writeReadyState(root);
@@ -1259,7 +1265,7 @@ describe('the selection composes, and still authorises nothing', () => {
   });
 });
 
-describe('the automatic path writes nothing and waits for nothing', () => {
+describe('the publication writes nothing, and nothing on this path waits', () => {
   it('leaves the runtime directory exactly as it found it', async () => {
     const root = repositoryRoot();
     const home = scratchHome();
@@ -1437,7 +1443,12 @@ describe('two unattended publishers cannot both create one ref', () => {
       `${other}:refs/heads/${BRANCH}`,
     );
     expect(rejected.status).not.toBe(0);
-    expect(rejected.out).toContain('rejected');
+    // The exact word, because the whole point of this row is WHICH mechanism
+    // refused. `(stale info)` is git's own name for the lease comparison it made
+    // here, from the ref advertisement, before sending an update; a server-side
+    // refusal reads `[remote rejected]` and would satisfy a bare 'rejected'.
+    expect(rejected.out).toContain('stale info');
+    expect(rejected.out).not.toContain('remote rejected');
     expect(git(lab, '--git-dir', remote, 'rev-parse', `refs/heads/${BRANCH}`).out.trim()).toBe(commit);
 
     // And the measured residual this slice records rather than hides: a second
@@ -1533,8 +1544,17 @@ describe('two unattended publishers cannot both create one ref', () => {
         git(lab, '--git-dir', remote, 'for-each-ref', `refs/heads/${BRANCH}`).out.trim().split('\n'),
       ).toHaveLength(1);
     }
-    // A positive control on the loop: at least one round produced a loser at
-    // all, so the assertions above ran against something.
-    expect(shapes.size).toBeGreaterThan(0);
+    // Deliberately NOT a control. `shapes` cannot be empty once the loop has
+    // run: exactly one of two results contains `[new branch]`, so the other one
+    // always exists and is always classified. An earlier draft asserted
+    // `shapes.size > 0` and called it a positive control; a review measured that
+    // it is entailed by the assertion twelve lines above and can never fail.
+    //
+    // What this case pins is the invariant, and it OBSERVES the shape rather than
+    // requiring one. If a runner only ever serialises, the server's own ref
+    // transaction is exercised by nothing here - `L-V4-13-10`.
+    for (const shape of shapes) {
+      expect(['SERIALISED_UP_TO_DATE', 'RACED_REJECTED_BY_SERVER'], shape).toContain(shape);
+    }
   });
 });

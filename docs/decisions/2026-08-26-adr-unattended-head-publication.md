@@ -177,13 +177,16 @@ is a flag of its own, and passing both is refused before anything is resolved.
 `--automatic-publish-head-only`, and the name is chosen under two constraints
 this build already enforces.
 
-A sweep over the live program refuses any registered option name containing
-`force`, `unattended`, `adopt`, `takeover` or `steal`. It is copied into every
-slice file that adds a flag — `grep -n 'force|unattended|adopt|takeover|steal'
-tests/*.ts` finds it in nine, of which `tests/v4-05-…` builds the whole program
-and the rest build the delivery command alone. A count is not written here
-because a count beside a set nothing enforces is the shape this repository has
-been caught by three times.
+No registered option name in this build may contain `force`, `unattended`,
+`adopt`, `takeover` or `steal`. The rule is enforced by more than one instrument
+and the difference matters: `tests/v2-07lr-…` scans the *source* for `.option(`
+declarations across the tree, while the per-slice copies build a program — the
+whole one in `tests/v4-05-…`, the delivery command alone in the rest — and read
+the flags commander holds. Neither is a superset of the other, which is why both
+exist. How many copies there are is deliberately not stated: a number beside a
+set nothing enforces is the shape this repository has been caught by three
+times, and an earlier draft of this paragraph both wrote one and then said it
+would not.
 
 `--unattended-publish-head` fails that sweep, and widening the sweep would be the
 wrong repair: the guard is right and the name would be the problem, exactly as
@@ -443,6 +446,12 @@ everything else in this ADR (the act is create-only, the target is re-derived,
 the conclusion is read, one mutation per invocation), and stated rather than
 absorbed.
 
+**`L-V4-13-8` — no live product dogfood was possible.** This repository has no
+orchestrated task and no runtime state, so no legitimate delivery could exercise
+the automatic path end to end. What is measured against real bytes is the
+declaration — a real file in a real scratch profile, read by the real loader —
+and the fence, against a real bare repository. Unchanged from `L-V4-12-9`.
+
 **`L-V4-13-9` — the grant requires `--drive`, and a drive does more than
 publish.** See §12. Local records, the execution lease and the repository's own
 verification commands can all run on an invocation nobody is watching. Not new,
@@ -450,6 +459,16 @@ not a forge mutation, not separable from the narrowing that makes the publicatio
 safe — and therefore stated rather than absorbed. An operator not prepared for
 their profile's verify commands to run unattended should not make the
 declaration.
+
+**`L-V4-13-10` — the racing interleaving is observed, not required.** The
+concurrent case pins the invariant that holds in every interleaving and
+classifies the loser's outcome into the two known shapes. It does not require
+that any round actually raced, because requiring that would be requiring a
+scheduler. On a runner where the two children always serialise, the server's own
+ref transaction is exercised by nothing in this suite and the case is still
+green. The row in §10 attributed to the server is therefore measured *when it
+occurs* and not on every run — which is the honest reading of that table, and an
+earlier draft of it did not say so.
 
 **Not carried, because it was measured false:** the concern that two racing
 publishers could both create the ref. Against a real bare repository, driven five
