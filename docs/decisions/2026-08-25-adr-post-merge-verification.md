@@ -431,9 +431,13 @@ The rest are unreachable by construction, and each says so in place:
 - **`M36`** — the store's read-back-before-write. The document is assembled from
   values that have just been validated, so this build cannot construct one it
   would refuse;
-- **`M48`** — the containment test on the derived workspace path. The path is
-  `<parent>/<basename>.verification/<taskId>`, a sibling of the repository by
-  construction, so it is never inside it;
+- **`M48`** — the containment test on the derived workspace path. No fixture
+  uses a repository root for which it fires. It is **not** true that the path is
+  outside the repository by construction, and an earlier version of this bullet
+  said so: measured at this head, a root of `C:\a\.` derives
+  `C:\a\..verification\<taskId>`, which the imported `isContained` reports as
+  contained — which is the gate doing its job on a root a person could plausibly
+  pass;
 - **`M46`, `M60`** — the ownership and lease re-proofs in front of the *forced*
   removal. Both exist for a window between two subprocesses, and no fixture can
   change the world inside it.

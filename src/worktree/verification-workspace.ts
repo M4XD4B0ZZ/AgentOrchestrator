@@ -137,10 +137,16 @@ export type VerificationWorkspaceIdentityResult =
 // as having exactly one implementation and lists the copies that already exist
 // so a fifth cannot arrive quietly. Adding this module to that list would have
 // been the wrong repair — the list is a record of debt, not a place to file
-// more of it — and the two implementations were not even equivalent. This one
-// answered from `path.relative`; `doctor/safe-write.ts` resolves both sides
-// first and compares case-insensitively on Windows, which is the behaviour the
-// rest of this build's containment decisions are made with.
+// more of it — and the two implementations were not equivalent.
+//
+// WHERE they differ was measured, because the obvious answer is wrong: an
+// earlier version of this comment said the copy neither resolved its arguments
+// nor compared case-insensitively, and `path.win32.relative` does both. The one
+// divergence found is the copy's `rel.startsWith('..')` string test, which
+// answers "not contained" for a genuine child whose first path segment begins
+// with `..` — `C:/a` and `C:/a/..verification/T` being exactly that shape. The
+// imported predicate answers `true` there, and `true` means refuse, so the swap
+// is strictly the safer direction.
 
 /**
  * Derives where one task's verification workspace belongs.
@@ -268,9 +274,11 @@ export interface VerificationWorkspaceCreationFailure {
    * not clear a worktree Git had registered — the one case an operator has to
    * act on.
    *
-   * It is deliberately not `pathExists`. A competitor's plain directory at the
-   * derived path makes that true while this call created nothing, and reporting
-   * it as residue would send an operator after somebody else's leftovers.
+   * It does not claim the debris is **this call's**. After the fact a killed
+   * `worktree add`'s unregistered directory and a competitor's plain one are
+   * indistinguishable, and both mean the same thing for the next run: the
+   * occupied-path gate will refuse it. Saying more than that would be inventing
+   * a distinction the code cannot make.
    */
   readonly residue: boolean;
 }
@@ -508,7 +516,21 @@ export async function createVerificationWorkspace(
     // proof. `NOTHING_REGISTERED` is the answer when Git registered nothing —
     // whatever is at the path is not ours and is not this call's residue.
     const undone = await removeVerificationWorkspace(repository, taskId, options);
-    const leaked = !workspaceIsGone(undone.code) && undone.code !== 'NOTHING_REGISTERED';
+    // Residue is "something is at the derived path and this run did not clear
+    // it", and it is read from BOTH the removal and the filesystem.
+    //
+    // Neither alone is right, and each was tried. `pathExists` alone reports a
+    // competitor's directory as this call's leftovers. The removal alone loses
+    // the case the first version of this comment named: Git creates the
+    // directory before it writes the registration, so a `worktree add` killed
+    // inside that window leaves an UNregistered directory — `NOTHING_REGISTERED`
+    // — which would then be reported as nothing left, and the next run is
+    // terminal at the occupied-path gate above.
+    //
+    // Together they answer the question an operator actually has. This
+    // deliberately does not claim the debris is ours: after the fact the two are
+    // indistinguishable, and both mean the same thing for the next run.
+    const leaked = !workspaceIsGone(undone.code) && pathExists(identity.workspacePath);
     return creationFailure('WORKSPACE_CREATE_FAILED', leaked);
   }
 

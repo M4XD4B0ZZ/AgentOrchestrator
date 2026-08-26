@@ -310,13 +310,22 @@ export const RECONCILIATION_TRAILER =
  * checkout, running the declared commands and writing a record. The trailer
  * block had no term for verification at all.
  */
+/*
+ * The lease clause is hedged on purpose. It read "took this repository's
+ * execution lease and gave it back" — flat past tense — on a trailer that is
+ * printed for EVERY run that took a lease, including one whose Lease line four
+ * lines above says `NOT_OWNER`, `LEASE_REMOVE_FAILED` or `RELEASE_NOT_REPORTED`.
+ * A review found it: the same shape as the "Read-only …" claim the round before
+ * had fixed, in the constant written to fix it.
+ */
 export const VERIFICATION_TRAILER =
   'Read-only on the forge, and emphatically not read-only here. Verification contacted\n' +
-  'github.com not at all. On this machine it took this repository\'s execution lease and gave\n' +
-  'it back — the Lease line says how — and it can create and remove one detached checkout in\n' +
-  'a directory beside the repository, and write one verification record beside the task\n' +
-  'state. The Verification and Record lines above say what this run did. Your own working\n' +
-  'tree is not touched. It writes no task state and no block-ledger entry, so the task is in\n' +
+  'github.com not at all. On this machine it took this repository\'s execution lease and tried\n' +
+  'to give it back — the Lease line above says whether it did — and it can create and remove\n' +
+  'one detached checkout in a directory beside the repository, and write one verification\n' +
+  'record beside the task state. The Verification, Record, Workspace and Lease lines above\n' +
+  'say what this run did, and your own working tree is not one of the things it touches.\n' +
+  'It writes no task state and no block-ledger entry, so the task is in\n' +
   'exactly the state it was in before this run, and it starts no agent and reverts nothing\n' +
   'whatever the result was. What it does start is the commands this repository\'s own profile\n' +
   'declares: what those do, and whether they reach a network, is the profile\'s to answer for\n' +

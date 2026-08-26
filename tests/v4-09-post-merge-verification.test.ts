@@ -85,6 +85,7 @@ import {
   NOT_CONTACTED_TRAILER,
   VERIFICATION_TRAILER,
 } from '../src/cli/render-delivery-observation.js';
+import { EXIT_RUN_NEEDS_OPERATOR } from '../src/cli/run-exit-codes.js';
 import {
   registerDeliveryCommand,
   ATTENDED_OPTION_DESCRIPTION,
@@ -94,6 +95,7 @@ import {
 import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
+  EXECUTION_LEASE_FILE_NAME,
   type LeaseRepository,
 } from '../src/lease/execution-lease.js';
 import type { ExecutionLeaseEvidence } from '../src/core/execution-lease-evidence.js';
@@ -2380,6 +2382,8 @@ describe('the delivery command verifies only when asked, and takes the lease to 
     argv: readonly string[],
     repo: ReturnType<typeof unleasedRepo>,
     verify: VerificationRunner,
+    /** The Git seam, for the one case that has to lose the lease mid-run. */
+    gitSeam: typeof runGitCommand = runGitCommand,
   ): Promise<{ out: string; forgeReads: number; forgeMutations: number; exitCode: number | undefined }> {
     let forgeReads = 0;
     let forgeMutations = 0;
@@ -2455,7 +2459,7 @@ describe('the delivery command verifies only when asked, and takes the lease to 
         }) as never,
         // Real Git, so the worktree really appears and really goes; real
         // check-ignore, so the store's own gate is exercised rather than stubbed.
-        git: runGitCommand,
+        git: gitSeam,
         verify,
         now: () => new Date(AT),
       });
@@ -2563,16 +2567,55 @@ describe('the delivery command verifies only when asked, and takes the lease to 
     // exempt**." `block --attended` and `release --attended` both apply it, and
     // a review found this — the third lease-taking path — exiting 0 with a
     // stuck lease.
+    //
+    // The FAILING half is the point, and an earlier version of this case did
+    // not have it: it ran only the control below and asserted exit 0, so both
+    // halves of the override — applying it at all, and gating it on
+    // `leaseTaken` — could be deleted with the suite green. A test whose name
+    // claims a measurement has to make it.
+    //
+    // The lease document is removed from under the run through the Git seam,
+    // which is a real moment: `leasedGit` proves the lease per call, so this is
+    // what losing it mid-run looks like from inside. The release then finds
+    // nothing at the lease name and cannot answer `RELEASED`.
     const repo = unleasedRepo();
     try {
       writeReceipt(repo.root, { mergeCommit: repo.mergeCommit });
       const { runner } = recordingRunner();
 
-      // The control first: a clean run keeps its own verdict.
+      const leasePath = join(repo.gitCommonDir, EXECUTION_LEASE_FILE_NAME);
+      let removed = false;
+      const stealsTheLease = async (cwd: string, args: readonly string[]) => {
+        if (!removed) {
+          removed = true;
+          rmSync(leasePath, { force: true });
+        }
+        return runGitCommand(cwd, args);
+      };
+
+      const lost = await runCli(['--verify-merge'], repo, runner, stealsTheLease);
+      // The lease really was taken and really is not there any more, so the
+      // assertions below are about a release that failed rather than about a
+      // run that never acquired one.
+      expect(removed).toBe(true);
+      expect(() => statSync(leasePath)).toThrow();
+      expect(lost.out, lost.out).toContain('Lease        :');
+      expect(lost.out).not.toContain('Lease        : RELEASED');
+      // The rule: not nominal, whatever its own work came to.
+      expect(lost.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
+
+      // The control: an ordinary run gives the lease back and keeps its own
+      // verdict — so the code above is attributable to the release and not to
+      // `--verify-merge` having started to fail the command outright.
       const clean = await runCli(['--verify-merge'], repo, runner);
       expect(clean.out).toContain('Verification : VERIFICATION_ATTEMPTED');
       expect(clean.out).toContain('Lease        : RELEASED');
       expect(clean.exitCode ?? 0).toBe(0);
+
+      // And a run that took NO lease is not punished for one it never held.
+      const none = await runCli([], repo, runner);
+      expect(none.out).not.toContain('Lease        :');
+      expect(none.exitCode ?? 0).toBe(0);
     } finally {
       repo.dispose();
     }
