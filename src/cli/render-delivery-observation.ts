@@ -357,6 +357,22 @@ export const VERIFICATION_TRAILER =
  * verification trailer's: this act takes no lease at all, so there is no
  * outcome for it to be wrong about.
  */
+export const CONCLUSION_TRAILER =
+  'Read-only on the forge, and not necessarily read-only here. Concluding a delivery\n' +
+  'contacted github.com not at all, opened no network connection of its own, and read no Git\n' +
+  'history — it asked nothing about the base branch, about reachability, or about whether the\n' +
+  'merge still stands. What it can read is four documents beside this task: any conclusion\n' +
+  'already recorded, the merge receipt, the verification history and the task state; the\n' +
+  'ladder stops at the first one that answers, so a refusal has read fewer. What it can write\n' +
+  'is one directory, one conclusion beside the task state, and a staging file beside that\n' +
+  'conclusion which a crash can leave behind. The Completion and Record lines above say what\n' +
+  'this run did. It takes no execution lease, starts no agent and runs no verification, and\n' +
+  'the only process it can start is git check-ignore, twice, immediately before it writes —\n' +
+  'a run that refused starts none at all. It writes\n' +
+  'no task state and no block-ledger entry, so the task is in exactly the state it was in\n' +
+  'before this run: READY_FOR_PR is terminal, and the task\'s current commit is still the\n' +
+  'implementation head rather than the merge commit.';
+
 /**
  * What driving a delivery is answerable for, and the things it is not.
  *
@@ -373,28 +389,17 @@ export const DRIVE_TRAILER =
   'an attempt this run stops, whatever that attempt came to, because the next thing to do after\n' +
   'any attempt is to read what happened rather than to repeat it. Nothing is retried here and\n' +
   'nothing is polled: there is no sleep, no loop and no background work, so a condition that is\n' +
-  'not ready is reported and not waited for. A delivery already concluded is answered from the\n' +
+  'not ready is reported and not waited for. What a drive CAN do beyond reading: it can ask\n' +
+  'github.com about this commit, it can write the merge receipt, the verification history and\n' +
+  'the conclusion beside this task — up to three records in one invocation — and it can take\n' +
+  'this repository\'s execution lease and start the profile commands, because verifying the\n' +
+  'merge commit does. A delivery already concluded is answered from the\n' +
   'conclusion on disk, and that answer costs no forge request, no execution lease and no\n' +
   'verification. The driver keeps no record of its own and remembers nothing between runs: every\n' +
   'invocation re-derives its position from the task, the four documents beside it and, when it\n' +
   'needs them, fresh answers from github.com. It writes no task state and no block-ledger entry,\n' +
   'starts no agent, and READY_FOR_PR stays terminal however far the delivery got.';
 
-export const CONCLUSION_TRAILER =
-  'Read-only on the forge, and not necessarily read-only here. Concluding a delivery\n' +
-  'contacted github.com not at all, opened no network connection of its own, and read no Git\n' +
-  'history — it asked nothing about the base branch, about reachability, or about whether the\n' +
-  'merge still stands. What it can read is four documents beside this task: any conclusion\n' +
-  'already recorded, the merge receipt, the verification history and the task state; the\n' +
-  'ladder stops at the first one that answers, so a refusal has read fewer. What it can write\n' +
-  'is one directory, one conclusion beside the task state, and a staging file beside that\n' +
-  'conclusion which a crash can leave behind. The Completion and Record lines above say what\n' +
-  'this run did. It takes no execution lease, starts no agent and runs no verification, and\n' +
-  'the only process it can start is git check-ignore, twice, immediately before it writes —\n' +
-  'a run that refused starts none at all. It writes\n' +
-  'no task state and no block-ledger entry, so the task is in exactly the state it was in\n' +
-  'before this run: READY_FOR_PR is terminal, and the task\'s current commit is still the\n' +
-  'implementation head rather than the merge commit.';
 
 /**
  * One merge reading as one phrase.
@@ -1330,9 +1335,12 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     if (trailers.length > 0) trailers.push('');
     trailers.push(CONCLUSION_TRAILER);
   }
-  // Gated on the flag, like the three above it, and for the same reason: what
-  // this trailer says is as much about what the driver did NOT do as about what
-  // it did, so it is owed by every run that asked for one.
+  // Gated on the flag, like the reconciliation's and the conclusion's — the
+  // verification's above is gated on what happened, and a review caught this
+  // comment saying "like the three above it" as though all three agreed. The
+  // reason is the conclusion trailer's: what this one says is as much about
+  // what the driver did NOT do as about what it did, so it is owed by every run
+  // that asked for one, including the ones that changed nothing.
   if (view.drive != null) {
     if (trailers.length > 0) trailers.push('');
     trailers.push(DRIVE_TRAILER);

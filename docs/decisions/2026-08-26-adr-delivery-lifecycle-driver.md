@@ -37,8 +37,11 @@ Everything below is those three, argued.
 `concludeDeliveryForTask` (`src/deliver/conclude-delivery.ts:443`) is the
 position oracle. It can be, because of three properties it already had:
 
-- it is **pure**. Its whole seam list is a clock — no forge seam, no Git seam,
-  no verification seam — so asking it costs nothing and reaches nothing;
+- its whole seam list is **a clock** — no forge seam, no Git seam, no
+  verification seam — so asking it contacts nothing, starts no process and takes
+  no lease. Not free: it reads up to three documents from disk. An earlier
+  draft of this line said "pure" and "reaches nothing", which a review measured
+  as overstating exactly that;
 - it **writes nothing**. The caller records, and only on the one member that
   says there is something to record;
 - its refusals **name the missing stage**. `RECEIPT_ABSENT` means no merge has
@@ -211,8 +214,10 @@ Four kinds, kept apart:
 | **code** | `VERIFICATION_FAILED` | 3 |
 | **infrastructure** | `VERIFICATION_NOT_ESTABLISHED` | 3 |
 | **external not ready** | `CHECKS_PENDING`, `EFFECT_ATTEMPTED` | 5 |
-| | `PULL_REQUEST_REQUIRED`, `HEAD_NOT_PUBLISHED`, `MERGE_NOT_ESTABLISHED`, `OBSERVATION_UNSETTLED`, `SUBJECT_CHANGED` | 4 |
-| **authority / a person** | `ATTENDED_AUTHORITY_REQUIRED`, `HUMAN_DECISION_REQUIRED`, `CHECKS_FAILED`, `CHECKS_ABSENT`, `PULL_REQUEST_AMBIGUOUS`, `DELIVERY_EVIDENCE_UNUSABLE`, `CONCLUSION_NOT_ATTESTED` | 3 |
+| | `PULL_REQUEST_REQUIRED`, `HEAD_NOT_PUBLISHED`, `FORGE_STATE_UNKNOWN`, `OBSERVATION_UNSETTLED`, `SUBJECT_CHANGED` | 4 |
+| **authority** | `ATTENDED_AUTHORITY_REQUIRED` | 4 |
+| **a person** | `HUMAN_DECISION_REQUIRED`, `CHECKS_FAILED`, `CHECKS_ABSENT`, `PULL_REQUEST_AMBIGUOUS`, `DELIVERY_EVIDENCE_UNUSABLE`, `CONCLUSION_NOT_ATTESTED` | 3 |
+| **a record that did not land** | `CONCLUSION_NOT_DURABLE`, `RECEIPT_NOT_DURABLE` | the store's own grade |
 
 `VERIFICATION_NOT_ESTABLISHED` is graded 3 rather than 4, and the trade-off is
 stated rather than absorbed: two of its causes clear on their own — a lease
@@ -244,7 +249,11 @@ should be, and the nominal member is about a delivery that is already finished.
 | no receipt | the reconciliation's two questions, then the observation's two |
 | an act that mutates | that act's own readings, one request, one reading |
 
-There is no fetch anywhere in `src/`, and the driver adds none.
+No path here runs `git fetch`, and the driver adds none — `L-V4-09-3` is the
+standing statement, and it is measured over the whole of `src/` by
+`tests/v4-09-post-merge-verification.test.ts`. (Not a claim that nothing in this
+build opens a socket: `notify/ntfy-transport.ts` does, on a path no delivery
+flag reaches.)
 
 ## 10. Non-goals
 
@@ -282,3 +291,32 @@ the three mutation vectors behind counted seams.
 ## Residuals
 
 See "Carried forward from V4 slice 11, deliberately" in `README.md`.
+
+## What Review 1 changed
+
+Three lenses read the exact head this ADR was written against. What they moved,
+and it is recorded here because each was a claim this document made:
+
+- **the fall-throughs were not classifications.** The creation and the merge
+  each ended in one word covering their whole remaining vocabulary, and two
+  members were measurably mis-stated by it: `PULL_REQUEST_AMBIGUOUS` — *more*
+  than one open pull request at this head — was reported as "no open pull
+  request has this head", and a forge that could not be read was reported as "a
+  person put it there". Both are now read member by member;
+- **`MERGE_NOT_ESTABLISHED` covered two unrelated conditions** — a forge that
+  would not answer and a receipt that would not reach the disk — and graded both
+  "nothing durable is wrong". It is now `FORGE_STATE_UNKNOWN` and
+  `RECEIPT_NOT_DURABLE`, and the second is graded by the receipt store's own
+  codes, exactly as the conclusion's counterpart is;
+- **the reported position was stale on the recovery path.** A run that had just
+  filed a receipt printed `Position: RECEIPT_ABSENT`, three lines under a
+  `Completion` line saying otherwise;
+- **`ATTENDED_AUTHORITY_REQUIRED` was graded 3** where this repository grades
+  every sibling authority refusal 4, putting "you did not pass `--merge-pr`"
+  under the same shell answer as "the checks failed";
+- **the classification of the conclusion ladder was a set with a fall-through**,
+  claiming a completeness nothing enforced. It is a total map now, so a
+  sixteenth member of that vocabulary fails the build;
+- **and four assertions in the serial gate were red**, because they name the
+  file the act ladders used to live in. The extraction had been run against the
+  parallel gate only.

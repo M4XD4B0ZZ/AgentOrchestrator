@@ -479,9 +479,12 @@ removed.
 
 ## Residuals
 
-- **L-V4-10-1 — the conclusion is not authority, and nothing reads it.** No code
-  in `src/` consumes the record. It is an audit trail and the end of the
-  lifecycle, not a permission for a later step.
+- **L-V4-10-1 — the conclusion is not authority.** It is an audit trail and the
+  end of the lifecycle, not a permission for a later step. *"And nothing reads
+  it" was true when this slice shipped and is false since V4 slice 11:*
+  `delivery --drive` consumes the record, and consuming it ends the driver — a
+  full stop rather than a licence. Corrected here as well as in `README.md`,
+  because a residual that has become false is worse than one never written.
 - **L-V4-10-2 — the record is not evidence of authorship.** The binding is a
   keyless SHA-256 over public values and the function is exported. Anyone who
   can write into the runtime directory can write a conclusion that reads back

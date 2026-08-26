@@ -413,6 +413,10 @@ interface Forge {
   readonly checks?: 'success' | 'failure' | 'pending' | 'none';
   /** Make every request fail, so nothing settles. */
   readonly unreadable?: boolean;
+  /** What the locator answers, one entry per asking module, in order. */
+  readonly atHeadByAsking?: readonly (readonly Record<string, unknown>[])[];
+  /** Fail every read-by-number taken after this many locator reads. */
+  readonly byNumberFailsAfterLocator?: number;
 }
 
 function openPull(over: Record<string, unknown> = {}) {
@@ -487,6 +491,7 @@ async function drive(
   const forge = over.forge ?? {};
   const counts: Counts = { forge: 0, publish: 0, create: 0, merge: 0, verify: 0 };
   let byNumberReads = 0;
+  let locatorReads = 0;
   let remoteRef: 'absent' | 'at-head' | 'other' = over.remoteRef ?? 'absent';
   const chunks: string[] = [];
   const outer = process.exitCode;
@@ -501,6 +506,13 @@ async function drive(
     if (forge.unreadable === true) return commandResult({ exitCode: 1 });
     const path = args.find((a) => a.startsWith('repos/')) ?? '';
     if (/\/pulls\/\d+$/.test(path)) {
+      // A read by number taken after the reconciliation has had its answer.
+      // The merge ladder's pre-reading is the only one that qualifies, so this
+      // is how a case reaches "the forge could not be read at the merge"
+      // without the merge having been attempted.
+      if (forge.byNumberFailsAfterLocator !== undefined && locatorReads > forge.byNumberFailsAfterLocator) {
+        return commandResult({ exitCode: 1, stdout: '{}' });
+      }
       const page = (forge.byNumber ?? [openPull()])[
         Math.min(byNumberReads, (forge.byNumber ?? [openPull()]).length - 1)
       ];
@@ -509,6 +521,16 @@ async function drive(
       return commandResult({ stdout: JSON.stringify(page) });
     }
     if (path.endsWith('/pulls')) {
+      locatorReads += 1;
+      // The locator is asked by three different modules in one drive — the
+      // reconciliation, the observation and the creation — and a case that
+      // needs them to see different worlds says so by ordinal. Anything past
+      // the list repeats its last entry.
+      const pages = forge.atHeadByAsking;
+      if (pages !== undefined) {
+        const page = pages[Math.min(locatorReads - 1, pages.length - 1)] ?? [];
+        return commandResult({ stdout: JSON.stringify(page) });
+      }
       return commandResult({ stdout: JSON.stringify(forge.atHead ?? []) });
     }
     if (path.endsWith('/check-runs')) {
@@ -685,13 +707,13 @@ describe('the driver vocabulary is closed, total and graded', () => {
     CHECKS_ABSENT: EXIT_RUN_NEEDS_OPERATOR,
     CHECKS_FAILED: EXIT_RUN_NEEDS_OPERATOR,
     HUMAN_DECISION_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
-    ATTENDED_AUTHORITY_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
-    MERGE_NOT_ESTABLISHED: EXIT_RUN_REFUSED,
-    HEAD_NOT_PUBLISHED: EXIT_RUN_REFUSED,
+    FORGE_STATE_UNKNOWN: EXIT_RUN_REFUSED,
+    RECEIPT_NOT_DURABLE: EXIT_RUN_REFUSED,
     OBSERVATION_UNSETTLED: EXIT_RUN_REFUSED,
     SUBJECT_CHANGED: EXIT_RUN_REFUSED,
     PULL_REQUEST_REQUIRED: EXIT_RUN_REFUSED,
     CONCLUSION_NOT_DURABLE: EXIT_RUN_REFUSED,
+    ATTENDED_AUTHORITY_REQUIRED: EXIT_RUN_REFUSED,
     EFFECT_ATTEMPTED: EXIT_RUN_CALL_AGAIN,
     CHECKS_PENDING: EXIT_RUN_CALL_AGAIN,
   });
@@ -710,23 +732,23 @@ describe('the driver vocabulary is closed, total and graded', () => {
 
   it('substitutes the conclusion store’s own grade for the one member that needs it', () => {
     // The floor, when no record came back at all.
-    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', null)).toBe(EXIT_RUN_REFUSED);
+    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE')).toBe(EXIT_RUN_REFUSED);
     // A benign race the store already grades 4.
-    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', 'EVIDENCE_MOVED')).toBe(EXIT_RUN_REFUSED);
+    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', { conclusion: 'EVIDENCE_MOVED' })).toBe(EXIT_RUN_REFUSED);
     // Durable state an operator has to look at, graded 3 by the same table.
-    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', 'WRITE_FAILED')).toBe(
+    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', { conclusion: 'WRITE_FAILED' })).toBe(
       EXIT_RUN_NEEDS_OPERATOR,
     );
-    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', 'CONFLICTING_CONCLUSION')).toBe(
+    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', { conclusion: 'CONFLICTING_CONCLUSION' })).toBe(
       EXIT_RUN_NEEDS_OPERATOR,
     );
     // The input situation is unusable and is fixed by editing the repository.
-    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', 'RUNTIME_PATH_NOT_IGNORED')).toBe(
+    expect(exitCodeForDrive('CONCLUSION_NOT_DURABLE', { conclusion: 'RUNTIME_PATH_NOT_IGNORED' })).toBe(
       EXIT_RUN_INPUT_UNUSABLE,
     );
     // And no other member consults it: a record code handed in beside a member
     // that has nothing to do with the store must change nothing.
-    expect(exitCodeForDrive('CHECKS_PENDING', 'WRITE_FAILED')).toBe(EXIT_RUN_CALL_AGAIN);
+    expect(exitCodeForDrive('CHECKS_PENDING', { conclusion: 'WRITE_FAILED' })).toBe(EXIT_RUN_CALL_AGAIN);
   });
 
   it('names an act and its flags for each of the three, and no others', () => {
@@ -1296,7 +1318,7 @@ describe('the driver asks about a merge before it asks about a pull request', ()
       const r = await drive(['--drive', '--merge-pr', '--attended'], repo, {
         forge: { unreadable: true },
       });
-      expect(driven(r)).toBe('MERGE_NOT_ESTABLISHED');
+      expect(driven(r)).toBe('FORGE_STATE_UNKNOWN');
       expect(r.exitCode).toBe(EXIT_RUN_REFUSED);
       expect(mutated(r)).toBe(false);
       expect(() => statSync(receiptPath(repo.root))).toThrow();
@@ -1334,7 +1356,7 @@ describe('the way in: every act still needs its own flag', () => {
       saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
       const r = await drive(['--drive'], repo, { forge: { atHead: [] } });
       expect(driven(r)).toBe('ATTENDED_AUTHORITY_REQUIRED');
-      expect(r.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
+      expect(r.exitCode).toBe(EXIT_RUN_REFUSED);
       expect(r.out).toContain('Next act     : PUBLISH_HEAD');
       expect(r.out).toContain('Authorise by : --publish-head --attended');
       expect(mutated(r)).toBe(false);
@@ -1490,7 +1512,7 @@ describe('the way in: every act still needs its own flag', () => {
       });
       // The reconciliation is the first forge question, so an unreadable forge
       // stops there rather than at the observation.
-      expect(driven(r)).toBe('MERGE_NOT_ESTABLISHED');
+      expect(driven(r)).toBe('FORGE_STATE_UNKNOWN');
       expect(mutated(r)).toBe(false);
     } finally {
       repo.dispose();
@@ -1964,7 +1986,7 @@ describe('an authority given for one act is not an authority for another', () =>
     }
   });
 
-  it('stops when the head could not be established on the remote', async () => {
+  it('stops on a reading of the remote that could not be taken', async () => {
     const repo = fixture();
     try {
       saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
@@ -1972,7 +1994,9 @@ describe('an authority given for one act is not an authority for another', () =>
         forge: { atHead: [] },
         remoteUnreadable: true,
       });
-      expect(driven(r)).toBe('HEAD_NOT_PUBLISHED');
+      // A reading that could not be taken, not a head that is not there — the
+      // driver names the two differently now, and a review measured why.
+      expect(driven(r)).toBe('FORGE_STATE_UNKNOWN');
       expect(r.exitCode).toBe(EXIT_RUN_REFUSED);
       // Nothing was pushed, and the creation was never reached: a pull request
       // is opened from a branch, and this run cannot say there is one.
@@ -1994,8 +2018,10 @@ describe('a record that did not reach the disk has not moved the delivery', () =
         // Git says the runtime path is not ignored, so every store refuses.
         ignored: 'NOT_IGNORED',
       });
-      expect(driven(r)).toBe('MERGE_NOT_ESTABLISHED');
-      expect(r.exitCode).toBe(EXIT_RUN_REFUSED);
+      expect(driven(r)).toBe('RECEIPT_NOT_DURABLE');
+      // The receipt store's own grade for this code, not a number chosen by the
+      // driver: an unignored runtime path is fixed by editing the repository.
+      expect(r.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
       expect(() => statSync(receiptPath(repo.root))).toThrow();
       // And no verification was run for a merge nothing recorded.
       expect(r.counts.verify).toBe(0);
@@ -2103,6 +2129,119 @@ describe('when the gate is reached, its verdict is what the driver carries', () 
       expect(driven(again)).toBe('DELIVERY_CONCLUDED');
       expect(contactedForge(again)).toBe(false);
       expect(again.counts.verify).toBe(0);
+    } finally {
+      repo.dispose();
+    }
+  });
+});
+
+/* ═══════ 15. one reading, one member — the fixes Review 1 measured ═══════ */
+
+describe('an act that refuses without sending is read member by member', () => {
+  it('says two pull requests claim this head, not that none does', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      // The reconciliation and the observation see an empty head, so the
+      // decision is `PULL_REQUEST_REQUIRED` and the creation is reached. The
+      // creation's own fresh reading — the third — sees two open pull requests
+      // at this head, which is the exact negation of that decision.
+      const r = await drive(['--drive', '--create-pr', '--attended'], repo, {
+        forge: {
+          atHeadByAsking: [[], [], [openPull(), openPull({ number: PR + 1 })]],
+          byNumber: [openPull()],
+        },
+        remoteRef: 'at-head',
+      });
+      expect(driven(r)).toBe('PULL_REQUEST_AMBIGUOUS');
+      expect(r.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
+      expect(r.counts.create).toBe(0);
+      // And never the sentence that says the opposite of what was read.
+      expect(r.out).not.toContain('Drive        : PULL_REQUEST_REQUIRED');
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('does not tell an operator to ask again about a work branch that is its base', async () => {
+    const repo = fixture();
+    try {
+      // The mint refuses a head ref equal to the base, and no invocation clears
+      // it. Reported as a subject nobody can deliver — exit 2 — rather than as
+      // "nothing durable is wrong, ask again".
+      saveTaskState(taskStateFor(repo.root, { workBranch: BASE }) as never, {
+        repositoryRoot: repo.root,
+      });
+      const r = await drive(['--drive', '--publish-head', '--create-pr', '--attended'], repo, {
+        forge: { atHead: [] },
+        remoteRef: 'at-head',
+      });
+      expect(driven(r)).toBe('SUBJECT_NOT_ESTABLISHED');
+      expect(r.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+      expect(mutated(r)).toBe(false);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('stops on a base branch this build will not send, before any reading', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root, { baseBranch: 'a..b' }) as never, {
+        repositoryRoot: repo.root,
+      });
+      const r = await drive(['--drive', '--merge-pr', '--attended'], repo, {
+        forge: { atHead: [openPull()], byNumber: [openPull()] },
+      });
+      // The reconciliation refuses it, and the driver reports the subject
+      // rather than calling the arm unreachable — a review measured that the
+      // caller's own gates do not cover this producer.
+      expect(driven(r)).toBe('SUBJECT_NOT_ESTABLISHED');
+      expect(r.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+      expect(mutated(r)).toBe(false);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('calls a forge it could not read at the merge a reading, not a person', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive', '--merge-pr', '--attended'], repo, {
+        forge: {
+          atHead: [openPull()],
+          byNumber: [openPull()],
+          checks: 'success',
+          // The reconciliation and the observation get their answers; the
+          // merge ladder's own pre-reading does not.
+          byNumberFailsAfterLocator: 1,
+        },
+      });
+      expect(driven(r)).toBe('FORGE_STATE_UNKNOWN');
+      expect(r.exitCode).toBe(EXIT_RUN_REFUSED);
+      // Nothing was sent, and nobody put this delivery anywhere: reporting it
+      // as a person's decision is the confusion the vocabulary keeps apart.
+      expect(r.counts.merge).toBe(0);
+      expect(r.out).toContain('Merge        : PULL_REQUEST_STATE_UNKNOWN');
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('reports the position the ladder names now, not the one it opened with', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive'], repo, {
+        forge: { atHead: [mergedPull()], byNumber: [mergedPull()] },
+      });
+      // This invocation filed the receipt, so `RECEIPT_ABSENT` is exactly what
+      // the position is NOT — and a review measured the earlier version
+      // printing it three lines under a Completion line saying otherwise.
+      expect(statSync(receiptPath(repo.root)).isFile()).toBe(true);
+      expect(r.out).toContain('Position     : VERIFICATION_ABSENT');
+      expect(r.out).not.toContain('Position     : RECEIPT_ABSENT');
     } finally {
       repo.dispose();
     }

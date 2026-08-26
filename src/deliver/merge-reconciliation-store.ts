@@ -257,6 +257,13 @@ export function receiptIsOnDisk(code: MergeReconciliationRecordCode): boolean {
   return RECEIPT_ON_DISK_BY_CODE[code];
 }
 
+/**
+ * Whether an attempt to put bytes on the target path was made at all.
+ *
+ * Reported separately from the code, and named for the question an operator
+ * actually asks after a repeat run: *did this touch anything?* A code alone
+ * would answer it only by being memorised, and there are thirteen of them.
+ */
 export const WRITE_ATTEMPTS = ['NOT_ATTEMPTED', 'COMPLETED', 'FAILED'] as const;
 export type WriteAttempt = (typeof WRITE_ATTEMPTS)[number];
 

@@ -9017,11 +9017,15 @@ a different commit.
 - **L-V4-05-7 — `--attended` now appears on four commands with four
   independently worded help strings.** It means the same thing in all four, and
   nothing proves that.
-- **L-V4-05-8 — every publication outcome exits 0.** The exit code answers only
-  whether the *observation* settled, so a script cannot tell `PUBLISHED` from
-  `PUBLICATION_REFUSED`. Deliberate — a machine-readable delivery signal is what
-  these slices keep refusing to give — but a mutating command whose failure is
-  prose-only is worth carrying explicitly.
+- **L-V4-05-8 — under `--publish-head`, every publication outcome exits 0.** The
+  exit code answers only whether the *observation* settled, so a script cannot
+  tell `PUBLISHED` from `PUBLICATION_REFUSED`. Deliberate — a machine-readable
+  delivery signal is what these slices keep refusing to give — but a mutating
+  command whose failure is prose-only is worth carrying explicitly. **Narrowed
+  to this flag by V4 slice 11**: under `--drive` the code grades the driver's own
+  member, so a publication that was attempted exits 5 and one whose head could
+  not be established exits 4. The sentence was unqualified until a review
+  measured it against the new flag.
 - **L-V4-05-9 — a work branch becomes a ref through a character class, not
   through `isValidBranchName`.** Git's own `check-ref-format` refuses what that
   class admits, so the outcome is a wasted push and an undiagnosed refusal. What
@@ -9200,8 +9204,10 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
   The same limit as `L-V4-05-6`: driving the command needs a production
   `TaskState` for this repository, and fabricating one would prove something
   about a file rather than about the product.
-- **L-V4-06-8 — every creation outcome exits 0.** The exit code still answers
-  only the observation question.
+- **L-V4-06-8 — under `--create-pr`, every creation outcome exits 0.** The exit
+  code still answers only the observation question. **Narrowed to this flag by
+  V4 slice 11**, which grades its own member: the same worlds reached through
+  `--drive` exit 5, 4 or 3.
 - **L-V4-06-9 — draft is now read but still not decided on.** Slice 4's decision
   does not consider it, so a positive delivery decision can still be true of a
   draft pull request.
@@ -9985,11 +9991,14 @@ no ladder refusal *changes* the exit code.
 - **L-V4-10-8 — the profile digest identifies the contract, not the toolchain.**
   Inherited unchanged from `L-V4-09-4`, and it bounds what "under profile P"
   means here too.
-- **L-V4-10-9 — the exit code carries the verdict in one direction only.** No
-  ladder refusal *changes* it, as on every other flag here — which is not the
-  same as "a refusal exits nominal", a sentence an earlier draft carried and a
-  review measured false. The only override this slice adds is a conclusion that
-  could not be made durable.
+- **L-V4-10-9 — under `--conclude-delivery`, the exit code carries the verdict in
+  one direction only.** No ladder refusal *changes* it, as on every other flag
+  here — which is not the same as "a refusal exits nominal", a sentence an
+  earlier draft carried and a review measured false. The only override this
+  slice adds is a conclusion that could not be made durable. **Narrowed to this
+  flag by V4 slice 11**: under `--drive` the same ladder refusals do change `$?`,
+  because there the code grades the driver's member rather than the
+  observation.
 - **L-V4-10-11 — `ALREADY_CONCLUDED` cannot compare the merge commit.** The
   ladder reads the conclusion before the receipt, so it compares the
   implementation head and the target and not `baseRef` or the pull-request
@@ -10141,6 +10150,17 @@ produced one, because by then the invocation is already over: asking again is a
 *later invocation*, which begins with a reading, which is what each of those
 modules asks for by name.
 
+### One reading, one member
+
+Where an act refuses without sending anything, the driver reads its vocabulary
+member by member rather than collapsing it into one word. A forge that could not
+be read is `FORGE_STATE_UNKNOWN` and not "a person put it there"; a head with two
+open pull requests is `PULL_REQUEST_AMBIGUOUS` and not "no pull request has this
+head"; a merge that was observed and whose receipt did not reach the disk is
+`RECEIPT_NOT_DURABLE`, graded by the receipt store's own code, and not "nothing
+durable is wrong". Each of those three was measured wrong in review before it
+was measured right.
+
 ### The exit code, under this flag only
 
 Without `--drive`, `delivery`'s exit code answers the observation question and
@@ -10172,27 +10192,61 @@ conclusion and a task still reported as `READY_FOR_PR` remain the expected set.
   whose target stops resolving is `SUBJECT_NOT_ESTABLISHED` and nothing else is
   mentioned — including a conclusion sitting readable on disk. Inherited from
   `L-V4-10-14`.
-- **L-V4-11-3 — `EXIT_RUN_CALL_AGAIN` is an invitation a caller may abuse.** Two
-  members grade 5, and a shell loop over them is a poller this build did not
-  write and does not endorse. Nothing in `src/` invokes this command.
+- **L-V4-11-3 — `EXIT_RUN_CALL_AGAIN` is an invitation a caller may abuse, and
+  one of the two members is a mutation.** `CHECKS_PENDING` grades 5, and a shell
+  loop over it is a poller this build did not write. `EFFECT_ATTEMPTED` grades 5
+  too, and a loop over *that* re-enters the lifecycle: the next invocation
+  re-derives from a fresh reading and, if the reading says the act did not
+  happen, may legitimately send it again. That is the documented recovery — *a
+  retry must begin with a reading* — and not a blind repeat, but a caller that
+  loops on `$?` without reading the report has automated a forge mutation.
+  Nothing in `src/` invokes this command.
 - **L-V4-11-4 — `VERIFICATION_NOT_ESTABLISHED` is graded for its worst cause.**
   Two of its causes clear on their own and would deserve a 4;
   `MERGE_COMMIT_UNAVAILABLE` never clears (`L-V4-09-3`). One code cannot say
   both, and it says 3.
-- **L-V4-11-5 — `PULL_REQUEST_REQUIRED` covers several creation refusals.** The
-  member says no open pull request has this head, which is true of every one of
-  them; *why* the creation did not happen is in the Creation block, not in the
-  driver's member.
+- **L-V4-11-5 — `PULL_REQUEST_REQUIRED` is the creation ladder's remainder.**
+  The members that contradict its sentence, or that no re-run can clear, are read
+  by name — `PULL_REQUEST_AMBIGUOUS`, `SUBJECT_CHANGED`, the three unknown
+  readings, and the two subject refusals. What is left is `CREATION_REFUSED`,
+  of which the sentence is true. An earlier version of this entry claimed the
+  sentence was true of *every* member of the remainder, and a review measured two
+  for which it was not: it reported "no open pull request has this head" for a
+  head that had two, and graded a work branch equal to its base as "ask again".
 - **L-V4-11-6 — one verification attempt per invocation, and no cap across
   them.** The driver runs the gate once and stops. Nothing bounds how many
   invocations an operator makes, and the history's own ceiling
   (`ATTEMPT_HISTORY_FULL`, `L-V4-09-6`) is still the only limit.
+- **L-V4-11-12 — the publication's last arm is a floor.** With nothing
+  attempted, a publication that is not `ALREADY_PUBLISHED` and is not one of the
+  three named refusals can only be a work branch this build will not turn into a
+  ref or an authority the mint would not grant — and the creation ladder one step
+  later answers both with the same member. Deleting the arm changes no reachable
+  outcome; it stays because relying on a sibling's gate is not a guarantee this
+  branch makes. Measured: the mutant survives.
 - **L-V4-11-7 — the "gate could not answer" arm is a floor.** Removing it
   changes no reachable outcome: the fallback after the re-derivation produces the
   same member. It is kept so the classification is explicit, and so a run that
   could not verify does not make a second, write-capable pass over the conclusion
   ladder. Measured: the mutant survives, and its companion — which changes that
   fallback's member — is killed.
+- **L-V4-11-9 — `FORGE_STATE_UNKNOWN` does not say which reading failed.** The
+  forge could not answer the merge question, or an act's own reading of the
+  remote ref, the pull request or the situation at this head could not be taken.
+  Which one is in the block above it; the driver's member says only that nothing
+  was sent and the next invocation begins with the same reading.
+- **L-V4-11-10 — `HUMAN_DECISION_REQUIRED` includes one race.** `ALREADY_MERGED`
+  from the merge ladder reaches it, and that is the reconciliation two steps
+  earlier disagreeing with the merge ladder's own reading a moment later. Two
+  readings that disagree is not a state this build acts on, so it stops — but a
+  person did not necessarily put it there, and the member's sentence says one
+  did.
+- **L-V4-11-11 — the receipt and the conclusion have durability grades; the
+  verification history does not.** A gate that ran and whose verdict could not be
+  written reads back as `VERIFICATION_ABSENT` on the next ladder pass, and the
+  driver reports `VERIFICATION_NOT_ESTABLISHED` — which is true of the standing
+  verdict and does not distinguish "the machine could not answer" from "the
+  answer could not be kept". The Verification block above says which.
 - **L-V4-11-8 — no live product dogfood was possible.** Unchanged from
   `L-V4-09-7` and `L-V4-10-10`: this repository has no AO task at `READY_FOR_PR`
   carrying a delivery target, a merge receipt and a verification history, and

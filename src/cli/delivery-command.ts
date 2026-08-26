@@ -1,5 +1,5 @@
 /**
- * `agent-loop delivery` — the delivery surface (V4 slices 2 to 7).
+ * `agent-loop delivery` — the delivery surface (V4 slices 2 to 11).
  *
  * ── Why a command of its own, and why the network is a flag on it ──────────
  *
@@ -49,8 +49,12 @@
  *
  * ── What it will not do ────────────────────────────────────────────────────
  *
- * It writes no task state, takes no execution lease, prepares no workspace and
- * starts no agent. It never updates, closes, reopens, marks ready or draft,
+ * It writes no task state and starts no agent. It takes the execution lease on
+ * exactly one path — `--verify-merge`, which starts this repository's own build
+ * and test commands in a detached checkout, and which `--drive` reaches when a
+ * delivery needs a verdict about its merge commit; that is V4 slice 9's
+ * widening, and it lives in `delivery-steps.ts` rather than here.
+ * It never updates, closes, reopens, marks ready or draft,
  * comments on, labels or reviews a pull request, never enables an auto-merge and
  * never enters a merge queue, and there is no flag that would. `READY_FOR_PR` is
  * still terminal, and delivering a task at that state — including merging its
@@ -395,11 +399,15 @@ export const CONCLUDE_DELIVERY_OPTION_DESCRIPTION =
   'nominal either, under the code its own failure earns. Read the Completion and Record lines.';
 
 /**
- * Operator presence, in the shape `release` established.
+ * The driver's own sentence, exported so it can be pinned.
  *
- * A second, independent statement rather than a widening of the first: one flag
- * says which act, and this one says that a person is present for it. Neither
- * implies the other, and there is no unattended publication.
+ * Pinned by rule rather than by literal, which is what the five rounds this
+ * command's help already cost bought: a sentence that enumerates goes stale, a
+ * sentence that states a rule does not. What the suite checks is that this text
+ * says the three things true of every drive — each act still needs its own flag
+ * and `--attended`, at most one act is attempted, nothing waits — and that it
+ * names the flags it will not compose with, because that refusal is otherwise a
+ * surprise.
  */
 export const DRIVE_OPTION_DESCRIPTION =
   'Work out where this task delivery stands and run the acts that stand between it and a ' +
@@ -409,11 +417,22 @@ export const DRIVE_OPTION_DESCRIPTION =
   'invocation - the moment one reports an attempt this run stops and the next one reads what ' +
   'happened rather than repeating it. It never waits: a check still running, a pull request ' +
   'nobody has opened and an act nobody authorised are reported and returned from, with no ' +
-  'sleep, no loop and no background work. A delivery already concluded is answered from the ' +
+  'sleep, no loop and no background work. It asks github.com about this commit when it needs ' +
+  'to, writes whichever of the merge receipt, the verification history and the conclusion this ' +
+  'delivery still needs, and takes the repository execution lease when it verifies the merge ' +
+  'commit. A delivery already concluded is answered from the ' +
   'record on disk without contacting github.com, taking the execution lease or running a ' +
   'verification. Not combinable with --observe, --record, --decide, --reconcile-merge, ' +
   '--verify-merge or --conclude-delivery, which name the acts one at a time.';
 
+/**
+ * Operator presence, in the shape `release` established.
+ *
+ * A second, independent statement rather than a widening of the first: one flag
+ * says which act, and this one says that a person is present for it. Neither
+ * implies the other, and there is no unattended publication — which `--drive`
+ * does not change, because it names no act of its own.
+ */
 export const ATTENDED_OPTION_DESCRIPTION =
   'States that an operator is present for this invocation. Required by every flag here that can ' +
   'change something outside this machine — today --publish-head, --create-pr and --merge-pr. ' +
@@ -443,11 +462,17 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   "repository's, and what those do is the profile's to answer for. " +
   "With --conclude-delivery it joins that receipt to that verification history and stores the " +
   'judgement that this delivery is concluded, reading no network and no Git history. ' +
+  'With --drive it works out which of those acts this delivery still needs and runs those, in ' +
+  'that order, stopping at the first condition it cannot cross; it adds no act, each act that ' +
+  'reaches github.com still needs its own flag and --attended, and at most one of them is ' +
+  'attempted per invocation. --drive does not combine with the flags that name the acts one at ' +
+  'a time. ' +
   'Contacting a forge is never implicit: with no flag that says ' +
   'it contacts github.com, nothing is read from a network. It writes no task state at all, and ' +
-  'every flag here that writes a record — --record, --reconcile-merge, --verify-merge and ' +
-  '--conclude-delivery — writes exactly one beside the task; no other flag here writes a ' +
-  'record. It never updates, closes, ' +
+  'the records it writes are written by the flags that ask for them — --record, ' +
+  '--reconcile-merge, --verify-merge and --conclude-delivery write one each; --drive writes ' +
+  'whichever of those the delivery still needs, which in one invocation can be three. ' +
+  'It never updates, closes, ' +
   'reopens, reviews, comments on or labels a pull request, and never enables an auto-merge.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
@@ -580,8 +605,14 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
         // The driver's own member decides the code, graded one member at a time
         // by `run-exit-codes.ts`, with the conclusion store's grade substituted
         // for the one member that needs it.
-        const record = driven.deliveryConclusion?.record ?? null;
-        const primary = exitCodeForDrive(driven.outcome, record === null ? null : record.code);
+        // Both store codes, because the driver has two members whose grade is
+        // the store's own rather than a number chosen for them. Passed as named
+        // fields rather than one value: two closed vocabularies behind one
+        // parameter is a parameter that can take the wrong one.
+        const primary = exitCodeForDrive(driven.outcome, {
+          conclusion: driven.deliveryConclusion?.record?.code ?? null,
+          receipt: driven.reconciliation?.record?.code ?? null,
+        });
         // …and the lease rule last, over it. `run-exit-codes.ts` states the
         // precedence: an invocation that took this repository's only writer slot
         // and cannot prove it gave the slot back may not exit nominal however

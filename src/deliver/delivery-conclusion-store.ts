@@ -213,10 +213,12 @@ export type ConclusionWriteAttempt = (typeof CONCLUSION_WRITE_ATTEMPTS)[number];
  * which asks whether *this invocation* wrote: `ALREADY_CONCLUDED` filed nothing
  * and the claim is durable all the same.
  *
- * It has **no production consumer today**, and that is stated rather than
- * quietly true: the exit-code rule in `cli/delivery-command.ts` used to call it
- * and now grades each code individually through
- * `run-exit-codes.ts`'s own table. The two must agree — a code graded `null`
+ * It had **no production consumer** until V4 slice 11, and that was stated
+ * rather than left quietly true. It has one now: `cli/delivery-driver.ts` calls
+ * it to tell a delivery that was concluded from one whose claim did not reach
+ * the disk. The exit-code rule beside it does not — it grades each code
+ * individually through `run-exit-codes.ts`'s own table.
+ * The two must agree — a code graded `null`
  * there is exactly a code that is durable here — and nothing in the types says
  * so, which is why the test file asserts the correspondence over the whole
  * vocabulary rather than trusting it. A review found the pair unbound.

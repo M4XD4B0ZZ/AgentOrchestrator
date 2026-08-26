@@ -23,9 +23,12 @@
  * `concludeDeliveryForTask` is the position oracle, and it can be, because of
  * three properties it already had before this slice wanted them:
  *
- *  1. it is **pure** — its whole seam list is a clock. No forge seam, no Git
- *     seam, no verification seam, so asking it costs nothing and reaches
- *     nothing;
+ *  1. its whole seam list is **a clock**. No forge seam, no Git seam, no
+ *     verification seam, so asking it contacts nothing, starts no process and
+ *     takes no lease. It is not free — it reads up to three documents from
+ *     disk, which its own header says, and an earlier version of this line
+ *     called it "pure" and "reaches nothing", which a review measured as
+ *     overstating exactly that;
  *  2. it **writes nothing** — the caller records, and only on the one member
  *     that says there is something to record;
  *  3. its refusals **name the stage that is missing**. `RECEIPT_ABSENT` means
@@ -223,29 +226,31 @@ export const DELIVERY_DRIVES = [
    */
   'VERIFICATION_NOT_ESTABLISHED',
   /**
-   * The merge question could not be settled from the forge, so no receipt could
-   * be written and no verification has anything to be about.
+   * A reading this invocation needed could not be taken.
    *
-   * Includes a receipt that was observed and could not be made durable: a
-   * delivery whose next act depends on a document that is not on disk has not
-   * moved, whatever the reading said.
-   */
-  'MERGE_NOT_ESTABLISHED',
-  /**
-   * The delivery head could not be established on the remote, so there is no
-   * branch for a pull request to be opened from.
+   * The forge could not answer the merge question, or an act's own reading —
+   * the remote ref, the pull request by number, the situation at this head —
+   * could not be completed. Nothing was sent on any of those paths, and nothing
+   * durable is wrong: the next invocation begins with the same reading.
    *
-   * Not a claim that the head is absent: the remote could not be read, the
-   * remote's URLs disagree, the authority was refused, or the local subject
-   * moved under the act. Each is in the Publication block above; what this
-   * member says is that the way in is not open yet.
+   * It is deliberately **not** `MERGE_NOT_ESTABLISHED`, which this member
+   * replaced. A review measured that name covering two unrelated conditions —
+   * a forge that would not answer, and a receipt that would not reach the disk
+   * — and grading them both as "nothing durable is wrong", which is false of
+   * the second.
    */
-  'HEAD_NOT_PUBLISHED',
+  'FORGE_STATE_UNKNOWN',
   /**
-   * The forge did not answer both of the observation's questions, so nothing
-   * was established to decide from. Slice 2's `OBSERVATION_INCOMPLETE`, one
-   * level up.
+   * The merge was observed and the receipt did not reach the disk.
+   *
+   * The delivery has not moved, because every act after this one reads the
+   * document rather than the reading that produced it. **Something durable may
+   * well be wrong** — a contradictory receipt already on disk, a directory that
+   * could not be made, a write that got far enough to leave a staging file —
+   * so the exit code is the store's own, graded one code at a time, exactly as
+   * {@link DELIVERY_DRIVES}' conclusion counterpart is.
    */
+  'RECEIPT_NOT_DURABLE',
   'OBSERVATION_UNSETTLED',
   /**
    * The local subject moved while the forge was being asked, or could not be
@@ -327,12 +332,12 @@ export const DELIVERY_DRIVE_DETAIL: Readonly<Record<DeliveryDrive, string>> = Ob
     'The standing verdict for this merge commit under this profile is a failure. ' +
     'That is an answer about the code, and this build does nothing about it.',
   VERIFICATION_NOT_ESTABLISHED:
-    'The merge commit could not be verified — the machine could not answer, ' +
-    'which is not the machine saying no.',
-  MERGE_NOT_ESTABLISHED:
-    'Whether this delivery was merged could not be established, so no receipt was recorded.',
-  HEAD_NOT_PUBLISHED:
-    'The delivery head is not established on the remote, so no pull request can be opened from it.',
+    'No standing verdict about this merge commit under this profile could be established. ' +
+    'That is not the machine saying no — the Verification block above says what stopped it.',
+  FORGE_STATE_UNKNOWN:
+    'A reading this invocation needed could not be taken from github.com. Nothing was sent.',
+  RECEIPT_NOT_DURABLE:
+    'The merge was observed and the receipt did not reach the disk, so this delivery has not moved.',
   OBSERVATION_UNSETTLED:
     'At least one of the two questions was not answered, so there is nothing to decide from.',
   SUBJECT_CHANGED:
@@ -432,23 +437,42 @@ export function refuseDeliveryDrive(
 }
 
 /**
- * Which conclusion-ladder refusals mean "a record could not be read, or is
- * about another delivery".
+ * What each member of the conclusion ladder means to the driver.
  *
- * A set rather than a chain of `||`, so the mapping is one enumerable object a
- * test can drive every member of, and so a new member of the conclusion
- * vocabulary has to be classified here rather than falling through.
+ * A **total** map rather than a set of the interesting ones, and that is the
+ * whole point: `satisfies Record<DeliveryConclusionOutcome, …>` makes a
+ * sixteenth member of that vocabulary fail the build here until somebody
+ * classifies it. A review measured the earlier version — a `ReadonlySet` plus
+ * an unconditional fall-through — claiming exactly this property and not having
+ * it: a new member would have compiled and been treated as a *stage*, sending
+ * the driver on to reconcile, observe and mutate on an outcome nobody had read.
+ *
+ * `null` means "this is a stage, not a stop": the ladder is telling the driver
+ * which act is missing rather than why it may not proceed.
  */
-const EVIDENCE_UNUSABLE: ReadonlySet<DeliveryConclusionOutcome> = Object.freeze(
-  new Set<DeliveryConclusionOutcome>([
-    'CONCLUSION_UNREADABLE',
-    'CONCLUSION_CONFLICT',
-    'RECEIPT_UNREADABLE',
-    'RECEIPT_NOT_THIS_DELIVERY',
-    'VERIFICATION_UNREADABLE',
-    'VERIFICATION_NOT_THIS_DELIVERY',
-  ]),
-) as ReadonlySet<DeliveryConclusionOutcome>;
+const CONCLUSION_MEANING = Object.freeze({
+  // Stops the caller already refused. Floors here, kept so the map stays total.
+  SUBJECT_NOT_ESTABLISHED: 'SUBJECT_NOT_ESTABLISHED',
+  TASK_NOT_READY: 'TASK_NOT_READY',
+  // The terminal member, and the one that needs the record read beside it.
+  ALREADY_CONCLUDED: 'DELIVERY_CONCLUDED',
+  DELIVERY_CONCLUDED: 'DELIVERY_CONCLUDED',
+  // A document that could not be read, or is about another delivery.
+  CONCLUSION_UNREADABLE: 'DELIVERY_EVIDENCE_UNUSABLE',
+  CONCLUSION_CONFLICT: 'DELIVERY_EVIDENCE_UNUSABLE',
+  RECEIPT_UNREADABLE: 'DELIVERY_EVIDENCE_UNUSABLE',
+  RECEIPT_NOT_THIS_DELIVERY: 'DELIVERY_EVIDENCE_UNUSABLE',
+  VERIFICATION_UNREADABLE: 'DELIVERY_EVIDENCE_UNUSABLE',
+  VERIFICATION_NOT_THIS_DELIVERY: 'DELIVERY_EVIDENCE_UNUSABLE',
+  // Everything was read and the mint declined.
+  CONCLUSION_NOT_ATTESTED: 'CONCLUSION_NOT_ATTESTED',
+  // The repository answered about the code, and said no.
+  VERIFICATION_NOT_PASSING: 'VERIFICATION_FAILED',
+  // The three that name a stage rather than a stop.
+  RECEIPT_ABSENT: null,
+  VERIFICATION_ABSENT: null,
+  PROFILE_NOT_VERIFIED: null,
+}) satisfies Record<DeliveryConclusionOutcome, DeliveryDrive | null>;
 
 /**
  * The acts the driver may run, and the ones it may not.
@@ -534,8 +558,10 @@ export async function driveDelivery(
    * `deliveryConclusion` for which one. Everything else is this invocation's
    * result.
    *
-   * Called at most twice: once at the top, and once more after an act that
-   * wrote one of the documents it reads. The second call is a re-derivation
+   * Called at most three times, and only on one path: once at the top, once
+   * after a reconciliation that filed a receipt, and once after the gate. Each
+   * is a re-derivation from disk rather than a retry — nothing is re-attempted,
+   * and only the terminal one can mint or record. The second call is a re-derivation
    * from disk, not a retry — nothing is re-attempted, and if it still answers a
    * stage the driver stops rather than going round again.
    */
@@ -556,28 +582,25 @@ export async function driveDelivery(
     const stop = (outcome: DeliveryDrive): { stop: DeliveryDriveResult; stage: DeliveryConclusionOutcome } =>
       ({ stop: settle(outcome, stage), stage });
 
-    if (stage === 'ALREADY_CONCLUDED') return stop('DELIVERY_CONCLUDED');
-    if (stage === 'DELIVERY_CONCLUDED') {
+    // One lookup in a total map, rather than a chain of comparisons a new
+    // member could fall off the end of.
+    const meaning = CONCLUSION_MEANING[stage];
+    if (meaning === null) {
+      // `RECEIPT_ABSENT`, `VERIFICATION_ABSENT` and `PROFILE_NOT_VERIFIED`: the
+      // three that name a stage rather than a stop.
+      return { stop: null, stage };
+    }
+    if (meaning === 'DELIVERY_CONCLUDED' && stage === 'DELIVERY_CONCLUDED') {
       // Concluded **and** on disk, or it is not concluded as far as a caller is
       // concerned: a run that answered yes and left nothing behind has told a
-      // caller about something that did not happen. `ALREADY_CONCLUDED` returns
-      // above without a record and needs none — the claim was there already.
+      // caller about something that did not happen. `ALREADY_CONCLUDED` takes
+      // the map's answer directly and needs no record — the claim was there
+      // before this invocation began.
       return view.record !== null && conclusionIsDurable(view.record.code)
         ? stop('DELIVERY_CONCLUDED')
         : stop('CONCLUSION_NOT_DURABLE');
     }
-    if (EVIDENCE_UNUSABLE.has(stage)) return stop('DELIVERY_EVIDENCE_UNUSABLE');
-    if (stage === 'CONCLUSION_NOT_ATTESTED') return stop('CONCLUSION_NOT_ATTESTED');
-    if (stage === 'VERIFICATION_NOT_PASSING') return stop('VERIFICATION_FAILED');
-    // Floors. The caller refused both of these before this function could run,
-    // so neither is reachable through the driver; they stay because each is a
-    // member of the vocabulary this function classifies, and a member that fell
-    // through to a stage would be a delivery driven on a subject nobody has.
-    if (stage === 'SUBJECT_NOT_ESTABLISHED') return stop('SUBJECT_NOT_ESTABLISHED');
-    if (stage === 'TASK_NOT_READY') return stop('TASK_NOT_READY');
-    // `RECEIPT_ABSENT`, `VERIFICATION_ABSENT` and `PROFILE_NOT_VERIFIED` are the
-    // three that name a stage rather than a stop.
-    return { stop: null, stage };
+    return stop(meaning);
   };
 
   const first = await askConclusion();
@@ -592,7 +615,17 @@ export async function driveDelivery(
    * commit/profile pair anyway — so a loop could only ever re-pay a ten-minute
    * gate to be told the same thing.
    */
-  const verifyThenConclude = async (): Promise<DeliveryDriveResult> => {
+  const verifyThenConclude = async (
+    /**
+     * The stage the ladder names **now**, not the one this invocation opened
+     * with. The reconciliation branch moves the ladder past `RECEIPT_ABSENT`
+     * before calling this, and a review measured the earlier version reporting
+     * the opening stage on that path — `Position: RECEIPT_ABSENT` under a
+     * `Completion: VERIFICATION_ABSENT` line, on the run that had just recorded
+     * the receipt.
+     */
+    at: DeliveryConclusionOutcome,
+  ): Promise<DeliveryDriveResult> => {
     verification = await performVerification(options, repository, subject, taskLoad, {
       // A fresh object of exactly the named seams, not `seams` itself. A wider
       // value is assignable to a narrower parameter type, so passing `seams`
@@ -609,7 +642,7 @@ export async function driveDelivery(
       // lease, the workspace, a merge commit this build will not fetch, or a
       // mint that declined. None of them is a verdict about the code, and
       // reporting one as a failure is the confusion slice 9 exists to prevent.
-      return settle('VERIFICATION_NOT_ESTABLISHED', stage);
+      return settle('VERIFICATION_NOT_ESTABLISHED', at);
     }
     const after = await askConclusion();
     // The gate ran and the ladder still names a stage: the history it wrote is
@@ -620,7 +653,7 @@ export async function driveDelivery(
 
   // ── The merge is on disk; what is missing is a verdict about it ───────────
   if (stage === 'VERIFICATION_ABSENT' || stage === 'PROFILE_NOT_VERIFIED') {
-    return verifyThenConclude();
+    return verifyThenConclude(stage);
   }
 
   // ── No receipt: ask whether this delivery was already merged ──────────────
@@ -644,15 +677,19 @@ export async function driveDelivery(
     // rather than this result, so a reading nobody could store has advanced
     // nothing.
     if (reconciliation.record === null || !receiptIsOnDisk(reconciliation.record.code)) {
-      return settle('MERGE_NOT_ESTABLISHED', stage);
+      return settle('RECEIPT_NOT_DURABLE', stage);
     }
     const after = await askConclusion();
     if (after.stop !== null) return after.stop;
     // The receipt is on disk, so the ladder has moved past `RECEIPT_ABSENT` and
-    // is asking for a verdict about M. Run the gate, once.
-    return verifyThenConclude();
+    // is asking for a verdict about M. Run the gate, once — and under the stage
+    // the ladder names **now**, not the one this invocation started from. A
+    // review measured the earlier version reporting `Position: RECEIPT_ABSENT`
+    // on the invocation that had just recorded one, three lines under a
+    // `Completion` line saying otherwise.
+    return verifyThenConclude(after.stage);
   }
-  if (reconciled === 'FORGE_UNREADABLE') return settle('MERGE_NOT_ESTABLISHED', stage);
+  if (reconciled === 'FORGE_UNREADABLE') return settle('FORGE_STATE_UNKNOWN', stage);
   if (
     reconciled === 'PULL_REQUEST_AMBIGUOUS' ||
     reconciled === 'MERGE_NOT_THIS_DELIVERY' ||
@@ -661,7 +698,11 @@ export async function driveDelivery(
     return settle('HUMAN_DECISION_REQUIRED', stage);
   }
   if (reconciled === 'SUBJECT_NOT_ESTABLISHED' || reconciled === 'TASK_NOT_READY') {
-    // Floors: the caller refused both before this function ran.
+    // `TASK_NOT_READY` is a floor — the caller refused it before this function
+    // ran. `SUBJECT_NOT_ESTABLISHED` is **not**, and a review measured why: the
+    // reconciliation has a producer the caller does not check, a `baseBranch`
+    // that is not a sendable branch name. A task at `READY_FOR_PR` carrying
+    // `a..b` reaches it.
     return settle(reconciled, stage);
   }
   // `NOT_MERGED`, `PULL_REQUEST_STILL_OPEN` and `NO_PULL_REQUEST_AT_HEAD` all
@@ -714,9 +755,21 @@ export async function driveDelivery(
       seams,
     );
     if (merge.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
-    // Nothing was sent, so the ladder's refusal is the answer. `ALREADY_MERGED`
-    // reaches here too: the reconciliation above said otherwise a moment ago,
-    // and two readings that disagree is a race rather than a state to act on.
+    // Nothing was sent, so the ladder's refusal is the answer — and it is read
+    // member by member rather than collapsed. A review measured the collapsed
+    // version reporting "a person put it there" for a forge that could not be
+    // read, which is the machine-versus-person confusion this vocabulary exists
+    // to keep apart.
+    const merged = merge.result.outcome;
+    if (merged === 'PULL_REQUEST_STATE_UNKNOWN' || merged === 'OBSERVATION_UNAVAILABLE') {
+      return settle('FORGE_STATE_UNKNOWN', stage);
+    }
+    if (merged === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
+    // `PULL_REQUEST_NOT_OPEN`, `DRAFT_REFUSED`, `WRONG_BASE`, `HEAD_MOVED` and
+    // `ALREADY_MERGED` are all states somebody put this delivery in — and the
+    // last of them is a race with the reconciliation two steps above, which
+    // said otherwise a moment ago. Two readings that disagree is not a state to
+    // act on either.
     return settle('HUMAN_DECISION_REQUIRED', stage);
   }
 
@@ -749,12 +802,24 @@ export async function driveDelivery(
     if (publication.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
     const published = publication.result.publication;
     if (published === 'REF_HOLDS_ANOTHER_COMMIT') return settle('HUMAN_DECISION_REQUIRED', stage);
+    if (published === 'REMOTE_STATE_UNKNOWN' || published === 'REMOTE_URLS_DIVERGE') {
+      // A reading that could not be taken, not a head that is not there.
+      return settle('FORGE_STATE_UNKNOWN', stage);
+    }
+    if (published === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
     if (published !== 'ALREADY_PUBLISHED') {
-      // Nothing was pushed and the head is not established: the remote could
-      // not be read, the URLs disagree, the authority was refused, or the
-      // subject moved. None of them is a condition the creation could cross,
-      // and none of them is about a merge.
-      return settle('HEAD_NOT_PUBLISHED', stage);
+      // Nothing was pushed and the head is not established. What is left, with
+      // nothing attempted, is a work branch this build will not turn into a ref
+      // and an authority the mint would not grant. No invocation clears either,
+      // so neither is "ask again".
+      //
+      // **A floor, and measured so.** Both of those reach the creation ladder's
+      // own subject refusal one step later, and this function answers that with
+      // the same member — so a counter-proof that deletes this arm survives.
+      // It stays because the creation refusing on the publication's behalf is
+      // another function's wiring, and a guarantee that depends on where a
+      // sibling's gate sits is not one this branch can make.
+      return settle('SUBJECT_NOT_ESTABLISHED', stage);
     }
   }
 
@@ -792,5 +857,31 @@ export async function driveDelivery(
   ) {
     return settle('HUMAN_DECISION_REQUIRED', stage);
   }
+  // The creation ladder's own vocabulary decides the rest, member by member,
+  // rather than falling through to one word. A review measured what a bare
+  // fall-through cost here: `PULL_REQUEST_AMBIGUOUS` — *more* than one open
+  // pull request at this head — was reported as "no open pull request has this
+  // head", and a `SUBJECT_NOT_ESTABLISHED` that no re-run can clear was graded
+  // "ask again". Both are conditions the driver already has an exact member for.
+  if (created === 'PULL_REQUEST_AMBIGUOUS') return settle('PULL_REQUEST_AMBIGUOUS', stage);
+  if (created === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
+  if (
+    created === 'REMOTE_STATE_UNKNOWN' ||
+    created === 'PULL_REQUEST_STATE_UNKNOWN' ||
+    created === 'REMOTE_URLS_DIVERGE'
+  ) {
+    return settle('FORGE_STATE_UNKNOWN', stage);
+  }
+  if (created === 'SUBJECT_NOT_ESTABLISHED' || created === 'AUTHORITY_REFUSED') {
+    // The intended pull request is not one the mint will describe: the work
+    // branch and the base are the same ref, or one of them is not a name this
+    // build will send. No invocation clears that, so it is not "ask again".
+    return settle('SUBJECT_NOT_ESTABLISHED', stage);
+  }
+  // What is left is `CREATION_REFUSED` — the request was sent nowhere because
+  // the ladder would not send it — and the two floors this path cannot reach,
+  // `OPERATOR_ABSENT` and `DECISION_NOT_ESTABLISHED`, both of which are decided
+  // above. In every one of them the sentence is true: no open pull request has
+  // this head.
   return settle('PULL_REQUEST_REQUIRED', stage);
 }

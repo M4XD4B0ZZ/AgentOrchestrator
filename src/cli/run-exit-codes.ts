@@ -20,7 +20,9 @@
  * | 3    | The durable state needs an operator before anything may run.     |
  * | 4    | This invocation was refused or achieved nothing; the state may   |
  * |      | be fine. Re-invoking under other conditions can differ.          |
- * | 5    | Budget exhausted mid-drive: call again to continue.              |
+ * | 5    | Nothing is wrong and this invocation is over; calling again      |
+ * |      | continues. Two shapes produce it: a step budget exhausted        |
+ * |      | mid-run, and a delivery whose next move is another invocation.   |
  *
  * `NO_PROGRESS` remains one outcome for more than one situation (the V1-07
  * followup recorded as R-2/R-3); its exit code is uniformly 4, and the finer
@@ -30,6 +32,7 @@
 
 import type { BlockStopReason } from '../block/block-ledger.js';
 import type { DeliveryConclusionRecordCode } from '../deliver/delivery-conclusion-store.js';
+import type { MergeReconciliationRecordCode } from '../deliver/merge-reconciliation-store.js';
 import type { DeliveryDrive } from './delivery-driver.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
@@ -288,9 +291,14 @@ export function exitCodeForReleaseOutcome(outcome: ReleaseOutcome): CliExitCode 
  *
  * Nothing here exits 5 at all, and that is the lifetime decision showing
  * through: a block run does not outlive its invocation, so there is no state in
- * which calling again continues anything. `EXIT_RUN_CALL_AGAIN` stays what it
- * is — `run --attended`'s answer for one task — and `block` simply never
- * produces it.
+ * which calling again continues anything. `block` simply never produces it.
+ *
+ * `EXIT_RUN_CALL_AGAIN` was `run --attended`'s answer for one task and nothing
+ * else until V4 slice 11, which gave `delivery --drive` two members that mean
+ * the same thing about a delivery rather than about a step budget — an act was
+ * attempted and the next invocation reads what happened, or a check is still
+ * running. The gloss in this file's header was widened with them; a review
+ * measured it still saying "budget" for a code two other shapes now produce.
  */
 const BLOCK_STOP_EXIT_CODES = Object.freeze({
   COMPLETE: EXIT_RUN_OK,
@@ -613,13 +621,20 @@ const DRIVE_EXIT_CODES = Object.freeze({
   CHECKS_ABSENT: EXIT_RUN_NEEDS_OPERATOR,
   CHECKS_FAILED: EXIT_RUN_NEEDS_OPERATOR,
   HUMAN_DECISION_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
-  ATTENDED_AUTHORITY_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
 
-  // This invocation achieved nothing and nothing durable is wrong: the forge
-  // could not answer, the local subject moved under it, or no pull request has
+  // This invocation achieved nothing and nothing durable is wrong: a reading
+  // could not be taken, the local subject moved under it, or no pull request has
   // this head and this run did not open one.
-  MERGE_NOT_ESTABLISHED: EXIT_RUN_REFUSED,
-  HEAD_NOT_PUBLISHED: EXIT_RUN_REFUSED,
+  //
+  // `ATTENDED_AUTHORITY_REQUIRED` is here rather than at 3, and a review moved
+  // it: code 4 is defined above as "refused or achieved nothing; the state may
+  // be fine; re-invoking under other conditions can differ", which is exactly
+  // an act nobody named — and this file already grades every sibling authority
+  // refusal 4 (`EXECUTION_UNAUTHORISED`, `CONTINUATION_NOT_AUTHORISED`,
+  // `RUN_GATE_REFUSED`). At 3 it would have put "you did not pass --merge-pr"
+  // under the same shell answer as "the checks failed".
+  ATTENDED_AUTHORITY_REQUIRED: EXIT_RUN_REFUSED,
+  FORGE_STATE_UNKNOWN: EXIT_RUN_REFUSED,
   OBSERVATION_UNSETTLED: EXIT_RUN_REFUSED,
   SUBJECT_CHANGED: EXIT_RUN_REFUSED,
   PULL_REQUEST_REQUIRED: EXIT_RUN_REFUSED,
@@ -629,6 +644,12 @@ const DRIVE_EXIT_CODES = Object.freeze({
   // and no record came back at all, which is the second receipt read disagreeing
   // with the ladder's: a race, not a floor to be graded harder.
   CONCLUSION_NOT_DURABLE: EXIT_RUN_REFUSED,
+  // The same floor, for the same reason, on the receipt. Replaced by the
+  // receipt store's own grade whenever a record exists — see
+  // {@link exitCodeForDrive}. A review measured the earlier version folding
+  // this into "nothing durable is wrong", which is false of a contradictory
+  // receipt already on disk and of a write that left a staging file behind.
+  RECEIPT_NOT_DURABLE: EXIT_RUN_REFUSED,
 
   // Call again, and both times the words mean what they say.
   EFFECT_ATTEMPTED: EXIT_RUN_CALL_AGAIN,
@@ -650,12 +671,85 @@ const DRIVE_EXIT_CODES = Object.freeze({
  * authority: no primary code is exempt, and this is a primary code like any
  * other.
  */
+/**
+ * The override for one merge-receipt record code, or `null` to keep the primary.
+ *
+ * The receipt's counterpart of {@link exitCodeForConclusionRecord}, and graded
+ * one code at a time for the same reason: a review measured the driver folding
+ * every failed receipt write into "nothing durable is wrong", which is false of
+ * a contradictory receipt already on disk — the conclusion store's analogue,
+ * `CONFLICTING_CONCLUSION`, is graded 3 in this file — and of a write that got
+ * far enough to leave a directory and a staging file behind.
+ *
+ * Total by type over {@link MergeReconciliationRecordCode}, so a new store code
+ * fails the build here until somebody grades it.
+ */
+const RECEIPT_RECORD_EXIT_CODES = Object.freeze({
+  // On disk. Nothing to override — the primary answers. Unreachable through
+  // `RECEIPT_NOT_DURABLE`, whose whole condition is that neither holds.
+  RECORDED: null,
+  ALREADY_RECORDED: null,
+
+  // Nothing is wrong and the next invocation may well succeed.
+  RUNTIME_IGNORE_UNDETERMINED: EXIT_RUN_REFUSED,
+
+  // The input situation is unusable and is fixed by editing the repository.
+  RUNTIME_PATH_NOT_IGNORED: EXIT_RUN_INPUT_UNUSABLE,
+  LOCATION_UNSUITABLE: EXIT_RUN_INPUT_UNUSABLE,
+  RECEIPT_TOO_LARGE: EXIT_RUN_INPUT_UNUSABLE,
+
+  // Durable state an operator has to look at: a second contradictory receipt, a
+  // document this build cannot read, a receipt it would not accept back, or a
+  // write that got far enough to leave something behind.
+  CONFLICTING_RECEIPT: EXIT_RUN_NEEDS_OPERATOR,
+  EXISTING_RECEIPT_UNREADABLE: EXIT_RUN_NEEDS_OPERATOR,
+  RECEIPT_CONTRACT_VIOLATION: EXIT_RUN_NEEDS_OPERATOR,
+  DIRECTORY_CREATE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  WRITE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+
+  // Something is wrong inside the tool. Both are floors: the reconciliation
+  // builds the proof and the expectations from its own readings.
+  MERGE_NOT_PROVEN: EXIT_RUN_UNEXPECTED,
+  SUBJECT_MISMATCH: EXIT_RUN_UNEXPECTED,
+}) satisfies Record<MergeReconciliationRecordCode, CliExitCode | null>;
+
+/**
+ * The store codes one driver result reached, or `null` where it reached none.
+ *
+ * Two fields rather than one, because they are two different closed
+ * vocabularies and one parameter that took either would be a parameter that
+ * could take the wrong one.
+ */
+export interface DriveRecordCodes {
+  readonly conclusion?: DeliveryConclusionRecordCode | null;
+  readonly receipt?: MergeReconciliationRecordCode | null;
+}
+
+/**
+ * The exit code for one driver result.
+ *
+ * The store codes are consulted for exactly two members, for the reason
+ * {@link exitCodeForConclusionRecord} exists: a run that decided something was
+ * filed and could not leave it on disk has told a caller yes about something
+ * that did not happen, and *which* code that becomes is one store code at a
+ * time rather than a single number chosen here.
+ *
+ * The execution lease is **not** applied here. It is applied by the caller, last
+ * and over this, because `run-exit-codes.ts` states it as a rule about
+ * authority: no primary code is exempt, and this is a primary code like any
+ * other.
+ */
 export function exitCodeForDrive(
   outcome: DeliveryDrive,
-  record: DeliveryConclusionRecordCode | null = null,
+  records: DriveRecordCodes = {},
 ): CliExitCode {
-  if (outcome === 'CONCLUSION_NOT_DURABLE' && record !== null) {
-    return exitCodeForConclusionRecord(record) ?? DRIVE_EXIT_CODES.CONCLUSION_NOT_DURABLE;
+  const conclusion = records.conclusion ?? null;
+  if (outcome === 'CONCLUSION_NOT_DURABLE' && conclusion !== null) {
+    return exitCodeForConclusionRecord(conclusion) ?? DRIVE_EXIT_CODES.CONCLUSION_NOT_DURABLE;
+  }
+  const receipt = records.receipt ?? null;
+  if (outcome === 'RECEIPT_NOT_DURABLE' && receipt !== null) {
+    return RECEIPT_RECORD_EXIT_CODES[receipt] ?? DRIVE_EXIT_CODES.RECEIPT_NOT_DURABLE;
   }
   return DRIVE_EXIT_CODES[outcome];
 }
