@@ -1884,6 +1884,11 @@ describe('the CLI surface', () => {
     const { readFileSync } = await import('node:fs');
     const reachable = [
       'src/cli/delivery-command.ts',
+      // V4 slice 11 moved the act ladders out of the command into this module,
+      // and put the driver beside it. Both are named here for the reason the
+      // comment above gives: this is a check on a list of files, and a file
+      // that is not on the list is not checked.
+      'src/cli/delivery-steps.ts',
       'src/cli/render-delivery-observation.ts',
       'src/deliver/observe-delivery.ts',
       'src/deliver/forge-observation.ts',
@@ -1927,6 +1932,7 @@ describe('the CLI surface', () => {
     const seen = new Set<string>();
     for (const file of [
       'src/cli/delivery-command.ts',
+      'src/cli/delivery-steps.ts',
       'src/cli/render-delivery-observation.ts',
       'src/deliver/observe-delivery.ts',
       'src/deliver/forge-observation.ts',

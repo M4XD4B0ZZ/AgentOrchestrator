@@ -43,6 +43,13 @@ import {
   HEAD_PUBLICATION_DETAIL,
   type RemoteRefReading,
 } from '../deliver/head-publication.js';
+import {
+  DELIVERY_DRIVE_DETAIL,
+  DELIVERY_EFFECT_FLAG,
+  type DeliveryDrive,
+  type DeliveryEffect,
+} from './delivery-driver.js';
+import type { DeliveryConclusionOutcome } from '../deliver/conclude-delivery.js';
 import type { PublicationResult } from '../deliver/publish-delivery-head.js';
 import {
   PULL_REQUEST_CREATION_DETAIL,
@@ -350,6 +357,29 @@ export const VERIFICATION_TRAILER =
  * verification trailer's: this act takes no lease at all, so there is no
  * outcome for it to be wrong about.
  */
+/**
+ * What driving a delivery is answerable for, and the things it is not.
+ *
+ * The longest trailer on this command, because it is the only flag under which
+ * an operator does not choose the acts one at a time and therefore the only one
+ * where "what could this have done?" is not answered by the flags they typed.
+ */
+export const DRIVE_TRAILER =
+  'Driving derives where this delivery stands and runs the acts that stand between it and a\n' +
+  'conclusion. It adds no act of its own, and it can do nothing an invocation naming an act by\n' +
+  'its own flag could not. Publishing a head, opening a pull request and merging one each still\n' +
+  'require that flag and --attended, separately; a drive given none of them changes nothing on\n' +
+  'github.com. At most ONE forge mutation is attempted per invocation: the moment an act reports\n' +
+  'an attempt this run stops, whatever that attempt came to, because the next thing to do after\n' +
+  'any attempt is to read what happened rather than to repeat it. Nothing is retried here and\n' +
+  'nothing is polled: there is no sleep, no loop and no background work, so a condition that is\n' +
+  'not ready is reported and not waited for. A delivery already concluded is answered from the\n' +
+  'conclusion on disk, and that answer costs no forge request, no execution lease and no\n' +
+  'verification. The driver keeps no record of its own and remembers nothing between runs: every\n' +
+  'invocation re-derives its position from the task, the four documents beside it and, when it\n' +
+  'needs them, fresh answers from github.com. It writes no task state and no block-ledger entry,\n' +
+  'starts no agent, and READY_FOR_PR stays terminal however far the delivery got.';
+
 export const CONCLUSION_TRAILER =
   'Read-only on the forge, and not necessarily read-only here. Concluding a delivery\n' +
   'contacted github.com not at all, opened no network connection of its own, and read no Git\n' +
@@ -546,6 +576,30 @@ export interface DeliveryObservationView {
   readonly verification?: VerificationView | null;
   /** What `--conclude-delivery` amounted to, or `null` when it was not asked for. */
   readonly deliveryConclusion?: DeliveryConclusionView | null;
+  /**
+   * What `--drive` came to, or `null` when it was not asked for.
+   *
+   * The driver's *acts* are not carried here. They are the fields above: a
+   * driver invocation that reconciled a merge fills `reconciliation`, and it
+   * renders exactly as it would have under `--reconcile-merge`. This field is
+   * only the one sentence those blocks cannot say between them — where the
+   * lifecycle now stands, and what has to happen for it to move.
+   */
+  readonly drive?: DeliveryDriveView | null;
+}
+
+/**
+ * What one driver invocation came to.
+ *
+ * `position` is the conclusion ladder's own member, carried because it is where
+ * the driver's derivation came from and an operator reading a stop is entitled
+ * to see the reading it was derived from. `requiredEffect` is non-null on
+ * exactly one outcome.
+ */
+export interface DeliveryDriveView {
+  readonly outcome: DeliveryDrive;
+  readonly position: DeliveryConclusionOutcome | null;
+  readonly requiredEffect: DeliveryEffect | null;
 }
 
 /**
@@ -1083,6 +1137,32 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     }
   }
 
+  // Last, and after every act, because it is the sentence about all of them.
+  //
+  // The label is `Drive`, which no other line in this report uses: `Delivery`
+  // is the resolved target, `Conclusion` is the observation conclusion and
+  // `Completion` is the join. Four different facts, four labels, and a review
+  // has already caught two of them sharing one.
+  const drive = view.drive ?? null;
+  if (drive !== null) {
+    lines.push('', `Drive        : ${drive.outcome}`, `  ${DELIVERY_DRIVE_DETAIL[drive.outcome]}`);
+    // Where the derivation came from, printed on every outcome that has one.
+    // A driver stop is only as good as the reading it was derived from, and an
+    // operator who cannot see that reading cannot check the driver's work.
+    lines.push(
+      `  Position     : ${drive.position ?? 'no conclusion ladder was reached'}`,
+    );
+    // The act, and the flags that would authorise it — never on any other
+    // outcome. `requiredEffect` is null everywhere else, including after an
+    // attempt, where the act names itself in its own block above.
+    if (drive.requiredEffect !== null) {
+      lines.push(
+        `  Next act     : ${drive.requiredEffect}`,
+        `  Authorise by : ${DELIVERY_EFFECT_FLAG[drive.requiredEffect]}`,
+      );
+    }
+  }
+
   // Derived from what happened, not from which flags were passed — and from
   // whether the act was *attempted*, not from whether it read anything. A
   // review found the previous rule printing "Not read-only." over runs that
@@ -1249,6 +1329,13 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   if (view.deliveryConclusion != null) {
     if (trailers.length > 0) trailers.push('');
     trailers.push(CONCLUSION_TRAILER);
+  }
+  // Gated on the flag, like the three above it, and for the same reason: what
+  // this trailer says is as much about what the driver did NOT do as about what
+  // it did, so it is owed by every run that asked for one.
+  if (view.drive != null) {
+    if (trailers.length > 0) trailers.push('');
+    trailers.push(DRIVE_TRAILER);
   }
   lines.push('', ...trailers, '');
 

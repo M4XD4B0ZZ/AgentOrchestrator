@@ -9947,9 +9947,14 @@ no ladder refusal *changes* the exit code.
 
 ### Carried forward from V4 slice 10, deliberately
 
-- **L-V4-10-1 — the conclusion is not authority, and nothing reads it.** No code
-  in `src/` consumes the record. It is an audit trail and the end of the delivery
-  lifecycle, not a permission for a later step.
+- **L-V4-10-1 — the conclusion is not authority.** It is the end of the delivery
+  lifecycle, not a permission for a later step. The second half of this
+  sentence — "and nothing reads it" — was true when slice 10 shipped and is
+  **false since V4 slice 11**: `delivery --drive` reads the record, and reading
+  it ends the driver. That is the only consumption there is, and it is a full
+  stop rather than a licence. Corrected here rather than carried forward,
+  because a residual that has become false is worse than one that was never
+  written.
 - **L-V4-10-2 — the record is not evidence of authorship.** The binding is a
   keyless SHA-256 over public values and the function is exported, so anyone who
   can write into the runtime directory can write a conclusion that reads back
@@ -10019,6 +10024,180 @@ no ladder refusal *changes* the exit code.
   repository's own policy, from no AO task.
 
 
+## Driving the delivery (V4 slice 11)
+
+`delivery --drive` works out where a task's delivery currently stands and runs
+the acts that stand between it and a conclusion, stopping at the first condition
+this invocation cannot cross.
+
+It adds **no act**. Everything it can do, an operator could already do by naming
+an act's own flag. What it removes is the requirement that the operator remember
+*which* act comes next.
+
+```
+agent-loop delivery --repository <path> --task <id> --drive
+agent-loop delivery --repository <path> --task <id> --drive --publish-head --attended
+agent-loop delivery --repository <path> --task <id> --drive --create-pr   --attended
+agent-loop delivery --repository <path> --task <id> --drive --merge-pr    --attended
+```
+
+### Position is derived, and stored nowhere
+
+There is no new durable record, and no `DeliveryState`. Every invocation
+re-derives its position from the task and the documents already beside it.
+
+The oracle is `concludeDeliveryForTask` — slice 10's ladder — and it can be,
+because of three properties it already had: it is **pure** (its whole seam list
+is a clock), it **writes nothing**, and its refusals **name the stage that is
+missing**. `RECEIPT_ABSENT` means no merge has been reconciled;
+`VERIFICATION_ABSENT` and `PROFILE_NOT_VERIFIED` mean **M** has no standing
+verdict under this profile; `VERIFICATION_NOT_PASSING` means the repository
+answered and said no. Each is exactly one existing act away.
+
+A durable driver state could hold only two kinds of thing, and both are wrong: a
+second copy of facts already on disk, or a memory of where the last invocation
+got to — which is precisely the input that would let a driver repeat a mutation
+it has no proof about.
+
+### A concluded delivery is terminal, and costs nothing
+
+A delivery already concluded answers `DELIVERY_CONCLUDED` **before anything is
+contacted**: no forge request, no execution lease, no verification, no
+publication, no pull request, no merge.
+
+That is a consequence of slice 10's own ordering rather than a check added here,
+which is why deleting the receipt or the verification history afterwards cannot
+un-conclude a delivery. The conclusion is not permission for anything — it ends
+the driver and authorises nothing.
+
+### At most one forge mutation per invocation
+
+**The driver stops at the first act that reports an attempt.**
+
+Not at the first act it *calls*: a publication that answers `ALREADY_PUBLISHED`
+sent nothing and is a reading, so the driver goes on to the creation in the same
+pass. But the moment an act's attempt is anything other than `NOT_ATTEMPTED`,
+the invocation is over and the report says to ask again.
+
+Three things follow:
+
+- **never three effects behind one `--attended`**, though the flag surface has
+  permitted that since slice 7 and still does;
+- **no observation proof is consumed after a mutation.** The merge is the only
+  act that reads the proof, and it is reachable only in an invocation where
+  nothing was pushed and nothing was created — so the proof authorising a merge
+  grant is exactly as fresh as it is under `--merge-pr` alone;
+- **no grant outlives its act**, and no invocation mints two of one kind.
+
+It also means `L-V4-06-10` and `L-V4-07-1` are **not closed**: publish-then-create
+and create-then-merge still do not compose in one invocation, and the driver does
+not try to make them.
+
+### Every act still needs its own flag
+
+There is no drive-shaped authority.
+
+| invocation | may mutate github.com |
+| --- | --- |
+| `--drive` | nothing |
+| `--drive --attended` | **nothing** |
+| `--drive --publish-head --attended` | the branch push |
+| `--drive --create-pr --attended` | the pull request |
+| `--drive --merge-pr --attended` | the merge |
+
+`--drive --attended` on its own authorises no mutation at all: `--attended` has
+never been the authority, only the operator's presence. When the next act is one
+this invocation may not perform, the report names it and the flags that would
+grant it, and nothing is sent.
+
+`--drive` does not compose with `--observe`, `--record`, `--decide`,
+`--reconcile-merge`, `--verify-merge` or `--conclude-delivery`. Those name the
+acts one at a time; the driver chooses them. A run that asks for both is refused
+before anything is contacted or written.
+
+### It asks whether it already happened, before it makes it happen
+
+Reconciliation runs before the observation, every time, whenever no receipt is on
+disk. An observation looks for an **open** pull request at this head, so a
+delivery that was merged and closed is indistinguishable to it from one that
+never had a pull request at all — and a driver that read only the decision would
+stage a finished delivery as "needs a pull request".
+
+That is also what makes recovery work. A branch somebody else pushed, a pull
+request somebody else opened, a merge **somebody else performed** and a
+conclusion already on disk are all just states the derivation finds. AO
+authorship is never required.
+
+### It never waits
+
+There is no sleep, no loop, no timer and no background work. A condition that is
+not ready is a result, not a wait: `CHECKS_PENDING`, `PULL_REQUEST_REQUIRED`,
+`ATTENDED_AUTHORITY_REQUIRED`, `EFFECT_ATTEMPTED`. Two of those exit
+`EXIT_RUN_CALL_AGAIN`, and both times the words are literal — **nothing in this
+build calls again by itself**.
+
+Every uncertain outcome is a full stop. The driver never re-issues a request that
+produced one, because by then the invocation is already over: asking again is a
+*later invocation*, which begins with a reading, which is what each of those
+modules asks for by name.
+
+### The exit code, under this flag only
+
+Without `--drive`, `delivery`'s exit code answers the observation question and
+never an act's verdict — five residuals record that from five angles, and it is
+unchanged. Under `--drive` the code grades the **driver's** own member, and no
+member of that vocabulary says "the merge is warranted":
+`ATTENDED_AUTHORITY_REQUIRED` says an act has not been authorised, not that it
+should be, and the nominal member is about a delivery that is already finished.
+
+The execution lease rule is applied last, over that grade, because it is a rule
+about authority: no primary code is exempt.
+
+### `READY_FOR_PR` is still terminal
+
+The driver writes no task state and no block-ledger entry, starts no agent, and
+takes no execution lease of its own — the one act that needs one takes it, and
+gives it back in a `finally`. A merged pull request, a recorded pass, a recorded
+conclusion and a task still reported as `READY_FOR_PR` remain the expected set.
+
+### Carried forward from V4 slice 11, deliberately
+
+- **L-V4-11-1 — the three acts still do not compose on a first delivery.**
+  Unchanged from `L-V4-06-10` and `L-V4-07-1`, and now deliberate rather than
+  incidental: the driver stops at the first attempt, so publishing, opening and
+  merging are three invocations. The driver names the next one; it does not
+  perform it.
+- **L-V4-11-2 — the driver derives no position for a task it cannot resolve.**
+  The delivery target and the task state are read before any ladder, so a task
+  whose target stops resolving is `SUBJECT_NOT_ESTABLISHED` and nothing else is
+  mentioned — including a conclusion sitting readable on disk. Inherited from
+  `L-V4-10-14`.
+- **L-V4-11-3 — `EXIT_RUN_CALL_AGAIN` is an invitation a caller may abuse.** Two
+  members grade 5, and a shell loop over them is a poller this build did not
+  write and does not endorse. Nothing in `src/` invokes this command.
+- **L-V4-11-4 — `VERIFICATION_NOT_ESTABLISHED` is graded for its worst cause.**
+  Two of its causes clear on their own and would deserve a 4;
+  `MERGE_COMMIT_UNAVAILABLE` never clears (`L-V4-09-3`). One code cannot say
+  both, and it says 3.
+- **L-V4-11-5 — `PULL_REQUEST_REQUIRED` covers several creation refusals.** The
+  member says no open pull request has this head, which is true of every one of
+  them; *why* the creation did not happen is in the Creation block, not in the
+  driver's member.
+- **L-V4-11-6 — one verification attempt per invocation, and no cap across
+  them.** The driver runs the gate once and stops. Nothing bounds how many
+  invocations an operator makes, and the history's own ceiling
+  (`ATTEMPT_HISTORY_FULL`, `L-V4-09-6`) is still the only limit.
+- **L-V4-11-7 — the "gate could not answer" arm is a floor.** Removing it
+  changes no reachable outcome: the fallback after the re-derivation produces the
+  same member. It is kept so the classification is explicit, and so a run that
+  could not verify does not make a second, write-capable pass over the conclusion
+  ladder. Measured: the mutant survives, and its companion — which changes that
+  fallback's member — is killed.
+- **L-V4-11-8 — no live product dogfood was possible.** Unchanged from
+  `L-V4-09-7` and `L-V4-10-10`: this repository has no AO task at `READY_FOR_PR`
+  carrying a delivery target, a merge receipt and a verification history, and
+  fabricating one would fabricate the evidence the driver exists to read.
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
@@ -10027,7 +10206,12 @@ gave this build three forge acts — publish a branch, open a pull request, merg
 one — and every one of them requires an operator to be present for that
 invocation. None of them decides that a merge is warranted; they perform an act
 an operator asked for, on the exact commit that invocation observed. Slices 8, 9
-and 10 add no fourth act: they read, and write locally.
+and 10 add no fourth act: they read, and write locally. Slice 11 adds none
+either, and adds no authority: `--drive` works out which of the existing acts a
+delivery still needs and runs those, but each of the three that reach github.com
+still requires its own flag and `--attended`, separately, and at most one of them
+is attempted per invocation. Deciding that a merge is *warranted* is still not
+something this build does.
 
 `READY_FOR_PR` remains terminal, and there is **no `COMPLETE` task state**. It
 stays terminal even after a merge, after that merge commit has been verified, and
@@ -10037,9 +10221,12 @@ expected set. What slices 8 to 10 change is that the *delivery* side is now
 answerable, beside the task rather than inside it: the merge and its resulting
 commit are durable (slice 8), that exact commit's verification verdict is durable
 (slice 9), and the judgement that the two describe one concluded delivery is
-durable (slice 10). None of that is a task-state transition, and the three
-measured reasons it must not become one are in
+durable (slice 10), and the whole of it can be driven from one flag without an
+operator remembering the ordering (slice 11). None of that is a task-state
+transition, and the three measured reasons it must not become one are in
 [Concluding the delivery (V4 slice 10)](#concluding-the-delivery-v4-slice-10).
+Slice 11 adds no reason to revisit them: the driver writes no task state, and
+a delivery it drives to a conclusion leaves the task exactly where it found it.
 
 V4 slices 1 to 4 do not shorten that list. They add the four things every item
 on it needs first. Slice 1: a repository can **declare** its delivery target, and
@@ -10070,7 +10257,8 @@ permission", and slice 7 consuming that decision does not make it a stronger
 claim; publishing a head grants no authority to open a pull request, opening one
 grants no authority to merge it, and merging one is an act an operator asks for
 rather than a conclusion this build reaches — each is requested and authorised
-separately; and `READY_FOR_PR` is still terminal, with
+separately, and a driver that sequences them does not merge them into one
+authority; and `READY_FOR_PR` is still terminal, with
 no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1),
 [Durable delivery evidence (V4 slice 3)](#durable-delivery-evidence-v4-slice-3),
 [The delivery decision (V4 slice 4)](#the-delivery-decision-v4-slice-4),
@@ -10079,7 +10267,8 @@ no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-
 [Merging the pull request (V4 slice 7)](#merging-the-pull-request-v4-slice-7),
 [Reconciling the merge (V4 slice 8)](#reconciling-the-merge-v4-slice-8),
 [Verifying the merge commit (V4 slice 9)](#verifying-the-merge-commit-v4-slice-9),
-[Concluding the delivery (V4 slice 10)](#concluding-the-delivery-v4-slice-10)
+[Concluding the delivery (V4 slice 10)](#concluding-the-delivery-v4-slice-10),
+[Driving the delivery (V4 slice 11)](#driving-the-delivery-v4-slice-11)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on

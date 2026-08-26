@@ -30,6 +30,7 @@
 
 import type { BlockStopReason } from '../block/block-ledger.js';
 import type { DeliveryConclusionRecordCode } from '../deliver/delivery-conclusion-store.js';
+import type { DeliveryDrive } from './delivery-driver.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
 import type { LeaseReleaseResult } from '../lease/execution-lease.js';
@@ -559,4 +560,102 @@ export function exitCodeForConclusionRecord(
   code: DeliveryConclusionRecordCode,
 ): CliExitCode | null {
   return CONCLUSION_RECORD_EXIT_CODES[code];
+}
+
+/**
+ * Exit code for every driver outcome. Total; pinned by test.
+ *
+ * ── What this table does and does not make `$?` mean ───────────────────────
+ *
+ * Without `--drive`, `delivery`'s exit code answers one question — was the
+ * observation settled — and five residuals (`L-V4-05-8`, `L-V4-06-8`,
+ * `L-V4-08-8`, `L-V4-09-8`, `L-V4-10-9`) each record, from a different angle,
+ * that no act's verdict reaches `$?`. **That is unchanged.** This table is
+ * consulted only on an invocation that asked for the driver, and it grades the
+ * driver's own member.
+ *
+ * What it deliberately does **not** encode is "the merge is warranted".
+ * `ATTENDED_AUTHORITY_REQUIRED` says an act has not been authorised, not that it
+ * should be; which act is in the report, and whether it ought to happen is a
+ * person's judgement that no code in this file makes. The positive member is
+ * about a delivery that is already **finished**, which is a fact about the past.
+ *
+ * `EXIT_RUN_CALL_AGAIN` appears exactly twice, and both times the instruction is
+ * literal: an act was attempted and the next invocation has to read what
+ * happened, or a check is still running. **Nothing in this build calls again by
+ * itself.** `run-driver.ts`'s loop is over `runTask`, and no path from it
+ * reaches this command.
+ */
+const DRIVE_EXIT_CODES = Object.freeze({
+  // Nominal: the lifecycle is over and its evidence is on disk.
+  DELIVERY_CONCLUDED: EXIT_RUN_OK,
+
+  // The invocation cannot be carried out as written, and editing it fixes that.
+  SUBJECT_NOT_ESTABLISHED: EXIT_RUN_INPUT_UNUSABLE,
+  TASK_NOT_READY: EXIT_RUN_INPUT_UNUSABLE,
+  DRIVE_NOT_COMBINABLE: EXIT_RUN_INPUT_UNUSABLE,
+
+  // A person has to look before anything else happens: a record that cannot be
+  // read, a verdict that says the code failed, a machine that could not answer,
+  // a commit nothing has succeeded on, or an act nobody authorised.
+  DELIVERY_EVIDENCE_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
+  CONCLUSION_NOT_ATTESTED: EXIT_RUN_NEEDS_OPERATOR,
+  VERIFICATION_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  // Graded 3 rather than 4 on purpose, and the trade-off is stated rather than
+  // absorbed. Two of its causes clear on their own — a lease another run holds,
+  // a workspace that could not be made — and 4 would be right for those. The
+  // third does not: `MERGE_COMMIT_UNAVAILABLE` is terminal, because this build
+  // will not fetch a merge commit it does not have (`L-V4-09-3`). One code
+  // cannot say both, and telling an operator "try again" about a condition that
+  // never clears is the worse of the two errors.
+  VERIFICATION_NOT_ESTABLISHED: EXIT_RUN_NEEDS_OPERATOR,
+  PULL_REQUEST_AMBIGUOUS: EXIT_RUN_NEEDS_OPERATOR,
+  CHECKS_ABSENT: EXIT_RUN_NEEDS_OPERATOR,
+  CHECKS_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  HUMAN_DECISION_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
+  ATTENDED_AUTHORITY_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
+
+  // This invocation achieved nothing and nothing durable is wrong: the forge
+  // could not answer, the local subject moved under it, or no pull request has
+  // this head and this run did not open one.
+  MERGE_NOT_ESTABLISHED: EXIT_RUN_REFUSED,
+  HEAD_NOT_PUBLISHED: EXIT_RUN_REFUSED,
+  OBSERVATION_UNSETTLED: EXIT_RUN_REFUSED,
+  SUBJECT_CHANGED: EXIT_RUN_REFUSED,
+  PULL_REQUEST_REQUIRED: EXIT_RUN_REFUSED,
+  // A floor. The command replaces it with the store's own grade whenever a
+  // record exists, one code at a time, exactly as `--conclude-delivery` does —
+  // see {@link exitCodeForDrive}. It is reachable only when the ladder concluded
+  // and no record came back at all, which is the second receipt read disagreeing
+  // with the ladder's: a race, not a floor to be graded harder.
+  CONCLUSION_NOT_DURABLE: EXIT_RUN_REFUSED,
+
+  // Call again, and both times the words mean what they say.
+  EFFECT_ATTEMPTED: EXIT_RUN_CALL_AGAIN,
+  CHECKS_PENDING: EXIT_RUN_CALL_AGAIN,
+}) satisfies Record<DeliveryDrive, CliExitCode>;
+
+/**
+ * The exit code for one driver result.
+ *
+ * `record` is the conclusion store's code when the driver reached the store,
+ * and `null` otherwise. It is consulted for exactly one member, for the reason
+ * {@link exitCodeForConclusionRecord} exists: a run that decided a delivery was
+ * concluded and could not leave the claim on disk has told a caller yes about
+ * something that did not happen, and *which* code that becomes is one store
+ * code at a time rather than a single number chosen here.
+ *
+ * The execution lease is **not** applied here. It is applied by the caller, last
+ * and over this, because `run-exit-codes.ts` states it as a rule about
+ * authority: no primary code is exempt, and this is a primary code like any
+ * other.
+ */
+export function exitCodeForDrive(
+  outcome: DeliveryDrive,
+  record: DeliveryConclusionRecordCode | null = null,
+): CliExitCode {
+  if (outcome === 'CONCLUSION_NOT_DURABLE' && record !== null) {
+    return exitCodeForConclusionRecord(record) ?? DRIVE_EXIT_CODES.CONCLUSION_NOT_DURABLE;
+  }
+  return DRIVE_EXIT_CODES[outcome];
 }

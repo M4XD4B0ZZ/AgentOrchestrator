@@ -3025,8 +3025,11 @@ describe('post-merge verification changes no execution state and no ledger', () 
     // What replaces the blanket ban is stronger than the sentence it came from.
     const SURFACE = [
       ...walk('src/deliver'),
-      'src/cli/delivery-command.ts',
-      'src/cli/render-delivery-observation.ts',
+      // Derived rather than named, so a delivery module added to `src/cli/`
+      // joins this surface without anybody remembering to. V4 slice 11 moved the
+      // lease acquisition into `delivery-steps.ts` and added `delivery-driver.ts`
+      // beside it; under the old hand-written pair both would have escaped.
+      ...walk('src/cli').filter((file) => file.includes('delivery')),
     ].sort();
     expect(SURFACE.length).toBeGreaterThanOrEqual(20);
 

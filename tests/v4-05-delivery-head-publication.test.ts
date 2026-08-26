@@ -979,8 +979,12 @@ describe('exactly one module can change anything, and it changes one ref', () =>
 
   const SURFACE = [
     ...walk('src/deliver'),
-    'src/cli/delivery-command.ts',
-    'src/cli/render-delivery-observation.ts',
+    // Derived rather than named, so a delivery module added to `src/cli/`
+    // joins this surface without anybody remembering to. V4 slice 11 moved the
+    // three mint call sites into `delivery-steps.ts` and added
+    // `delivery-driver.ts` beside it; under the old hand-written pair both would
+    // have escaped every assertion below.
+    ...walk('src/cli').filter((file) => file.includes('delivery')),
   ].sort();
 
   it('names a push in exactly one module of the delivery surface', () => {
@@ -998,7 +1002,7 @@ describe('exactly one module can change anything, and it changes one ref', () =>
     );
     // The public facade re-exports the type; the CLI mints. Nothing else.
     expect(importers.sort()).toEqual(
-      ['src/cli/delivery-command.ts', 'src/deliver/head-publication-grant.ts', 'src/deliver/publish-delivery-head.ts'].sort(),
+      ['src/cli/delivery-steps.ts', 'src/deliver/head-publication-grant.ts', 'src/deliver/publish-delivery-head.ts'].sort(),
     );
     // And the only one that CALLS the mint is the command ladder. The module
     // that declares it is excluded by name rather than by a cleverer regex: a
@@ -1010,7 +1014,7 @@ describe('exactly one module can change anything, and it changes one ref', () =>
     const minters = all
       .filter((f) => f !== DECLARES)
       .filter((f) => /\bmintHeadPublicationGrant\s*\(/.test(codeOnly(f)));
-    expect(minters).toEqual(['src/cli/delivery-command.ts']);
+    expect(minters).toEqual(['src/cli/delivery-steps.ts']);
   });
 
   // The title lost "and no merge" at V4 slice 7, which added one. What that

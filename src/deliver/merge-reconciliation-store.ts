@@ -221,6 +221,42 @@ export type MergeReconciliationRecordCode =
  * actually asks after a repeat run: *did this touch anything?* A code alone
  * would answer it only by being memorised, and there are thirteen of them.
  */
+/**
+ * Whether the receipt is on disk after the call this code came from.
+ *
+ * A total table rather than a comparison, for the reason
+ * `delivery-conclusion-store.ts` gives about its own: written as
+ * `code === 'RECORDED' || code === 'ALREADY_RECORDED'` a new member of the
+ * vocabulary would silently answer `false`, and the member most likely to be
+ * added is another way of saying "it is already there". Written like this the
+ * build fails until somebody classifies it.
+ *
+ * `ALREADY_RECORDED` is `true` and wrote nothing, which is the idempotency
+ * claim: a caller reading `recorded` alone would report every repeat run as
+ * having lost the receipt.
+ */
+const RECEIPT_ON_DISK_BY_CODE: Readonly<Record<MergeReconciliationRecordCode, boolean>> =
+  Object.freeze({
+    RECORDED: true,
+    ALREADY_RECORDED: true,
+    CONFLICTING_RECEIPT: false,
+    EXISTING_RECEIPT_UNREADABLE: false,
+    MERGE_NOT_PROVEN: false,
+    SUBJECT_MISMATCH: false,
+    LOCATION_UNSUITABLE: false,
+    RUNTIME_PATH_NOT_IGNORED: false,
+    RUNTIME_IGNORE_UNDETERMINED: false,
+    DIRECTORY_CREATE_FAILED: false,
+    RECEIPT_TOO_LARGE: false,
+    RECEIPT_CONTRACT_VIOLATION: false,
+    WRITE_FAILED: false,
+  });
+
+/** `true` when the receipt is on disk after the call this code came from. */
+export function receiptIsOnDisk(code: MergeReconciliationRecordCode): boolean {
+  return RECEIPT_ON_DISK_BY_CODE[code];
+}
+
 export const WRITE_ATTEMPTS = ['NOT_ATTEMPTED', 'COMPLETED', 'FAILED'] as const;
 export type WriteAttempt = (typeof WRITE_ATTEMPTS)[number];
 

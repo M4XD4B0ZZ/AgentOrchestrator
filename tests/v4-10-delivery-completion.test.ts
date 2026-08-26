@@ -3564,7 +3564,9 @@ describe('the command hands the store two independently-read operands', () => {
     // Pinned structurally, because the defect is *which expression is written*
     // rather than a behaviour any fixture can separate: the two reads agree on
     // every input an in-process test can construct.
-    const source = readFileSync('src/cli/delivery-command.ts', 'utf8');
+    // `performConclusion` moved to `delivery-steps.ts` at V4 slice 11, with the
+    // three anti-tautology expressions unchanged. The pin follows the code.
+    const source = readFileSync('src/cli/delivery-steps.ts', 'utf8');
     const opens = source.indexOf('const record = await recordDeliveryConclusion({');
     expect(opens).toBeGreaterThan(0);
     // Searched FORWARD from the call, not from the top of the file: the same

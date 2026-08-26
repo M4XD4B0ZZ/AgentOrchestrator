@@ -40,12 +40,12 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  ADMITS_CREATION_LADDER,
   CREATE_PR_OPTION_DESCRIPTION,
   ATTENDED_OPTION_DESCRIPTION,
   DELIVERY_COMMAND_DESCRIPTION,
   registerDeliveryCommand,
 } from '../src/cli/delivery-command.js';
+import { ADMITS_CREATION_LADDER } from '../src/cli/delivery-steps.js';
 import { DELIVERY_DECISIONS } from '../src/deliver/delivery-decision.js';
 import {
   CREATION_TRAILER,
@@ -1931,8 +1931,12 @@ describe('what this slice did not gain', () => {
 
   const SURFACE = [
     ...walk('src/deliver'),
-    'src/cli/delivery-command.ts',
-    'src/cli/render-delivery-observation.ts',
+    // Derived rather than named, so a delivery module added to `src/cli/`
+    // joins this surface without anybody remembering to. V4 slice 11 moved the
+    // three mint call sites into `delivery-steps.ts` and added
+    // `delivery-driver.ts` beside it; under the old hand-written pair both would
+    // have escaped every assertion below.
+    ...walk('src/cli').filter((file) => file.includes('delivery')),
   ].sort();
 
   const CREATOR = 'src/deliver/github-pull-request-creator.ts';
@@ -2023,7 +2027,7 @@ describe('what this slice did not gain', () => {
     // transport name the subject type. Nothing else.
     expect(importers.sort()).toEqual(
       [
-        'src/cli/delivery-command.ts',
+        'src/cli/delivery-steps.ts',
         'src/deliver/create-pull-request.ts',
         'src/deliver/github-pull-request-creator.ts',
         'src/deliver/pull-request-creation-grant.ts',
@@ -2038,10 +2042,10 @@ describe('what this slice did not gain', () => {
     // that only looked for the call site.
     const namesTheMint = /\bmintPullRequestCreationGrant\b/;
     const minters = all.filter((f) => f !== DECLARES).filter((f) => namesTheMint.test(codeOnly(f)));
-    expect(minters).toEqual(['src/cli/delivery-command.ts']);
+    expect(minters).toEqual(['src/cli/delivery-steps.ts']);
     // False-negative guards: both patterns match the module they are aimed at.
-    expect(importsTheMint.test(readFileSync('src/cli/delivery-command.ts', 'utf8'))).toBe(true);
-    expect(namesTheMint.test(codeOnly('src/cli/delivery-command.ts'))).toBe(true);
+    expect(importsTheMint.test(readFileSync('src/cli/delivery-steps.ts', 'utf8'))).toBe(true);
+    expect(namesTheMint.test(codeOnly('src/cli/delivery-steps.ts'))).toBe(true);
   });
 
   it('runs the creation through its own seam, not the reading one', () => {
