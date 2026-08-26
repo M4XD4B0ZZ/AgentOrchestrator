@@ -1607,6 +1607,7 @@ describe('the delivery command merges only when asked, and only when it may', ()
         '--conclude-delivery',
         '--create-pr',
         '--decide',
+        '--drive',
         '--merge-pr',
         '--observe',
         '--publish-head',
@@ -1678,8 +1679,12 @@ describe('the merge report', () => {
 describe('what the merging surface is', () => {
   const SURFACE = [
     ...walk('src/deliver'),
-    'src/cli/delivery-command.ts',
-    'src/cli/render-delivery-observation.ts',
+    // Derived rather than named, so a delivery module added to `src/cli/`
+    // joins this surface without anybody remembering to. V4 slice 11 moved the
+    // three mint call sites into `delivery-steps.ts` and added
+    // `delivery-driver.ts` beside it; under the old hand-written pair both would
+    // have escaped every assertion below.
+    ...walk('src/cli').filter((file) => file.includes('delivery')),
   ].sort();
 
   const MERGER = 'src/deliver/github-pull-request-merger.ts';
@@ -1730,7 +1735,7 @@ describe('what the merging surface is', () => {
     // fails when the set changes.
     expect(importers).toEqual(
       [
-        'src/cli/delivery-command.ts',
+        'src/cli/delivery-steps.ts',
         'src/deliver/github-pull-request-merger.ts',
         'src/deliver/merge-grant.ts',
         'src/deliver/merge-pull-request.ts',
@@ -1743,7 +1748,7 @@ describe('what the merging surface is', () => {
       .map((f) => f.replace(/\\/g, '/'))
       .filter((f) => f !== DECLARES)
       .filter((f) => /\bmintMergeGrant\s*\(/.test(codeOnly(f)));
-    expect(minters).toEqual(['src/cli/delivery-command.ts']);
+    expect(minters).toEqual(['src/cli/delivery-steps.ts']);
   });
 
   it('has no loop, no retry and one call site of the transport', () => {

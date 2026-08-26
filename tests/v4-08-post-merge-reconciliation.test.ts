@@ -2640,8 +2640,10 @@ describe('the execution lifecycle is untouched, and the block ledger with it', (
         expect(source, `${file}: ${token}`).not.toContain(token);
       }
     }
-    // The control: those names DO appear in the modules that own them.
-    expect(codeOnly('src/cli/delivery-command.ts')).toContain('mergePullRequest');
+    // The control: those names DO appear in the modules that own them. V4
+    // slice 11 moved the act ladders out of the command and into
+    // `delivery-steps.ts`, which is where the merge call now sits.
+    expect(codeOnly('src/cli/delivery-steps.ts')).toContain('mergePullRequest');
   });
 
   it('sweeps the reconciliation modules for a mutating request vector', () => {

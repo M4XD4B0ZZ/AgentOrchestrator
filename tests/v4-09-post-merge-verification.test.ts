@@ -2879,13 +2879,17 @@ describe('post-merge verification changes no execution state and no ledger', () 
     // And the CLI, which the six above deliberately exclude because it is the
     // whole delivery surface rather than this slice's modules.
     //
-    // It is here because of what the lease widening opened: `delivery-command.ts`
-    // now imports `loop/leased-spawns.js`, and that module exports `leasedAgent`
-    // beside `leasedGit` and `leasedVerify`. Before this slice, `tests/v4-02-…`
-    // refused the whole import; its ADMITTED list now lets it in and says the
-    // "no agent" half is asserted here — which a review found was true of no
-    // file. It is true of this line.
-    const cli = codeOnly('src/cli/delivery-command.ts');
+    // It is here because of what the lease widening opened: the delivery
+    // surface now imports `loop/leased-spawns.js`, and that module exports
+    // `leasedAgent` beside `leasedGit` and `leasedVerify`. Before this slice,
+    // `tests/v4-02-…` refused the whole import; its ADMITTED list now lets it in
+    // and says the "no agent" half is asserted here — which a review found was
+    // true of no file. It is true of this line.
+    //
+    // V4 slice 11 moved the act ladders — and with them the import, the lease
+    // and the two leased seams — into `delivery-steps.ts`. The file this reads
+    // followed the code; what it asserts is unchanged.
+    const cli = codeOnly('src/cli/delivery-steps.ts');
     expect(cli.replace(/\s+/g, '').length).toBeGreaterThan(1000);
     for (const forbidden of ['leasedAgent', 'runClaudeWriter', 'runCodexReviewer', 'startTask']) {
       expect(cli, `src/cli/delivery-command.ts must not reach ${forbidden}`).not.toContain(
@@ -2919,8 +2923,10 @@ describe('post-merge verification changes no execution state and no ledger', () 
         expect(source, `${file} must not reach ${forbidden}`).not.toContain(forbidden);
       }
     }
-    // Positive control: the module that does merge still does.
-    expect(codeOnly('src/cli/delivery-command.ts')).toContain('mergePullRequest');
+    // Positive control: the module that does merge still does. V4 slice 11
+    // moved the act ladders into `delivery-steps.ts`, which is where the merge
+    // call now sits.
+    expect(codeOnly('src/cli/delivery-steps.ts')).toContain('mergePullRequest');
   });
 
   it('names the merge receipt as read-only, and never writes one', () => {
@@ -3025,14 +3031,20 @@ describe('post-merge verification changes no execution state and no ledger', () 
     // What replaces the blanket ban is stronger than the sentence it came from.
     const SURFACE = [
       ...walk('src/deliver'),
-      'src/cli/delivery-command.ts',
-      'src/cli/render-delivery-observation.ts',
+      // Derived rather than named, so a delivery module added to `src/cli/`
+      // joins this surface without anybody remembering to. V4 slice 11 moved the
+      // lease acquisition into `delivery-steps.ts` and added `delivery-driver.ts`
+      // beside it; under the old hand-written pair both would have escaped.
+      ...walk('src/cli').filter((file) => file.includes('delivery')),
     ].sort();
     expect(SURFACE.length).toBeGreaterThanOrEqual(20);
 
-    // One file, derived from the tree rather than named.
+    // One file, derived from the tree rather than named. V4 slice 11 moved it
+    // from `delivery-command.ts` to `delivery-steps.ts` with the act ladders;
+    // the guarantee — one file, on a surface derived from the tree — is what it
+    // was, and the driver added beside it takes no lease of its own.
     expect(SURFACE.filter((file) => /\bacquire\w*ExecutionLease\s*\(/.test(codeOnly(file)))).toEqual(
-      ['src/cli/delivery-command.ts'],
+      ['src/cli/delivery-steps.ts'],
     );
 
     // Nothing under `src/deliver/` at all. The ladder and every store take
@@ -3044,7 +3056,7 @@ describe('post-merge verification changes no execution state and no ledger', () 
 
     // Once each. A second acquire is a second window, and an acquire without a
     // matching release leaves the repository claimed.
-    const cli = codeOnly('src/cli/delivery-command.ts');
+    const cli = codeOnly('src/cli/delivery-steps.ts');
     expect(cli.match(/\bacquireRepositoryExecutionLease\s*\(/g)).toHaveLength(1);
     expect(cli.match(/\breleaseRepositoryExecutionLease\s*\(/g)).toHaveLength(1);
     // Given back in a `finally`, so no path out — including a throw — keeps it.
