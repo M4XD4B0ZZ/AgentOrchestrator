@@ -1497,7 +1497,32 @@ describe('the surface states its own limits', () => {
     // The sentence that said the command contacts no forge without --observe.
     expect(top).not.toContain('Without --observe the command starts no client');
     expect(top).toContain('Given none of the flags named above');
-    // Opening pull requests is still not in this build, and must still say so.
-    expect(top).toContain('Opening pull requests is not in this build');
+
+    // ── The clause that had to be rewritten, and why it is asserted this way ──
+    //
+    // This line used to read: `expect(top).toContain('Opening pull requests is
+    // not in this build')`, under the comment "still not in this build, and
+    // must still say so". It was true at slice 5. **V4 slice 6 made it false
+    // and did not come back here**, so from that day the top-level help denied
+    // a capability the build had, and this test held the denial in place — a
+    // pin guarding a lie, which is worse than no pin. Slice 7 made it false
+    // twice over. Slice 12's sweep found it and corrected the help.
+    //
+    // The replacement asserts the rule rather than a list of acts, because a
+    // list beside a growing surface is exactly what went stale here: what the
+    // build refuses is *deciding* a merge is warranted, and what it permits is
+    // performing one an operator asked for in that invocation.
+    expect(top).toContain('Deciding that a merge is WARRANTED is not in this build');
+    expect(top).not.toContain('Opening pull requests is not in this build');
+    // And the three acts that reach github.com are named, each needing
+    // `--attended`. `--publish-head` is asserted above; the other two were
+    // absent from this description entirely until slice 12.
+    expect(top).toContain('--create-pr');
+    expect(top).toContain('--merge-pr');
+    // The superlative that went with it, and died the same way: `--publish-head`
+    // was called "the one thing any command in this build can change outside
+    // this machine" — false since slice 6, false again since slice 7.
+    expect(top).not.toContain('the one thing any command');
+    expect(top).toContain('Three flags can change something outside this machine');
   });
 });

@@ -1600,7 +1600,11 @@ describe('the delivery command merges only when asked, and only when it may', ()
     // effect-boundary cases in `tests/v4-08-…` and `tests/v4-09-…` rather than
     // inferred from this list. V4 slice 10 added `--conclude-delivery`, whose
     // own boundary — no forge, no Git history, no lease, no task state — is
-    // measured in `tests/v4-10-…`.
+    // measured in `tests/v4-10-…`. V4 slice 12 added `--select-task`, which
+    // names no act at all: it decides *which* delivery `--drive` is about, and
+    // that it grants nothing — the same three flags plus `--attended` still
+    // gate every mutation — is measured in `tests/v4-12-…` by counting the four
+    // mutation seams at zero, not inferred from its absence of an effect here.
     expect(longs).toEqual(
       [
         '--attended',
@@ -1614,6 +1618,7 @@ describe('the delivery command merges only when asked, and only when it may', ()
         '--reconcile-merge',
         '--record',
         '--repository',
+        '--select-task',
         '--task',
         '--verify-merge',
       ].sort(),
