@@ -12,8 +12,19 @@
  * shape for exactly one reason and this slice needs a stronger version of it:
  * the root is derived from `os.userInfo()` through
  * `config/internal/path-provider.ts`, which consults no environment block, so a
- * caller, a parent process, a repository file or an agent writing inside its own
- * worktree cannot place this file or move where it is looked for.
+ * parent process, a repository file or an agent writing inside its own worktree
+ * cannot place this file or move where it is looked for.
+ *
+ * "A caller" is deliberately not in that list, and a review took it out. Both
+ * functions below take a {@link PathProvider}, so a caller inside this package
+ * can point the lookup anywhere — that is the test seam, and `trusted-profile.ts`
+ * refuses the same override for the reason it gives. The property that holds is
+ * narrower, and it is a fact about the tree rather than about a signature:
+ * `registerDeliveryCommand` is called in exactly one place in `src/`
+ * (`cli/index.ts`), with no seams at all, and `package.json` exports only the
+ * CLI entry — so no operator input, no environment value and no repository file
+ * reaches the parameter, and nothing outside this package can call these
+ * functions to begin with.
  *
  * ── Why not the repository profile, pinned or otherwise ────────────────────
  *

@@ -177,11 +177,17 @@ is a flag of its own, and passing both is refused before anything is resolved.
 `--automatic-publish-head-only`, and the name is chosen under two constraints
 this build already enforces.
 
-`tests/v4-05-…:1396` and four sibling copies sweep every registered option of
-every command and refuse a name containing `force`, `unattended`, `adopt`,
-`takeover` or `steal`. `--unattended-publish-head` fails that sweep, and widening
-the sweep would be the wrong repair: the guard is right and the name would be the
-problem, exactly as `run-command.ts` records for `--automatic-resume-only`.
+A sweep over the live program refuses any registered option name containing
+`force`, `unattended`, `adopt`, `takeover` or `steal`. It is copied into every
+slice file that adds a flag — `grep -n 'force|unattended|adopt|takeover|steal'
+tests/*.ts` finds it in nine, of which `tests/v4-05-…` builds the whole program
+and the rest build the delivery command alone. A count is not written here
+because a count beside a set nothing enforces is the shape this repository has
+been caught by three times.
+
+`--unattended-publish-head` fails that sweep, and widening the sweep would be the
+wrong repair: the guard is right and the name would be the problem, exactly as
+`run-command.ts` records for `--automatic-resume-only`.
 
 So the spelling mirrors that flag: the act it permits, and `-only` carrying the
 restriction. It is the CLI spelling of what it does, and the trailing word says
@@ -279,19 +285,22 @@ declaration that stopped permitting this repository between the ladder's read an
 that moment refuses there, under the same member the first read would have
 produced, with nothing read from the remote and nothing attempted.
 
-That it is the *last* read is measured rather than asserted. The suite takes a
-control run to establish how many repository resolutions this path makes, and
-then removes the declaration on the last one — which is the resolution the
+That it is the *last read from disk* is measured rather than asserted. The suite
+takes a control run to establish how many repository resolutions this path makes,
+and then removes the declaration on the last one — which is the resolution the
 `recheck` closure itself performs, strictly after the ladder's own read. A hook
 that fired earlier would remove the declaration before the ladder read it and
 would measure that step twice while measuring the re-proof not at all.
 
-What this does **not** claim: there is no re-read between the pre-reading of the
-remote ref and the push itself. Two subprocesses run in that window and nothing
-is consulted in it. That window is inherent to the existing mechanism, it is the
-same window an attended publication has, and closing it would mean a fourth
-subprocess whose answer could go stale in its own turn. It is recorded as
-`L-V4-13-4` rather than argued away.
+What this does **not** claim, and an earlier draft did: that the re-proof is
+"immediately before" the remote is contacted. It is not. `publishDeliveryHead`
+runs the recheck second, and after it come two local `git remote get-url` calls
+and then `ls-remote` — a network round trip with a 120-second ceiling — before
+the push. Nothing is consulted inside that window. It is inherent to the existing
+mechanism, it is the same window an attended publication has, and closing it
+would mean a further subprocess whose answer could go stale in its own turn. It
+is recorded as `L-V4-13-4`, widened to name the whole window rather than only its
+last two steps.
 
 Between invocations there is nothing to revoke: no permission is stored, no
 grant survives a process, and the next invocation reads the file again.
@@ -301,12 +310,25 @@ grant survives a process, and the next invocation reads the file again.
 The fence is unchanged and it is the server's. Measured on a real bare remote
 with the exact pinned vector:
 
-| Case | Measured |
-| --- | --- |
-| ref absent, one publisher | `[new branch]`, exit 0 → `PUBLISHED` |
-| two publishers race for the same absent ref, same commit | one `[new branch]` exit 0; the other `[remote rejected] (atomic transaction failed)` / `cannot lock ref: reference already exists`, exit 1 → `CONVERGED_AFTER_UNCERTAIN_EFFECT` |
-| ref already at this commit before the push | `[up to date]`, exit 0 — the empty lease is not evaluated |
-| ref at another commit | `[rejected] (stale info)`, exit 1, ref unchanged → `REF_HOLDS_ANOTHER_COMMIT` |
+| Case | Measured | Decided by |
+| --- | --- | --- |
+| ref absent, one publisher | `[new branch]`, exit 0 → `PUBLISHED` | the server accepts the create |
+| two publishers create the same ref at once | exactly one `[new branch]` exit 0; the loser is refused, and which way depends on the interleaving — `[remote rejected] (atomic transaction failed)` / `cannot lock ref … reference already exists` exit 1 when they genuinely race, `[up to date]` exit 0 when they serialise | **the server**, in receive-pack's ref transaction, on the racing interleaving |
+| ref already at this commit before the push | `[up to date]`, exit 0 — the empty lease is not evaluated | this side, from the ref advertisement |
+| ref at another commit | `[rejected] (stale info)`, exit 1, ref unchanged → `REF_HOLDS_ANOTHER_COMMIT` | **this side**, from the ref advertisement, before any update is sent |
+
+The race is driven five times and what the suite pins is the invariant that holds
+in every interleaving — exactly one process reports `[new branch]`, the ref ends
+holding that commit, and there is exactly one such ref — plus that the loser's
+outcome is one of the two shapes above and never a third. Pinning *which* shape
+would be pinning the scheduler.
+
+Two mechanisms, and the slice measures both rather than calling them one thing.
+An earlier draft of this section called the `(stale info)` row "the server-side
+compare-and-swap"; a review measured that it is decided locally, and the row that
+really fences two concurrent publishers is the second one, which that draft
+reasoned about rather than measured. Both are now driven against a real bare
+repository in `tests/v4-13-…`.
 
 The third row is the honest residual. In the real ladder a ref already at this
 commit is answered `ALREADY_PUBLISHED` from the pre-reading and no push happens;
@@ -331,9 +353,25 @@ state, because there is no state to persist.
 
 ## 12. Durability
 
-Nothing new is written anywhere. No task state, no block ledger, no delivery
-record, no selection record, no publication record. The declaration is read and
-never written by this build.
+**The publication writes nothing.** No task state, no block ledger, no delivery
+record, no selection record, no publication record, no cached permission. Nothing
+about the grant survives the process, which is why the next invocation reads the
+declaration again rather than trusting one.
+
+**The invocation is a `--drive`, and that is a different question.** A drive can
+write the merge receipt, the post-merge verification history and the delivery
+conclusion; and when it verifies the merge commit it takes this repository's
+execution lease, makes a detached worktree, and runs the verification commands
+the repository's own profile declares. None of that is new, none of it is a forge
+mutation, and none of it takes a grant — `--drive` has done all of it since
+slices 8 to 11, with no grant at all. What is new is that it can now happen on an
+invocation nobody is watching, and the two cannot be separated because this grant
+requires the drive. That is `L-V4-13-9`, and it is the price of §5's narrowing:
+the drive is what makes the publication safe to perform unattended, and the drive
+brings its own local acts with it.
+
+An earlier draft of this section said "nothing new is written anywhere", which is
+true of the publication and false of the invocation. A review measured it.
 
 ## 13. Non-goals
 
@@ -369,8 +407,11 @@ that in advance.
 repository name differs from the delivery target's only in case answers
 `NOT_DECLARED`. Fail-closed, and it will look like a bug to whoever hits it.
 
-**`L-V4-13-4` — nothing is re-read between the ref pre-reading and the push.**
-Two subprocesses run in that window. Inherited from slice 5 and unchanged.
+**`L-V4-13-4` — nothing is re-read between the authority re-proof and the push.**
+Two local `git remote get-url` calls and one `ls-remote` — a network round trip
+with a 120-second ceiling — run in that window. Inherited from slice 5 and
+unchanged; what this slice changes is that the fact proved before the window is a
+permission and not only a subject.
 
 **`L-V4-13-5` — a publisher that created nothing can report `PUBLISHED`.**
 Measured, with the exact vector: a push of the same commit onto a ref that
@@ -402,7 +443,18 @@ everything else in this ADR (the act is create-only, the target is re-derived,
 the conclusion is read, one mutation per invocation), and stated rather than
 absorbed.
 
+**`L-V4-13-9` — the grant requires `--drive`, and a drive does more than
+publish.** See §12. Local records, the execution lease and the repository's own
+verification commands can all run on an invocation nobody is watching. Not new,
+not a forge mutation, not separable from the narrowing that makes the publication
+safe — and therefore stated rather than absorbed. An operator not prepared for
+their profile's verify commands to run unattended should not make the
+declaration.
+
 **Not carried, because it was measured false:** the concern that two racing
-publishers could both create the ref. Against a real bare repository with the
-exact vector, the second is rejected by the server-side compare-and-swap and the
-ref does not move.
+publishers could both create the ref. Against a real bare repository, driven five
+times, exactly one process reports `[new branch]` every time; the loser is
+refused by the server's own ref transaction when the two genuinely race and sees
+the ref already advertised when they serialise. The refusal of a push to an occupied ref at
+*another* commit is a different mechanism and is decided on this side, from the
+ref advertisement, before an update is sent — see §10.

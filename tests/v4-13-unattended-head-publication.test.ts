@@ -45,7 +45,7 @@
  */
 
 import { Command } from 'commander';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
@@ -71,12 +71,16 @@ import {
   permitsUnattendedHeadPublication,
   type DeliveryAutomationOutcome,
 } from '../src/deliver/delivery-automation.js';
+import { buildProgram } from '../src/cli/index.js';
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import { orchestratorHome } from '../src/config/paths.js';
 import {
   AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION,
   PUBLICATION_GRANT_REFUSALS,
   PUBLICATION_GRANT_REFUSAL_DETAIL,
+  DELIVERY_COMMAND_DESCRIPTION,
+  DRIVE_OPTION_DESCRIPTION,
+  SELECT_TASK_OPTION_DESCRIPTION,
   refusePublicationGrants,
   registerDeliveryCommand,
   type DeliveryCommandInput,
@@ -88,6 +92,7 @@ import {
   type HeadPublication,
 } from '../src/deliver/head-publication.js';
 import { DELIVERY_EFFECT_FLAG } from '../src/cli/delivery-driver.js';
+import { DRIVE_TRAILER, SELECTION_TRAILER } from '../src/cli/render-delivery-observation.js';
 import { EXIT_RUN_INPUT_UNUSABLE } from '../src/cli/run-exit-codes.js';
 import {
   DELIVERY_CONCLUSION_VERSION,
@@ -97,7 +102,7 @@ import {
 import { deliveryConclusionDirectory } from '../src/deliver/delivery-conclusion-store.js';
 import { taskRuntimeDirectory } from '../src/state/state-location.js';
 import { saveTaskState } from '../src/state/state-store.js';
-import { validReadyForPrState } from './fixtures.js';
+import { validCreatedState, validReadyForPrState } from './fixtures.js';
 
 /**
  * Source with comments blanked, so a sweep measures code rather than prose.
@@ -156,6 +161,27 @@ const DECLARED_TARGET = Object.freeze({
   result: Object.freeze({
     outcome: 'RESOLVED',
     target: Object.freeze({ provider: 'github', ...IDENTITY }),
+  }),
+});
+
+/** One open pull request at H, unmerged, on the declared base. */
+const OPEN_PULL = Object.freeze({
+  number: 13,
+  state: 'open',
+  draft: false,
+  merged: false,
+  merge_commit_sha: null,
+  head: Object.freeze({ sha: HEAD }),
+  base: Object.freeze({ ref: BASE }),
+});
+
+/** The same remote, naming a different repository. Nothing declares this one. */
+const MOVED_TARGET = Object.freeze({
+  declared: true,
+  remoteName: 'origin',
+  result: Object.freeze({
+    outcome: 'RESOLVED',
+    target: Object.freeze({ provider: 'github', ...IDENTITY, name: 'a-different-repository' }),
   }),
 });
 
@@ -246,6 +272,32 @@ function writeReadyState(root: string, taskId = TASK): void {
       workBranch: BRANCH,
       currentCommit: HEAD,
       basePinnedCommit: OTHER,
+      stateEnteredAt: AT,
+    }),
+    { repositoryRoot: root },
+  );
+  if (!saved.ok) throw new Error(`fixture state not saved: ${saved.code}`);
+}
+
+/**
+ * A task that exists, has a resolved head, and is NOT finished.
+ *
+ * Both halves matter. Without the head the *subject* step answers first and the
+ * case would measure that instead — driven and measured: a `CREATED` fixture
+ * with `currentCommit: null` answers `SUBJECT_NOT_ESTABLISHED`. With one, the
+ * subject resolves and the state step is the one that refuses.
+ */
+function writeNotReadyState(root: string, taskId: string): void {
+  const saved = saveTaskState(
+    validCreatedState({
+      taskId,
+      repositoryRoot: root,
+      worktreePath: join(root, taskId),
+      state: 'IMPLEMENTING',
+      baseBranch: BASE,
+      workBranch: `${BRANCH}-b`,
+      basePinnedCommit: OTHER,
+      currentCommit: HEAD,
       stateEnteredAt: AT,
     }),
     { repositoryRoot: root },
@@ -361,6 +413,19 @@ async function drive(
     readonly pushFails?: boolean;
     /** Runs on each resolve, so a case can move the world mid-ladder. */
     readonly onResolve?: (n: number) => void;
+    /**
+     * From this resolve onwards, the repository declares a DIFFERENT delivery
+     * target. The one way a case can make the identity move under the ladder,
+     * which is not something a file on disk can do.
+     */
+    readonly targetMovesAt?: number;
+    /**
+     * The forge answers with one open pull request at this head, whose only
+     * check succeeded. The one world in which the driver reaches the merge
+     * stage at all — and therefore the only one in which "this grant is not a
+     * merge authority" can be measured rather than assumed.
+     */
+    readonly openPullRequest?: boolean;
     readonly task?: string;
   } = {},
 ): Promise<Run> {
@@ -392,16 +457,32 @@ async function drive(
             gitCommonDir: join(root, '.git'),
             taskSource: { kind: 'MARKDOWN_DIRECTORY', path: TASK_DIR },
             verification: { phases: [] },
-            delivery: DECLARED_TARGET,
+            delivery:
+              over.targetMovesAt !== undefined && counts.resolves >= over.targetMovesAt
+                ? MOVED_TARGET
+                : DECLARED_TARGET,
           },
         };
       }) as never,
       runner: (async (_command: string, args: readonly string[]) => {
         counts.forge += 1;
-        const path = args.join(' ');
-        if (path.includes('/pulls')) return commandResult({ stdout: '[]' });
-        if (path.includes('/check-runs')) {
-          return commandResult({ stdout: JSON.stringify({ total_count: 0, check_runs: [] }) });
+        const path = args.find((a) => a.startsWith('repos/')) ?? args.join(' ');
+        if (/\/pulls\/\d+$/.test(path)) {
+          return over.openPullRequest === true
+            ? commandResult({ stdout: JSON.stringify(OPEN_PULL) })
+            : commandResult({ exitCode: 1, stdout: '{}' });
+        }
+        if (path.endsWith('/pulls')) {
+          return commandResult({ stdout: over.openPullRequest === true ? JSON.stringify([OPEN_PULL]) : '[]' });
+        }
+        if (path.endsWith('/check-runs')) {
+          return commandResult({
+            stdout: JSON.stringify(
+              over.openPullRequest === true
+                ? { total_count: 1, check_runs: [{ head_sha: HEAD, status: 'completed', conclusion: 'success' }] }
+                : { total_count: 0, check_runs: [] },
+            ),
+          });
         }
         return commandResult({ stdout: JSON.stringify({ sha: HEAD, state: 'success', total_count: 0, statuses: [] }) });
       }) as never,
@@ -574,6 +655,19 @@ describe('the declaration contract is closed, and every refusal fails closed', (
     expect(permission(home, { host: IDENTITY.host, owner: 'someone-else', name: IDENTITY.name })).toBe(
       'ALLOWED',
     );
+  });
+
+  it('compares the host too, and not only the owner and the name', () => {
+    // The declaration's own host is narrowed by the contract to the one forge
+    // this build supports, so a wrong-host *entry* cannot be written. The
+    // grading function is nonetheless total over any target it is handed — the
+    // subject side is a different validation — and a mutant that dropped the
+    // host comparison survived every other case in this file until this one.
+    const home = scratchHome();
+    declare(home, PERMITTING);
+    expect(permission(home, { ...IDENTITY, host: 'gitlab.example' })).toBe('NOT_DECLARED');
+    expect(permission(home, { ...IDENTITY, host: '' })).toBe('NOT_DECLARED');
+    expect(permission(home)).toBe('ALLOWED');
   });
 
   it('does not fold case, and says so by refusing', () => {
@@ -853,6 +947,44 @@ describe('the grant is refused on the command line before anything is resolved',
     expect(option?.long ?? '').not.toMatch(/force|unattended|adopt|takeover|steal/i);
   });
 
+  it('leaves no operator-facing text saying this act needs an operator', () => {
+    // Four surfaces name the grants for the three acts, and every one of them
+    // said `--attended` before this slice. Three were sentences a test already
+    // pinned; `DRIVE_TRAILER` had no wording pin at all, which is how it went
+    // stale unnoticed while it was printed on the very run that publishes.
+    //
+    // Pinned as a rule and not as a list, because a list goes stale at the next
+    // slice: what each of these has to say is that an act needs its own flag AND
+    // a grant naming that act, and none of them may say that presence is the
+    // only grant for the publication.
+    const RULE = 'flag and a grant that names that act';
+    for (const [what, text] of [
+      ['DRIVE_TRAILER', DRIVE_TRAILER],
+      ['SELECTION_TRAILER', SELECTION_TRAILER],
+      ['DRIVE_OPTION_DESCRIPTION', DRIVE_OPTION_DESCRIPTION],
+      ['SELECT_TASK_OPTION_DESCRIPTION', SELECT_TASK_OPTION_DESCRIPTION],
+    ] as const) {
+      expect(text, what).toContain(RULE);
+      expect(text, what).not.toContain('flag and --attended');
+    }
+    // And the front page, which names the acts one at a time.
+    const front = DELIVERY_COMMAND_DESCRIPTION;
+    expect(front).toContain('--publish-head and a grant for that act');
+    expect(front).toContain('--automatic-publish-head-only');
+    expect(front).not.toContain('With --publish-head and --attended');
+
+    // The top-level `agent-loop --help` page too. It is not exported, so it is
+    // read from the live program rather than from a constant — which is the
+    // stronger reading anyway: what an operator sees is what commander holds.
+    // It said "each needs `--attended` of its own" until this slice, and no test
+    // looked at it; `L-V4-12-8` records the last time that cost a false claim.
+    const help = buildProgram().description();
+    expect(help).toContain('--publish-head');
+    expect(help).toContain('--automatic-publish-head-only');
+    expect(help).not.toContain('each needs `--attended` of its own');
+    expect(help).toContain('a grant');
+  });
+
   it('says the load-bearing things in that sentence', () => {
     const text = AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION;
     expect(text).toContain('NOBODY is present');
@@ -893,6 +1025,24 @@ describe('the grant reaches one act and stops', () => {
     expect(run.counts.create).toBe(0);
   });
 
+  it('does not merge a green pull request it finds waiting', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home, PERMITTING);
+    // The one world in which the driver reaches the merge stage: the head is
+    // already on the remote, one open pull request has it, and its only check
+    // succeeded. An operator passing `--merge-pr --attended` here would merge.
+    const run = await drive(AUTOMATIC, root, home, { remoteRef: 'at-head', openPullRequest: true });
+    expect(run.counts.merge).toBe(0);
+    expect(run.counts.create).toBe(0);
+    expect(run.counts.publish).toBe(0);
+    // Positive control: the stage really was reached, which is what makes the
+    // zero above a measurement rather than a fixture that never got there.
+    expect(driven(run)).toBe('ATTENDED_AUTHORITY_REQUIRED');
+    expect(run.out).toContain('Next act     : MERGE_PULL_REQUEST');
+  });
+
   it('names both grants for the publication and one for each other act', () => {
     expect(DELIVERY_EFFECT_FLAG.PUBLISH_HEAD).toContain('--automatic-publish-head-only');
     expect(DELIVERY_EFFECT_FLAG.CREATE_PULL_REQUEST).not.toContain('automatic');
@@ -922,15 +1072,38 @@ describe('the subject and the target are established freshly, and bound exactly'
     expect(run.counts.publish).toBe(0);
   });
 
-  it('refuses a task that is not at READY_FOR_PR, before asking about authority', async () => {
+  it('refuses a task with no record, and says so about the work rather than the grant', async () => {
     const root = repositoryRoot();
     const home = scratchHome();
     declare(home, PERMITTING);
-    // No task state at all: the subject cannot be established, and the answer is
-    // about the work rather than about the grant.
+    // No task state at all. The driver's own floor answers, above the ladder, so
+    // this measures WHICH answer an unestablished subject gets under a
+    // permitting declaration — not the order of the ladder's own steps, which
+    // this run never reaches. The ordering inside the ladder is measured by the
+    // case below, which reaches it.
     const run = await drive(AUTOMATIC, root, home);
     expect(driven(run)).toBe('SUBJECT_NOT_ESTABLISHED');
+    expect(published(run)).toBeNull();
     expect(mutated(run)).toBe(0);
+  });
+
+  it('answers the work before the authority, inside the ladder that asks both', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    // A task record that exists and is not finished, named directly so the
+    // ladder is reached, and a declaration that would refuse. The ladder must
+    // answer about the work: an operator whose task is unfinished is not told to
+    // go and write a permission file.
+    writeReadyState(root);
+    writeNotReadyState(root, 'V4-13-B');
+    const run = await drive(['--publish-head'], root, home, { task: 'V4-13-B' });
+    expect(published(run)).toBe('TASK_NOT_READY');
+    expect(mutated(run)).toBe(0);
+    // Control: the same invocation on the finished task reaches the authority
+    // step instead, so the member above is the ladder choosing and not the only
+    // thing it can say.
+    const control = await drive(['--publish-head'], root, home);
+    expect(published(control)).toBe('OPERATOR_ABSENT');
   });
 
   it('does not publish for a delivery that is already concluded', async () => {
@@ -975,6 +1148,26 @@ describe('the subject and the target are established freshly, and bound exactly'
     expect(published(run)).toBe('AUTOMATIC_PUBLICATION_NOT_DECLARED');
     expect(run.counts.publish).toBe(0);
     expect(run.counts.resolves).toBe(last);
+  });
+
+  it('reports a changed repository as a changed subject, not as a missing permission', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    // The declaration covers the repository the ladder resolves. The recheck
+    // resolves a different one, which nothing declares — so the re-proof refuses
+    // there. The honest report is that the subject moved, and the permission
+    // sentence would be a true statement about the wrong event.
+    declare(home, PERMITTING);
+    const control = await drive(AUTOMATIC, root, home);
+    expect(published(control)).toBe('PUBLISHED');
+    const last = control.counts.resolves;
+
+    const again = repositoryRoot();
+    writeReadyState(again);
+    const run = await drive(AUTOMATIC, again, home, { targetMovesAt: last });
+    expect(published(run)).toBe('SUBJECT_CHANGED');
+    expect(run.counts.publish).toBe(0);
   });
 
   it('reports the withdrawal only when there was one', async () => {
@@ -1094,9 +1287,17 @@ describe('the automatic path writes nothing and waits for nothing', () => {
     }
   });
 
-  it('mints no other authority from the automatic path', () => {
+  it('keeps the declaration module clear of every authority artefact', () => {
+    // Deliberately NOT a claim about the automatic *path*: that path runs
+    // through `cli/delivery-steps.ts`, which calls all three mints and is the
+    // only module in `src/` that may — pinned in
+    // `tests/v4-05-delivery-head-publication.test.ts`, unchanged by this slice.
+    // What is measured here is that the module deciding the PERMISSION holds no
+    // authority artefact of its own, so the permission cannot become one by
+    // being read.
+    //
     // Scanned on the code alone, so the header may go on explaining which
-    // authority this declaration is *about* — which is the load-bearing part of
+    // authority this declaration is about — which is the load-bearing part of
     // the design and the first thing a reader needs.
     const code = codeOnly('src/deliver/delivery-automation.ts');
     expect(code).toContain('loadDeliveryAutomation');
@@ -1185,10 +1386,9 @@ describe('two unattended publishers cannot both create one ref', () => {
     expect(commit).toMatch(/^[0-9a-f]{40}$/);
     git(seed, 'remote', 'add', 'origin', remote);
 
-    // The exact vector, twice, sequentially — which is the *harder* case for
-    // this claim than two concurrent processes, because the second publisher
-    // here believed the ref was absent and is answered by a remote where it is
-    // not. Concurrency cannot produce an outcome this ordering does not.
+    // The exact vector. Driven three ways below, because two different
+    // mechanisms refuse a publication and calling them one thing is what an
+    // earlier draft of this file did.
     const push = (): { status: number; out: string } =>
       git(
         seed,
@@ -1214,8 +1414,10 @@ describe('two unattended publishers cannot both create one ref', () => {
     expect(first.status).toBe(0);
     expect(first.out).toContain('[new branch]');
 
-    // A different commit onto the ref the first one created: the server-side
-    // compare-and-swap refuses it, and the ref does not move.
+    // A different commit onto the ref the first one created. This one is
+    // refused **on this side**: git compares the ref the remote advertised
+    // against the empty lease and answers `(stale info)` without sending an
+    // update at all. The ref does not move.
     writeFileSync(join(seed, 'b.txt'), 'b\n', 'utf8');
     git(seed, 'add', 'b.txt');
     git(seed, 'commit', '--quiet', '-m', 'second');
@@ -1248,5 +1450,91 @@ describe('two unattended publishers cannot both create one ref', () => {
     const again = push();
     expect(again.status).toBe(0);
     expect(again.out).toContain('up to date');
+  });
+
+  it('lets exactly one of two SIMULTANEOUS creators win, whichever way the loser is refused', async () => {
+    // The case the sequential ordering above cannot produce, and the one the
+    // absence of an operator makes worth measuring: both publishers are told the
+    // ref is absent and both send an update.
+    //
+    // What is asserted is the invariant, not the interleaving. Two children on a
+    // loaded machine may genuinely race — and then the loser is refused by the
+    // server's own ref transaction — or they may serialise, and then the loser
+    // sees the ref already advertised at this commit and reports `up to date`.
+    // Both are safe and both are DIFFERENT from the outcome an operator would
+    // be told about, so the case requires the loser's outcome to be one of those
+    // two known shapes rather than pinning which. A third shape fails here.
+    const shapes = new Set<string>();
+    for (let round = 0; round < 5; round += 1) {
+      const lab = scratchRoot('ao-v413-race-');
+      const remote = join(lab, 'remote.git');
+      const seed = join(lab, 'seed');
+      mkdirSync(remote, { recursive: true });
+      mkdirSync(seed, { recursive: true });
+      expect(git(lab, 'init', '--bare', '--quiet', remote).status).toBe(0);
+      expect(git(seed, 'init', '--quiet', '-b', BASE, '.').status).toBe(0);
+      git(seed, 'config', 'user.email', 'fixture@example.invalid');
+      git(seed, 'config', 'user.name', 'Fixture');
+      writeFileSync(join(seed, 'a.txt'), `round ${String(round)}\n`, 'utf8');
+      git(seed, 'add', 'a.txt');
+      expect(git(seed, 'commit', '--quiet', '-m', 'base').status).toBe(0);
+      const commit = git(seed, 'rev-parse', 'HEAD').out.trim();
+
+      // Two clones of one object database, so both really can offer the commit
+      // and both are told the ref is absent, because it is.
+      const clones = [join(lab, 'c1'), join(lab, 'c2')];
+      for (const clone of clones) {
+        expect(git(lab, 'clone', '--quiet', seed, clone).status).toBe(0);
+        git(clone, 'remote', 'set-url', 'origin', remote);
+      }
+
+      const args = [
+        '-c', 'push.followTags=false',
+        '-c', 'push.recurseSubmodules=no',
+        '-c', 'push.gpgSign=false',
+        '-c', 'core.hooksPath=',
+        'push', '--porcelain', '--atomic', '--receive-pack=git-receive-pack',
+        `--force-with-lease=refs/heads/${BRANCH}:`,
+        '--', 'origin', `${commit}:refs/heads/${BRANCH}`,
+      ];
+      const results = await Promise.all(
+        clones.map(
+          (cwd) =>
+            new Promise<{ code: number; out: string }>((done) => {
+              const child = spawn('git', args, { cwd });
+              let out = '';
+              child.stdout.on('data', (d: Buffer) => (out += d.toString()));
+              child.stderr.on('data', (d: Buffer) => (out += d.toString()));
+              child.on('close', (code) => done({ code: code ?? 1, out }));
+            }),
+        ),
+      );
+
+      // Exactly one process created the ref. This is the property that matters
+      // and it holds in every interleaving.
+      const created = results.filter((r) => r.out.includes('[new branch]'));
+      expect(created, results.map((r) => r.out).join('\n---\n')).toHaveLength(1);
+      expect(created[0]?.code).toBe(0);
+
+      const loser = results.find((r) => !r.out.includes('[new branch]'));
+      const out = loser?.out ?? '';
+      const shape =
+        loser?.code === 0 && out.includes('up to date')
+          ? 'SERIALISED_UP_TO_DATE'
+          : loser?.code !== 0 && /rejected|cannot lock ref/.test(out)
+            ? 'RACED_REJECTED_BY_SERVER'
+            : `UNKNOWN: code=${String(loser?.code)} ${out}`;
+      expect(shape.startsWith('UNKNOWN'), shape).toBe(false);
+      shapes.add(shape);
+
+      // And whichever it was: one ref, at this commit, and nothing moved.
+      expect(git(lab, '--git-dir', remote, 'rev-parse', `refs/heads/${BRANCH}`).out.trim()).toBe(commit);
+      expect(
+        git(lab, '--git-dir', remote, 'for-each-ref', `refs/heads/${BRANCH}`).out.trim().split('\n'),
+      ).toHaveLength(1);
+    }
+    // A positive control on the loop: at least one round produced a loser at
+    // all, so the assertions above ran against something.
+    expect(shapes.size).toBeGreaterThan(0);
   });
 });

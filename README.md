@@ -8897,10 +8897,13 @@ fencing.
 `--publish-head` alone does nothing; it requires a grant that names this act.
 `--attended` is one, in the same shape `release` uses; V4 slice 13 added a
 second, `--automatic-publish-head-only`, which is the operator's standing
-declaration rather than their presence. When one of the two is given and the
-task is at `READY_FOR_PR`, one opaque `HeadPublicationGrant` is minted, bound to
-`{host, owner, name, remoteName, ref, commit}` — the same artefact from either
-route, because what it authorises is a ref at a commit and not a reason.
+declaration rather than their presence. When the ladder's authority step answers
+`AUTHORISED` — which `--attended` does on its own, and which the automatic grant
+does only where the operator's declaration grades this repository `ALLOWED` —
+and the task is at `READY_FOR_PR`, one opaque `HeadPublicationGrant` is minted,
+bound to `{host, owner, name, remoteName, ref, commit}`. It is the same artefact
+from either route, because what it authorises is a ref at a commit and not a
+reason; what differs is what has to be true before the mint is reached.
 
 It is **one-shot, structurally**: there is no accessor that reads what it
 authorises without spending it in the same call, so a grant that could be read
@@ -10590,11 +10593,18 @@ At most one forge mutation is attempted per invocation, unchanged.
 ### The permission is re-proved at the last moment
 
 The declaration is read again, against a freshly resolved delivery identity,
-inside the `recheck` that runs immediately before the remote is contacted. An
-operator who withdrew it while the ladder was running is answered there, with
-nothing read from the remote and nothing attempted. That it is the *last* read is
-measured: the suite establishes how many repository resolutions the path makes
-and removes the declaration on the last one.
+inside the `recheck` — the last thing this build **reads from disk** before the
+remote is contacted. An operator who withdrew it while the ladder was running is
+answered there, with nothing read from the remote and nothing attempted. That it
+is the last such read is measured: the suite establishes how many repository
+resolutions the path makes and removes the declaration on the last one.
+
+"Last read from disk" and "immediately before the push" are not the same
+sentence, and the second one would be false. Between the re-proof and the push
+git is asked for the remote's two URLs and then for the ref itself — the second
+of those is a network round trip with a two-minute ceiling. The permission is
+therefore proved before that window and not inside it, exactly as the subject is.
+`L-V4-13-4`.
 
 Nothing is stored between invocations. There is no "publication pending" state,
 no cached permission and no grant that survives a process, so the next invocation
@@ -10610,13 +10620,48 @@ Against a real bare repository, with the exact vector this build sends:
 | ref at another commit | `[rejected] (stale info)`, exit 1, ref unmoved |
 | ref already at this commit | `[up to date]`, exit 0 — the lease is not evaluated |
 
-The second row is the fence, and it is the server's: two publishers cannot both
-create the ref, whichever order they arrive in. The third is `L-V4-13-5` below.
+Two different mechanisms sit in that table, and the slice measures both rather
+than calling them one thing. The `(stale info)` row is decided **on this side**:
+git compares the ref the remote advertised against the empty lease and refuses
+before it sends an update. The row that fences two *concurrent* publishers is a
+different one, and it is the server's — receive-pack's own ref transaction:
 
-### `READY_FOR_PR` is still terminal
+| Case | Measured |
+| --- | --- |
+| two publishers create the same ref at once | exactly one `[new branch]` exit 0, every time; the loser is refused by the server's ref transaction when they genuinely race and reports `up to date` when they serialise |
 
-Nothing here writes task state, touches the block ledger, or gives `READY_FOR_PR`
-an outgoing transition. The automatic path writes nothing at all.
+Both are measured against a real bare repository in
+`tests/v4-13-unattended-head-publication.test.ts`. The race is driven five times,
+and what is pinned is the invariant that holds in every interleaving — exactly one
+`[new branch]`, one ref, at that commit — plus that the loser's outcome is one of
+the two shapes above and never a third. Pinning which shape would be pinning the
+scheduler. The `up to date` row is
+`L-V4-13-5` below.
+
+### What an unattended invocation can do besides publish
+
+The publication itself writes nothing: no task state, no block-ledger entry, no
+delivery record, no cached permission. Nothing about the grant is durable, and
+the next invocation reads the declaration again.
+
+The *invocation* is a `--drive`, and a drive does more than publish. This is not
+new and it is not this grant's doing — `delivery --drive` has done all of it with
+no grant at all since V4 slices 8 to 11 — but under this flag it happens with
+nobody present, so it is stated here rather than left to be discovered:
+
+- it can write the merge receipt, the post-merge verification history and the
+  delivery conclusion beside the task, up to three records in one invocation;
+- when it verifies the merge commit it takes this repository's execution lease,
+  makes a detached Git worktree beside the repository, and **runs the
+  verification commands the repository's own profile declares.**
+
+None of that is a forge mutation and none of it needs a grant today. An operator
+who is not prepared for their profile's verify commands to run unattended should
+not declare the repository publishable that way — the two arrive together,
+because the flag requires `--drive`. `L-V4-13-9`.
+
+`READY_FOR_PR` stays terminal: nothing here writes task state, touches the block
+ledger, or gives it an outgoing transition.
 
 ### Carried forward from V4 slice 13, deliberately
 
@@ -10633,9 +10678,12 @@ an outgoing transition. The automatic path writes nothing at all.
   and a repository name; this build does not, so a differently-capitalised entry
   answers `NOT_DECLARED`. Fail-closed, and it will look like a bug to whoever
   hits it.
-- **L-V4-13-4 — nothing is re-read between the ref pre-reading and the push.**
-  Two subprocesses run in that window. Inherited from slice 5, unchanged, and the
-  same window an attended publication has.
+- **L-V4-13-4 — nothing is re-read between the authority re-proof and the
+  push.** Two local `git remote get-url` calls and one `ls-remote` — a network
+  round trip with a 120-second ceiling — run in that window, and nothing is
+  consulted inside it. Inherited from slice 5 unchanged, and the same window an
+  attended publication has; what this slice changes is that the fact proved
+  before it is a permission rather than only a subject.
 - **L-V4-13-5 — a publisher that created nothing can report `PUBLISHED`.**
   Measured: a push of the same commit onto a ref that already holds it exits 0
   and reports `up to date` without the lease being evaluated. In the ladder that
@@ -10652,6 +10700,15 @@ an outgoing transition. The automatic path writes nothing at all.
   `mayPerform` answers `false` for an act with no grant, so the driver settles
   `ATTENDED_AUTHORITY_REQUIRED` and the ladder is never called. The member is
   reached by naming `--publish-head` directly.
+- **L-V4-13-9 — the flag requires `--drive`, and a drive does more than
+  publish.** Under this grant a run can write the merge receipt, the verification
+  history and the conclusion, take the execution lease, make a detached worktree
+  and run the repository profile's own verification commands, all with nobody
+  present. None of that is new and none of it is a forge mutation — `--drive`
+  has done it with no grant at all since slice 9 — but it now happens on an
+  invocation nobody is watching, and the two cannot be separated because the
+  grant requires the drive. Measured only for the publishing shape; the other
+  shapes are `tests/v4-11-…`'s.
 - **L-V4-13-8 — no live product dogfood was possible.** Unchanged from
   `L-V4-12-9`: this repository has no orchestrated task and no runtime state, so
   no legitimate delivery could exercise the automatic path end to end. What is

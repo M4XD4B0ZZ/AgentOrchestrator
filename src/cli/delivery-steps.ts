@@ -366,14 +366,27 @@ export async function performPublication(
       // than the one the ladder resolved a moment ago. `recheck` is the last
       // thing this build reads before the remote is contacted, so this is where
       // a permission that stopped standing is caught: an operator who edited
-      // the declaration, or a task that was re-pinned onto a different delivery
-      // target, is answered here with nothing sent.
+      // the declaration is answered here with nothing sent.
       //
       // It is a second reading and not a cached one. On the attended path it is
       // the same constant-time arm the ladder took and reads no file at all.
       const still = resolvePublicationAuthority(options, rebuilt.subject, seams);
       if (still !== 'AUTHORISED') {
-        withdrawn = still;
+        // …and the refusal is only *reported as* a withdrawal when this pass
+        // resolved the same repository the ladder did. A task re-pinned onto
+        // another delivery target also fails this grading — correctly, because
+        // nobody declared anything about the repository now in front of it —
+        // but the honest answer there is that the subject moved, which is what
+        // `publishDeliveryHead` will say on its own. Reporting "this operator
+        // declared nothing about this repository" for a run whose repository
+        // changed underneath it would be a true sentence about the wrong event.
+        if (
+          rebuilt.subject.host === subject.subject.host &&
+          rebuilt.subject.owner === subject.subject.owner &&
+          rebuilt.subject.name === subject.subject.name
+        ) {
+          withdrawn = still;
+        }
         return null;
       }
       return Object.freeze({
