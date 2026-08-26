@@ -399,10 +399,18 @@ measurement of the CI model above is a read.
 
 ## The counter-proof, and why fifteen mutants survive
 
-67 mutants against a baseline the lab proves green before applying anything —
-a red baseline reports every mutant killed and measures nothing. 52 killed, 15
+69 mutants against a baseline the lab proves green before applying anything —
+a red baseline reports every mutant killed and measures nothing. 54 killed, 15
 survived, **0 harness failures**, and every survivor is classified rather than
 counted.
+
+Two of those mutants exist because the final review found the authority half of
+this slice delivered *unmeasured*: `M61` deletes the exit-code override that
+stops a run exiting nominal when it cannot prove it gave the lease back, and
+`M62` deletes the `leaseTaken` guard that keeps the override off a run which
+never took one. Both were survivable until the test whose name claimed to measure
+them acquired a failing arm — the lease document removed from under the run
+through the Git seam — and both die now.
 
 Nothing here is an unkilled defect. Each survivor is a guard that is unreachable
 while something else stands, and five of them are **demonstrated** to be pairs by
