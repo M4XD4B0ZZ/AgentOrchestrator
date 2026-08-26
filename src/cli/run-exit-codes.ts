@@ -29,6 +29,7 @@
  */
 
 import type { BlockStopReason } from '../block/block-ledger.js';
+import type { DeliveryConclusionRecordCode } from '../deliver/delivery-conclusion-store.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
 import type { ReleaseOutcome } from '../run/release-workspace.js';
 import type { LeaseReleaseResult } from '../lease/execution-lease.js';
@@ -481,4 +482,81 @@ export function exitCodeWithLeaseRelease(
   release: LeaseReleaseResult | null,
 ): CliExitCode {
   return release !== null && release.code === 'RELEASED' ? primary : EXIT_RUN_NEEDS_OPERATOR;
+}
+
+/**
+ * The exit code a run that **concluded a delivery** may keep, given what the
+ * conclusion store did with it.
+ *
+ * `delivery`'s exit code otherwise answers one question — was the observation
+ * settled — and `--record`, `--reconcile-merge` and `--verify-merge` all report
+ * their store code in the report and leave `$?` alone. Every *refusal* of the
+ * conclusion ladder keeps that convention, because a refusal is an **answer**.
+ *
+ * This is the one departure, and it is narrow: the ladder decided the delivery
+ * was concluded and the claim is not on disk afterwards. That run has told a
+ * caller yes about something that did not happen, and `--conclude-delivery` is
+ * the one flag whose whole purpose is to answer "is this delivery concluded?".
+ *
+ * The two codes the conclusion is durable under return `null`, meaning "keep
+ * the primary": `ALREADY_CONCLUDED` filed nothing and the claim is on disk all
+ * the same, which is why this is graded on durability rather than on `recorded`.
+ *
+ * The rest are graded **one by one**, against this file's own definitions,
+ * rather than collapsed onto one number. A review measured the first version
+ * doing exactly that and named two codes it mis-classified: an honest
+ * concurrent `--verify-merge` that moves the history is `EVIDENCE_MOVED`, where
+ * the next invocation may well succeed — the definition of code 4. The
+ * identical condition is already graded in this file: `START_TASK_EXIT_CODES`
+ * gives `RUNTIME_IGNORE_UNDETERMINED` a 4 and `RUNTIME_NOT_IGNORED` a 2, three
+ * lines apart, with the comment "Git could not answer … the next invocation may
+ * well succeed: the definition of code 4". (An earlier version of this
+ * paragraph said "twelve lines above", which a review measured as pointing at
+ * this table's own entry rather than at that one.)
+ * "Does not exit nominal" does not require "needs an operator".
+ */
+const CONCLUSION_RECORD_EXIT_CODES = Object.freeze({
+  // On disk. Nothing to override — the primary answers.
+  CONCLUSION_RECORDED: null,
+  ALREADY_CONCLUDED: null,
+
+  // Nothing is wrong and the next invocation may well succeed.
+  EVIDENCE_MOVED: EXIT_RUN_REFUSED,
+  RUNTIME_IGNORE_UNDETERMINED: EXIT_RUN_REFUSED,
+
+  // The input situation is unusable and is fixed by editing the repository.
+  RUNTIME_PATH_NOT_IGNORED: EXIT_RUN_INPUT_UNUSABLE,
+  LOCATION_UNSUITABLE: EXIT_RUN_INPUT_UNUSABLE,
+  RECORD_TOO_LARGE: EXIT_RUN_INPUT_UNUSABLE,
+
+  // Durable state an operator has to look at before anything else happens: a
+  // second contradictory answer, a document this build cannot read, a receipt
+  // this build would not accept its own record from, or a write that got far
+  // enough to leave a directory and a staging file behind.
+  CONFLICTING_CONCLUSION: EXIT_RUN_NEEDS_OPERATOR,
+  EXISTING_CONCLUSION_UNREADABLE: EXIT_RUN_NEEDS_OPERATOR,
+  RECORD_CONTRACT_VIOLATION: EXIT_RUN_NEEDS_OPERATOR,
+  DIRECTORY_CREATE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  WRITE_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+
+  // Something is wrong inside the tool. Both are floors: the command builds the
+  // proof and the expectations from one reading of one receipt, so neither can
+  // be reached by an operator doing anything at all.
+  CONCLUSION_NOT_PROVEN: EXIT_RUN_UNEXPECTED,
+  SUBJECT_MISMATCH: EXIT_RUN_UNEXPECTED,
+}) satisfies Record<DeliveryConclusionRecordCode, CliExitCode | null>;
+
+/**
+ * The override for one conclusion record code, or `null` to keep the primary.
+ *
+ * Total by type over {@link DeliveryConclusionRecordCode}, so a new store code
+ * fails the build here until somebody grades it — the discipline
+ * `block/block-conclusion.ts` states for its own maps. The grades themselves
+ * are pinned by a hand-written table in the slice's test file, which is
+ * deliberately not derived from this one.
+ */
+export function exitCodeForConclusionRecord(
+  code: DeliveryConclusionRecordCode,
+): CliExitCode | null {
+  return CONCLUSION_RECORD_EXIT_CODES[code];
 }

@@ -1598,10 +1598,13 @@ describe('the delivery command merges only when asked, and only when it may', ()
     // the two additions is a forge mutation — one reads github.com and writes
     // locally, the other contacts nothing — and that is measured by the
     // effect-boundary cases in `tests/v4-08-…` and `tests/v4-09-…` rather than
-    // inferred from this list.
+    // inferred from this list. V4 slice 10 added `--conclude-delivery`, whose
+    // own boundary — no forge, no Git history, no lease, no task state — is
+    // measured in `tests/v4-10-…`.
     expect(longs).toEqual(
       [
         '--attended',
+        '--conclude-delivery',
         '--create-pr',
         '--decide',
         '--merge-pr',

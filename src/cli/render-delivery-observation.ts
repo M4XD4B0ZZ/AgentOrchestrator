@@ -62,6 +62,12 @@ import type { MergeReconciliationRecordResult } from '../deliver/merge-reconcili
 import { renderLeaseRelease } from './render-lease.js';
 import type { LeaseReleaseResult } from '../lease/execution-lease.js';
 import { VERIFICATION_EVENT_SENTENCE } from '../deliver/post-merge-verification.js';
+import { CONCLUSION_EVENT_SENTENCE } from '../deliver/delivery-conclusion.js';
+import type { DeliveryConclusionRecordResult } from '../deliver/delivery-conclusion-store.js';
+import {
+  DELIVERY_CONCLUSION_DETAIL,
+  type DeliveryConclusionResult,
+} from '../deliver/conclude-delivery.js';
 import type { PostMergeVerificationRecordResult } from '../deliver/post-merge-verification-store.js';
 import { postMergeVerificationFactsOf } from '../deliver/post-merge-verification-proof.js';
 import {
@@ -332,6 +338,35 @@ export const VERIFICATION_TRAILER =
   'and not this build\'s.';
 
 /**
+ * What concluding a delivery is answerable for, and the four claims it is not.
+ *
+ * The shortest trailer on this command, because the act is the smallest: three
+ * reads and one write. It exists all the same, for the reason
+ * {@link RECONCILIATION_TRAILER} exists — a run that put bytes on disk may not
+ * close with the bare word "Read-only." — and because the word "concluded" is
+ * the most over-readable one this command prints.
+ *
+ * The lease clause is a flat negative rather than a hedge, unlike the
+ * verification trailer's: this act takes no lease at all, so there is no
+ * outcome for it to be wrong about.
+ */
+export const CONCLUSION_TRAILER =
+  'Read-only on the forge, and not necessarily read-only here. Concluding a delivery\n' +
+  'contacted github.com not at all, opened no network connection of its own, and read no Git\n' +
+  'history — it asked nothing about the base branch, about reachability, or about whether the\n' +
+  'merge still stands. What it can read is four documents beside this task: any conclusion\n' +
+  'already recorded, the merge receipt, the verification history and the task state; the\n' +
+  'ladder stops at the first one that answers, so a refusal has read fewer. What it can write\n' +
+  'is one directory, one conclusion beside the task state, and a staging file beside that\n' +
+  'conclusion which a crash can leave behind. The Completion and Record lines above say what\n' +
+  'this run did. It takes no execution lease, starts no agent and runs no verification, and\n' +
+  'the only process it can start is git check-ignore, twice, immediately before it writes —\n' +
+  'a run that refused starts none at all. It writes\n' +
+  'no task state and no block-ledger entry, so the task is in exactly the state it was in\n' +
+  'before this run: READY_FOR_PR is terminal, and the task\'s current commit is still the\n' +
+  'implementation head rather than the merge commit.';
+
+/**
  * One merge reading as one phrase.
  *
  * `MERGED` prints the resulting commit, because the whole ladder turns on
@@ -509,6 +544,26 @@ export interface DeliveryObservationView {
   readonly reconciliation?: ReconciliationView | null;
   /** What `--verify-merge` amounted to, or `null` when it was not asked for. */
   readonly verification?: VerificationView | null;
+  /** What `--conclude-delivery` amounted to, or `null` when it was not asked for. */
+  readonly deliveryConclusion?: DeliveryConclusionView | null;
+}
+
+/**
+ * What a delivery conclusion established, and what it wrote.
+ *
+ * Two fields because they are two questions, and a run can answer them
+ * differently: the join may hold while the local write refuses. A single word
+ * for both would hide exactly the case an operator has to act on — and that
+ * case is the one the exit-code rule in `delivery-command.ts` exists for.
+ *
+ * `record` is `null` when no write was reached, which is every outcome short of
+ * `DELIVERY_CONCLUDED`. That is a different thing from a write that was reached
+ * and declined to touch the path.
+ */
+export interface DeliveryConclusionView {
+  readonly result: DeliveryConclusionResult;
+  /** The store's verdict, or `null` when the store was never reached. */
+  readonly record: DeliveryConclusionRecordResult | null;
 }
 
 /**
@@ -968,6 +1023,66 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     }
   }
 
+  const deliveryConclusion = view.deliveryConclusion ?? null;
+  if (deliveryConclusion !== null) {
+    const c = deliveryConclusion.result;
+    lines.push(
+      '',
+      // Two labelled lines, never one, for the reason the reconciliation and
+      // verification blocks give: `Completion` is what the join came to, and
+      // `Record` is what this machine now holds. They can differ, and the exit
+      // code depends on the second.
+      //
+      // Neither label is `Delivery` or `Conclusion`, and that is not a style
+      // choice. This report already prints `Delivery     :` for the resolved
+      // delivery TARGET and `Conclusion   :` for the observation conclusion, so
+      // either would have put two different facts under one label in one
+      // report. A test caught it before anybody read the output.
+      `Completion   : ${c.outcome}`,
+      `  ${DELIVERY_CONCLUSION_DETAIL[c.outcome]}`,
+      // Both halves of the join, printed on every outcome that has them. An
+      // operator reading `VERIFICATION_NOT_THIS_DELIVERY` needs to see which
+      // two objects disagreed, and one of them alone does not say.
+      `  Merge commit : ${c.mergeCommit ?? 'none was established'}`,
+      `  Delivered    : ${c.subjectCommit ?? 'none was established'}`,
+      `  Profile      : ${c.profileDigest ?? 'not resolved'}`,
+    );
+    // The profile the STORED conclusion was drawn under, where one was read.
+    //
+    // Printed beside the current digest rather than instead of it, because on
+    // `ALREADY_CONCLUDED` they can differ and the difference is the whole
+    // story: a conclusion drawn under a contract this repository no longer
+    // declares. A review measured the earlier version printing only the current
+    // one there, so an operator could not tell that from a conclusion drawn
+    // under the profile in front of them.
+    if (c.concludedUnderProfile !== null) {
+      lines.push(
+        `  Concluded on : ${c.concludedUnderProfile}` +
+          (c.concludedUnderProfile === c.profileDigest ? '  (the same profile)' : '  (a DIFFERENT profile)'),
+      );
+    }
+    // The verdict that stood, where one was found. Printed for a failure as
+    // well as a pass: `VERIFICATION_NOT_PASSING` is an answer about the code,
+    // and naming it is what distinguishes it from a run that never happened.
+    if (c.standingOutcome !== null) {
+      lines.push(`  Verified as  : ${c.standingOutcome}`);
+    }
+    lines.push(
+      `  Record       : ${
+        deliveryConclusion.record === null
+          ? 'not written — no attempt was made to record'
+          : `${deliveryConclusion.record.code}  (write: ${deliveryConclusion.record.writeAttempt})`
+      }`,
+    );
+    // The sentence that keeps the judgement apart from every standing it is
+    // not. Printed for the two outcomes that carry a durable claim, and for no
+    // others: a reader told `RECEIPT_ABSENT` has not been given a conclusion to
+    // over-read.
+    if (c.outcome === 'DELIVERY_CONCLUDED' || c.outcome === 'ALREADY_CONCLUDED') {
+      lines.push('', CONCLUSION_EVENT_SENTENCE);
+    }
+  }
+
   // Derived from what happened, not from which flags were passed — and from
   // whether the act was *attempted*, not from whether it read anything. A
   // review found the previous rule printing "Not read-only." over runs that
@@ -1027,6 +1142,23 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   // a checkout, whatever its verdict came to — so every one of those runs owes
   // the disclosure below, including the ones that recorded nothing.
   const verificationTouchedMachine = view.verification?.leaseTaken === true;
+  // Whether this run put bytes on disk through a conclusion.
+  //
+  // The reconciliation's rule, not the verification's, because the act is the
+  // reconciliation's shape: no lease, no subprocess of its own, one file. Gated
+  // on an ATTEMPT rather than on success for the reason recorded there — by the
+  // time the replace can fail, the directory exists and a staging file has been
+  // put beside the target — and a run that refused, or answered
+  // `ALREADY_CONCLUDED` without touching the path, really is read-only here and
+  // says so.
+  const conclusionTouchedDisk =
+    view.deliveryConclusion?.record != null &&
+    view.deliveryConclusion.record.writeAttempt !== 'NOT_ATTEMPTED';
+  // The two ways this command can stop being read-only *on this machine*
+  // without attempting anything on a forge, as one predicate. It gates the
+  // read-only wording only; which trailer is owed is still decided by each act
+  // separately, below.
+  const touchedThisMachine = verificationTouchedMachine || conclusionTouchedDisk;
   const trailers: string[] = [];
   if (
     !publicationAttempted &&
@@ -1060,7 +1192,7 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
     // found `delivery --verify-merge` closing with "Read-only. No forge was
     // contacted, no task state was written, and nothing was delivered." after
     // doing all three, because this block had no term for verification at all.
-    if (!verificationTouchedMachine) {
+    if (!touchedThisMachine) {
       trailers.push(contacted ? CONTACTED_TRAILER : NOT_CONTACTED_TRAILER);
     } else if (contacted) {
       trailers.push(OBSERVED_AND_CHANGED_TRAILER);
@@ -1106,6 +1238,17 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
   if (verificationTouchedMachine) {
     if (trailers.length > 0) trailers.push('');
     trailers.push(VERIFICATION_TRAILER);
+  }
+  // The same discipline again, and gated on the flag rather than on the write.
+  //
+  // Unlike the reconciliation's and the verification's, this trailer's own text
+  // is about what was *read* as much as what was written — "read no Git
+  // history" is the claim an operator most needs on a run that refused — so it
+  // is owed by every run that asked for a conclusion, including the ones that
+  // wrote nothing. `RECONCILIATION_TRAILER` is gated the same way, one line up.
+  if (view.deliveryConclusion != null) {
+    if (trailers.length > 0) trailers.push('');
+    trailers.push(CONCLUSION_TRAILER);
   }
   lines.push('', ...trailers, '');
 

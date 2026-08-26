@@ -9724,6 +9724,301 @@ nothing is overwritten, and when it is full the next attempt is refused with
   new, and it is named here because it is invisible until a host hands back a
   short path.
 
+## Concluding the delivery (V4 slice 10)
+
+`delivery --conclude-delivery` joins the two records the slices before it wrote
+— the merge receipt and the post-merge verification history — and records that
+this task's delivery is concluded, beside the task state:
+
+```
+.agent-orchestrator/runtime/delivery-conclusion/<taskId>.json
+```
+
+It reads up to four documents beside the task — any conclusion already recorded,
+the merge receipt, the verification history and the task state — and writes one.
+The only process this act starts is `git check-ignore`, twice, before it writes;
+the invocation that reaches it has already resolved the repository, which starts
+Git children of its own before any flag is examined. It opens no network
+connection of its own, contacts no forge, takes no execution lease, starts no
+agent, runs no verification, reads no Git **history**, and writes neither task
+state nor block ledger.
+
+The sentence it carries is:
+
+> At time T, this task's delivery was concluded: its implementation head **H**
+> was merged as pull request **#N** on that target, producing merge commit
+> **M**, and **M** stood at a pass under verification profile **P**.
+
+### A commit claim and a delivery claim are different things
+
+Slice 9's record is about a **commit**: *at time T, commit M completed profile P
+with result R.* That is true of M whichever task, receipt or pull request it came
+from.
+
+A **delivery** claim needs the two documents joined, and nothing before this
+slice joined them. `--verify-merge` compares the history's merge commit against
+the receipt's on its convergence path and nothing else; the verification store
+compares the rest — the implementation head, the target, the pull-request number
+— only on a write path a converged run never reaches. So a history filed under a
+task, recording a genuine pass of a genuine commit, could name a **different pull
+request, a different fork or a different implementation head** and look correct
+to every reader this build had.
+
+Six fields are compared here, and a mismatch in any of them is
+`VERIFICATION_NOT_THIS_DELIVERY` — a result no earlier code path could produce.
+
+### The four propositions, and the two that are required
+
+| | proposition | required |
+| --- | --- | --- |
+| **P1** | M has a `VERIFIED_PASS` standing under the profile resolved now | **yes** |
+| **P2** | M is reachable from the configured delivery base | **no** |
+| **P3** | the receipt still reconciles *this task* to M | **yes** |
+| **P4** | the delivery may be concluded | `P1 ∧ P3` |
+
+### Why base membership is not asked
+
+Four measurements, not a preference.
+
+**Ancestry is not a claim about content, in either direction.** Two real fixtures
+answer identically on the predicate a membership gate would be built on: a base
+that advanced linearly past M, and a base where M was **reverted** and its whole
+contribution deleted — both exit 0 from `merge-base --is-ancestor`. And the
+converse: a base carrying M's tree byte-identically under a squashed object name
+exits **1**. A third fixture — revert, then revert the revert — answers 0
+throughout. Ancestry is invariant under content churn, which is exactly why it
+carries no content information.
+
+A *content* command does separate the first two — `git diff` and `git ls-tree`
+both do, and the test file asserts the reverted fixture's file is gone from the
+base tree. The claim is about the graph predicate, not about every Git command.
+
+*No Git predicate measured here proves "M's changes are still present in base."*
+`git cherry` and `patch-id` were not measured and nothing is claimed about them.
+
+**The predicate can answer "no" when the truth is "yes", silently.** In a
+repository shallow enough that the walk stops before M — object present, path
+truncated — `--is-ancestor` exits **1**, the genuine-no code, with **empty
+stderr**. Ground truth in the origin is exit 0. A tag named `main` beside branch
+`main` makes the bare name resolve to the **tag**, and whether that yields a wrong
+1 depends on where the tag points — measured: exit 1 with the tag at an older
+commit, exit 0 with it at the branch tip, and `warning: refname 'main' is
+ambiguous` on stderr in both. Neither of this build's Git runners surfaces stderr,
+so neither the warning nor the difference reaches it.
+
+**The base AO can see is local, and AO does not fetch.** `TaskState.baseBranch`
+comes from the profile's `repository.defaultBranch` and is existence-checked as
+`refs/heads/<name>`. There is no `git fetch` in `src/`. Measured on this repository while the
+slice was written, and verifiable from its own reflog: pull request #64 merged
+producing `ff1cf0a` at 07:13:56 UTC; `git reflog show origin/main` records the
+fetch that brought the object in, and `git reflog show main` records the
+fast-forward of the **local** branch — the ref `baseBranch` resolves to — as a
+separate, later entry at 07:14:32 UTC. In those 36 seconds the object was in the
+clone and `refs/heads/main` did not contain it, so a base gate would have
+answered exit **1**, the genuine-no code, for a merge that had just succeeded.
+Nothing obliges an operator to fast-forward at all.
+
+**Slice 9's record already disclaims the property in writing.** It lists
+"currently on the base branch" and "currently reachable from the base" among the
+things a pass does not say. Adding it here would contradict the document it is
+drawn from.
+
+So a conclusion means **the delivery happened and the commit it produced was
+verified**. It does not mean the change is still there, and there is no field in
+which such a claim could hide. Five real-Git fixtures pin that the answer is
+unchanged when the base advances, when the merge is reverted, when the base is
+force-moved off it, when the merge object is absent from the repository entirely,
+and when the base branch does not exist — each with a control asserting Git
+really does answer differently there.
+
+### The standing verdict, and why any pass is not enough
+
+`--verify-merge` asks "is a re-run pointless?", for which *any* pass under the
+digest is a yes. Completion asks a bigger question — "is the standing verdict a
+pass?" — and answers it differently:
+
+- only attempts under **this** profile count. A verdict under another contract
+  answers another question, and that is the only kind of reason this build
+  accepts for setting a result aside. Age is still never one;
+- `VERIFICATION_NOT_ESTABLISHED` attempts are **skipped**. Nothing was learned
+  about the code, and a machine that could not answer is not the machine saying
+  no — counting one would let a busy workstation un-conclude a delivery;
+- of the rest, the **last** stands. `attempts` is append-only and ordered oldest
+  first, so array position is the order; no instant is compared, because the
+  clock can step backwards.
+
+The two rules differ on exactly one shape: a pass followed by a fail for the same
+profile. That is unreachable through this build's own product path — a pass
+converges `--verify-merge` before it runs anything — and becomes reachable the
+moment a forced re-verification exists (`L-V4-09-2`). Using the looser rule would
+have baked in the assumption that one never will.
+
+### A concluded delivery stays concluded
+
+`ALREADY_CONCLUDED` is decided **before every document the ladder reads** —
+before the merge receipt as well as before any verification question. Two
+readings come earlier and belong to the caller: the delivery target and the task
+state, which together *are* the subject. Without them there is no "this task's
+current delivery" for a conclusion to be about, so those two refuse first and the
+conclusion is not consulted. A review found the earlier wording — "before every
+other document" — false for exactly that reason, and it is `L-V4-10-14`. Edit the profile,
+make the history unreadable, delete the receipt, let a newer build rewrite either
+of them: the conclusion still stands. It is a statement about an instant that has
+passed, and re-deriving it is not what makes it true.
+
+That ordering was wrong in the first version of this slice, and a review measured
+the cost: with the receipt asked first, deleting the receipt made a task whose
+conclusion sat readable on disk answer `RECEIPT_ABSENT`, never mentioning the
+conclusion. Five fixtures now pin the corrected order, each with a control
+asserting the same repository answered `ALREADY_CONCLUDED` before its source was
+broken.
+
+Asking the conclusion first is possible because the record carries its own
+identity — the implementation head and the delivery target — which is exactly
+what the receipt gate compares, through one shared predicate. The price is that
+the ladder cannot compare the merge commit or the pull request there, because
+only the receipt carries those; the report prints the **stored** merge commit and
+the **stored** profile digest beside the one resolved now, so a discrepancy is in
+front of the operator. That is `L-V4-10-11`.
+
+That is also why it is a record rather than a derivation. A derived answer would
+flip from "concluded" to "cannot tell" the moment its evidence stopped being
+readable.
+
+### The evidence is re-read before the write
+
+The assessment reads three documents and then writes. The last thing before the
+write is a re-read of all three, compared against what the proof says was
+assessed; anything that moved is `EVIDENCE_MOVED` and nothing is written.
+
+It catches an honest case as well as a hostile one: the verification history is
+append-only, so a concurrent `--verify-merge` moves it without anybody tampering.
+The refusal says the evidence moved and claims nothing about intent.
+
+It is a *narrowing*, not mutual exclusion. The window between the comparison and
+the atomic replace cannot be closed without a lock, and a lock is a service.
+
+### `READY_FOR_PR` is still terminal, and there is no `COMPLETE` state
+
+Not taste, and not deferred: refused on three grounds this build already
+enforces.
+
+1. A settled block-ledger entry's `evidenceRevision` is a digest over the **raw
+   bytes** of the task-state file. Any post-delivery write — a transition, or a
+   same-state checkpoint — falsifies every settled entry for that task, and the
+   ledger has no repair path.
+2. Every `TaskState` mutation goes through `advanceTaskState`, which needs the
+   repository execution lease. Taking a repository-wide writer slot to file a
+   judgement would make bookkeeping contend with runs of other tasks.
+3. `recordAgentInterruption` applies no phase guard to a terminal state — only
+   `canTransition` refuses it. One outgoing edge re-opens a path to
+   `BLOCKED_USAGE_LIMIT`, from which an **unattended** resume into `IMPLEMENTING`
+   can be granted on an already-merged task.
+
+So after a conclusion: the task is still `READY_FOR_PR`, its `currentCommit` is
+still **H** — a different commit from **M** — and a settled ledger entry whose
+`resultCommit` is H still proves. All three are pinned against a real task-state
+file and a really settled entry, byte for byte, with negative controls beside
+each.
+
+### The exit code, and its one exception
+
+Every refusal keeps this command's convention: the exit code answers whether the
+observation settled, and the report carries the refusal. A refusal is an answer.
+
+One shape departs. If the ladder concluded and the conclusion is **not on disk**
+afterwards, the run does not exit nominal. This is the flag whose whole purpose
+is to answer "is this delivery concluded?", and a run that decided yes and wrote
+nothing would otherwise tell a caller yes about something that did not happen.
+
+*Which* code it becomes is decided one store code at a time, against this
+repository's own definitions: 4 where nothing is wrong and the next invocation
+may succeed (`EVIDENCE_MOVED`, `RUNTIME_IGNORE_UNDETERMINED`), 2 for a
+repository defect fixed by editing it (`RUNTIME_PATH_NOT_IGNORED` and its two
+siblings), 3 for durable state an operator has to look at, and 1 for the two
+floors the command cannot reach. The first version collapsed all twelve onto 3,
+and a review measured two of them mis-classified against tables twelve lines
+away in the same file.
+
+Note what this is **not**: "a refusal exits nominal". The exit code answers
+whether the observation settled, so a subject that could not be established is
+already a 2, with or without this flag. What is true is the narrower sentence —
+no ladder refusal *changes* the exit code.
+
+### Carried forward from V4 slice 10, deliberately
+
+- **L-V4-10-1 — the conclusion is not authority, and nothing reads it.** No code
+  in `src/` consumes the record. It is an audit trail and the end of the delivery
+  lifecycle, not a permission for a later step.
+- **L-V4-10-2 — the record is not evidence of authorship.** The binding is a
+  keyless SHA-256 over public values and the function is exported, so anyone who
+  can write into the runtime directory can write a conclusion that reads back
+  clean. Inherited from `L-V4-08-2` rather than new; the opaque mint is an
+  in-process product-code provenance boundary and nothing more.
+- **L-V4-10-3 — a conclusion drawn from a forged pass is a conclusion drawn from
+  a forged pass.** There is no way to tell one from the other without a signed
+  record, so none is claimed.
+- **L-V4-10-4 — base membership is never established.** Deliberate and measured.
+  A reader who needs "the change is still on the branch" must ask Git themselves;
+  AO will not answer it and does not pretend to.
+- **L-V4-10-5 — read-before-write is not a transaction.** Two invocations racing
+  on one task can both read `ABSENT` and both write; the second rename wins. Both
+  would have written the same judgement about the same delivery, so the bytes
+  differ only in `concludedAt`. The freshness gate narrows the window; it does
+  not close it.
+- **L-V4-10-6 — `CONCLUSION_CONFLICT` and `CONCLUSION_UNREADABLE` are terminal.**
+  No repair path, no supersession. Clearing one means deleting a file by hand,
+  which is the out-of-band editing the binding exists to detect.
+- **L-V4-10-7 — the byte budget cannot refuse a run that went through the
+  ladder.** Measured over the shortest, production and longest ISO-8601 instants
+  both records admit: this record is **189 to 230** bytes larger than the merge
+  receipt for the same root, and the receipt is read first — so a receipt small
+  enough to be read at all leaves this record at most **8,420** bytes against a
+  16,384 budget. Two earlier drafts said "exactly 200" and "8,392"; both were
+  measured false by review. The budget is not unreachable in general — a caller
+  assembling a request directly can cross it — and both gates are driven.
+- **L-V4-10-8 — the profile digest identifies the contract, not the toolchain.**
+  Inherited unchanged from `L-V4-09-4`, and it bounds what "under profile P"
+  means here too.
+- **L-V4-10-9 — the exit code carries the verdict in one direction only.** No
+  ladder refusal *changes* it, as on every other flag here — which is not the
+  same as "a refusal exits nominal", a sentence an earlier draft carried and a
+  review measured false. The only override this slice adds is a conclusion that
+  could not be made durable.
+- **L-V4-10-11 — `ALREADY_CONCLUDED` cannot compare the merge commit.** The
+  ladder reads the conclusion before the receipt, so it compares the
+  implementation head and the target and not `baseRef` or the pull-request
+  number, which only the receipt carries. A hand-written conclusion naming a
+  different merge for the same head reads as already concluded; the report prints
+  the stored merge commit, so the discrepancy is visible, and this build does not
+  flag it. Slice 8's receipt is written-once and never superseded, so the shape
+  does not arise through the product.
+- **L-V4-10-12 — the byte budget is unreachable through the *ladder* only.** An
+  earlier draft called the write side unreachable "through any callable path". A
+  review refuted it by measurement: the location derivation requires only that
+  the root be absolute, and the size is judged long before the directory is
+  created, so a request assembled directly reaches `RECORD_TOO_LARGE` with no
+  injected seam. The true claim is narrower — no run that goes through the ladder
+  reaches it, because the receipt read first has the smaller budget. Both gates
+  are driven, and both mutants die.
+- **L-V4-10-14 — a conclusion is not consulted when there is no subject.** The
+  delivery target and the task state are read by the command, before the ladder,
+  and together they ARE the subject: without them there is no "this task's
+  current delivery" for a conclusion to be about. So a task whose delivery target
+  stops resolving, or whose state file becomes unreadable, is refused with
+  `SUBJECT_NOT_ESTABLISHED` and its conclusion is never mentioned. A review found
+  an earlier draft claiming the conclusion was read "before every other
+  document", which is false of exactly those two. Driven by a test.
+- **L-V4-10-13 — the "not a file" guard is not observable.** Measured on Windows,
+  opening a directory succeeds and reports size 0, so without the guard the empty
+  read decodes to `MALFORMED` anyway. It is kept as a statement of intent, and
+  named here rather than defended as load-bearing.
+- **L-V4-10-10 — no live product dogfood was possible.** Unchanged from
+  `L-V4-09-7`: the subject must come from a legitimate merge receipt, and this
+  repository has none — every pull request here was merged by a human under the
+  repository's own policy, from no AO task.
+
+
 ## Not implemented yet
 
 Still missing, deliberately: unattended operation; owned process containment on
@@ -9731,15 +10026,20 @@ POSIX; and any *autonomous* product-side PR/CI/merge decision. V4 slices 5 to 7
 gave this build three forge acts — publish a branch, open a pull request, merge
 one — and every one of them requires an operator to be present for that
 invocation. None of them decides that a merge is warranted; they perform an act
-an operator asked for, on the exact commit that invocation observed. Slice 8 adds
-no fourth act: it reads, and writes locally.
+an operator asked for, on the exact commit that invocation observed. Slices 8, 9
+and 10 add no fourth act: they read, and write locally.
 
-`READY_FOR_PR` remains terminal. It stays terminal even after a merge, so a
-merged pull request and a task still reported as `READY_FOR_PR` are the expected
-pair. What slice 8 changes is that the *delivery* side is now answerable: the
-merge and its resulting commit are durable, beside the task rather than inside
-it. The post-merge verification of that commit and `COMPLETE` are still not
-built.
+`READY_FOR_PR` remains terminal, and there is **no `COMPLETE` task state**. It
+stays terminal even after a merge, after that merge commit has been verified, and
+after the delivery has been concluded — so a merged pull request, a recorded
+pass, a recorded conclusion and a task still reported as `READY_FOR_PR` are the
+expected set. What slices 8 to 10 change is that the *delivery* side is now
+answerable, beside the task rather than inside it: the merge and its resulting
+commit are durable (slice 8), that exact commit's verification verdict is durable
+(slice 9), and the judgement that the two describe one concluded delivery is
+durable (slice 10). None of that is a task-state transition, and the three
+measured reasons it must not become one are in
+[Concluding the delivery (V4 slice 10)](#concluding-the-delivery-v4-slice-10).
 
 V4 slices 1 to 4 do not shorten that list. They add the four things every item
 on it needs first. Slice 1: a repository can **declare** its delivery target, and
@@ -9777,7 +10077,9 @@ no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-
 [Publishing the delivery head (V4 slice 5)](#publishing-the-delivery-head-v4-slice-5),
 [Creating the pull request (V4 slice 6)](#creating-the-pull-request-v4-slice-6),
 [Merging the pull request (V4 slice 7)](#merging-the-pull-request-v4-slice-7),
-[Reconciling the merge (V4 slice 8)](#reconciling-the-merge-v4-slice-8)
+[Reconciling the merge (V4 slice 8)](#reconciling-the-merge-v4-slice-8),
+[Verifying the merge commit (V4 slice 9)](#verifying-the-merge-commit-v4-slice-9),
+[Concluding the delivery (V4 slice 10)](#concluding-the-delivery-v4-slice-10)
 and [`docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md`](docs/decisions/2026-08-23-adr-autonomous-delivery-m1.md).
 
 Containment evidence in the lease and the recovery contract are **no longer** on
