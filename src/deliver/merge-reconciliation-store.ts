@@ -215,13 +215,6 @@ export type MergeReconciliationRecordCode =
   | 'WRITE_FAILED';
 
 /**
- * Whether an attempt to put bytes on the target path was made at all.
- *
- * Reported separately from the code, and named for the question an operator
- * actually asks after a repeat run: *did this touch anything?* A code alone
- * would answer it only by being memorised, and there are thirteen of them.
- */
-/**
  * Whether the receipt is on disk after the call this code came from.
  *
  * A total table rather than a comparison, for the reason

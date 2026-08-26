@@ -605,7 +605,11 @@ const DRIVE_EXIT_CODES = Object.freeze({
 
   // A person has to look before anything else happens: a record that cannot be
   // read, a verdict that says the code failed, a machine that could not answer,
-  // a commit nothing has succeeded on, or an act nobody authorised.
+  // a commit nothing has succeeded on, or a state somebody put this delivery in.
+  //
+  // "An act nobody authorised" used to be on that list and is not: a review
+  // moved `ATTENDED_AUTHORITY_REQUIRED` to 4, where this file grades every
+  // sibling authority refusal, and the clause went with it.
   DELIVERY_EVIDENCE_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
   CONCLUSION_NOT_ATTESTED: EXIT_RUN_NEEDS_OPERATOR,
   VERIFICATION_FAILED: EXIT_RUN_NEEDS_OPERATOR,
@@ -656,21 +660,6 @@ const DRIVE_EXIT_CODES = Object.freeze({
   CHECKS_PENDING: EXIT_RUN_CALL_AGAIN,
 }) satisfies Record<DeliveryDrive, CliExitCode>;
 
-/**
- * The exit code for one driver result.
- *
- * `record` is the conclusion store's code when the driver reached the store,
- * and `null` otherwise. It is consulted for exactly one member, for the reason
- * {@link exitCodeForConclusionRecord} exists: a run that decided a delivery was
- * concluded and could not leave the claim on disk has told a caller yes about
- * something that did not happen, and *which* code that becomes is one store
- * code at a time rather than a single number chosen here.
- *
- * The execution lease is **not** applied here. It is applied by the caller, last
- * and over this, because `run-exit-codes.ts` states it as a rule about
- * authority: no primary code is exempt, and this is a primary code like any
- * other.
- */
 /**
  * The override for one merge-receipt record code, or `null` to keep the primary.
  *

@@ -442,7 +442,8 @@ export const ATTENDED_OPTION_DESCRIPTION =
 
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
-  'and — only with --observe — ask github.com two read-only questions about that commit: ' +
+  'and — with --observe, or with --drive when the delivery has got that far — ask github.com ' +
+  'two read-only questions about that commit: ' +
   'is there exactly one open pull request whose head is this commit, and what is the check ' +
   'state of this commit. With --record it stores that ' +
   'observation as a historical record beside the task state; without it, nothing is written. ' +
@@ -463,15 +464,15 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   "With --conclude-delivery it joins that receipt to that verification history and stores the " +
   'judgement that this delivery is concluded, reading no network and no Git history. ' +
   'With --drive it works out which of those acts this delivery still needs and runs those, in ' +
-  'that order, stopping at the first condition it cannot cross; it adds no act, each act that ' +
-  'reaches github.com still needs its own flag and --attended, and at most one of them is ' +
-  'attempted per invocation. --drive does not combine with the flags that name the acts one at ' +
+  'that order, stopping at the first condition it cannot cross; it adds no act, each of the ' +
+  'three that CHANGE github.com still needs its own flag and --attended, and at most one of ' +
+  'them is attempted per invocation. It reads github.com without any of them. --drive does not combine with the flags that name the acts one at ' +
   'a time. ' +
   'Contacting a forge is never implicit: with no flag that says ' +
   'it contacts github.com, nothing is read from a network. It writes no task state at all, and ' +
-  'the records it writes are written by the flags that ask for them — --record, ' +
-  '--reconcile-merge, --verify-merge and --conclude-delivery write one each; --drive writes ' +
-  'whichever of those the delivery still needs, which in one invocation can be three. ' +
+  'every flag here that writes a record — --record, --reconcile-merge, --verify-merge and ' +
+  '--conclude-delivery — writes exactly one beside the task; --drive writes whichever of those ' +
+  'the delivery still needs, which in one invocation can be three. ' +
   'It never updates, closes, ' +
   'reopens, reviews, comments on or labels a pull request, and never enables an auto-merge.';
 
@@ -603,8 +604,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           }),
         );
         // The driver's own member decides the code, graded one member at a time
-        // by `run-exit-codes.ts`, with the conclusion store's grade substituted
-        // for the one member that needs it.
+        // by `run-exit-codes.ts`.
         // Both store codes, because the driver has two members whose grade is
         // the store's own rather than a number chosen for them. Passed as named
         // fields rather than one value: two closed vocabularies behind one

@@ -477,6 +477,8 @@ async function drive(
     readonly publicationLeavesRefAbsent?: boolean;
     /** The remote cannot be read at all, so nothing about the head settles. */
     readonly remoteUnreadable?: boolean;
+    /** The remote fetches from one URL and pushes to another. */
+    readonly remoteUrlsDiverge?: boolean;
     /** What Git answers about the runtime path, which decides every write. */
     readonly ignored?: 'IGNORED' | 'NOT_IGNORED' | 'UNDETERMINED';
     /**
@@ -576,7 +578,14 @@ async function drive(
         // The two local questions: which URLs this remote carries. Answered
         // with one URL for both, so they agree.
         if (joined.includes('remote get-url')) {
-          return commandResult({ stdout: 'https://github.com/M4XD4B0ZZ/AgentOrchestrator.git' });
+          // Two questions, both local, both answered. Under this knob they
+          // answer differently, which is `REMOTE_URLS_DIVERGE` — and the point
+          // of the case is that nothing was asked of github.com to learn it.
+          const url =
+            over.remoteUrlsDiverge === true && joined.includes('--push')
+              ? 'https://github.com/someone-else/AgentOrchestrator.git'
+              : 'https://github.com/M4XD4B0ZZ/AgentOrchestrator.git';
+          return commandResult({ stdout: url });
         }
         // The remote reading, before and after. `--exit-code` turns absence
         // into status 2, which is the distinction the act is built on.
@@ -2242,6 +2251,77 @@ describe('an act that refuses without sending is read member by member', () => {
       expect(statSync(receiptPath(repo.root)).isFile()).toBe(true);
       expect(r.out).toContain('Position     : VERIFICATION_ABSENT');
       expect(r.out).not.toContain('Position     : RECEIPT_ABSENT');
+    } finally {
+      repo.dispose();
+    }
+  });
+});
+
+/* ══════ 16. two flags that could not have helped — Review 2's findings ═══ */
+
+describe('the driver never names an act that could not fix the condition', () => {
+  it('does not send an operator to --publish-head for a ref holding another commit', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      // The delivery ref is on the remote at a commit that is not this head.
+      // Publishing is create-only and answers that world `REF_HOLDS_ANOTHER_COMMIT`
+      // — moving a ref is a destructive act this build does not perform, and no
+      // flag makes it perform one. So naming the flag would send an operator to
+      // a refusal.
+      const r = await drive(['--drive', '--create-pr', '--attended'], repo, {
+        forge: { atHead: [] },
+        remoteRef: 'other',
+      });
+      expect(driven(r)).toBe('HUMAN_DECISION_REQUIRED');
+      expect(r.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
+      expect(r.out).not.toContain('Authorise by : --publish-head --attended');
+      expect(r.counts.create).toBe(0);
+      // …and the same world reached with the publication authorised answers the
+      // same member, rather than two members for one world.
+      const withPublish = await drive(
+        ['--drive', '--publish-head', '--create-pr', '--attended'],
+        repo,
+        { forge: { atHead: [] }, remoteRef: 'other' },
+      );
+      expect(driven(withPublish)).toBe('HUMAN_DECISION_REQUIRED');
+      expect(withPublish.counts.publish).toBe(0);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('does not call a local answer a reading github.com could not give', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      // `git remote get-url --all` and `--push --all` both answer, and they
+      // answer differently. Nothing was asked of github.com, and a person put
+      // that configuration there.
+      const r = await drive(['--drive', '--publish-head', '--create-pr', '--attended'], repo, {
+        forge: { atHead: [] },
+        remoteUrlsDiverge: true,
+      });
+      expect(driven(r)).toBe('HUMAN_DECISION_REQUIRED');
+      expect(r.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
+      expect(r.out).toContain('REMOTE_URLS_DIVERGE');
+      // Never the sentence that says a reading could not be taken from a host
+      // this run did not ask anything.
+      expect(r.out).not.toContain('Drive        : FORGE_STATE_UNKNOWN');
+      expect(r.counts.publish).toBe(0);
+      expect(r.counts.create).toBe(0);
+
+      // And the creation asks the same two local questions on its own account,
+      // so the same world reached without the publication authorised has to
+      // answer the same member rather than a different one.
+      const creationOnly = await drive(['--drive', '--create-pr', '--attended'], repo, {
+        forge: { atHead: [] },
+        remoteUrlsDiverge: true,
+        remoteRef: 'at-head',
+      });
+      expect(driven(creationOnly)).toBe('HUMAN_DECISION_REQUIRED');
+      expect(creationOnly.out).not.toContain('Drive        : FORGE_STATE_UNKNOWN');
+      expect(creationOnly.counts.create).toBe(0);
     } finally {
       repo.dispose();
     }

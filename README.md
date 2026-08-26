@@ -9023,9 +9023,9 @@ a different commit.
   delivery signal is what these slices keep refusing to give — but a mutating
   command whose failure is prose-only is worth carrying explicitly. **Narrowed
   to this flag by V4 slice 11**: under `--drive` the code grades the driver's own
-  member, so a publication that was attempted exits 5 and one whose head could
-  not be established exits 4. The sentence was unqualified until a review
-  measured it against the new flag.
+  member instead, so the same worlds can exit 0, 2, 3, 4 or 5. Which one is a
+  question for that member's own grade and not for this entry — an earlier
+  version of this sentence enumerated two codes and a review measured both wrong.
 - **L-V4-05-9 — a work branch becomes a ref through a character class, not
   through `isValidBranchName`.** Git's own `check-ref-format` refuses what that
   class admits, so the outcome is a wasted push and an undiagnosed refusal. What
@@ -9206,8 +9206,8 @@ ADR: [`docs/decisions/2026-08-24-adr-pull-request-creation.md`](docs/decisions/2
   about a file rather than about the product.
 - **L-V4-06-8 — under `--create-pr`, every creation outcome exits 0.** The exit
   code still answers only the observation question. **Narrowed to this flag by
-  V4 slice 11**, which grades its own member: the same worlds reached through
-  `--drive` exit 5, 4 or 3.
+  V4 slice 11**, which grades its own member instead: the same worlds reached
+  through `--drive` can exit 2, 3, 4 or 5.
 - **L-V4-06-9 — draft is now read but still not decided on.** Slice 4's decision
   does not consider it, so a positive delivery decision can still be true of a
   draft pull request.
@@ -9518,7 +9518,9 @@ separate record, redesigning block evidence, and the existing companion pattern
   `state/runtime-ignored.ts` owns `STAGING_PROBE_SUFFIX` and does not export it,
   so slice 3's store and this one each hard-code `tmp-probe`. Three spellings of
   one fact that have to agree, with nothing making them.
-- **L-V4-08-8 — the exit code never reports this flag.** It is computed from the
+- **L-V4-08-8 — under `--reconcile-merge`, the exit code never reports this
+  flag.** Narrowed to this flag by V4 slice 11, which grades its own member.
+  It is computed from the
   observation conclusion, and the reconciliation result never reaches it, so a
   refused write — including a conflicting receipt — is not visible in `$?`. It
   names no number deliberately: two earlier versions of this sentence did, and
@@ -9690,7 +9692,9 @@ nothing is overwritten, and when it is full the next attempt is refused with
   request #63 was merged by a human under the repository's own policy, from no AO
   task. Fabricating a `TaskState` and a receipt to enable a demonstration would
   manufacture exactly the evidence this slice exists to require.
-- **L-V4-09-8 — the exit code does not report the verification verdict.** It is
+- **L-V4-09-8 — under `--verify-merge`, the exit code does not report the
+  verification verdict.** Narrowed to this flag by V4 slice 11, which grades its
+  own member. It is
   computed from the observation conclusion, so a `VERIFIED_FAIL`, a refused write
   and a leaked workspace are none of them visible in `$?`. Slice 7's convention
   rather than a new one, stated on the flag's own surface. The **one** thing that
@@ -10056,9 +10060,11 @@ There is no new durable record, and no `DeliveryState`. Every invocation
 re-derives its position from the task and the documents already beside it.
 
 The oracle is `concludeDeliveryForTask` — slice 10's ladder — and it can be,
-because of three properties it already had: it is **pure** (its whole seam list
-is a clock), it **writes nothing**, and its refusals **name the stage that is
-missing**. `RECEIPT_ABSENT` means no merge has been reconciled;
+because of three properties it already had: its whole seam list is **a clock**
+(no forge seam, no Git seam, no verification seam — so asking it contacts
+nothing, starts no process and takes no lease, though it does read up to three
+documents from disk), it **writes nothing**, and its refusals **name the stage
+that is missing**. `RECEIPT_ABSENT` means no merge has been reconciled;
 `VERIFICATION_ABSENT` and `PROFILE_NOT_VERIFIED` mean **M** has no standing
 verdict under this profile; `VERIFICATION_NOT_PASSING` means the repository
 answered and said no. Each is exactly one existing act away.
@@ -10217,13 +10223,18 @@ conclusion and a task still reported as `READY_FOR_PR` remain the expected set.
   them.** The driver runs the gate once and stops. Nothing bounds how many
   invocations an operator makes, and the history's own ceiling
   (`ATTEMPT_HISTORY_FULL`, `L-V4-09-6`) is still the only limit.
-- **L-V4-11-12 — the publication's last arm is a floor.** With nothing
-  attempted, a publication that is not `ALREADY_PUBLISHED` and is not one of the
-  three named refusals can only be a work branch this build will not turn into a
-  ref or an authority the mint would not grant — and the creation ladder one step
-  later answers both with the same member. Deleting the arm changes no reachable
-  outcome; it stays because relying on a sibling's gate is not a guarantee this
-  branch makes. Measured: the mutant survives.
+- **L-V4-11-12 — the publication's last arm is a floor only when the creation is
+  authorised too.** With nothing attempted, a publication that is not
+  `ALREADY_PUBLISHED` and not one of the named refusals can only be a work branch
+  this build will not turn into a ref, or an authority the mint would not grant.
+  With `--create-pr --attended` also given, the creation refuses both one step
+  later with the same member, and deleting the arm changes nothing. **Without it,
+  deleting the arm changes the answer** — control reaches the authority branch and
+  tells an operator to pass a flag for a delivery whose work branch this build
+  will not send at all. The counter-proof does not reach that shape, which is why
+  the mutant survives and the arm stays. An earlier version of this entry claimed
+  the arm changed no reachable outcome, and a review measured the shape that
+  separates them.
 - **L-V4-11-7 — the "gate could not answer" arm is a floor.** Removing it
   changes no reachable outcome: the fallback after the re-derivation produces the
   same member. It is kept so the classification is explicit, and so a run that

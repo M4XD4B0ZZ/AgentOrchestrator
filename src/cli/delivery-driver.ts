@@ -251,6 +251,11 @@ export const DELIVERY_DRIVES = [
    * {@link DELIVERY_DRIVES}' conclusion counterpart is.
    */
   'RECEIPT_NOT_DURABLE',
+  /**
+   * The forge did not answer both of the observation's questions, so nothing
+   * was established to decide from. Slice 2's `OBSERVATION_INCOMPLETE`, one
+   * level up.
+   */
   'OBSERVATION_UNSETTLED',
   /**
    * The local subject moved while the forge was being asked, or could not be
@@ -765,11 +770,12 @@ export async function driveDelivery(
       return settle('FORGE_STATE_UNKNOWN', stage);
     }
     if (merged === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
-    // `PULL_REQUEST_NOT_OPEN`, `DRAFT_REFUSED`, `WRONG_BASE`, `HEAD_MOVED` and
-    // `ALREADY_MERGED` are all states somebody put this delivery in — and the
-    // last of them is a race with the reconciliation two steps above, which
-    // said otherwise a moment ago. Two readings that disagree is not a state to
-    // act on either.
+    // What is left is states somebody put this delivery in —
+    // `PULL_REQUEST_NOT_OPEN`, `DRAFT_REFUSED`, `WRONG_BASE`, `HEAD_MOVED`,
+    // `POSTCONDITION_MISMATCH` and `ALREADY_MERGED` — plus the four floors this
+    // path cannot reach. The last of those is a race with the reconciliation
+    // two steps above, which said otherwise a moment ago, and two readings that
+    // disagree is not a state to act on either.
     return settle('HUMAN_DECISION_REQUIRED', stage);
   }
 
@@ -802,9 +808,19 @@ export async function driveDelivery(
     if (publication.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
     const published = publication.result.publication;
     if (published === 'REF_HOLDS_ANOTHER_COMMIT') return settle('HUMAN_DECISION_REQUIRED', stage);
-    if (published === 'REMOTE_STATE_UNKNOWN' || published === 'REMOTE_URLS_DIVERGE') {
+    if (published === 'REMOTE_STATE_UNKNOWN') {
       // A reading that could not be taken, not a head that is not there.
       return settle('FORGE_STATE_UNKNOWN', stage);
+    }
+    if (published === 'REMOTE_URLS_DIVERGE') {
+      // **Not** a reading that failed. `readUrlAgreement` is two local
+      // `git remote get-url` calls and both answered; what they answered is
+      // that this remote fetches from one place and pushes to another. A person
+      // configured that, no invocation clears it, and nothing was contacted —
+      // a review measured the earlier version telling an operator that a
+      // reading "could not be taken from github.com" when github.com had not
+      // been asked anything.
+      return settle('HUMAN_DECISION_REQUIRED', stage);
     }
     if (published === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
     if (published !== 'ALREADY_PUBLISHED') {
@@ -813,12 +829,15 @@ export async function driveDelivery(
       // and an authority the mint would not grant. No invocation clears either,
       // so neither is "ask again".
       //
-      // **A floor, and measured so.** Both of those reach the creation ladder's
-      // own subject refusal one step later, and this function answers that with
-      // the same member — so a counter-proof that deletes this arm survives.
-      // It stays because the creation refusing on the publication's behalf is
-      // another function's wiring, and a guarantee that depends on where a
-      // sibling's gate sits is not one this branch can make.
+      // A floor **only when `--create-pr --attended` was given too**, and a
+      // review measured the difference: with the creation authorised, both
+      // reach its own subject refusal one step later and this function answers
+      // that with the same member. Without it, control falls to the authority
+      // branch below and answers `ATTENDED_AUTHORITY_REQUIRED` — telling an
+      // operator to pass a flag for a delivery whose work branch this build
+      // will not send at all. So the arm is load-bearing on the shape a
+      // counter-proof does not reach, which is why the mutant survives and the
+      // arm stays.
       return settle('SUBJECT_NOT_ESTABLISHED', stage);
     }
   }
@@ -844,10 +863,20 @@ export async function driveDelivery(
   );
   if (creation.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
   const created = creation.result.creation;
-  if (created === 'HEAD_NOT_PUBLISHED' || created === 'HEAD_SHA_MISMATCH') {
-    // The branch is not on the remote at this commit, and this invocation was
-    // not allowed to put it there — or was, and could not.
+  if (created === 'HEAD_NOT_PUBLISHED') {
+    // The branch is not on the remote at all, and publishing it is the act that
+    // puts it there.
     return settle('ATTENDED_AUTHORITY_REQUIRED', stage, 'PUBLISH_HEAD');
+  }
+  if (created === 'HEAD_SHA_MISMATCH') {
+    // The ref is there and holds another commit. **Publishing cannot fix
+    // that** — the publication is create-only and answers the same world with
+    // `REF_HOLDS_ANOTHER_COMMIT`, because moving a ref is a destructive act
+    // this build does not perform and no flag makes it perform one. A review
+    // measured the earlier version answering both with "pass --publish-head
+    // --attended", which sends an operator to a flag that would refuse, and
+    // gave one world two different members depending on which flags were named.
+    return settle('HUMAN_DECISION_REQUIRED', stage);
   }
   if (
     created === 'PRIOR_PULL_REQUEST_CLOSED' ||
@@ -865,12 +894,13 @@ export async function driveDelivery(
   // "ask again". Both are conditions the driver already has an exact member for.
   if (created === 'PULL_REQUEST_AMBIGUOUS') return settle('PULL_REQUEST_AMBIGUOUS', stage);
   if (created === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
-  if (
-    created === 'REMOTE_STATE_UNKNOWN' ||
-    created === 'PULL_REQUEST_STATE_UNKNOWN' ||
-    created === 'REMOTE_URLS_DIVERGE'
-  ) {
+  if (created === 'REMOTE_STATE_UNKNOWN' || created === 'PULL_REQUEST_STATE_UNKNOWN') {
     return settle('FORGE_STATE_UNKNOWN', stage);
+  }
+  if (created === 'REMOTE_URLS_DIVERGE') {
+    // Local, answered, and a person's configuration — the same argument the
+    // publication path makes about the same reading.
+    return settle('HUMAN_DECISION_REQUIRED', stage);
   }
   if (created === 'SUBJECT_NOT_ESTABLISHED' || created === 'AUTHORITY_REFUSED') {
     // The intended pull request is not one the mint will describe: the work
@@ -879,9 +909,9 @@ export async function driveDelivery(
     return settle('SUBJECT_NOT_ESTABLISHED', stage);
   }
   // What is left is `CREATION_REFUSED` — the request was sent nowhere because
-  // the ladder would not send it — and the two floors this path cannot reach,
-  // `OPERATOR_ABSENT` and `DECISION_NOT_ESTABLISHED`, both of which are decided
-  // above. In every one of them the sentence is true: no open pull request has
-  // this head.
+  // the ladder would not send it — and the three floors this path cannot reach,
+  // `OPERATOR_ABSENT`, `TASK_NOT_READY` and `DECISION_NOT_ESTABLISHED`, all
+  // decided above. In every one of them the sentence is true: no open pull
+  // request has this head.
   return settle('PULL_REQUEST_REQUIRED', stage);
 }
