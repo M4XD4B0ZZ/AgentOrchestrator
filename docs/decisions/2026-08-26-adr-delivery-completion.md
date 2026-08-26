@@ -81,7 +81,7 @@ slice (Git 2.55.0.windows.3, Windows 10 19045, local repositories).
 
 ### 1. Ancestry is not a claim about content, in either direction
 
-Two fixtures, identical on **every** predicate:
+Two fixtures, identical on the predicate a membership gate would be built on:
 
 | fixture | `merge-base --is-ancestor M main` | M's content in base |
 | --- | --- | --- |
@@ -91,6 +91,13 @@ Two fixtures, identical on **every** predicate:
 And the converse: a fixture whose base carries M's tree byte-identically under a
 squashed object name answers `--is-ancestor` with exit **1** while
 `git diff --stat M main` is **empty** and `tree(M) == tree(base)`.
+
+A content command **does** separate them — `git diff --stat M main` reports
+`f.txt | 1 -` for the reverted fixture and nothing of the sort for the advanced
+one, and this ADR runs exactly that to prove the content is gone. So the claim
+is about the *graph* predicate, not about every Git command, and an earlier
+version of this section said "identical on every predicate" while running the
+counterexample two paragraphs later. A review measured it.
 
 So ancestry is neither sufficient nor necessary for "the delivery's changes are
 present". A third fixture — revert, then revert the revert — answers 0
@@ -116,10 +123,20 @@ existence check passes. The wrong answer is byte-identical to the genuine "no"
 of a force-push, with nothing on stderr.
 
 A second, independent vector: a tag `refs/tags/main` beside branch
-`refs/heads/main` makes the bare name `main` resolve to the **tag**, and
-`--is-ancestor <tip-of-branch> main` exits **1** while
-`--is-ancestor <tip-of-branch> refs/heads/main` exits 0. The only tell is a
-stderr `warning:`, and **neither of this build's Git runners surfaces stderr**
+`refs/heads/main` makes the bare name `main` resolve to the **tag**. What
+follows depends on where the tag points, and an earlier version of this
+paragraph did not say so — a review measured both:
+
+```
+tag main at an OLDER commit:  merge-base --is-ancestor <branch-tip> main  -> exit 1
+tag main at the branch tip:   merge-base --is-ancestor <branch-tip> main  -> exit 0
+both:                         stderr: warning: refname 'main' is ambiguous.
+```
+
+The ambiguity and the warning are unconditional; the wrong `1` is not.
+`--is-ancestor <tip-of-branch> refs/heads/main` exits 0 in both. The only tell
+is that stderr `warning:`, and **neither of this build's Git runners surfaces
+stderr**
 (`repo/git-query.ts` drops it and the exit code with it; `worktree/git-command.ts`
 keeps the exit code and drops stderr).
 
@@ -134,11 +151,23 @@ be wrong in both states and unable to know it.
 fetch` anywhere in `src/` — that is L-V4-09-3 and it is unchanged by this slice.
 So the local base is a snapshot of whatever the operator last pulled.
 
-Measured on **this repository, while this slice was being written**: pull
-request #64 was merged at 07:13 UTC producing `ff1cf0a`, and the local `main`
-sat at `e203143` — the *previous* delivery's merge commit — until a `git fetch`
-was run. A base-membership gate would have answered `NOT_ANCESTOR` for a merge
-that had succeeded minutes earlier.
+Measured on **this repository, while this slice was being written**, and
+verifiable from its own reflog. Pull request #64 was merged producing
+`ff1cf0a` (committer date 07:13:56 UTC). `git reflog show origin/main` records
+the fetch that moved `refs/remotes/origin/main` to it; `git reflog show main`
+records the fast-forward of the **local** branch — the ref
+`TaskState.baseBranch` resolves to — as a separate, later entry at 07:14:32 UTC.
+
+In the 36 seconds between them the object was in the clone and
+`refs/heads/main` still pointed at `e203143`, the previous delivery's merge
+commit. A gate on the local base would have answered exit **1** — the genuine-no
+code — for a merge that had just succeeded. Before the fetch it would have
+answered 128 instead, which is not an answer either.
+
+An earlier version of this paragraph said "minutes earlier". A review measured
+the reflog and it is 36 seconds; the window is real and the adjective was not.
+The window is also not bounded by anything: nothing obliges an operator to
+fast-forward at all, and an operator working on a branch may never do so.
 
 ### 4. The record this is drawn from already disclaims the property
 
@@ -208,11 +237,39 @@ What persisting buys, and a fresh two-file read cannot:
   newer build, a full attempt list, a corrupted byte — or the moment the profile
   was edited. The conclusion is a statement about an instant that has passed; it
   stays true whatever happens to its sources afterwards. `ALREADY_CONCLUDED` is
-  therefore decided **before** any verification question, and three fixtures pin
-  it: no history at all, an unreadable history, and a standing failure — under a
-  profile this build no longer declares — all still answer `ALREADY_CONCLUDED`;
+  therefore decided **before every other document is read**, and five fixtures
+  pin it: the receipt deleted, the receipt rewritten by a newer build, the
+  receipt corrupted, the history deleted, the history corrupted — each with a
+  control asserting the same repository answered `ALREADY_CONCLUDED` before its
+  source was broken, and each still answering it afterwards;
 - **provenance.** The record names the exact documents it was drawn from, by
   their own binding digests, and the profile it was judged under.
+
+### The ordering was wrong first, and a review measured it
+
+The first version asked the merge receipt **before** it looked for a conclusion,
+because the conclusion's identity was compared against the receipt. A review
+drove it: delete the receipt, or let a newer build rewrite it, and a task whose
+conclusion sat readable on disk answered `RECEIPT_ABSENT` — "No merge receipt
+has been recorded for this task" — never mentioning the conclusion at all. The
+monotonicity this record is sold on held against two of its three sources and
+not the third, while this document claimed all three.
+
+The fix is to ask the conclusion first, which is possible because the record
+carries its own identity: the implementation head **H** and the delivery target.
+Those are exactly what the receipt gate compares, so one predicate —
+`aboutThisDelivery` — answers both questions and there is no second spelling to
+drift.
+
+The price is stated rather than hidden. The ladder can no longer compare
+`baseRef` or the pull-request number when it reports `ALREADY_CONCLUDED`,
+because only the receipt carries those. A hand-written conclusion naming a
+different **merge commit** for the same head therefore reads as
+`ALREADY_CONCLUDED` rather than as a conflict — and the report prints the
+*stored* merge commit, so the discrepancy is in front of the operator even
+though this build does not call it one. That is `L-V4-10-11`, and a test drives
+it. Slice 8's receipt is written-once and never superseded, so the shape does
+not arise through the product.
 
 ## The standing verdict, and why `hasPassFor` is not reused
 
@@ -275,17 +332,41 @@ in the report and leave `$?` alone. Every **refusal** of the conclusion ladder
 keeps that convention: a refusal is an *answer*, and the report carries it.
 
 One shape departs: the ladder reached `DELIVERY_CONCLUDED` and the conclusion is
-not on disk afterwards. `EXIT_RUN_NEEDS_OPERATOR`.
+not on disk afterwards. This is the one flag whose whole purpose is to answer
+*"is this delivery concluded?"*, and a run that decided yes and wrote nothing has
+told a caller yes about something that did not happen.
 
-The reason is the principle `run-exit-codes.ts` already states for the lease —
-"an invocation that … cannot prove it gave the slot back has left something
-behind, and it may not exit nominal however well its own work went". This is the
-one flag whose whole purpose is to answer *"is this delivery concluded?"*, and a
-run that decided yes and wrote nothing has told a caller yes about something
-that did not happen.
+**Which** code it becomes is decided one store code at a time, in
+`run-exit-codes.ts`, and that was a correction. The first version collapsed all
+twelve non-durable codes onto `EXIT_RUN_NEEDS_OPERATOR`, and a review measured
+two it mis-classified against this repository's own definitions: an honest
+concurrent `--verify-merge` moving the history is `EVIDENCE_MOVED`, where the
+next invocation may well succeed — the definition of code 4, and the code
+`RUNTIME_IGNORE_UNDETERMINED` is already graded for the identical condition —
+while a path Git says is not ignored is a repository defect fixed by editing it,
+which `RUNTIME_NOT_IGNORED` is graded 2 for twelve lines away. "Does not exit
+nominal" does not require "needs an operator".
 
-The predicate is `conclusionIsDurable(code)`, a total table, not `recorded`:
-`ALREADY_CONCLUDED` filed nothing and the claim is on disk all the same.
+| store code | exit | why |
+| --- | --- | --- |
+| `CONCLUSION_RECORDED`, `ALREADY_CONCLUDED` | *keep the primary* | the claim is on disk |
+| `EVIDENCE_MOVED`, `RUNTIME_IGNORE_UNDETERMINED` | 4 | nothing is wrong; try again |
+| `RUNTIME_PATH_NOT_IGNORED`, `LOCATION_UNSUITABLE`, `RECORD_TOO_LARGE` | 2 | a repository defect, fixed by editing it |
+| `CONFLICTING_CONCLUSION`, `EXISTING_CONCLUSION_UNREADABLE`, `RECORD_CONTRACT_VIOLATION`, `DIRECTORY_CREATE_FAILED`, `WRITE_FAILED` | 3 | durable state an operator must look at |
+| `CONCLUSION_NOT_PROVEN`, `SUBJECT_MISMATCH` | 1 | floors; the command cannot reach them |
+
+The table is total by type over `DeliveryConclusionRecordCode`, so a new store
+code fails the build until somebody grades it, and the grades are pinned by a
+hand-written table in the test file that is deliberately not derived from it.
+
+It is graded on **durability**, not on `recorded`: `ALREADY_CONCLUDED` filed
+nothing and the claim is on disk all the same.
+
+One correction to what this section said before: "a refusal exits nominal" is
+**false**, and a review measured it. The exit code answers whether the
+*observation* settled, and a subject that could not be established is already a
+2 — with or without this flag. The true sentence is the narrower one: no ladder
+refusal *changes* the exit code.
 
 ## What was reused, and what had to be built
 
@@ -333,18 +414,24 @@ re-proved before and after — with negative controls beside each.
 
 ## The counter-proof, and why one mutant survives
 
-57 mutants against a baseline the lab proves green before applying anything — a
+66 mutants against a baseline the lab proves green before applying anything — a
 red baseline reports every mutant killed and measures nothing, and this campaign
 hit exactly that on its first run (an unsupported reporter flag) and refused to
-continue. 56 killed, 1 survived, **0 harness failures**, and **0
+continue. **65 killed, 1 survived, 0 harness failures, 0 `NOT_APPLIED`, and 0
 `KILLED_ELSEWHERE`**: no mutant here is caught only by an unrelated gate.
+
+The `NOT_APPLIED` column earned its place mid-slice. After the review fixes
+moved seven guards, seven mutants stopped matching their target text and the
+harness reported them as *not applied* rather than as killed — which is exactly
+what a campaign that scored them as kills would have hidden. They were repointed
+at the new code and all seven die.
 
 The lab works on a copy of the tree with no `.git` and a junction to
 `node_modules`. It proves each edit landed by reading the file back, and re-runs
 every survivor against a wider control set.
 
-Two mutants found **genuine coverage gaps** rather than confirming the design,
-and both are now killed by tests written because of them:
+Mutants that found **genuine coverage gaps** rather than confirming the design.
+All are now killed by tests written because of them:
 
 - **`M35`** removed the binding comparison in `readDeliveryConclusion` and
   survived. Every existing case reached that reading through a *recomputed*
@@ -361,16 +448,43 @@ and both are now killed by tests written because of them:
   refuses it. The test drives exactly that, with a positive control asserting the
   ladder really did get all the way through first.
 
+Three more came out of the review round rather than the first campaign:
+
+- **`M54`** removes the byte budget on the **read** side. The first campaign had
+  no mutant for it, and it is not the same as the write side: `repositoryRoot` is
+  a plain `.min(1).max(4096)` string, so 4,096 characters that JSON escapes to
+  six bytes each is schema-legal and far over 16,384. Without the guard such a
+  file reads as a conclusion. It dies;
+- **`M55`/`M56`** remove the target's own re-read before the write — the gate the
+  review's second finding added. Both die;
+- **`M60`** deletes the report line that names the profile the *stored*
+  conclusion was drawn under, and it **survived** the first re-run: the result
+  field was asserted and the rendered line was not, which is not what an operator
+  reads. It dies now.
+
 The one survivor is classified rather than counted:
 
 | survivor | why it is not reachable | companion that dies |
 | --- | --- | --- |
-| `M41` — the byte budget on write | the record is exactly 200 bytes larger than the merge receipt for the same `repositoryRoot`, and the ladder reads the receipt first; a receipt small enough to be read at all leaves this record at most 8,392 bytes against a 16,384 budget | `M41b` lowers the budget to 400 and **dies** |
+| `M41` — the byte budget **on write** | the write path builds the payload from a `repositoryRoot` that must be an absolute path this process can create a directory under, and the ladder reads the merge receipt first; measured over every combination of the shortest, production and longest ISO-8601 instants both records admit, this record is **189 to 230** bytes larger than the receipt and can reach **8,420** against a 16,384 budget — 7,964 of headroom | `M41b` lowers the budget to 400 and **dies** |
 
 `M41b` is the point of that row. The gate is live — it refuses the moment
 anything reaches it — and what makes `M41` unobservable is the *threshold*, not
-a dead branch. The 200-byte constant is measured in the test file for three
-encodings rather than asserted.
+a dead branch. The 189-to-230 range and the 8,420 worst case are recomputed by
+the test file over three encodings and three instant lengths rather than
+asserted.
+
+An earlier version of this row said the delta was "exactly 200 bytes". A review
+measured that it is not: both records carry two ISO-8601 instants, the regex
+admits 20 to 35 characters, and the two documents' instants are independent —
+the 200 came from a table in which all four happened to be the same length. The
+operational conclusion survived; the stated measurement did not.
+
+The **read** side of the same budget is a different matter, and the first
+campaign did not have a mutant for it. It is reachable: `repositoryRoot` is a
+plain `.min(1).max(4096)` string, so 4,096 characters that JSON escapes to six
+bytes each is schema-legal and far over 16,384. Without the guard such a file
+reads as a conclusion. `M54` removes it and dies.
 
 ## Residuals
 
@@ -408,6 +522,29 @@ encodings rather than asserted.
 - **L-V4-10-8 — the profile digest identifies the contract, not the toolchain.**
   Inherited unchanged from `L-V4-09-4`, and it bounds what "under profile P"
   means here too.
-- **L-V4-10-9 — `--conclude-delivery` reports its verdict in `$?` in one
-  direction only.** A refusal exits nominal, exactly as every other flag on this
-  command does. The only override is a conclusion that could not be made durable.
+- **L-V4-10-9 — `--conclude-delivery` reports its verdict in the exit code in
+  one direction only.** No ladder refusal *changes* the exit code, exactly as on
+  every other flag here — which is not the same as "a refusal exits nominal", a
+  sentence an earlier draft carried and a review measured false: the exit code
+  answers whether the observation settled, so a subject that could not be
+  established is a 2 regardless. The only override this slice adds is a
+  conclusion that could not be made durable.
+- **L-V4-10-11 — `ALREADY_CONCLUDED` cannot compare the merge commit.** The
+  ladder reads the conclusion before the receipt, deliberately, so it compares
+  the implementation head and the target — which it has from the task — and not
+  `baseRef` or the pull-request number, which only the receipt carries. A
+  hand-written conclusion naming a different merge for the same head therefore
+  reads as already concluded. The report prints the *stored* merge commit, so
+  the discrepancy is visible; this build does not flag it. Slice 8's receipt is
+  written-once and never superseded, so the shape does not arise through the
+  product.
+- **L-V4-10-12 — the write-side byte budget is unreachable, and stays.** The
+  read side is reachable and is driven; the write side builds its payload from a
+  `repositoryRoot` that must be a directory this process can create, so no
+  callable path can cross it. It is kept as a floor, with a companion mutant that
+  lowers the threshold and dies to show the gate is live.
+- **L-V4-10-13 — the `!stat.isFile()` guard is not observable.** Measured on
+  Windows, opening a directory succeeds and reports size 0, so without the guard
+  the empty read decodes to `MALFORMED` anyway. It is kept as a statement of
+  intent about a platform answer this repository has been surprised by, and it is
+  named here rather than defended as load-bearing.

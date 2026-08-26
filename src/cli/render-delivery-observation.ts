@@ -352,15 +352,18 @@ export const VERIFICATION_TRAILER =
  */
 export const CONCLUSION_TRAILER =
   'Read-only on the forge, and not necessarily read-only here. Concluding a delivery\n' +
-  'contacted github.com not at all, opened no network connection, and read no Git history —\n' +
-  'it asked nothing about the base branch, about reachability, or about whether the merge\n' +
-  'still stands. What it read is this task\'s merge receipt, its verification history and its\n' +
-  'own state; what it can write is one directory, one conclusion beside the task state, and a\n' +
-  'staging file beside that conclusion which a crash can leave behind. The Record line\n' +
-  'above says whether this run wrote one. It takes no execution lease and starts no process\n' +
-  'but the check-ignore probe. It writes no task state and no block-ledger entry, so the task\n' +
-  'is in exactly the state it was in before this run: READY_FOR_PR is terminal, and the\n' +
-  'task\'s current commit is still the implementation head rather than the merge commit.';
+  'contacted github.com not at all, opened no network connection of its own, and read no Git\n' +
+  'history — it asked nothing about the base branch, about reachability, or about whether the\n' +
+  'merge still stands. What it can read is four documents beside this task: any conclusion\n' +
+  'already recorded, the merge receipt, the verification history and the task state; the\n' +
+  'ladder stops at the first one that answers, so a refusal has read fewer. What it can write\n' +
+  'is one directory, one conclusion beside the task state, and a staging file beside that\n' +
+  'conclusion which a crash can leave behind. The Completion and Record lines above say what\n' +
+  'this run did. It takes no execution lease, starts no agent and runs no verification, and\n' +
+  'the only process this act starts is git check-ignore, twice, before it writes. It writes\n' +
+  'no task state and no block-ledger entry, so the task is in exactly the state it was in\n' +
+  'before this run: READY_FOR_PR is terminal, and the task\'s current commit is still the\n' +
+  'implementation head rather than the merge commit.';
 
 /**
  * One merge reading as one phrase.
@@ -1043,6 +1046,20 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
       `  Delivered    : ${c.subjectCommit ?? 'none was established'}`,
       `  Profile      : ${c.profileDigest ?? 'not resolved'}`,
     );
+    // The profile the STORED conclusion was drawn under, where one was read.
+    //
+    // Printed beside the current digest rather than instead of it, because on
+    // `ALREADY_CONCLUDED` they can differ and the difference is the whole
+    // story: a conclusion drawn under a contract this repository no longer
+    // declares. A review measured the earlier version printing only the current
+    // one there, so an operator could not tell that from a conclusion drawn
+    // under the profile in front of them.
+    if (c.concludedUnderProfile !== null) {
+      lines.push(
+        `  Concluded on : ${c.concludedUnderProfile}` +
+          (c.concludedUnderProfile === c.profileDigest ? '  (the same profile)' : '  (a DIFFERENT profile)'),
+      );
+    }
     // The verdict that stood, where one was found. Printed for a failure as
     // well as a pass: `VERIFICATION_NOT_PASSING` is an answer about the code,
     // and naming it is what distinguishes it from a run that never happened.

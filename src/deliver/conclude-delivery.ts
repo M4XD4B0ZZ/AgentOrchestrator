@@ -44,8 +44,10 @@
  * kind would make every settled entry for the task unprovable. No agent is
  * started, no verification is run, no workspace is made, and nothing at all is
  * sent to a forge: this module has no forge seam, no Git seam and no
- * verification seam, and the only subprocess anywhere on the path is the
- * runtime-ignore probe every record writer runs before it writes.
+ * verification seam, and starts no subprocess at all. The two
+ * `git check-ignore` probes belong to the store, which runs them before it
+ * writes; the command that reaches both has already resolved the repository,
+ * which starts Git children of its own before any flag is examined.
  *
  * ── What a conclusion does not authorise ───────────────────────────────────
  *
@@ -69,7 +71,6 @@ import type { DeliveryConclusionProof } from './delivery-conclusion-proof.js';
 import { loadDeliveryConclusion } from './delivery-conclusion-store.js';
 import { loadMergeReconciliation } from './merge-reconciliation-store.js';
 import type { MergeReconciliationSubject } from './merge-reconciliation.js';
-import { sameConcludedDelivery } from './delivery-conclusion.js';
 import { loadPostMergeVerification } from './post-merge-verification-store.js';
 
 /**
@@ -137,8 +138,51 @@ export const DELIVERY_CONCLUSIONS = [
   /** The task is not at the state a delivery is concluded from. */
   'TASK_NOT_READY',
   /**
+   * This delivery is already concluded, and this run changed nothing.
+   *
+   * Decided **before every other document is read** — before the merge receipt
+   * as well as before any verification question — and that ordering is the
+   * contract rather than an accident: a delivery that was concluded stays
+   * concluded. Edit the profile, make the verification history unreadable,
+   * delete the merge receipt, or let a newer build rewrite either of them: the
+   * conclusion still stands, because it is a statement about an instant that
+   * has passed and re-deriving it is not what makes it true.
+   *
+   * An earlier version asked the receipt first, and a review measured the cost:
+   * a task whose conclusion sat readable on disk answered `RECEIPT_ABSENT` and
+   * never mentioned it. The monotonicity this record exists for held against
+   * two of its three sources and not the third.
+   *
+   * What is compared is the stored conclusion's own identity — the
+   * implementation head **H** and the delivery target — against the task's
+   * subject, by the same predicate the receipt gate uses. The record's *own*
+   * merge commit and profile digest are reported, not this run's.
+   */
+  'ALREADY_CONCLUDED',
+  /**
+   * Something is on the conclusion's path and this build cannot read it:
+   * malformed, a contract version it does not have, or bound to another task —
+   * **or edited in place**, because the binding digest covers every field.
+   *
+   * Refused rather than written over. Under `UNSUPPORTED_VERSION` the document
+   * may be a perfectly good conclusion written by a newer build.
+   */
+  'CONCLUSION_UNREADABLE',
+  /**
+   * A readable conclusion is on disk for a **different** delivery of this task:
+   * its implementation head or its target is not this task's.
+   *
+   * Nothing is written and nothing is repaired. Two conclusions for one task
+   * would be two answers to one question, and choosing between them is not a
+   * decision this build makes silently.
+   */
+  'CONCLUSION_CONFLICT',
+  /**
    * No merge receipt. **Not** a claim that the delivery was not merged — only
    * that AO has not reconciled one, which is `--reconcile-merge`'s job.
+   *
+   * Reached only when no conclusion is on disk: a concluded delivery is
+   * reported as concluded whatever became of the receipt afterwards.
    */
   'RECEIPT_ABSENT',
   /**
@@ -152,33 +196,6 @@ export const DELIVERY_CONCLUSIONS = [
    * repository from the one the profile declares.
    */
   'RECEIPT_NOT_THIS_DELIVERY',
-  /**
-   * This delivery is already concluded, and this run changed nothing.
-   *
-   * Decided **before** any verification question, and that ordering is the
-   * contract rather than an accident: a delivery that was concluded stays
-   * concluded. If the profile is edited afterwards, or the verification history
-   * becomes unreadable, or a newer build writes a record this one cannot parse,
-   * the conclusion still stands — it is a statement about an instant that has
-   * passed, and re-deriving it is not what makes it true.
-   */
-  'ALREADY_CONCLUDED',
-  /**
-   * Something is on the conclusion's path and this build cannot read it:
-   * malformed, a contract version it does not have, or bound to another task.
-   *
-   * Refused rather than written over. Under `UNSUPPORTED_VERSION` the document
-   * may be a perfectly good conclusion written by a newer build.
-   */
-  'CONCLUSION_UNREADABLE',
-  /**
-   * A readable conclusion is on disk for a **different** delivery of this task.
-   *
-   * Nothing is written and nothing is repaired. Two conclusions for one task
-   * would be two answers to one question, and choosing between them is not a
-   * decision this build makes silently.
-   */
-  'CONCLUSION_CONFLICT',
   /**
    * No verification history. **Not** a claim that the merge is unverified —
    * only that AO holds no record of having verified it, which is
@@ -226,12 +243,20 @@ export const DELIVERY_CONCLUSIONS = [
   /**
    * Every question was answered and this build declined to attest to the join.
    *
-   * It is **not** claimed to be unreachable. The mint checks the two records
-   * agree about the task and the repository root — which the ladder does not,
-   * because each loader has already compared its own document against the
-   * subject — and it re-checks the object-name, digest and instant shapes that
-   * both schemas already enforce. A document that satisfied both schemas and
-   * failed one of those would arrive here.
+   * It is **not** claimed to be unreachable, and the reachable cause is not the
+   * one an earlier version of this note named. That version said the mint only
+   * "re-checks the object-name, digest and instant shapes that both schemas
+   * already enforce", which would make this member a floor. A review found two
+   * of the mint's gates reading values **no schema produced**: the profile
+   * digest computed in this function, and `seams.now().toISOString()` — and
+   * `toISOString` yields `+275760-09-13T00:00:00.000Z` for a date past year
+   * 9999, which the `^\d{4}` anchor rejects. A clock seam returning such a date
+   * reaches this member with both documents perfectly valid, and the test file
+   * drives exactly that.
+   *
+   * The mint also checks that the two records agree about the task and the
+   * repository root, which the ladder does not, because each loader has already
+   * compared its own document against the subject.
    */
   'CONCLUSION_NOT_ATTESTED',
   /**
@@ -274,28 +299,45 @@ export const DELIVERY_CONCLUSION_DETAIL: Readonly<Record<DeliveryConclusionOutco
 export interface DeliveryConclusionResult {
   readonly outcome: DeliveryConclusionOutcome;
   /**
-   * The merge commit the conclusion is, or would have been, about.
+   * The merge commit this result is about.
    *
-   * Non-null from the line that reads a usable receipt onwards, and `null`
-   * before it. Nothing else decides it.
+   * On `ALREADY_CONCLUDED` and `CONCLUSION_CONFLICT` it is the **stored
+   * conclusion's** own merge commit; from the line that reads a usable receipt
+   * onwards it is the receipt's; `null` before either. Nothing else decides it.
    */
   readonly mergeCommit: string | null;
   /**
-   * The implementation head the receipt names.
+   * The implementation head, from whichever document supplied
+   * {@link mergeCommit}.
    *
-   * Non-null from the same line. Carried because an operator reading
-   * `VERIFICATION_NOT_THIS_DELIVERY` needs both halves of the join to see which
-   * document is the odd one.
+   * Carried because an operator reading `VERIFICATION_NOT_THIS_DELIVERY` needs
+   * both halves of the join to see which document is the odd one.
    */
   readonly subjectCommit: string | null;
   /**
-   * Which contract the question was asked under.
+   * The profile **this invocation resolved**, and never a stored one.
    *
-   * Non-null from the same line, because the digest is computed from the
-   * resolved repository and does not depend on the receipt — it is carried from
-   * that point so a report can say what a refusal was measured against.
+   * Non-null on every outcome, including the ones decided before any document
+   * is read, because the digest is computed from the resolved repository and
+   * does not depend on any of them — a report can therefore always say what a
+   * refusal was measured against. A review found three receipt refusals
+   * printing "not resolved" for a digest that had been computed two lines
+   * earlier.
    */
   readonly profileDigest: string | null;
+  /**
+   * The profile the **stored** conclusion was drawn under, on the two outcomes
+   * that read one, and `null` everywhere else.
+   *
+   * Kept apart from {@link profileDigest} rather than folded into it, because
+   * they are different facts and a run can hold both: `ALREADY_CONCLUDED` under
+   * an edited profile means "a conclusion exists, drawn under a contract this
+   * build no longer has". A review measured the earlier version printing only
+   * the current digest there, so an operator could not tell the two apart —
+   * while deleting the record and re-running the same repository answers
+   * `PROFILE_NOT_VERIFIED`.
+   */
+  readonly concludedUnderProfile: string | null;
   /**
    * The standing verdict's outcome under that profile, where one was found, and
    * `null` where the ladder stopped before asking or found none.
@@ -321,6 +363,7 @@ function outcome(
   profileDigest: string | null = null,
   standingOutcome: string | null = null,
   proof: DeliveryConclusionProof | null = null,
+  concludedUnderProfile: string | null = null,
 ): DeliveryConclusionResult {
   return Object.freeze({
     outcome: code,
@@ -329,7 +372,40 @@ function outcome(
     profileDigest,
     standingOutcome,
     proof,
+    concludedUnderProfile,
   });
+}
+
+/**
+ * Whether a record naming an implementation head and a target is about **this
+ * task's current delivery**.
+ *
+ * One predicate, two call sites — the stored conclusion and the merge receipt —
+ * because it is one question asked of two documents. Written as a shared
+ * derivation rather than as two spellings of the same rule, for the reason a
+ * review gave when it found `publishableRef` duplicated: two expressions that
+ * had to agree, and nothing that made them.
+ *
+ * `subjectCommit` is the record's own copy of the task's `currentCommit`. A
+ * record naming another commit is about a delivery this task has walked away
+ * from. The forge identity is part of the same question rather than something
+ * assumed to follow from it: two forks can share a commit object name exactly.
+ */
+function aboutThisDelivery(
+  record: {
+    readonly subjectCommit: string;
+    readonly host: string;
+    readonly owner: string;
+    readonly name: string;
+  },
+  subject: ConclusionSubject,
+): boolean {
+  return (
+    record.subjectCommit === subject.deliveryCommit &&
+    record.host === subject.host &&
+    record.owner === subject.owner &&
+    record.name === subject.name
+  );
 }
 
 /**
@@ -350,9 +426,11 @@ export function refuseDeliveryConclusion(
 /**
  * Decides whether this task's delivery may be concluded, and proves it.
  *
- * Never throws for an expected condition. Reads three files and writes none —
- * recording is the caller's step, through `recordDeliveryConclusion`, which
- * re-reads all three before it writes.
+ * Never throws for an expected condition. Writes nothing, and reads **up to
+ * three** documents — any conclusion already recorded, then the merge receipt,
+ * then the verification history — stopping at the first that answers. It never
+ * reads the task state; the caller does that, and hands the subject in.
+ * Recording is the caller's step, through `recordDeliveryConclusion`.
  */
 export function concludeDeliveryForTask(
   repository: ConclusionRepository,
@@ -372,63 +450,84 @@ export function concludeDeliveryForTask(
 
   const recordSubject = Object.freeze({ taskId: subject.taskId, repositoryRoot: root });
 
-  // ── 1. The receipt is the only authority for the delivery ────────────────
+  // ── 1. A concluded delivery stays concluded ──────────────────────────────
+  //
+  // **First**, ahead of the receipt as well as ahead of the verification
+  // questions, and the ordering is the contract rather than a convenience.
+  //
+  // It used to sit after the receipt gate, and a review measured what that
+  // cost: delete the receipt, or let a newer build rewrite it, or let the task
+  // move — and a task whose conclusion was on disk and perfectly readable
+  // answered `RECEIPT_ABSENT`, never mentioning the conclusion at all. The
+  // monotonicity this record exists for held against two of its three sources
+  // and not the third, while the documentation claimed all three.
+  //
+  // Asking first is possible because the conclusion record carries its own
+  // identity: the implementation head **H** and the delivery target. Those are
+  // exactly what the receipt gate below compares, so the same predicate answers
+  // both questions and there is no second spelling to drift.
+  const storedConclusion = loadDeliveryConclusion(root, subject.taskId, recordSubject);
+  if (storedConclusion.reading === 'DELIVERY_CONCLUDED') {
+    // Non-null on this reading by construction; the guard keeps a future change
+    // to the load result from letting a `null` be read as agreement.
+    if (storedConclusion.conclusion === null) {
+      return outcome('CONCLUSION_UNREADABLE', null, null, profileDigest);
+    }
+    const already = storedConclusion.conclusion;
+    // The **stored** record's own facts are reported, not this run's: an
+    // operator reading `ALREADY_CONCLUDED` needs the merge commit and the
+    // profile the conclusion was actually drawn under, and this run has not
+    // asked any question under the profile it resolved. A review measured the
+    // earlier version printing the digest resolved *now* beside a conclusion
+    // recorded under another one, with nothing saying they differed.
+    const recorded = (code: DeliveryConclusionOutcome) =>
+      outcome(
+        code,
+        already.mergeCommit,
+        already.subjectCommit,
+        profileDigest,
+        null,
+        null,
+        already.profileDigest,
+      );
+    return aboutThisDelivery(already, subject)
+      ? recorded('ALREADY_CONCLUDED')
+      : recorded('CONCLUSION_CONFLICT');
+  }
+  if (storedConclusion.reading !== 'ABSENT') {
+    return outcome('CONCLUSION_UNREADABLE', null, null, profileDigest);
+  }
+
+  // ── 2. The receipt is the only authority for a NEW conclusion ────────────
   const storedReceipt = loadMergeReconciliation(
     root,
     subject.taskId,
     recordSubject as MergeReconciliationSubject,
   );
-  if (storedReceipt.reading === 'ABSENT') return outcome('RECEIPT_ABSENT');
+  if (storedReceipt.reading === 'ABSENT') {
+    return outcome('RECEIPT_ABSENT', null, null, profileDigest);
+  }
   if (storedReceipt.reading !== 'HISTORICAL_MERGE' || storedReceipt.receipt === null) {
-    return outcome('RECEIPT_UNREADABLE');
+    return outcome('RECEIPT_UNREADABLE', null, null, profileDigest);
   }
   const receipt = storedReceipt.receipt;
 
-  // ── 2. The receipt must be about this task's current delivery ────────────
+  // ── 3. The receipt must be about this task's current delivery ────────────
   //
   // `subjectCommit` is the receipt's own record of the task's `currentCommit`
   // at reconciliation. If the task has moved since, this receipt describes a
   // delivery of a commit the task no longer stands on, and concluding it would
-  // conclude a delivery the task has walked away from.
-  if (receipt.subjectCommit !== subject.deliveryCommit) {
-    return outcome('RECEIPT_NOT_THIS_DELIVERY');
-  }
-  // Two forks can share a commit object name exactly, so the target identity is
-  // part of the question rather than something assumed to follow from it.
-  if (
-    receipt.host !== subject.host ||
-    receipt.owner !== subject.owner ||
-    receipt.name !== subject.name
-  ) {
-    return outcome('RECEIPT_NOT_THIS_DELIVERY');
+  // conclude a delivery the task has walked away from. The forge identity is
+  // part of the same question: two forks can share a commit object name
+  // exactly, so the target is checked rather than assumed to follow.
+  if (!aboutThisDelivery(receipt, subject)) {
+    return outcome('RECEIPT_NOT_THIS_DELIVERY', null, null, profileDigest);
   }
 
   const mergeCommit = receipt.mergeCommit;
   const head = receipt.subjectCommit;
   const at = (code: DeliveryConclusionOutcome, standing: string | null = null) =>
     outcome(code, mergeCommit, head, profileDigest, standing);
-
-  // ── 3. A concluded delivery stays concluded ──────────────────────────────
-  //
-  // Ahead of every verification question, deliberately. See the member's own
-  // note: re-deriving a conclusion is not what makes it true, and a build that
-  // asked the verification questions first would un-conclude a delivery the
-  // moment its profile was edited or its history became unreadable.
-  const storedConclusion = loadDeliveryConclusion(root, subject.taskId, recordSubject);
-  if (storedConclusion.reading === 'DELIVERY_CONCLUDED') {
-    // Non-null on this reading by construction; the guard keeps a future change
-    // to the load result from letting a `null` be read as agreement.
-    if (storedConclusion.conclusion === null) return at('CONCLUSION_UNREADABLE');
-    // The receipt is the other operand, not the payload this run would have
-    // built. That is the point of asking here at all: the store asks the same
-    // question of the document it is about to write, and this asks it of the
-    // authority the whole ladder is reading from, so a stored conclusion that
-    // disagrees with the *receipt* is caught before any verification work.
-    return sameConcludedDelivery(storedConclusion.conclusion, receipt)
-      ? at('ALREADY_CONCLUDED')
-      : at('CONCLUSION_CONFLICT');
-  }
-  if (storedConclusion.reading !== 'ABSENT') return at('CONCLUSION_UNREADABLE');
 
   // ── 4. The verification history for this task ────────────────────────────
   const storedVerification = loadPostMergeVerification(root, subject.taskId, recordSubject);

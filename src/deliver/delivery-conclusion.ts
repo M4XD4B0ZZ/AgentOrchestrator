@@ -42,8 +42,12 @@
  *     and the summary under "Why base membership is not asked" below;
  *  2. **that the merge has not been reverted.** A revert is a new commit, so it
  *     changes nothing a reachability question could see. Measured: a reverted
- *     merge and a clean linear advance answer identically on every Git
- *     predicate available here;
+ *     merge and a clean linear advance are indistinguishable to
+ *     `merge-base --is-ancestor`, which is the predicate a membership gate
+ *     would be built on. They are **not** indistinguishable to every Git
+ *     command — `git diff` and `git ls-tree` separate them, and the ADR runs
+ *     the first of those to prove the content is gone. What no *graph* predicate
+ *     answers is the question a gate would need;
  *  3. **that M's changes are present anywhere today.** Ancestry is neither
  *     sufficient nor necessary for that, and both directions were measured;
  *  4. **that the base branch passes now.** A later commit is a different
@@ -128,29 +132,43 @@ export const DELIVERY_CONCLUSION_VERSION = 1;
  * schema `.max()` bounds UTF-16 code units and a code unit is not a byte.
  *
  * It is, honestly, a **floor rather than a gate on the product path**, and the
- * arithmetic that makes it one is measured rather than argued. For any given
- * `repositoryRoot`, this record serialises to **exactly 200 bytes more** than
- * slice 8's receipt for the same root — the two differ by a fixed set of
- * fixed-width fields and by nothing that scales with the root:
+ * measurement that makes it one is a measurement rather than an argument.
  *
- * | `repositoryRoot` (4096 chars) | receipt | this record |
- * | --- | --- | --- |
- * | ASCII | 5,560 | 5,760 |
- * | CJK (U+4E00) | 13,752 | 13,952 |
- * | U+0001 (escapes to ``) | 26,040 | 26,240 |
+ * The relationship to slice 8's receipt is *not* a constant, and an earlier
+ * version of this comment said it was — "exactly 200 bytes more", from a table
+ * whose four instants all happened to be the same length. A review measured it:
+ * both records carry two ISO-8601 instants, `ISO_8601` admits 20 to 35
+ * characters, and the two documents' instants are independent, so the delta
+ * moves with them.
  *
- * The receipt's own budget is 8,192, and `conclude-delivery.ts` reads the
- * receipt first. So a receipt small enough to be read at all is one for which
- * this record is at most 8,392 bytes, and this budget cannot be the thing that
- * refuses a run. It is set at 16,384 — the same figure the verification record
- * uses — rather than at something snug, because a budget tuned to the current
- * field list is a budget that starts refusing records the first time a field is
- * added, and the gate exists to stop a *pathological* document, not to be the
- * narrowest constraint in the chain.
+ * Measured, over every combination of a short (20-char), production
+ * (`toISOString`, 24-char) and long (35-char) instant, for the largest
+ * `repositoryRoot` that still leaves the **receipt** inside its own 8,192-byte
+ * budget — ASCII, CJK (U+4E00) and U+0001, which JSON escapes to six bytes:
  *
- * It is still checked, and `RECORD_TOO_LARGE` is still a code, for the reason
- * the sibling records give: this is what stands in front of a file somebody may
- * have written by hand.
+ * | | bytes |
+ * | --- | --- |
+ * | delta, receipt to this record | **189 to 230** |
+ * | largest this record can be while the receipt is still readable | **8,420** |
+ * | this budget | 16,384 |
+ * | headroom | 7,964 |
+ *
+ * The worst case is a CJK root of 2,252 characters with the receipt's instants
+ * short and this record's long. `conclude-delivery.ts` reads the receipt first
+ * — a receipt over 8,192 bytes is `RECEIPT_UNREADABLE` and no conclusion is
+ * built at all — so this budget cannot be what refuses a run.
+ *
+ * It is set at 16,384, the figure the verification record uses, rather than at
+ * something snug: a budget tuned to the current field list starts refusing
+ * records the first time a field is added, and the gate exists to stop a
+ * *pathological* document rather than to be the narrowest constraint in the
+ * chain.
+ *
+ * It is still checked, on both sides, and `RECORD_TOO_LARGE` is still a code,
+ * for the reason the sibling records give: this is what stands in front of a
+ * file somebody may have written by hand. Both gates are driven by the test
+ * file with a document that really is over the budget — a review found neither
+ * of them reached by anything.
  */
 export const MAX_DELIVERY_CONCLUSION_BYTES = 16_384;
 
@@ -372,10 +390,14 @@ export function isDeliveryConcluded(reading: DeliveryConclusionReading): boolean
  *
  * Structural rather than `DeliveryConclusion`, because the two things compared
  * are never both conclusions: the store compares a stored conclusion against
- * the payload it is about to write, and `conclude-delivery.ts` compares a
- * stored conclusion against the merge receipt. One rule, two call sites, and
- * therefore one function — two spellings of a comparison that has to agree is a
- * defect this repository has caught in review more than once.
+ * the payload it is about to write. That is its **one** call site today.
+ *
+ * The ladder in `conclude-delivery.ts` deliberately does not use it. It asks a
+ * narrower question — is this stored conclusion about the *task's current*
+ * delivery — which it can answer from the task's subject alone, without reading
+ * the merge receipt first. That ordering is what makes a concluded delivery
+ * survive its receipt going missing, and the price is that the ladder cannot
+ * compare `baseRef` or the pull-request number, which only the receipt carries.
  */
 export interface ConcludedDeliveryIdentity {
   readonly subjectCommit: string;

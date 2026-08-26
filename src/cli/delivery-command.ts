@@ -145,10 +145,7 @@ import {
   refuseDeliveryConclusion,
   type DeliveryConclusionResult,
 } from '../deliver/conclude-delivery.js';
-import {
-  conclusionIsDurable,
-  recordDeliveryConclusion,
-} from '../deliver/delivery-conclusion-store.js';
+import { recordDeliveryConclusion } from '../deliver/delivery-conclusion-store.js';
 import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
@@ -177,11 +174,12 @@ import {
   type VerificationView,
 } from './render-delivery-observation.js';
 import {
+  exitCodeForConclusionRecord,
   exitCodeWithLeaseRelease,
   EXIT_RUN_INPUT_UNUSABLE,
-  EXIT_RUN_NEEDS_OPERATOR,
   EXIT_RUN_OK,
   EXIT_RUN_REFUSED,
+  EXIT_RUN_UNEXPECTED,
   type CliExitCode,
 } from './run-exit-codes.js';
 
@@ -562,8 +560,10 @@ export const CONCLUDE_DELIVERY_OPTION_DESCRIPTION =
   'same pull request. The verification must carry a passing standing verdict for that commit ' +
   'under the profile resolved now; a verdict under a different profile answers a different ' +
   "contract and is not enough, and a run that could not be started is not a failure of the " +
-  'code and is not counted as one. It reads three files and writes one, starts no process ' +
-  'except the check-ignore probe every record writer runs, opens no network connection, ' +
+  'code and is not counted as one. It reads up to four documents beside the task — any ' +
+  'conclusion already recorded, the merge receipt, the verification history and the task ' +
+  'state — and writes one. This act starts no process of its own except git check-ignore, ' +
+  'twice, before it writes; it opens no network connection of its own, ' +
   'contacts no forge, takes no execution lease, starts no agent, runs no verification, and ' +
   'writes neither task state nor block ledger — READY_FOR_PR stays terminal and the task\'s ' +
   'current commit stays the implementation head, which is a different commit from the merge. ' +
@@ -572,9 +572,10 @@ export const CONCLUDE_DELIVERY_OPTION_DESCRIPTION =
   'branch now, that it is reachable from it, that the merge has not been reverted, that its ' +
   'changes are still present, or that the base branch passes today — none of those questions ' +
   'is asked, and no Git history is read. A delivery already concluded is reported as such and ' +
-  'nothing is rewritten. The exit code answers whether the observation settled, with one ' +
-  'exception: a run that concluded the delivery and could not leave that conclusion on disk ' +
-  'does not exit nominal. Read the Completion and Record lines.';
+  'nothing is rewritten. The exit code answers whether the observation settled — which for ' +
+  'a subject that could not be established is already not nominal — with one addition: a run ' +
+  'that concluded the delivery and could not leave that conclusion on disk does not exit ' +
+  'nominal either, under the code its own failure earns. Read the Completion and Record lines.';
 
 /**
  * Operator presence, in the shape `release` established.
@@ -1001,24 +1002,30 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       // that decided yes and could not leave the conclusion on disk has told a
       // caller yes about something that did not happen, and a caller reading
       // `$?` would act on it. So exactly one shape overrides: the ladder reached
-      // `DELIVERY_CONCLUDED` and the store's code is not one the conclusion is
-      // durable under. Every ladder refusal keeps the convention — those are
-      // *answers*, and the report carries them.
+      // `DELIVERY_CONCLUDED` and the store did not leave the claim on disk.
+      // Every ladder refusal keeps the convention — those are *answers*, and the
+      // report carries them.
       //
-      // `conclusionIsDurable` rather than `recorded`, because those are
-      // different questions: `ALREADY_CONCLUDED` filed nothing and the claim is
-      // on disk all the same.
+      // WHICH code it becomes is `run-exit-codes.ts`'s to decide, one store code
+      // at a time, and not a single number chosen here. A review measured the
+      // first version collapsing all twelve non-durable codes onto
+      // `EXIT_RUN_NEEDS_OPERATOR`, including two this repository's own tables
+      // grade 4 and 2 for the identical condition. `null` there means "keep the
+      // primary", which is what the two durable codes answer.
       const leaseAdjusted =
         verification !== null && verification.leaseTaken
           ? exitCodeWithLeaseRelease(exitCodeFor(conclusion), verification.leaseRelease)
           : exitCodeFor(conclusion);
-      process.exitCode =
-        deliveryConclusion !== null &&
-        deliveryConclusion.result.outcome === 'DELIVERY_CONCLUDED' &&
-        (deliveryConclusion.record === null ||
-          !conclusionIsDurable(deliveryConclusion.record.code))
-          ? EXIT_RUN_NEEDS_OPERATOR
-          : leaseAdjusted;
+      // `record === null` is a floor: `performConclusion` returns it only on a
+      // path its own comment marks unreachable through the ladder. It is graded
+      // as the tool's own defect rather than left to fall through to nominal.
+      const concludedNotDurable =
+        deliveryConclusion !== null && deliveryConclusion.result.outcome === 'DELIVERY_CONCLUDED'
+          ? deliveryConclusion.record === null
+            ? EXIT_RUN_UNEXPECTED
+            : exitCodeForConclusionRecord(deliveryConclusion.record.code)
+          : null;
+      process.exitCode = concludedNotDurable ?? leaseAdjusted;
     });
 }
 

@@ -22,8 +22,10 @@
  *    does not ask, and `delivery-conclusion.ts` records the measurements that
  *    decided it should not;
  *  - **not** that the merge has not been reverted. Measured: a reverted merge
- *    and a clean linear advance are indistinguishable on every Git predicate
- *    this build could run;
+ *    and a clean linear advance are indistinguishable to
+ *    `merge-base --is-ancestor`, the graph predicate a membership gate would be
+ *    built on. A content diff does separate them, and the ADR runs one — this is
+ *    a statement about the graph, not about every Git command;
  *  - **not** that M's changes are still present anywhere;
  *  - **not** that the base branch passes now, or that any other commit passed;
  *  - **not** that the task's state machine moved. `TaskState` is not written,
@@ -301,11 +303,15 @@ export function mintDeliveryConclusion(
   // first, so that an operator whose two records disagree is told *that* rather
   // than being told the mint declined; the mint asks because it is the thing
   // that may not produce an artefact from records it has not checked itself.
-  // Against this build's ladder the mint's call refuses nothing the ladder
-  // would have let through, and a counter-proof measures exactly that: deleting
-  // the mint's call alone survives, deleting both together is killed. Its
-  // honest status is "redundant while the ladder stands, load-bearing without
-  // it".
+  //
+  // Against this build's *ladder* the mint's call refuses nothing the ladder
+  // would have let through, so its honest status there is "redundant while the
+  // ladder stands, load-bearing without it". It is **not** unmeasured: the
+  // suite calls `mintDeliveryConclusion` directly with a skewed history, so
+  // deleting this line alone is killed. An earlier version of this comment
+  // claimed the opposite — "deleting the mint's call alone survives" — and a
+  // review re-ran that exact mutant and measured it dead. The claim had been
+  // written before the direct-mint test existed and never re-run.
   if (!describesSameDelivery(receipt, verification)) return null;
 
   // ── The standing verdict under the profile resolved now ──────────────────

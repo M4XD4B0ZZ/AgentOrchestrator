@@ -27,20 +27,27 @@
  *
  * ── The freshness gate, and what it is worth ───────────────────────────────
  *
- * The assessment reads three documents — the merge receipt, the verification
- * history and the task's own state — decides, and only then arrives here. That
- * is a window, and this module closes as much of it as one process can: the
- * last thing before the write is a **re-read of all three**, compared against
- * what the proof says was assessed. Anything that moved is `EVIDENCE_MOVED` and
- * nothing is written.
+ * A conclusion is drawn from four documents beside the task — any conclusion
+ * already recorded, the merge receipt, the verification history and the task
+ * state — and only then arrives here. That is a window, and this module closes
+ * as much of it as one process can: the last thing before the write is a
+ * **re-read of all four**. Three are compared against what the proof says was
+ * assessed and produce `EVIDENCE_MOVED`; the fourth is the target itself, and
+ * anything now standing on it produces the code step 4 would have. Nothing is
+ * written in either case.
  *
  * What that is worth, stated rather than implied. It closes the window between
- * the assessment and this function, which on this path is the long one — three
- * file reads and a digest. It does **not** close the window between the compare
- * and the `rename`, which is microseconds and cannot be closed without a lock,
- * and a lock is a service. So this is a *narrowing*, not mutual exclusion, and
- * it is the same honest position `merge-reconciliation-store.ts` takes about its
- * own read-before-write.
+ * the assessment and this function, which on this path is the long one — several
+ * file reads, a digest, and two awaited Git subprocesses. It does **not** close
+ * the window between the last compare and the `rename`, which is microseconds
+ * and cannot be closed without a lock, and a lock is a service. So this is a
+ * *narrowing*, not mutual exclusion, and it is the same honest position
+ * `merge-reconciliation-store.ts` takes about its own read-before-write.
+ *
+ * The target's own re-read was not in the first version, and a review measured
+ * the cost: a conclusion appearing in that window — including one written by a
+ * newer build, which this module classifies as unreplaceable — was overwritten
+ * and reported as `CONCLUSION_RECORDED`.
  *
  * ── Read-before-write, and not a transaction ───────────────────────────────
  *
@@ -481,6 +488,43 @@ export async function recordDeliveryConclusion(
     return recordFailure('EVIDENCE_MOVED', location.path);
   }
 
+  // ── 8. And the path itself, which step 4 read and nothing has re-read ────
+  //
+  // The document this call is about to replace is the one document the gate
+  // above does not cover, and a review measured what that cost: a conclusion —
+  // including one written by a **newer build**, which this build classifies as
+  // unreplaceable — appearing between step 4 and the rename was overwritten,
+  // and the run reported `CONCLUSION_RECORDED`. Three written guarantees said
+  // otherwise, including this module's own "never replaced blindly".
+  //
+  // So the last read before the write is of the target itself, and anything
+  // other than `ABSENT` refuses. The two codes are the ones step 4 would have
+  // produced, because the situation is the one step 4 exists for — it simply
+  // arrived later.
+  const targetNow = loadDeliveryConclusion(
+    request.repositoryRoot,
+    request.taskId,
+    subject,
+    ...(request.open === undefined ? [] : ([request.open] as const)),
+  );
+  if (targetNow.reading === 'DELIVERY_CONCLUDED') {
+    return targetNow.conclusion !== null && sameConcludedDelivery(targetNow.conclusion, payload)
+      ? Object.freeze({
+          code: 'ALREADY_CONCLUDED' as const,
+          recorded: false as const,
+          writeAttempt: 'NOT_ATTEMPTED' as const,
+          path: location.path,
+          errnoCode: null,
+        })
+      : recordFailure('CONFLICTING_CONCLUSION', location.path);
+  }
+  if (targetNow.reading !== 'ABSENT') {
+    return recordFailure('EXISTING_CONCLUSION_UNREADABLE', location.path);
+  }
+  // What remains open is the window between this line and the `rename` below,
+  // which is microseconds and cannot be closed without a lock — and a lock is a
+  // service. This is a narrowing, not mutual exclusion, and `L-V4-10-5` says so.
+
   try {
     mkdirSync(location.directory, { recursive: true, mode: 0o700 });
   } catch (error: unknown) {
@@ -593,10 +637,16 @@ export function loadDeliveryConclusion(
 
   try {
     const stat = fstatSync(handle);
-    // A directory standing where the record should be is not a record. Stated
-    // as its own check because the platform does not state it for us: measured
-    // on Windows, `openSync(dir, 'r')` succeeds and `fstat` reports size 0, so
-    // without this a directory would read as an empty file.
+    // A directory standing where the record should be is not a record.
+    //
+    // Stated honestly: this guard is **not** observable. Measured on Windows,
+    // `openSync(dir, 'r')` succeeds and `fstat` reports size 0 — so without it
+    // the read loop does not run, `read === size`, and `JSON.parse('')` throws
+    // into the arm below, which returns the same `MALFORMED`. A review measured
+    // deleting this line and the suite stayed green, correctly: no behaviour
+    // depends on it, so no test can pin it. It stays as a statement of intent
+    // about a platform answer this repository has been surprised by before, and
+    // it is named here rather than defended as load-bearing.
     if (!stat.isFile()) return load('MALFORMED', location.path);
     const size = stat.size;
     if (size > MAX_DELIVERY_CONCLUSION_BYTES) return load('MALFORMED', location.path);
@@ -619,6 +669,21 @@ export function loadDeliveryConclusion(
 
     const result = readDeliveryConclusion(raw, subject);
     return load(result.reading, location.path, result.conclusion);
+  } catch {
+    // Everything after a successful open — `fstat`, the read loop, the decode —
+    // can still fail, and this function's contract is that it never throws.
+    // `merge-reconciliation-store.ts` carries this same `catch` with a comment
+    // recording that a review measured its absence and that "the
+    // never-overwrite guarantee ran through this line"; the sibling this module
+    // was modelled on does **not** have it, and a review measured that gap
+    // here too: an injected read that fails with `EIO` after the open escaped
+    // as a rejection, past two functions whose headers say they never throw,
+    // into a commander action with no `catch`.
+    //
+    // `MALFORMED` rather than `ABSENT`, for the reason the open's own arm
+    // gives: at the writer above, "nobody wrote one" is permission to write a
+    // fresh conclusion over whatever is there.
+    return load('MALFORMED', location.path);
   } finally {
     try {
       closeSync(handle);
