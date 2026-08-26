@@ -141,6 +141,15 @@ import {
   type PostMergeVerificationRecordResult,
 } from '../deliver/post-merge-verification-store.js';
 import {
+  concludeDeliveryForTask,
+  refuseDeliveryConclusion,
+  type DeliveryConclusionResult,
+} from '../deliver/conclude-delivery.js';
+import {
+  conclusionIsDurable,
+  recordDeliveryConclusion,
+} from '../deliver/delivery-conclusion-store.js';
+import {
   acquireRepositoryExecutionLease,
   releaseRepositoryExecutionLease,
   type LeaseReleaseResult,
@@ -163,12 +172,14 @@ import { resolveRepository, type ResolvedRepository } from '../repo/resolve-repo
 import { loadTaskState } from '../state/state-store.js';
 import {
   renderDeliveryObservation,
+  type DeliveryConclusionView,
   type ReconciliationView,
   type VerificationView,
 } from './render-delivery-observation.js';
 import {
   exitCodeWithLeaseRelease,
   EXIT_RUN_INPUT_UNUSABLE,
+  EXIT_RUN_NEEDS_OPERATOR,
   EXIT_RUN_OK,
   EXIT_RUN_REFUSED,
   type CliExitCode,
@@ -185,6 +196,7 @@ interface DeliveryOptions {
   readonly mergePr?: boolean;
   readonly reconcileMerge?: boolean;
   readonly verifyMerge?: boolean;
+  readonly concludeDelivery?: boolean;
   readonly attended?: boolean;
 }
 
@@ -534,6 +546,37 @@ export const VERIFY_MERGE_OPTION_DESCRIPTION =
   'nominal, whatever its own work came to. Read the Verification, Record and Lease lines.';
 
 /**
+ * The end of the delivery lifecycle, and the sentence it may not be read as.
+ *
+ * The description says what is *joined* rather than what is run, because
+ * nothing is run: this flag reads two records and the task, and writes a third
+ * record if they agree. The three things an operator is most likely to read
+ * into "complete" — that the change is on the branch, that it survived, that
+ * the task moved on — are each denied by name.
+ */
+export const CONCLUDE_DELIVERY_OPTION_DESCRIPTION =
+  "Conclude this task's delivery, by joining its merge receipt to its post-merge verification " +
+  'history, and record that judgement beside the task state. Requires both — run ' +
+  '--reconcile-merge and then --verify-merge first — and requires them to describe one ' +
+  'delivery: the same merge commit, the same implementation head, the same repository and the ' +
+  'same pull request. The verification must carry a passing standing verdict for that commit ' +
+  'under the profile resolved now; a verdict under a different profile answers a different ' +
+  "contract and is not enough, and a run that could not be started is not a failure of the " +
+  'code and is not counted as one. It reads three files and writes one, starts no process ' +
+  'except the check-ignore probe every record writer runs, opens no network connection, ' +
+  'contacts no forge, takes no execution lease, starts no agent, runs no verification, and ' +
+  'writes neither task state nor block ledger — READY_FOR_PR stays terminal and the task\'s ' +
+  'current commit stays the implementation head, which is a different commit from the merge. ' +
+  'What is stored is one past judgement: that at that instant this delivery had happened and ' +
+  'the commit it produced was verified. It is not a claim that the merge commit is on the base ' +
+  'branch now, that it is reachable from it, that the merge has not been reverted, that its ' +
+  'changes are still present, or that the base branch passes today — none of those questions ' +
+  'is asked, and no Git history is read. A delivery already concluded is reported as such and ' +
+  'nothing is rewritten. The exit code answers whether the observation settled, with one ' +
+  'exception: a run that concluded the delivery and could not leave that conclusion on disk ' +
+  'does not exit nominal. Read the Completion and Record lines.';
+
+/**
  * Operator presence, in the shape `release` established.
  *
  * A second, independent statement rather than a widening of the first: one flag
@@ -567,10 +610,13 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'checkout beside the repository, and stores the result beside the task state. It contacts no ' +
   'forge and opens no network connection of its own; the commands it starts are the ' +
   "repository's, and what those do is the profile's to answer for. " +
+  "With --conclude-delivery it joins that receipt to that verification history and stores the " +
+  'judgement that this delivery is concluded, reading no network and no Git history. ' +
   'Contacting a forge is never implicit: with no flag that says ' +
-  'it contacts github.com, nothing is read from a network. It writes no task state, and every ' +
-  'flag here that writes a record — --record, --reconcile-merge and --verify-merge — writes ' +
-  'exactly one beside the task; no other flag here writes a record. It never updates, closes, ' +
+  'it contacts github.com, nothing is read from a network. It writes no task state at all, and ' +
+  'every flag here that writes a record — --record, --reconcile-merge, --verify-merge and ' +
+  '--conclude-delivery — writes exactly one beside the task; no other flag here writes a ' +
+  'record. It never updates, closes, ' +
   'reopens, reviews, comments on or labels a pull request, and never enables an auto-merge.';
 
 export function registerDeliveryCommand(program: Command, seams: DeliveryCommandSeams = {}): void {
@@ -620,6 +666,10 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
     .option(
       '--verify-merge',
       VERIFY_MERGE_OPTION_DESCRIPTION,
+    )
+    .option(
+      '--conclude-delivery',
+      CONCLUDE_DELIVERY_OPTION_DESCRIPTION,
     )
     .option(
       '--attended',
@@ -871,6 +921,31 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
             })
           : null;
 
+      // After the verification on purpose, and for the same reason that one is
+      // after the reconciliation: an invocation that asked for both verifies the
+      // commit and then concludes the delivery that verification is about. One
+      // asked only for this finds the history already there, or refuses with
+      // `VERIFICATION_ABSENT`.
+      //
+      // It takes no execution lease. Every act on this command that takes one
+      // starts a process from the repository under test; this one reads three
+      // files and writes a fourth, which is exactly what `--record` and
+      // `--reconcile-merge` do without a lease. Taking a repository-wide writer
+      // slot to file a judgement would make bookkeeping contend with runs of
+      // other tasks.
+      const deliveryConclusion =
+        options.concludeDelivery === true
+          ? await performConclusion(repository, options.task, subject, taskLoad, load, {
+              // A fresh object of exactly the named seams, not `seams` itself.
+              // A wider value is assignable to a narrower parameter type, so
+              // passing `seams` would leave the forge runners on the value at
+              // runtime and "it cannot reach one" would be about the type only.
+              now: seams.now,
+              checkIgnored: seams.checkIgnored,
+              git: seams.git,
+            })
+          : null;
+
       process.stdout.write(
         renderDeliveryObservation({
           repositoryId: repository.id,
@@ -887,6 +962,7 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
           merge,
           reconciliation,
           verification,
+          deliveryConclusion,
         }),
       );
 
@@ -911,11 +987,38 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       // verification and could not acquire the lease took no slot, and owes
       // nothing back. `exitCodeWithLeaseRelease(primary, null)` would refuse it,
       // which would be punishing a run for a lease it never held.
-      const verdict = exitCodeFor(conclusion);
-      process.exitCode =
+      // The second thing that can override it, and the reason it is not the
+      // same rule as the lease's.
+      //
+      // The lease rule is about *leaving something behind*: a run that took the
+      // writer slot and cannot prove it gave it back has changed this machine
+      // and must not exit nominal. A refused record leaves nothing behind, and
+      // that is why `--record`, `--reconcile-merge` and `--verify-merge` all
+      // report their store code in the report and none of them touches `$?`.
+      //
+      // This one is different, and narrowly. `--conclude-delivery` is the flag
+      // whose whole purpose is to answer "is this delivery concluded?". A run
+      // that decided yes and could not leave the conclusion on disk has told a
+      // caller yes about something that did not happen, and a caller reading
+      // `$?` would act on it. So exactly one shape overrides: the ladder reached
+      // `DELIVERY_CONCLUDED` and the store's code is not one the conclusion is
+      // durable under. Every ladder refusal keeps the convention — those are
+      // *answers*, and the report carries them.
+      //
+      // `conclusionIsDurable` rather than `recorded`, because those are
+      // different questions: `ALREADY_CONCLUDED` filed nothing and the claim is
+      // on disk all the same.
+      const leaseAdjusted =
         verification !== null && verification.leaseTaken
-          ? exitCodeWithLeaseRelease(verdict, verification.leaseRelease)
-          : verdict;
+          ? exitCodeWithLeaseRelease(exitCodeFor(conclusion), verification.leaseRelease)
+          : exitCodeFor(conclusion);
+      process.exitCode =
+        deliveryConclusion !== null &&
+        deliveryConclusion.result.outcome === 'DELIVERY_CONCLUDED' &&
+        (deliveryConclusion.record === null ||
+          !conclusionIsDurable(deliveryConclusion.record.code))
+          ? EXIT_RUN_NEEDS_OPERATOR
+          : leaseAdjusted;
     });
 }
 
@@ -1762,6 +1865,132 @@ async function performVerification(
     leaseTaken: true,
     leaseRelease,
   });
+}
+
+/**
+ * What the conclusion path may reach.
+ *
+ * There is deliberately **no forge seam of any kind** and **no verification
+ * runner**. Concluding a delivery asks github.com nothing and runs no gate: it
+ * reads three documents already on disk. The `git` seam here is not a way to
+ * read history — it is the runtime-ignore probe every record writer on this
+ * command uses before it writes, and `checkIgnored` is the injectable form of
+ * exactly that question. A seam this path does not hold is a capability it
+ * provably does not have.
+ */
+interface ConclusionCommandSeams {
+  readonly now?: (() => Date) | undefined;
+  readonly checkIgnored?: ((relativePath: string) => Promise<IgnoreVerdict>) | undefined;
+  readonly git?: GitRunner | undefined;
+}
+
+/**
+ * Joins this task's merge receipt to its verification history, and records the
+ * judgement.
+ *
+ * ── Why this one takes no lease when the verification beside it does ───────
+ *
+ * `--verify-merge` takes the execution lease because it starts the repository's
+ * own build and test commands and makes a Git worktree appear and disappear
+ * beside the repository. This starts nothing of the sort. It reads three files,
+ * asks Git twice whether a path is ignored — the same probe `--record` and
+ * `--reconcile-merge` run — and replaces one file atomically. Those two flags
+ * write their records without a lease, and the rule they follow is the one that
+ * applies here: the lease is the repository's *writer slot for productive
+ * spawns*, and taking it to file a judgement would make bookkeeping contend
+ * with runs of other tasks for no guarantee gained.
+ *
+ * ── The order of the two refusals this owns ────────────────────────────────
+ *
+ * A subject that could not be established is ahead of a task that is not ready,
+ * because a refusal about a subject that does not exist would be describing
+ * nothing. The same order the ladder declares them in, and the same order
+ * slices 7, 8 and 9 use.
+ */
+async function performConclusion(
+  repository: ResolvedRepository,
+  taskId: string,
+  subject: ReturnType<typeof resolveObservationSubject>,
+  taskLoad: ReturnType<typeof loadTaskState>,
+  load: typeof loadTaskState,
+  seams: ConclusionCommandSeams,
+): Promise<DeliveryConclusionView> {
+  const refused = (result: DeliveryConclusionResult): DeliveryConclusionView =>
+    Object.freeze({ result, record: null });
+
+  if (!subject.ok || !taskLoad.ok) {
+    return refused(refuseDeliveryConclusion('SUBJECT_NOT_ESTABLISHED'));
+  }
+  if (taskLoad.state.state !== 'READY_FOR_PR') {
+    return refused(refuseDeliveryConclusion('TASK_NOT_READY'));
+  }
+
+  const now = seams.now ?? (() => new Date());
+
+  const result = concludeDeliveryForTask(
+    { root: repository.root, verification: repository.verification },
+    {
+      taskId,
+      host: subject.subject.host,
+      owner: subject.subject.owner,
+      name: subject.subject.name,
+      // The task's `currentCommit`, resolved once at the top of the action.
+      // Taken from there rather than re-read, so the receipt check and the
+      // report cannot be about two different delivery heads.
+      deliveryCommit: subject.subject.commit,
+    },
+    { now },
+  );
+
+  if (result.outcome !== 'DELIVERY_CONCLUDED' || result.proof === null) {
+    return Object.freeze({ result, record: null });
+  }
+
+  // Every expectation comes from the receipt this command reads for itself and
+  // from the task, never from the proof. The store compares the two; handing it
+  // the proof's own facts as the expectation would make that comparison a
+  // tautology — which is a defect this repository has already had reach
+  // production once, in the mint the slice before this one shipped.
+  const recordSubject = { taskId, repositoryRoot: repository.root };
+  const stored = loadMergeReconciliation(repository.root, taskId, recordSubject);
+  if (stored.reading !== 'HISTORICAL_MERGE' || stored.receipt === null) {
+    // Unreachable through the ladder, which refuses long before a proof exists
+    // if the receipt is not readable. It is here because the receipt is read
+    // twice — once there and once here — and a build in which those two
+    // readings could disagree must not write a record from the second.
+    return Object.freeze({ result, record: null });
+  }
+
+  const record = await recordDeliveryConclusion({
+    repositoryRoot: repository.root,
+    taskId,
+    proof: result.proof,
+    expectedSubjectCommit: stored.receipt.subjectCommit,
+    expectedMergeCommit: stored.receipt.mergeCommit,
+    expectedHost: stored.receipt.host,
+    expectedOwner: stored.receipt.owner,
+    expectedName: stored.receipt.name,
+    expectedPullRequestNumber: stored.receipt.pullRequestNumber,
+    // The revision of the exact task-state bytes the subject was resolved from,
+    // carried from the single load at the top of the action. Re-reading it here
+    // would compare the write against a reading taken after the assessment,
+    // which is the window the gate exists to close rather than to move.
+    assessedStateRevision: taskLoad.revision,
+    // …and the *other* side of that comparison, taken by the store at the last
+    // moment before it writes. It lives here rather than in the store because
+    // the delivery surface may not take a value import from the task-state
+    // module, and this command is the one admitted exception. A fresh
+    // `loadTaskState`, not a captured value: a closure over `taskLoad.revision`
+    // would make the store compare a number with itself.
+    readStateRevision: () => {
+      const again = load(repository.root, taskId);
+      return again.ok ? again.revision : null;
+    },
+    checkIgnored:
+      seams.checkIgnored ?? createRuntimeIgnoreProbe(repository.root, seams.git ?? runGitCommand),
+  });
+
+  return Object.freeze({ result, record });
 }
 
 /**
