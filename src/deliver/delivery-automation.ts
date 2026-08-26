@@ -28,7 +28,8 @@
  *
  * ── Why not the repository profile, pinned or otherwise ────────────────────
  *
- * The obvious candidate was `.agent-orchestrator/repo-profile.yaml`, read out of
+ * The obvious candidate was the repository profile — the one file `repo/
+ * profile-location.ts` names, and the only place it is named — read out of
  * the task's own scope-authority commit the way `scope/pinned-scope.ts` reads
  * the scope declaration. That module's header already argues the
  * self-authorisation case correctly, and this slice would have inherited the
@@ -39,8 +40,11 @@
  *
  *  - **in this repository the profile is not in any commit.** `.gitignore`
  *    ignores `.agent-orchestrator/`, the file is untracked, and
- *    `git show HEAD:.agent-orchestrator/repo-profile.yaml` answers
- *    `fatal: path … exists on disk, but not in 'HEAD'`. A permission read from a
+ *    `git show HEAD:<that path>` answers `fatal: path … exists on disk, but not
+ *    in 'HEAD'`. The path is deliberately not spelled here: exactly two modules
+ *    in `src/` may name it, `tests/repo-resolution.test.ts` proves it, and a
+ *    third naming it — even in a comment saying it is not used — is a third
+ *    place a reader could take the answer from. A permission read from a
  *    commit is therefore unreadable in the one repository this build is
  *    dogfooded against, and a mechanism that fails closed everywhere it is used
  *    is not a mechanism;
