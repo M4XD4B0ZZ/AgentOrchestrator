@@ -167,6 +167,68 @@ export const TASK_NAMING_REFUSALS = [
 export type TaskNamingRefusal = (typeof TASK_NAMING_REFUSALS)[number];
 
 /**
+ * Every way the *grants* on this command line can be unusable, decided before
+ * anything is resolved, read or contacted.
+ *
+ * Their own vocabulary rather than members of {@link TASK_NAMING_REFUSALS},
+ * because they answer a different question: not "which delivery" but "what is
+ * this invocation permitted to do to one". An invocation can name its delivery
+ * perfectly and still be refused here, and the two sets are checked in that
+ * order — a grant conflict is decided without reference to which delivery it is
+ * about, so it is decided first.
+ *
+ * All four exist because V4 slice 13 gave one act a second grant. The rule they
+ * enforce together is that `--automatic-publish-head-only` is exactly what its
+ * name says and can never be more: it is the publication act, with nobody
+ * present, on a delivery this invocation worked out for itself.
+ */
+export const PUBLICATION_GRANT_REFUSALS = [
+  /**
+   * `--attended` and `--automatic-publish-head-only` together.
+   *
+   * Two grants, and the meaning of the pair would have to be invented: one
+   * states a person is present for this invocation and the other states nobody
+   * is. `run --attended --automatic-resume-only` is refused for the same reason
+   * and under a sibling code.
+   */
+  'PUBLICATION_GRANT_CONFLICT',
+  /**
+   * `--automatic-publish-head-only` without `--drive`.
+   *
+   * The narrowing this slice rests on, and it is not tidiness. Under `--drive`
+   * the publication is reached only after this invocation has re-derived the
+   * delivery's position from disk and from github.com: a concluded delivery
+   * stops, the merge receipt and verification history are read, the observation
+   * is taken fresh, and the decision must be `PULL_REQUEST_REQUIRED`. Without
+   * it, a bare publication would skip every one of those — and a delivery that
+   * was merged and whose branch the forge deleted presents an absent ref again,
+   * which an unattended publisher would answer by re-creating it.
+   */
+  'AUTOMATIC_PUBLICATION_WITHOUT_DRIVE',
+  /**
+   * `--automatic-publish-head-only` without `--publish-head`.
+   *
+   * A grant is not an act here and never has been. `--attended` names no act
+   * either, and the act flag is what `mayPerform` reads; an invocation that
+   * granted without naming would be relying on the grant's spelling to say
+   * which act it meant.
+   */
+  'AUTOMATIC_PUBLICATION_WITHOUT_ACT',
+  /**
+   * `--automatic-publish-head-only` together with `--create-pr` or `--merge-pr`.
+   *
+   * Refused rather than quietly ineffective. Both of those acts require
+   * `--attended`, which this invocation cannot also pass, so leaving the
+   * combination alone would produce a run that does not do what its command
+   * line plainly asks — and the failure would be silent. The `-only` in the flag
+   * name is a promise, and this is where it is kept.
+   */
+  'AUTOMATIC_PUBLICATION_WITH_OTHER_ACT',
+] as const;
+
+export type PublicationGrantRefusal = (typeof PUBLICATION_GRANT_REFUSALS)[number];
+
+/**
  * What commander hands the action, which is not yet {@link DeliveryOptions}.
  *
  * The one difference is `task`, and it is deliberate: `DeliveryOptions.task`
@@ -213,6 +275,54 @@ export const TASK_NAMING_REFUSAL_DETAIL: Readonly<Record<TaskNamingRefusal, stri
       '--select-task chooses which delivery the driver drives, so it needs --drive. The flags ' +
       'that name one act take the delivery an operator names with --task.',
   });
+
+/**
+ * The grant refusal this invocation earns, or `null` when its grants compose.
+ *
+ * Ordered most-specific first. The conflict comes before everything else
+ * because an invocation carrying two grants has to drop one whichever way the
+ * rest of the line is fixed, and the two "without" members come before the
+ * "with other act" one because an invocation missing `--drive` or the act flag
+ * is not yet asking for anything this build could grade.
+ *
+ * Pure, total over the flags, and consulted before the repository is resolved:
+ * **whether an invocation is refused for its flags must not depend on what is
+ * in the repository.** That is the same rule `--drive`'s own combination check
+ * is written under, and it was written that way because a review measured the
+ * alternative producing two answers for one command line.
+ */
+export function refusePublicationGrants(
+  invoked: DeliveryCommandInput,
+): PublicationGrantRefusal | null {
+  if (invoked.automaticPublishHeadOnly !== true) return null;
+  if (invoked.attended === true) return 'PUBLICATION_GRANT_CONFLICT';
+  if (invoked.drive !== true) return 'AUTOMATIC_PUBLICATION_WITHOUT_DRIVE';
+  if (invoked.publishHead !== true) return 'AUTOMATIC_PUBLICATION_WITHOUT_ACT';
+  if (invoked.createPr === true || invoked.mergePr === true) {
+    return 'AUTOMATIC_PUBLICATION_WITH_OTHER_ACT';
+  }
+  return null;
+}
+
+export const PUBLICATION_GRANT_REFUSAL_DETAIL: Readonly<
+  Record<PublicationGrantRefusal, string>
+> = Object.freeze({
+  PUBLICATION_GRANT_CONFLICT:
+    '--attended and --automatic-publish-head-only are two different grants and cannot both be ' +
+    'given. One states a person is present for this invocation; the other states nobody is.',
+  AUTOMATIC_PUBLICATION_WITHOUT_DRIVE:
+    '--automatic-publish-head-only requires --drive. Publishing with nobody present is only ' +
+    'done from a position this invocation worked out for itself: a concluded delivery stops, ' +
+    'the merge receipt and the verification history are read, and the pull-request situation ' +
+    'is observed fresh. A bare publication would skip all of that.',
+  AUTOMATIC_PUBLICATION_WITHOUT_ACT:
+    '--automatic-publish-head-only is a grant and not an act. Name the act with --publish-head, ' +
+    'exactly as --attended requires.',
+  AUTOMATIC_PUBLICATION_WITH_OTHER_ACT:
+    '--automatic-publish-head-only grants the publication and nothing else. --create-pr and ' +
+    '--merge-pr require --attended, which this invocation cannot also give, so the combination ' +
+    'is refused rather than left to do nothing.',
+});
 
 export const RECORD_REFUSAL_DETAIL: Readonly<Record<RecordRefusal, string>> = Object.freeze({
   RECORD_REQUIRES_OBSERVATION:
@@ -295,7 +405,9 @@ export const DECIDE_OPTION_DESCRIPTION =
  */
 export const PUBLISH_HEAD_OPTION_DESCRIPTION =
   'Create the task\'s work branch on the delivery remote, at exactly its pinned commit. ' +
-  'Requires --attended and a task at READY_FOR_PR. Create-only: the ref is written under a ' +
+  'Requires a task at READY_FOR_PR and a grant that names this act: --attended, or ' +
+  '--automatic-publish-head-only with --drive, where this machine’s operator has declared ' +
+  'this repository publishable with nobody present. Create-only: the ref is written under a ' +
   'compare-and-swap that refuses an existing ref, so a branch already there is never moved, ' +
   'rewritten or deleted — whatever it holds. Idempotent by observation: the remote is read ' +
   'before and after, a ref already at this commit is reported and not pushed to, and an ' +
@@ -500,9 +612,9 @@ export const CONCLUDE_DELIVERY_OPTION_DESCRIPTION =
  */
 export const DRIVE_OPTION_DESCRIPTION =
   'Work out where this task delivery stands and run the acts that stand between it and a ' +
-  'conclusion, stopping at the first condition this invocation cannot cross. It adds no act: ' +
-  'each of the three that change github.com still needs its own flag and --attended, and a ' +
-  'drive given none of them changes nothing there. At most one of those acts is attempted per ' +
+  'conclusion, stopping at the first condition this invocation cannot cross. It adds no act ' +
+  'and no grant: each of the three that change github.com still needs its own flag and a ' +
+  'grant that names that act, and a drive given none of them changes nothing there. At most one of those acts is attempted per ' +
   'invocation - the moment one reports an attempt this run stops and the next one reads what ' +
   'happened rather than repeating it. It never waits: a check still running, a pull request ' +
   'nobody has opened and an act nobody authorised are reported and returned from, with no ' +
@@ -530,7 +642,7 @@ export const SELECT_TASK_OPTION_DESCRIPTION =
   'dependency order, ties broken by the smallest id, that is at READY_FOR_PR and has no ' +
   'delivery conclusion recorded beside it. Requires --drive, and does not combine with --task. ' +
   'It authorises nothing: each of the three acts that change github.com still needs its own ' +
-  'flag and --attended, exactly as under --task. The candidates are the tasks this repository ' +
+  'flag and a grant that names that act, exactly as under --task. The candidates are the tasks this repository ' +
   'declares, so the answer never depends on the order a directory was listed in. A task is ' +
   'passed over only when its delivery is concluded, when it has no task state at all, or when ' +
   'that state is not READY_FOR_PR; a task whose conclusion or state cannot be READ stops the ' +
@@ -544,17 +656,60 @@ export const SELECT_TASK_OPTION_DESCRIPTION =
  *
  * A second, independent statement rather than a widening of the first: one flag
  * says which act, and this one says that a person is present for it. Neither
- * implies the other, and there is no unattended publication — which `--drive`
- * does not change, because it names no act of its own, and which
- * `--select-task` does not change either, because choosing a subject is not
- * authorising anything to be done to it.
+ * implies the other — which `--drive` does not change, because it names no act
+ * of its own, and which `--select-task` does not change either, because
+ * choosing a subject is not authorising anything to be done to it.
+ *
+ * The sentence that used to end this paragraph said there is no unattended
+ * publication. **V4 slice 13 made that false on purpose**, and it is corrected
+ * rather than left standing: one act now has a second grant, spelled below.
+ * What survives — and is the point — is the independence. The grant still has
+ * to be named, the act still has to be named, and neither grant can be reached
+ * by leaving the other one out.
  */
 export const ATTENDED_OPTION_DESCRIPTION =
-  'States that an operator is present for this invocation. Required by every flag here that can ' +
-  'change something outside this machine — today --publish-head, --create-pr and --merge-pr. ' +
-  'Not a claim ' +
-  'about credentials, and not needed by any read-only part of this command. There is no ' +
-  'unattended publication, no unattended pull request and no unattended merge.';
+  'States that an operator is present for this invocation. It is one of the two grants this ' +
+  'command has, and it is the only one for --create-pr and --merge-pr: there is no unattended ' +
+  'pull request and no unattended merge. --publish-head takes it too, and since V4 slice 13 ' +
+  'has a second grant of its own, --automatic-publish-head-only, which this flag cannot be ' +
+  'combined with. Not a claim about credentials, and not needed by any read-only part of this ' +
+  'command.';
+
+/**
+ * The second grant, and the only act that has one.
+ *
+ * ── Why it is not spelled `--unattended-…` ────────────────────────────────
+ *
+ * Because no option registered on any command in this build may carry `force`,
+ * `unattended`, `adopt`, `takeover` or `steal` in its name — a sweep over the
+ * live program enforces it, and `run-command.ts` records why the guard is right
+ * and the name would be the problem. `--automatic-publish-head-only` is also
+ * the better name on its own terms: it is the CLI spelling of what it permits,
+ * and the trailing `-only` carries the restriction where `--unattended-…` reads
+ * as the broad capability this deliberately is not.
+ *
+ * ── Why the sentence names a file it cannot show ──────────────────────────
+ *
+ * Because the permission is not on the command line and an operator reading
+ * this needs to know where it is. It names the location and the contract, and
+ * deliberately does not claim what the local file currently says: help text is
+ * static, the declaration is read at the moment of acting, and a sentence that
+ * described one machine's file would be false on every other.
+ */
+export const AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION =
+  'States that NOBODY is present for this invocation, and grants exactly one act: creating the ' +
+  'work branch on the delivery remote. It grants nothing else — not a pull request, not a ' +
+  'merge, not a comment, not a branch deletion and not an update of a ref that already exists ' +
+  '— and it is refused together with --attended, --create-pr or --merge-pr. Requires --drive ' +
+  'and --publish-head: publishing with nobody present is done only from a position this ' +
+  'invocation derived for itself, so a concluded delivery stops and the pull-request situation ' +
+  'is observed fresh first. It is not sufficient on its own. This machine’s operator must ' +
+  'also have declared this exact repository publishable that way, in ' +
+  '<user profile>/.agent-orchestrator/delivery-automation.yaml, by host, owner and name; no ' +
+  'file, no entry, or an entry saying ATTENDED_ONLY all refuse, and a file that cannot be read ' +
+  'refuses under its own answer rather than being treated as a no. Nothing in the repository ' +
+  'being delivered can make that declaration. At most one act is attempted per invocation, so ' +
+  'a publication ends the run and the next invocation reads what happened.';
 
 export const DELIVERY_COMMAND_DESCRIPTION =
   'Report the delivery target and the exact commit a delivery observation would be about, ' +
@@ -564,7 +719,9 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   'state of this commit. With --record it stores that ' +
   'observation as a historical record beside the task state; without it, nothing is written. ' +
   'With --decide it classifies this invocation\'s own answers into one delivery decision, which ' +
-  'is not merge eligibility and grants nothing. With --publish-head and --attended it creates ' +
+  'is not merge eligibility and grants nothing. With --publish-head and a grant for that act ' +
+  '— --attended, or --drive --automatic-publish-head-only where this machine’s ' +
+  'operator has declared this repository publishable with nobody present — it creates ' +
   'the work branch on the delivery remote at its pinned commit, create-only. With --create-pr ' +
   'and --attended, on top of --observe and --decide, it opens one pull request from that branch ' +
   'to the base branch. With --merge-pr and --attended, on the same footing plus a fresh ' +
@@ -580,8 +737,9 @@ export const DELIVERY_COMMAND_DESCRIPTION =
   "With --conclude-delivery it joins that receipt to that verification history and stores the " +
   'judgement that this delivery is concluded, reading no network and no Git history. ' +
   'With --drive it works out which of those acts this delivery still needs and runs those, in ' +
-  'that order, stopping at the first condition it cannot cross; it adds no act, each of the ' +
-  'three that CHANGE github.com still needs its own flag and --attended, and at most one of ' +
+  'that order, stopping at the first condition it cannot cross; it adds no act and no grant, ' +
+  'each of the three that CHANGE github.com still needs its own flag and a grant that names ' +
+  'that act, and at most one of ' +
   'them is attempted per invocation. It reads github.com without any of them. --drive does not combine with the flags that name the acts one at ' +
   'a time. ' +
   'Contacting a forge is never implicit: with no flag that says ' +
@@ -668,6 +826,10 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       '--attended',
       ATTENDED_OPTION_DESCRIPTION,
     )
+    .option(
+      '--automatic-publish-head-only',
+      AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION,
+    )
     .action(async (invoked: DeliveryCommandInput) => {
       // ── How this invocation names its delivery ───────────────────────────
       //
@@ -675,6 +837,24 @@ export function registerDeliveryCommand(program: Command, seams: DeliveryCommand
       // invocation that cannot say which delivery it is about should not cost a
       // Git subprocess to find that out. `block-command.ts` makes the same
       // argument about its own argument checks and its lease.
+      // The grants first, and above the naming check for the reason that check
+      // is itself above the resolver: an invocation carrying two grants, or a
+      // grant with no act, is unusable as written and costs no Git subprocess
+      // to say so. Whether it also named a delivery is a later question, and it
+      // is a different one.
+      const grants = refusePublicationGrants(invoked);
+      if (grants !== null) {
+        process.stdout.write(
+          `
+Grant        : ${grants}
+  ${PUBLICATION_GRANT_REFUSAL_DETAIL[grants]}
+
+`,
+        );
+        process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+        return;
+      }
+
       const naming = refuseTaskNaming(invoked);
       if (naming !== null) {
         process.stdout.write(

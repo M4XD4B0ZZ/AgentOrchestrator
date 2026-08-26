@@ -117,19 +117,68 @@ export const HEAD_PUBLICATIONS = [
    */
   'TASK_NOT_READY',
   /**
-   * `--publish-head` was given and `--attended` was not.
+   * `--publish-head` was given and no grant for it was.
    *
-   * A member rather than a silence: the operator asked for a mutation and did
-   * not say they were present for it, and answering nothing at all would hide a
-   * refusal behind a default. The same shape `release` uses, for the same
-   * reason — there is no unattended publication and no override.
+   * A member rather than a silence: the operator asked for a mutation and named
+   * neither of the two authorities that permit one, and answering nothing at
+   * all would hide a refusal behind a default.
+   *
+   * The sentence above this one used to read "and `--attended` was not", and
+   * **V4 slice 13 made that half of the story.** There are now two grants for
+   * this act and this member means neither was named: `--attended`, the
+   * operator stating they are present, or `--automatic-publish-head-only`,
+   * stating that nobody is. What did not change is that a grant has to be
+   * *named*: the absence of `--attended` is not the automatic one, and there is
+   * still no override.
    *
    * Behind the two subject members in the ladder, and the code agrees: this
    * build tells an operator that the task is not finished before it tells them
-   * they did not declare themselves present, because the first is a fact about
-   * the work and the second is a fact about the invocation.
+   * they granted nothing, because the first is a fact about the work and the
+   * second is a fact about the invocation.
    */
   'OPERATOR_ABSENT',
+  /**
+   * The invocation asked to publish unattended and this operator has decided
+   * nothing about this repository.
+   *
+   * There is no `delivery-automation.yaml` under the OS user profile, it lists
+   * no repositories, or none of the ones it lists is this delivery target. All
+   * three mean the same thing and are one member on purpose: nobody said yes,
+   * and the remedy is the same sentence in the same file.
+   *
+   * Ahead of the denial below because "no decision" and "a decision that says
+   * no" are different states of the world, and the second is the one an
+   * operator may have made deliberately.
+   */
+  'AUTOMATIC_PUBLICATION_NOT_DECLARED',
+  /**
+   * The invocation asked to publish unattended and this operator said no.
+   *
+   * The declaration names this exact repository and its `headPublication` is
+   * `ATTENDED_ONLY`. Kept apart from the member above because a revocation an
+   * operator wrote on purpose should not read as a file they forgot.
+   */
+  'AUTOMATIC_PUBLICATION_DENIED',
+  /**
+   * The declaration exists and could not be turned into a permission.
+   *
+   * The OS would not say where the user profile is, the file could not be read,
+   * it exceeds the size this build will parse, it is not one warning-free YAML
+   * document, it carries a mapping key refused by name, it is not this
+   * contract — a version this build does not understand, an unknown key, a
+   * permission that is not one of the two members — or two of its entries name
+   * one repository.
+   *
+   * A member of its own rather than a fall-through into
+   * {@link HEAD_PUBLICATIONS} `AUTOMATIC_PUBLICATION_NOT_DECLARED`, and that is
+   * the whole point of it: "the operator meant to allow this and I could not
+   * tell" must not be delivered as "the operator did not allow this", or a
+   * broken authority configuration reads as a working refusal for as long as
+   * nobody looks. Which of the causes it was is deliberately not carried — a
+   * refusal about a file this build will not quote cannot name the value it
+   * refused, and the file is one document an operator can open.
+   */
+  'PUBLICATION_POLICY_UNREADABLE',
   /**
    * The authority was refused at the effect: not minted, or already spent.
    *
@@ -240,7 +289,13 @@ export const HEAD_PUBLICATION_DETAIL: Readonly<Record<HeadPublication, string>> 
   TASK_NOT_READY:
     'The task has not reached READY_FOR_PR. Only a finished task has a delivery head, so nothing was read and nothing was attempted.',
   OPERATOR_ABSENT:
-    'Publishing creates a branch on the delivery remote, so it requires an operator to be present for this invocation. Nothing was read and nothing was attempted. Pass --attended to publish.',
+    'Publishing creates a branch on the delivery remote, so it requires a grant naming that act for this invocation. Nothing was read and nothing was attempted. Pass --attended to publish with an operator present, or --drive --publish-head --automatic-publish-head-only to publish with nobody present where this machine’s operator has declared that for this repository.',
+  AUTOMATIC_PUBLICATION_NOT_DECLARED:
+    'This invocation asked to publish with nobody present, and this machine’s operator has declared nothing about this repository. Nothing was read from the delivery remote and nothing was attempted.',
+  AUTOMATIC_PUBLICATION_DENIED:
+    'This invocation asked to publish with nobody present, and this machine’s operator has declared that this repository is published only with an operator present. Nothing was read from the delivery remote and nothing was attempted.',
+  PUBLICATION_POLICY_UNREADABLE:
+    'This invocation asked to publish with nobody present, and the declaration that would permit it could not be read into a permission. It is treated as a broken authority configuration rather than as a refusal: nothing was read from the delivery remote and nothing was attempted, and an operator has to look at the file.',
   AUTHORITY_REFUSED:
     'The authority for this publication was not one this build minted, or it had already been used. Nothing was attempted.',
   SUBJECT_CHANGED:

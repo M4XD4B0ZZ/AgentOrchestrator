@@ -765,9 +765,20 @@ describe('the driver vocabulary is closed, total and graded', () => {
       ['CREATE_PULL_REQUEST', 'MERGE_PULL_REQUEST', 'PUBLISH_HEAD'].sort(),
     );
     for (const effect of DELIVERY_EFFECTS) {
+      // Every act still names a grant, and `--attended` is still one for each.
       expect(DELIVERY_EFFECT_FLAG[effect], effect).toContain('--attended');
+      // And every entry names its own act, so no report can send an operator to
+      // the flag for a different one.
+      expect(DELIVERY_EFFECT_FLAG[effect], effect).toContain(
+        { PUBLISH_HEAD: '--publish-head', CREATE_PULL_REQUEST: '--create-pr', MERGE_PULL_REQUEST: '--merge-pr' }[effect],
+      );
     }
-    expect(DELIVERY_EFFECT_FLAG.PUBLISH_HEAD).toBe('--publish-head --attended');
+    // Two grants for one act since V4 slice 13, and both are named. An operator
+    // running unattended who is sent to `--attended` has been sent to a flag
+    // their own invocation refuses.
+    expect(DELIVERY_EFFECT_FLAG.PUBLISH_HEAD).toBe(
+      '--publish-head --attended (or --publish-head --automatic-publish-head-only)',
+    );
     expect(DELIVERY_EFFECT_FLAG.CREATE_PULL_REQUEST).toBe('--create-pr --attended');
     expect(DELIVERY_EFFECT_FLAG.MERGE_PULL_REQUEST).toBe('--merge-pr --attended');
   });
@@ -1768,7 +1779,13 @@ describe('the report says what happened and what is needed next', () => {
    * otherwise a surprise.
    */
   it('says what a drive may do, in the terms the driver enforces', () => {
-    expect(DRIVE_OPTION_DESCRIPTION).toContain('--attended');
+    // '--attended' stood here, and V4 slice 13 made naming one grant the wrong
+    // shape for this sentence: the rule the driver enforces is that an act needs
+    // its own flag AND a grant for that act, whichever grant that is. The rule
+    // is what is pinned, because a sentence that enumerates goes stale and a
+    // sentence that states a rule does not.
+    expect(DRIVE_OPTION_DESCRIPTION).toContain('its own flag and a grant that names that act');
+    expect(DRIVE_OPTION_DESCRIPTION).toContain('It adds no act and no grant');
     expect(DRIVE_OPTION_DESCRIPTION).toContain('At most one');
     expect(DRIVE_OPTION_DESCRIPTION).toContain('no sleep, no loop and no background work');
     for (const flag of [

@@ -70,8 +70,11 @@
  * Three things follow, and they are the whole safety argument:
  *
  *  - **at most one irreversible forge effect per invocation.** Never three
- *    behind one `--attended`, even though the flag surface has permitted that
- *    since slice 7 and still does;
+ *    behind one grant, even though the flag surface has permitted an operator
+ *    to name all three since slice 7 and still does. Stated as a rule about
+ *    grants rather than about `--attended`, because since V4 slice 13 there are
+ *    two of them; under the automatic one the bound is tighter still, since the
+ *    other two acts are refused on the command line;
  *  - **no observation proof is ever consumed after a mutation.** The merge is
  *    the only act that reads the proof, and it is reachable only in an
  *    invocation where nothing was pushed and nothing was created — so the
@@ -161,7 +164,11 @@ export type DeliveryEffect = (typeof DELIVERY_EFFECTS)[number];
 
 /** The flag that authorises each act, for the sentence the report prints. */
 export const DELIVERY_EFFECT_FLAG: Readonly<Record<DeliveryEffect, string>> = Object.freeze({
-  PUBLISH_HEAD: '--publish-head --attended',
+  // Two entries for one act, since V4 slice 13. Both are named because naming
+  // only the first would send an operator running unattended to a flag their
+  // invocation refuses, and naming only the second would send an operator at a
+  // terminal to a declaration they do not need.
+  PUBLISH_HEAD: '--publish-head --attended (or --publish-head --automatic-publish-head-only)',
   CREATE_PULL_REQUEST: '--create-pr --attended',
   MERGE_PULL_REQUEST: '--merge-pr --attended',
 });
@@ -487,10 +494,34 @@ const CONCLUSION_MEANING = Object.freeze({
  * `--merge-pr --attended` authorises, on a delivery the driver has worked out
  * is at the merge. There is no drive-shaped authority, no "advance everything"
  * flag, and no way to reach an act whose own flag was not named.
+ *
+ * ── The one act with two grants, and why the shape changed ────────────────
+ *
+ * V4 slice 13 gave the publication a second grant, `--automatic-publish-head-
+ * only`, and the function is restructured rather than extended so that the
+ * second grant cannot leak. `options.attended !== true` used to be a single
+ * floor over all three acts; a slice that added an `||` to it would have widened
+ * every act at once, which is exactly the mistake a floor makes easy. So the
+ * publication answers first and completely, and the floor below it now guards
+ * only the two acts that still have one grant each.
+ *
+ * What it still reads is flags, and only flags: the act's own, plus the grants.
+ * Whether the *declaration* permits an unattended publication is not asked here
+ * — this function is pure, and asking would mean reading a file to answer a
+ * question about a command line. `performPublication` asks it, at the point of
+ * effect, and refuses there under its own member.
  */
 function mayPerform(options: DeliveryOptions, effect: DeliveryEffect): boolean {
+  if (effect === 'PUBLISH_HEAD') {
+    if (options.publishHead !== true) return false;
+    return options.attended === true || options.automaticPublishHeadOnly === true;
+  }
+  // The two acts this build performs only with an operator present. Neither is
+  // reachable under the automatic publication grant, and `delivery-command.ts`
+  // refuses their flags alongside it besides — two independent refusals, because
+  // one of them is a rule about a command line and this one is a rule about an
+  // authority.
   if (options.attended !== true) return false;
-  if (effect === 'PUBLISH_HEAD') return options.publishHead === true;
   if (effect === 'CREATE_PULL_REQUEST') return options.createPr === true;
   return options.mergePr === true;
 }
@@ -829,6 +860,25 @@ export async function driveDelivery(
       return settle('HUMAN_DECISION_REQUIRED', stage);
     }
     if (published === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
+    if (
+      published === 'AUTOMATIC_PUBLICATION_NOT_DECLARED' ||
+      published === 'AUTOMATIC_PUBLICATION_DENIED' ||
+      published === 'PUBLICATION_POLICY_UNREADABLE'
+    ) {
+      // The invocation asked to publish with nobody present and the authority
+      // for that was not established. Named ahead of the arm below because that
+      // one answers `SUBJECT_NOT_ESTABLISHED`, and there is nothing wrong with
+      // this subject: the work branch is publishable, the task is ready, and an
+      // operator passing `--publish-head --attended` would publish it now.
+      //
+      // `ATTENDED_AUTHORITY_REQUIRED` is the member because it is the true one:
+      // this act was not authorised by this invocation, an attended invocation
+      // would authorise it, and `DELIVERY_EFFECT_FLAG` names both routes.
+      // Which of the three refusals it was is on the `Publication` line beside
+      // this, in that member's own words — a summary that tried to carry it
+      // would be a second vocabulary saying the same thing one step later.
+      return settle('ATTENDED_AUTHORITY_REQUIRED', stage, 'PUBLISH_HEAD');
+    }
     if (published !== 'ALREADY_PUBLISHED') {
       // Nothing was pushed and the head is not established. What is left, with
       // nothing attempted, is a work branch this build will not turn into a ref
