@@ -337,11 +337,18 @@ export const AUDIT_QUERY_SENTENCES: Readonly<
 /**
  * What a query compared, printed once beside the entries rather than per entry.
  *
- * Three paragraphs, and the third is the one an operator most needs. A filter
- * reads like an index and this one is not: every entry in the store was opened
- * and graded to answer the question, exactly as it would have been without it,
- * and what the query changed is which of them are printed. Saying so is what
- * keeps `L-V4-14-3` an open residual rather than a closed-looking one.
+ * Five paragraphs. The last is the one an operator most needs: a filter reads
+ * like an index and this one is not — every entry in the store was opened and
+ * graded to answer the question, exactly as it would have been without it, and
+ * what the query changed is which of them are printed. Saying so is what keeps
+ * `L-V4-14-3` an open residual rather than a closed-looking one.
+ *
+ * The middle three name what is and is not on the page, and each was added
+ * because a review found the report claiming otherwise: what a query compares,
+ * that an entry with no readable record is neither in nor out, that an entry
+ * naming another branch is listed anyway where this build did not read all of
+ * its evidence, and that a record spelled outside this build's own rules cannot
+ * be named by any query at all.
  */
 export const AUDIT_QUERY_MEANING = [
   'What this query compared:',

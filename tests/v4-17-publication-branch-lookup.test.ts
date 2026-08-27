@@ -990,6 +990,40 @@ describe('what a filtered report says', () => {
       STORE_NOT_READ: 'Nothing was read, so nothing about that branch is established here',
     });
 
+  /**
+   * The clause each sentence may not lose, beyond the one that identifies it.
+   *
+   * The fragment above says which sentence was printed; these say the sentence
+   * still bounds what it claims. Measured, and each one is a mutant that was
+   * green without this: the disclaimer after a negative's first clause could be
+   * replaced wholesale - one replacement asserted every outcome document in the
+   * store had been read - and `STORE_NOT_READ`'s tail could be made to
+   * fabricate a comparison over a store that was never opened.
+   */
+  const SENTENCE_BOUND: Readonly<Record<HeadPublicationBranchQueryReading, readonly string[]>> =
+    Object.freeze({
+      NAMED_RECORDS_PRESENT: [
+        'did not read in',
+        'The only entries left out are',
+        'what any record here establishes and no more',
+      ],
+      NO_NAMED_RECORD_PRESENT: [
+        'Whether anything beside those records was readable is',
+        'an attended publication records nothing here',
+        'has a store of their own',
+        'this command asked no forge what any ref holds',
+      ],
+      NO_NAMED_RECORD_AND_EVIDENCE_UNREAD: [
+        'is not established here',
+        'deliberately not written as the stronger one',
+      ],
+      STORE_NOT_READ: [
+        'This is not an',
+        'must not be read as one',
+        'is the whole of what this command found out',
+      ],
+    });
+
   /** Each fragment must belong to its own sentence and to no other. */
   function expectOnly(text: string, reading: HeadPublicationBranchQueryReading): void {
     for (const member of HEAD_PUBLICATION_BRANCH_QUERY_READINGS) {
@@ -999,6 +1033,9 @@ describe('what a filtered report says', () => {
       );
       if (member === reading) expect(text, member).toContain(fragment);
       else expect(text, member).not.toContain(fragment);
+    }
+    for (const bound of SENTENCE_BOUND[reading]) {
+      expect(text, `${reading} must keep: ${bound}`).toContain(bound);
     }
   }
 
@@ -1117,29 +1154,62 @@ describe('what a filtered report says', () => {
     // Every entry this build read in full and which names another branch is
     // left out, and nothing else is. Here both of the two were read in full.
     expect(selection.shown).toHaveLength(selection.named + selection.unestablished);
-    expect(selection.shown.every((entry) => !entryWasRead(entry) || entry.record !== null)).toBe(
-      true,
-    );
+    // The rule, and not a tautology. An earlier version of this line asserted
+    // `!entryWasRead(entry) || entry.record !== null`, which holds for any array
+    // whatsoever: `entryWasRead` is true only on the one arm that carries a
+    // record, so the left side already implies the right. This says the thing
+    // the comment above says - a shown entry read in full names the branch.
+    expect(
+      selection.shown.every(
+        (entry) =>
+          !entryWasRead(entry) ||
+          (entry.record !== null && recordNamesQueriedBranch(entry.record, BRANCH)),
+      ),
+      'a shown entry read in full must name the queried branch',
+    ).toBe(true);
   });
 
   it('shows exactly the entries the store grade is about, plus the matches', () => {
     const home = scratchHome();
-    record(home, { at: '2026-08-27T12:00:00.000Z' });
+    const match = record(home, { at: '2026-08-27T12:00:00.000Z' });
     const damaged = record(home, { at: '2026-08-27T12:01:00.000Z', name: 'OtherRepo' });
     writeFileSync(join(auditRoot(home), damaged, 'outcome.json'), '{not json', 'utf8');
-    record(home, { at: '2026-08-27T12:02:00.000Z', name: 'OtherRepo', outcome: true });
+    const clean = record(home, { at: '2026-08-27T12:02:00.000Z', name: 'OtherRepo', outcome: true });
     plantFile(home, 'junk.txt', 'x');
 
     const listing = list(home);
     const selection = selectQueriedBranch(listing.entries, BRANCH);
-
-    // The one rule, stated as a rule rather than as a list: an entry is left
-    // out exactly when this build read it in full and its record names another
-    // branch. Everything the store grade counts as not-read is on the page.
     const hidden = listing.entries.filter((entry) => !selection.shown.includes(entry));
+
+    // Both halves, named. An earlier version asserted only that whatever was
+    // hidden had been read in full - which a completely inverted filter also
+    // satisfies, measured: hide the matches, show every non-match, and all
+    // three of its assertions still passed.
+    expect(hidden.map((entry) => entry.name)).toEqual([clean]);
+    expect(selection.shown.map((entry) => entry.name)).toEqual([match, damaged, 'junk.txt']);
+    // …and the rule those two lists are an instance of.
     expect(hidden.every(entryWasRead), 'nothing unread may be hidden').toBe(true);
     expect(listing.entries.filter((entry) => !entryWasRead(entry)).length).toBe(2);
     expect(selection.shown.filter((entry) => !entryWasRead(entry)).length).toBe(2);
+  });
+
+  /**
+   * The newly-shown class keeps the listing's own place in the order.
+   *
+   * `shown`'s own docblock promises "in the order the listing established", and
+   * the report prints the order paragraph under the entries. Measured: a mutant
+   * that collected these entries separately and appended them at the end
+   * survived the whole suite, because both existing order cases use stores in
+   * which every event entry matches.
+   */
+  it('keeps a shown non-matching entry in the listing order, not at the end', () => {
+    const home = scratchHome();
+    const first = record(home, { at: '2026-08-27T12:00:00.000Z' });
+    const damaged = record(home, { at: '2026-08-27T12:01:00.000Z', name: 'OtherRepo' });
+    writeFileSync(join(auditRoot(home), damaged, 'outcome.json'), '{not json', 'utf8');
+    const last = record(home, { at: '2026-08-27T12:02:00.000Z' });
+
+    expect(shownNames(home)).toEqual([first, damaged, last]);
   });
 
   /**
@@ -1180,14 +1250,37 @@ describe('what a filtered report says', () => {
     expectOnly(text, 'STORE_NOT_READ');
   });
 
-  it('says that the whole store was read to answer the query', () => {
+  /**
+   * Every load-bearing clause of the query paragraph, written out here.
+   *
+   * `toContain(AUDIT_QUERY_MEANING)` compares the emitter with itself: it holds
+   * for any wording and it holds when a whole paragraph is deleted. Measured -
+   * two mutants each deleted one of the paragraphs and the entire suite stayed
+   * green, including the only text that tells an operator why an entry naming
+   * another branch is on the page.
+   */
+  it('says what the query compared, what it could not, and that it is not an index', () => {
     const home = scratchHome();
     record(home);
 
-    expect(report(home, BRANCH)).toContain(AUDIT_QUERY_MEANING);
-    expect(AUDIT_QUERY_MEANING).toContain('no index');
-    // …and does not say it where there is no query.
-    expect(report(home)).not.toContain(AUDIT_QUERY_MEANING);
+    const text = report(home, BRANCH);
+    for (const clause of [
+      'four values of each record this build read',
+      'character for',
+      'Nothing was folded, shortened, lengthened or matched in part',
+      'The\n  commit, the task, the checkout and the local name of the remote are not compared',
+      'neither named by this query nor shown to name another branch',
+      'is listed below anyway when this build',
+      'Only an entry read in full and naming\n  another branch is left out',
+      'cannot be named by any query',
+      'There is no index here',
+      'exactly as it would have been with no query at all',
+    ]) {
+      expect(text, clause.slice(0, 40)).toContain(clause);
+    }
+    // …and none of it is said where there is no query.
+    expect(report(home)).not.toContain('There is no index here');
+    expect(report(home)).not.toContain('is listed below anyway when this build');
   });
 
   it('registers every new label and every new sentence with the sweeps', () => {
@@ -1273,9 +1366,37 @@ describe('what a filtered report says', () => {
     expect(branchQueryReading({ named: 0, elsewhere: 0, unestablished: 1, shown: [] })).toBe(
       'NO_NAMED_RECORD_AND_EVIDENCE_UNREAD',
     );
+    // The fourth, which is not a function of any count: there is no selection
+    // to count over, because no listing was produced.
+    expect(branchQueryReading(null)).toBe('STORE_NOT_READ');
     expect(Object.keys(AUDIT_QUERY_SENTENCES).sort()).toEqual(
       [...HEAD_PUBLICATION_BRANCH_QUERY_READINGS].sort(),
     );
+    expect(HEAD_PUBLICATION_BRANCH_QUERY_READINGS).toHaveLength(4);
+  });
+
+  /**
+   * The front page names the flags and the one clause that keeps them honest.
+   *
+   * It is the one operator-facing text with no sweep of its own, and the clause
+   * it carries is the one both other texts carry.
+   */
+  it('names the query on the front page, with what it does not hide', () => {
+    // Read off the built program rather than off a constant, so the pin is on
+    // what an operator sees when they type `agent-loop --help`.
+    const front = buildProgram().description();
+    expect(front.length).toBeGreaterThan(500);
+    for (const clause of [
+      '--forge-host',
+      '--forge-owner',
+      '--forge-name',
+      'show only the records naming that one branch',
+      'could not read in full is shown either way',
+      'a filter and',
+      'not an index',
+    ]) {
+      expect(front, clause).toContain(clause);
+    }
   });
 });
 
@@ -1488,6 +1609,21 @@ describe('the command line', () => {
         'proof of',
       ]) {
         expect(flat, `${forbidden} in: ${sentence.slice(0, 60)}`).not.toContain(forbidden);
+      }
+      // …and bound to the matching contract, not only to shape. A description
+      // saying the opposite of what the code does passed every rule above:
+      // measured, with `--forge-owner` reworded to promise case folding and
+      // substring matching, and the whole suite stayed green. These are the
+      // three promises this command may never make, in any of its own prose.
+      for (const contradiction of [
+        'case is folded',
+        'is folded before',
+        'in any capitalisation',
+        'a substring',
+        'part of a',
+        'partial',
+      ]) {
+        expect(flat, `${contradiction} in: ${sentence.slice(0, 60)}`).not.toContain(contradiction);
       }
     }
   });

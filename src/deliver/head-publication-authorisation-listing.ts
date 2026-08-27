@@ -887,7 +887,15 @@ export function recordNamesQueriedBranch(
 export interface HeadPublicationBranchSelection {
   /** Entries whose record this build read, naming the branch that was asked for. */
   readonly named: number;
-  /** Entries whose record it read, naming a different branch. Not shown. */
+  /**
+   * Entries whose record it read, naming a different branch.
+   *
+   * **Shown only where this build did not read all of the entry's evidence** —
+   * see {@link shown} for the one rule and for why it is that one. This line
+   * said "Not shown." for one commit, which was the same class of false
+   * rule-in-a-comment the blocker below was: two statements of one contract, on
+   * one interface, disagreeing.
+   */
   readonly elsewhere: number;
   /**
    * Entries it read no record for, so nothing about the query is established
@@ -983,7 +991,7 @@ export function selectQueriedBranch(
 }
 
 /**
- * What a store had to say about one branch. A closed set of three.
+ * What a store had to say about one branch. A closed set of four.
  *
  * Two of them are negatives and they are deliberately not one member. "Nothing
  * here names that branch, and everything here was read" and "nothing here names

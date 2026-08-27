@@ -12,9 +12,9 @@ the other non-goal in §13, a post-effect outcome record. That ADR answers §11'
 three arguments one at a time and accepts the third: `(record, no outcome)` says
 exactly what `(record)` alone says, and it is now the uncommon shape rather than
 the only one. And by `2026-08-27-adr-publication-branch-lookup.md`, which splits
-§17's single non-goal — "searching, filtering or indexing the store" — carving
-out one exact-identity filter and leaving searching and indexing where they are.
-It narrows `L-V4-14-3` a second time and does not close it.
+§13's "searching, filtering and indexing the store" into its three words, taking
+up one exact-identity filter and leaving searching and indexing outside. It
+narrows `L-V4-14-3` a second time and does not close it.
 
 `2026-08-26-adr-unattended-head-publication.md` §12, whose first sentence reads
 "**The publication writes nothing.**" That stops being true for the automatic
@@ -485,9 +485,12 @@ authorisations` under its own decision, as this section requires. See
 `2026-08-27-adr-publication-authorisation-listing.md`. **"A post-effect outcome
 record" is no longer one either:** V4 slice 16 shipped `outcome.json` beside each
 authorisation, under its own decision and answering §11's three arguments one at
-a time. See `2026-08-27-adr-publication-outcome-evidence.md`. Searching,
-filtering and indexing the store are still outside, and so is everything else in
-the list.
+a time. See `2026-08-27-adr-publication-outcome-evidence.md`.
+
+**And "searching, filtering and indexing" is no longer one sentence:** V4 slice
+17 took up one exact-identity branch filter, under
+`2026-08-27-adr-publication-branch-lookup.md`. Searching and indexing are still
+outside, and so is everything else in the list.
 
 `READY_FOR_PR` remains terminal and the transition table is untouched.
 

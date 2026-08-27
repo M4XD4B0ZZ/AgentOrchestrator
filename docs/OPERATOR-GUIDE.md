@@ -1314,8 +1314,9 @@ zwar lesen konnte, neben dem aber ein Dokument liegt, das es nicht lesen konnte,
 ist genau der Eintrag, den die Zeile `Listing` bereits gegen den Store zählt —
 ihn wegzulassen würde diese Zeile zu einer Lüge machen. Beide stehen bei **jeder**
 Abfrage in der Liste. Weggelassen wird nur eines: ein Eintrag, den AO vollständig
-gelesen hat und dessen Datensatz einen anderen Branch nennt. Die Zählzeile sagt,
-wie viele es jeweils sind:
+gelesen hat und dessen Datensatz einen anderen Branch nennt. Die Zählzeile gruppiert jeden
+Eintrag nach dem Branch, den sein Datensatz nennt; sie weist nicht gesondert aus,
+welche davon aus diesem Grund gezeigt werden - das sagen die Einträge selbst:
 
 ```text
 Query        : github.com/M4XD4B0ZZ/AgentOrchestrator refs/heads/ao/task/V4-17
@@ -1331,8 +1332,11 @@ denn die Aufzählung erfährt von der Abfrage gar nichts.
 in diesem Store ist jetzt kein von AO lesbarer Datensatz, der diesen Branch
 nennt. Löschen hinterlässt keine Lücke, eine beaufsichtigte Veröffentlichung
 schreibt hier gar nichts, ein anderer OS-Benutzer hat einen eigenen Store, und
-dieser Befehl fragt keinen Forge. Wenn im Store zusätzlich Einträge liegen, die
-AO nicht lesen konnte, steht ein anderer Satz da, der genau das sagt.
+dieser Befehl fragt keinen Forge. Wenn im Store zusätzlich Einträge liegen, deren
+**Datensatz** AO nicht lesen konnte, steht ein anderer Satz da, der genau das
+sagt. Ein Datensatz, den AO lesen konnte, neben dem aber ein unlesbares Dokument
+liegt, zeigt sich auf der `Outcome`-Zeile des Eintrags und auf `Listing` - nicht
+in diesem Satz.
 
 **Das ist ein Filter, kein Index.** Es wird weiterhin **jeder** Eintrag geöffnet
 und bewertet, um die Frage zu beantworten. `L-V4-14-3` ist damit ein zweites Mal

@@ -6,9 +6,12 @@
 **Supersedes** nothing. **Superseded by** nothing.
 **Amends** two. **Amended by** nothing.
 
-`2026-08-27-adr-unattended-publication-audit.md` §17, which lists "searching,
-filtering or indexing the store" as one non-goal. It is split here: **one exact
-filter is carved out and decided; searching and indexing stay non-goals.**
+`2026-08-27-adr-unattended-publication-audit.md` §13, whose non-goal list ends
+"Searching, filtering and indexing the store are still outside". It is split
+here: **one exact filter is carved out and decided; searching and indexing stay
+non-goals.** (That ADR has fourteen numbered sections; an earlier version of this
+line cited a §17 it does not have, and the section that does carry the sentence
+was left standing as a result.)
 
 `2026-08-27-adr-publication-authorisation-listing.md` §15 and §17, whose command
 now takes four flags. Its own claims are unchanged: the listing still contacts
@@ -218,7 +221,7 @@ as a clean negative does. The query is echoed on every outcome, so an operator
 can always see what was asked.
 
 The strongest claim any negative makes is about **records currently present in
-the readable store**. None of the three sentences says a branch was never
+the readable store**. None of these sentences says a branch was never
 authorised, was never published, or that this is a complete history; the suite
 sweeps for each of those phrasings, and the existing sweep already forbids
 "never authorised" outright.
@@ -241,8 +244,9 @@ unchanged.
 that exact spelling. A single argument would need a third identity grammar and
 would ship a separator trap. The operator already types these as three keys in
 the declaration the records were written under, and the permission path already
-compares them as three exact fields. `--repository` is spoken for on five
-commands with an incompatible meaning — a filesystem path.
+compares them as three exact fields. `--repository` is spoken for on six
+command surfaces with an incompatible meaning — a filesystem path: `block`,
+`delivery`, `lease status`, `lease recover`, `release` and `run`.
 
 **Prefixed `--forge-`** rather than bare `--host --owner --name`, following the
 record view's rename discipline and keeping the flags' spelling next to the

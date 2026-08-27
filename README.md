@@ -10980,7 +10980,8 @@ command that reads it:
 agent-loop publication authorisations
 ```
 
-No repository, no options, no network. It reads one directory under your own OS
+No repository, no network, and no option that asks for anything but a narrower
+report. It reads one directory under your own OS
 user profile and grades every entry in it.
 
 ```text
@@ -11329,7 +11330,9 @@ record for carries no host, owner, name or ref at all, so it can be neither
 matched nor ruled out. And an entry whose record it read beside a document it
 could not is one the store's grade already counts against it — leaving that out
 would make the line about the store promise a listing the report did not give.
-Both appear under every query, and the count line says how many there are:
+Both appear under every query. The count line groups every entry by the branch
+its record names - it does not break out which of them are shown for this
+reason, and the entries themselves are what say that:
 
 ```text
 Query        : github.com/M4XD4B0ZZ/AgentOrchestrator refs/heads/ao/task/V4-17
@@ -11348,8 +11351,10 @@ record names a different branch.
 store names that branch" is the strongest true sentence available: anything
 running as your OS user can delete a record without trace, an attended
 publication records nothing here, another OS user has a store of their own, and
-this command asks no forge anything. Where the store also holds entries it could
-not read, a different sentence is printed saying so.
+this command asks no forge anything. Where the store also holds entries whose **record**
+it could not read, a different sentence is printed saying so - and where it read
+a record beside a document it could not, that shows on the entry's own `Outcome`
+line and on `Listing` rather than in this sentence.
 
 **It is a filter and not an index.** Every entry is still opened and graded to
 answer the question — `L-V4-14-3` is narrowed for the second time and is not

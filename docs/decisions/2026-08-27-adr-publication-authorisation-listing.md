@@ -13,7 +13,9 @@ naming one branch exactly, and amends §15 and §17 — §15's "no filter" and �
 which an exact-identity filter is. Every claim this ADR makes about the command is unchanged: it
 still contacts no forge, starts no Git, takes no lease, reads no declaration and
 creates nothing, it still prints every entry when nothing is asked, and there is
-still no limit, no page and no index.
+still no limit, no page and no index. What that slice does falsify is the
+surface: two sentences below say this command has no options at all, and each now
+carries a note.
 
 `2026-08-27-adr-unattended-publication-audit.md`, in three places. §13 lists "an
 operator-facing command that lists or searches the store" among that slice's
@@ -31,7 +33,8 @@ read: `agent-loop publication authorisations`. It lists every entry in the store
 grades each one with the contract that wrote it, changes nothing, and asks
 nothing outside that one directory.**
 
-One new command group with one subcommand, no options at all. One new reader
+One new command group with one subcommand, no options at all - V4 slice 17 added
+four, and the note in the header records it. One new reader
 module, one new renderer, one location module extracted from the writer. No new
 record, no new field, no new flag on any existing command, no change to the
 publication path.
@@ -98,7 +101,9 @@ accident.
 
 ## 3. Repository requirement: none, and it must be none
 
-The command takes **no `--repository`** and no options at all.
+The command takes **no `--repository`** and, when this slice shipped, no options
+at all. V4 slice 17 added four, all of them naming one branch to narrow the
+report to; `--repository` is still refused, for the reasons below.
 
 **The root is not a function of any repository.** It is
 `join(orchestratorHome(provider), 'head-publication-authorisations')`, and

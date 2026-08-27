@@ -273,8 +273,14 @@ export const BRANCH_QUERY_REFUSAL_DETAIL: Readonly<Record<BranchQueryRefusal, st
  * *code* rather than to its sentence.
  *
  * Built from the map rather than listed, so a sixth refusal is swept without
- * anybody remembering to add it. The option descriptions are read off the
- * registered command by the suite, for the same reason.
+ * anybody remembering to add it.
+ *
+ * It holds the refusal sentences and **nothing else**. The option descriptions
+ * are swept too, and the suite reads those off the registered command rather
+ * than from here — a constant carrying them would be a second copy of text
+ * commander already owns. An earlier version of this paragraph said they were
+ * in here; they never were, and the suite pins that this list is exactly as
+ * long as the refusal vocabulary.
  */
 export const BRANCH_QUERY_PRINTED_TEXT: readonly string[] = Object.freeze(
   BRANCH_QUERY_REFUSALS.map((refusal) => BRANCH_QUERY_REFUSAL_DETAIL[refusal]),
