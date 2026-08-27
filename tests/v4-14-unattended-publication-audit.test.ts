@@ -1118,13 +1118,33 @@ describe('a record is evidence and never authority', () => {
 
   it('is read in exactly one module of the source tree, and not by the minter', () => {
     const all = walkSource('src');
+    // The rule rather than the list. Slice 14 pinned an exact two-element array
+    // here; slice 15 added an operator-facing reader and the array would have had
+    // to be widened by hand every time — a literal that goes stale is a pin that
+    // guards nothing. What must hold is that no module which decides whether a
+    // publication may happen reads a stored record, whichever modules do.
     const readers = all.filter((file) =>
-      /\breadHeadPublicationAuthorisation\s*\(/.test(codeOnly(file)),
+      /\b(?:read|inspect)HeadPublicationAuthorisation\s*\(/.test(codeOnly(file)),
     );
+    // An allow-list, and this is the second version of this case. Slice 15
+    // replaced the original with a deny-list of module names, on the argument
+    // that a literal goes stale — and a review measured what that costs, which
+    // is that a future authority module named anything outside the pattern
+    // could read the store with the whole suite green. A pin that goes stale by
+    // refusing is worth more than one that goes stale by permitting.
     expect(readers).toEqual([
+      'src/deliver/head-publication-authorisation-listing.ts',
       'src/deliver/head-publication-authorisation-store.ts',
       'src/deliver/head-publication-authorisation.ts',
     ]);
+    // ...and the deny-list stays beneath it, because the two fail in different
+    // directions: this one still holds if the list above is ever widened by
+    // somebody who did not think about what they were widening it with.
+    for (const file of readers) {
+      expect(file, `${file} decides publications and must not read a record`).not.toMatch(
+        /delivery-steps|delivery-driver|publish-delivery-head|git-head-publisher|head-publication-grant|delivery-automation/,
+      );
+    }
 
     // The module that mints the publication authority writes records and never
     // reads one. A reader there would be the shape this rule exists to forbid.
@@ -1605,13 +1625,25 @@ describe('the store is where the authority is, and the repository cannot reach i
       join(home, '.agent-orchestrator', HEAD_PUBLICATION_AUDIT_DIR_NAME),
     );
     // A pure function of the profile: no repository path, no environment, no
-    // Git and no command line reaches it.
-    const code = codeOnly('src/deliver/head-publication-authorisation-store.ts');
-    for (const forbidden of ['process.env', 'execFile', 'spawn', 'GitRunner', 'cwd()']) {
-      expect(code, forbidden).not.toContain(forbidden);
+    // Git and no command line reaches it. Swept over both halves, because V4
+    // slice 15 moved the location out of the writer so that a read-only listing
+    // could learn a directory name without importing the exclusive `mkdir` — the
+    // rule is about the whole derivation, not about which file it sits in.
+    const store = codeOnly('src/deliver/head-publication-authorisation-store.ts');
+    const location = codeOnly('src/deliver/internal/head-publication-audit-location.ts');
+    for (const code of [store, location]) {
+      for (const forbidden of ['process.env', 'execFile', 'spawn', 'GitRunner', 'cwd()']) {
+        expect(code, forbidden).not.toContain(forbidden);
+      }
     }
-    expect(code).toContain('orchestratorHome');
-    expect(code.replace(/\s+/g, '').length).toBeGreaterThan(500);
+    expect(location).toContain('orchestratorHome');
+    // The module that owns the location creates nothing. That is what makes the
+    // reader's own closure free of a directory creator, and it is pinned here
+    // rather than only in slice 15's suite, because it is this store's property.
+    for (const forbidden of ['mkdirSync', 'writeFileSync', 'renameSync', 'createRunDirectory']) {
+      expect(location, forbidden).not.toContain(forbidden);
+    }
+    expect(store.replace(/\s+/g, '').length).toBeGreaterThan(500);
   });
 
   it('survives the repository it describes being deleted', async () => {

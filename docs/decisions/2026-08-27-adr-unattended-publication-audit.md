@@ -4,7 +4,9 @@
 **Status** accepted
 **Slice** V4 slice 14
 **Supersedes** nothing. **Superseded by** nothing.
-**Amends** one.
+**Amends** one. **Amended by** `2026-08-27-adr-publication-authorisation-listing.md`,
+which takes up this ADR's own non-goal of an operator-facing command that lists
+the store (§13), and narrows `L-V4-14-3`.
 
 `2026-08-26-adr-unattended-head-publication.md` §12, whose first sentence reads
 "**The publication writes nothing.**" That stops being true for the automatic
@@ -393,7 +395,7 @@ about. A case records under both spellings and requires two directories.
 | --- | --- | --- | --- | --- | --- |
 | 1 | before the declaration is read | none | untouched by this run | nothing | **no** — a fresh invocation, a fresh declaration read, a fresh grant |
 | 2 | after the declaration is read, before the record | none; the permission was never stored | untouched | nothing | **no**, same |
-| 3 | while the record is staged | the event directory, and inside it a staging file or nothing at all; the record's own name is absent | untouched | nothing — a reader opens by name and never enumerates, so an event directory with no record in it is not a record | **no**, same |
+| 3 | while the record is staged | the event directory, and inside it a staging file or nothing at all; the record's own name is absent | untouched | nothing — the record is opened **by name** inside the event directory, which is never enumerated, so an event directory holding only a staging file is not a record. V4 slice 15's operator-facing reader enumerates the store **root** and is bound by the same rule one level down: it lists event directories and opens `authorisation.json` by name, and reports this shape as `RECORD_ABSENT` | **no**, same |
 | 4 | after the record, before the effect | the record | untouched | permission and subject, established at that instant; nothing attempted | **no**, same |
 | 5 | immediately before the push process starts | the record | untouched | the same as 4, and the record cannot distinguish itself from 4 | **no**, same |
 | 6 | the push starts and this process dies | the record | **unknown** — the server may have committed the ref | the same as 4. Nothing about the ref | **no**, and safely: the next run's pre-reading answers `ALREADY_PUBLISHED` and sends nothing |
@@ -459,7 +461,13 @@ autonomous merge eligibility; review-policy evaluation; CI polling; a scheduler;
 daemon; recurring execution; draining more than one task per invocation;
 cross-project orchestration; a generic audit framework for every AO action;
 cryptographic non-repudiation; a retention policy; an operator-facing command that
-lists or searches the store; and auditing the local acts a `--drive` performs.
+searches the store; and auditing the local acts a `--drive` performs.
+
+**One of these was taken up.** "An operator-facing command that lists the store"
+is no longer a non-goal: V4 slice 15 shipped `agent-loop publication
+authorisations` under its own decision, as this section requires. See
+`2026-08-27-adr-publication-authorisation-listing.md`. Searching, filtering and
+indexing the store are still outside, and so is everything else in the list.
 
 `READY_FOR_PR` remains terminal and the transition table is untouched.
 
@@ -476,7 +484,10 @@ a MAC, and file modes do not restrict anything on NTFS.
 **`L-V4-14-3` — the store is not indexed.** Records are addressable only by event
 identity; the repository, task, ref and commit live in the body. Finding the
 record for a branch means reading the directory. That is the price of putting no
-identity in the path (§9), and there is no command that does the reading.
+identity in the path (§9). V4 slice 15 added the reading — one command that
+lists the whole store — and narrowed this to what remains: there is still no
+index, no search and no filter, so finding the record for one branch means
+reading every entry.
 
 **`L-V4-14-4` — hard links are not inspected.** The link check on the store's path
 uses `lstat` and catches symbolic links and junctions, which is measured. A hard

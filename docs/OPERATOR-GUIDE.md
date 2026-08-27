@@ -1043,6 +1043,143 @@ Konfiguration ab. Notiert als `L-V4-02-6`.
 
 ---
 
+## 19a. Nachlesen, wozu AO sich selbst berechtigt hat (V4 Slice 15) — read-only
+
+Wenn AO **unbeaufsichtigt** einen Branch auf dem Delivery-Remote anlegen darf
+(`delivery --drive --publish-head --automatic-publish-head-only`, siehe §1),
+schreibt es **vorher** einen unveränderlichen Datensatz. Der liegt außerhalb
+jedes Repositories, in deinem eigenen Benutzerprofil:
+
+```text
+%USERPROFILE%\.agent-orchestrator\head-publication-authorisations\
+    <UTC-Zeitpunkt>-<uuid>\
+        authorisation.json
+```
+
+Seit V4 Slice 15 kannst du das lesen:
+
+```powershell
+agent-loop publication authorisations
+```
+
+**Kein `--repository`, keine Optionen, kein Netzwerk.** Der Befehl liest genau
+dieses eine Verzeichnis. Er startet kein Git, keine GitHub CLI und keinen Agenten,
+nimmt keine Lease, legt nichts an und ändert nichts — auch dann nicht, wenn das
+Verzeichnis gar nicht existiert.
+
+```text
+Store        : C:\Users\Max\.agent-orchestrator\head-publication-authorisations
+Listing      : READ
+Entries      : 1 (1 read, 0 not read)
+  Every entry in the store is a record this build read.
+
+Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
+  Reading      : HISTORICAL_AUTHORISATION
+  Authorised at: 2026-08-27T12:00:00.000Z
+  Act          : HEAD_PUBLICATION, invocation mode AUTOMATIC
+  Task         : V4-14
+  Checkout     : D:\AgentOrchestrator
+  Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator
+  Ref          : refs/heads/ao/task/V4-14
+  Commit       : 10583ee91a5747d0049f563ffaac64b0cf643aeb
+  Declaration  : AUTOMATIC_ALLOWED, sha256 f59d285e0c233651c7610df32edf58d0d932a3ada9c50f984ff128ce5c7c5a5b
+```
+
+### Was ein Eintrag heißt — und was nicht
+
+- Ein Datensatz sagt: **zu diesem Zeitpunkt** hat ein Lauf aus der Deklaration mit
+  genau diesen Bytes festgestellt, dass automatisches Publizieren für dieses
+  Repository erlaubt war, und hat Task, Checkout, Remote, Ref und Commit als
+  Gegenstand der **einen** Veröffentlichung bestimmt, die er dann versuchen
+  durfte.
+- Er sagt **nicht**, dass etwas versucht wurde. Er wird geschrieben, **bevor** AO
+  den Remote überhaupt anspricht. Ein Lauf, der den Ref schon auf diesem Commit
+  vorfindet, sendet nichts — und hinterlässt denselben Datensatz.
+- Er sagt **nicht**, dass der Branch existiert, und **nicht**, dass AO ihn
+  angelegt hat.
+- Er sagt **nicht**, dass die Erlaubnis heute noch gilt. Der Befehl liest
+  `delivery-automation.yaml` gar nicht.
+- `Declaration` ist der SHA-256 der **exakten Bytes** der Deklaration zu jenem
+  Zeitpunkt. Ein Kommentar, ein Zeilenende oder CRLF ändern ihn — und alle
+  ergeben dieselbe Erlaubnis. Der Digest ist keine Aussage über Bedeutung.
+
+### Reihenfolge
+
+Sortiert nach Eintragsnamen: erst die Einträge, die AO als Event-Verzeichnis
+liest, dann alles andere. Der Name eines Event-Verzeichnisses trägt den
+Zeitpunkt, den die Uhr des schreibenden Laufs gemeldet hat — ein Name ist aber
+nur ein Name, und wer im Store schreiben kann, wählt ihn selbst. Die Zeit **im**
+Datensatz wird gegen nichts geprüft.
+
+### Kaputte Einträge werden gezeigt, nie weggelassen
+
+Was AO nicht als Datensatz lesen kann, steht trotzdem in der Liste, mit einer
+eigenen Zeile `Reading` und einem Satz, was es ist. Die Zählzeile trennt beides:
+`Entries : 5 (3 read, 2 not read)`.
+
+```text
+HISTORICAL_AUTHORISATION   gelesen, Digest passt zum Verzeichnisnamen
+RECORD_ABSENT              Event-Verzeichnis ohne Datensatz: Absturz beim Schreiben,
+                           eine Verweigerung danach, der Datensatz wurde
+                           geloescht, oder jemand hat hier einfach ein
+                           Verzeichnis angelegt. AO unterscheidet das nicht.
+RECORD_EMPTY               Datei da, 0 Bytes — das schreibt AO nie
+RECORD_UNREADABLE          Link, keine normale Datei, Lesen misslang, oder der
+                           Name war gar nicht abfragbar
+RECORD_MALFORMED           kein Datensatz dieses Builds (auch: zu groß)
+RECORD_UNSUPPORTED_VERSION neuere Vertragsversion — verweigert, nichts wird gezeigt
+RECORD_NOT_THIS_EVENT      Digest passt nicht zum Verzeichnis: kopiert oder verändert
+UNRECOGNISED_ENTRY         gar kein Event-Verzeichnis: Link, Datei, fremder Name -
+                           oder AO konnte den Eintrag gar nicht bestimmen
+```
+
+### Exit-Codes
+
+```text
+0   Eine Liste wurde erstellt — auch wenn kaputte Einträge darin stehen.
+    Auch: kein Store vorhanden, oder Store leer.
+3   Der Store selbst war nicht lesbar: er ist kein Verzeichnis, ODER ein
+    Verzeichnis auf dem Weg dorthin ist keines, ODER ein Link liegt im Pfad,
+    ODER das Profil war nicht ermittelbar. Das ist derselbe Store, in den die
+    nächste unbeaufsichtigte Veröffentlichung schreiben müsste.
+```
+
+Ein kaputter Eintrag ist **kein** Exit-Code-3-Fall: nichts auf einem
+Autoritätspfad nimmt je einen gespeicherten Datensatz als Erlaubnis, und AO
+löscht hier nie etwas — ein
+Nicht-Null-Code wäre dauerhaft und mit diesem Werkzeug nicht wegzubekommen. Der
+Befund steht im Bericht.
+
+### Was der Befehl dir nicht beweisen kann
+
+**Jeder Prozess, der als dein OS-Benutzer läuft, kann einen Datensatz schreiben,
+der genauso aussieht wie die echten — und jeden davon spurlos löschen.** Der
+Binding-Digest ist Integritätsstruktur, keine Signatur: es gibt in diesem Build
+keinerlei Schlüsselmaterial. Er erkennt einen aus einem anderen Event kopierten
+Datensatz, ein nachträglich geändertes Feld und einen Datensatz aus einem Build
+mit anderem Vertrag. Mehr nicht.
+
+Deshalb heißt **leerer Store**: hier ist jetzt nichts. Er heißt **nicht**, dass
+nie etwas erlaubt wurde — eine beaufsichtigte Veröffentlichung schreibt hier
+überhaupt nichts, ein anderer OS-Benutzer hat einen eigenen Store, und Gelöschtes
+hinterlässt keine Lücke.
+
+### Weiterleiten in `head` oder einen Pager ist in Ordnung
+
+Der Bericht ist bewusst unbegrenzt lang. Wenn du ihn in `head`, `more` oder einen
+Pager schickst und den Leser schließt, ist das ein **normales Ende**: AO bricht
+nicht ab und meldet keinen Fehler.
+
+### Der Store wächst unbegrenzt
+
+Ein Verzeichnis pro erlaubter unbeaufsichtigter Veröffentlichung, dauerhaft.
+**AO** löscht dort nie etwas, und dieser Befehl auch nicht — er zeigt **alle**
+Einträge, ohne Limit und ohne Filter. Ein Mensch oder ein anderer Prozess unter
+demselben OS-Benutzer kann sehr wohl löschen; siehe oben. Eine Aufbewahrungsregel ist eine eigene
+Entscheidung und bewusst noch nicht getroffen (`L-V4-14-1`, `L-V4-15-1`).
+
+---
+
 ## 20. Jetzt speziell: Zera / HealthApp
 
 AgentOrchestrator soll die **zentrale Orchestrierung für Zera/HealthApp**
