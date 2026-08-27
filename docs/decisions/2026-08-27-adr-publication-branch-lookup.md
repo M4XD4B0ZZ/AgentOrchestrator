@@ -198,10 +198,14 @@ binding is an integrity statement and never an authentication one.
 
 | The store | What is printed |
 | --- | --- |
-| matches exist | the matching entries, and `NAMED_RECORDS_PRESENT`'s sentence |
-| no match, every entry read | `NO_NAMED_RECORD_PRESENT` |
-| no match, some entries unread | `NO_NAMED_RECORD_AND_EVIDENCE_UNREAD` |
-| store not readable | the store's own sentence, and `STORE_NOT_READ` |
+| at least one record names the branch | `NAMED_RECORDS_PRESENT` |
+| none does, and every entry has a record this build read | `NO_NAMED_RECORD_PRESENT` |
+| none does, and some entry has no record it could read | `NO_NAMED_RECORD_AND_EVIDENCE_UNREAD` |
+| no listing was produced at all | the store's own sentence, and `STORE_NOT_READ` |
+
+The **page** under the first three rows is the same set in every case: the
+entries naming the branch, plus everything this build did not read in full. Only
+the sentence changes.
 
 The last row is load-bearing. On `STORE_ABSENT`, `STORE_UNREADABLE`,
 `STORE_PATH_UNSAFE` and `PROFILE_UNAVAILABLE` the entries array is empty because
