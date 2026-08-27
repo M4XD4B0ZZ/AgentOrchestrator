@@ -78,10 +78,9 @@ import { line } from './render-attended-run.js';
 export const AUDIT_ENTRY_SENTENCES: Readonly<Record<HeadPublicationAuditEntryReading, string>> =
   Object.freeze({
     HISTORICAL_AUTHORISATION:
-      'A record this build read, whose digest recomputes from the values it records and from\n' +
-      '    the name of the directory it sits in. Three of those values are not shown: the two\n' +
-      '    contract versions, and the event identity the record claims for itself - which is\n' +
-      '    held back deliberately, because it is unchecked text a forger chooses.',
+      'A record this build read: the event identity it carries is the directory it sits in,\n' +
+      '    and its digest recomputes from that name and from the values it records - of which\n' +
+      '    the two contract versions are the only ones not shown above.',
     RECORD_ABSENT:
       'This event directory holds no record. Three things leave one: an invocation that died\n' +
       '    while staging a record, a refusal after the directory was made - this build removes\n' +

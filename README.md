@@ -11088,6 +11088,10 @@ which is shown exactly as recorded and checked against nothing.
   enumerating reader has one fact that did not come out of the bytes: the
   directory's name. So the check establishes "bound to this directory name", not
   "bound to this event, task and repository", and the wording says exactly that.
+- **L-V4-15-8 — the exit code cannot tell a clean store from a tampered one.**
+  There is no machine-readable output, so the exit code is all a script reads,
+  and it is 0 for any store that was listed however its entries graded. The
+  finding is in the report, and only in the report.
 - **L-V4-15-6 — a hard link at a record's name is read.** The refusal is on
   reparse points, which is what `lstat` can see. A hard link is not one, nothing
   counts links, and `mklink /H` needs no elevation — so a record's bytes can live

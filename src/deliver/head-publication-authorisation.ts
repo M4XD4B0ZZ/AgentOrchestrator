@@ -173,7 +173,15 @@ const AuthorisationSchema = z
     owner: z.string().min(1).max(100),
     /** The bound the operator's declaration puts on this value. */
     name: z.string().min(1).max(100),
-    /** The **local** name of the remote. Never a URL; see the header. */
+    /**
+     * The **local** name of the remote.
+     *
+     * What this build writes here is a remote name and never a URL — see the
+     * header. What this bound *admits* is a hundred characters of anything, and
+     * that is stated rather than promised away: a record written by anything
+     * else running as this OS user can carry a URL with a credential in it, and
+     * a reader that shows what is recorded will show it. `L-V4-15-7`.
+     */
     declaredRemote: z.string().min(1).max(100),
     ref: z.string().min(1).max(300),
     commit: z.string().regex(OBJECT_NAME, 'Must be an object name.'),
@@ -462,7 +470,27 @@ function grade(bytes: Buffer, subjectFor: SubjectFor): Graded {
   if (!contract.success) return { reading: 'MALFORMED', record: null };
 
   const { binding, ...payload } = contract.data;
-  if (headPublicationAuthorisationBinding(subjectFor(payload), payload) !== binding) {
+  const subject = subjectFor(payload);
+
+  // The two event identities must agree, and the binding does not make them.
+  //
+  // It covers both — `subject.eventId` and `payload.eventId` are separate
+  // inputs — so a digest recomputed over a *pair* that disagrees is
+  // self-consistent and recomputes cleanly. The writer never produces such a
+  // pair: it sets both from one value, and the exclusive `mkdir` refuses any
+  // name but that one. **So a record whose own `eventId` differs from the
+  // identity it is read under cannot have come from this build's writer**, and
+  // saying `HISTORICAL_AUTHORISATION` about it would be this reader's strongest
+  // sentence about a document it can prove it did not write.
+  //
+  // A review found this after four independent lenses had all walked past it,
+  // and after a first fix had papered over the symptom — an operator-facing
+  // report claiming the digest covered what it showed — with a longer sentence.
+  // `NOT_THIS_EVENT` is already exactly this meaning: it belongs to a different
+  // event. It costs nothing on any record this build wrote.
+  if (payload.eventId !== subject.eventId) return { reading: 'NOT_THIS_EVENT', record: null };
+
+  if (headPublicationAuthorisationBinding(subject, payload) !== binding) {
     return { reading: 'NOT_THIS_EVENT', record: null };
   }
   return { reading: 'HISTORICAL_AUTHORISATION', record: contract.data };

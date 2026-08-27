@@ -198,6 +198,20 @@ What is lost is the sentence: the binding proves the payload is bound **to the
 name of the directory it sits in**, not "to this event, task and repository". The
 report says the former and never the latter.
 
+It also catches one thing the binding alone could not, and this was found only
+after four independent lenses had walked past it. The digest covers **both**
+event identities — the directory's name and the one inside the document — as
+separate inputs, so a digest recomputed over a *pair that disagrees* is
+self-consistent and recomputes cleanly. The writer never produces such a pair: it
+sets both from one value, and the exclusive `mkdir` refuses any name but that
+one. **So a record whose own `eventId` is not the directory it sits in cannot
+have come from this build's writer**, and it used to read
+`HISTORICAL_AUTHORISATION` while carrying 128 characters of chosen text in the
+one field the report held back. The grader now compares the two before it
+compares the digest, and answers `NOT_THIS_EVENT`, which is already exactly that
+meaning. A first fix had papered the symptom over with a longer sentence; this is
+the cause.
+
 What it never caught and still does not: a whole record recomputed by somebody
 who can write in the store. There is no key material in this build. `L-V4-14-2`.
 
@@ -551,6 +565,26 @@ event, task and repository". The report's wording is bounded to match — includ
 that three of the binding's inputs are not shown at all: the two contract
 versions, and the event identity the record claims for itself, which is held back
 because §6a makes it unchecked text a forger chooses.
+
+**`L-V4-15-8` — the exit code cannot distinguish a clean store from a tampered
+one.** §9 refuses machine-readable output, so the exit code is the only thing a
+script reads, and §11 makes it 0 for a store that was listed however its entries
+graded. `agent-loop publication authorisations || alert` therefore fires for a
+permissions problem and never for a record whose binding no longer recomputes.
+That is the accepted cost of the §11 decision rather than an oversight, and it
+is named here because it is the reason the human-readable report is also the
+only findings channel — which is what made the pipe defect in §11a worse than it
+looked.
+
+**`L-V4-15-9` — the suite imports the CLI entry, which runs `main()`.**
+`src/cli/index.ts` calls `main()` at module scope, so importing `buildProgram`
+from it parses this process's own argv, prints the front-page help and sets
+`process.exitCode`. The exit-contract case here snapshots and restores that
+value, so nothing is measured wrongly, and the noise on stderr is this build
+reporting an unknown command to itself. Pre-existing and reproducible across
+five delivery suites rather than introduced here; naming it is what this slice
+adds. Fixing it means guarding the entry against being imported, which touches
+every dist harness that drives the real CLI and is a change of its own.
 
 **`L-V4-15-6` — a hard link at a record's name is read.** The refusal is on
 reparse points, which is what `lstat` can see; a hard link is not one, nothing

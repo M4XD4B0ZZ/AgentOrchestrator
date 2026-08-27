@@ -1521,26 +1521,48 @@ describe('a forged record does not get to choose what the report says', () => {
     );
   }
 
-  it('never prints the event identity a record claims for itself', () => {
+  it('refuses a record whose own event identity is not the directory it sits in', () => {
     const home = scratchHome();
     const name = eventName('20260827T170000000Z', 'd');
-    // The contract bounds `eventId` inside the document as a string of at most
-    // 128 characters and checks nothing else about it, and the binding covers
-    // both it and the directory name. So a forged record can be perfectly
-    // readable and claim any identity it likes.
+    // The contract bounds `eventId` inside the document at 128 characters and
+    // checks no grammar, and the binding covers BOTH it and the directory name
+    // as separate inputs — so a digest recomputed over a pair that disagrees is
+    // self-consistent and recomputes cleanly. Nothing made the two agree.
+    //
+    // The writer never produces such a pair: it sets both from one value and the
+    // exclusive `mkdir` refuses any other name. So this is a record this build
+    // can prove it did not write, and it used to read `HISTORICAL_AUTHORISATION`
+    // with 128 characters of chosen text inside it.
     forge(home, name, { eventId: 'THIS IS NOT A RUN ID AT ALL' });
 
     const result = list(home);
     const text = renderPublicationAuthorisations(result);
 
-    expect(result.entries[0]?.reading).toBe('HISTORICAL_AUTHORISATION');
+    expect(result.entries[0]?.reading).toBe('RECORD_NOT_THIS_EVENT');
+    expect(result.entries[0]?.record).toBeNull();
     expect(result.entries[0]?.name).toBe(name);
-    // The heading is the name on disk. The claimed one is not printed at all:
-    // 128 characters of chosen text under a readable banner is a record
-    // misrepresenting where it is, and the directory name is the one fact about
-    // an entry that does not come out of the bytes.
+    expect(result.outcome).toBe('READ_WITH_UNUSABLE_ENTRIES');
+    // Nothing of it is shown, and the heading is still the name on disk.
     expect(text).toContain(name);
     expect(text).not.toContain('THIS IS NOT A RUN ID AT ALL');
+  });
+
+  it('reads a record whose event identity does agree, and shows the name on disk', () => {
+    const home = scratchHome();
+    const name = eventName('20260827T170500000Z', 'd');
+    // The control for the case above: same construction, same re-sealing, and
+    // the one field that differs is the one being tested. Without it the refusal
+    // above could come from anything the forging helper does.
+    forge(home, name, {});
+
+    const result = list(home);
+
+    expect(result.entries[0]?.reading).toBe('HISTORICAL_AUTHORISATION');
+    expect(result.entries[0]?.record?.recordedEventId).toBe(name);
+    // The heading comes from the directory, not from the field — which is now
+    // provably the same string for any readable record, and is still taken from
+    // the one of the two that is not inside the bytes.
+    expect(renderPublicationAuthorisations(result)).toContain(`Entry        : ${name}`);
   });
 
   it('cannot forge extra lines into the report with a control character', () => {
