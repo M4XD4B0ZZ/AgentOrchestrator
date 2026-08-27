@@ -253,13 +253,20 @@ output and the same exit code.
 The filter is a projection applied **after** `listHeadPublicationAuthorisations`
 returns. The enumeration never learns there was a query.
 
-Per store child the listing performs, unchanged: one `lstat` on the directory,
-one on `authorisation.json`, an `open`+`fstat`+`read`+`close`, and on the good
-arm one `lstat` on `outcome.json` and a second bounded read — between 1 and 11
-syscalls depending on what is there, plus one `readdir` and two walks of the
-store's path. Θ(N) syscalls in the number of store children, with the sort's
-O(N log N) comparisons on top. Measured on a real 16-entry store at 0.22 ms per
-entry, syscall-bound rather than parse-bound.
+Per store child the listing performs, **read from the code rather than
+instrumented**: one `lstat` on the directory, one on `authorisation.json`, an
+`open`+`fstat`+`read`+`close`, and on the good arm one `lstat` on `outcome.json`
+and a second bounded read — between 1 and 11 file operations depending on what is
+there, plus one `readdir` and two walks of the store's path. Θ(N) in the number
+of store children, with the sort's O(N log N) comparisons on top.
+
+Measured on this machine, with the real writers building the store and the real
+listing reading it: **200 entries in 145 ms (0.73 ms/entry) and 800 entries in
+564 ms (0.70 ms/entry)**, with an outcome document beside half of them. Linear
+across that range. The selection itself is not the cost: it is 0.17 ms over 200
+entries and 0.32 ms over 800, three orders of magnitude below the enumeration.
+Nothing is claimed about a store larger than 800 entries, or about a volume other
+than this one.
 
 **Outcome reads are not skipped for non-matching records, and that is the crux.**
 `entryWasRead` is `HISTORICAL_AUTHORISATION` **and** a clean outcome reading, and

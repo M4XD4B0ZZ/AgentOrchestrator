@@ -81,6 +81,7 @@ import {
   selectQueriedBranch,
   type HeadPublicationAuditEntry,
   type HeadPublicationBranchQuery,
+  type HeadPublicationBranchQueryReading,
 } from '../src/deliver/head-publication-authorisation-listing.js';
 import {
   isForgeHost,
@@ -896,6 +897,36 @@ describe('what a filtered report says', () => {
     expect(whole).toContain('How this list is ordered:');
   });
 
+  /**
+   * One literal fragment per reading, and the reason it is a literal.
+   *
+   * Asserting `report` contains `AUDIT_QUERY_SENTENCES[reading]` compares the
+   * emitter with itself: it holds for any wording, including a wrong one, and
+   * it holds when two members' texts are exchanged. Measured, not supposed - a
+   * mutant that swaps the two negatives' bodies survived every assertion in an
+   * earlier version of this file, and so did one that swapped a negative with
+   * the positive. The fragments below are written out here, so a rewrite of any
+   * of the three has to come past this case.
+   */
+  const SENTENCE_FRAGMENT: Readonly<Record<HeadPublicationBranchQueryReading, string>> =
+    Object.freeze({
+      NAMED_RECORDS_PRESENT: 'are the ones naming that branch',
+      NO_NAMED_RECORD_PRESENT: 'is one it did read a record for',
+      NO_NAMED_RECORD_AND_EVIDENCE_UNREAD: 'are ones it read no record for at all',
+    });
+
+  /** Each fragment must belong to its own sentence and to no other. */
+  function expectOnly(text: string, reading: HeadPublicationBranchQueryReading): void {
+    for (const member of HEAD_PUBLICATION_BRANCH_QUERY_READINGS) {
+      const fragment = SENTENCE_FRAGMENT[member];
+      expect(AUDIT_QUERY_SENTENCES[member], `${member} must carry its own fragment`).toContain(
+        fragment,
+      );
+      if (member === reading) expect(text, member).toContain(fragment);
+      else expect(text, member).not.toContain(fragment);
+    }
+  }
+
   it('says what a clean store with no match does and does not mean', () => {
     const home = scratchHome();
     record(home, { name: 'OtherRepo' });
@@ -903,8 +934,7 @@ describe('what a filtered report says', () => {
     const text = report(home, BRANCH);
 
     expect(text).toContain('Matching     : 0 named by this query, 1 naming another branch, 0 not established');
-    expect(text).toContain(AUDIT_QUERY_SENTENCES.NO_NAMED_RECORD_PRESENT);
-    expect(text).not.toContain(AUDIT_QUERY_SENTENCES.NAMED_RECORDS_PRESENT);
+    expectOnly(text, 'NO_NAMED_RECORD_PRESENT');
   });
 
   it('does not describe a store holding unreadable evidence as a clean negative', () => {
@@ -914,25 +944,75 @@ describe('what a filtered report says', () => {
 
     const text = report(home, BRANCH);
 
-    expect(text).toContain(AUDIT_QUERY_SENTENCES.NO_NAMED_RECORD_AND_EVIDENCE_UNREAD);
-    expect(text).not.toContain(AUDIT_QUERY_SENTENCES.NO_NAMED_RECORD_PRESENT);
+    expectOnly(text, 'NO_NAMED_RECORD_AND_EVIDENCE_UNREAD');
   });
 
-  it('never turns a store it could not read into an answer about a branch', () => {
+  it('says which entries name the branch when some do', () => {
     const home = scratchHome();
-    // The store's path is a file, so nothing can be enumerated.
-    mkdirSync(join(home, '.agent-orchestrator'), { recursive: true });
-    writeFileSync(auditRoot(home), 'x', 'utf8');
+    record(home, { at: '2026-08-27T12:00:00.000Z' });
+    record(home, { at: '2026-08-27T12:01:00.000Z', name: 'OtherRepo' });
+
+    expectOnly(report(home, BRANCH), 'NAMED_RECORDS_PRESENT');
+  });
+
+  it('counts every entry in the store exactly once', () => {
+    const home = scratchHome();
+    record(home, { at: '2026-08-27T12:00:00.000Z', outcome: true });
+    record(home, { at: '2026-08-27T12:01:00.000Z' });
+    record(home, { at: '2026-08-27T12:02:00.000Z', name: 'OtherRepo' });
+    record(home, { at: '2026-08-27T12:03:00.000Z', owner: 'someone-else' });
+    plantDirectory(home, eventName('20260827T120400000Z', '1'));
+    plantFile(home, 'junk.txt', 'x');
+
+    const listing = list(home);
+    const selection = selectQueriedBranch(listing.entries, BRANCH);
+
+    // The three counts partition the store. Without this an operator could be
+    // shown three numbers that do not add up to the one above them.
+    expect(selection.named + selection.elsewhere + selection.unestablished).toBe(
+      listing.entries.length,
+    );
+    expect(selection.named).toBe(2);
+    expect(selection.elsewhere).toBe(2);
+    expect(selection.unestablished).toBe(2);
+    expect(selection.shown).toHaveLength(selection.named + selection.unestablished);
+  });
+
+  /**
+   * The two outcomes that produce no listing, and they are the dangerous pair.
+   *
+   * `entries` is empty on both because nothing was read, so a selection over it
+   * would answer "no record names that branch" for a store this build could not
+   * open — the reassuring absence this whole command exists to prevent, arriving
+   * through a query. `STORE_ABSENT` is here beside `STORE_UNREADABLE` because it
+   * is the one an operator is most likely to read as an answer: a store that is
+   * simply not there looks like an empty one.
+   */
+  it.each([
+    [
+      'a store whose path is a file',
+      'STORE_UNREADABLE',
+      (home: string) => {
+        mkdirSync(join(home, '.agent-orchestrator'), { recursive: true });
+        writeFileSync(auditRoot(home), 'x', 'utf8');
+      },
+    ],
+    ['a store that is not there', 'STORE_ABSENT', () => undefined],
+  ])('never turns %s into an answer about a branch', (_label, outcome, prepare) => {
+    const home = scratchHome();
+    prepare(home);
 
     const text = report(home, BRANCH);
 
-    expect(text).toContain('Listing      : STORE_UNREADABLE');
+    expect(text).toContain(`Listing      : ${outcome}`);
     // The query is echoed, and no count and no answer about the branch is
     // printed: nothing was read, so nothing about the branch is established.
     expect(text).toContain('Query        : ');
     expect(text).not.toContain('Matching     : ');
+    expect(text).not.toContain(AUDIT_QUERY_MEANING);
     for (const reading of HEAD_PUBLICATION_BRANCH_QUERY_READINGS) {
       expect(text, reading).not.toContain(AUDIT_QUERY_SENTENCES[reading]);
+      expect(text, reading).not.toContain(SENTENCE_FRAGMENT[reading]);
     }
   });
 

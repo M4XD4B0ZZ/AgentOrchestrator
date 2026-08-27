@@ -142,6 +142,26 @@
  */
 
 import type { GitQueryResult } from '../repo/git-query.js';
+/**
+ * The three identity grammars, which were private constants in this file until
+ * V4 slice 17 needed the same rules to bound an operator's *query* over the
+ * publication audit store. They moved rather than being copied — the move
+ * `internal/delivery-ref-grammar.ts` already records for the ref grammar —
+ * because a second copy is free to drift from the first, and a review has
+ * already found one in this repository.
+ *
+ * They moved into a module that imports nothing at all, and that is not
+ * tidiness. The reader that needs them may not import *this* module for them:
+ * this file carries a type edge to `repo/git-query.ts`, which reaches
+ * `doctor/exec.ts`, and the suite's closure sweep follows type edges — so
+ * importing this file for a regular expression would put `spawn` in a
+ * read-only command's swept graph.
+ *
+ * `isForgeRepositoryName` carries both halves of the name rule: the character
+ * class, and the separate refusal of a name made only of dots. That pairing was
+ * two statements here and is now one call, so no caller can apply one half
+ * without the other.
+ */
 import {
   isForgeHost,
   isForgeOwner,
@@ -348,27 +368,9 @@ function refuse(code: DeliveryTargetRefusal): DeliveryTargetRefused {
  */
 const PRINTABLE_ASCII = /^[\x21-\x7e]+$/;
 
-/**
- * The three identity grammars, and where they live now.
- *
- * They were private constants here until V4 slice 17 needed the same rules to
- * bound an operator's *query* over the publication audit store. They moved
- * rather than being copied — the move `internal/delivery-ref-grammar.ts`
- * already records for the ref grammar — because a second copy is free to drift
- * from the first, and a review has already found one in this repository.
- *
- * They moved into a module that imports nothing at all, and that is not
- * tidiness. The reader that needs them may not import *this* module for them:
- * this file carries a type edge to `repo/git-query.ts`, which reaches
- * `doctor/exec.ts`, and the suite's closure sweep follows type edges — so
- * importing this file for a regular expression would put `spawn` in a
- * read-only command's swept graph.
- *
- * `isForgeRepositoryName` carries both halves of the name rule: the character
- * class, and the separate refusal of a name made only of dots. That pairing
- * used to be two statements here and is now one call, so no caller can apply
- * one without the other.
- */
+// The host, owner and repository-name grammars used to be three private
+// constants here. They live in `internal/forge-identity-grammar.ts` since V4
+// slice 17 — see the note on their import at the top of this file.
 
 /**
  * The one user name a remote URL may carry.
