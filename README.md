@@ -10596,11 +10596,15 @@ At most one forge mutation is attempted per invocation, unchanged.
 ### The permission is re-proved at the last moment
 
 The declaration is read again, against a freshly resolved delivery identity,
-inside the `recheck` — the last thing this build **reads from disk** before the
-remote is contacted. An operator who withdrew it while the ladder was running is
+inside the `recheck`, and it is the last **declaration** read before the remote
+is contacted. An operator who withdrew it while the ladder was running is
 answered there, with nothing read from the remote and nothing attempted. That it
 is the last such read is measured: the suite establishes how many repository
 resolutions the path makes and removes the declaration on the last one.
+
+It was also the last read of any kind until V4 slice 14, which writes and reads
+back an authorisation record inside the same closure, after this. Nothing there
+consults the declaration; what follows the re-proof is still the same window.
 
 "Last read from disk" and "immediately before the push" are not the same
 sentence, and the second one would be false. Between the re-proof and the push
@@ -10685,12 +10689,15 @@ ledger, or gives it an outgoing transition.
   and a repository name; this build does not, so a differently-capitalised entry
   answers `NOT_DECLARED`. Fail-closed, and it will look like a bug to whoever
   hits it.
-- **L-V4-13-4 — nothing is re-read between the authority re-proof and the
+- **L-V4-13-4 — no permission is re-read between the authority re-proof and the
   push.** Two local `git remote get-url` calls and one `ls-remote` — a network
-  round trip with a 120-second ceiling — run in that window, and nothing is
+  round trip with a 120-second ceiling — run in that window, and no permission is
   consulted inside it. Inherited from slice 5 unchanged, and the same window an
   attended publication has; what this slice changes is that the fact proved
-  before it is a permission rather than only a subject.
+  before it is a permission rather than only a subject. Since V4 slice 14 one
+  further local write and read-back happens inside the closure, before that
+  window opens: the authorisation record, which consults no permission and does
+  not narrow the window.
 - **L-V4-13-5 — a publisher that created nothing can report `PUBLISHED`.**
   Measured: a push of the same commit onto a ref that already holds it exits 0
   and reports `up to date` without the lease being evaluated. In the ladder that
@@ -10781,8 +10788,9 @@ delivery remote and nothing is attempted**. The publication reports
 `PUBLICATION_AUDIT_UNWRITTEN` and the drive settles
 `PUBLICATION_AUDIT_NOT_DURABLE`, which is graded 3: nothing on the remote is in
 question, and what is wrong is local — either the store under the operator's own
-profile, or a subject this build's record contract will not hold. Neither is
-cleared by asking again.
+profile, or a subject this build's record contract will not hold. Almost none of
+it clears by asking again — an event name already taken does, because the next
+invocation mints a fresh one — so it is a stop rather than a "call again".
 
 That is not a `try`/`catch` around a logging call. The record is written inside
 the same closure that re-proves the permission, and a closure that cannot
@@ -10800,8 +10808,10 @@ authorised to attempt.*
 
 It does **not** say a publication was attempted. The record precedes the two
 `git remote get-url` calls and the `ls-remote` that decide whether anything is
-sent at all, so a run that finds the ref already at this commit sends nothing and
-leaves this record behind. That is an ordinary, valid shape.
+sent at all, so a run that finds the ref already at this commit — or holding
+another one, or a remote whose two URLs disagree, or one whose ref cannot be read
+at all — sends nothing and leaves this record behind. That is an ordinary, valid
+shape.
 
 It does **not** say the ref exists.
 
@@ -10900,13 +10910,6 @@ disagrees about the payload. All three are driven.
   record that never existed are the same bytes. File modes are not a defence:
   `0o600` and `0o700` were measured on this NTFS volume to yield `0o666`, and
   access is whatever the profile directory's inherited ACLs say.
-- **L-V4-14-7 — a subject this build will not record cannot be published
-  unattended.** The record bounds a ref at 300 characters and a repository root
-  at 4096, while nothing upstream bounds a work branch's length at all. A task
-  whose branch exceeds that publishes attended and refuses unattended, under a
-  member that says the refusal is local. Fail-closed, generous against the
-  branch names this build generates, and stated because it will look like a
-  store problem to whoever hits it.
 - **L-V4-14-3 — the store is not indexed, and nothing reads it for you.**
   Records are addressable only by event identity; the repository, task, ref and
   commit are in the body. Finding the record for a branch means reading the
@@ -10927,6 +10930,15 @@ disagrees about the payload. All three are driven.
   history and the conclusion, take the execution lease and run the repository
   profile's own verification commands. None of that is a forge mutation and none
   of it is recorded here. `L-V4-13-9` with a sharper edge.
+- **L-V4-14-7 — a subject this build will not record cannot be published
+  unattended.** The record bounds a ref at 300 characters and a repository root
+  at 4096, and nothing on the publication path bounds either: `PUBLISHABLE_REF`
+  carries no length and the task record bounds `workBranch` only as non-blank. A
+  work branch this build *derives* is bounded at 255 by `isValidBranchName`, so
+  `refs/heads/<name>` is at most 266 and fits; a task record carrying a branch
+  longer than 289 does not, and that delivery publishes attended and refuses
+  unattended under a member that says the refusal is local. Fail-closed, and
+  stated because it will look like a store problem to whoever hits it.
 - **`L-V4-13-4` is unchanged and now matters differently.** Two local
   `git remote get-url` calls and one `ls-remote` still run between the record and
   the push, and nothing is consulted inside that window. The record makes the

@@ -10,10 +10,12 @@
 "**The publication writes nothing.**" That stops being true for the automatic
 path, in one bounded way: an unattended publication now writes exactly one
 immutable record, under the operator's own profile, before it contacts the
-delivery remote. Everything else in that section survives — no task state, no
-block ledger, no delivery record, no selection record, no cached permission, and
-nothing about the grant surviving the process. The attended path is unchanged in
-every observable way, including that it still writes nothing at all.
+delivery remote. That section's list of six things the publication does not write
+loses exactly one member — "no publication record" — and keeps the other five: no
+task state, no block ledger, no delivery record, no selection record, no cached
+permission. Nothing about the grant survives the process, and the attended path
+is unchanged in every observable way, including that it still writes nothing at
+all.
 
 ## The decision
 
@@ -59,9 +61,9 @@ of them are made:
 | | Claim | In the record? |
 | --- | --- | --- |
 | A | the declaration permitted automatic publication for this exact identity | **yes** |
-| B | the publication subject was exactly this task, repository, remote, ref and commit | **yes**, and enforced rather than assumed — see §7 |
+| B | the publication subject was exactly this task, repository, remote, ref and commit | **yes**, and enforced rather than assumed — see §7a |
 | C | the invocation had reached the point where an attempt was permitted | **yes** — that is what "was then authorised to attempt" says, and no more |
-| D | the effect function was entered | **no.** The record is written before the URL agreement, before the pre-reading and before the push. A run that finds the ref already at this commit, or holding another one, or a remote whose two URLs disagree, sends nothing and leaves this record behind |
+| D | the effect function was entered | **no.** The record is written before the URL agreement, before the pre-reading and before the push. A run that finds the ref already at this commit, or holding another one, or a remote whose two URLs disagree, or one whose ref cannot be read at all, sends nothing and leaves this record behind |
 | E | the remote ref afterwards holds this commit | **no.** Nothing is written after the effect |
 | F | AO created the ref | **no, and it could not be.** `L-V4-13-5` measures the case: a create of a commit a ref already holds exits zero and reports the remote up to date without the empty lease being evaluated, so a publisher that changed nothing is graded `PUBLISHED`. The transport's `--porcelain` output does distinguish `*` from `=`, and this build deliberately does not read it — the postcondition comes from a second `ls-remote`, which cannot tell who moved the ref either |
 
@@ -180,8 +182,9 @@ is used, so "no unrelated entry is copied" is measured against one that existed.
 
 `declaredPermission` is written as a constant, and the constant is true for a
 reason about the code rather than about the writer's care:
-`permitsUnattendedHeadPublication` answers `ALLOWED` from an exhaustive switch
-with exactly one arm, so an `ALLOWED` answer *is* that member. A case drives the
+`permitsUnattendedHeadPublication` decides on an exhaustive switch over the
+declaration vocabulary in which exactly one arm answers `ALLOWED`, so an
+`ALLOWED` answer *is* that member. A case drives the
 grader over the whole declaration vocabulary and requires exactly one member to
 grade `ALLOWED`.
 
@@ -223,8 +226,11 @@ publishDeliveryHead       (unchanged)
    claim
    recheck ─┬─ repository, task record, subject, work branch, all re-resolved
             ├─ AUTHORITY RE-PROVED against the identity this pass resolved
-            ├─ ★ THE RECORD: built, judged, one exclusive directory,
-            │    staged, flushed, renamed, read back — or the closure refuses
+            ├─ SUBJECT EQUALITY: the six fields the grant was minted from, plus
+            │    the repository root — or the closure refuses (§7a)
+            ├─ ★ THE RECORD: built, judged, one exclusive directory, staged,
+            │    flushed where the filesystem allows, renamed, read back —
+            │    or the closure refuses
             └─ returns the subject
    two `git remote get-url`      ← nothing is consulted in this window
    one `ls-remote`               ← network, 120 s ceiling
@@ -286,21 +292,31 @@ publish was minted from the facts the ladder resolved a moment earlier. Those ca
 differ — another process holding this repository's execution lease can advance a
 task while this command runs, which is the reason `recheck` exists at all.
 
-`publishDeliveryHead` compares the two, over all six fields, and refuses
+`publishDeliveryHead` compares the two, over six fields, and refuses
 `SUBJECT_CHANGED` with nothing attempted. But it does that *after* the closure
 returns, so an earlier draft of this slice wrote the record first: a durable
 record naming a remote, ref and commit no grant in this build had authorised, for
-a publication that was refused one step later. Three independent reviewers
-reproduced it — one by moving the declared remote on the re-check's own
-resolution, one by advancing the task's commit — and in both runs the only
-durable artefact of the invocation asserted an authorisation that never existed.
+a publication that was refused one step later. A review reproduced it two ways —
+by moving the declared remote on the re-check's own resolution, and by advancing
+the task's commit — and in both runs the only durable artefact of the invocation
+asserted an authorisation that never existed.
 
-So the closure asks the same question first, over the same six fields, and
-refuses before it writes. No outcome changes, because the answer downstream is
-the same member with nothing attempted; what changes is that the record's own
-sentence is true of every record on disk. Row B of §1 is enforced rather than
-hoped for, and §1 row D's enumeration is complete because this fourth shape now
-leaves nothing behind.
+So the closure asks first, and refuses before it writes. It asks over seven
+fields rather than six: the six `sameSubject` will compare, plus the repository
+root, which it will not — the record names the root *this* pass resolved while
+the push runs Git in the root the ladder resolved, and a record naming a checkout
+the publication was never run in would be the same defect wearing a different
+hat.
+
+**One outcome changes, and it is stated rather than glossed.** A run whose
+subject moved *and* whose record could not have been written used to reach the
+write, fail it, and be renamed `PUBLICATION_AUDIT_UNWRITTEN` by §7's arm; it now
+reports the `SUBJECT_CHANGED` it always was, and settles and exits accordingly.
+That is the more truthful of the two: nothing about the store is what stopped it.
+
+Row B of §1 is enforced rather than hoped for. It does **not** make row D's
+enumeration exhaustive — a pre-reading that cannot be taken at all still leaves a
+record behind with nothing attempted, and row D names that shape too.
 
 ## 8. Why an unaudited automatic publication is unconstructable
 
@@ -470,6 +486,16 @@ lease and run the profile's verification commands. None of that is a forge
 mutation and none of it is recorded here. `L-V4-13-9` unchanged, and now with a
 sharper edge: an operator reading this store sees the forge act and not the local
 ones.
+
+**`L-V4-14-7` — a subject this build will not record cannot be published
+unattended.** The record bounds a ref at 300 characters and a repository root at
+4096, and nothing on the publication path bounds either: `PUBLISHABLE_REF`
+carries no length and the task record bounds `workBranch` only as non-blank. A
+work branch this build *derives* is bounded at 255 by `isValidBranchName`, so
+`refs/heads/<name>` is at most 266 and fits; a task record carrying a branch
+longer than 289 does not, and that delivery publishes attended and refuses
+unattended under a member that says the refusal is local. Fail-closed, and stated
+because it will look like a store problem to whoever hits it.
 
 **`L-V4-13-4` is unchanged and now matters differently.** Nothing is re-read
 between the authority re-proof and the push, and the record sits inside that

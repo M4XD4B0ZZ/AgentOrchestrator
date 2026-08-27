@@ -271,8 +271,14 @@ export const DELIVERY_DRIVES = [
    * Nothing was read from the delivery remote and nothing was attempted, which
    * is why it is not `EFFECT_ATTEMPTED` either. What is wrong is local and in
    * one of two places: the store under the operator's own profile, or a subject
-   * this build's record contract will not hold. Neither is cleared by asking
-   * again, and the `Publication` line beside this says which member it was.
+   * this build's record contract will not hold. Almost none of it clears on its
+   * own — an event name already taken does, because the next invocation mints a
+   * fresh one — so this is a stop rather than a "call again".
+   *
+   * Which of the store's refusals it was is deliberately not carried up to here.
+   * `performPublication` answers one member for all of them, so a summary that
+   * claimed to name the cause would be a second vocabulary saying less than the
+   * first.
    */
   'PUBLICATION_AUDIT_NOT_DURABLE',
   /**

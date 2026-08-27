@@ -91,10 +91,11 @@
  * ── Created once, and never rewritten ──────────────────────────────────────
  *
  * The record file is written into a directory this invocation exclusively
- * created, through the crash-safe primitive: stage beside the target, flush,
- * close, one rename. Inside a directory nobody else can have, that rename has
- * nothing to race against, and the guarantee it buys is the one that matters
- * after a crash — the file is either absent or complete, never a prefix.
+ * created, through the crash-safe primitive: stage beside the target, flush
+ * where the filesystem supports it, close, one rename. Inside a directory nobody
+ * else can have, that rename has nothing to race against, and the guarantee it
+ * buys is the one that matters after a crash — the file is either absent or
+ * complete, never a prefix.
  *
  * There is no update path, no second write and no field a later invocation
  * could change. A record is one immutable fact about one instant, and a later
@@ -187,7 +188,7 @@ export function newHeadPublicationAuditEventId(now: Date): string {
  * slice exists to forbid.
  */
 export const HEAD_PUBLICATION_AUDIT_CODES = [
-  /** Written, flushed, and read back as this event's record. */
+  /** Written, and read back byte-for-byte as this event's record. */
   'RECORDED',
   /** The OS could not be asked where the user profile is, so there is no store. */
   'PROFILE_UNAVAILABLE',
@@ -215,7 +216,7 @@ export type HeadPublicationAuditCode = (typeof HEAD_PUBLICATION_AUDIT_CODES)[num
 
 export interface HeadPublicationAuditResult {
   readonly code: HeadPublicationAuditCode;
-  /** `true` only after a complete write, a flush and a matching read-back. */
+  /** `true` only after a complete write and a matching read-back. */
   readonly recorded: boolean;
   /** The event identity this invocation used. Always present. */
   readonly eventId: string;
@@ -252,7 +253,10 @@ export interface HeadPublicationAuditRequest {
   readonly commit: string;
   /** SHA-256 of the exact declaration bytes the permission was graded from. */
   readonly declarationDigest: string;
-  /** When the permission was graded. Not freshness — see the record's header. */
+  /**
+   * When the record was built, immediately after the permission was graded and
+   * the subject checked. Not freshness — see the record's header.
+   */
   readonly authorisedAt: string;
   readonly pathProvider?: PathProvider | undefined;
   /**
@@ -272,9 +276,9 @@ export interface HeadPublicationAuditRequest {
  * The permission member a record may name.
  *
  * A constant rather than a parameter, and the reason is the grader's shape:
- * `permitsUnattendedHeadPublication` answers `ALLOWED` from an exhaustive switch
- * with exactly one arm, so an `ALLOWED` answer *is* this member and nothing else
- * could have produced it. A caller passing the member in could pass a different
+ * `permitsUnattendedHeadPublication` decides on an exhaustive switch over the
+ * declaration vocabulary in which exactly one arm answers `ALLOWED`, so an
+ * `ALLOWED` answer *is* this member and nothing else could have produced it. A caller passing the member in could pass a different
  * one; deriving it here from a fact about the code cannot. A third member added
  * to the declaration vocabulary makes that switch a compile error, which is
  * where the question would have to be answered again.
@@ -413,7 +417,19 @@ export function recordHeadPublicationAuthorisation(
   // ── 3. One directory, created exclusively ─────────────────────────────────
   const directory = createRunDirectory({ runsRoot: root, runId: request.eventId });
   const refusal = DIRECTORY_REFUSAL[directory.code];
-  if (refusal !== null) return outcome(refusal, request.eventId, directory.errnoCode);
+  // Two conditions, and they are a deliberate pair rather than one check and a
+  // spare: the map says which refusal a code becomes, and `created` says whether
+  // there is a directory to write in. A future member mapped to `null` by
+  // mistake — the shape `CREATED` already has — would otherwise resume the write
+  // against a path nobody made.
+  //
+  // Measured as a pair, and stated as one. Removing either half alone leaves the
+  // suite green, because the other half answers; removing both fails it. That is
+  // what "belt and braces" means here, and saying so is better than letting a
+  // later reader take one of them for coverage it does not provide.
+  if (refusal !== null || !directory.created) {
+    return outcome(refusal ?? 'STORE_UNAVAILABLE', request.eventId, directory.errnoCode);
+  }
 
   // ── 4. The bytes ──────────────────────────────────────────────────────────
   const written = writeFileAtomically({

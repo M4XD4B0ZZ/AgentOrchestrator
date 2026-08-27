@@ -21,9 +21,10 @@
  *  - **not "a publication was attempted".** The record is written before the
  *    two `git remote get-url` reads and before the `ls-remote` that decides
  *    whether anything is sent at all. A run that finds the ref already at this
- *    commit, or holding another one, or a remote whose two URLs disagree, sends
- *    nothing — and leaves this record behind. That is a valid historical shape,
- *    not a defect, and the vocabulary has to survive it;
+ *    commit, or holding another one, or a remote whose two URLs disagree, or one
+ *    whose ref cannot be read at all, sends nothing — and leaves this record
+ *    behind. That is a valid historical shape, not a defect, and the vocabulary
+ *    has to survive it;
  *  - **not "the ref exists"**, and **not "this build created it"**. That second
  *    one is measured false rather than merely unproven: a create of a commit a
  *    ref already holds exits zero and reports the remote up to date without the
@@ -66,16 +67,18 @@
  *
  * ── What is deliberately not in it ─────────────────────────────────────────
  *
- * No URL, in whole or in part — the delivery target refuses to record one at all
- * because a URL is the value most likely to carry a credential, and the push
- * vector names a bare remote for the same reason. No bytes of the declaration
- * and no entry of it other than the one that matched: the file may name up to
- * 256 repositories and none of the others is this event's business. No
- * subprocess output. No foreign exception message. No repository-authored prose
- * — no task title, no brief, no findings. No path to the declaration, and no
- * operator user name **as a field of its own** — `repositoryRoot` is a local
- * path and on Windows an ordinary checkout under the user profile embeds one,
- * which is stated here rather than claimed away.
+ * No URL. `host`, `owner` and `name` are the forge identity the delivery target
+ * parsed out of the remote's URL, and they are the whole of what this record
+ * takes from it: no scheme, no userinfo, no port, no path and no query — the
+ * delivery target refuses to record any of those, because a URL is the value
+ * most likely to carry a credential, and the push vector names a bare remote for
+ * the same reason. No bytes of the declaration and no entry of it other than the
+ * one that matched: the file may name many repositories and none of the others
+ * is this event's business. No subprocess output. No foreign exception message.
+ * No repository-authored prose — no task title, no brief, no findings. No path
+ * to the declaration, and no operator user name **as a field of its own** —
+ * `repositoryRoot` is a local path and on Windows an ordinary checkout under the
+ * user profile embeds one, which is stated here rather than claimed away.
  */
 
 import { createHash } from 'node:crypto';
@@ -96,10 +99,15 @@ export const HEAD_PUBLICATION_AUTHORISATION_VERSION = 1;
  * The largest record this build will write or read back.
  *
  * The payload is a fixed set of bounded scalars — no arrays, no free text — and
- * this bound sits above the largest record the shapes below produce in practice,
- * not above the largest they admit: every field at its declared maximum encodes
- * larger than this, and is refused rather than written. Checked on the encoded
- * bytes before anything is created, and again on the bytes read back.
+ * every field's own bound is below. Measured against them: a record with every
+ * field at its declared maximum, in ASCII, encodes to 5,852 bytes, so this bound
+ * is above what the contract admits rather than merely above what it produces in
+ * practice. It can still be reached, because JSON escaping is per character and
+ * a `repositoryRoot` of 4,096 characters that all need escaping does not fit —
+ * and such a record is refused rather than written.
+ *
+ * Checked on the encoded bytes before anything is created, and again on the
+ * bytes read back.
  */
 export const MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES = 8_192;
 
@@ -161,8 +169,9 @@ const AuthorisationSchema = z
     /** The bound every sibling delivery record uses for the same value. */
     repositoryRoot: z.string().min(1).max(4096),
     host: z.string().min(1).max(253),
-    /** The bound the operator's declaration puts on the same two values. */
+    /** The bound the operator's declaration puts on this value. */
     owner: z.string().min(1).max(100),
+    /** The bound the operator's declaration puts on this value. */
     name: z.string().min(1).max(100),
     /** The **local** name of the remote. Never a URL; see the header. */
     declaredRemote: z.string().min(1).max(100),

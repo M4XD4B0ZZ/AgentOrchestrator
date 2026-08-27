@@ -191,9 +191,12 @@ export const HEAD_PUBLICATIONS = [
    *
    * Two kinds of cause reach this member and an operator needs to tell them
    * apart: the store under the operator's own profile could not be used, or the
-   * subject in front of this build is one its record contract will not hold.
-   * Which member it was is the store's own, and it is not carried here — a
-   * refusal about a file this build will not quote cannot name what it refused.
+   * subject in front of this build is one its record contract will not hold. The
+   * store's own member says which, and this one deliberately does not carry it:
+   * this is the publication vocabulary, and a member of it that also spelled a
+   * store code would be two vocabularies in one word. What it costs is that an
+   * operator has two places to look rather than one, and that is stated here
+   * rather than implied away.
    *
    * A member of its own rather than a fall-through, and specifically not
    * {@link HEAD_PUBLICATIONS} `SUBJECT_CHANGED`, which is where the mechanism

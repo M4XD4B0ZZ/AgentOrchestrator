@@ -83,7 +83,7 @@ import { HEAD_PUBLICATIONS, HEAD_PUBLICATION_DETAIL } from '../src/deliver/head-
 import { DELIVERY_DRIVES, DELIVERY_DRIVE_DETAIL } from '../src/cli/delivery-driver.js';
 import { EXIT_RUN_NEEDS_OPERATOR, exitCodeForDrive } from '../src/cli/run-exit-codes.js';
 import { taskRuntimeDirectory } from '../src/state/state-location.js';
-import { saveTaskState } from '../src/state/state-store.js';
+import { loadTaskState, saveTaskState } from '../src/state/state-store.js';
 import { validReadyForPrState } from './fixtures.js';
 
 /* ── source sweeps ────────────────────────────────────────────────────────── */
@@ -274,21 +274,50 @@ function repositoryRoot(): string {
   return root;
 }
 
-function writeReadyState(root: string, taskId = TASK): void {
+function writeReadyState(
+  root: string,
+  over: { readonly taskId?: string; readonly commit?: string; readonly branch?: string } = {},
+): void {
   const saved = saveTaskState(
     validReadyForPrState({
-      taskId,
+      taskId: over.taskId ?? TASK,
       repositoryRoot: root,
-      worktreePath: join(root, taskId),
+      worktreePath: join(root, over.taskId ?? TASK),
       baseBranch: BASE,
-      workBranch: BRANCH,
-      currentCommit: HEAD,
+      workBranch: over.branch ?? BRANCH,
+      currentCommit: over.commit ?? HEAD,
       basePinnedCommit: OTHER,
       stateEnteredAt: AT,
     }),
     { repositoryRoot: root },
   );
   if (!saved.ok) throw new Error(`fixture state not saved: ${saved.code}`);
+}
+
+/**
+ * Moves the task under a run that is already in flight.
+ *
+ * The revision has to be read first: `saveTaskState` refuses an overwrite
+ * without one, which is the optimistic concurrency this repository's state store
+ * is built on and is not something a fixture may work around.
+ */
+function moveReadyState(root: string, over: { readonly commit?: string; readonly branch?: string }): void {
+  const loaded = loadTaskState(root, TASK);
+  if (!loaded.ok) throw new Error(`fixture state not read: ${loaded.code}`);
+  const saved = saveTaskState(
+    validReadyForPrState({
+      taskId: TASK,
+      repositoryRoot: root,
+      worktreePath: join(root, TASK),
+      baseBranch: BASE,
+      workBranch: over.branch ?? BRANCH,
+      currentCommit: over.commit ?? HEAD,
+      basePinnedCommit: OTHER,
+      stateEnteredAt: AT,
+    }),
+    { repositoryRoot: root, expectedRevision: loaded.revision },
+  );
+  if (!saved.ok) throw new Error(`fixture state not moved: ${saved.code}`);
 }
 
 /* ── the CLI, with every vector counted ───────────────────────────────────── */
@@ -348,6 +377,18 @@ async function drive(
     /** What Git answers about a repository-relative path. */
     readonly checkIgnored?: 'IGNORED' | 'NOT_IGNORED' | 'UNDETERMINED';
     /**
+     * From this resolve onwards the resolver answers a different repository
+     * root, which must hold the same task at the same commit.
+     *
+     * The one way to separate "the root this pass resolved" from "the root the
+     * publication runs Git in": `publishDeliveryHead` is given the ladder's
+     * root and never the re-check's, so a record built from the re-check's
+     * would name a checkout the publication was never run in.
+     */
+    readonly rootMovesAt?: number;
+    /** The root {@link rootMovesAt} switches to. Must hold the same task. */
+    readonly otherRoot?: string;
+    /**
      * From this resolve onwards the repository declares a different remote NAME
      * for the same forge identity.
      *
@@ -390,7 +431,10 @@ async function drive(
           ok: true,
           repository: {
             id: 'fixture-repo',
-            root,
+            root:
+              over.rootMovesAt !== undefined && counts.resolves >= over.rootMovesAt && over.otherRoot !== undefined
+                ? over.otherRoot
+                : root,
             gitCommonDir: join(root, '.git'),
             taskSource: { kind: 'MARKDOWN_DIRECTORY', path: TASK_DIR },
             verification: { phases: [] },
@@ -596,7 +640,11 @@ describe('the record is a precondition of the act, not a note about it', () => {
     declare(working, permitting());
     const control = await drive(AUTOMATIC, root, working);
     expect(published(control)).toBe('PUBLISHED');
-    expect(control.counts.remoteReads).toBeGreaterThan(0);
+    // Four, and counted rather than bounded: the two `git remote get-url`
+    // calls, the pre-reading `ls-remote` and the reading taken afterwards. A
+    // looser control would be satisfied by one `ls-remote` alone, and would not
+    // notice if the get-url half of the counter had stopped matching its vector.
+    expect(control.counts.remoteReads).toBe(4);
 
     const run = await drive(AUTOMATIC, root, home);
 
@@ -828,6 +876,89 @@ describe('the record names the exact declaration it acted under', () => {
     // build ever authorised a publication to.
     expect(recordsIn(later)).toEqual([]);
     expect(eventIds(later)).toEqual([]);
+  });
+
+  it('writes nothing for a repository root the publication is not run in', async () => {
+    const root = repositoryRoot();
+    const twin = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    // The same task, at the same commit, on the same branch, in a second
+    // checkout. Everything the six subject fields compare is identical; the only
+    // difference is which directory the record would name.
+    writeReadyState(twin);
+    declare(home, permitting());
+
+    const control = await drive(AUTOMATIC, root, home);
+    expect(published(control)).toBe('PUBLISHED');
+    const resolves = control.counts.resolves;
+
+    const later = scratchHome();
+    declare(later, permitting());
+    const run = await drive(AUTOMATIC, root, later, {
+      remoteRef: 'absent',
+      rootMovesAt: resolves,
+      otherRoot: twin,
+    });
+
+    expect(published(run)).toBe('SUBJECT_CHANGED');
+    expect(run.counts.publish).toBe(0);
+    // Without the seventh comparison the record would name `twin`, while the
+    // publication would have run Git in `root`.
+    expect(recordsIn(later)).toEqual([]);
+  });
+
+  it('writes nothing for a commit the authority was not minted for', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home, permitting());
+
+    const control = await drive(AUTOMATIC, root, home);
+    expect(published(control)).toBe('PUBLISHED');
+    const resolves = control.counts.resolves;
+
+    // The task advances between the ladder's reading and the re-check's — the
+    // exact window the re-check exists for, and the one another process holding
+    // this repository's execution lease can produce.
+    const later = scratchHome();
+    declare(later, permitting());
+    const run = await drive(AUTOMATIC, root, later, {
+      remoteRef: 'absent',
+      onResolve: (n) => {
+        if (n === resolves) moveReadyState(root, { commit: OTHER });
+      },
+    });
+
+    expect(published(run)).toBe('SUBJECT_CHANGED');
+    expect(run.counts.publish).toBe(0);
+    expect(recordsIn(later)).toEqual([]);
+  });
+
+  it('writes nothing for a ref the authority was not minted for', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home, permitting());
+
+    const control = await drive(AUTOMATIC, root, home);
+    expect(published(control)).toBe('PUBLISHED');
+    const resolves = control.counts.resolves;
+
+    // The work branch moves, so the publishable ref this pass derives is not the
+    // one the grant carries — while the commit and every identity are unchanged.
+    const later = scratchHome();
+    declare(later, permitting());
+    const run = await drive(AUTOMATIC, root, later, {
+      remoteRef: 'absent',
+      onResolve: (n) => {
+        if (n === resolves) moveReadyState(root, { branch: `${BRANCH}-moved` });
+      },
+    });
+
+    expect(published(run)).toBe('SUBJECT_CHANGED');
+    expect(run.counts.publish).toBe(0);
+    expect(recordsIn(later)).toEqual([]);
   });
 
   it('writes nothing when the permission is withdrawn between the two readings', async () => {

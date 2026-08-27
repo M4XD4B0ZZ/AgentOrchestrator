@@ -351,15 +351,17 @@ function resolvePublicationAuthority(
  * imports" until a review counted them — the test beside it always asserted
  * three.)
  *
- * V4 slice 14 adds one step to the automatic path and to no other: inside that
- * same `recheck`, strictly after the permission has been re-proved, strictly
- * after the re-resolved subject has been shown to be the one the grant
- * authorises, and strictly before anything is contacted, the invocation writes
- * and reads back a durable record of what it was permitted by and what it was
- * about to act on. A record that cannot be established refuses the publication,
- * through the closure's own refusal channel, with nothing read from the remote.
- * The attended path does not reach it: the gate is which grant answered, and the
- * attended one is a constant that carries no declaration to record.
+ * V4 slice 14 adds two steps inside that same `recheck`. The first runs on both
+ * paths: the re-resolved subject has to be the one the grant was minted from,
+ * asked over the six fields `publishDeliveryHead` will compare plus the
+ * repository root it will not. The second runs on the automatic path alone:
+ * strictly after the permission has been re-proved and strictly before anything
+ * is contacted, the invocation writes and reads back a durable record of what it
+ * was permitted by and what it was about to act on. A record that cannot be
+ * established refuses the publication, through the closure's own refusal
+ * channel, with nothing read from the remote. The attended path does not reach
+ * that second step: the gate is which grant answered, and the attended one is a
+ * constant that carries no declaration to record.
  *
  * Note what is *not* passed to the mint: nothing derived from the task's title,
  * brief, findings or any other repository-authored prose. The grant carries six
@@ -470,12 +472,25 @@ export async function performPublication(
       // The subject the grant authorises and the subject this pass resolved
       // have to be the same one, and that is asked HERE rather than left to
       // `publishDeliveryHead`. It asks a moment later — `sameSubject` over the
-      // same six fields — and refuses `SUBJECT_CHANGED` with nothing attempted,
-      // so no outcome changes by asking first. What changes is what is left
-      // behind: without this, a task that advances between the ladder's reading
-      // and this one leaves a durable record naming a remote, ref and commit no
-      // grant in this build ever authorised, for a publication that is refused
-      // one step later. Three reviewers reproduced exactly that.
+      // same six fields — and refuses `SUBJECT_CHANGED` with nothing attempted.
+      // What this changes is what is left behind: without it, a task that
+      // advances between the ladder's reading and this one leaves a durable
+      // record naming a remote, ref and commit no grant in this build ever
+      // authorised, for a publication that is refused one step later. A review
+      // reproduced it two ways — by moving the declared remote on this pass's
+      // own resolution, and by advancing the task's commit.
+      //
+      // One outcome does change, and only one. A run whose subject moved *and*
+      // whose record could not have been written used to reach the write, fail
+      // it, and be renamed `PUBLICATION_AUDIT_UNWRITTEN` by the arm at the end of
+      // this function; it now reports the `SUBJECT_CHANGED` it always was. That
+      // is the more truthful of the two — nothing about the store is what
+      // stopped it — and it is stated rather than glossed as "no change".
+      //
+      // The seventh comparison is the repository root, which `sameSubject` does
+      // not make: the record names the root *this* pass resolved, while the push
+      // runs Git in the root the ladder resolved. Left uncompared, a record could
+      // name a checkout the publication was never run in.
       //
       // It sits after the authority arm so the withdrawal report is unchanged:
       // a permission that stopped standing is still named there, and a subject
@@ -486,7 +501,8 @@ export async function performPublication(
         rebuilt.subject.name !== subject.subject.name ||
         rebuilt.remoteName !== subject.remoteName ||
         ref !== intended ||
-        rebuilt.subject.commit !== subject.subject.commit
+        rebuilt.subject.commit !== subject.subject.commit ||
+        again.repository.root !== repositoryRoot
       ) {
         return null;
       }
