@@ -269,9 +269,10 @@ export const DELIVERY_DRIVES = [
    * nobody watches.
    *
    * Nothing was read from the delivery remote and nothing was attempted, which
-   * is why it is not `EFFECT_ATTEMPTED` either. What is wrong is on this
-   * machine, under the operator's own profile, and the next invocation will
-   * meet it again until somebody looks.
+   * is why it is not `EFFECT_ATTEMPTED` either. What is wrong is local and in
+   * one of two places: the store under the operator's own profile, or a subject
+   * this build's record contract will not hold. Neither is cleared by asking
+   * again, and the `Publication` line beside this says which member it was.
    */
   'PUBLICATION_AUDIT_NOT_DURABLE',
   /**

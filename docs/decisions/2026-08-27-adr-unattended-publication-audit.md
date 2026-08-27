@@ -23,9 +23,11 @@ subject it is about to act on.**
 
 One new operator-owned directory,
 `<OS user profile>/.agent-orchestrator/head-publication-authorisations/`. One
-immutable file per authorised attempt. Two new production modules. One new
-member in the publication vocabulary and one in the driver's. No new flag, no new
-grant, no new effect, no change to the push, and no change to the attended path.
+immutable file per invocation that establishes the permission and the subject —
+which is not the same as per attempt, and §1 row D is where that difference is
+spelled out. Two new production modules. One new member in the publication
+vocabulary and one in the driver's. No new flag, no new grant, no new effect, no
+change to the push, and no change to the attended path.
 
 ## The three sentences the contract rests on
 
@@ -40,7 +42,7 @@ grant, no new effect, no change to the push, and no change to the attended path.
 > **It is evidence for a person and never an input to an authority.** No future
 > publication is closer to happening because a record exists.
 
-## 1. The exact claim, and the five it is not
+## 1. The exact claim, and the three it refuses to make
 
 The record asserts exactly this:
 
@@ -57,7 +59,7 @@ of them are made:
 | | Claim | In the record? |
 | --- | --- | --- |
 | A | the declaration permitted automatic publication for this exact identity | **yes** |
-| B | the publication subject was exactly this task, repository, remote, ref and commit | **yes** |
+| B | the publication subject was exactly this task, repository, remote, ref and commit | **yes**, and enforced rather than assumed — see §7 |
 | C | the invocation had reached the point where an attempt was permitted | **yes** — that is what "was then authorised to attempt" says, and no more |
 | D | the effect function was entered | **no.** The record is written before the URL agreement, before the pre-reading and before the push. A run that finds the ref already at this commit, or holding another one, or a remote whose two URLs disagree, sends nothing and leaves this record behind |
 | E | the remote ref afterwards holds this commit | **no.** Nothing is written after the effect |
@@ -68,7 +70,7 @@ requires the record to carry no field named `published`, `attempted`, `created`,
 `createdBy`, `state`, `phase`, `status`, `expiresAt`, `retryAfter` or `pending`,
 and to contain no member of `HEAD_PUBLICATIONS` anywhere in its bytes.
 
-## 2. Where it lives, and the three roots that lost
+## 2. Where it lives, and why not where every other record does
 
     <OS user profile>/.agent-orchestrator/head-publication-authorisations/
         <event id>/
@@ -156,14 +158,19 @@ commit                    the exact object name
 declarationSchemaVersion  1
 declaredPermission        AUTOMATIC_ALLOWED
 declarationDigest         SHA-256 of the exact declaration bytes
-authorisedAt              the instant the permission was graded
+authorisedAt              the instant the record was built, immediately after
+                          the permission was graded and the subject checked
 binding                   SHA-256 over all of the above, under its own label
 ```
 
 Absent, and named as absent: no URL in whole or in part, no credential, no bytes
 of the declaration, no entry of it other than the one that matched, no subprocess
-output, no foreign exception message, no repository-authored prose, no operator
-user name, no path to the declaration, and no field with a state machine in it.
+output, no foreign exception message, no repository-authored prose, no path to
+the declaration, and no field with a state machine in it. **Not** absent, and
+said so: an operator user name, which `repositoryRoot` carries whenever the
+checkout sits under a Windows user profile. That is a local path in a file under
+that same user's profile, and claiming it away would be the kind of stated
+absence a later slice builds on.
 
 Two of those are driven rather than asserted. The publication runner in the suite
 answers both `git remote get-url` calls with a URL carrying a user name and a
@@ -268,9 +275,32 @@ a result carrying this member cannot describe an effect. A record written *after
 the remote had been contacted could not be renamed into a refusal at all, which is
 why the placement and the vocabulary are one decision rather than two.
 
-One variable carries both reasons, because they cannot both happen: the record is
-written only after the re-proof answered `AUTHORISED`, and the withdrawal is
-recorded only when it did not.
+One variable carries both reasons, because they cannot both happen within one
+execution of the closure and the closure runs at most once: `publishDeliveryHead`
+awaits `recheck` at exactly one call site, with no loop and no retry.
+
+## 7a. The record may not name a subject the grant does not authorise
+
+The record is built from the facts *this* pass resolved, and the authority to
+publish was minted from the facts the ladder resolved a moment earlier. Those can
+differ — another process holding this repository's execution lease can advance a
+task while this command runs, which is the reason `recheck` exists at all.
+
+`publishDeliveryHead` compares the two, over all six fields, and refuses
+`SUBJECT_CHANGED` with nothing attempted. But it does that *after* the closure
+returns, so an earlier draft of this slice wrote the record first: a durable
+record naming a remote, ref and commit no grant in this build had authorised, for
+a publication that was refused one step later. Three independent reviewers
+reproduced it — one by moving the declared remote on the re-check's own
+resolution, one by advancing the task's commit — and in both runs the only
+durable artefact of the invocation asserted an authorisation that never existed.
+
+So the closure asks the same question first, over the same six fields, and
+refuses before it writes. No outcome changes, because the answer downstream is
+the same member with nothing attempted; what changes is that the record's own
+sentence is true of every record on disk. Row B of §1 is enforced rather than
+hoped for, and §1 row D's enumeration is complete because this fourth shape now
+leaves nothing behind.
 
 ## 8. Why an unaudited automatic publication is unconstructable
 
@@ -307,14 +337,15 @@ afterwards.
 Every existing per-task store here would have been wrong. They are file-per-task
 and published by replacement, and a rename overwrites: two invocations would
 produce one record and the survivor would be whichever finished second. A mutant
-that writes into a shared name instead of an event directory fails 36 cases.
+that writes into a shared name instead of an event directory does not survive the
+suite.
 
 The name is a UTC instant plus a version-4 UUID. Neither part is trusted on its
 own — equal timestamps collide by construction and a process id is reused after
 exit — so the guarantee comes from the exclusive `mkdir` and the name only has to
 be unlikely to repeat. A case mints 64 identities at one pinned instant and
-requires 64 distinct names; a mutant that weakens the identity to the instant
-alone fails five cases.
+requires 64 distinct names, and a mutant that weakens the identity to the instant
+alone does not survive it.
 
 **Nothing from the repository, the task, the forge identity, the environment or
 the command line enters the path.** Two measurements decided that. Owner and
@@ -332,7 +363,7 @@ about. A case records under both spellings and requires two directories.
 | --- | --- | --- | --- | --- | --- |
 | 1 | before the declaration is read | none | untouched by this run | nothing | **no** — a fresh invocation, a fresh declaration read, a fresh grant |
 | 2 | after the declaration is read, before the record | none; the permission was never stored | untouched | nothing | **no**, same |
-| 3 | while the record is staged | a staging file beside the target, or nothing; the record's own name is absent | untouched | nothing — a reader opens by name and never enumerates | **no**, same |
+| 3 | while the record is staged | the event directory, and inside it a staging file or nothing at all; the record's own name is absent | untouched | nothing — a reader opens by name and never enumerates, so an event directory with no record in it is not a record | **no**, same |
 | 4 | after the record, before the effect | the record | untouched | permission and subject, established at that instant; nothing attempted | **no**, same |
 | 5 | immediately before the push process starts | the record | untouched | the same as 4, and the record cannot distinguish itself from 4 | **no**, same |
 | 6 | the push starts and this process dies | the record | **unknown** — the server may have committed the ref | the same as 4. Nothing about the ref | **no**, and safely: the next run's pre-reading answers `ALREADY_PUBLISHED` and sends nothing |
@@ -381,8 +412,8 @@ either. It is named as a non-goal rather than deferred silently.
 **Unbounded, and stated as a decision.** One directory of one small JSON document
 per authorised unattended publication attempt, forever. Nothing deletes it.
 
-That is the same absence `doctor/run-directory.ts` already declares two
-directories away, in the same words: retention is out of scope until there is a
+That is the same absence `doctor/run-directory.ts` already declares, for another
+directory under the same profile, in the same words: retention is out of scope until there is a
 policy, and an incomplete artefact is left exactly as it is rather than cleaned
 up. The bound in practice is operator invocations of a command that requires
 three flags and a standing declaration.
@@ -423,10 +454,14 @@ link is not a reparse point and nothing counts links, so a record's name could b
 made to alias another file. Other reparse-point classes — volume mount points,
 cloud-file placeholders — were not measured and nothing is claimed about them.
 
-**`L-V4-14-5` — "written and read back" is not "durable across power loss".** The
-record's own handle is flushed before the rename; the directory entry is not,
-because nothing in this build flushes a directory entry. The claim is bounded to
-what the primitives give.
+**`L-V4-14-5` — "written and read back" is not "durable across power loss".** Two
+gaps, both stated rather than rounded away. The staging handle is flushed only
+where the filesystem supports flushing: the primitive treats an `EINVAL` from
+`fsync` as "not supported here" and reports the write as done, and this store
+does not refuse that, because refusing would make an unattended publication
+depend on a filesystem property nothing else in this build depends on. And the
+directory entry is never flushed at all, because nothing in this build flushes
+one.
 
 **`L-V4-14-6` — the record does not cover the local acts a drive performs.** The
 grant requires `--drive`, and a drive can write the merge receipt, the

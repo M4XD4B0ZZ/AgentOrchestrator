@@ -72,12 +72,16 @@
  * and no entry of it other than the one that matched: the file may name up to
  * 256 repositories and none of the others is this event's business. No
  * subprocess output. No foreign exception message. No repository-authored prose
- * — no task title, no brief, no findings. No operator user name and no path to
- * the declaration.
+ * — no task title, no brief, no findings. No path to the declaration, and no
+ * operator user name **as a field of its own** — `repositoryRoot` is a local
+ * path and on Windows an ordinary checkout under the user profile embeds one,
+ * which is stated here rather than claimed away.
  */
 
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+
+import { MAX_TASK_ID_LENGTH } from '../plan/task-id.js';
 
 /**
  * Contract version of the record. Bump on any payload change.
@@ -91,10 +95,11 @@ export const HEAD_PUBLICATION_AUTHORISATION_VERSION = 1;
 /**
  * The largest record this build will write or read back.
  *
- * The payload is a fixed set of bounded scalars — no arrays, no free text — so
- * anything approaching this bound is not a record this build produced. Checked
- * on the encoded bytes before anything is created, and again on the bytes read
- * back, so a record that grew on disk is refused rather than parsed.
+ * The payload is a fixed set of bounded scalars — no arrays, no free text — and
+ * this bound sits above the largest record the shapes below produce in practice,
+ * not above the largest they admit: every field at its declared maximum encodes
+ * larger than this, and is refused rather than written. Checked on the encoded
+ * bytes before anything is created, and again on the bytes read back.
  */
 export const MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES = 8_192;
 
@@ -151,9 +156,12 @@ const AuthorisationSchema = z
     eventId: z.string().min(1).max(128),
     act: z.enum(AUDITED_FORGE_ACTS),
     invocationMode: z.enum(AUDITED_INVOCATION_MODES),
-    taskId: z.string().min(1).max(128),
-    repositoryRoot: z.string().min(1).max(1_024),
+    /** Derived from the task-id contract rather than chosen, so the two cannot drift. */
+    taskId: z.string().min(1).max(MAX_TASK_ID_LENGTH),
+    /** The bound every sibling delivery record uses for the same value. */
+    repositoryRoot: z.string().min(1).max(4096),
     host: z.string().min(1).max(253),
+    /** The bound the operator's declaration puts on the same two values. */
     owner: z.string().min(1).max(100),
     name: z.string().min(1).max(100),
     /** The **local** name of the remote. Never a URL; see the header. */

@@ -10643,9 +10643,13 @@ scheduler. The `up to date` row is
 
 ### What an unattended invocation can do besides publish
 
-The publication itself writes nothing: no task state, no block-ledger entry, no
-delivery record, no cached permission. Nothing about the grant is durable, and
-the next invocation reads the declaration again.
+The publication itself writes nothing **in the repository**: no task state, no
+block-ledger entry, no delivery record, no cached permission. Since V4 slice 14
+it does write one thing, and outside every repository — an immutable
+authorisation record under the operator's own profile, before the remote is
+contacted; see [the record that has to exist first](#the-record-that-has-to-exist-first-v4-slice-14).
+Nothing about the grant is durable, and the next invocation reads the
+declaration again.
 
 The *invocation* is a `--drive`, and a drive does more than publish. This is not
 new and it is not this grant's doing — `delivery --drive` has done all of it with
@@ -10775,9 +10779,10 @@ still writes nothing anywhere.
 If the record cannot be written and read back, **nothing is read from the
 delivery remote and nothing is attempted**. The publication reports
 `PUBLICATION_AUDIT_UNWRITTEN` and the drive settles
-`PUBLICATION_AUDIT_NOT_DURABLE`, which is graded 3: what is wrong is on this
-machine, under the operator's own profile, and the next invocation will meet it
-again until somebody looks.
+`PUBLICATION_AUDIT_NOT_DURABLE`, which is graded 3: nothing on the remote is in
+question, and what is wrong is local — either the store under the operator's own
+profile, or a subject this build's record contract will not hold. Neither is
+cleared by asking again.
 
 That is not a `try`/`catch` around a logging call. The record is written inside
 the same closure that re-proves the permission, and a closure that cannot
@@ -10888,13 +10893,20 @@ disagrees about the payload. All three are driven.
 
 - **L-V4-14-1 — the store is unbounded.** One directory of one small document per
   authorised unattended publication attempt, forever. Nothing deletes it, which
-  is the same absence the doctor's runs root already declares two directories
-  away. A retention policy is a decision of its own.
+  is the same absence the doctor's runs root already declares under the same
+  profile. A retention policy is a decision of its own.
 - **L-V4-14-2 — the record is not tamper-proof, and its absence proves nothing.**
   Same-user forgery and same-user deletion are both open. An absent record and a
   record that never existed are the same bytes. File modes are not a defence:
   `0o600` and `0o700` were measured on this NTFS volume to yield `0o666`, and
   access is whatever the profile directory's inherited ACLs say.
+- **L-V4-14-7 — a subject this build will not record cannot be published
+  unattended.** The record bounds a ref at 300 characters and a repository root
+  at 4096, while nothing upstream bounds a work branch's length at all. A task
+  whose branch exceeds that publishes attended and refuses unattended, under a
+  member that says the refusal is local. Fail-closed, generous against the
+  branch names this build generates, and stated because it will look like a
+  store problem to whoever hits it.
 - **L-V4-14-3 — the store is not indexed, and nothing reads it for you.**
   Records are addressable only by event identity; the repository, task, ref and
   commit are in the body. Finding the record for a branch means reading the
@@ -10905,8 +10917,11 @@ disagrees about the payload. All three are driven.
   Other reparse-point classes were not measured and nothing is claimed about
   them.
 - **L-V4-14-5 — "written and read back" is not "durable across power loss".**
-  The record's own handle is flushed before the rename; the directory entry is
-  not, because nothing in this build flushes a directory entry.
+  The staging handle is flushed only where the filesystem supports flushing —
+  the primitive treats an `EINVAL` from `fsync` as "not supported here" and
+  reports the write as done, and this store does not refuse that — and the
+  directory entry is never flushed at all, because nothing in this build flushes
+  one.
 - **L-V4-14-6 — the record covers the forge act, not the local ones.** The grant
   requires `--drive`, and a drive can write the merge receipt, the verification
   history and the conclusion, take the execution lease and run the repository

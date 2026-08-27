@@ -111,10 +111,14 @@
  * reader an operator would use, so the comparison here carries the grading with
  * it rather than repeating it.
  *
- * What may honestly be claimed after that is "written, flushed and read back",
- * and **not** "durable across power loss". The file's own handle is flushed;
- * the directory entry is not, because nothing in this build flushes a directory
- * entry, and a claim this store cannot keep is worse than the gap it hides.
+ * What may honestly be claimed after that is "written, closed and read back",
+ * and **not** "durable across power loss". Two gaps, and both are stated rather
+ * than rounded away. The staging handle is flushed only where the filesystem
+ * supports flushing — the primitive treats an `EINVAL` from `fsync` as "not
+ * supported here" and reports the write as done, and this store does not refuse
+ * it, because refusing would make the publication depend on a filesystem
+ * property nothing else in this build depends on. And the directory entry is
+ * never flushed at all, because nothing in this build flushes one.
  */
 
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
@@ -122,7 +126,7 @@ import { join } from 'node:path';
 
 import { orchestratorHome } from '../config/paths.js';
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
-import { createRunDirectory, newRunId } from '../doctor/run-directory.js';
+import { createRunDirectory, newRunId, type RunDirectoryCode } from '../doctor/run-directory.js';
 import { writeFileAtomically, type ReplaceFn, type TempSuffixFn } from '../state/atomic-file.js';
 import {
   HEAD_PUBLICATION_AUTHORISATION_VERSION,
@@ -171,12 +175,11 @@ export function newHeadPublicationAuditEventId(now: Date): string {
 /**
  * Every way recording can end. A closed set, and exactly one of them wrote.
  *
- * The vocabulary distinguishes what an operator would do about each: a profile
- * the OS will not name, a link on the store's path, a root that cannot be made,
- * a name already taken, a record this build would not read back, a write that
- * did not complete, and bytes that came back wrong. Folding those into one
- * "audit failed" would be telling a person the same thing about seven different
- * machines.
+ * The members are apart because the remedies are: folding them into one "audit
+ * failed" would tell a person the same thing about conditions that need
+ * different things done to them. Each carries its own sentence below, and there
+ * is deliberately no tally here — a count beside an enumeration is the shape
+ * this repository has already had to correct more than once.
  *
  * There is deliberately **no** `ALREADY_RECORDED`. In a receipt store that
  * member is an idempotency claim; here a record already at the name is a
@@ -280,6 +283,25 @@ const RECORDED_PERMISSION = 'AUTOMATIC_ALLOWED' as const;
 
 /** The declaration contract version a record is written against. */
 const RECORDED_DECLARATION_SCHEMA_VERSION = 1 as const;
+
+/**
+ * How the exclusive directory creation's answers become this store's.
+ *
+ * Total by type over {@link RunDirectoryCode}, so a member added to that
+ * vocabulary is a compile error here rather than a code that falls past a switch
+ * and lets the write proceed into a directory nobody established. `null` is the
+ * one answer that continues.
+ */
+const DIRECTORY_REFUSAL: Readonly<Record<RunDirectoryCode, HeadPublicationAuditCode | null>> =
+  Object.freeze({
+    CREATED: null,
+    INVALID_RUN_ID: 'EVENT_ID_UNSUITABLE',
+    PATH_ESCAPES_RUNS_ROOT: 'EVENT_ID_UNSUITABLE',
+    PATH_CONTAINS_LINK: 'STORE_PATH_UNSAFE',
+    RUN_DIRECTORY_EXISTS: 'EVENT_NAME_TAKEN',
+    RUNS_ROOT_CREATE_FAILED: 'STORE_UNAVAILABLE',
+    RUN_DIRECTORY_CREATE_FAILED: 'STORE_UNAVAILABLE',
+  });
 
 /**
  * Reads back exactly what is on disk at `path`, or `null` when it cannot.
@@ -390,20 +412,8 @@ export function recordHeadPublicationAuthorisation(
 
   // ── 3. One directory, created exclusively ─────────────────────────────────
   const directory = createRunDirectory({ runsRoot: root, runId: request.eventId });
-  switch (directory.code) {
-    case 'CREATED':
-      break;
-    case 'INVALID_RUN_ID':
-    case 'PATH_ESCAPES_RUNS_ROOT':
-      return outcome('EVENT_ID_UNSUITABLE', request.eventId, directory.errnoCode);
-    case 'PATH_CONTAINS_LINK':
-      return outcome('STORE_PATH_UNSAFE', request.eventId, directory.errnoCode);
-    case 'RUN_DIRECTORY_EXISTS':
-      return outcome('EVENT_NAME_TAKEN', request.eventId, directory.errnoCode);
-    case 'RUNS_ROOT_CREATE_FAILED':
-    case 'RUN_DIRECTORY_CREATE_FAILED':
-      return outcome('STORE_UNAVAILABLE', request.eventId, directory.errnoCode);
-  }
+  const refusal = DIRECTORY_REFUSAL[directory.code];
+  if (refusal !== null) return outcome(refusal, request.eventId, directory.errnoCode);
 
   // ── 4. The bytes ──────────────────────────────────────────────────────────
   const written = writeFileAtomically({

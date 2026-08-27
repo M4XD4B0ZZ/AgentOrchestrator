@@ -157,6 +157,16 @@ const DECLARED_TARGET = Object.freeze({
   }),
 });
 
+/** The same forge repository, declared under a different local remote name. */
+const MOVED_REMOTE = Object.freeze({
+  declared: true,
+  remoteName: 'upstream',
+  result: Object.freeze({
+    outcome: 'RESOLVED',
+    target: Object.freeze({ provider: 'github', ...IDENTITY }),
+  }),
+});
+
 /** A remote URL carrying credentials, which no record may ever contain. */
 const SECRET_URL = 'https://a-user:a-secret-token@github.com/M4XD4B0ZZ/AgentOrchestrator.git';
 
@@ -308,6 +318,8 @@ interface Counts {
   create: number;
   merge: number;
   resolves: number;
+  /** Every Git question about the remote: both get-url calls and the ls-remote. */
+  remoteReads: number;
 }
 
 interface Run {
@@ -335,9 +347,26 @@ async function drive(
     readonly task?: string;
     /** What Git answers about a repository-relative path. */
     readonly checkIgnored?: 'IGNORED' | 'NOT_IGNORED' | 'UNDETERMINED';
+    /**
+     * From this resolve onwards the repository declares a different remote NAME
+     * for the same forge identity.
+     *
+     * The one way a case can move the publication subject underneath a standing
+     * permission: the identity is unchanged, so the declaration still permits,
+     * and the grant the ladder minted names a remote the re-check no longer
+     * resolves.
+     */
+    readonly remoteMovesAt?: number;
   } = {},
 ): Promise<Run> {
-  const counts: Counts = { forge: 0, publish: 0, create: 0, merge: 0, resolves: 0 };
+  const counts: Counts = {
+    forge: 0,
+    publish: 0,
+    create: 0,
+    merge: 0,
+    resolves: 0,
+    remoteReads: 0,
+  };
   const pushVectors: (readonly string[])[] = [];
   let remoteRef: 'absent' | 'at-head' | 'other' = over.remoteRef ?? 'absent';
   const chunks: string[] = [];
@@ -365,7 +394,10 @@ async function drive(
             gitCommonDir: join(root, '.git'),
             taskSource: { kind: 'MARKDOWN_DIRECTORY', path: TASK_DIR },
             verification: { phases: [] },
-            delivery: DECLARED_TARGET,
+            delivery:
+              over.remoteMovesAt !== undefined && counts.resolves >= over.remoteMovesAt
+                ? MOVED_REMOTE
+                : DECLARED_TARGET,
           },
         };
       }) as never,
@@ -385,8 +417,12 @@ async function drive(
         const joined = args.join(' ');
         // A credential-bearing URL on both reads, so "no secret reaches the
         // record" is measured against a secret that really was in reach.
-        if (joined.includes('remote get-url')) return commandResult({ stdout: SECRET_URL });
+        if (joined.includes('remote get-url')) {
+          counts.remoteReads += 1;
+          return commandResult({ stdout: SECRET_URL });
+        }
         if (joined.includes('ls-remote')) {
+          counts.remoteReads += 1;
           const ref = args[args.length - 1] ?? '';
           const at = remoteRef === 'absent' ? null : remoteRef === 'at-head' ? HEAD : OTHER;
           if (at === null) return commandResult({ exitCode: 2 });
@@ -555,11 +591,20 @@ describe('the record is a precondition of the act, not a note about it', () => {
     declare(home, permitting());
     blockStore(home);
 
+    // The control, so the counter below is known to be able to move.
+    const working = scratchHome();
+    declare(working, permitting());
+    const control = await drive(AUTOMATIC, root, working);
+    expect(published(control)).toBe('PUBLISHED');
+    expect(control.counts.remoteReads).toBeGreaterThan(0);
+
     const run = await drive(AUTOMATIC, root, home);
 
-    // Not merely "no push": nothing was read from the remote either. The two
+    // Not merely "no push": nothing was READ from the remote either. The two
     // `git remote get-url` calls and the `ls-remote` all come after the record,
-    // so a run that refused here cannot have asked the remote anything.
+    // so a run that refused here cannot have asked the remote anything — and
+    // that is counted rather than argued from the ordering.
+    expect(run.counts.remoteReads).toBe(0);
     expect(run.pushVectors).toEqual([]);
     expect(published(run)).toBe('PUBLICATION_AUDIT_UNWRITTEN');
   });
@@ -754,6 +799,35 @@ describe('the record names the exact declaration it acted under', () => {
     const run = await drive(AUTOMATIC, root, empty);
     expect(run.counts.publish).toBe(0);
     expect(recordsIn(empty)).toEqual([]);
+  });
+
+  it('writes nothing for a subject the authority was not minted for', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home, permitting());
+
+    // A control run first, to learn which resolution the re-check performs.
+    const control = await drive(AUTOMATIC, root, home);
+    expect(published(control)).toBe('PUBLISHED');
+    const resolves = control.counts.resolves;
+
+    // Now the repository declares a different remote NAME from the re-check's
+    // own resolution onwards. The forge identity is unchanged, so the
+    // declaration still permits and the authority is still established — but
+    // the subject in front of this pass is not the one the grant was minted
+    // for, and the effect refuses it a step later.
+    const later = scratchHome();
+    declare(later, permitting());
+    const run = await drive(AUTOMATIC, root, later, { remoteMovesAt: resolves });
+
+    expect(run.counts.resolves).toBe(resolves);
+    expect(published(run)).toBe('SUBJECT_CHANGED');
+    expect(run.counts.publish).toBe(0);
+    // The record would otherwise name `upstream` — a remote no grant in this
+    // build ever authorised a publication to.
+    expect(recordsIn(later)).toEqual([]);
+    expect(eventIds(later)).toEqual([]);
   });
 
   it('writes nothing when the permission is withdrawn between the two readings', async () => {

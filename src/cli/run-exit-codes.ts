@@ -631,12 +631,13 @@ const DRIVE_EXIT_CODES = Object.freeze({
   // store. Those two are written *after* something happened, so a failed write
   // means a caller was told yes about a thing that is not on disk, and which
   // code that becomes depends on what the store found. This one is written
-  // *before* anything is contacted: every reachable cause is a fault on the
-  // operator's own machine — a profile the OS will not name, a link on the
-  // store's path, a root that cannot be made, a name already taken, a write
-  // that did not complete, bytes that came back wrong — and every one of them
-  // meets the next invocation again. Nothing on the remote is in question,
-  // which is what the member's own sentence says.
+  // *before* anything is contacted, so nothing on the remote is in question and
+  // there is no such asymmetry to grade. The rule rather than a list, because a
+  // list beside a closed vocabulary goes stale: what failed is local — the store
+  // under the operator's profile, or a subject this record's contract will not
+  // hold — and a person has to look at one of the two. Which member it was is on
+  // the `Publication` line beside this. It is deliberately not graded 5: no
+  // invocation of this command clears either cause on its own.
   PUBLICATION_AUDIT_NOT_DURABLE: EXIT_RUN_NEEDS_OPERATOR,
 
   // This invocation achieved nothing and nothing durable is wrong: a reading

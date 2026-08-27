@@ -182,12 +182,14 @@ export interface DeliveryCommandSeams {
   /**
    * Where the OS says this user's profile directory is.
    *
-   * The one seam on the unattended-publication declaration, and it is the
-   * *directory* rather than the declaration: a test that could hand in a
-   * permission would be a test of nothing, because handing in a permission is
-   * exactly what this build refuses to let anything do. A test points this at a
-   * scratch directory and writes a real file into it, so the reader, the size
-   * ceiling, the YAML boundary and the contract are all really exercised.
+   * The one seam on the operator's profile, and it is the *directory* rather
+   * than any artefact in it: it decides both where the unattended-publication
+   * declaration is read and where the authorisation records are written. A test
+   * that could hand in a permission would be a test of nothing, because handing
+   * one in is exactly what this build refuses to let anything do. A test points
+   * this at a scratch directory and writes a real file into it, so the reader,
+   * the size ceiling, the YAML boundary, the contract and the real store are all
+   * exercised against real bytes.
    *
    * Production never supplies one. Absent, the loader asks `os.userInfo()`.
    */
@@ -350,13 +352,14 @@ function resolvePublicationAuthority(
  * three.)
  *
  * V4 slice 14 adds one step to the automatic path and to no other: inside that
- * same `recheck`, strictly after the permission has been re-proved and strictly
- * before anything is contacted, the invocation writes and reads back a durable
- * record of what it was permitted by and what it was about to act on. A record
- * that cannot be established refuses the publication, through the closure's own
- * refusal channel, with nothing read from the remote. The attended path does not
- * reach it: the gate is which grant answered, and the attended one is a constant
- * that carries no declaration to record.
+ * same `recheck`, strictly after the permission has been re-proved, strictly
+ * after the re-resolved subject has been shown to be the one the grant
+ * authorises, and strictly before anything is contacted, the invocation writes
+ * and reads back a durable record of what it was permitted by and what it was
+ * about to act on. A record that cannot be established refuses the publication,
+ * through the closure's own refusal channel, with nothing read from the remote.
+ * The attended path does not reach it: the gate is which grant answered, and the
+ * attended one is a constant that carries no declaration to record.
  *
  * Note what is *not* passed to the mint: nothing derived from the task's title,
  * brief, findings or any other repository-authored prose. The grant carries six
@@ -407,9 +410,13 @@ export async function performPublication(
   // Why the closure below refused, when it did. Written there and read once,
   // after `publishDeliveryHead` has returned.
   //
-  // One variable for two reasons, because they cannot both happen: the record is
-  // written only after the re-proof answered `AUTHORISED`, and the withdrawal is
-  // recorded only when it did not. Two variables would be two states this
+  // One variable for two reasons, because they cannot both happen *and* cannot
+  // both persist. Within one execution of the closure the two arms are mutually
+  // exclusive — the record is written only after the re-proof answered
+  // `AUTHORISED`, the withdrawal is recorded only when it did not — and the
+  // closure runs at most once per call, because `publishDeliveryHead` awaits
+  // `seams.recheck()` at exactly one call site with no loop and no retry, and
+  // `performPublication` calls it once. Two variables would be two states this
   // function would then have to rank.
   let recheckRefusal: HeadPublication | null = null;
 
@@ -457,6 +464,30 @@ export async function performPublication(
         ) {
           recheckRefusal = still.outcome;
         }
+        return null;
+      }
+
+      // The subject the grant authorises and the subject this pass resolved
+      // have to be the same one, and that is asked HERE rather than left to
+      // `publishDeliveryHead`. It asks a moment later — `sameSubject` over the
+      // same six fields — and refuses `SUBJECT_CHANGED` with nothing attempted,
+      // so no outcome changes by asking first. What changes is what is left
+      // behind: without this, a task that advances between the ladder's reading
+      // and this one leaves a durable record naming a remote, ref and commit no
+      // grant in this build ever authorised, for a publication that is refused
+      // one step later. Three reviewers reproduced exactly that.
+      //
+      // It sits after the authority arm so the withdrawal report is unchanged:
+      // a permission that stopped standing is still named there, and a subject
+      // that moved underneath a standing permission is answered here.
+      if (
+        rebuilt.subject.host !== subject.subject.host ||
+        rebuilt.subject.owner !== subject.subject.owner ||
+        rebuilt.subject.name !== subject.subject.name ||
+        rebuilt.remoteName !== subject.remoteName ||
+        ref !== intended ||
+        rebuilt.subject.commit !== subject.subject.commit
+      ) {
         return null;
       }
 

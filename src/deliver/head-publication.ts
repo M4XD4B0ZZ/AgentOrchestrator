@@ -186,8 +186,14 @@ export const HEAD_PUBLICATIONS = [
    * watching, and the accountability for it is a precondition rather than a
    * side effect: before the delivery remote is contacted at all, a record
    * naming the exact declaration, repository, task, remote, ref and commit has
-   * to be created, flushed and read back. When that cannot be done, nothing is
-   * read from the remote and nothing is attempted.
+   * to be created and read back. When that cannot be done, nothing is read from
+   * the remote and nothing is attempted.
+   *
+   * Two kinds of cause reach this member and an operator needs to tell them
+   * apart: the store under the operator's own profile could not be used, or the
+   * subject in front of this build is one its record contract will not hold.
+   * Which member it was is the store's own, and it is not carried here — a
+   * refusal about a file this build will not quote cannot name what it refused.
    *
    * A member of its own rather than a fall-through, and specifically not
    * {@link HEAD_PUBLICATIONS} `SUBJECT_CHANGED`, which is where the mechanism
@@ -319,7 +325,7 @@ export const HEAD_PUBLICATION_DETAIL: Readonly<Record<HeadPublication, string>> 
   PUBLICATION_POLICY_UNREADABLE:
     'This invocation asked to publish with nobody present, and the declaration that would permit it could not be read into a permission. It is treated as a broken authority configuration rather than as a refusal: nothing was read from the delivery remote and nothing was attempted, and an operator has to look at the file.',
   PUBLICATION_AUDIT_UNWRITTEN:
-    'This invocation was permitted to publish with nobody present, and the durable record that has to exist before an unattended publication could not be written and read back. Accountability for an act nobody watches is a precondition of it, not a side effect: nothing was read from the delivery remote and nothing was attempted, and an operator has to look at this machine.',
+    'This invocation was permitted to publish with nobody present, and the durable record that has to exist before an unattended publication could not be written and read back. Accountability for an act nobody watches is a precondition of it, not a side effect: nothing was read from the delivery remote and nothing was attempted. What stopped it is local, and it is one of two things: the record store under this machine operator\u2019s profile, or a subject this build will not put in a record.',
   AUTHORITY_REFUSED:
     'The authority for this publication was not one this build minted, or it had already been used. Nothing was attempted.',
   SUBJECT_CHANGED:
