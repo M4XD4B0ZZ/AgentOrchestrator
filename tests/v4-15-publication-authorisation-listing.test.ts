@@ -656,11 +656,17 @@ describe('the filesystem does not choose the order', () => {
     const home = scratchHome();
     const later = record(home, { at: new Date('2026-08-27T12:00:01.000Z') });
     const earlier = record(home, { at: new Date('2025-01-01T00:00:00.000Z') });
+    // Three names chosen to separate three different orders at once.
+    //
     // Measured on this volume: `readdir` answers in the directory index's own
     // case-folded collation, in which `a-entry` precedes `B-entry` and `_under`
-    // comes last. A code-unit sort puts them the other way round, so these three
-    // names are what separate this module's order from the filesystem's.
-    for (const junk of ['B-entry', 'a-entry', '_under']) plantDirectory(home, junk);
+    // comes last; a code-unit sort puts them the other way round. And `0-stray`
+    // sorts BEFORE an event name, because every event name begins with the
+    // century digit `2` — so a listing that sorted everything into one list
+    // would put it first, and this one puts it in the second tier. Without that
+    // entry the two arrangements are indistinguishable on this fixture, which is
+    // how a first version of this case passed while the tiering was gone.
+    for (const junk of ['B-entry', 'a-entry', '_under', '0-stray']) plantDirectory(home, junk);
 
     const raw = readdirSync(auditRoot(home));
     const names = list(home).entries.map((e) => e.name);
@@ -669,10 +675,12 @@ describe('the filesystem does not choose the order', () => {
     // order, and then everything else, in name order. A name this build did not
     // mint carries no instant, so interleaving it among the events would place
     // it at a time nothing measured.
-    expect(names).toEqual([earlier, later, ...['B-entry', '_under', 'a-entry'].sort()]);
-    // The measurement that makes the sort load-bearing rather than incidental:
-    // the directory itself hands these back in another order entirely.
+    expect(names).toEqual([earlier, later, ...['B-entry', '_under', 'a-entry', '0-stray'].sort()]);
+    // Neither the directory's order nor a single sort of everything.
     expect(names, 'the fixture must separate the two orders').not.toEqual(raw);
+    expect(names, 'the fixture must separate two tiers from one list').not.toEqual(
+      [...names].sort(),
+    );
     expect(raw.length).toBe(names.length);
   });
 
@@ -1120,8 +1128,59 @@ describe('what the report may not say', () => {
     }
   });
 
+  it('uses an outcome word only inside a denial, and nowhere else', () => {
+    // The rule this measures, rather than a list of phrasings. A first version
+    // banned the exact strings "was published", "were published" and "has
+    // published", and a mutant that rewrote one sentence to "A branch this build
+    // published, whose digest recomputes..." walked straight past all three. The
+    // sentence-shaped instrument catches the class: an outcome verb may appear
+    // only where something within the same clause denies it.
+    const negations = ['not', 'never', 'no ', 'nothing', 'cannot', 'does not', 'without'];
+    const outcomes = [
+      'published',
+      'publishes',
+      'created',
+      'creates',
+      'succeeded',
+      'succeeds',
+      'pushed',
+      'attempted',
+      'executed',
+      'completed',
+    ];
+
+    let seen = 0;
+    for (const sentence of [
+      ...AUDIT_PRINTED_TEXT,
+      PUBLICATION_GROUP_DESCRIPTION,
+      AUTHORISATIONS_DESCRIPTION,
+    ]) {
+      const one = flat(sentence).toLowerCase();
+      for (const word of outcomes) {
+        let at = one.indexOf(word);
+        while (at !== -1) {
+          seen += 1;
+          const before = one.slice(Math.max(0, at - 80), at);
+          expect(
+            negations.some((no) => before.includes(no)),
+            `"${word}" is asserted rather than denied in: ...${one.slice(Math.max(0, at - 80), at + 30)}`,
+          ).toBe(true);
+          at = one.indexOf(word, at + 1);
+        }
+      }
+    }
+    // A positive control: the rule is worthless if no printed sentence contains
+    // one of these words at all, because then it would pass for any text.
+    expect(seen, 'the denials must actually use the words they deny').toBeGreaterThan(2);
+  });
+
   it('bounds the claim in its own words, rather than leaving it unsaid', () => {
     const text = flat(everythingPrinted());
+    // The heading is pinned with the sentences under it. A mutant that left the
+    // denials in place and retitled them "Also worth knowing" survived an
+    // earlier version of this case: every sentence stayed true and the framing
+    // that makes them bounds rather than trivia was gone.
+    expect(text).toContain('What it does not say:');
     // The denials have to be present, not merely the assertions absent: an
     // operator reading a directory of readable records needs the bounds in front
     // of them, and a report that simply omitted the words would leave the

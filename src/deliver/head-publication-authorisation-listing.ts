@@ -419,14 +419,28 @@ function listing(
  *
  * Opened by name and `fstat`ed rather than `stat`ed, for the reason the store's
  * own read-back gives: on Windows a directory opens successfully and reports
- * size zero, so without the file test a directory sitting at the record's name
- * would read as an empty file — `RECORD_ABSENT` reached by accident, about an
- * entry that is not absent at all. Measured, not assumed.
+ * size zero, so without a file test a directory sitting at the record's name
+ * would read as an empty file — the wrong answer reached by accident. Measured,
+ * not assumed.
+ *
+ * That test is the second of a **pair**, and this says so rather than letting a
+ * later reader take it for coverage it does not provide. `classify` has already
+ * `lstat`ed the same path and refused a non-file, so removing either half alone
+ * leaves the suite green — the other half answers. Removing both fails it, and a
+ * mutant does exactly that. They are kept because they answer about different
+ * objects: the `lstat` refuses a **link**, which an `fstat` on an opened handle
+ * cannot see because it reports the target; and the `fstat` binds the answer to
+ * the object this call actually opened, which the earlier `lstat` cannot,
+ * because anything may replace the name between the two.
  *
  * The bound is applied by reading no further rather than by judging the size
  * here: whatever comes back goes to the contract's own grader, which is the one
- * place that decides what "too large to be a record" means. One byte past the
- * bound is enough for it to say so, and a file of any size costs the same read.
+ * place that decides what "too large to be a record" means, and one byte past
+ * the bound is enough for it to say so. **What the bound buys is bounded
+ * allocation and nothing else**, and that is stated because it is not something
+ * this suite can observe: measured on this machine, reading a five-gigabyte
+ * sparse file whole succeeds and grades `MALFORMED` exactly as the bounded read
+ * does. A mutant that removes the bound therefore survives, deliberately.
  */
 function recordBytes(path: string): Buffer | null {
   let handle: number;
