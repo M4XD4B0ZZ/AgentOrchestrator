@@ -125,9 +125,13 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { orchestratorHome } from '../config/paths.js';
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { createRunDirectory, newRunId, type RunDirectoryCode } from '../doctor/run-directory.js';
+import {
+  HEAD_PUBLICATION_AUDIT_DIR_NAME,
+  HEAD_PUBLICATION_AUDIT_FILE_NAME,
+  headPublicationAuditRoot,
+} from './internal/head-publication-audit-location.js';
 import { writeFileAtomically, type ReplaceFn, type TempSuffixFn } from '../state/atomic-file.js';
 import {
   HEAD_PUBLICATION_AUTHORISATION_VERSION,
@@ -139,26 +143,20 @@ import {
 } from './head-publication-authorisation.js';
 
 /**
- * The directory under the orchestrator home that holds the records.
+ * The store's location, re-exported.
  *
- * A directory of its own, following the rule this build already made structural
- * after reproducing the alternative: a new kind of record gets its own
- * directory rather than its own name inside a shared one.
- *
- * Named for what it holds — authorisations — and deliberately not for
- * publications. A directory called `head-publications` would make its own
- * existence a claim that things were published, and the records inside it assert
- * nothing of the sort.
+ * The three values moved to `internal/head-publication-audit-location.ts` when
+ * V4 slice 15 added a read of this store: a read-only listing must not import
+ * the module that owns the exclusive `mkdir` and the publishing `rename` merely
+ * to learn a directory name. They are re-exported here so every slice-14 caller
+ * and its whole suite are unchanged — the same thing
+ * `internal/head-publication-grant.ts` does with the ref grammar it gave away.
  */
-export const HEAD_PUBLICATION_AUDIT_DIR_NAME = 'head-publication-authorisations';
-
-/** The one file name inside an event directory. No alternative spelling. */
-export const HEAD_PUBLICATION_AUDIT_FILE_NAME = 'authorisation.json';
-
-/** The store root. A pure function of the OS user identity. */
-export function headPublicationAuditRoot(provider: PathProvider = OS_PATH_PROVIDER): string {
-  return join(orchestratorHome(provider), HEAD_PUBLICATION_AUDIT_DIR_NAME);
-}
+export {
+  HEAD_PUBLICATION_AUDIT_DIR_NAME,
+  HEAD_PUBLICATION_AUDIT_FILE_NAME,
+  headPublicationAuditRoot,
+};
 
 /**
  * A fresh event identity: a UTC instant and a version-4 UUID.

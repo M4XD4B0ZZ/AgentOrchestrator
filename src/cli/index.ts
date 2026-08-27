@@ -20,6 +20,7 @@ import { registerBlockCommand } from './block-command.js';
 import { registerDeliveryCommand } from './delivery-command.js';
 import { registerDoctorCommand } from './doctor-command.js';
 import { registerLeaseCommand } from './lease-command.js';
+import { registerPublicationCommand } from './publication-command.js';
 import { registerReleaseCommand } from './release-command.js';
 import { registerRunCommand } from './run-command.js';
 import { enforceSupportedRuntime } from './runtime-gate.js';
@@ -49,6 +50,11 @@ const DESCRIPTION = [
   '    `--attended` is a grant for all three; `--automatic-publish-head-only`',
   '    is a second one, for the publication alone, and only where this',
   '    machine’s operator declared that repository publishable that way',
+  '  - `publication authorisations`: the read-only listing of what this build',
+  '    recorded it was permitted to attempt with nobody present. It reads one',
+  '    directory under this OS user’s profile, opens no repository and starts no',
+  '    program; a record in it is evidence for a person and never an input to an',
+  '    authority',
   '',
   'Network access, stated in full. Exactly one request is made by this process',
   'itself, and it is opt-in:',
@@ -178,6 +184,7 @@ export function buildProgram(): Command {
   registerReleaseCommand(program);
   registerLeaseCommand(program);
   registerDeliveryCommand(program);
+  registerPublicationCommand(program);
 
   return program;
 }

@@ -10840,8 +10840,10 @@ others is any event's business.
 A record on disk brings no future publication closer. Every unattended attempt
 still needs a new invocation that asks, a declaration that still permits, a
 freshly resolved subject, a fresh reading of the remote and a fresh one-shot
-grant — and the store is read by exactly one module in the whole source tree,
-which is not the one that mints the authority.
+grant — and no module that decides whether a publication may happen reads a
+stored record. Since V4 slice 15 the store has an operator-facing reader too;
+that reader is on no authority path either, and the suite pins the rule rather
+than the list of files, because a list goes stale the moment one is added.
 
 No record is a retry token, no restart resumes from one, and there is no field in
 it with a state machine: no `state`, no `phase`, no `pending`, no expiry, no
@@ -10910,10 +10912,13 @@ disagrees about the payload. All three are driven.
   record that never existed are the same bytes. File modes are not a defence:
   `0o600` and `0o700` were measured on this NTFS volume to yield `0o666`, and
   access is whatever the profile directory's inherited ACLs say.
-- **L-V4-14-3 — the store is not indexed, and nothing reads it for you.**
-  Records are addressable only by event identity; the repository, task, ref and
-  commit are in the body. Finding the record for a branch means reading the
-  directory, and there is no command that does it.
+- **L-V4-14-3 — the store is still not indexed, and V4 slice 15 narrowed this
+  rather than closing it.** `agent-loop publication authorisations` now reads
+  the whole store and shows what each entry is, so evidence nobody could read is
+  no longer the gap. What remains is that records are addressable only by event
+  identity: the repository, task, ref and commit live in the body, so finding
+  the record for one branch means reading every entry. There is no index, no
+  search and no filter, and the listing grows with the store.
 - **L-V4-14-4 — hard links are not inspected.** The link check on the store's
   path uses `lstat`, which catches symbolic links and junctions — measured, with
   a real junction. A hard link is not a reparse point and nothing counts links.
@@ -10952,6 +10957,138 @@ disagrees about the payload. All three are driven.
   primitive, read back off the disk.
 
 See [`docs/decisions/2026-08-27-adr-unattended-publication-audit.md`](docs/decisions/2026-08-27-adr-unattended-publication-audit.md).
+
+## Reading the evidence (V4 slice 15)
+
+Slice 14 wrote a record before every unattended publication and left nobody able
+to read it. Evidence nobody can read is not accountability, so there is now one
+command that reads it:
+
+```powershell
+agent-loop publication authorisations
+```
+
+No repository, no options, no network. It reads one directory under your own OS
+user profile and grades every entry in it.
+
+```text
+Store        : C:\Users\you\.agent-orchestrator\head-publication-authorisations
+Listing      : READ
+Entries      : 2 (2 read, 0 not read)
+  Every entry in the store is a record this build read.
+
+Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
+  Reading      : HISTORICAL_AUTHORISATION
+  Authorised at: 2026-08-27T12:00:00.000Z
+  Act          : HEAD_PUBLICATION, invocation mode AUTOMATIC
+  Task         : V4-14
+  Checkout     : D:\AgentOrchestrator
+  Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator
+  Ref          : refs/heads/ao/task/V4-14
+  Commit       : 10583ee91a5747d0049f563ffaac64b0cf643aeb
+  Declaration  : AUTOMATIC_ALLOWED, sha256 4c2f...
+```
+
+### What a line here means, and what it does not
+
+Everything the report says is about **an authorisation at one instant**, because
+that is all the record is. It was written before the invocation contacted the
+delivery remote at all, so no reading of it says a publication was attempted,
+that the ref exists, that this build created it, or that the declaration still
+permits any of it. The report says so in its own words, under every listing.
+
+`Declaration` is the SHA-256 of the exact bytes of
+`delivery-automation.yaml` as they were read at that instant. It means *those
+bytes* and never *that meaning*: a comment, a trailing newline or CRLF endings
+all change it and all parse to the same permission. The command does not open
+that file, and a policy edited today does not change what a record from last week
+says.
+
+### What a broken entry means
+
+An entry that is not a record this build could read is **listed**, counted apart
+in the `Entries` line, and given a sentence saying what it turned out to be.
+Nothing is skipped, repaired or cleaned up — a listing that quietly dropped what
+it could not read would look complete and would not be. The readings are:
+
+| Reading | What it is |
+| --- | --- |
+| `HISTORICAL_AUTHORISATION` | a record this build read, bound to the name of the directory it sits in |
+| `RECORD_ABSENT` | an event directory with no record in it — what a crash between the directory and the write leaves, and what every refusal after it leaves |
+| `RECORD_EMPTY` | a file at the record's name holding no bytes. The write cannot leave one, so something else made it |
+| `RECORD_UNREADABLE` | a link, something that is not an ordinary file, or a read that did not complete |
+| `RECORD_MALFORMED` | bytes that are not a record this build declares, including one past the size bound |
+| `RECORD_UNSUPPORTED_VERSION` | a record from a build this one cannot read. Refused, never guessed at, and nothing in it is shown |
+| `RECORD_NOT_THIS_EVENT` | the digest does not recompute for the directory it sits in: a record copied out of another event, or a field edited in place |
+| `UNRECOGNISED_ENTRY` | not an event directory at all — a link, a file, or a name this build would not mint |
+
+The command exits **0** whenever it produced a listing, including one holding
+entries it could not read: no authority path reads a record, so a damaged one
+blocks nothing, and nothing prunes this store — a non-zero grade would be
+permanent and unclearable. It exits **3** only when it could not read the store
+itself, which is also the store the next authorised publication would have to
+write into.
+
+`no store here` and `I could not read the store` are never the same report.
+
+### Why an old record gives no present authority
+
+Nothing on any authority path reads one. Every unattended attempt still needs a
+new invocation that asks, a declaration that still permits, a freshly resolved
+subject, a fresh reading of the remote and a fresh one-shot grant.
+
+That is structural as well as stated. The type this command hands out has its
+identity fields deliberately renamed — `forgeHost`, `forgeOwner`, `forgeName`,
+`authorisedRef`, `authorisedCommit` — because the publication mint takes a
+structurally typed `{host, owner, name, commit}`, and a value carrying the
+record's own field names would be an argument it accepts. Measured: a brand and
+a private field are no defence against a structural parameter. Renaming is.
+
+### What it cannot tell you
+
+**Anyone who can write files as your OS user can add a record that reads exactly
+like the rest, and can delete one without trace.** The binding digest is
+integrity structure, not a signature — there is no key material anywhere in this
+build. It catches a record copied out of another event, a field edited without
+recomputation, and a record from a build that disagrees about the payload. It
+catches nothing else.
+
+So an empty store means *nothing is here now*. It does not mean nothing was ever
+authorised: an attended publication records nothing here at all, another OS user
+has another store, and a deleted record leaves nothing behind to be missing.
+
+The list is ordered by event directory name, which carries the instant the
+writing invocation's own clock reported — not by the time inside the record,
+which is shown exactly as recorded and checked against nothing.
+
+### Carried forward from V4 slice 15, deliberately
+
+- **L-V4-15-1 — the listing is unbounded.** One block per event, forever. There
+  is no limit, no page and no filter, because a truncation rule would be a
+  retention decision wearing a display costume while `L-V4-14-1` is open.
+- **L-V4-15-2 — `UNRECOGNISED_ENTRY` answers two questions.** "This is not an
+  event directory" and "this could not be classified at all" share a member,
+  because reaching the second needs a race no fixture here can force.
+- **L-V4-15-3 — the reader's import closure still contains writers.** It shares
+  the event-name grammar and the link inspector with `doctor/` modules that also
+  hold writes. Nothing calls them, and "this command creates nothing" is carried
+  by a source sweep and by hashing every byte under the profile before and after
+  a listing, rather than by the import graph.
+- **L-V4-15-4 — a control character in a recorded value is shown as
+  `<U+XXXX>`.** Seven fields of a record are free text bounded only in length, so
+  a forged record could otherwise print itself as several entries. Every other
+  character is unchanged.
+- **L-V4-15-5 — the binding proves less here than to the writer.** An
+  enumerating reader has one fact that did not come out of the bytes: the
+  directory's name. So the check establishes "bound to this directory name", not
+  "bound to this event, task and repository", and the wording says exactly that.
+- **`L-V4-14-3` is narrowed, not closed.** The store is read now; it is still not
+  indexed, so finding the record for one branch means reading every entry.
+- **`L-V4-14-1` and `L-V4-14-2` are unchanged and now matter more.** This is the
+  first command that shows an operator a store nothing prunes, and the first
+  place a forged record would be displayed as `HISTORICAL_AUTHORISATION`.
+
+See [`docs/decisions/2026-08-27-adr-publication-authorisation-listing.md`](docs/decisions/2026-08-27-adr-publication-authorisation-listing.md).
 
 ## Not implemented yet
 

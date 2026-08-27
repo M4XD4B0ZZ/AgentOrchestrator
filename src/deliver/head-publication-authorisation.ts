@@ -264,23 +264,54 @@ export type HeadPublicationAuthorisationReading =
   (typeof HEAD_PUBLICATION_AUTHORISATION_READINGS)[number];
 
 /**
- * Grades bytes that claim to be one event's authorisation record.
+ * What one grading produced: the answer, and — only on the good answer — the
+ * record it read.
  *
- * Total and offline. Never throws, never repairs, never rewrites: a record this
- * build cannot read is reported, and the file is left exactly as it is.
+ * The record is `null` on every other member, and that is a property of the type
+ * rather than a convention: a caller cannot reach the fields of a record this
+ * build refused, so there is no path along which an unreadable event's values
+ * get displayed as though they had been established.
  */
-export function readHeadPublicationAuthorisation(
-  bytes: Buffer,
-  subject: HeadPublicationAuthorisationSubject,
-): HeadPublicationAuthorisationReading {
-  if (bytes.byteLength === 0) return 'ABSENT';
-  if (bytes.byteLength > MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES) return 'MALFORMED';
+export type HeadPublicationAuthorisationInspection =
+  | {
+      readonly reading: 'HISTORICAL_AUTHORISATION';
+      readonly record: HeadPublicationAuthorisation;
+    }
+  | {
+      readonly reading: Exclude<HeadPublicationAuthorisationReading, 'HISTORICAL_AUTHORISATION'>;
+      readonly record: null;
+    };
+
+/**
+ * How the identity a record is graded *under* is obtained.
+ *
+ * Two callers need two answers, and the difference is the whole of what
+ * separates {@link readHeadPublicationAuthorisation} from
+ * {@link inspectHeadPublicationAuthorisation}. It is a function of the parsed
+ * document rather than a value, because the second caller cannot build the
+ * subject until the bytes have parsed — and it is applied *after* the contract
+ * has been satisfied, so it is never handed an unvalidated shape.
+ */
+type SubjectFor = (
+  payload: HeadPublicationAuthorisationPayload,
+) => HeadPublicationAuthorisationSubject;
+
+/**
+ * The one grader. Both entry points below are this function under a different
+ * answer to "whose identity is this record read under?", so there is a single
+ * parser, a single version gate and a single binding comparison in this build.
+ */
+function grade(bytes: Buffer, subjectFor: SubjectFor): HeadPublicationAuthorisationInspection {
+  if (bytes.byteLength === 0) return { reading: 'ABSENT', record: null };
+  if (bytes.byteLength > MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES) {
+    return { reading: 'MALFORMED', record: null };
+  }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(bytes.toString('utf8'));
   } catch {
-    return 'MALFORMED';
+    return { reading: 'MALFORMED', record: null };
   }
 
   // The version is read before the contract, so a record written by a later
@@ -292,16 +323,72 @@ export function readHeadPublicationAuthorisation(
     Array.isArray(parsed) ||
     !('authorisationVersion' in parsed)
   ) {
-    return 'MALFORMED';
+    return { reading: 'MALFORMED', record: null };
   }
   const version = (parsed as { readonly authorisationVersion: unknown }).authorisationVersion;
-  if (typeof version !== 'number' || !Number.isInteger(version)) return 'MALFORMED';
-  if (version !== HEAD_PUBLICATION_AUTHORISATION_VERSION) return 'UNSUPPORTED_VERSION';
+  if (typeof version !== 'number' || !Number.isInteger(version)) {
+    return { reading: 'MALFORMED', record: null };
+  }
+  if (version !== HEAD_PUBLICATION_AUTHORISATION_VERSION) {
+    return { reading: 'UNSUPPORTED_VERSION', record: null };
+  }
 
   const contract = AuthorisationSchema.safeParse(parsed);
-  if (!contract.success) return 'MALFORMED';
+  if (!contract.success) return { reading: 'MALFORMED', record: null };
 
   const { binding, ...payload } = contract.data;
-  if (headPublicationAuthorisationBinding(subject, payload) !== binding) return 'NOT_THIS_EVENT';
-  return 'HISTORICAL_AUTHORISATION';
+  if (headPublicationAuthorisationBinding(subjectFor(payload), payload) !== binding) {
+    return { reading: 'NOT_THIS_EVENT', record: null };
+  }
+  return { reading: 'HISTORICAL_AUTHORISATION', record: contract.data };
+}
+
+/**
+ * Grades bytes that claim to be one event's authorisation record, under an
+ * identity the caller establishes for itself.
+ *
+ * Total and offline. Never throws, never repairs, never rewrites: a record this
+ * build cannot read is reported, and the file is left exactly as it is.
+ *
+ * This is the form the writer uses, and the subject it passes came from the
+ * facts the publication was authorised against — never from the document. That
+ * is the point: a record read under an identity taken out of itself would be
+ * evidence for whatever it happened to say.
+ */
+export function readHeadPublicationAuthorisation(
+  bytes: Buffer,
+  subject: HeadPublicationAuthorisationSubject,
+): HeadPublicationAuthorisationReading {
+  return grade(bytes, () => subject).reading;
+}
+
+/**
+ * Grades bytes found at one event directory, for a reader that has no
+ * independent knowledge of the task or the repository — and says so.
+ *
+ * An operator listing the store is exactly that reader: the record is the only
+ * evidence there is about which task and which checkout an event was about, so
+ * those two halves of the subject are taken from the document, and `eventId` —
+ * the directory's own name — is the one half that is not.
+ *
+ * What that costs, stated exactly rather than left to be discovered. The
+ * comparison is still not a tautology, and this was measured rather than
+ * reasoned: because every field is also an input to the digest in its own right,
+ * an edit to `taskId` or `repositoryRoot` changes the digest inputs even when
+ * the subject is rebuilt from the edited document, and a record moved into
+ * another event directory is refused on the name that directory has. What it
+ * cannot catch is what {@link headPublicationAuthorisationBinding} never could:
+ * a whole record recomputed by somebody who can write in the store. There is no
+ * key material in this build, so a valid binding is an integrity statement and
+ * never an authentication one.
+ */
+export function inspectHeadPublicationAuthorisation(
+  bytes: Buffer,
+  eventId: string,
+): HeadPublicationAuthorisationInspection {
+  return grade(bytes, (payload) => ({
+    eventId,
+    taskId: payload.taskId,
+    repositoryRoot: payload.repositoryRoot,
+  }));
 }
