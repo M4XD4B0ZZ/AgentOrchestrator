@@ -480,17 +480,26 @@ export async function performPublication(
       // reproduced it two ways — by moving the declared remote on this pass's
       // own resolution, and by advancing the task's commit.
       //
-      // One outcome does change, and only one. A run whose subject moved *and*
-      // whose record could not have been written used to reach the write, fail
-      // it, and be renamed `PUBLICATION_AUDIT_UNWRITTEN` by the arm at the end of
-      // this function; it now reports the `SUBJECT_CHANGED` it always was. That
-      // is the more truthful of the two — nothing about the store is what
-      // stopped it — and it is stated rather than glossed as "no change".
+      // Two outcomes change, and both are named rather than glossed as "no
+      // change" — an earlier draft of this comment said one, and a confirmation
+      // pass counted them.
       //
-      // The seventh comparison is the repository root, which `sameSubject` does
-      // not make: the record names the root *this* pass resolved, while the push
-      // runs Git in the root the ladder resolved. Left uncompared, a record could
-      // name a checkout the publication was never run in.
+      // The first is on the six fields `sameSubject` also compares. A run whose
+      // subject moved *and* whose record could not have been written used to
+      // reach the write, fail it, and be renamed `PUBLICATION_AUDIT_UNWRITTEN`
+      // by the arm at the end of this function; it now reports the
+      // `SUBJECT_CHANGED` it always was. That is the more truthful of the two,
+      // because nothing about the store is what stopped it.
+      //
+      // The second is the seventh comparison, the repository root, which
+      // `sameSubject` does **not** make. A run whose six subject fields matched
+      // but whose re-check resolved a different root used to publish; it now
+      // reports `SUBJECT_CHANGED` and sends nothing. That is a real narrowing
+      // and it is deliberate: the record names the root *this* pass resolved,
+      // while the push runs Git in the root the ladder resolved, so publishing
+      // there would leave a record naming a checkout the publication was never
+      // run in. Refusing is the fail-closed direction, and the case that drives
+      // it opens with a control on the same fixture that publishes.
       //
       // It sits after the authority arm so the withdrawal report is unchanged:
       // a permission that stopped standing is still named there, and a subject

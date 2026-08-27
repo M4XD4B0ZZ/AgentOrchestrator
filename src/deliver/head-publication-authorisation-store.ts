@@ -59,9 +59,9 @@
  * coordination at all.
  *
  * Every existing per-task store here would be wrong for that. They are
- * file-per-task and published by replacement — stage beside the target, flush,
- * one rename — and a rename overwrites. Two invocations would produce one
- * record, and the survivor would be whichever finished second.
+ * file-per-task and published by replacement — stage beside the target, then one
+ * rename — and a rename overwrites. Two invocations would produce one record,
+ * and the survivor would be whichever finished second.
  *
  * So the identity is per **event**, not per task, and the fence is the kernel's:
  * the event directory is created with a non-recursive `mkdir`, which either
@@ -278,8 +278,9 @@ export interface HeadPublicationAuditRequest {
  * A constant rather than a parameter, and the reason is the grader's shape:
  * `permitsUnattendedHeadPublication` decides on an exhaustive switch over the
  * declaration vocabulary in which exactly one arm answers `ALLOWED`, so an
- * `ALLOWED` answer *is* this member and nothing else could have produced it. A caller passing the member in could pass a different
- * one; deriving it here from a fact about the code cannot. A third member added
+ * `ALLOWED` answer *is* this member and nothing else could have produced it. A
+ * caller passing the member in could pass a different one; deriving it here from
+ * a fact about the code cannot. A third member added
  * to the declaration vocabulary makes that switch a compile error, which is
  * where the question would have to be answered again.
  */

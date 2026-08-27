@@ -165,10 +165,13 @@ authorisedAt              the instant the record was built, immediately after
 binding                   SHA-256 over all of the above, under its own label
 ```
 
-Absent, and named as absent: no URL in whole or in part, no credential, no bytes
-of the declaration, no entry of it other than the one that matched, no subprocess
-output, no foreign exception message, no repository-authored prose, no path to
-the declaration, and no field with a state machine in it. **Not** absent, and
+Absent, and named as absent: no URL as such — `host`, `owner` and `name` are the
+forge identity the delivery target parsed out of the remote's URL, and they are
+the whole of what this record takes from it, with no scheme, no userinfo, no
+port, no path and no query — no credential, no bytes of the declaration, no entry
+of it other than the one that matched, no subprocess output, no foreign exception
+message, no repository-authored prose, no path to the declaration, and no field
+with a state machine in it. **Not** absent, and
 said so: an operator user name, which `repositoryRoot` carries whenever the
 checkout sits under a Windows user profile. That is a local path in a file under
 that same user's profile, and claiming it away would be the kind of stated
@@ -308,11 +311,22 @@ the push runs Git in the root the ladder resolved, and a record naming a checkou
 the publication was never run in would be the same defect wearing a different
 hat.
 
-**One outcome changes, and it is stated rather than glossed.** A run whose
-subject moved *and* whose record could not have been written used to reach the
-write, fail it, and be renamed `PUBLICATION_AUDIT_UNWRITTEN` by §7's arm; it now
-reports the `SUBJECT_CHANGED` it always was, and settles and exits accordingly.
-That is the more truthful of the two: nothing about the store is what stopped it.
+**Two outcomes change, and both are stated rather than glossed.** An earlier
+draft of this paragraph said one, and a confirmation pass counted them.
+
+The first is on the six fields `sameSubject` also compares. A run whose subject
+moved *and* whose record could not have been written used to reach the write,
+fail it, and be renamed `PUBLICATION_AUDIT_UNWRITTEN` by §7's arm; it now reports
+the `SUBJECT_CHANGED` it always was, and settles and exits accordingly. That is
+the more truthful of the two: nothing about the store is what stopped it.
+
+The second is the seventh comparison. `sameSubject` does not compare the
+repository root, so a run whose six subject fields matched but whose re-check
+resolved a different root used to **publish**; it now reports `SUBJECT_CHANGED`
+and sends nothing. That is a real narrowing rather than a no-op, and it is the
+fail-closed direction: publishing there would leave a record naming a checkout
+the publication was never run in. A case drives it, opening with a control on the
+same fixture that publishes.
 
 Row B of §1 is enforced rather than hoped for. It does **not** make row D's
 enumeration exhaustive — a pre-reading that cannot be taken at all still leaves a
@@ -497,10 +511,12 @@ longer than 289 does not, and that delivery publishes attended and refuses
 unattended under a member that says the refusal is local. Fail-closed, and stated
 because it will look like a store problem to whoever hits it.
 
-**`L-V4-13-4` is unchanged and now matters differently.** Nothing is re-read
-between the authority re-proof and the push, and the record sits inside that
-window rather than closing it. What the record adds is that the fact proved before
-the window is now durable; what it does not add is a narrower window.
+**`L-V4-13-4` is unchanged and now matters differently.** No *permission* is
+re-read between the authority re-proof and the push, and no permission is
+consulted inside that window. The window itself is not empty any more: the
+record's own write and read-back happen there, before the two `git remote
+get-url` calls and the `ls-remote`. What the record adds is that the fact proved
+before the window is now durable; what it does not add is a narrower window.
 
 **`L-V4-13-5` is unchanged and is the reason for §1's row F.** A publisher that
 created nothing can report `PUBLISHED`, and no record this slice writes may be
