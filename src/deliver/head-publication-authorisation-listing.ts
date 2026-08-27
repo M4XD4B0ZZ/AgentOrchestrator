@@ -803,6 +803,265 @@ export function entryWasRead(entry: HeadPublicationAuditEntry): boolean {
   );
 }
 
+/* ── Asking about one branch (V4 slice 17) ──────────────────────────────── */
+
+/**
+ * The four values that name one branch on one forge repository.
+ *
+ * Four and not one, because a ref is not a branch: `refs/heads/main` in one
+ * repository is not the branch of that name in another, and the record's own
+ * schema admits **any** host and any owner rather than an enum — so a key
+ * missing one of these answers with somebody else's history. Measured against
+ * the contract rather than against what this build happens to write today:
+ * `SUPPORTED_FORGE_HOSTS` has one member, and a key resting on that is a key
+ * that is right only until the list grows.
+ *
+ * Four and not more. `authorisedCommit` is what the branch pointed at, not
+ * which branch it is; `declaredRemote` is the **local** name of the pointer the
+ * identity was read through, and two records agreeing on host, owner and name
+ * name one repository whatever the local remote is called; `repositoryRoot` is
+ * a checkout, and "two clones of one project are two of these". A key carrying
+ * any of those splits one branch's history and reports part of it as the whole.
+ * The rest of the record is either a per-event fact — the instant, the event
+ * identity, the binding, the declaration digest — or a field the schema pins to
+ * a single admissible value, which discriminates nothing.
+ *
+ * Spelled in {@link AuthorisedPublicationRecord}'s renamed field names, and
+ * that is the same defence the rename itself is: a value carrying `host`,
+ * `owner`, `name`, `commit`, `ref` or `remoteName` is structurally an argument
+ * to the publication mint and to the re-check seam. A query is one field short
+ * of that today, which is an accident of one field rather than a defence.
+ */
+export interface HeadPublicationBranchQuery {
+  readonly forgeHost: string;
+  readonly forgeOwner: string;
+  readonly forgeName: string;
+  readonly authorisedRef: string;
+}
+
+/**
+ * Whether one record this build read names the branch that was asked for.
+ *
+ * Four `===` and nothing else. No case is folded, no prefix is added, no suffix
+ * is trimmed and no part of a value is matched, and each of those is a decision
+ * rather than an omission:
+ *
+ *  - **case is not folded** because the authority this store is about does not
+ *    fold it either. `permitsUnattendedHeadPublication` compares owner and name
+ *    exactly and answers `NOT_DECLARED` for a differently capitalised entry
+ *    (`L-V4-13-3`). A reader that folded would put a second, disagreeing
+ *    definition of "the same repository" into one build, and would teach an
+ *    operator a rule the permission path does not honour. It would also apply
+ *    one forge's convention to a record whose host field admits any string;
+ *  - **nothing is prepended** because the query and the record are compared as
+ *    they are. A rule that turned `main` into `refs/heads/main` would make one
+ *    query string mean two stored values, since a ref of `refs/heads/refs/heads/x`
+ *    is one the writer's own grammar admits;
+ *  - **no part of a value is matched** because a substring rule names records
+ *    the operator did not ask for, and on a store nothing prunes that is a
+ *    mistake with no undo.
+ *
+ * It takes a record and never bytes. Every field it reads is one the grader has
+ * already checked and whose binding it has already recomputed, which is what
+ * keeps a record this build refused from answering a question about a branch —
+ * see {@link selectQueriedBranch}.
+ */
+export function recordNamesQueriedBranch(
+  record: AuthorisedPublicationRecord,
+  query: HeadPublicationBranchQuery,
+): boolean {
+  return (
+    record.forgeHost === query.forgeHost &&
+    record.forgeOwner === query.forgeOwner &&
+    record.forgeName === query.forgeName &&
+    record.authorisedRef === query.authorisedRef
+  );
+}
+
+/**
+ * What a store's entries turned out to be, once one branch was asked about.
+ *
+ * Three counts over the whole store and one list, and the three counts
+ * partition the entries exactly: every entry is counted once and in one group.
+ */
+export interface HeadPublicationBranchSelection {
+  /** Entries whose record this build read, naming the branch that was asked for. */
+  readonly named: number;
+  /**
+   * Entries whose record it read, naming a different branch.
+   *
+   * **Shown only where this build did not read all of the entry's evidence** —
+   * see {@link shown} for the one rule and for why it is that one. This line
+   * said "Not shown." for one commit, which was the same class of false
+   * rule-in-a-comment the blocker below was: two statements of one contract, on
+   * one interface, disagreeing.
+   */
+  readonly elsewhere: number;
+  /**
+   * Entries it read no record for, so nothing about the query is established
+   * for them. Shown.
+   *
+   * There is nothing to compare: the entry type puts the record on one arm and
+   * `null` on the other seven, and the only other field those arms carry is the
+   * directory's name — an instant and a random identifier, which encodes no
+   * ref, no task and no repository. So one of these may be the record for the
+   * branch being asked about and this build cannot say that it is not.
+   */
+  readonly unestablished: number;
+  /**
+   * What a report prints, in the order the listing established.
+   *
+   * **Exactly one class is left out: an entry this build read in full which
+   * names a different branch.** Everything else is here, and that is the whole
+   * decision this type exists to record.
+   *
+   * The unestablished are here because dropping them would turn "one of these
+   * might be your branch and I cannot tell" into "there is no record for this
+   * branch" — the reassuring absence this command exists to prevent, arriving
+   * through a filter instead of through a listing.
+   *
+   * And an entry naming another branch is here too **when this build did not
+   * read all of its evidence** — a record it read beside an outcome document it
+   * could not. That case is not obvious and was a shipped defect for one
+   * commit: the store's grade and the report's tally are `entryWasRead`, which
+   * is "the record was read *and* nothing beside it was a document I could
+   * not", while this selection asked only whether a record was read. The two
+   * disagreed on exactly that entry, so a store of one such record printed
+   * `Entries : 1 (0 read, 1 not read)`, printed "each one is listed above with
+   * what it turned out to be", and listed nothing. Measured, with the real
+   * writers and the real renderer.
+   *
+   * So the rule here is `entryWasRead` and not "a record was read": one
+   * predicate, one question. That is the rule V4 slice 16 already learned once,
+   * and this is its second spelling being removed rather than added.
+   */
+  readonly shown: readonly HeadPublicationAuditEntry[];
+}
+
+/**
+ * Sorts one store's entries into what was asked for, what was not, and what
+ * could not be judged either way.
+ *
+ * A projection over a listing that has already happened, and deliberately not a
+ * parameter to {@link listHeadPublicationAuthorisations}. Two things rest on
+ * that. The store's grade is `entries.every(entryWasRead)` over **every**
+ * classified entry, and its printed sentence says "every entry in the store" —
+ * a filter inside the enumeration would narrow that to the selection while the
+ * sentence went on claiming the store. And the outcome beside each readable
+ * record is graded for every entry, so an entry excluded by a query still
+ * counts against the store the way it did before there were queries.
+ *
+ * Total, pure, and one pass. It opens nothing, builds no path and asks the
+ * filesystem nothing, so a value that looks like a path — `refs/heads/../x`,
+ * which the writer's own grammar admits — is a string that names no record
+ * rather than a path anything walks.
+ */
+export function selectQueriedBranch(
+  entries: readonly HeadPublicationAuditEntry[],
+  query: HeadPublicationBranchQuery,
+): HeadPublicationBranchSelection {
+  let named = 0;
+  let elsewhere = 0;
+  let unestablished = 0;
+  const shown: HeadPublicationAuditEntry[] = [];
+
+  for (const entry of entries) {
+    // The record is `null` on seven of the eight arms, by type. There is no
+    // branch on those entries to compare, so this is not a policy about broken
+    // evidence — it is the absence of anything to have a policy about.
+    if (entry.record === null) {
+      unestablished += 1;
+      shown.push(entry);
+      continue;
+    }
+    if (recordNamesQueriedBranch(entry.record, query)) {
+      named += 1;
+      shown.push(entry);
+      continue;
+    }
+    // Counted as naming another branch, because that is what this build
+    // established about it. Shown anyway unless it was read in full: an entry
+    // that grades the store down is an entry the store's own sentence promises
+    // is listed, and a filter that hid one would make that sentence false.
+    elsewhere += 1;
+    if (!entryWasRead(entry)) shown.push(entry);
+  }
+
+  return Object.freeze({ named, elsewhere, unestablished, shown: Object.freeze(shown) });
+}
+
+/**
+ * What a store had to say about one branch. A closed set of four.
+ *
+ * Two of them are negatives and they are deliberately not one member. "Nothing
+ * here names that branch, and everything here was read" and "nothing here names
+ * that branch, and some of what is here was not read" are different sentences,
+ * and folding them would let the second be printed as the first — which is the
+ * reassuring-absence failure in its exact shape.
+ */
+export const HEAD_PUBLICATION_BRANCH_QUERY_READINGS = [
+  /** At least one record this build read names the branch. */
+  'NAMED_RECORDS_PRESENT',
+  /** None does, and every entry in the store is an entry it read a record for. */
+  'NO_NAMED_RECORD_PRESENT',
+  /** None does, and at least one entry is one it read no record for at all. */
+  'NO_NAMED_RECORD_AND_EVIDENCE_UNREAD',
+  /**
+   * No listing was produced, so the branch was not asked about anything.
+   *
+   * A member rather than a printed silence. The three above are answers; this
+   * one is the refusal to give an answer, and it exists because the absence of
+   * a line is not a sentence — the rule this slice's suite states for the
+   * negatives and which the store-level outcomes escaped in the first version
+   * of this report. `STORE_ABSENT` is the shape that needs it most: it exits 0
+   * like a clean negative does.
+   */
+  'STORE_NOT_READ',
+] as const;
+
+export type HeadPublicationBranchQueryReading =
+  (typeof HEAD_PUBLICATION_BRANCH_QUERY_READINGS)[number];
+
+/**
+ * Which of the four a query got. Total, and the order of the tests is the
+ * contract.
+ *
+ * `null` is "no listing was produced", which is why this takes a selection or
+ * nothing rather than only a selection: a selection over the empty entry list
+ * of a store that could not be read would answer the strong negative for a
+ * store nothing was read from.
+ *
+ * A store with a match is reported as having one whatever else is in it,
+ * because everything this build did not read in full is listed beside the match
+ * and speaks for itself.
+ *
+ * **The negatives split on `unestablished` and not on `entryWasRead`**, and a
+ * review proposed the other one. The question these two members answer is
+ * "could something here be the branch I asked about, without this build being
+ * able to tell?", and that is exactly "no record was read". An entry whose
+ * *record* this build read names a different branch as definitely as any record
+ * here names anything — an unreadable document beside it changes what became of
+ * that publication and not which branch it was about. Splitting on
+ * `entryWasRead` would print "whether any of these concerns that branch is not
+ * established" over an entry this build can say does not, which is an overclaim
+ * in the other direction.
+ *
+ * What that entry does change is the store's grade and the tally, and both are
+ * printed above these sentences; the entry itself is listed, because
+ * {@link selectQueriedBranch} shows everything `entryWasRead` is false for. The
+ * clean negative's own wording says only what it means and points at the line
+ * that owns the other question.
+ */
+export function branchQueryReading(
+  selection: HeadPublicationBranchSelection | null,
+): HeadPublicationBranchQueryReading {
+  if (selection === null) return 'STORE_NOT_READ';
+  if (selection.named > 0) return 'NAMED_RECORDS_PRESENT';
+  return selection.unestablished > 0
+    ? 'NO_NAMED_RECORD_AND_EVIDENCE_UNREAD'
+    : 'NO_NAMED_RECORD_PRESENT';
+}
+
 /** Code-unit order, written out so no locale, collation or default can enter it. */
 function byName(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;

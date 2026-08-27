@@ -22,6 +22,32 @@
  * the subcommand for what the store holds — authorisations, not publications,
  * the same distinction the directory's own name makes.
  *
+ * ── Asking about one branch (V4 slice 17) ──────────────────────────────────
+ *
+ * Four flags, all four or none: `--forge-host`, `--forge-owner`, `--forge-name`
+ * and `--ref`. Given together they narrow **what is printed** to the records
+ * naming that one branch, compared character for character on those four values
+ * and on no other. Given in part they are refused, with exit 2 and nothing read.
+ *
+ * Three fields for the repository and not one string. There is no parser in
+ * this build that turns `host/owner/name` into an identity — the one that
+ * exists is URL-shaped and refuses that exact spelling — so a single argument
+ * would need a third identity grammar and would ship a separator trap. The
+ * operator already types these as three keys in the declaration this store's
+ * records were written under, and the permission path already compares them as
+ * three exact fields.
+ *
+ * The commit, the task, the checkout and the local remote name are **not** part
+ * of the query, and each exclusion is a decision recorded where the query type
+ * is declared. Two publications of one branch differ in all four, and a query
+ * using any of them would answer with part of a branch's history and print it
+ * as the whole.
+ *
+ * It is a filter and not an index, and the report says so in as many words.
+ * Every entry in the store is still opened and graded to answer the question;
+ * what the query changes is which of them are printed. `L-V4-14-3` is narrowed
+ * again and is not closed.
+ *
  * ── No `--repository`, and that is the point ───────────────────────────────
  *
  * The store root is a pure function of the OS user identity, resolved through
@@ -106,9 +132,18 @@ import { formatSafeError } from '../core/safe-error.js';
 import {
   listHeadPublicationAuthorisations,
   type HeadPublicationAuditListingOutcome,
+  type HeadPublicationBranchQuery,
 } from '../deliver/head-publication-authorisation-listing.js';
+import { PUBLISHABLE_REF } from '../deliver/internal/delivery-ref-grammar.js';
+import {
+  isForgeHost,
+  isForgeOwner,
+  isForgeRepositoryName,
+} from '../deliver/internal/forge-identity-grammar.js';
+import { line } from './render-attended-run.js';
 import { renderPublicationAuthorisations } from './render-publication-authorisations.js';
 import {
+  EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_NEEDS_OPERATOR,
   EXIT_RUN_OK,
   EXIT_RUN_UNEXPECTED,
@@ -149,6 +184,178 @@ export interface PublicationCommandSeams {
   readonly pathProvider?: PathProvider | undefined;
 }
 
+/* ── Asking about one branch (V4 slice 17) ──────────────────────────────── */
+
+/**
+ * The four flags, as Commander hands them over.
+ *
+ * Four `option`s and never `requiredOption`s. Their absence has a meaning — it
+ * is the whole-store listing this command shipped with — and a `requiredOption`
+ * would let Commander refuse a missing one with exit **1**, this build's code
+ * for a defect inside the tool, on a bare stderr line that never passes through
+ * the safe formatter. Measured against the shipped artefact. V4 slice 12 made
+ * the same demotion for `--task` and for the same reason.
+ */
+export interface AuthorisationsOptions {
+  readonly forgeHost?: string | undefined;
+  readonly forgeOwner?: string | undefined;
+  readonly forgeName?: string | undefined;
+  readonly ref?: string | undefined;
+}
+
+/**
+ * Why a query was not usable as written. A closed set of five.
+ *
+ * Every member is refused before anything is read, so none of them is a
+ * statement about the store — and none may be graded like one.
+ */
+export const BRANCH_QUERY_REFUSALS = [
+  /**
+   * One, two or three of the four were given.
+   *
+   * There is no partial query and there must not be one: three of the four
+   * fields name a repository and every branch in it, and the fourth names a ref
+   * in every repository. Either is a question this command would have to answer
+   * with somebody else's history.
+   */
+  'QUERY_FIELDS_MISSING',
+  'FORGE_HOST_UNUSABLE',
+  'FORGE_OWNER_UNUSABLE',
+  'FORGE_NAME_UNUSABLE',
+  /** Not `refs/heads/<branch>` under the grammar this build publishes with. */
+  'REF_UNUSABLE',
+] as const;
+
+export type BranchQueryRefusal = (typeof BRANCH_QUERY_REFUSALS)[number];
+
+/**
+ * One sentence per refusal, total by type.
+ *
+ * Each says what was wanted rather than what was wrong with what was given: the
+ * value an operator typed is not echoed back, because AO-002 keeps operator
+ * input out of refusals and because a refused value has been established to be
+ * nothing.
+ */
+export const BRANCH_QUERY_REFUSAL_DETAIL: Readonly<Record<BranchQueryRefusal, string>> =
+  Object.freeze({
+    QUERY_FIELDS_MISSING:
+      'A branch is named by four values together - --forge-host, --forge-owner, --forge-name\n' +
+      '  and --ref - or by none of them, which lists the whole store. Three of them name a\n' +
+      '  repository and every branch in it; the fourth names a ref in every repository. Neither\n' +
+      '  is the question this command answers.',
+    FORGE_HOST_UNUSABLE:
+      'A host here is a lowercase dotted name of at least two labels, with no port, no scheme\n' +
+      '  and no path - the spelling every identity this build resolves is carried in. Nothing\n' +
+      '  is folded to reach it: a record is compared against what you typed.',
+    FORGE_OWNER_UNUSABLE:
+      'An owner here is letters, digits and hyphens, at most thirty-nine of them, and neither\n' +
+      '  the first nor the last may be a hyphen. That is the rule this build applies to an\n' +
+      '  owner it resolves, applied to the one you asked about.',
+    FORGE_NAME_UNUSABLE:
+      'A repository name here is letters, digits, dots, underscores and hyphens, at most one\n' +
+      '  hundred of them, not beginning with a hyphen and not made only of dots. That is the\n' +
+      '  rule this build applies to a name it resolves, applied to the one you asked about.',
+    REF_UNUSABLE:
+      'A ref here is the whole ref this build would record - refs/heads/ followed by a branch\n' +
+      '  name - and never a bare branch name. A bare name would have to be turned into a ref\n' +
+      '  by this command guessing, and refs/heads/ is itself a branch name a ref may contain,\n' +
+      '  so one guess would stand for two different stored values.',
+  });
+
+/**
+ * Every option description this subcommand registers, and every refusal
+ * sentence it can print, in one exported list.
+ *
+ * Exported because both are text an operator reads and neither was reached by
+ * any vocabulary sweep for one commit — the report's sentences are swept through
+ * `AUDIT_PRINTED_TEXT`, and these were simply outside it. A review found the
+ * assertion that looked like it swept them applying the rule to the refusal's
+ * *code* rather than to its sentence.
+ *
+ * Built from the map rather than listed, so a sixth refusal is swept without
+ * anybody remembering to add it.
+ *
+ * It holds the refusal sentences and **nothing else**. The option descriptions
+ * are swept too, and the suite reads those off the registered command rather
+ * than from here — a constant carrying them would be a second copy of text
+ * commander already owns. An earlier version of this paragraph said they were
+ * in here; they never were, and the suite pins that this list is exactly as
+ * long as the refusal vocabulary.
+ */
+export const BRANCH_QUERY_PRINTED_TEXT: readonly string[] = Object.freeze(
+  BRANCH_QUERY_REFUSALS.map((refusal) => BRANCH_QUERY_REFUSAL_DETAIL[refusal]),
+);
+
+/**
+ * What an invocation asked for. Three answers and no fourth.
+ *
+ * `WHOLE_STORE` is the shipped command, unchanged. `ONE_BRANCH` carries the
+ * query in {@link HeadPublicationBranchQuery}'s own field names rather than in
+ * the flags' — the rename that keeps a value of this shape from being an
+ * argument to the publication mint.
+ */
+export type BranchQueryReading =
+  | { readonly kind: 'WHOLE_STORE' }
+  | { readonly kind: 'ONE_BRANCH'; readonly query: HeadPublicationBranchQuery }
+  | { readonly kind: 'REFUSED'; readonly refusal: BranchQueryRefusal };
+
+/**
+ * Reads the four flags, and nothing else.
+ *
+ * A pure function of four strings. It resolves no profile, builds no path and
+ * opens nothing — which is what makes a ref that looks like a path a string
+ * that names no record rather than a path anything walks. `refs/heads/../x` is
+ * a ref the writer's own grammar admits, and it reaches nothing here but a
+ * comparison.
+ *
+ * The grammars are the writer's, imported rather than restated: every identity
+ * this build can put in a record passed exactly these rules on the way in, so a
+ * query bounded by them can name any record this build wrote. A record carrying
+ * a value outside them — which only something other than this build can write —
+ * cannot be named by a query, is counted as naming another branch, and is shown
+ * in full by the whole-store listing. That is `L-V4-17-2`.
+ *
+ * Deliberately **not** bounded by `SUPPORTED_FORGE_HOSTS`. That constant says
+ * which hosts this build may publish to *now*; this store holds what was
+ * recorded *then*, and a reader bounded by a current constant could not ask
+ * about a record the current configuration can no longer produce. It is the
+ * same reason this command does not open the declaration as it stands today.
+ */
+export function readBranchQuery(options: AuthorisationsOptions): BranchQueryReading {
+  const { forgeHost, forgeOwner, forgeName, ref } = options;
+  const supplied = [forgeHost, forgeOwner, forgeName, ref].filter(
+    (value) => value !== undefined,
+  ).length;
+
+  if (supplied === 0) return { kind: 'WHOLE_STORE' };
+  if (
+    forgeHost === undefined ||
+    forgeOwner === undefined ||
+    forgeName === undefined ||
+    ref === undefined
+  ) {
+    return { kind: 'REFUSED', refusal: 'QUERY_FIELDS_MISSING' };
+  }
+
+  // In a fixed order, so one invocation gets one answer. Each grammar refuses a
+  // leading `-` by construction, which is what answers a measured Commander
+  // shape: `--ref --forge-owner` binds the second flag as the first's value.
+  if (!isForgeHost(forgeHost)) return { kind: 'REFUSED', refusal: 'FORGE_HOST_UNUSABLE' };
+  if (!isForgeOwner(forgeOwner)) return { kind: 'REFUSED', refusal: 'FORGE_OWNER_UNUSABLE' };
+  if (!isForgeRepositoryName(forgeName)) return { kind: 'REFUSED', refusal: 'FORGE_NAME_UNUSABLE' };
+  if (!PUBLISHABLE_REF.test(ref)) return { kind: 'REFUSED', refusal: 'REF_UNUSABLE' };
+
+  return {
+    kind: 'ONE_BRANCH',
+    query: Object.freeze({
+      forgeHost,
+      forgeOwner,
+      forgeName,
+      authorisedRef: ref,
+    }),
+  };
+}
+
 export const PUBLICATION_GROUP_DESCRIPTION =
   'Read what this build recorded about publications it was permitted to attempt with nobody ' +
   'present. Read-only, and local: nothing here contacts a forge, starts git, takes a lease or ' +
@@ -168,15 +375,23 @@ export const AUTHORISATIONS_DESCRIPTION =
   'input that permits a publication. Any process running as this OS user can write a record that reads ' +
   'exactly like the rest, and can delete one without trace, so this is neither a complete ' +
   'history nor evidence of who wrote what - and an attended publication records nothing here ' +
-  'at all. Takes no repository: the store is outside every repository, each record names its ' +
-  'own, and a record outlives the checkout it was about.';
+  'at all. Given --forge-host, --forge-owner, --forge-name and --ref together, it shows only ' +
+  'the records naming that one branch, compared character for character on those four values ' +
+  'and on no other; anything it did not read in full is shown whichever way you ask, because ' +
+  'an entry it could not read all of is one this report may not leave out. It still reads ' +
+  'every entry in the store to answer that, because there is no index. A value outside the ' +
+  'rules this build records an identity under is refused rather than compared. Takes no ' +
+  'repository checkout: the store is outside every ' +
+  'repository, each record names its own, and a record outlives the checkout it was about.';
 
 /**
  * Writes the report, and survives the reader going away.
  *
  * This is the first command in the build whose output is deliberately unbounded
- * — one block per event, forever, with no limit flag and no machine-readable
- * form — so it is the first whose operator has a reason to pipe it into `head`,
+ * — asked nothing, one block per event, forever, with no limit flag and no
+ * machine-readable form; the V4 slice 17 branch filter narrows what is printed
+ * and bounds nothing, because a store can hold any number of events for one
+ * branch — so it is the first whose operator has a reason to pipe it into `head`,
  * `more` or a pager they then close. Measured: past roughly ninety records the
  * report exceeds the pipe buffer, the reader's exit makes the next write raise
  * `EPIPE` on this stream, and **an unhandled `error` event on a stream is an
@@ -231,10 +446,56 @@ export function registerPublicationCommand(
   publication
     .command('authorisations')
     .description(AUTHORISATIONS_DESCRIPTION)
-    .action(() => {
+    .option(
+      '--forge-host <host>',
+      'With the three below: show only the records naming that one branch. A host as this ' +
+        'build records one it resolved - lowercase, dotted, no port and no scheme. Never ' +
+        'defaulted: the record contract admits any host, so a default would assert something ' +
+        'no record here is bound by. A value outside that rule is refused rather than ' +
+        'compared, and a record carrying one cannot be named by any query.',
+    )
+    .option(
+      '--forge-owner <owner>',
+      'The owning user or organisation as this build records one it resolved. Compared ' +
+        'character for character; case is not folded, because the permission this store is ' +
+        'about does not fold it either.',
+    )
+    .option(
+      '--forge-name <name>',
+      'The repository name as this build records one it resolved. Compared character for ' +
+        'character, and refused rather than compared if it is outside that rule.',
+    )
+    .option(
+      '--ref <ref>',
+      'The whole ref, refs/heads/ and all, as this build records one. A bare branch name is ' +
+        'refused rather than turned into a ref, because refs/heads/ is itself something a ' +
+        'branch name may contain and one guess would stand for two stored values.',
+    )
+    .action((options: AuthorisationsOptions) => {
       try {
+        // The arguments first, and strictly before anything is read. Whether an
+        // invocation is refused for how it was written must not depend on what
+        // is in the store: the same argv against an absent store, an unreadable
+        // one and a full one has to answer the same way, and V4 slice 12
+        // measured the version of this defect where it did not.
+        const asked = readBranchQuery(options);
+        if (asked.kind === 'REFUSED') {
+          writeReport(
+            `\n${line('Query', asked.refusal)}\n  ${BRANCH_QUERY_REFUSAL_DETAIL[asked.refusal]}\n\n`,
+          );
+          process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
+          return;
+        }
+
+        // The listing never learns there was a query. Its grade is over every
+        // entry in the store, its tally counts every entry in the store, and
+        // every readable record's outcome is read and graded whichever branch it
+        // names — so `READ` goes on meaning what its own sentence says. The
+        // query chooses what is printed from the result.
         const listing = listHeadPublicationAuthorisations(seams.pathProvider);
-        writeReport(renderPublicationAuthorisations(listing));
+        writeReport(
+          renderPublicationAuthorisations(listing, asked.kind === 'ONE_BRANCH' ? asked.query : null),
+        );
         process.exitCode = AUDIT_LISTING_EXIT[listing.outcome];
       } catch (error) {
         // The listing is total and does not throw, so reaching here is a defect

@@ -1067,10 +1067,15 @@ Seit V4 Slice 15 kannst du das lesen:
 agent-loop publication authorisations
 ```
 
-**Kein `--repository`, keine Optionen, kein Netzwerk.** Der Befehl liest genau
+**Kein `--repository`, kein Netzwerk.** Der Befehl liest genau
 dieses eine Verzeichnis. Er startet kein Git, keine GitHub CLI und keinen Agenten,
 nimmt keine Lease, legt nichts an und ändert nichts — auch dann nicht, wenn das
 Verzeichnis gar nicht existiert.
+
+Eigene Optionen gibt es seit V4 Slice 17 vier, und sie benennen **einen Branch**:
+`--forge-host`, `--forge-owner`, `--forge-name` und `--ref`. Ohne sie zeigt der
+Befehl alles, wie bisher. Sie verlangen kein Repository, keinen Checkout und
+keinen Netzzugang — siehe unten.
 
 ```text
 Store        : C:\Users\Max\.agent-orchestrator\head-publication-authorisations
@@ -1247,10 +1252,95 @@ nicht ab und meldet keinen Fehler.
 ### Der Store wächst unbegrenzt
 
 Ein Verzeichnis pro erlaubter unbeaufsichtigter Veröffentlichung, dauerhaft.
-**AO** löscht dort nie etwas, und dieser Befehl auch nicht — er zeigt **alle**
-Einträge, ohne Limit und ohne Filter. Ein Mensch oder ein anderer Prozess unter
-demselben OS-Benutzer kann sehr wohl löschen; siehe oben. Eine Aufbewahrungsregel ist eine eigene
-Entscheidung und bewusst noch nicht getroffen (`L-V4-14-1`, `L-V4-15-1`).
+**AO** löscht dort nie etwas, und dieser Befehl auch nicht — ohne Angabe zeigt er
+**alle** Einträge, ohne Limit und ohne Seiten. Ein Mensch oder ein anderer Prozess
+unter demselben OS-Benutzer kann sehr wohl löschen; siehe oben. Eine
+Aufbewahrungsregel ist eine eigene Entscheidung und bewusst noch nicht getroffen
+(`L-V4-14-1`, `L-V4-15-1`).
+
+### Nach genau einem Branch fragen (V4 Slice 17)
+
+Seit V4 Slice 17 kannst du den Bericht auf **einen** Branch einschränken:
+
+```powershell
+agent-loop publication authorisations `
+  --forge-host github.com `
+  --forge-owner M4XD4B0ZZ `
+  --forge-name AgentOrchestrator `
+  --ref refs/heads/ao/task/V4-17
+```
+
+**Alle vier Angaben oder keine.** Keine heißt: die ganze Liste wie bisher. Ein
+bis drei werden abgelehnt, mit Exit-Code **2** und ohne dass irgendetwas gelesen
+wird.
+
+**Ein Branch sind vier Werte, nicht einer.** `refs/heads/main` in Repository A ist
+nicht derselbe Branch wie derselbe Ref in Repository B. Deshalb werden Host,
+Owner, Repository-Name und Ref verglichen — **zeichenweise**. Nichts wird
+klein-/großgeschrieben angeglichen, nichts abgeschnitten, nichts ergänzt, und es
+wird nie ein Teil eines Wertes verglichen. Ein anders geschriebener Owner ist ein
+anderer Owner; genau so entscheidet auch die Erlaubnis (`L-V4-13-3`).
+
+**Achtung — nicht jeder Schreibfehler wird verglichen.** Die vier Angaben müssen
+den Regeln entsprechen, unter denen AO selbst eine Identität aufschreibt. Was
+diesen Regeln nicht entspricht, wird **abgelehnt** (Exit-Code 2) und gar nicht
+erst verglichen. Am ehesten trifft dich das beim Host: der muss **klein**
+geschrieben sein. `--forge-host GitHub.com` ergibt
+
+```text
+Query        : FORGE_HOST_UNUSABLE
+```
+
+und nicht "0 Treffer". Umgekehrt heißt das: einen Datensatz, den etwas anderes
+mit einem Wert außerhalb dieser Regeln geschrieben hat, kannst du mit keiner
+Abfrage benennen — er wird als "naming another branch" gezählt, und die Liste
+ohne Abfrage zeigt ihn vollständig (`L-V4-17-2`).
+
+**Der Commit gehört nicht dazu.** Zwei Veröffentlichungen desselben Branches auf
+zwei Commits sind zwei Einträge einer Historie, und beide werden gezeigt. Ebenso
+zwei Einträge auf demselben Commit, zwei aus verschiedenen Klonen und zwei über
+Remotes mit verschiedenen lokalen Namen. Es wird nichts zusammengefasst, nichts
+entdoppelt und nichts auf "den neuesten" reduziert.
+
+**Der Ref muss vollständig sein.** `refs/heads/mein-branch`, nie `mein-branch`.
+Ein kurzer Name würde bedeuten, dass AO `refs/heads/` errät — und `refs/heads/`
+ist selbst etwas, das in einem Branch-Namen vorkommen darf, ein Rateergebnis
+stünde also für zwei verschiedene gespeicherte Werte.
+
+**Was AO nicht vollständig lesen konnte, wird trotzdem gezeigt.** Ein Eintrag ohne
+lesbaren Datensatz trägt weder Host noch Owner noch Name noch Ref — er kann also
+weder zutreffen noch ausgeschlossen werden. Und ein Eintrag, dessen Datensatz AO
+zwar lesen konnte, neben dem aber ein Dokument liegt, das es nicht lesen konnte,
+ist genau der Eintrag, den die Zeile `Listing` bereits gegen den Store zählt —
+ihn wegzulassen würde diese Zeile zu einer Lüge machen. Beide stehen bei **jeder**
+Abfrage in der Liste. Weggelassen wird nur eines: ein Eintrag, den AO vollständig
+gelesen hat und dessen Datensatz einen anderen Branch nennt. Die Zählzeile gruppiert jeden
+Eintrag nach dem Branch, den sein Datensatz nennt; sie weist nicht gesondert aus,
+welche davon aus diesem Grund gezeigt werden - das sagen die Einträge selbst:
+
+```text
+Query        : github.com/M4XD4B0ZZ/AgentOrchestrator refs/heads/ao/task/V4-17
+Entries      : 6 (5 read, 1 not read)
+Matching     : 3 named by this query, 2 naming another branch, 1 not established
+```
+
+`Entries` und `Listing` sagen weiterhin etwas über den **ganzen** Store: ein
+kaputter Eintrag außerhalb deiner Abfrage zieht die Bewertung weiterhin herunter,
+denn die Aufzählung erfährt von der Abfrage gar nichts.
+
+**Kein Treffer heißt nicht "war nie erlaubt".** Der stärkste wahre Satz lautet:
+in diesem Store ist jetzt kein von AO lesbarer Datensatz, der diesen Branch
+nennt. Löschen hinterlässt keine Lücke, eine beaufsichtigte Veröffentlichung
+schreibt hier gar nichts, ein anderer OS-Benutzer hat einen eigenen Store, und
+dieser Befehl fragt keinen Forge. Wenn im Store zusätzlich Einträge liegen, deren
+**Datensatz** AO nicht lesen konnte, steht ein anderer Satz da, der genau das
+sagt. Ein Datensatz, den AO lesen konnte, neben dem aber ein unlesbares Dokument
+liegt, zeigt sich auf der `Outcome`-Zeile des Eintrags und auf `Listing` - nicht
+in diesem Satz.
+
+**Das ist ein Filter, kein Index.** Es wird weiterhin **jeder** Eintrag geöffnet
+und bewertet, um die Frage zu beantworten. `L-V4-14-3` ist damit ein zweites Mal
+verkleinert und immer noch offen.
 
 ---
 

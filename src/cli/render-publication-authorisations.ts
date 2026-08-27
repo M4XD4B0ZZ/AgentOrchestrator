@@ -58,13 +58,19 @@
 
 import {
   HEAD_PUBLICATION_AUDIT_ENTRY_READINGS,
+  HEAD_PUBLICATION_BRANCH_QUERY_READINGS,
   HEAD_PUBLICATION_OUTCOME_ENTRY_READINGS,
+  branchQueryReading,
   entryWasRead,
+  selectQueriedBranch,
   type AuthorisedPublicationRecord,
   type HeadPublicationAuditEntry,
   type HeadPublicationAuditEntryReading,
   type HeadPublicationAuditListing,
   type HeadPublicationAuditListingOutcome,
+  type HeadPublicationBranchQuery,
+  type HeadPublicationBranchQueryReading,
+  type HeadPublicationBranchSelection,
   type HeadPublicationOutcomeEntryReading,
 } from '../deliver/head-publication-authorisation-listing.js';
 import { line } from './render-attended-run.js';
@@ -287,6 +293,96 @@ export const AUDIT_MEANING = [
 ].join('\n');
 
 /**
+ * What a store had to say about one branch. One static sentence per reading,
+ * closed and total by type.
+ *
+ * The two negatives are two sentences and never one. "Nothing here names that
+ * branch" is one keystroke from "this branch was never authorised", and the
+ * distance between them is made of clauses rather than of restraint — so each
+ * negative carries its own, and the one printed over a store holding entries
+ * this build could not read says so in the same breath.
+ *
+ * Each sentence has to hold for every store that produces its reading, which is
+ * the rule the tables above follow. None of them names a cause, and none of
+ * them says what did or did not happen on a delivery remote: this command asks
+ * no forge anything, and a store is not a history.
+ */
+export const AUDIT_QUERY_SENTENCES: Readonly<
+  Record<HeadPublicationBranchQueryReading, string>
+> = Object.freeze({
+  NAMED_RECORDS_PRESENT:
+    'Some entries below name that branch, and the rest are ones this build did not read in\n' +
+    '  full - it lists those whichever branch is involved, because an entry it could not read\n' +
+    '  all of is one the line above counts against the store. The only entries left out are\n' +
+    '  records it read in full which name a different branch, and those are counted above.\n' +
+    '  What each entry below establishes is what any record here establishes and no more.',
+  NO_NAMED_RECORD_PRESENT:
+    'No record this build read in this store names that branch, and there is no entry here\n' +
+    '  whose record it could not read. Whether anything beside those records was readable is\n' +
+    '  the line above. That is a statement about what is in this store now\n' +
+    '  and about nothing else: an attended publication records nothing here, another OS user\n' +
+    '  has a store of their own, anything running as this one can remove a record without\n' +
+    '  trace, and this command asked no forge what any ref holds.',
+  NO_NAMED_RECORD_AND_EVIDENCE_UNREAD:
+    'No record this build read in this store names that branch - and some of the entries\n' +
+    '  listed below are ones it read no record for at all, so whether any of those concerns\n' +
+    '  that branch is not established here. This is weaker than the answer a whole store\n' +
+    '  would give, and it is deliberately not written as the stronger one.',
+  STORE_NOT_READ:
+    'Nothing was read, so nothing about that branch is established here. This is not an\n' +
+    '  answer to what you asked and must not be read as one: what the line above says about\n' +
+    '  the store is the whole of what this command found out.',
+});
+
+/**
+ * What a query compared, printed once beside the entries rather than per entry.
+ *
+ * Five paragraphs. The last is the one an operator most needs: a filter reads
+ * like an index and this one is not — every entry in the store was opened and
+ * graded to answer the question, exactly as it would have been without it, and
+ * what the query changed is which of them are printed. Saying so is what keeps
+ * `L-V4-14-3` an open residual rather than a closed-looking one.
+ *
+ * The middle three name what is and is not on the page, and each was added
+ * because a review found the report claiming otherwise: what a query compares,
+ * that an entry with no readable record is neither in nor out, that an entry
+ * naming another branch is listed anyway where this build did not read all of
+ * its evidence, and that a record spelled outside this build's own rules cannot
+ * be named by any query at all.
+ */
+export const AUDIT_QUERY_MEANING = [
+  'What this query compared:',
+  '  four values of each record this build read - the host, the owner and the repository',
+  '  name it records, and the ref it records - against the four you named, character for',
+  '  character. Nothing was folded, shortened, lengthened or matched in part on either side,',
+  '  so a record spelling any of the four differently is a record naming another branch. The',
+  '  commit, the task, the checkout and the local name of the remote are not compared: two',
+  '  publications of one branch differ in those, and a query that used them would answer with',
+  '  part of a branch\'s history and call it the whole.',
+  '',
+  '  An entry this build read no record for carries none of those four values, so it is',
+  '  neither named by this query nor shown to name another branch. Any such entry is listed',
+  '  below with what it turned out to be, and is counted separately above.',
+  '',
+  '  An entry counted above as naming another branch is listed below anyway when this build',
+  '  did not read all of its evidence - a record it read, beside a document it could not.',
+  '  Leaving those out would make the line about the store say that everything it could not',
+  '  read is listed here while one such entry was not, so each is shown with what it turned',
+  '  out to be and counted where its record puts it. Only an entry read in full and naming',
+  '  another branch is left out.',
+  '',
+  '  "Naming another branch" is the result of that comparison and not a judgement about a',
+  '  forge. A record spelled outside the rules this build records an identity under - which',
+  '  only something else writing here can produce - cannot be named by any query, because the',
+  '  query is bounded by those same rules; it is counted there, and the listing with no query',
+  '  shows it in full.',
+  '',
+  '  There is no index here. Every entry in the store was read and graded to answer this,',
+  '  exactly as it would have been with no query at all; what the query changed is which of',
+  '  them are printed.',
+].join('\n');
+
+/**
  * What the store is, and what it is not, printed once.
  *
  * The forgery and deletion limits are stated here rather than beside every
@@ -342,7 +438,14 @@ export const AUDIT_NOTHING_READ_TRAILER = `This command changed nothing:\n${READ
 export const AUDIT_REPORT_LABELS = [
   'Store',
   'Listing',
+  // The two V4 slice 17 adds. `Query` carries what was asked, in the spelling
+  // it was asked in and passed through `printable` like every other value;
+  // `Matching` carries the three counts, which partition the store's entries
+  // exactly and are printed together so a filtered report cannot show one of
+  // them alone.
+  'Query',
   'Entries',
+  'Matching',
   'Reason',
   'Entry',
   'Reading',
@@ -471,47 +574,122 @@ function tally(entries: readonly HeadPublicationAuditEntry[]): string {
   return `${entries.length} (${read} read, ${rest} not read)`;
 }
 
+/** The queried branch, on one line, in the spelling it was asked in. */
+function queryIdentity(query: HeadPublicationBranchQuery): string {
+  return `${query.forgeHost}/${query.forgeOwner}/${query.forgeName} ${query.authorisedRef}`;
+}
+
 /**
- * The whole report.
+ * The three counts, always all three.
  *
- * Every entry is printed, always. There is no limit, no page and no "most
- * recent": the store is unbounded by decision (`L-V4-14-1`) and a listing that
- * silently dropped part of it would be exactly the failure this command exists
- * to prevent. What that costs is one block per event, forever, and it is stated
- * in the operator guide rather than solved by truncation.
+ * Together for the reason the read/not-read tally is: they partition the
+ * store's entries exactly, and a report showing one of them alone would let a
+ * store full of evidence this build could not judge read as an answer about a
+ * branch.
  */
-export function renderPublicationAuthorisations(listing: HeadPublicationAuditListing): string {
+function matching(selection: HeadPublicationBranchSelection): string {
+  return (
+    `${selection.named} named by this query, ` +
+    `${selection.elsewhere} naming another branch, ` +
+    `${selection.unestablished} not established`
+  );
+}
+
+/**
+ * The whole report, for the whole store or for one branch.
+ *
+ * Every entry of the store is printed when nothing was asked, always. There is
+ * no limit, no page and no "most recent": the store is unbounded by decision
+ * (`L-V4-14-1`) and a listing that silently dropped part of it would be exactly
+ * the failure this command exists to prevent.
+ *
+ * A query narrows **what is printed** and nothing else, and the difference is
+ * load-bearing. `listing` was produced without the query: its outcome is graded
+ * over every entry in the store, its `Entries` tally counts every entry in the
+ * store, and every readable record's outcome was read and graded whether or not
+ * the query keeps it. So `Listing : READ` goes on meaning "every entry in the
+ * store", which is what its own printed sentence says.
+ *
+ * What a query removes from the page is exactly one class: entries this build
+ * read **in full** — `entryWasRead`, the record and whatever sits beside it —
+ * which name a different branch. Nothing else is removed, and that bound is what
+ * keeps `READ_WITH_UNUSABLE_ENTRIES`'s "each one is listed above" true: every
+ * entry that grades the store down is an entry a query shows.
+ *
+ * An earlier version of this paragraph said the removed class was "entries whose
+ * record this build read", and shipped for one commit. It was measured false by
+ * a review: a record this build read, beside an outcome document it could not,
+ * is not `entryWasRead` — so a store holding one of those naming another branch
+ * printed `Entries : 1 (0 read, 1 not read)`, printed "each one is listed above
+ * with what it turned out to be", and listed nothing.
+ *
+ * The three "print this only where it applies" tests below read the **shown**
+ * entries and not the store's, which is the half a first draft got wrong: a
+ * store whose only outcome-bearing record named another branch would otherwise
+ * have printed "What an outcome here says:" above a report with no `Command`
+ * line on it.
+ */
+export function renderPublicationAuthorisations(
+  listing: HeadPublicationAuditListing,
+  query: HeadPublicationBranchQuery | null = null,
+): string {
+  const read = listing.outcome === 'READ' || listing.outcome === 'READ_WITH_UNUSABLE_ENTRIES';
+  // Only where a listing was produced. On every other outcome `entries` is
+  // empty because nothing was read, and a selection over it would answer "no
+  // record names that branch" for a store this build could not open — the one
+  // thing this command may never say.
+  const selection = query !== null && read ? selectQueriedBranch(listing.entries, query) : null;
+  const shown = selection === null ? listing.entries : selection.shown;
+
   const lines: string[] = [''];
 
   if (listing.root !== null) lines.push(line('Store', printable(listing.root)));
   lines.push(line('Listing', listing.outcome));
+  // Echoed on every outcome, including the ones that read nothing: an operator
+  // who cannot see what was compared cannot tell a typo from an empty store.
+  //
+  // `printable` here is unreachable by construction and kept for symmetry with
+  // the record's own value lines, which carry bytes off a disk anything running
+  // as this OS user can write. Every value reaching it has passed one of the
+  // four query grammars, and none of those admits a character the escaper
+  // rewrites — so a mutant removing it survives, deliberately. Said here so a
+  // later reader does not take it for a live guard, and so a later widening of
+  // the query grammar is told this guard has never been exercised.
+  if (query !== null) lines.push(line('Query', printable(queryIdentity(query))));
 
-  if (listing.outcome === 'READ' || listing.outcome === 'READ_WITH_UNUSABLE_ENTRIES') {
-    lines.push(line('Entries', tally(listing.entries)));
-  }
+  if (read) lines.push(line('Entries', tally(listing.entries)));
+  if (selection !== null) lines.push(line('Matching', matching(selection)));
   if (listing.errnoCode !== null) lines.push(line('Reason', listing.errnoCode));
 
   lines.push(`  ${AUDIT_LISTING_SENTENCES[listing.outcome]}`);
+  // On every outcome where a query was made, including the ones that read
+  // nothing. The fourth reading exists so that "the branch was not asked about
+  // anything" is a printed sentence rather than a missing line — which is the
+  // rule the three answers already follow, applied to the case that escaped it.
+  if (query !== null) lines.push(`  ${AUDIT_QUERY_SENTENCES[branchQueryReading(selection)]}`);
 
-  for (const entry of listing.entries) {
+  for (const entry of shown) {
     lines.push('', ...entryLines(entry));
   }
 
-  if (listing.entries.length > 0) lines.push('', AUDIT_ORDER);
+  if (shown.length > 0) lines.push('', AUDIT_ORDER);
   // The meaning names the labels of a readable record, so it is printed only
   // where one exists. A store holding a single stray file used to be told what
   // "the instant under `Authorised at`" means, in a report with no such line.
-  if (listing.entries.some((entry) => entry.reading === 'HISTORICAL_AUTHORISATION')) {
+  if (shown.some((entry) => entry.reading === 'HISTORICAL_AUTHORISATION')) {
     lines.push('', AUDIT_MEANING);
   }
   // The outcome's meaning names the three labels only a read outcome produces, so
   // it is printed only where one exists — the rule the paragraph above it
   // learned in review. A store of authorisations with no outcome beside any of
   // them is not told what `Command` means in a report with no such line.
-  if (listing.entries.some((entry) => entry.record !== null && entry.outcomeRecord !== null)) {
+  if (shown.some((entry) => entry.record !== null && entry.outcomeRecord !== null)) {
     lines.push('', AUDIT_OUTCOME_MEANING);
   }
-  const read = listing.outcome === 'READ' || listing.outcome === 'READ_WITH_UNUSABLE_ENTRIES';
+  // Only where a comparison was actually made. Its closing paragraph says every
+  // entry in the store was read to answer the query, which is false where none
+  // was.
+  if (selection !== null) lines.push('', AUDIT_QUERY_MEANING);
   lines.push('', AUDIT_PROVENANCE, '', read ? AUDIT_READ_ONLY_TRAILER : AUDIT_NOTHING_READ_TRAILER);
 
   return `${lines.join('\n')}\n\n`;
@@ -521,10 +699,12 @@ export function renderPublicationAuthorisations(listing: HeadPublicationAuditLis
 export const AUDIT_PRINTED_TEXT: readonly string[] = Object.freeze([
   ...HEAD_PUBLICATION_AUDIT_ENTRY_READINGS.map((r) => AUDIT_ENTRY_SENTENCES[r]),
   ...HEAD_PUBLICATION_OUTCOME_ENTRY_READINGS.map((r) => AUDIT_OUTCOME_SENTENCES[r]),
+  ...HEAD_PUBLICATION_BRANCH_QUERY_READINGS.map((r) => AUDIT_QUERY_SENTENCES[r]),
   ...Object.values(AUDIT_LISTING_SENTENCES),
   AUDIT_ORDER,
   AUDIT_MEANING,
   AUDIT_OUTCOME_MEANING,
+  AUDIT_QUERY_MEANING,
   AUDIT_PROVENANCE,
   AUDIT_READ_ONLY_TRAILER,
   AUDIT_NOTHING_READ_TRAILER,
