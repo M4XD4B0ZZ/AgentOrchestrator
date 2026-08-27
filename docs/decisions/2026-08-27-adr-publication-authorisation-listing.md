@@ -226,13 +226,18 @@ claiming any identity it likes. The report therefore prints **the directory
 name** as the entry's identity and never the record's own field. A driven case
 plants 128 characters of chosen text and requires it absent from the output.
 
-**Seven fields are free text bounded only in length**, so a record can carry a
-newline or an escape sequence. Left alone, one forged record would print itself
-as several plausible entries — a forgery misrepresenting the *reading*, which is
-worse than the forgery this build already concedes. Every recorded value is
-therefore printed with control characters replaced by `<U+XXXX>` and **nothing
-else changed**: a path with an umlaut, a hundred-character owner and a hyphenated
-branch all print exactly as recorded.
+**Nine fields are bounded in length and in nothing else**, so a record can carry
+a newline, an escape sequence or a bidirectional override. Left alone, one forged
+record would print itself as several plausible entries, or reverse one without
+changing a byte — a forgery misrepresenting the *reading*, which is worse than
+the forgery this build already concedes. Every recorded value is therefore
+printed with each character of one closed class replaced by `<U+XXXX>`: the C0
+and C1 controls, the twelve bidirectional formatting characters, and the line and
+paragraph separators. Most of those are not control characters, and no sentence
+anywhere calls the class that any more, because one did and it was false the
+moment the class widened. **Nothing outside the class is changed**: a path with
+an umlaut, a hundred-character owner and a hyphenated branch all print exactly as
+recorded.
 
 ## 7. Broken-entry policy: surface, count, name, continue
 
@@ -244,10 +249,14 @@ Every entry is listed. A damaged one is named, counted in the `Entries` line as
 "not read", and carries a sentence saying what it turned out to be. Nothing is
 repaired, moved, cleaned up or normalised.
 
-The vocabulary is closed and eight members wide. Five are the record's own
-readings with a `RECORD_` prefix, because they are answers about a document;
-three are answers about an entry, which the record's grader cannot produce
-because it is only ever reached with bytes in hand:
+The vocabulary is closed and eight members wide, from two places. **Four** are
+the store's own reading vocabulary under a `RECORD_` prefix, mapped one for one:
+they are answers about a *document*. **Four** are established by the listing,
+because they are answers about an *entry* and the grader never sees one — it is
+only ever reached with bytes in hand. `HISTORICAL_AUTHORISATION` is the good
+answer and carries no prefix; `RECORD_ABSENT` and `RECORD_UNREADABLE` are settled
+from an errno and a file test before any bytes exist; `UNRECOGNISED_ENTRY` is
+settled before the record is looked for at all:
 
 | member | meaning |
 | --- | --- |
@@ -361,9 +370,11 @@ The first draft graded a damaged entry `3`, and three measured facts say that is
 wrong.
 
 **Code 3 means "the durable state needs an operator before anything may run", and
-a damaged record blocks nothing.** No authority path reads a stored record, and
-the next unattended publication mints a fresh random event identity, so a damaged
-neighbour cannot even collide with it.
+a damaged record blocks nothing.** No stored record is ever an input that permits
+a publication — the one place the effect path reads one is the write it has just
+made, read back before the remote is contacted, and that read can only refuse —
+and the next unattended publication mints a fresh random event identity, so a
+damaged neighbour cannot even collide with it.
 
 **`RECORD_ABSENT` is an ordinary, permanent shape of this store.** It is what a
 crash between the `mkdir` and the rename leaves, and what *every* refusal after
@@ -418,8 +429,14 @@ uncaught exception — 1,355 bytes of raw Node stack outside the safe formatter,
 and exit 1, for the ordinary gesture §11 argues must work in a script. The rule
 is not new: this build states it twice about the streams of the processes it
 starts, and it had never applied to its own stdout because no command produced
-enough output to reach it. A closed reader is now an ending, and every other
-stream error still reaches the arm that reports a defect.
+enough output to reach it. A closed reader is now an ending.
+
+The first version of that guard re-threw everything else, saying the error was
+"left to the caller's `catch`". Measured false in a second round: the event is
+emitted from a tick, long after the action's `try` has closed, so the throw was
+an uncaught exception producing exactly the raw stack the guard removes — the
+listener was behaviourally identical to having none. The other arm now reports
+through the safe formatter itself.
 
 ## 12. Trust
 
@@ -472,6 +489,14 @@ becomes `recordedEventId` — and the suite pins that none of `host`, `owner`,
 `name`, `commit`, `ref` or `remoteName` is a field name on it. Completeness of
 the rename is a compile error by construction; that the two sides carry the same
 *values* is a separate question and a separate case asks it.
+
+The map that expresses the rename is exported as a list of pairs rather than as
+the object it is built from, and that is not cosmetic: a `Record` keyed by the
+record's own field names is itself structurally a mint argument, so the module
+whose whole point is not to export one was exporting one. It fails at runtime —
+the values are field names, not a host and an object name — but the argument here
+is structural, and a defence with a runtime hole in it is not the defence this
+section claims.
 
 **The source names no authority artefact.** No mint, no grant type, no claim, no
 publisher, no scheduler, no timer.
@@ -553,10 +578,10 @@ and by hashing every path and byte under the profile before and after a listing,
 rather than by the import graph. Closing it means splitting two `doctor/`
 modules, which is a change of its own.
 
-**`L-V4-15-4` — a control character in a recorded value is not shown verbatim.**
-It is replaced by `<U+XXXX>` so a forged record cannot forge report lines. Every
-other character is unchanged, and this is the one place the report is not a
-byte-exact echo of what is stored.
+**`L-V4-15-4` — a character able to forge a line or reorder one is not shown
+verbatim.** It is replaced by `<U+XXXX>` so a forged record cannot forge report
+lines. Everything outside that class is unchanged, and this is the one place the
+report is not a byte-exact echo of what is stored.
 
 **`L-V4-15-5` — the binding proves less to this reader than to the writer.** See
 §6. `taskId` and `repositoryRoot` are supplied from the document, so the
@@ -565,6 +590,15 @@ event, task and repository". The report's wording is bounded to match — includ
 that three of the binding's inputs are not shown at all: the two contract
 versions, and the event identity the record claims for itself, which is held back
 because §6a makes it unchecked text a forger chooses.
+
+**`L-V4-15-10` — a path whose components do not exist at all reads as an absent
+store.** The walk in §11a stops at the first component that is not there, because
+nothing below an absent component can exist either — so a profile on a volume
+that is not mounted reports "there is no store" rather than refusing. Not
+productively reachable: the profile resolver requires the profile directory to
+exist and to be a directory before this command has a root at all, so a
+productive run fails earlier with `PROFILE_UNAVAILABLE`. Reachable through the
+internal test seam, and named because "not reachable" is a claim.
 
 **`L-V4-15-8` — the exit code cannot distinguish a clean store from a tampered
 one.** §9 refuses machine-readable output, so the exit code is the only thing a

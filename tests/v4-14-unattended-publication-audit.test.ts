@@ -1126,10 +1126,20 @@ describe('a record is evidence and never authority', () => {
     const readers = all.filter((file) =>
       /\b(?:read|inspect)HeadPublicationAuthorisation\s*\(/.test(codeOnly(file)),
     );
-    // A positive control: the contract's own module and its writer are both
-    // still in there, so an empty or collapsed match cannot pass this for free.
-    expect(readers).toContain('src/deliver/head-publication-authorisation.ts');
-    expect(readers).toContain('src/deliver/head-publication-authorisation-store.ts');
+    // An allow-list, and this is the second version of this case. Slice 15
+    // replaced the original with a deny-list of module names, on the argument
+    // that a literal goes stale — and a review measured what that costs, which
+    // is that a future authority module named anything outside the pattern
+    // could read the store with the whole suite green. A pin that goes stale by
+    // refusing is worth more than one that goes stale by permitting.
+    expect(readers).toEqual([
+      'src/deliver/head-publication-authorisation-listing.ts',
+      'src/deliver/head-publication-authorisation-store.ts',
+      'src/deliver/head-publication-authorisation.ts',
+    ]);
+    // ...and the deny-list stays beneath it, because the two fail in different
+    // directions: this one still holds if the list above is ever widened by
+    // somebody who did not think about what they were widening it with.
     for (const file of readers) {
       expect(file, `${file} decides publications and must not read a record`).not.toMatch(
         /delivery-steps|delivery-driver|publish-delivery-head|git-head-publisher|head-publication-grant|delivery-automation/,

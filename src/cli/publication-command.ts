@@ -60,10 +60,13 @@
  * facts say that is wrong.
  *
  * **Code 3 means "the durable state needs an operator before anything may run",
- * and a damaged record blocks nothing.** No authority path reads a stored
- * record — the suite pins that — and the next unattended publication mints a
- * fresh random event identity, so a damaged neighbour cannot even collide with
- * it. Grading 3 would assert a blocking condition that does not exist.
+ * and a damaged record blocks nothing.** No stored record is ever an input that
+ * permits a publication — the suite pins that, and the one place the effect path
+ * reads a record at all is the write it has just made, read back before the
+ * remote is contacted, which can only refuse. And the next unattended
+ * publication mints a fresh random event identity, so a damaged neighbour cannot
+ * even collide with it. Grading 3 would assert a blocking condition that does
+ * not exist.
  *
  * **`RECORD_ABSENT` is an ordinary, permanent shape of this store.** An event
  * directory with nothing in it is what a crash between the `mkdir` and the
@@ -184,13 +187,22 @@ export const AUTHORISATIONS_DESCRIPTION =
  * had produced enough output to reach it.
  *
  * A closed reader is a normal end, not a failure: the grade this invocation
- * already worked out stands, and nothing about the store is in question. Every
- * other stream error is left to the caller's `catch`, which is the arm that
- * reports a defect in this build.
+ * already worked out stands, and nothing about the store is in question.
+ *
+ * Everything else is reported here rather than re-thrown, and that is the second
+ * version of this listener. The first re-threw, with a comment saying the error
+ * was "left to the caller's `catch`" — measured false: the event is emitted from
+ * a tick, long after the action's `try` has closed, so a throw from inside the
+ * listener is an uncaught exception producing exactly the raw stack this guard
+ * exists to remove. It was behaviourally identical to having no listener at all.
+ * So the other arm does the reporting itself, through the same safe formatter
+ * (AO-002) and the same exit code the caller's own arm would have used.
  */
 function writeReport(text: string): void {
   process.stdout.on('error', (error: NodeJS.ErrnoException) => {
-    if (error.code !== 'EPIPE') throw error;
+    if (error.code === 'EPIPE') return;
+    process.stderr.write(`${formatSafeError(error)}\n`);
+    process.exitCode = EXIT_RUN_UNEXPECTED;
   });
   process.stdout.write(text);
 }

@@ -82,11 +82,11 @@ export const AUDIT_ENTRY_SENTENCES: Readonly<Record<HeadPublicationAuditEntryRea
       '    and its digest recomputes from that name and from the values it records - of which\n' +
       '    the two contract versions are the only ones not shown above.',
     RECORD_ABSENT:
-      'This event directory holds no record. Three things leave one: an invocation that died\n' +
-      '    while staging a record, a refusal after the directory was made - this build removes\n' +
-      '    neither - and anything running as this OS user deleting the record afterwards. This\n' +
-      '    build cannot tell those apart. It says nothing about a publication and it authorises\n' +
-      '    nothing.',
+      'This event directory holds no record. An invocation that died while staging one leaves\n' +
+      '    this, so does a refusal after the directory was made - this build removes neither -\n' +
+      '    and so does anything running as this OS user deleting the record, or simply making a\n' +
+      '    directory here. This build cannot tell those apart. It says nothing about a\n' +
+      '    publication and it authorises nothing.',
     RECORD_EMPTY:
       'A file is at this record\'s name and holds no bytes, so there is no record to read.\n' +
       '    The write protocol publishes by renaming a complete file into place and cannot leave\n' +
@@ -132,8 +132,9 @@ export const AUDIT_LISTING_SENTENCES: Readonly<
     '  Nothing was read through it: what a link points at is not this store, and this build\n' +
     '  does not follow one to find out.',
   STORE_UNREADABLE:
-    'Something is at the store\'s path and its contents could not be listed, so nothing\n' +
-    '  here is a list of what is in it.',
+    'The store could not be listed: something is at its path that cannot be, or a directory\n' +
+    '  on the way to it is not a directory. Nothing here is a list of what is in it, and a\n' +
+    '  store that cannot be read is not a store that says nothing was authorised.',
   PROFILE_UNAVAILABLE:
     'This build could not establish where this user\'s profile directory is - the operating\n' +
     '  system could not be asked, or the answer it gave was not one this build accepts - so\n' +
@@ -162,15 +163,16 @@ export const AUDIT_LISTING_SENTENCES: Readonly<
  */
 export const AUDIT_ORDER = [
   'How this list is ordered:',
-  '  by the name of each entry: first the ones whose names have the shape this build mints,',
-  '  then everything else, each group in the same order. That shape carries the instant the',
+  '  by the name of each entry: first the ones read as event directories, then everything',
+  '  else, each group in the same order. An event directory\'s name carries the instant the',
   '  writing invocation\'s own clock reported, so for records this build wrote the first group',
   '  is that clock\'s order - a name is only what a directory is called, and anything able to',
   '  write here can choose one. Two events minted in the same millisecond are separated by a',
   '  random identifier and their order between them means nothing. The time shown against a',
   '  record is the one inside that record and is checked against nothing - not against a',
   '  calendar, not against the directory name - and it is shown as recorded except that a',
-  '  control character in it is written as its code point. A sorted list cannot show a gap: a',
+  '  character able to forge a line or reorder one is written as its code point. A sorted',
+  '  list cannot show a gap: a',
   '  deleted record leaves nothing behind to be missing.',
 ].join('\n');
 
@@ -258,34 +260,39 @@ export const AUDIT_REPORT_LABELS = [
  * Every character class a recorded value may not put on a line unaltered.
  *
  * The C0 and C1 controls, because a newline splits one entry into two and an
- * escape sequence paints over the lines above it. And the bidirectional
- * formatting characters, because they do the same damage by another route: an
- * override reorders what a terminal shows without changing a byte, so a ref or a
- * checkout path can be made to read as something else entirely. The Unicode line
- * and paragraph separators are in the set for the first reason.
+ * escape sequence paints over the lines above it. The twelve Unicode
+ * bidirectional formatting characters, because they do the same damage by
+ * another route: an override reorders what a terminal shows without changing a
+ * byte, so a ref or a checkout path can be made to read as something else
+ * entirely. And the line and paragraph separators, for the first reason.
  *
- * Everything else is left exactly as recorded.
+ * So the class is **not** "control characters" — most of what is in it is
+ * `Cf`, not `Cc` — and no sentence here says that any more, because one did and
+ * it was false the moment this widened. It is "what can forge a line or reorder
+ * one". Everything outside it is left exactly as recorded.
  */
 const UNPRINTABLE =
-  /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+  /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
 /**
  * A recorded value, made safe to put on a line of a report.
  *
- * Seven fields of a record are free text: the task id, the checkout, the host,
- * the owner, the name, the remote, the ref and the recorded instant are all
- * bounded in length and in nothing else. A record is a file under this OS user's
+ * Nine fields of a record are bounded in length and in nothing else — the event
+ * identity it claims, the task id, the checkout, the host, the owner, the name,
+ * the remote, the ref and the recorded instant — and eight of those are printed.
+ * (The ninth is refused before anything is printed: a record whose claimed
+ * identity is not the directory it sits in is not read at all.) A record is a file under this OS user's
  * profile and `L-V4-14-2` concedes that anything running as this user can write
  * one — so a value carrying a newline would let a single forged record print
  * itself as several plausible entries, and one carrying an escape sequence would
  * let it paint over the lines above it. That is worse than the forgery this
  * build already concedes: it is a forged record misrepresenting the *reading*.
  *
- * So every control character is replaced by its code point in angle brackets,
- * and **nothing else is changed**. A path with an umlaut, a branch name with a
- * hyphen and a hundred-character owner all print exactly as recorded; a value
- * that could not have come from a name, a path or a ref does not get to choose
- * what the report looks like.
+ * So every character in {@link UNPRINTABLE} is replaced by its code point in
+ * angle brackets, and **nothing outside that class is changed**. A path with an
+ * umlaut, a branch name with a hyphen and a hundred-character owner all print
+ * exactly as recorded; a value that could not have come from a name, a path or a
+ * ref does not get to choose what the report looks like.
  */
 function printable(value: string): string {
   return value.replace(UNPRINTABLE, (character) => {

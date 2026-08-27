@@ -80,7 +80,7 @@ import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import {
   HEAD_PUBLICATION_AUDIT_ENTRY_READINGS,
   HEAD_PUBLICATION_AUDIT_LISTINGS,
-  HEAD_PUBLICATION_AUDIT_RECORD_FIELD,
+  HEAD_PUBLICATION_AUDIT_RECORD_FIELDS,
   listHeadPublicationAuthorisations,
   type HeadPublicationAuditEntryReading,
   type HeadPublicationAuditListingOutcome,
@@ -1072,12 +1072,16 @@ describe('evidence, and never authority', () => {
     // The rename is complete by type. That it carries the same VALUES is a
     // different question and this is where it is asked: a map proves only that
     // every key was named.
-    expect(Object.keys(HEAD_PUBLICATION_AUDIT_RECORD_FIELD).slice().sort()).toEqual(
+    expect(HEAD_PUBLICATION_AUDIT_RECORD_FIELDS.map(([from]) => from).slice().sort()).toEqual(
       Object.keys(stored).slice().sort(),
     );
-    for (const [from, to] of Object.entries(HEAD_PUBLICATION_AUDIT_RECORD_FIELD)) {
+    for (const [from, to] of HEAD_PUBLICATION_AUDIT_RECORD_FIELDS) {
       expect(shown[to], `${from} -> ${to}`).toEqual(stored[from]);
     }
+    // ...and the exported correspondence is a list of pairs, never an object
+    // keyed by the record's own field names: such an object is itself the shape
+    // the mint's parameter accepts, from the one module that must not export it.
+    expect(Array.isArray(HEAD_PUBLICATION_AUDIT_RECORD_FIELDS)).toBe(true);
   });
 
   it('exports no grader that hands out a record the mint would accept', () => {
@@ -1666,15 +1670,39 @@ describe('the report survives a reader that walks away', () => {
       expect(added.length, 'the write must be guarded').toBe(1);
       const guard = added[0] as (error: NodeJS.ErrnoException) => void;
 
-      const closed: NodeJS.ErrnoException = new Error('write EPIPE');
-      closed.code = 'EPIPE';
-      expect(() => guard(closed)).not.toThrow();
+      const errors: string[] = [];
+      const stderr = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: unknown): boolean => {
+        errors.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write;
+      const grade = process.exitCode;
+      try {
+        const closed: NodeJS.ErrnoException = new Error('write EPIPE');
+        closed.code = 'EPIPE';
+        expect(() => guard(closed)).not.toThrow();
+        expect(errors, 'a closed reader is an ending, not a report').toEqual([]);
+        expect(process.exitCode, 'and it does not change the grade').toBe(grade);
 
-      // ...and it is a guard on one condition, not a blanket swallow: anything
-      // else is still a defect and still reaches the caller's own handler.
-      const other: NodeJS.ErrnoException = new Error('write EACCES');
-      other.code = 'EACCES';
-      expect(() => guard(other)).toThrow();
+        // ...and it is a guard on one condition, not a blanket swallow. Anything
+        // else is reported HERE rather than re-thrown, and that distinction is
+        // the second version of this case: the first asserted that a re-throw
+        // reached the caller's `catch`, by calling the listener synchronously
+        // from test code. Node emits this event from a tick, long after that
+        // `try` has closed, so what a re-throw really produced was the uncaught
+        // exception and the raw stack the guard exists to remove.
+        const other: NodeJS.ErrnoException = new Error('write EACCES');
+        other.code = 'EACCES';
+        expect(() => guard(other)).not.toThrow();
+        expect(errors.length).toBe(1);
+        // Through the safe formatter, never as the exception's own message.
+        expect(errors[0]).not.toContain('EACCES');
+        expect(errors[0]).toContain('UNEXPECTED_ERROR');
+        expect(process.exitCode).toBe(1);
+      } finally {
+        process.stderr.write = stderr;
+        process.exitCode = grade;
+      }
     } finally {
       for (const listener of added) {
         process.stdout.removeListener('error', listener as never);

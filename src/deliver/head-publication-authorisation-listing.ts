@@ -108,7 +108,7 @@ import { safeErrnoCode } from '../core/safe-error.js';
 import { inspectLinkChain, pathChain } from '../doctor/safe-write.js';
 import { isValidRunId } from '../doctor/run-directory.js';
 import {
-  HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELD,
+  HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELDS,
   MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES,
   inspectHeadPublicationAuthorisation,
   type AuthorisedPublicationRecord,
@@ -250,7 +250,7 @@ const ENTRY_READING: Readonly<
  * place a caller has to import to read the store.
  */
 export type { AuthorisedPublicationRecord };
-export const HEAD_PUBLICATION_AUDIT_RECORD_FIELD = HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELD;
+export const HEAD_PUBLICATION_AUDIT_RECORD_FIELDS = HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELDS;
 
 export type HeadPublicationAuditEntry =
   | {

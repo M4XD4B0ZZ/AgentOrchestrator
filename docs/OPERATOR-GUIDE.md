@@ -1082,7 +1082,7 @@ Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator
   Ref          : refs/heads/ao/task/V4-14
   Commit       : 10583ee91a5747d0049f563ffaac64b0cf643aeb
-  Declaration  : AUTOMATIC_ALLOWED, sha256 4c2f9f0e1b7d3a5c8e2f4a6b0d9c1e3f5a7b9d0c2e4f6a8b1d3e5f7a9c0b2d4e6
+  Declaration  : AUTOMATIC_ALLOWED, sha256 f59d285e0c233651c7610df32edf58d0d932a3ada9c50f984ff128ce5c7c5a5b
 ```
 
 ### Was ein Eintrag heißt — und was nicht
@@ -1103,6 +1103,14 @@ Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Zeitpunkt. Ein Kommentar, ein Zeilenende oder CRLF ändern ihn — und alle
   ergeben dieselbe Erlaubnis. Der Digest ist keine Aussage über Bedeutung.
 
+### Reihenfolge
+
+Sortiert nach Eintragsnamen: erst die Einträge, die AO als Event-Verzeichnis
+liest, dann alles andere. Der Name eines Event-Verzeichnisses trägt den
+Zeitpunkt, den die Uhr des schreibenden Laufs gemeldet hat — ein Name ist aber
+nur ein Name, und wer im Store schreiben kann, wählt ihn selbst. Die Zeit **im**
+Datensatz wird gegen nichts geprüft.
+
 ### Kaputte Einträge werden gezeigt, nie weggelassen
 
 Was AO nicht als Datensatz lesen kann, steht trotzdem in der Liste, mit einer
@@ -1115,7 +1123,8 @@ RECORD_ABSENT              Event-Verzeichnis ohne Datensatz: Absturz beim Schrei
                            eine Verweigerung danach, oder der Datensatz wurde
                            geloescht. AO kann das nicht unterscheiden.
 RECORD_EMPTY               Datei da, 0 Bytes — das schreibt AO nie
-RECORD_UNREADABLE          Link, keine normale Datei, oder Lesen misslang
+RECORD_UNREADABLE          Link, keine normale Datei, Lesen misslang, oder der
+                           Name war gar nicht abfragbar
 RECORD_MALFORMED           kein Datensatz dieses Builds (auch: zu groß)
 RECORD_UNSUPPORTED_VERSION neuere Vertragsversion — verweigert, nichts wird gezeigt
 RECORD_NOT_THIS_EVENT      Digest passt nicht zum Verzeichnis: kopiert oder verändert
@@ -1128,13 +1137,15 @@ UNRECOGNISED_ENTRY         gar kein Event-Verzeichnis: Link, Datei, fremder Name
 ```text
 0   Eine Liste wurde erstellt — auch wenn kaputte Einträge darin stehen.
     Auch: kein Store vorhanden, oder Store leer.
-3   Der Store selbst war nicht lesbar (kein Verzeichnis, Link im Pfad,
-    Profil nicht ermittelbar). Das ist derselbe Store, in den die nächste
-    unbeaufsichtigte Veröffentlichung schreiben müsste.
+3   Der Store selbst war nicht lesbar: er ist kein Verzeichnis, ODER ein
+    Verzeichnis auf dem Weg dorthin ist keines, ODER ein Link liegt im Pfad,
+    ODER das Profil war nicht ermittelbar. Das ist derselbe Store, in den die
+    nächste unbeaufsichtigte Veröffentlichung schreiben müsste.
 ```
 
 Ein kaputter Eintrag ist **kein** Exit-Code-3-Fall: nichts auf einem
-Autoritätspfad liest je einen Datensatz, und nichts löscht hier je etwas — ein
+Autoritätspfad nimmt je einen gespeicherten Datensatz als Erlaubnis, und AO
+löscht hier nie etwas — ein
 Nicht-Null-Code wäre dauerhaft und mit diesem Werkzeug nicht wegzubekommen. Der
 Befund steht im Bericht.
 

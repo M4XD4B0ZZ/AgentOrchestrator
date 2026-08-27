@@ -364,8 +364,29 @@ const RECORD_FIELD: Readonly<
   binding: 'binding',
 });
 
-/** The map, exported so the suite can pin the correspondence rather than restate it. */
-export const HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELD = RECORD_FIELD;
+/**
+ * The rename, exported as pairs so the suite can pin the correspondence rather
+ * than restate it.
+ *
+ * **Pairs and not the object it is built from**, which is not cosmetic. A
+ * `Record` keyed by the record's own field names carries `host`, `owner`, `name`
+ * and `commit` as keys, and that is structurally `mintHeadPublicationGrant`'s
+ * first parameter — so the module whose whole point is to hand out nothing the
+ * mint accepts was exporting exactly that. It fails at runtime, because the
+ * values are field names rather than a host and an object name, but the argument
+ * this rename makes is a structural one and a structural argument with a runtime
+ * hole in it is not the argument. The totality check stays on the private
+ * `RECORD_FIELD`, so a field added to the record is still a compile error here.
+ */
+export const HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELDS: readonly (readonly [
+  keyof HeadPublicationAuthorisation,
+  keyof AuthorisedPublicationRecord,
+])[] = Object.freeze(
+  Object.entries(RECORD_FIELD).map(([from, to]) => Object.freeze([from, to])) as readonly (readonly [
+    keyof HeadPublicationAuthorisation,
+    keyof AuthorisedPublicationRecord,
+  ])[],
+);
 
 function view(record: HeadPublicationAuthorisation): AuthorisedPublicationRecord {
   return Object.freeze({

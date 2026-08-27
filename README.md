@@ -10986,7 +10986,7 @@ Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator
   Ref          : refs/heads/ao/task/V4-14
   Commit       : 10583ee91a5747d0049f563ffaac64b0cf643aeb
-  Declaration  : AUTOMATIC_ALLOWED, sha256 4c2f9f0e1b7d3a5c8e2f4a6b0d9c1e3f5a7b9d0c2e4f6a8b1d3e5f7a9c0b2d4e6
+  Declaration  : AUTOMATIC_ALLOWED, sha256 f59d285e0c233651c7610df32edf58d0d932a3ada9c50f984ff128ce5c7c5a5b
 ```
 
 Every identity is whole. The object name and the declaration digest are never
@@ -11019,16 +11019,16 @@ it could not read would look complete and would not be. The readings are:
 | `HISTORICAL_AUTHORISATION` | a record this build read, bound to the name of the directory it sits in |
 | `RECORD_ABSENT` | an event directory with no record in it — a crash between the directory and the write, a refusal after it, or the record having been deleted. This build cannot tell those apart |
 | `RECORD_EMPTY` | a file at the record's name holding no bytes. The write cannot leave one, so something else made it |
-| `RECORD_UNREADABLE` | a link, something that is not an ordinary file, or a read that did not complete |
+| `RECORD_UNREADABLE` | a link, something that is not an ordinary file, a read that did not complete, or a name that could not be asked about at all |
 | `RECORD_MALFORMED` | bytes that are not a record this build declares, including one past the size bound |
 | `RECORD_UNSUPPORTED_VERSION` | a record from a build this one cannot read. Refused, never guessed at, and nothing in it is shown |
 | `RECORD_NOT_THIS_EVENT` | the digest does not recompute for the directory it sits in: a record copied out of another event, or a field edited in place |
 | `UNRECOGNISED_ENTRY` | not an event directory at all — a link, a file, a name this build would not mint, or an entry it could not describe at all |
 
 The command exits **0** whenever it produced a listing, including one holding
-entries it could not read: no authority path reads a record, so a damaged one
-blocks nothing, and nothing prunes this store — a non-zero grade would be
-permanent and unclearable. It exits **3** only when it could not read the store
+entries it could not read: no stored record is ever an input that permits a
+publication, so a damaged one blocks nothing, and nothing prunes this store — a
+non-zero grade would be permanent and unclearable. It exits **3** only when it could not read the store
 itself, which is also the store the next authorised publication would have to
 write into.
 
@@ -11063,9 +11063,12 @@ So an empty store means *nothing is here now*. It does not mean nothing was ever
 authorised: an attended publication records nothing here at all, another OS user
 has another store, and a deleted record leaves nothing behind to be missing.
 
-The list is ordered by event directory name, which carries the instant the
-writing invocation's own clock reported — not by the time inside the record,
-which is shown exactly as recorded and checked against nothing.
+The list is ordered by entry name: first the entries read as event directories,
+then everything else. An event directory's name carries the instant the writing
+invocation's own clock reported — a name is only what a directory is called, and
+anything able to write in the store can choose one. The time *inside* a record is
+checked against nothing, and is shown as recorded except that a character able to
+forge a line or reorder one is written as its code point.
 
 ### Carried forward from V4 slice 15, deliberately
 
@@ -11080,10 +11083,13 @@ which is shown exactly as recorded and checked against nothing.
   hold writes. Nothing calls them, and "this command creates nothing" is carried
   by a source sweep and by hashing every byte under the profile before and after
   a listing, rather than by the import graph.
-- **L-V4-15-4 — a control character in a recorded value is shown as
-  `<U+XXXX>`.** Seven fields of a record are free text bounded only in length, so
-  a forged record could otherwise print itself as several entries. Every other
-  character is unchanged.
+- **L-V4-15-4 — a character able to forge a line or reorder one is shown as
+  `<U+XXXX>`.** Nine fields of a record are bounded in length and in nothing
+  else, so a forged record could otherwise print itself as several entries, or
+  reverse one with a bidirectional override without changing a byte. The class is
+  the C0 and C1 controls, the twelve bidirectional formatting characters, and the
+  line and paragraph separators — most of which are not control characters.
+  Everything outside that class is unchanged.
 - **L-V4-15-5 — the binding proves less here than to the writer.** An
   enumerating reader has one fact that did not come out of the bytes: the
   directory's name. So the check establishes "bound to this directory name", not
