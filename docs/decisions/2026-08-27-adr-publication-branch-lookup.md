@@ -93,9 +93,21 @@ they discriminate nothing.
 `commit`, `ref` or `remoteName` is structurally an argument to
 `mintHeadPublicationGrant` and to the publication re-check seam. The record view
 was renamed for exactly that reason, and a query object is a second place the
-same hole can open. A `{host, owner, name, ref}` query is not assignable to the
-mint today only because `commit` is missing — an accident of one field, not a
-defence. The suite pins the query's keys.
+same hole can open.
+
+Measured with the compiler rather than argued, by writing the calls and reading
+what `tsc` said:
+
+- `mintHeadPublicationGrant(query, 'origin', ref)` with the query this build
+  builds → **TS2739**, "missing the following properties from type
+  `ObservationSubject`: host, owner, name, commit". Four fields deep;
+- the same call with a hypothetical `{host, owner, name, ref}` query → **TS2741**,
+  and it names exactly one missing property, `commit`. So that spelling is one
+  field short of the mint's parameter — an accident, not a defence;
+- and adding `commit` to it compiles with no error at all.
+
+The suite pins the query's keys, and pins them off the value `readBranchQuery`
+returns rather than off a fixture.
 
 ## 2. Match semantics: exact, and only exact
 

@@ -311,10 +311,11 @@ export const AUDIT_QUERY_SENTENCES: Readonly<
   Record<HeadPublicationBranchQueryReading, string>
 > = Object.freeze({
   NAMED_RECORDS_PRESENT:
-    'The entries below whose record this build read are the ones naming that branch. Every\n' +
-    '  other record it read here names a different branch and is counted above rather than\n' +
-    '  shown; what each entry below establishes is what any record here establishes and no\n' +
-    '  more.',
+    'Some entries below name that branch, and the rest are ones this build did not read in\n' +
+    '  full - it lists those whichever branch is involved, because an entry it could not read\n' +
+    '  all of is one the line above counts against the store. The only entries left out are\n' +
+    '  records it read in full which name a different branch, and those are counted above.\n' +
+    '  What each entry below establishes is what any record here establishes and no more.',
   NO_NAMED_RECORD_PRESENT:
     'No record this build read in this store names that branch, and there is no entry here\n' +
     '  whose record it could not read. Whether anything beside those records was readable is\n' +

@@ -984,7 +984,7 @@ describe('what a filtered report says', () => {
    */
   const SENTENCE_FRAGMENT: Readonly<Record<HeadPublicationBranchQueryReading, string>> =
     Object.freeze({
-      NAMED_RECORDS_PRESENT: 'are the ones naming that branch',
+      NAMED_RECORDS_PRESENT: 'Some entries below name that branch',
       NO_NAMED_RECORD_PRESENT: 'there is no entry here',
       NO_NAMED_RECORD_AND_EVIDENCE_UNREAD: 'are ones it read no record for at all',
       STORE_NOT_READ: 'Nothing was read, so nothing about that branch is established here',
@@ -1053,6 +1053,45 @@ describe('what a filtered report says', () => {
     record(home, { at: '2026-08-27T12:01:00.000Z', name: 'OtherRepo' });
 
     expectOnly(report(home, BRANCH), 'NAMED_RECORDS_PRESENT');
+  });
+
+  /**
+   * The sentence printed over a list may not deny what the list contains.
+   *
+   * This is the second half of the review-1 blocker and it was not caught by
+   * fixing the first. Once an entry naming another branch is shown - which it
+   * must be, when this build did not read all of its evidence - a sentence
+   * saying every other record "is counted above rather than shown" is false
+   * about the very page it is on. That is exactly what the first fix left
+   * behind, and the report was rendered before it was noticed.
+   */
+  it('does not tell the operator that a record it can see was not shown', () => {
+    const home = scratchHome();
+    const wanted = record(home, { at: '2026-08-27T12:00:00.000Z' });
+    const damaged = record(home, { at: '2026-08-27T12:01:00.000Z', name: 'OtherRepo' });
+    writeFileSync(join(auditRoot(home), damaged, 'outcome.json'), '{not json', 'utf8');
+    const hidden = record(home, { at: '2026-08-27T12:02:00.000Z', name: 'OtherRepo' });
+
+    const text = report(home, BRANCH);
+
+    // Three entries, one of each: named, shown-though-elsewhere, hidden.
+    expect(text).toContain(wanted);
+    expect(text).toContain(damaged);
+    expect(text).not.toContain(hidden);
+    expect(text).toContain(
+      'Matching     : 1 named by this query, 2 naming another branch, 0 not established',
+    );
+    expectOnly(text, 'NAMED_RECORDS_PRESENT');
+
+    // …and no printed sentence claims that every record naming another branch
+    // is absent from a page that has one on it.
+    const flat = text.replace(/\s+/g, ' ');
+    for (const denial of [
+      'counted above rather than shown',
+      'names a different branch and is counted above rather than shown',
+    ]) {
+      expect(flat, denial).not.toContain(denial);
+    }
   });
 
   it('counts every entry in the store exactly once', () => {
