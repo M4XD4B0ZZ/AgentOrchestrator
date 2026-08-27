@@ -10731,13 +10731,210 @@ ledger, or gives it an outgoing transition.
 
 See [`docs/decisions/2026-08-26-adr-unattended-head-publication.md`](docs/decisions/2026-08-26-adr-unattended-head-publication.md).
 
+## The record that has to exist first (V4 slice 14)
+
+Slice 13 let this build create one branch with nobody present. It left nothing on
+disk saying so, which meant that "why did this branch appear?" had exactly one
+answer — the report of a run, in a terminal that had scrolled away.
+
+An unattended publication now writes one immutable record **before** it contacts
+the delivery remote at all, and refuses to publish if it cannot.
+
+    <OS user profile>/.agent-orchestrator/head-publication-authorisations/
+        20260827T120000000Z-<uuid>/
+            authorisation.json
+
+```json
+{
+  "authorisationVersion": 1,
+  "eventId": "20260827T120000000Z-…",
+  "act": "HEAD_PUBLICATION",
+  "invocationMode": "AUTOMATIC",
+  "taskId": "V4-14",
+  "repositoryRoot": "D:\\AgentOrchestrator",
+  "host": "github.com",
+  "owner": "M4XD4B0ZZ",
+  "name": "AgentOrchestrator",
+  "declaredRemote": "origin",
+  "ref": "refs/heads/ao/task/V4-14",
+  "commit": "…",
+  "declarationSchemaVersion": 1,
+  "declaredPermission": "AUTOMATIC_ALLOWED",
+  "declarationDigest": "…",
+  "authorisedAt": "2026-08-27T12:00:00.000Z",
+  "binding": "…"
+}
+```
+
+Nothing else changes. No new flag, no new grant, no new effect, the same push,
+and `--publish-head --attended` behaves exactly as it did — including that it
+still writes nothing anywhere.
+
+### It is a precondition, not a note
+
+If the record cannot be written and read back, **nothing is read from the
+delivery remote and nothing is attempted**. The publication reports
+`PUBLICATION_AUDIT_UNWRITTEN` and the drive settles
+`PUBLICATION_AUDIT_NOT_DURABLE`, which is graded 3: what is wrong is on this
+machine, under the operator's own profile, and the next invocation will meet it
+again until somebody looks.
+
+That is not a `try`/`catch` around a logging call. The record is written inside
+the same closure that re-proves the permission, and a closure that cannot
+complete it refuses the publication through the channel that already existed for
+a withdrawn permission — before the remote's URLs are read, before the ref is
+read, and therefore before anything could have happened.
+
+### What it says, and the three things it does not
+
+It says: *at this instant, this invocation established — from the declaration
+whose exact bytes are `declarationDigest` — that automatic publication was
+permitted for this exact repository, and resolved this exact task, repository,
+remote, ref and commit as the subject of the one publication it was then
+authorised to attempt.*
+
+It does **not** say a publication was attempted. The record precedes the two
+`git remote get-url` calls and the `ls-remote` that decide whether anything is
+sent at all, so a run that finds the ref already at this commit sends nothing and
+leaves this record behind. That is an ordinary, valid shape.
+
+It does **not** say the ref exists.
+
+It does **not** say this build created one — and that is measured rather than
+merely unclaimed. `L-V4-13-5`: a push of a commit a ref already holds exits zero
+and reports the remote up to date, so a publisher that changed nothing is graded
+`PUBLISHED`. No record here may be read as evidence of authorship, and the suite
+sweeps the record's own bytes for every member of the publication vocabulary to
+keep it that way.
+
+### `declarationDigest` means *these bytes*
+
+It is a SHA-256 of what `readFileSync` returned, before any decoding, taken from
+the same read that produced the permission. A comment, a trailing newline, CRLF
+line endings and a change to an entry naming some other repository all produce a
+different digest — and all four parse to the same permission. The digest is not a
+claim about meaning, and this build could not make one: it did not read the file
+that way.
+
+The record carries the **matched** entry's permission member and nothing else
+from the file. A declaration may name up to 256 repositories, and none of the
+others is any event's business.
+
+### Evidence, never authority
+
+A record on disk brings no future publication closer. Every unattended attempt
+still needs a new invocation that asks, a declaration that still permits, a
+freshly resolved subject, a fresh reading of the remote and a fresh one-shot
+grant — and the store is read by exactly one module in the whole source tree,
+which is not the one that mints the authority.
+
+No record is a retry token, no restart resumes from one, and there is no field in
+it with a state machine: no `state`, no `phase`, no `pending`, no expiry, no
+attempt counter. A record with nothing mutable in it has nothing for a later
+slice to resume from.
+
+### Why it lives under the operator's profile
+
+Every other durable delivery record in this build sits inside the repository it
+describes. This one does not, for three measured reasons.
+
+**The subject outlives the checkout.** The record is about a ref on a forge, and
+the checkout is the most deletable thing in the system. A case deletes the whole
+repository after a publication and reads the record back unchanged.
+
+**The audited party must not own the store.** `--repository` takes a path, and a
+linked worktree resolves as a repository in its own right — so an in-repository
+store can be inside the sandbox of the agent whose work is being delivered. The
+operator profile is the one root that cannot be relocated by a caller, a parent
+process, a CLI flag or a repository file.
+
+**It is where the permission already lives.** The declaration is a file in that
+same directory, so one trust argument governs both.
+
+There is a fourth reason and it is about ordering: an in-repository record has to
+ask Git whether its own path is ignored before it may be written, which would put
+the target repository's `.gitignore` and two more child processes on the critical
+path of an authority record. A case drives an invocation whose ignore probe can
+only answer "could not tell" and requires it to record and publish anyway.
+
+### Two invocations cannot share one record
+
+The publication takes no execution lease, so nothing local fences two unattended
+runs. The identity is therefore per **event** rather than per task, and the fence
+is the kernel's: the event directory is created with a non-recursive `mkdir`,
+which either creates it or fails, in one step. A name already taken is a refusal
+and the record already there is byte-identical afterwards.
+
+Nothing from the repository, the task, the forge identity, the environment or the
+command line enters the path. Owner and repository names admit Windows device
+names, trailing dots and a hundred characters; and identity is compared
+case-sensitively while NTFS folds case, so two entries differing only in
+capitalisation are two different permissions that would otherwise file into one
+directory.
+
+### What it is not protected against
+
+**Anyone who can write files as this OS user can forge a record, and can delete
+one without trace.** The binding digest is integrity structure, not a message
+authentication code: every input to it is plain text sitting beside it. There is
+no key material anywhere in this build, and adding some would be a decision about
+key storage, rotation and compromise rather than a line of code.
+
+What the digest does catch is a record copied out of one event into another, any
+field edited without recomputation, and a record written by a build that
+disagrees about the payload. All three are driven.
+
+### Carried forward from V4 slice 14, deliberately
+
+- **L-V4-14-1 — the store is unbounded.** One directory of one small document per
+  authorised unattended publication attempt, forever. Nothing deletes it, which
+  is the same absence the doctor's runs root already declares two directories
+  away. A retention policy is a decision of its own.
+- **L-V4-14-2 — the record is not tamper-proof, and its absence proves nothing.**
+  Same-user forgery and same-user deletion are both open. An absent record and a
+  record that never existed are the same bytes. File modes are not a defence:
+  `0o600` and `0o700` were measured on this NTFS volume to yield `0o666`, and
+  access is whatever the profile directory's inherited ACLs say.
+- **L-V4-14-3 — the store is not indexed, and nothing reads it for you.**
+  Records are addressable only by event identity; the repository, task, ref and
+  commit are in the body. Finding the record for a branch means reading the
+  directory, and there is no command that does it.
+- **L-V4-14-4 — hard links are not inspected.** The link check on the store's
+  path uses `lstat`, which catches symbolic links and junctions — measured, with
+  a real junction. A hard link is not a reparse point and nothing counts links.
+  Other reparse-point classes were not measured and nothing is claimed about
+  them.
+- **L-V4-14-5 — "written and read back" is not "durable across power loss".**
+  The record's own handle is flushed before the rename; the directory entry is
+  not, because nothing in this build flushes a directory entry.
+- **L-V4-14-6 — the record covers the forge act, not the local ones.** The grant
+  requires `--drive`, and a drive can write the merge receipt, the verification
+  history and the conclusion, take the execution lease and run the repository
+  profile's own verification commands. None of that is a forge mutation and none
+  of it is recorded here. `L-V4-13-9` with a sharper edge.
+- **`L-V4-13-4` is unchanged and now matters differently.** Two local
+  `git remote get-url` calls and one `ls-remote` still run between the record and
+  the push, and nothing is consulted inside that window. The record makes the
+  fact proved *before* the window durable; it does not narrow the window.
+- **`L-V4-13-5` is unchanged and is why authorship is absent from the record.**
+- **`L-V4-13-8` is unchanged — no live product dogfood was possible.** This
+  repository has no orchestrated task and no runtime state, so no legitimate
+  delivery could exercise the automatic path end to end. What is measured against
+  real bytes is the store — real directories under a real scratch profile,
+  created by the real exclusive `mkdir`, written by the real crash-safe
+  primitive, read back off the disk.
+
+See [`docs/decisions/2026-08-27-adr-unattended-publication-audit.md`](docs/decisions/2026-08-27-adr-unattended-publication-audit.md).
+
 ## Not implemented yet
 
 Still missing, deliberately: **unattended pull-request creation and unattended
 merge**; owned process containment on POSIX; and any *autonomous* product-side
 PR/CI/merge decision. V4 slices 5 to 7 gave this build three forge acts —
 publish a branch, open a pull request, merge one — and two of the three still
-require an operator to be present for that invocation.
+require an operator to be present for that invocation. The one that does not now
+leaves a durable record of what permitted it, and no way to read that record back
+as permission.
 
 The third does not, as of V4 slice 13, and the exception is narrow enough to
 state in one sentence: **AO may create one work branch on one delivery remote

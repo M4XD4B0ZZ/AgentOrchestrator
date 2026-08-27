@@ -53,6 +53,10 @@ import {
   permitsUnattendedHeadPublication,
   type DeliveryAutomationOutcome,
 } from '../deliver/delivery-automation.js';
+import {
+  newHeadPublicationAuditEventId,
+  recordHeadPublicationAuthorisation,
+} from '../deliver/head-publication-authorisation-store.js';
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { publishDeliveryHead, type PublicationResult } from '../deliver/publish-delivery-head.js';
 import type { GitPublicationRunner } from '../deliver/git-head-publisher.js';
@@ -207,6 +211,41 @@ export function createRuntimeIgnoreProbe(
 }
 
 /**
+ * The authority answer: which of the two grants permitted this act, and — for
+ * the one that read a file — which bytes said so.
+ *
+ * Three shapes rather than an answer with an optional half, and the difference
+ * is load-bearing. `OPERATOR_DECLARATION` **carries** the digest, so an
+ * authority graded from a declaration cannot be constructed without naming the
+ * bytes it was graded from; the compiler refuses the shape that would let an
+ * unattended publication proceed with nothing to record. That is what makes the
+ * gate below a fact rather than a check somebody could remove.
+ *
+ * The digest is carried out of the grading rather than read again, because a
+ * second read is a second file: it has to be of the exact bytes that produced
+ * *this* permission, or the record would name a document that never authorised
+ * anything.
+ */
+type PublicationAuthority =
+  | { readonly outcome: 'AUTHORISED'; readonly grant: 'OPERATOR_PRESENT' }
+  | {
+      readonly outcome: 'AUTHORISED';
+      readonly grant: 'OPERATOR_DECLARATION';
+      /** SHA-256 of the exact declaration bytes this grading read. */
+      readonly declarationDigest: string;
+    }
+  | { readonly outcome: HeadPublication };
+
+/** The attended grant. Constant, and it reads nothing at all. */
+const AUTHORISED_WITH_AN_OPERATOR: PublicationAuthority = Object.freeze({
+  outcome: 'AUTHORISED' as const,
+  grant: 'OPERATOR_PRESENT' as const,
+});
+
+const authorityRefused = (outcome: HeadPublication): PublicationAuthority =>
+  Object.freeze({ outcome });
+
+/**
  * The two grants that permit one head publication, and everything that is not
  * one of them.
  *
@@ -245,9 +284,9 @@ function resolvePublicationAuthority(
   options: DeliveryOptions,
   target: { readonly host: string; readonly owner: string; readonly name: string },
   seams: DeliveryCommandSeams,
-): 'AUTHORISED' | HeadPublication {
-  if (options.attended === true) return 'AUTHORISED';
-  if (options.automaticPublishHeadOnly !== true) return 'OPERATOR_ABSENT';
+): PublicationAuthority {
+  if (options.attended === true) return AUTHORISED_WITH_AN_OPERATOR;
+  if (options.automaticPublishHeadOnly !== true) return authorityRefused('OPERATOR_ABSENT');
 
   const declaration: DeliveryAutomationOutcome = loadDeliveryAutomation(
     seams.pathProvider ?? OS_PATH_PROVIDER,
@@ -258,13 +297,24 @@ function resolvePublicationAuthority(
   // publishes.
   switch (permitsUnattendedHeadPublication(declaration, target)) {
     case 'ALLOWED':
-      return 'AUTHORISED';
+      // `ALLOWED` is only ever produced from a `DECLARED` outcome — the grader
+      // answers `UNREADABLE` for an unusable declaration and `NOT_DECLARED` for
+      // every other shape — so this narrowing cannot fail. It is written as a
+      // refusal rather than as an assertion because the one thing that must not
+      // happen is an unattended publication whose record cannot name the bytes
+      // it was permitted by.
+      if (declaration.state !== 'DECLARED') return authorityRefused('PUBLICATION_POLICY_UNREADABLE');
+      return Object.freeze({
+        outcome: 'AUTHORISED' as const,
+        grant: 'OPERATOR_DECLARATION' as const,
+        declarationDigest: declaration.declarationDigest,
+      });
     case 'NOT_DECLARED':
-      return 'AUTOMATIC_PUBLICATION_NOT_DECLARED';
+      return authorityRefused('AUTOMATIC_PUBLICATION_NOT_DECLARED');
     case 'DENIED':
-      return 'AUTOMATIC_PUBLICATION_DENIED';
+      return authorityRefused('AUTOMATIC_PUBLICATION_DENIED');
     case 'UNREADABLE':
-      return 'PUBLICATION_POLICY_UNREADABLE';
+      return authorityRefused('PUBLICATION_POLICY_UNREADABLE');
   }
 }
 
@@ -299,6 +349,15 @@ function resolvePublicationAuthority(
  * imports" until a review counted them — the test beside it always asserted
  * three.)
  *
+ * V4 slice 14 adds one step to the automatic path and to no other: inside that
+ * same `recheck`, strictly after the permission has been re-proved and strictly
+ * before anything is contacted, the invocation writes and reads back a durable
+ * record of what it was permitted by and what it was about to act on. A record
+ * that cannot be established refuses the publication, through the closure's own
+ * refusal channel, with nothing read from the remote. The attended path does not
+ * reach it: the gate is which grant answered, and the attended one is a constant
+ * that carries no declaration to record.
+ *
  * Note what is *not* passed to the mint: nothing derived from the task's title,
  * brief, findings or any other repository-authored prose. The grant carries six
  * fields, all of them identities or object names, and the push vector can only
@@ -329,10 +388,12 @@ export async function performPublication(
   // is told that rather than told to pass a flag that would not have helped.
   // What changed at V4 slice 13 is what this step asks, not where it sits.
   const authority = resolvePublicationAuthority(options, subject.subject, seams);
-  if (authority !== 'AUTHORISED') return refused(authority);
+  if (authority.outcome !== 'AUTHORISED') return refused(authority.outcome);
 
   const intended = publishableRef(taskLoad.state.workBranch);
   if (intended === null) return refused('SUBJECT_NOT_ESTABLISHED');
+
+  const now = seams.now ?? ((): Date => new Date());
 
   const grant = mintHeadPublicationGrant(subject.subject, subject.remoteName, intended);
   // The mint refuses a remote name, ref or object name it will not put in an
@@ -343,9 +404,14 @@ export async function performPublication(
   // fix it, which it cannot without naming the value it refused.
   if (grant === null) return refused('SUBJECT_NOT_ESTABLISHED');
 
-  // What the authority said at the moment of acting, when that is no longer
-  // `AUTHORISED`. Written by the closure below and read once, after it.
-  let withdrawn: HeadPublication | null = null;
+  // Why the closure below refused, when it did. Written there and read once,
+  // after `publishDeliveryHead` has returned.
+  //
+  // One variable for two reasons, because they cannot both happen: the record is
+  // written only after the re-proof answered `AUTHORISED`, and the withdrawal is
+  // recorded only when it did not. Two variables would be two states this
+  // function would then have to rank.
+  let recheckRefusal: HeadPublication | null = null;
 
   const published = await publishDeliveryHead(grant, repositoryRoot, {
     runner: seams.publicationRunner,
@@ -375,7 +441,7 @@ export async function performPublication(
       // It is a second reading and not a cached one. On the attended path it is
       // the same constant-time arm the ladder took and reads no file at all.
       const still = resolvePublicationAuthority(options, rebuilt.subject, seams);
-      if (still !== 'AUTHORISED') {
+      if (still.outcome !== 'AUTHORISED') {
         // …and the refusal is only *reported as* a withdrawal when this pass
         // resolved the same repository the ladder did. A task re-pinned onto
         // another delivery target also fails this grading — correctly, because
@@ -389,10 +455,63 @@ export async function performPublication(
           rebuilt.subject.owner === subject.subject.owner &&
           rebuilt.subject.name === subject.subject.name
         ) {
-          withdrawn = still;
+          recheckRefusal = still.outcome;
         }
         return null;
       }
+
+      // ── The accountability precondition, and the only place it is one ─────
+      //
+      // An unattended publication is the one act this build performs with
+      // nobody watching, so before it contacts the delivery remote at all it
+      // writes down what it was permitted by and what it was about to act on —
+      // and reads that back off the disk. A record that could not be written is
+      // a publication that does not happen.
+      //
+      // Here, and not earlier: this is strictly after the permission has been
+      // re-proved against the identity *this* pass resolved, so the record names
+      // the declaration the act really stands on rather than one the ladder read
+      // a moment ago. And not later, because everything after this closure is
+      // either a question put to Git or the effect itself.
+      //
+      // The gate is which grant answered, not the flag. `OPERATOR_DECLARATION`
+      // is the arm that read a declaration, so the attended path cannot reach
+      // this by any spelling — and the two cannot drift apart, because there is
+      // only one place that decides which arm ran. The digest comes with the
+      // answer rather than being looked up beside it, which is why there is no
+      // shape here that could publish with nothing to write down.
+      //
+      // What this does NOT do is narrow `L-V4-13-4`. Two `git remote get-url`
+      // calls and one `ls-remote` — a network round trip with a two-minute
+      // ceiling — still run between this record and the push, and nothing is
+      // consulted inside that window. The record's claim is bounded to match:
+      // it says what was established before anything was contacted, and it does
+      // not say that a publication was attempted.
+      if (still.grant === 'OPERATOR_DECLARATION') {
+        const at = now();
+        const recorded = recordHeadPublicationAuthorisation({
+          eventId: newHeadPublicationAuditEventId(at),
+          taskId: options.task,
+          // This pass's root, like every other fact here. A record filed under
+          // the root the ladder resolved would name a repository this closure
+          // did not look at.
+          repositoryRoot: again.repository.root,
+          host: rebuilt.subject.host,
+          owner: rebuilt.subject.owner,
+          name: rebuilt.subject.name,
+          declaredRemote: rebuilt.remoteName,
+          ref,
+          commit: rebuilt.subject.commit,
+          declarationDigest: still.declarationDigest,
+          authorisedAt: at.toISOString(),
+          ...(seams.pathProvider === undefined ? {} : { pathProvider: seams.pathProvider }),
+        });
+        if (recorded.code !== 'RECORDED') {
+          recheckRefusal = 'PUBLICATION_AUDIT_UNWRITTEN';
+          return null;
+        }
+      }
+
       return Object.freeze({
         host: rebuilt.subject.host,
         owner: rebuilt.subject.owner,
@@ -411,15 +530,23 @@ export async function performPublication(
   // authority lives.
   //
   // The rename is guarded three ways and each is load-bearing: only on that
-  // exact member, only when the closure above actually recorded a withdrawal,
-  // and only into a member that asserts the same thing `SUBJECT_CHANGED` does —
+  // exact member, only when the closure above actually recorded a reason, and
+  // only into a member that asserts the same thing `SUBJECT_CHANGED` does —
   // nothing read from the remote and nothing attempted. That last part is a
   // property of the ladder rather than a hope: `recheck` runs second, before the
   // URL agreement, before the pre-reading and before the push, so a result
   // carrying this member cannot describe an effect. A member that could describe
   // one would be renamed here into a refusal, which is the one direction that
   // must never happen.
-  const reason: HeadPublication | null = withdrawn;
+  //
+  // Two members arrive this way now. A permission that stopped standing between
+  // the ladder's reading and the re-proof, and — V4 slice 14 — an accountability
+  // record that could not be written before an unattended publication. Both
+  // satisfy the guard's third condition for the same structural reason, and the
+  // second one is why the guard is worth restating rather than trusting: a
+  // record written *after* the remote had been contacted could not be renamed
+  // into a refusal at all.
+  const reason: HeadPublication | null = recheckRefusal;
   if (reason !== null && published.publication === 'SUBJECT_CHANGED') return refused(reason);
   return published;
 }

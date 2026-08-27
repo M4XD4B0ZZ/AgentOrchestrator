@@ -91,6 +91,7 @@
  * schema change and its own slice.
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -213,6 +214,25 @@ export type DeliveryAutomationOutcome =
   | { readonly state: 'UNUSABLE'; readonly code: DeliveryAutomationRefusal }
   | {
       readonly state: 'DECLARED';
+      /**
+       * SHA-256 of the **exact bytes** this read took off the disk, before any
+       * decoding, parsing or normalisation.
+       *
+       * Present only on this member, and deliberately. A refusal may not carry
+       * anything derived from the file it refused — that rule is above and it
+       * is why {@link DeliveryAutomationOutcome} carries no digest on
+       * `UNUSABLE`. A document this build has accepted is different: the
+       * operator wrote it to be acted on, and a later reader has to be able to
+       * ask *which* bytes were acted on without the answer being a copy of the
+       * file.
+       *
+       * What it means is exactly "these bytes". It is not a digest of the
+       * parsed document, so a comment, a line ending, a reordering or a change
+       * to an entry naming some other repository all produce a different value
+       * — and that is the honest direction: this build cannot say those edits
+       * did not matter, because it did not read the file that way.
+       */
+      readonly declarationDigest: string;
       readonly repositories: ReadonlyArray<
         ForgeRepositoryName & { readonly headPublication: HeadPublicationDeclaration }
       >;
@@ -282,6 +302,12 @@ export function loadDeliveryAutomation(
 
   return Object.freeze({
     state: 'DECLARED' as const,
+    // Over `bytes`, which is what `readFileSync` returned — not over
+    // `bytes.toString('utf8')` and not over `contract.data`. The claim the
+    // digest is asked to support is "these are the bytes this invocation acted
+    // under", and a digest taken after a decode would be a claim about this
+    // build's reading of them instead.
+    declarationDigest: createHash('sha256').update(bytes).digest('hex'),
     repositories: Object.freeze(
       contract.data.repositories.map((entry) =>
         Object.freeze({

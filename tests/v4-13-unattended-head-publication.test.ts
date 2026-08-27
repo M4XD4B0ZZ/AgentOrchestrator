@@ -92,6 +92,7 @@ import {
   type HeadPublication,
 } from '../src/deliver/head-publication.js';
 import { DELIVERY_EFFECT_FLAG } from '../src/cli/delivery-driver.js';
+import { HEAD_PUBLICATION_AUDIT_DIR_NAME } from '../src/deliver/head-publication-authorisation-store.js';
 import { DRIVE_TRAILER, SELECTION_TRAILER } from '../src/cli/render-delivery-observation.js';
 import { EXIT_RUN_INPUT_UNUSABLE } from '../src/cli/run-exit-codes.js';
 import {
@@ -1354,18 +1355,18 @@ describe('the publication writes nothing, and nothing on this path waits', () =>
 });
 
 describe('the ladder produces every member the grader cannot', () => {
-  it('drives the four authority members for real, and produces exactly them', async () => {
+  it('drives the five ladder members for real, and produces exactly them', async () => {
     const root = repositoryRoot();
     const home = scratchHome();
     const produced = new Set<HeadPublication>();
 
-    // The four this case is responsible for all need a subject, so the state
+    // The members this case is responsible for all need a subject, so the state
     // arrives first. `SUBJECT_NOT_ESTABLISHED` and `TASK_NOT_READY` are the two
     // the ladder shares with every sibling act and are driven in
     // `tests/v4-05-delivery-head-publication.test.ts` and
     // `tests/v4-11-delivery-lifecycle-driver.test.ts`; what is new here, and
     // what would otherwise be a set of enum members nothing produces, is the
-    // four below.
+    // five below.
     writeReadyState(root);
 
     // OPERATOR_ABSENT: the act named directly, with no grant. Not under
@@ -1377,12 +1378,25 @@ describe('the ladder produces every member the grader cannot', () => {
     produced.add(publicationOf(await drive(AUTOMATIC, root, home)));
     writeRaw(home, 'schemaVersion: 1\nrepositories: [\n');
     produced.add(publicationOf(await drive(AUTOMATIC, root, home)));
+    // V4 slice 14: the permission stands and the record of it cannot be
+    // written. Blocked with a real obstruction rather than a seam — an ordinary
+    // file occupying the store root's own name, so the exclusive directory
+    // creation meets it the way it would meet any other unusable path.
+    const blocked = scratchHome();
+    declare(blocked, PERMITTING);
+    writeFileSync(
+      join(blocked, '.agent-orchestrator', HEAD_PUBLICATION_AUDIT_DIR_NAME),
+      'not a directory',
+      'utf8',
+    );
+    produced.add(publicationOf(await drive(AUTOMATIC, root, blocked)));
 
     expect([...produced].sort()).toEqual(
       [
         'AUTOMATIC_PUBLICATION_DENIED',
         'AUTOMATIC_PUBLICATION_NOT_DECLARED',
         'OPERATOR_ABSENT',
+        'PUBLICATION_AUDIT_UNWRITTEN',
         'PUBLICATION_POLICY_UNREADABLE',
       ].sort(),
     );

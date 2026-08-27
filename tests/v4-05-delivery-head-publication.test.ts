@@ -290,7 +290,7 @@ describe('the publication vocabulary', () => {
         }
       }
     }
-    // Seeded, not derived, and said plainly: these six are produced by
+    // Seeded, not derived, and said plainly: these are produced by
     // `performPublication`'s refusal ladder, which needs a resolved repository,
     // a task record and a seam for the operator's declaration to drive. They are
     // driven for real — every one of them, by a real call, asserted to be
@@ -307,6 +307,11 @@ describe('the publication vocabulary', () => {
       'AUTOMATIC_PUBLICATION_NOT_DECLARED',
       'AUTOMATIC_PUBLICATION_DENIED',
       'PUBLICATION_POLICY_UNREADABLE',
+      // V4 slice 14. Produced when the permission stood and the durable record
+      // of it could not be written, which needs a store this build can reach and
+      // cannot use — so it is driven over there with a real blocked store, in
+      // the same case as the five above it.
+      'PUBLICATION_AUDIT_UNWRITTEN',
     ]);
     // AUTHORITY_REFUSED and SUBJECT_CHANGED come from the publisher itself.
     const spent = grantFor();

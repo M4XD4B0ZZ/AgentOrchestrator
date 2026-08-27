@@ -180,6 +180,28 @@ export const HEAD_PUBLICATIONS = [
    */
   'PUBLICATION_POLICY_UNREADABLE',
   /**
+   * The permission stood, and the durable record of it could not be written.
+   *
+   * An unattended publication is the one act this build performs with nobody
+   * watching, and the accountability for it is a precondition rather than a
+   * side effect: before the delivery remote is contacted at all, a record
+   * naming the exact declaration, repository, task, remote, ref and commit has
+   * to be created, flushed and read back. When that cannot be done, nothing is
+   * read from the remote and nothing is attempted.
+   *
+   * A member of its own rather than a fall-through, and specifically not
+   * {@link HEAD_PUBLICATIONS} `SUBJECT_CHANGED`, which is where the mechanism
+   * would otherwise land it: nothing about the subject moved here, and telling
+   * an operator that it did would send them to look at a task that is fine.
+   * It is also not `AUTHORITY_REFUSED` — the authority was established; it is
+   * the evidence of it that is missing.
+   *
+   * Reachable only under the automatic grant. An attended publication has a
+   * person present to answer the question this record exists to answer, and
+   * writes no record at all.
+   */
+  'PUBLICATION_AUDIT_UNWRITTEN',
+  /**
    * The authority was refused at the effect: not minted, or already spent.
    *
    * Reachable in production only through a second use of a one-shot grant,
@@ -296,6 +318,8 @@ export const HEAD_PUBLICATION_DETAIL: Readonly<Record<HeadPublication, string>> 
     'This invocation asked to publish with nobody present, and this machine’s operator has declared that this repository is published only with an operator present. Nothing was read from the delivery remote and nothing was attempted.',
   PUBLICATION_POLICY_UNREADABLE:
     'This invocation asked to publish with nobody present, and the declaration that would permit it could not be read into a permission. It is treated as a broken authority configuration rather than as a refusal: nothing was read from the delivery remote and nothing was attempted, and an operator has to look at the file.',
+  PUBLICATION_AUDIT_UNWRITTEN:
+    'This invocation was permitted to publish with nobody present, and the durable record that has to exist before an unattended publication could not be written and read back. Accountability for an act nobody watches is a precondition of it, not a side effect: nothing was read from the delivery remote and nothing was attempted, and an operator has to look at this machine.',
   AUTHORITY_REFUSED:
     'The authority for this publication was not one this build minted, or it had already been used. Nothing was attempted.',
   SUBJECT_CHANGED:

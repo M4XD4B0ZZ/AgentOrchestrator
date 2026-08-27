@@ -626,6 +626,18 @@ const DRIVE_EXIT_CODES = Object.freeze({
   CHECKS_ABSENT: EXIT_RUN_NEEDS_OPERATOR,
   CHECKS_FAILED: EXIT_RUN_NEEDS_OPERATOR,
   HUMAN_DECISION_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
+  // Graded 3 and not overridden one store code at a time, unlike the two
+  // `_NOT_DURABLE` members below it — and the difference is the effect, not the
+  // store. Those two are written *after* something happened, so a failed write
+  // means a caller was told yes about a thing that is not on disk, and which
+  // code that becomes depends on what the store found. This one is written
+  // *before* anything is contacted: every reachable cause is a fault on the
+  // operator's own machine — a profile the OS will not name, a link on the
+  // store's path, a root that cannot be made, a name already taken, a write
+  // that did not complete, bytes that came back wrong — and every one of them
+  // meets the next invocation again. Nothing on the remote is in question,
+  // which is what the member's own sentence says.
+  PUBLICATION_AUDIT_NOT_DURABLE: EXIT_RUN_NEEDS_OPERATOR,
 
   // This invocation achieved nothing and nothing durable is wrong: a reading
   // could not be taken, the local subject moved under it, or no pull request has
