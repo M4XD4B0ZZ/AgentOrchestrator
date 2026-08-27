@@ -171,9 +171,8 @@ export const AUDIT_ORDER = [
   '  random identifier and their order between them means nothing. The time shown against a',
   '  record is the one inside that record and is checked against nothing - not against a',
   '  calendar, not against the directory name - and it is shown as recorded except that a',
-  '  character able to forge a line or reorder one is written as its code point. A sorted',
-  '  list cannot show a gap: a',
-  '  deleted record leaves nothing behind to be missing.',
+  '  character able to forge a line or reorder one is written as its code point. And a',
+  '  sorted list cannot show a gap: a deleted record leaves nothing behind to be missing.',
 ].join('\n');
 
 export const AUDIT_MEANING = [
@@ -221,14 +220,14 @@ export const AUDIT_PROVENANCE = [
  * arriving through the trailer rather than through the listing.
  */
 const READ_ONLY_CLAUSES =
-  'changed nothing: it created no directory and no file, wrote nothing, removed nothing,\n' +
-  'started no git and no forge client, took no execution lease, read no task state and opened\n' +
-  'no declaration.';
+  'it created no directory and no file, wrote nothing, removed nothing, started no git and\n' +
+  'no forge client, took no execution lease, read no task state and opened no declaration.';
 
-export const AUDIT_READ_ONLY_TRAILER = `This command read the store and ${READ_ONLY_CLAUSES}`;
+export const AUDIT_READ_ONLY_TRAILER =
+  `This command read the store and changed nothing:\n${READ_ONLY_CLAUSES}`;
 
 /** For every outcome where no listing was produced. */
-export const AUDIT_NOTHING_READ_TRAILER = `This command ${READ_ONLY_CLAUSES}`;
+export const AUDIT_NOTHING_READ_TRAILER = `This command changed nothing:\n${READ_ONLY_CLAUSES}`;
 
 /**
  * Every label this report puts a value beside.
