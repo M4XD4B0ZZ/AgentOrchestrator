@@ -1216,9 +1216,26 @@ describe('evidence, and never authority', () => {
 
     expect(publication).toBeDefined();
     expect(authorisations).toBeDefined();
-    // No options at all: no repository, no grant, no force, and nothing that
-    // could be read as asking for an act.
-    expect(authorisations?.options.map((o) => o.long)).toEqual([]);
+    // This read `toEqual([])` until V4 slice 17, which added four flags naming
+    // the branch a report should be narrowed to. The enumeration is kept rather
+    // than relaxed, so a fifth flag still fails here and has to be a decision -
+    // and the rule below is kept beside it, because an enumeration alone would
+    // hold while somebody widened it with something that does ask for an act.
+    expect(authorisations?.options.map((o) => o.long)).toEqual([
+      '--forge-host',
+      '--forge-owner',
+      '--forge-name',
+      '--ref',
+    ]);
+    for (const option of authorisations?.options ?? []) {
+      const long = option.long ?? '';
+      expect(long, long).not.toMatch(/force|unattended|adopt|takeover|steal/i);
+      // Every one takes a value and none is required: their absence is the
+      // whole-store listing this command shipped with, and a `requiredOption`
+      // would let commander refuse a missing one with exit 1.
+      expect(option.required, `${long} must take a value`).toBe(true);
+      expect(option.mandatory, `${long} must not be required`).toBe(false);
+    }
     expect(publication?.options.map((o) => o.long)).toEqual([]);
     expect(publication?.commands.map((c) => c.name())).toEqual(['authorisations']);
   });
@@ -1337,6 +1354,21 @@ describe('what the report may not say', () => {
     const withOutcome = scratchHome();
     recordWithOutcome(withOutcome);
     for (const raw of report(withOutcome).split('\n')) {
+      const label = labelOf(raw);
+      if (label !== null) everyLabel.add(label);
+    }
+    // …and over a report narrowed to one branch, which is where the two labels
+    // V4 slice 17 added are emitted. The same rule as the outcome fixture above
+    // it and added for the same reason: a label the constant carries and no
+    // fixture reaches is a label the strict value-line sweep below never sees.
+    const queried = scratchHome();
+    record(queried);
+    for (const raw of renderPublicationAuthorisations(list(queried), {
+      forgeHost: IDENTITY.host,
+      forgeOwner: IDENTITY.owner,
+      forgeName: IDENTITY.name,
+      authorisedRef: REF,
+    }).split('\n')) {
       const label = labelOf(raw);
       if (label !== null) everyLabel.add(label);
     }

@@ -10921,13 +10921,16 @@ disagrees about the payload. All three are driven.
   record that never existed are the same bytes. File modes are not a defence:
   `0o600` and `0o700` were measured on this NTFS volume to yield `0o666`, and
   access is whatever the profile directory's inherited ACLs say.
-- **L-V4-14-3 — the store is still not indexed, and V4 slice 15 narrowed this
-  rather than closing it.** `agent-loop publication authorisations` now reads
-  the whole store and shows what each entry is, so evidence nobody could read is
-  no longer the gap. What remains is that records are addressable only by event
-  identity: the repository, task, ref and commit live in the body, so finding
-  the record for one branch means reading every entry. There is no index, no
-  search and no filter, and the listing grows with the store.
+- **L-V4-14-3 — the store is still not indexed, and V4 slices 15 and 17 each
+  narrowed this rather than closing it.** Slice 15 made
+  `agent-loop publication authorisations` read the whole store and show what
+  each entry is, so evidence nobody could read is no longer the gap. Slice 17
+  gave it four flags naming one branch exactly — host, owner, repository name
+  and ref — so an operator no longer reads every entry to find one branch. What
+  remains is that **the machine** still does: records are addressable only by
+  event identity, the repository and ref live in the body, and answering the
+  question means opening and grading every entry. There is no index and no
+  search, and the store grows without bound.
 - **L-V4-14-4 — hard links are not inspected.** The link check on the store's
   path uses `lstat`, which catches symbolic links and junctions — measured, with
   a real junction. A hard link is not a reparse point and nothing counts links.
@@ -11090,9 +11093,12 @@ forge a line or reorder one is written as its code point.
 
 ### Carried forward from V4 slice 15, deliberately
 
-- **L-V4-15-1 — the listing is unbounded.** One block per event, forever. There
-  is no limit, no page and no filter, because a truncation rule would be a
-  retention decision wearing a display costume while `L-V4-14-1` is open.
+- **L-V4-15-1 — the listing is unbounded.** One block per event, forever, when
+  nothing is asked. There is still no limit and no page, because a truncation
+  rule would be a retention decision wearing a display costume while
+  `L-V4-14-1` is open. V4 slice 17 added the one thing that is not a truncation:
+  an exact branch filter, which promises no selection over time and narrows only
+  what is printed.
 - **L-V4-15-2 — `UNRECOGNISED_ENTRY` answers two questions.** "This is not an
   event directory" and "this could not be classified at all" share a member,
   because reaching the second needs a race no fixture here can force.
@@ -11127,7 +11133,8 @@ forge a line or reorder one is written as its code point.
   a URL with a credential, and a report that shows what is recorded shows it.
   Redacting would be hiding evidence.
 - **`L-V4-14-3` is narrowed, not closed.** The store is read now; it is still not
-  indexed, so finding the record for one branch means reading every entry.
+  indexed. V4 slice 17 narrowed it a second time — an operator can name one
+  branch — and the machine still reads every entry to answer that.
 - **`L-V4-14-1` and `L-V4-14-2` are unchanged and now matter more.** This is the
   first command that shows an operator a store nothing prunes, and the first
   place a forged record would be displayed as `HISTORICAL_AUTHORISATION`.
@@ -11285,6 +11292,88 @@ cannot both be reached.
   without trace.
 
 See [`docs/decisions/2026-08-27-adr-publication-outcome-evidence.md`](docs/decisions/2026-08-27-adr-publication-outcome-evidence.md).
+
+## Asking about one branch (V4 slice 17)
+
+Slice 15 made the store readable and slice 16 made each entry longer. Neither let
+you ask a question: answering "why did this branch appear?" meant reading every
+block yourself, in a directory nothing prunes.
+
+Now you can name the branch:
+
+```powershell
+agent-loop publication authorisations `
+  --forge-host github.com `
+  --forge-owner M4XD4B0ZZ `
+  --forge-name AgentOrchestrator `
+  --ref refs/heads/ao/task/V4-17
+```
+
+All four flags or none. None is the whole-store listing, unchanged.
+
+**A branch is four values, not one.** `refs/heads/main` in one repository is not
+the branch of that name in another, and the record's own schema admits any host
+and any owner rather than a fixed list — so all four are compared, character for
+character. Nothing is folded, shortened, lengthened or matched in part. A
+differently capitalised owner is a different owner, which is the same rule the
+permission path applies (`L-V4-13-3`) rather than a new one.
+
+**The commit is not part of it.** Two publications of one branch at two commits
+are two events in one branch's history, and both are shown. So are two events at
+one commit, two events from two clones, and two events through remotes with
+different local names. Nothing is collapsed, de-duplicated or reduced to "the
+latest".
+
+**What could not be read is still shown.** An entry this build read no record for
+carries no host, owner, name or ref at all, so it can be neither matched nor
+ruled out. Those entries appear under every query, and the count line says how
+many there are:
+
+```text
+Query        : github.com/M4XD4B0ZZ/AgentOrchestrator refs/heads/ao/task/V4-17
+Entries      : 6 (5 read, 1 not read)
+Matching     : 3 named by this query, 2 naming another branch, 1 not established
+```
+
+`Entries` is still about the whole store, and so is `Listing`. A damaged entry
+outside your query still grades the store down, because the enumeration never
+learns there was a query.
+
+**A negative says what it can and no more.** "No record this build read in this
+store names that branch" is the strongest true sentence available: anything
+running as your OS user can delete a record without trace, an attended
+publication records nothing here, another OS user has a store of their own, and
+this command asks no forge anything. Where the store also holds entries it could
+not read, a different sentence is printed saying so.
+
+**It is a filter and not an index.** Every entry is still opened and graded to
+answer the question — `L-V4-14-3` is narrowed for the second time and is not
+closed. Nothing is written, nothing is pruned, no repository is opened, no Git or
+GitHub client is started, and no lease is taken.
+
+### Carried forward from V4 slice 17, deliberately
+
+- **L-V4-17-1 — a filter is not an index.** The whole store is still read and
+  graded to answer a question about one branch. The report says so, and
+  `L-V4-14-3` stays open for that reason.
+- **L-V4-17-2 — a record outside the writer's own grammar cannot be named.** The
+  query is bounded by the rules every identity this build writes passed on the
+  way in. A record carrying a host, owner, name or ref outside them — which only
+  something other than this build can write — is counted as naming another branch
+  and cannot be targeted. The whole-store listing, which takes no query, shows it
+  in full.
+- **L-V4-17-3 — a re-sealed record is named by the query.** There is no key
+  material in this build, so a record whose digest was recomputed over an edited
+  payload reads as this build's own. No filter can do better.
+- **L-V4-17-4 — the negative is about the readable store and nothing more.** It
+  is never a statement that a branch was never authorised.
+- **`L-V4-14-1` is unchanged**: nothing prunes the store, and a filter is not a
+  retention rule.
+- **`L-V4-13-3` is unchanged and is now visible twice.** The lookup compares
+  identity exactly, as the permission does, and deliberately does not "fix" it
+  from the reading side.
+
+See [`docs/decisions/2026-08-27-adr-publication-branch-lookup.md`](docs/decisions/2026-08-27-adr-publication-branch-lookup.md).
 
 ## Not implemented yet
 

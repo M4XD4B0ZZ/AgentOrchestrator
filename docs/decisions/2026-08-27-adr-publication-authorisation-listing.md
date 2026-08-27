@@ -6,9 +6,14 @@
 **Supersedes** nothing. **Superseded by** nothing.
 **Amends** one. **Amended by** `2026-08-27-adr-publication-outcome-evidence.md`,
 which adds a second document beside each record this command reads, two fields to
-its entry type and four lines to what it prints. Every claim this ADR makes about the command is unchanged: it
+its entry type and four lines to what it prints; and by
+`2026-08-27-adr-publication-branch-lookup.md`, which gives the command four flags
+naming one branch exactly, and amends §15 and §17 — §15's "no filter" and §17's
+"filtering" non-goal, both of which were reasoned from retention and neither of
+which an exact-identity filter is. Every claim this ADR makes about the command is unchanged: it
 still contacts no forge, starts no Git, takes no lease, reads no declaration and
-creates nothing.
+creates nothing, it still prints every entry when nothing is asked, and there is
+still no limit, no page and no index.
 
 `2026-08-27-adr-unattended-publication-audit.md`, in three places. §13 lists "an
 operator-facing command that lists or searches the store" among that slice's
@@ -530,6 +535,13 @@ selection, and while `L-V4-14-1` is open any such rule is a retention decision
 wearing a display costume. Never silently truncating an accountability listing is
 worth more than a short report.
 
+**V4 slice 17 amends this paragraph in one clause and no more.** That slice added
+an exact branch filter, which is not a truncation: it promises no selection over
+time, it names what it excludes and counts it, and it shows every entry this
+build could not read whichever way it is asked. The store is still unbounded, the
+report is still unbounded when nothing is asked, and there is still no limit
+flag, no page and no "most recent N".
+
 There is also no pagination convention in this CLI to reuse — measured: no
 `--limit`, no `--page`, no `.slice(` in any command. The one bounded-report
 convention that exists is about printing counts instead of pasting identifiers
@@ -549,7 +561,9 @@ to decide what a retention policy should say, and one who cannot is not.
 ## 17. Non-goals
 
 Explicitly outside, and each needs its own decision: reconciling a record against
-what a forge holds now; searching, filtering or indexing the store; comparing a
+what a forge holds now; searching, filtering or indexing the store — of which V4
+slice 17 took up exactly one, an exact-identity branch filter, leaving searching
+and indexing outside; comparing a
 record against the current declaration; deleting, pruning or compacting;
 unattended pull-request creation; unattended merge; a scheduler; polling;
 notification; a generic audit framework for every AO act; cryptographic signing;
@@ -560,8 +574,11 @@ and an outcome record written after the effect.
 ## 18. What is carried, and what it costs
 
 **`L-V4-15-1` — the listing is unbounded.** See §15. One block per event,
-forever, and the store grows by one per authorised unattended publication with
-nothing pruning it. `L-V4-14-1` is its cause and is unchanged.
+forever, when nothing is asked, and the store grows by one per authorised
+unattended publication with nothing pruning it. `L-V4-14-1` is its cause and is
+unchanged, and so is the absence of a limit and a page. V4 slice 17 added an
+exact branch filter, which narrows the report and neither prunes the store nor
+promises a selection over time.
 
 **`L-V4-15-2` — `UNRECOGNISED_ENTRY` answers two different questions.** It is
 "this build does not read this as an event directory" *and* "this build could not
@@ -662,7 +679,8 @@ and `L-V4-13-5` are unchanged.** Two of them now matter *more*: this is the firs
 command that shows an operator a store nothing prunes, and the first place a
 forged record would be displayed as `HISTORICAL_AUTHORISATION`.
 
-**`L-V4-14-3` is narrowed rather than closed.** The store is read now. It is
+**`L-V4-14-3` is narrowed rather than closed**, and V4 slice 17 narrowed it
+again by adding the asking. The store is read now. It is
 still not indexed: records are addressable only by event identity, so finding the
 record for one branch means reading every entry.
 

@@ -11,7 +11,10 @@ the store (§13), and narrows `L-V4-14-3`; and by
 the other non-goal in §13, a post-effect outcome record. That ADR answers §11's
 three arguments one at a time and accepts the third: `(record, no outcome)` says
 exactly what `(record)` alone says, and it is now the uncommon shape rather than
-the only one.
+the only one. And by `2026-08-27-adr-publication-branch-lookup.md`, which splits
+§17's single non-goal — "searching, filtering or indexing the store" — carving
+out one exact-identity filter and leaving searching and indexing where they are.
+It narrows `L-V4-14-3` a second time and does not close it.
 
 `2026-08-26-adr-unattended-head-publication.md` §12, whose first sentence reads
 "**The publication writes nothing.**" That stops being true for the automatic
@@ -502,9 +505,11 @@ a MAC, and file modes do not restrict anything on NTFS.
 identity; the repository, task, ref and commit live in the body. Finding the
 record for a branch means reading the directory. That is the price of putting no
 identity in the path (§9). V4 slice 15 added the reading — one command that
-lists the whole store — and narrowed this to what remains: there is still no
-index, no search and no filter, so finding the record for one branch means
-reading every entry.
+lists the whole store — and V4 slice 17 added the asking: four flags naming one
+branch exactly, so an operator no longer reads every entry to find one. What
+remains after both is that **the machine** still does. There is no index and no
+search; answering a question about one branch means opening and grading every
+entry in the store.
 
 **`L-V4-14-4` — hard links are not inspected.** The link check on the store's path
 uses `lstat` and catches symbolic links and junctions, which is measured. A hard

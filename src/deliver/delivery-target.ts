@@ -142,6 +142,11 @@
  */
 
 import type { GitQueryResult } from '../repo/git-query.js';
+import {
+  isForgeHost,
+  isForgeOwner,
+  isForgeRepositoryName,
+} from './internal/forge-identity-grammar.js';
 
 // ── Result vocabulary ──────────────────────────────────────────────────────
 
@@ -244,7 +249,7 @@ export interface ForgeRepositoryIdentity {
    * Lowercased, dotted host name. Never a port and never an IPv6 literal.
    *
    * An **IPv4 address is accepted**, because a dotted host of digit-only labels
-   * satisfies {@link HOST_PATTERN} and refusing it would need a rule this
+   * satisfies {@link isForgeHost} and refusing it would need a rule this
    * module has no reason to hold: it does not decide which hosts AO may deal
    * with (`L-V4-01-2`). Stated because an earlier version of this sentence said
    * "never an IP literal", which was false for IPv4 and true only for IPv6.
@@ -344,41 +349,26 @@ function refuse(code: DeliveryTargetRefusal): DeliveryTargetRefused {
 const PRINTABLE_ASCII = /^[\x21-\x7e]+$/;
 
 /**
- * A dotted host name. Refuses `:` and `[` by omission, which is why no separate
- * port or IPv6 check exists: an earlier version had one, and no input could
- * reach it — both spellings die here, with the same code.
+ * The three identity grammars, and where they live now.
  *
- * At least two labels, so a bare hostname is refused — a delivery target must
- * be named by a fully qualified host, and requiring the dot is also what keeps
- * a Windows drive letter out of the scp-like branch below: `D:/work/repo` would
- * otherwise present `D` as a host.
- */
-const HOST_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
-
-/**
- * An owning user or organisation.
+ * They were private constants here until V4 slice 17 needed the same rules to
+ * bound an operator's *query* over the publication audit store. They moved
+ * rather than being copied — the move `internal/delivery-ref-grammar.ts`
+ * already records for the ref grammar — because a second copy is free to drift
+ * from the first, and a review has already found one in this repository.
  *
- * GitHub's published account-name grammar: alphanumerics and hyphens, no
- * leading or trailing hyphen, at most 39 characters. Enforced rather than
- * assumed because these characters become an argument to another program later;
- * being stricter than a forge needs is the safe direction, and a name this
- * refuses is reported as a refusal rather than passed on.
- */
-const OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-
-/**
- * A repository name.
+ * They moved into a module that imports nothing at all, and that is not
+ * tidiness. The reader that needs them may not import *this* module for them:
+ * this file carries a type edge to `repo/git-query.ts`, which reaches
+ * `doctor/exec.ts`, and the suite's closure sweep follows type edges — so
+ * importing this file for a regular expression would put `spawn` in a
+ * read-only command's swept graph.
  *
- * Alphanumerics, dot, underscore and hyphen — but **not a leading hyphen**, for
- * the reason given for the owner: a repository name reaches an argument vector
- * on exactly the same paths, and `-oProxyCommand` is not a name to hand onward.
- * A leading dot *is* allowed, because `.github` is an ordinary repository name,
- * which is why a name made only of dots is refused separately below.
+ * `isForgeRepositoryName` carries both halves of the name rule: the character
+ * class, and the separate refusal of a name made only of dots. That pairing
+ * used to be two statements here and is now one call, so no caller can apply
+ * one without the other.
  */
-const NAME_PATTERN = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,99}$/;
-
-/** A name that is only dots — `.`, `..`, `...` — is never a repository. */
-const ALL_DOTS = /^\.+$/;
 
 /**
  * The one user name a remote URL may carry.
@@ -466,7 +456,7 @@ export function parseRemoteUrlIdentity(url: string): DeliveryTargetResult {
   }
 
   const lowerHost = host.toLowerCase();
-  if (!HOST_PATTERN.test(lowerHost)) return refuse('REMOTE_URL_NOT_REPOSITORY_SHAPED');
+  if (!isForgeHost(lowerHost)) return refuse('REMOTE_URL_NOT_REPOSITORY_SHAPED');
 
   const segments = split.path.split('/');
   if (segments.length !== 2) return refuse('REMOTE_URL_NOT_REPOSITORY_SHAPED');
@@ -477,9 +467,10 @@ export function parseRemoteUrlIdentity(url: string): DeliveryTargetResult {
 
   const name = rawName.endsWith(GIT_SUFFIX) ? rawName.slice(0, -GIT_SUFFIX.length) : rawName;
 
-  if (!OWNER_PATTERN.test(owner)) return refuse('REMOTE_URL_NOT_REPOSITORY_SHAPED');
-  if (!NAME_PATTERN.test(name)) return refuse('REMOTE_URL_NOT_REPOSITORY_SHAPED');
-  if (ALL_DOTS.test(name)) return refuse('REMOTE_URL_NOT_REPOSITORY_SHAPED');
+  if (!isForgeOwner(owner)) return refuse('REMOTE_URL_NOT_REPOSITORY_SHAPED');
+  // One call and not two: the character class and the all-dots refusal are the
+  // two halves of one rule, and they are applied together where the rule lives.
+  if (!isForgeRepositoryName(name)) return refuse('REMOTE_URL_NOT_REPOSITORY_SHAPED');
 
   return Object.freeze({
     outcome: 'RESOLVED' as const,
