@@ -1727,8 +1727,12 @@ describe('the delivery command creates only when asked, and only when it may', (
     }
   });
 
-  it('says what --attended is required by, now that it is three flags', () => {
-    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--publish-head, --create-pr and --merge-pr');
+  it('says which acts --attended is the only grant for', () => {
+    // The enumeration '--publish-head, --create-pr and --merge-pr' stood here
+    // and V4 slice 13 made it the wrong shape: this flag is still A grant for
+    // all three and is the ONLY grant for two of them. The claim this case
+    // exists to keep is the second one, so that is what it asserts.
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--create-pr and --merge-pr');
     expect(ATTENDED_OPTION_DESCRIPTION).toContain('no unattended pull request');
     expect(ATTENDED_OPTION_DESCRIPTION).toContain('no unattended merge');
   });

@@ -48,6 +48,12 @@ import {
   concludeDeliveryDecision, isPositiveDeliveryDecision, revalidateSubject, type DeliveryDecision, type LocalSubject, type SubjectRevalidation } from '../deliver/delivery-decision.js';
 import type { DeliveryObservationProof } from '../deliver/delivery-observation-proof.js';
 import { PUBLISHABLE_REF, mintHeadPublicationGrant, type HeadPublicationSubject } from '../deliver/internal/head-publication-grant.js';
+import {
+  loadDeliveryAutomation,
+  permitsUnattendedHeadPublication,
+  type DeliveryAutomationOutcome,
+} from '../deliver/delivery-automation.js';
+import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { publishDeliveryHead, type PublicationResult } from '../deliver/publish-delivery-head.js';
 import type { GitPublicationRunner } from '../deliver/git-head-publisher.js';
 import type { HeadPublication } from '../deliver/head-publication.js';
@@ -92,6 +98,14 @@ export interface DeliveryOptions {
   readonly concludeDelivery?: boolean;
   readonly drive?: boolean;
   readonly attended?: boolean;
+  /**
+   * The other grant for the publication act: nobody is present for it.
+   *
+   * A field of its own rather than the absence of {@link attended}, because
+   * absence is not authority. `delivery-command.ts` refuses the two together
+   * before a repository is resolved, so the pair is never both true here.
+   */
+  readonly automaticPublishHeadOnly?: boolean;
 }
 
 /**
@@ -161,6 +175,19 @@ export interface DeliveryCommandSeams {
   readonly verify?: VerificationRunner;
   /** The Git runner the default ignore probe uses. */
   readonly git?: GitRunner;
+  /**
+   * Where the OS says this user's profile directory is.
+   *
+   * The one seam on the unattended-publication declaration, and it is the
+   * *directory* rather than the declaration: a test that could hand in a
+   * permission would be a test of nothing, because handing in a permission is
+   * exactly what this build refuses to let anything do. A test points this at a
+   * scratch directory and writes a real file into it, so the reader, the size
+   * ceiling, the YAML boundary and the contract are all really exercised.
+   *
+   * Production never supplies one. Absent, the loader asks `os.userInfo()`.
+   */
+  readonly pathProvider?: PathProvider;
 }
 
 /**
@@ -180,14 +207,88 @@ export function createRuntimeIgnoreProbe(
 }
 
 /**
+ * The two grants that permit one head publication, and everything that is not
+ * one of them.
+ *
+ * `'AUTHORISED'` or the member the ladder refuses with. A discriminated answer
+ * rather than a boolean, because the four refusals send an operator to four
+ * different places and a boolean would have thrown that away at the one gate
+ * where it matters most.
+ *
+ * ── Why the attended arm answers first ────────────────────────────────────
+ *
+ * So that an attended publication never reads the declaration file at all. A
+ * declaration that is missing, unreadable, malformed or says `ATTENDED_ONLY`
+ * cannot refuse an operator who is standing there, and V4 slice 5's path is
+ * therefore unchanged in every observable way — which is asserted rather than
+ * assumed.
+ *
+ * ── Why absence of the automatic flag is `OPERATOR_ABSENT` ────────────────
+ *
+ * Because it is the pre-slice-13 meaning, unchanged: the operator asked for a
+ * mutation and named no grant for it. The automatic grant has to be *named*.
+ * There is no arm here that reads a permitting declaration and lets an
+ * invocation that did not ask for automatic publication proceed, which is the
+ * whole of "capability is not permission" in one function: the operator's
+ * standing decision and this invocation's intent are conjoined, and neither can
+ * stand in for the other.
+ *
+ * ── Why the declaration is read here and not passed in ────────────────────
+ *
+ * A caller that could hand in a permission would be a caller authorising
+ * itself, which is the argument `scope/assess-scope.ts` makes about a scope
+ * declaration and `pinned-scope.ts` about where to read one. What a caller may
+ * supply is where the operating system's user profile is, and only through the
+ * internal test seam.
+ */
+function resolvePublicationAuthority(
+  options: DeliveryOptions,
+  target: { readonly host: string; readonly owner: string; readonly name: string },
+  seams: DeliveryCommandSeams,
+): 'AUTHORISED' | HeadPublication {
+  if (options.attended === true) return 'AUTHORISED';
+  if (options.automaticPublishHeadOnly !== true) return 'OPERATOR_ABSENT';
+
+  const declaration: DeliveryAutomationOutcome = loadDeliveryAutomation(
+    seams.pathProvider ?? OS_PATH_PROVIDER,
+  );
+  // An exhaustive switch over the permission vocabulary, so a member added to
+  // it is a compile error here rather than an arm that falls through to one of
+  // the answers below — and the one it would fall through to is the one that
+  // publishes.
+  switch (permitsUnattendedHeadPublication(declaration, target)) {
+    case 'ALLOWED':
+      return 'AUTHORISED';
+    case 'NOT_DECLARED':
+      return 'AUTOMATIC_PUBLICATION_NOT_DECLARED';
+    case 'DENIED':
+      return 'AUTOMATIC_PUBLICATION_DENIED';
+    case 'UNREADABLE':
+      return 'PUBLICATION_POLICY_UNREADABLE';
+  }
+}
+
+/**
  * Decides whether one delivery head may be published, and publishes it.
  *
  * The refusal ladder here is the one `HEAD_PUBLICATIONS` declares, in the same
  * order, and that is checked rather than asserted: the suite drives every arm
- * and pins which member comes out. Two of the three refusals are about the
- * work and one is about the invocation, and the work is answered first — an
- * operator whose task is not finished is told that, rather than being told to
- * pass a flag that would not have helped.
+ * and pins which member comes out. The refusals divide into those about the
+ * work and those about the invocation's authority, and the work is answered
+ * first — an operator whose task is not finished is told that, rather than
+ * being told to pass a flag that would not have helped. The count that used to
+ * stand in this sentence went stale at V4 slice 13, which added three authority
+ * members, so the rule is stated instead of the tally.
+ *
+ * Two grants reach the mint, and only two: an operator present for this
+ * invocation, or this machine's operator having declared, outside every
+ * repository, that this exact delivery target may be published with nobody
+ * present. {@link resolvePublicationAuthority} is where that is decided and it
+ * is decided once — and then again, against a freshly resolved identity, at the
+ * last point this build reads anything of its own before the remote is
+ * contacted. Not "immediately before": `publishDeliveryHead` asks Git for the
+ * remote's two URLs and then reads the ref itself after that, and the second of
+ * those is a network round trip. `L-V4-13-4`.
  *
  * The mint is called here and nowhere else. That is the reachability property
  * the whole authority rests on: a tree walk in the suite proves exactly one
@@ -223,7 +324,12 @@ export async function performPublication(
 
   if (!subject.ok || !taskLoad.ok) return refused('SUBJECT_NOT_ESTABLISHED');
   if (taskLoad.state.state !== 'READY_FOR_PR') return refused('TASK_NOT_READY');
-  if (options.attended !== true) return refused('OPERATOR_ABSENT');
+  // The invocation fact, in the position the invocation fact has always had:
+  // after both facts about the work, so an operator whose task is not finished
+  // is told that rather than told to pass a flag that would not have helped.
+  // What changed at V4 slice 13 is what this step asks, not where it sits.
+  const authority = resolvePublicationAuthority(options, subject.subject, seams);
+  if (authority !== 'AUTHORISED') return refused(authority);
 
   const intended = publishableRef(taskLoad.state.workBranch);
   if (intended === null) return refused('SUBJECT_NOT_ESTABLISHED');
@@ -237,7 +343,11 @@ export async function performPublication(
   // fix it, which it cannot without naming the value it refused.
   if (grant === null) return refused('SUBJECT_NOT_ESTABLISHED');
 
-  return publishDeliveryHead(grant, repositoryRoot, {
+  // What the authority said at the moment of acting, when that is no longer
+  // `AUTHORISED`. Written by the closure below and read once, after it.
+  let withdrawn: HeadPublication | null = null;
+
+  const published = await publishDeliveryHead(grant, repositoryRoot, {
     runner: seams.publicationRunner,
     // A second, independent pass through the whole resolution — repository,
     // task record, subject, work branch — for the reason
@@ -255,6 +365,34 @@ export async function performPublication(
       if (!rebuilt.ok) return null;
       const ref = publishableRef(reloaded.state.workBranch);
       if (ref === null) return null;
+      // The authority again, against the identity *this* pass resolved rather
+      // than the one the ladder resolved a moment ago. `recheck` is the last
+      // point at which this build reads anything of its own — two `git remote
+      // get-url` calls and one `ls-remote` follow it — so this is where a
+      // permission that stopped standing is caught: an operator who edited the
+      // declaration is answered here with nothing sent.
+      //
+      // It is a second reading and not a cached one. On the attended path it is
+      // the same constant-time arm the ladder took and reads no file at all.
+      const still = resolvePublicationAuthority(options, rebuilt.subject, seams);
+      if (still !== 'AUTHORISED') {
+        // …and the refusal is only *reported as* a withdrawal when this pass
+        // resolved the same repository the ladder did. A task re-pinned onto
+        // another delivery target also fails this grading — correctly, because
+        // nobody declared anything about the repository now in front of it —
+        // but the honest answer there is that the subject moved, which is what
+        // `publishDeliveryHead` will say on its own. Reporting "this operator
+        // declared nothing about this repository" for a run whose repository
+        // changed underneath it would be a true sentence about the wrong event.
+        if (
+          rebuilt.subject.host === subject.subject.host &&
+          rebuilt.subject.owner === subject.subject.owner &&
+          rebuilt.subject.name === subject.subject.name
+        ) {
+          withdrawn = still;
+        }
+        return null;
+      }
       return Object.freeze({
         host: rebuilt.subject.host,
         owner: rebuilt.subject.owner,
@@ -265,6 +403,25 @@ export async function performPublication(
       });
     },
   });
+
+  // `publishDeliveryHead` is not taught what a declaration is, and is not
+  // changed by this slice at all. It grades a `recheck` that answered `null` as
+  // `SUBJECT_CHANGED` — true about the subject, and silent about why. Naming the
+  // reason is this function's business because this function is where the
+  // authority lives.
+  //
+  // The rename is guarded three ways and each is load-bearing: only on that
+  // exact member, only when the closure above actually recorded a withdrawal,
+  // and only into a member that asserts the same thing `SUBJECT_CHANGED` does —
+  // nothing read from the remote and nothing attempted. That last part is a
+  // property of the ladder rather than a hope: `recheck` runs second, before the
+  // URL agreement, before the pre-reading and before the push, so a result
+  // carrying this member cannot describe an effect. A member that could describe
+  // one would be renamed here into a refusal, which is the one direction that
+  // must never happen.
+  const reason: HeadPublication | null = withdrawn;
+  if (reason !== null && published.publication === 'SUBJECT_CHANGED') return refused(reason);
+  return published;
 }
 
 /**

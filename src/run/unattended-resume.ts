@@ -1,5 +1,5 @@
 /**
- * The bounded quota-reset wait, and the only unattended execution path AO has
+ * The bounded quota-reset wait, and the only unattended path on which AO runs an AGENT
  * (V3-08).
  *
  * ── What this module is, in one sentence ───────────────────────────────────

@@ -290,7 +290,24 @@ describe('the publication vocabulary', () => {
         }
       }
     }
-    const fromLadder = new Set<HeadPublication>(['SUBJECT_NOT_ESTABLISHED', 'TASK_NOT_READY', 'OPERATOR_ABSENT']);
+    // Seeded, not derived, and said plainly: these six are produced by
+    // `performPublication`'s refusal ladder, which needs a resolved repository,
+    // a task record and a seam for the operator's declaration to drive. They are
+    // driven for real — every one of them, by a real call, asserted to be
+    // exactly the set the grader cannot produce — in
+    // `tests/v4-13-unattended-head-publication.test.ts`, under 'the ladder
+    // produces every member the grader cannot'. What this case is for is the
+    // union: a member that neither producer can reach is a dead enum, and adding
+    // one here without adding it there fails over there instead of passing
+    // quietly here.
+    const fromLadder = new Set<HeadPublication>([
+      'SUBJECT_NOT_ESTABLISHED',
+      'TASK_NOT_READY',
+      'OPERATOR_ABSENT',
+      'AUTOMATIC_PUBLICATION_NOT_DECLARED',
+      'AUTOMATIC_PUBLICATION_DENIED',
+      'PUBLICATION_POLICY_UNREADABLE',
+    ]);
     // AUTHORITY_REFUSED and SUBJECT_CHANGED come from the publisher itself.
     const spent = grantFor();
     expect(claimHeadPublication(spent)).not.toBeNull();
@@ -1319,17 +1336,30 @@ describe('the delivery command publishes only when asked, and only when told som
 // ── 9. The operator surface says what it can and cannot ────────────────────
 
 describe('the surface states its own limits', () => {
-  it('describes --publish-head as create-only, attended, and granting nothing', () => {
-    expect(PUBLISH_HEAD_OPTION_DESCRIPTION).toContain('Requires --attended');
+  it('describes --publish-head as create-only, granted, and granting nothing', () => {
+    // 'Requires --attended' stood here until V4 slice 13 gave this act a second
+    // grant and made the sentence false. It is replaced rather than dropped:
+    // what has to be said is that the act needs a grant and which grants exist,
+    // and both spellings are named because an operator running unattended who
+    // is sent to --attended has been sent to a flag their invocation refuses.
+    expect(PUBLISH_HEAD_OPTION_DESCRIPTION).toContain('Requires a task at READY_FOR_PR and a grant');
+    expect(PUBLISH_HEAD_OPTION_DESCRIPTION).toContain('--attended');
+    expect(PUBLISH_HEAD_OPTION_DESCRIPTION).toContain('--automatic-publish-head-only');
     expect(PUBLISH_HEAD_OPTION_DESCRIPTION).toContain('READY_FOR_PR');
     expect(PUBLISH_HEAD_OPTION_DESCRIPTION).toContain('Create-only');
     expect(PUBLISH_HEAD_OPTION_DESCRIPTION).toContain('opens no pull request');
     expect(PUBLISH_HEAD_OPTION_DESCRIPTION).toContain('writes no task state');
   });
 
-  it('describes --attended as presence, and refuses an unattended publication', () => {
+  it('describes --attended as presence, and as the only grant for the other two acts', () => {
     expect(ATTENDED_OPTION_DESCRIPTION).toContain('operator is present');
-    expect(ATTENDED_OPTION_DESCRIPTION).toContain('no unattended publication');
+    // 'no unattended publication' stood here and V4 slice 13 made it false. The
+    // half that is still true is asserted instead, and it is the half that
+    // matters: the two acts with the largest blast radius have exactly one
+    // grant, and this flag is it.
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('no unattended ' + 'pull request and no unattended merge');
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--automatic-publish-head-only');
+    expect(ATTENDED_OPTION_DESCRIPTION).not.toContain('no unattended publication');
   });
 
   it('keeps the command description true of the whole surface', () => {

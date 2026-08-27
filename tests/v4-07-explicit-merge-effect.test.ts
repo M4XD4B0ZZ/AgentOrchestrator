@@ -1608,6 +1608,12 @@ describe('the delivery command merges only when asked, and only when it may', ()
     expect(longs).toEqual(
       [
         '--attended',
+        // V4 slice 13's second grant for the publication act. It names no new
+        // act — the mutation set is still the same three — and what it does
+        // instead is say who may ask for one of them: nobody present, where
+        // this machine's operator declared that repository publishable that
+        // way. Its own boundary is measured in `tests/v4-13-…`.
+        '--automatic-publish-head-only',
         '--conclude-delivery',
         '--create-pr',
         '--decide',
@@ -1644,7 +1650,7 @@ describe('the delivery command merges only when asked, and only when it may', ()
     expect(MERGE_PR_OPTION_DESCRIPTION).toContain('GitHub is what enforces them');
     expect(MERGE_PR_OPTION_DESCRIPTION).toContain('never one you name');
     expect(MERGE_PR_OPTION_DESCRIPTION).toContain('still READY_FOR_PR');
-    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--publish-head, --create-pr and --merge-pr');
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--create-pr and --merge-pr');
     expect(ATTENDED_OPTION_DESCRIPTION).toContain('no unattended merge');
     expect(DELIVERY_COMMAND_DESCRIPTION).toContain('--merge-pr');
     expect(DELIVERY_COMMAND_DESCRIPTION).toContain('not merge eligibility');

@@ -2974,7 +2974,15 @@ describe('post-merge verification changes no execution state and no ledger', () 
     expect(DELIVERY_COMMAND_DESCRIPTION).not.toContain('contacting no network at all');
     // `--attended` still means what it meant: an effect outside this machine.
     // Verification has none, so it must not have been added to that list.
-    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--publish-head, --create-pr and --merge-pr');
+    //
+    // The list used to be one enumeration, '--publish-head, --create-pr and
+    // --merge-pr', and V4 slice 13 changed its shape: this flag is still a grant
+    // for all three and is now the ONLY grant for two of them. Both halves are
+    // asserted, because dropping either would let the sentence stop naming an
+    // act it governs. What this case is about is unchanged and is the last
+    // line: `--verify-merge` is not one of them.
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--create-pr and --merge-pr');
+    expect(ATTENDED_OPTION_DESCRIPTION).toContain('--publish-head');
     expect(ATTENDED_OPTION_DESCRIPTION).not.toContain('--verify-merge');
   });
 

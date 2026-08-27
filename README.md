@@ -8894,10 +8894,16 @@ fencing.
 
 ### The authority is a type, and it is spent when it is read
 
-`--publish-head` alone does nothing; it requires `--attended`, the same shape
-`release` uses. When both are given and the task is at `READY_FOR_PR`, one
-opaque `HeadPublicationGrant` is minted, bound to
-`{host, owner, name, remoteName, ref, commit}`.
+`--publish-head` alone does nothing; it requires a grant that names this act.
+`--attended` is one, in the same shape `release` uses; V4 slice 13 added a
+second, `--automatic-publish-head-only`, which is the operator's standing
+declaration rather than their presence. When the ladder's authority step answers
+`AUTHORISED` — which `--attended` does on its own, and which the automatic grant
+does only where the operator's declaration grades this repository `ALLOWED` —
+and the task is at `READY_FOR_PR`, one opaque `HeadPublicationGrant` is minted,
+bound to `{host, owner, name, remoteName, ref, commit}`. It is the same artefact
+from either route, because what it authorises is a ref at a commit and not a
+reason; what differs is what has to be true before the mint is reached.
 
 It is **one-shot, structurally**: there is no accessor that reads what it
 authorises without spending it in the same call, so a grant that could be read
@@ -10118,6 +10124,7 @@ There is no drive-shaped authority.
 | `--drive` | nothing |
 | `--drive --attended` | **nothing** |
 | `--drive --publish-head --attended` | the branch push |
+| `--drive --publish-head --automatic-publish-head-only` | the branch push, **only** where the operator declared it (V4 slice 13) |
 | `--drive --create-pr --attended` | the pull request |
 | `--drive --merge-pr --attended` | the merge |
 
@@ -10369,9 +10376,11 @@ driver's ladder, which is a second opinion about what a deliverable task is.
 
 ### Selecting is not permission
 
-`--publish-head`, `--create-pr`, `--merge-pr` and `--attended` mean exactly what
+`--publish-head`, `--create-pr`, `--merge-pr` and the grants mean exactly what
 they meant. `delivery --drive --select-task --attended` changes nothing on
-github.com. There is no `SelectionProof`: an opaque artefact exists in this build
+github.com, and neither does adding `--automatic-publish-head-only` to it: a
+chosen subject is still a subject, and the act flag and the grant are still both
+required. There is no `SelectionProof`: an opaque artefact exists in this build
 to force proof over assertion where an *authority* is granted, and a router
 grants none — adding one would imply a permission the selection does not carry.
 The driver cannot even tell a selected task from a named one; the word does not
@@ -10467,23 +10476,297 @@ so the plan's own order is the only in-build proxy for a block's ordering.
   real task markdown read by the real `discoverTasks`, real task-state files
   written by the real store, and real conclusion records with real bindings.
 
+## Publishing with nobody present (V4 slice 13)
+
+This is the first slice in which AO may change something outside the machine
+without a person being there for that invocation. It is deliberately the
+narrowest act it has: **creating one work branch on one delivery remote, at one
+commit, create-only.** It is not a pull request, not a merge, not a scheduler and
+not a loop.
+
+    delivery --repository <path> --task <id> \
+             --drive --publish-head --automatic-publish-head-only
+
+The push is unchanged — the same vector, the same empty-lease compare-and-swap,
+the same grader, the same refusal to retry an uncertain outcome. What is new is
+the answer to one question: *who may authorise it when nobody is present?*
+
+### The permission is the operator's, and it is outside every repository
+
+    <OS user profile>/.agent-orchestrator/delivery-automation.yaml
+
+```yaml
+schemaVersion: 1
+repositories:
+  - host: github.com
+    owner: M4XD4B0ZZ
+    name: AgentOrchestrator
+    headPublication: AUTOMATIC_ALLOWED   # or ATTENDED_ONLY
+```
+
+That directory is resolved from `os.userInfo()` — the process token on Windows,
+the passwd entry on POSIX — so it consults no environment variable, no CLI flag
+and no repository file. It is where `notify.yaml` already lives, under the same
+argument and the same loader.
+
+**The work being delivered cannot write it.** A task can edit its worktree, it
+can commit, and it can put a `delivery-automation.yaml` anywhere inside the
+repository it likes; none of those is the path above, and the module that reads
+the declaration names no repository path, no Git subcommand and no environment
+variable at all — which the suite measures by sweeping its source for the names
+those things go by. That is an instrument with a stated reach: it names ten
+tokens, so it catches a module that reached for the repository under any of them
+and would not catch one that built a path from parts under names nobody thought
+of. What it is, is a tripwire on the shape of the defect, placed there because
+the property it guards is the one the whole slice rests on.
+
+### Why not the repository profile, pinned to a commit
+
+`src/scope/pinned-scope.ts` already reads a repository profile out of the commit
+a task was pinned to, precisely so a writer cannot widen its own scope, and
+`scopeAuthorityCommit` already exists so that a predecessor in a block chain
+cannot widen its successor's. That is the right *pattern* and it was the first
+candidate. Two measured facts ruled it out.
+
+In **this** repository the profile is in no commit: `.gitignore` ignores
+`.agent-orchestrator/`, the file is untracked, and
+`git show HEAD:.agent-orchestrator/repo-profile.yaml` answers `fatal: path …
+exists on disk, but not in 'HEAD'`. A permission read from a commit is
+unreadable here, so the only path any test could exercise would be the refusal.
+And a repository profile is repository-authored input — the same trust class the
+publication mint already refuses to take prose from, which is a stronger reason
+to refuse a *permission* from it than a title.
+
+### Capability is not permission
+
+Two independent things are required, and neither implies the other:
+
+1. **this invocation asks** — `--automatic-publish-head-only`, which is refused
+   together with `--attended`, requires `--drive` and `--publish-head`, and is
+   refused beside `--create-pr` or `--merge-pr`. All four refusals are answered
+   before the repository is resolved, so what an invocation is refused for never
+   depends on what is in the repository;
+2. **the operator has decided** — an entry naming this exact `host/owner/name`
+   whose `headPublication` is `AUTOMATIC_ALLOWED`.
+
+A permitting declaration and no flag publishes nothing. The flag and no
+declaration publishes nothing. **Absence is never authority:** the automatic path
+is not "no `--attended`", it is a flag of its own.
+
+### Why it requires `--drive`
+
+Because publishing with nobody present is only done from a position this
+invocation derived for itself. Under `--drive` the publication is reached only
+after this run has read the delivery conclusion from disk (a concluded delivery
+stops), read the merge receipt and the verification history, taken a fresh
+observation of github.com, and reached a decision of `PULL_REQUEST_REQUIRED` — no
+open pull request has this head. A bare `--publish-head` would skip all of that,
+and the concrete failure is not hypothetical: a delivery that was merged and
+whose branch the forge deleted presents an absent ref again.
+
+### Default deny, and four different ways of not saying yes
+
+No file, an empty list, an entry for another repository, and `ATTENDED_ONLY` all
+refuse. So does a declaration this build cannot turn into a permission — a
+version it does not understand, a key it does not know, a permission value that
+is not one of the two members, one repository named twice, a malformed document,
+a forbidden mapping key, a file too large to parse, or one it cannot read — and
+that case gets **its own answer**, distinct from the one that says no, because a
+broken authority configuration must not be delivered as a working refusal.
+
+The vocabulary is closed in both directions. `schemaVersion` is a literal, every
+object is `.strict()` so an unknown key refuses the whole document, and the
+permission is a two-member enum graded by an exhaustive switch. A key some later
+slice would add for a *second act* therefore refuses today, rather than being
+ignored beside one this build does understand.
+
+### It grants one act, and stops
+
+`--automatic-publish-head-only` grants the publication and nothing else. It
+grants no pull request, no merge, no comment, no review, no branch deletion and
+no update of a ref that already exists. Two independent things enforce that: the
+command line refuses `--create-pr` and `--merge-pr` beside it, and the driver's
+own `mayPerform` answers `false` for both acts under every invocation without
+`--attended`. So a drive that publishes under the automatic grant and finds the
+head **already there** reports that creating the pull request is the next missing
+act — and does not perform it.
+
+At most one forge mutation is attempted per invocation, unchanged.
+
+### The permission is re-proved at the last moment
+
+The declaration is read again, against a freshly resolved delivery identity,
+inside the `recheck` — the last thing this build **reads from disk** before the
+remote is contacted. An operator who withdrew it while the ladder was running is
+answered there, with nothing read from the remote and nothing attempted. That it
+is the last such read is measured: the suite establishes how many repository
+resolutions the path makes and removes the declaration on the last one.
+
+"Last read from disk" and "immediately before the push" are not the same
+sentence, and the second one would be false. Between the re-proof and the push
+git is asked for the remote's two URLs and then for the ref itself — the second
+of those is a network round trip with a two-minute ceiling. The permission is
+therefore proved before that window and not inside it, exactly as the subject is.
+`L-V4-13-4`.
+
+Nothing is stored between invocations. There is no "publication pending" state,
+no cached permission and no grant that survives a process, so the next invocation
+reads the file again.
+
+### The fence, measured
+
+Against a real bare repository, with the exact vector this build sends:
+
+| Case | Measured |
+| --- | --- |
+| ref absent | `[new branch]`, exit 0 |
+| ref at another commit | `[rejected] (stale info)`, exit 1, ref unmoved |
+| ref already at this commit | `[up to date]`, exit 0 — the lease is not evaluated |
+
+Two different mechanisms sit in that table, and the slice measures both rather
+than calling them one thing. The `(stale info)` row is decided **on this side**:
+git compares the ref the remote advertised against the empty lease and refuses
+before it sends an update. The row that fences two *concurrent* publishers is a
+different one, and it is the server's — receive-pack's own ref transaction:
+
+| Case | Measured |
+| --- | --- |
+| two publishers create the same ref at once | exactly one `[new branch]` exit 0, every time; the loser is refused by the server's ref transaction when they genuinely race and reports `up to date` when they serialise |
+
+Both are measured against a real bare repository in
+`tests/v4-13-unattended-head-publication.test.ts`. The race is driven five times,
+and what is pinned is the invariant that holds in every interleaving — exactly one
+`[new branch]`, one ref, at that commit — plus that the loser's outcome is one of
+the two shapes above and never a third. Pinning which shape would be pinning the
+scheduler. The `up to date` row is
+`L-V4-13-5` below.
+
+### What an unattended invocation can do besides publish
+
+The publication itself writes nothing: no task state, no block-ledger entry, no
+delivery record, no cached permission. Nothing about the grant is durable, and
+the next invocation reads the declaration again.
+
+The *invocation* is a `--drive`, and a drive does more than publish. This is not
+new and it is not this grant's doing — `delivery --drive` has done all of it with
+no grant at all since V4 slices 8 to 11 — but under this flag it happens with
+nobody present, so it is stated here rather than left to be discovered:
+
+- it can write the merge receipt, the post-merge verification history and the
+  delivery conclusion beside the task, up to three records in one invocation;
+- when it verifies the merge commit it takes this repository's execution lease,
+  makes a detached Git worktree beside the repository, and **runs the
+  verification commands the repository's own profile declares.**
+
+None of that is a forge mutation and none of it needs a grant today. An operator
+who is not prepared for their profile's verify commands to run unattended should
+not declare the repository publishable that way — the two arrive together,
+because the flag requires `--drive`. `L-V4-13-9`.
+
+`READY_FOR_PR` stays terminal: nothing here writes task state, touches the block
+ledger, or gives it an outgoing transition.
+
+### Carried forward from V4 slice 13, deliberately
+
+- **L-V4-13-1 — the declaration is a file, and containment is not this slice's.**
+  It is outside every repository and every worktree, and the writing agent runs
+  under an edit-only profile with no shell — the same boundary `notify.yaml`
+  already stands on. It is not process containment: an agent that could execute
+  arbitrary commands as this OS user could write either file.
+- **L-V4-13-2 — the declaration is not repository-reviewable.** Choosing the
+  operator's home over a tracked profile buys immunity from the work being
+  delivered and gives up review. For a create-only branch push that is the right
+  trade; for an act with a larger blast radius it may not be.
+- **L-V4-13-3 — identity is compared exactly.** github.com folds case in an owner
+  and a repository name; this build does not, so a differently-capitalised entry
+  answers `NOT_DECLARED`. Fail-closed, and it will look like a bug to whoever
+  hits it.
+- **L-V4-13-4 — nothing is re-read between the authority re-proof and the
+  push.** Two local `git remote get-url` calls and one `ls-remote` — a network
+  round trip with a 120-second ceiling — run in that window, and nothing is
+  consulted inside it. Inherited from slice 5 unchanged, and the same window an
+  attended publication has; what this slice changes is that the fact proved
+  before it is a permission rather than only a subject.
+- **L-V4-13-5 — a publisher that created nothing can report `PUBLISHED`.**
+  Measured: a push of the same commit onto a ref that already holds it exits 0
+  and reports `up to date` without the lease being evaluated. In the ladder that
+  is normally answered `ALREADY_PUBLISHED` from the pre-reading and no push
+  happens; it is reachable when somebody else creates the ref at this commit
+  inside `L-V4-13-4`'s window. The remote state the member asserts is true; the
+  authorship it implies is not. Nothing durable records it.
+- **L-V4-13-6 — a credential prompt would stall an unattended push.**
+  `GIT_TERMINAL_PROMPT` is set nowhere and the child receives `USERPROFILE`, so a
+  machine whose credential helper wants an answer burns the 120-second ceiling
+  with nobody to resolve it. Not unsafe — the no-retry rule holds — but it is a
+  stall per invocation.
+- **L-V4-13-7 — `OPERATOR_ABSENT` is not reachable under `--drive`.** Measured:
+  `mayPerform` answers `false` for an act with no grant, so the driver settles
+  `ATTENDED_AUTHORITY_REQUIRED` and the ladder is never called. The member is
+  reached by naming `--publish-head` directly.
+- **L-V4-13-9 — the flag requires `--drive`, and a drive does more than
+  publish.** Under this grant a run can write the merge receipt, the verification
+  history and the conclusion, take the execution lease, make a detached worktree
+  and run the repository profile's own verification commands, all with nobody
+  present. None of that is new and none of it is a forge mutation — `--drive`
+  has done it with no grant at all since slice 9 — but it now happens on an
+  invocation nobody is watching, and the two cannot be separated because the
+  grant requires the drive. Measured only for the publishing shape; the other
+  shapes are `tests/v4-11-…`'s.
+- **L-V4-13-10 — the racing interleaving is observed, not required.** The
+  concurrent case pins the invariant that holds in every interleaving and
+  classifies the loser into the two known shapes; it does not require that any
+  round actually raced, because that would be requiring a scheduler. On a runner
+  where the two children always serialise, the server's own ref transaction is
+  exercised by nothing in this suite and the case is still green.
+- **L-V4-13-8 — no live product dogfood was possible.** Unchanged from
+  `L-V4-12-9`: this repository has no orchestrated task and no runtime state, so
+  no legitimate delivery could exercise the automatic path end to end. What is
+  measured against real bytes is the declaration — a real file in a real scratch
+  profile, read by the real loader — and the fence, against a real bare
+  repository.
+- **L-V4-12-1 is unchanged and now matters more.** Nothing re-establishes the
+  plan's order between `--select-task`'s walk and the effect. Attended, an
+  operator named the task; under the automatic grant the subject is chosen by a
+  walk nothing revalidates. Bounded by everything above, and stated.
+
+See [`docs/decisions/2026-08-26-adr-unattended-head-publication.md`](docs/decisions/2026-08-26-adr-unattended-head-publication.md).
+
 ## Not implemented yet
 
-Still missing, deliberately: unattended operation; owned process containment on
-POSIX; and any *autonomous* product-side PR/CI/merge decision. V4 slices 5 to 7
-gave this build three forge acts — publish a branch, open a pull request, merge
-one — and every one of them requires an operator to be present for that
-invocation. None of them decides that a merge is warranted; they perform an act
-an operator asked for, on the exact commit that invocation observed. Slices 8, 9
+Still missing, deliberately: **unattended pull-request creation and unattended
+merge**; owned process containment on POSIX; and any *autonomous* product-side
+PR/CI/merge decision. V4 slices 5 to 7 gave this build three forge acts —
+publish a branch, open a pull request, merge one — and two of the three still
+require an operator to be present for that invocation.
+
+The third does not, as of V4 slice 13, and the exception is narrow enough to
+state in one sentence: **AO may create one work branch on one delivery remote
+with nobody present, when this machine's operator has declared that repository
+publishable that way in a file outside every repository, and when the invocation
+explicitly asks for it.** It opens no pull request, merges nothing, and grants no
+authority for either — see [Publishing with nobody present (V4 slice
+13)](#publishing-with-nobody-present-v4-slice-13). The sentence that stood here
+said every forge act requires an operator; that slice made it false, and it is
+corrected rather than left standing.
+
+None of the three decides that a merge is warranted; they perform an act
+that was asked for — by an operator, or, for the publication alone, by an
+invocation carrying a permission an operator gave in advance — on the exact
+commit that invocation observed. Slices 8, 9
 and 10 add no fourth act: they read, and write locally. Slice 11 adds none
 either, and adds no authority: `--drive` works out which of the existing acts a
 delivery still needs and runs those, but each of the three that reach github.com
-still requires its own flag and `--attended`, separately, and at most one of them
-is attempted per invocation. Slice 12 adds no act and no authority either: it
+still requires its own flag and a grant that names that act, separately, and at
+most one of them is attempted per invocation. Slice 12 adds no act and no authority either: it
 answers *which* delivery `--drive` is about, from the plan the repository already
-declares, and every act it hands that delivery to still needs its own flag and
-`--attended`. Deciding that a merge is *warranted* is still not something this
-build does — and choosing a subject is not deciding it.
+declares, and every act it hands that delivery to still needs its own flag and a
+grant that names that act. Slice 13 adds no act either, and it does add an
+authority — the only one in this list that does. It is bounded to the
+publication, requires an explicit flag *and* an operator declaration the
+repository cannot write, and refuses `--create-pr` and `--merge-pr` beside
+itself. Deciding that a merge is *warranted* is still not something this
+build does — choosing a subject is not deciding it, and neither is publishing
+a branch.
 
 `READY_FOR_PR` remains terminal, and there is **no `COMPLETE` task state**. It
 stays terminal even after a merge, after that merge commit has been verified, and
@@ -10530,7 +10813,10 @@ claim; publishing a head grants no authority to open a pull request, opening one
 grants no authority to merge it, and merging one is an act an operator asks for
 rather than a conclusion this build reaches — each is requested and authorised
 separately, and a driver that sequences them does not merge them into one
-authority; and `READY_FOR_PR` is still terminal, with
+authority. Slice 13 does not weaken that: the grant it adds is the publication's
+alone, it is refused on the same command line as the other two acts, and a
+publication made under it stops at the pull request the delivery still needs
+instead of opening one; and `READY_FOR_PR` is still terminal, with
 no outgoing transition — see [The delivery target (V4 slice 1)](#the-delivery-target-v4-slice-1),
 [Durable delivery evidence (V4 slice 3)](#durable-delivery-evidence-v4-slice-3),
 [The delivery decision (V4 slice 4)](#the-delivery-decision-v4-slice-4),

@@ -393,8 +393,9 @@ export const DRIVE_TRAILER =
   'Driving derives where this delivery stands and runs the acts that stand between it and a\n' +
   'conclusion. It adds no act of its own, and it can do nothing an invocation naming an act by\n' +
   'its own flag could not. Publishing a head, opening a pull request and merging one each still\n' +
-  'require that flag and --attended, separately; a drive given none of them changes nothing on\n' +
-  'github.com. At most ONE forge mutation is attempted per invocation: the moment an act reports\n' +
+  'require that flag and a grant that names that act, separately; a drive given none of them\n' +
+  'changes nothing on github.com. At most ONE forge mutation is attempted per invocation:\n' +
+  'the moment an act reports\n' +
   'an attempt this run stops, whatever that attempt came to, because the next thing to do after\n' +
   'any attempt is to read what happened rather than to repeat it. Nothing is retried here and\n' +
   'nothing is polled: there is no sleep, no loop and no background work, so a condition that is\n' +
@@ -411,8 +412,10 @@ export const DRIVE_TRAILER =
 
 export const SELECTION_TRAILER =
   'Selecting a task chooses WHICH delivery is driven and authorises nothing about it. The three\n' +
-  'acts that reach github.com still need their own flag and --attended, separately, exactly as\n' +
-  'they do under --task. The candidates are the tasks this repository DECLARES, walked in the\n' +
+  'acts that reach github.com still need their own flag and a grant that names that act --\n' +
+  '--attended for any of them, or --automatic-publish-head-only for the publication alone --\n' +
+  'separately, exactly as they do under --task. The candidates are the tasks this\n' +
+  'repository DECLARES, walked in the\n' +
   "plan's own dependency order with ties broken by the smallest id, so the answer does not\n" +
   'depend on the order the filesystem listed anything. A task is passed over only when its\n' +
   'delivery is already concluded, when AO has never run it, or when its state is not the one a\n' +

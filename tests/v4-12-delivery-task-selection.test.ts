@@ -21,7 +21,7 @@
  *     to have been selected. Skipping would turn a visible evidence failure into
  *     an invisible bypass;
  *  4. **letting a choice become a permission.** A selection is routing. Every
- *     act still needs its own flag and `--attended`, and a drive that chose its
+ *     act still needs its own flag and a grant naming it, and a drive that chose its
  *     own subject is measured to send nothing through any of the **three**
  *     mutation seams — the publication, the creation and the merge. The fourth
  *     seam the harness counts is the forge *reader*, and it is deliberately not
@@ -921,7 +921,15 @@ describe('the registered surface', () => {
 
   it('tells an operator in the trailer that a choice is not a permission', () => {
     expect(SELECTION_TRAILER).toContain('authorises nothing');
-    expect(SELECTION_TRAILER).toContain('--attended');
+    // The rule, not one flag's name. `toContain('--attended')` stood here and
+    // went stale the moment V4 slice 13 gave the publication a second grant:
+    // the sentence would still have contained the substring while telling an
+    // operator running unattended that their act needs a flag their own
+    // invocation refuses. What has to be true is that selecting adds no
+    // authority and that each act still needs its own flag AND a grant.
+    expect(SELECTION_TRAILER).toContain('their own flag and a grant that names that act');
+    expect(SELECTION_TRAILER).toContain('--attended for any of them');
+    expect(SELECTION_TRAILER).toContain('--automatic-publish-head-only for the publication alone');
     expect(SELECTION_TRAILER).toContain('the walk stops there');
   });
 });
