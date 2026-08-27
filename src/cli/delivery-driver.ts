@@ -259,6 +259,29 @@ export const DELIVERY_DRIVES = [
    */
   'RECEIPT_NOT_DURABLE',
   /**
+   * The unattended publication was permitted and its accountability record did
+   * not reach the disk, so nothing was published.
+   *
+   * A member of its own rather than a variant of `ATTENDED_AUTHORITY_REQUIRED`,
+   * because the authority is not what is missing: this invocation was permitted
+   * and would have published. Telling an operator to pass a flag would be
+   * telling them to work around the one gate this build put in front of an act
+   * nobody watches.
+   *
+   * Nothing was read from the delivery remote and nothing was attempted, which
+   * is why it is not `EFFECT_ATTEMPTED` either. What is wrong is local and in
+   * one of two places: the store under the operator's own profile, or a subject
+   * this build's record contract will not hold. Almost none of it clears on its
+   * own — an event name already taken does, because the next invocation mints a
+   * fresh one — so this is a stop rather than a "call again".
+   *
+   * Which of the store's refusals it was is deliberately not carried up to here.
+   * `performPublication` answers one member for all of them, so a summary that
+   * claimed to name the cause would be a second vocabulary saying less than the
+   * first.
+   */
+  'PUBLICATION_AUDIT_NOT_DURABLE',
+  /**
    * The forge did not answer both of the observation's questions, so nothing
    * was established to decide from. Slice 2's `OBSERVATION_INCOMPLETE`, one
    * level up.
@@ -350,6 +373,9 @@ export const DELIVERY_DRIVE_DETAIL: Readonly<Record<DeliveryDrive, string>> = Ob
     'A reading this invocation needed could not be taken from github.com. Nothing was sent.',
   RECEIPT_NOT_DURABLE:
     'The merge was observed and the receipt did not reach the disk, so this delivery has not moved.',
+  PUBLICATION_AUDIT_NOT_DURABLE:
+    'Publishing with nobody present was permitted, and the record of that permission did not reach the disk. ' +
+    'Nothing was read from the delivery remote and nothing was attempted.',
   OBSERVATION_UNSETTLED:
     'At least one of the two questions was not answered, so there is nothing to decide from.',
   SUBJECT_CHANGED:
@@ -860,6 +886,15 @@ export async function driveDelivery(
       return settle('HUMAN_DECISION_REQUIRED', stage);
     }
     if (published === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
+    if (published === 'PUBLICATION_AUDIT_UNWRITTEN') {
+      // Named before the authority arm below, because this run had the
+      // authority. The publication was permitted, this build would not perform
+      // it without leaving durable evidence of that permission, and the evidence
+      // could not be established — so nothing was contacted. An operator sent to
+      // `--attended` here would be sent to work around the gate rather than to
+      // fix the machine.
+      return settle('PUBLICATION_AUDIT_NOT_DURABLE', stage);
+    }
     if (
       published === 'AUTOMATIC_PUBLICATION_NOT_DECLARED' ||
       published === 'AUTOMATIC_PUBLICATION_DENIED' ||

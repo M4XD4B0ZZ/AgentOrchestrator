@@ -626,6 +626,23 @@ const DRIVE_EXIT_CODES = Object.freeze({
   CHECKS_ABSENT: EXIT_RUN_NEEDS_OPERATOR,
   CHECKS_FAILED: EXIT_RUN_NEEDS_OPERATOR,
   HUMAN_DECISION_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
+  // Graded 3 and not overridden one store code at a time, unlike the two
+  // `_NOT_DURABLE` members below it — and the difference is the effect, not the
+  // store. Those two are written *after* something happened, so a failed write
+  // means a caller was told yes about a thing that is not on disk, and which
+  // code that becomes depends on what the store found. This one is written
+  // *before* anything is contacted, so nothing on the remote is in question and
+  // there is no such asymmetry to grade. The rule rather than a list, because a
+  // list beside a closed vocabulary goes stale: what failed is local — the store
+  // under the operator's profile, or a subject this record's contract will not
+  // hold — and a person has to look at one of the two.
+  //
+  // Graded 3 rather than 5, and the reason is the majority rather than all of
+  // them: one member does clear on its own, because an event name already taken
+  // carries a fresh identity on the next invocation, and the rest need somebody.
+  // Telling an operator "call again" about a store that cannot be written is the
+  // worse of the two errors.
+  PUBLICATION_AUDIT_NOT_DURABLE: EXIT_RUN_NEEDS_OPERATOR,
 
   // This invocation achieved nothing and nothing durable is wrong: a reading
   // could not be taken, the local subject moved under it, or no pull request has
