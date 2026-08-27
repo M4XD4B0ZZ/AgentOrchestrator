@@ -11324,10 +11324,12 @@ one commit, two events from two clones, and two events through remotes with
 different local names. Nothing is collapsed, de-duplicated or reduced to "the
 latest".
 
-**What could not be read is still shown.** An entry this build read no record for
-carries no host, owner, name or ref at all, so it can be neither matched nor
-ruled out. Those entries appear under every query, and the count line says how
-many there are:
+**What could not be read in full is still shown.** An entry this build read no
+record for carries no host, owner, name or ref at all, so it can be neither
+matched nor ruled out. And an entry whose record it read beside a document it
+could not is one the store's grade already counts against it — leaving that out
+would make the line about the store promise a listing the report did not give.
+Both appear under every query, and the count line says how many there are:
 
 ```text
 Query        : github.com/M4XD4B0ZZ/AgentOrchestrator refs/heads/ao/task/V4-17
@@ -11338,6 +11340,9 @@ Matching     : 3 named by this query, 2 naming another branch, 1 not established
 `Entries` is still about the whole store, and so is `Listing`. A damaged entry
 outside your query still grades the store down, because the enumeration never
 learns there was a query.
+
+Only one class is left off the page: an entry this build read in full whose
+record names a different branch.
 
 **A negative says what it can and no more.** "No record this build read in this
 store names that branch" is the strongest true sentence available: anything

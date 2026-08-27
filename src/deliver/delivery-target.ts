@@ -150,17 +150,17 @@ import type { GitQueryResult } from '../repo/git-query.js';
  * because a second copy is free to drift from the first, and a review has
  * already found one in this repository.
  *
- * They moved into a module that imports nothing at all, and that is not
- * tidiness. The reader that needs them may not import *this* module for them:
- * this file carries a type edge to `repo/git-query.ts`, which reaches
- * `doctor/exec.ts`, and the suite's closure sweep follows type edges — so
- * importing this file for a regular expression would put `spawn` in a
- * read-only command's swept graph.
- *
  * `isForgeRepositoryName` carries both halves of the name rule: the character
  * class, and the separate refusal of a name made only of dots. That pairing was
  * two statements here and is now one call, so no caller can apply one half
- * without the other.
+ * without the other — which is the reason the rules are handed out as
+ * predicates rather than as the patterns behind them.
+ *
+ * An earlier version of this note also claimed the move kept `spawn` out of the
+ * reader's swept import graph. A review measured that false: the second
+ * consumer is a CLI command whose graph already reached `doctor/exec.ts` before
+ * this slice and still does. See the grammar module's own header for the
+ * numbers.
  */
 import {
   isForgeHost,

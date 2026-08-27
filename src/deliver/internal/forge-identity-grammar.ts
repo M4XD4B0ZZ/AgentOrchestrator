@@ -8,20 +8,35 @@
  * mind: a second copy is free to drift from the first, and a review has already
  * found one in this repository.
  *
- * The second consumer is a **reader**. `publication-command.ts` bounds the
+ * The second consumer is a **reader**: `publication-command.ts` bounds the
  * identity an operator types before comparing it with a stored one, and the
- * only bound that cannot disagree with the writer's is the writer's own. What
- * it may not do is reach the writer to get it: `delivery-target.ts` carries a
- * type edge to `repo/git-query.ts`, which reaches `doctor/exec.ts`, and the
- * suite's closure sweep follows type edges — so importing that module for a
- * regular expression would put `spawn` in a read-only command's swept graph.
- * This module imports nothing at all.
+ * only bound that cannot disagree with the writer's is the writer's own.
  *
  * They are exported as **predicates and not as patterns**, which is the one
  * thing this module adds. A repository name is two rules and not one — the
  * character class, and a separate refusal of a name made only of dots — and a
  * second caller handed the character class alone would have been free to apply
  * one without the other. There is nothing here to forget.
+ *
+ * ── What this module does NOT buy, stated because a first version claimed it ─
+ *
+ * This module imports nothing at all, so it costs nothing in any import graph.
+ * That is true and it is the whole of what it is worth. An earlier version of
+ * this header claimed more — that importing `delivery-target.ts` instead would
+ * "put `spawn` in a read-only command's swept graph" — and a review measured it
+ * false in both halves.
+ *
+ * Measured, walking the same relative-import edges the suite's closure sweep
+ * walks: `publication-command.ts` reaches **171** files, and with comments
+ * stripped they already name `runCommand` (9), `runGitCommand` (7), `spawn` (4),
+ * `resolveRepository` (4) and even `mintHeadPublicationGrant` (2). They did on
+ * `main` too, through `render-attended-run.ts` — a command registered into the
+ * same program as `delivery` reaches what `delivery` reaches. Nothing this slice
+ * did changed that, and no closure sweep starts at a CLI command.
+ *
+ * The closure that **is** swept starts at the listing, and it is 13 files naming
+ * none of those tokens. It does not import this module either: the query
+ * grammar is applied at the command, before anything is read.
  */
 
 /**

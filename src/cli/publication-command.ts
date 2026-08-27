@@ -263,6 +263,24 @@ export const BRANCH_QUERY_REFUSAL_DETAIL: Readonly<Record<BranchQueryRefusal, st
   });
 
 /**
+ * Every option description this subcommand registers, and every refusal
+ * sentence it can print, in one exported list.
+ *
+ * Exported because both are text an operator reads and neither was reached by
+ * any vocabulary sweep for one commit — the report's sentences are swept through
+ * `AUDIT_PRINTED_TEXT`, and these were simply outside it. A review found the
+ * assertion that looked like it swept them applying the rule to the refusal's
+ * *code* rather than to its sentence.
+ *
+ * Built from the map rather than listed, so a sixth refusal is swept without
+ * anybody remembering to add it. The option descriptions are read off the
+ * registered command by the suite, for the same reason.
+ */
+export const BRANCH_QUERY_PRINTED_TEXT: readonly string[] = Object.freeze(
+  BRANCH_QUERY_REFUSALS.map((refusal) => BRANCH_QUERY_REFUSAL_DETAIL[refusal]),
+);
+
+/**
  * What an invocation asked for. Three answers and no fourth.
  *
  * `WHOLE_STORE` is the shipped command, unchanged. `ONE_BRANCH` carries the
@@ -353,9 +371,11 @@ export const AUTHORISATIONS_DESCRIPTION =
   'history nor evidence of who wrote what - and an attended publication records nothing here ' +
   'at all. Given --forge-host, --forge-owner, --forge-name and --ref together, it shows only ' +
   'the records naming that one branch, compared character for character on those four values ' +
-  'and on no other; entries it read no record for are shown whichever way you ask, because ' +
-  'nothing about them can be compared. It still reads every entry in the store to answer ' +
-  'that, because there is no index. Takes no repository checkout: the store is outside every ' +
+  'and on no other; anything it did not read in full is shown whichever way you ask, because ' +
+  'an entry it could not read all of is one this report may not leave out. It still reads ' +
+  'every entry in the store to answer that, because there is no index. A value outside the ' +
+  'rules this build records an identity under is refused rather than compared. Takes no ' +
+  'repository checkout: the store is outside every ' +
   'repository, each record names its own, and a record outlives the checkout it was about.';
 
 /**
@@ -422,25 +442,27 @@ export function registerPublicationCommand(
     .description(AUTHORISATIONS_DESCRIPTION)
     .option(
       '--forge-host <host>',
-      'With the three below: show only the records naming that one branch. The host exactly ' +
-        'as a record carries it - lowercase, dotted, no port and no scheme. Never defaulted: ' +
-        'the record contract admits any host, so a default would assert something no record ' +
-        'here is bound by.',
+      'With the three below: show only the records naming that one branch. A host as this ' +
+        'build records one it resolved - lowercase, dotted, no port and no scheme. Never ' +
+        'defaulted: the record contract admits any host, so a default would assert something ' +
+        'no record here is bound by. A value outside that rule is refused rather than ' +
+        'compared, and a record carrying one cannot be named by any query.',
     )
     .option(
       '--forge-owner <owner>',
-      'The owning user or organisation exactly as a record carries it. Compared character for ' +
-        'character; case is not folded, because the permission this store is about does not ' +
-        'fold it either.',
+      'The owning user or organisation as this build records one it resolved. Compared ' +
+        'character for character; case is not folded, because the permission this store is ' +
+        'about does not fold it either.',
     )
     .option(
       '--forge-name <name>',
-      'The repository name exactly as a record carries it. Compared character for character.',
+      'The repository name as this build records one it resolved. Compared character for ' +
+        'character, and refused rather than compared if it is outside that rule.',
     )
     .option(
       '--ref <ref>',
-      'The whole ref, refs/heads/ and all, exactly as a record carries it. A bare branch name ' +
-        'is refused rather than turned into a ref, because refs/heads/ is itself something a ' +
+      'The whole ref, refs/heads/ and all, as this build records one. A bare branch name is ' +
+        'refused rather than turned into a ref, because refs/heads/ is itself something a ' +
         'branch name may contain and one guess would stand for two stored values.',
     )
     .action((options: AuthorisationsOptions) => {

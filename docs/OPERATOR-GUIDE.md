@@ -1072,7 +1072,7 @@ dieses eine Verzeichnis. Er startet kein Git, keine GitHub CLI und keinen Agente
 nimmt keine Lease, legt nichts an und ändert nichts — auch dann nicht, wenn das
 Verzeichnis gar nicht existiert.
 
-Optionen gibt es seit V4 Slice 17 genau vier, und sie benennen **einen Branch**:
+Eigene Optionen gibt es seit V4 Slice 17 vier, und sie benennen **einen Branch**:
 `--forge-host`, `--forge-owner`, `--forge-name` und `--ref`. Ohne sie zeigt der
 Befehl alles, wie bisher. Sie verlangen kein Repository, keinen Checkout und
 keinen Netzzugang — siehe unten.
@@ -1281,6 +1281,21 @@ klein-/großgeschrieben angeglichen, nichts abgeschnitten, nichts ergänzt, und 
 wird nie ein Teil eines Wertes verglichen. Ein anders geschriebener Owner ist ein
 anderer Owner; genau so entscheidet auch die Erlaubnis (`L-V4-13-3`).
 
+**Achtung — nicht jeder Schreibfehler wird verglichen.** Die vier Angaben müssen
+den Regeln entsprechen, unter denen AO selbst eine Identität aufschreibt. Was
+diesen Regeln nicht entspricht, wird **abgelehnt** (Exit-Code 2) und gar nicht
+erst verglichen. Am ehesten trifft dich das beim Host: der muss **klein**
+geschrieben sein. `--forge-host GitHub.com` ergibt
+
+```text
+Query        : FORGE_HOST_UNUSABLE
+```
+
+und nicht "0 Treffer". Umgekehrt heißt das: einen Datensatz, den etwas anderes
+mit einem Wert außerhalb dieser Regeln geschrieben hat, kannst du mit keiner
+Abfrage benennen — er wird als "naming another branch" gezählt, und die Liste
+ohne Abfrage zeigt ihn vollständig (`L-V4-17-2`).
+
 **Der Commit gehört nicht dazu.** Zwei Veröffentlichungen desselben Branches auf
 zwei Commits sind zwei Einträge einer Historie, und beide werden gezeigt. Ebenso
 zwei Einträge auf demselben Commit, zwei aus verschiedenen Klonen und zwei über
@@ -1292,10 +1307,15 @@ Ein kurzer Name würde bedeuten, dass AO `refs/heads/` errät — und `refs/head
 ist selbst etwas, das in einem Branch-Namen vorkommen darf, ein Rateergebnis
 stünde also für zwei verschiedene gespeicherte Werte.
 
-**Was AO nicht lesen konnte, wird trotzdem gezeigt.** Ein Eintrag ohne lesbaren
-Datensatz trägt weder Host noch Owner noch Name noch Ref — er kann also weder
-zutreffen noch ausgeschlossen werden. Solche Einträge stehen bei **jeder** Abfrage
-in der Liste, und die Zählzeile sagt, wie viele es sind:
+**Was AO nicht vollständig lesen konnte, wird trotzdem gezeigt.** Ein Eintrag ohne
+lesbaren Datensatz trägt weder Host noch Owner noch Name noch Ref — er kann also
+weder zutreffen noch ausgeschlossen werden. Und ein Eintrag, dessen Datensatz AO
+zwar lesen konnte, neben dem aber ein Dokument liegt, das es nicht lesen konnte,
+ist genau der Eintrag, den die Zeile `Listing` bereits gegen den Store zählt —
+ihn wegzulassen würde diese Zeile zu einer Lüge machen. Beide stehen bei **jeder**
+Abfrage in der Liste. Weggelassen wird nur eines: ein Eintrag, den AO vollständig
+gelesen hat und dessen Datensatz einen anderen Branch nennt. Die Zählzeile sagt,
+wie viele es jeweils sind:
 
 ```text
 Query        : github.com/M4XD4B0ZZ/AgentOrchestrator refs/heads/ao/task/V4-17

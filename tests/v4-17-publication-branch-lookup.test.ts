@@ -60,6 +60,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { buildProgram } from '../src/cli/index.js';
 import {
   AUTHORISATIONS_DESCRIPTION,
+  BRANCH_QUERY_PRINTED_TEXT,
   BRANCH_QUERY_REFUSALS,
   BRANCH_QUERY_REFUSAL_DETAIL,
   readBranchQuery,
@@ -76,6 +77,7 @@ import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import {
   HEAD_PUBLICATION_BRANCH_QUERY_READINGS,
   branchQueryReading,
+  entryWasRead,
   listHeadPublicationAuthorisations,
   recordNamesQueriedBranch,
   selectQueriedBranch,
@@ -514,6 +516,14 @@ describe('exact means exact', () => {
    * convention to records whose host field admits any string.
    */
   it.each([
+    // The host is here even though a mis-cased host cannot be *asked* for - the
+    // query grammar is lowercase-only and refuses one with exit 2. What the
+    // record contract admits is any string of at most 253 characters, so a
+    // record carrying `GitHub.com` is a shape the store holds and a comparison
+    // has to answer. Without this row the case-folding mutant on `forgeHost`
+    // survives the whole publication suite while the other three are killed:
+    // measured, in a scratch copy, against a green baseline.
+    ['host', { host: 'GitHub.com' }],
     ['owner', { owner: 'm4xd4b0zz' }],
     ['repository name', { name: 'agentorchestrator' }],
     ['ref', { ref: 'refs/heads/AO/task/V4-17' }],
@@ -578,15 +588,24 @@ describe('exact means exact', () => {
    * `#private` field were each measured to be no defence — names are what work.
    */
   it('spells the query so it can never be an argument to a mint', () => {
+    // The value a production invocation builds, not this file's own fixture: an
+    // assertion over `BRANCH` would be an assertion about the test.
+    const asked = readBranchQuery({
+      forgeHost: IDENTITY.host,
+      forgeOwner: IDENTITY.owner,
+      forgeName: IDENTITY.name,
+      ref: REF,
+    });
+    expect(asked.kind).toBe('ONE_BRANCH');
+    const keys = Object.keys((asked as { query: HeadPublicationBranchQuery }).query);
+
     for (const forbidden of ['host', 'owner', 'name', 'commit', 'ref', 'remoteName']) {
-      expect(Object.keys(BRANCH), `a query must not carry ${forbidden}`).not.toContain(forbidden);
+      expect(keys, `a query must not carry ${forbidden}`).not.toContain(forbidden);
     }
-    expect(Object.keys(BRANCH).sort()).toEqual([
-      'authorisedRef',
-      'forgeHost',
-      'forgeName',
-      'forgeOwner',
-    ]);
+    expect(keys.sort()).toEqual(['authorisedRef', 'forgeHost', 'forgeName', 'forgeOwner']);
+    // …and the fixture this file compares against is the same shape, so every
+    // other case here is measuring the production spelling too.
+    expect(Object.keys(BRANCH).sort()).toEqual(keys.sort());
   });
 });
 
@@ -732,11 +751,66 @@ describe("the store's own grade is about the store", () => {
     const selection = selectQueriedBranch(listing.entries, BRANCH);
 
     expect(listing.outcome).toBe('READ_WITH_UNUSABLE_ENTRIES');
-    // The damaged entry is not shown — it names another branch, which this
-    // build did establish — but the grade it caused is.
     expect(selection.named).toBe(1);
     expect(selection.elsewhere).toBe(1);
     expect(report(home, BRANCH)).toContain('Listing      : READ_WITH_UNUSABLE_ENTRIES');
+  });
+
+  /**
+   * The entry that grades the store down must be on the page, whichever branch
+   * it names.
+   *
+   * This is the defect this file was written against and did not catch for one
+   * commit. `entryWasRead` is "the record was read AND nothing beside it was a
+   * document I could not"; the selection asked only whether a record was read.
+   * They disagree on exactly one class — a record this build read, beside an
+   * outcome it could not — and for that class the store's own sentence promised
+   * a listing the filter did not give. Measured then: `Entries : 1 (0 read, 1
+   * not read)`, "each one is listed above with what it turned out to be", and
+   * nothing listed.
+   *
+   * One case per outcome reading that grades a store down, because the rule is
+   * about the predicate rather than about one shape of damage.
+   */
+  it.each([
+    ['an outcome of no bytes', ''],
+    ['an outcome that is not one this build declares', '{not json'],
+    ['an outcome naming a version this build does not read', '{"outcomeVersion":2}'],
+  ])('lists a record naming another branch when %s sits beside it', (_label, bytes) => {
+    const home = scratchHome();
+    const other = record(home, { at: '2026-08-27T12:00:00.000Z', name: 'OtherRepo' });
+    writeFileSync(join(auditRoot(home), other, 'outcome.json'), bytes, 'utf8');
+
+    const listing = list(home);
+    const selection = selectQueriedBranch(listing.entries, BRANCH);
+    const text = report(home, BRANCH);
+
+    expect(listing.outcome).toBe('READ_WITH_UNUSABLE_ENTRIES');
+    // Counted where its record puts it: this build did establish which branch
+    // it names, and that is not the queried one.
+    expect(selection.elsewhere).toBe(1);
+    expect(selection.named).toBe(0);
+    // …and shown regardless, so the store's own sentence stays true.
+    expect(selection.shown.map((entry) => entry.name)).toEqual([other]);
+    expect(text).toContain(other);
+    expect(text).toContain('Each one is listed above with what it turned out');
+  });
+
+  it('leaves out only an entry it read in full that names another branch', () => {
+    const home = scratchHome();
+    const clean = record(home, { at: '2026-08-27T12:00:00.000Z', name: 'OtherRepo', outcome: true });
+    const absent = record(home, { at: '2026-08-27T12:01:00.000Z', name: 'OtherRepo' });
+
+    const selection = select(home);
+
+    // Both were read in full - one with an outcome, one with none beside it,
+    // and OUTCOME_ABSENT is a clean reading. Neither is shown.
+    expect(list(home).outcome).toBe('READ');
+    expect(selection.elsewhere).toBe(2);
+    expect(selection.shown).toEqual([]);
+    const text = report(home, BRANCH);
+    expect(text).not.toContain(clean);
+    expect(text).not.toContain(absent);
   });
 
   it('counts the whole store on the Entries line, whatever was asked', () => {
@@ -911,8 +985,9 @@ describe('what a filtered report says', () => {
   const SENTENCE_FRAGMENT: Readonly<Record<HeadPublicationBranchQueryReading, string>> =
     Object.freeze({
       NAMED_RECORDS_PRESENT: 'are the ones naming that branch',
-      NO_NAMED_RECORD_PRESENT: 'is one it did read a record for',
+      NO_NAMED_RECORD_PRESENT: 'there is no entry here',
       NO_NAMED_RECORD_AND_EVIDENCE_UNREAD: 'are ones it read no record for at all',
+      STORE_NOT_READ: 'Nothing was read, so nothing about that branch is established here',
     });
 
   /** Each fragment must belong to its own sentence and to no other. */
@@ -947,6 +1022,31 @@ describe('what a filtered report says', () => {
     expectOnly(text, 'NO_NAMED_RECORD_AND_EVIDENCE_UNREAD');
   });
 
+  /**
+   * A store that exists and is empty is a store that was read, and it gets an
+   * answer.
+   *
+   * The guard on the selection is the listing's own outcome and not a proxy for
+   * it. Measured: a mutant reading `listing.entries.length > 0` instead
+   * survived every publication suite, and drops the whole answer - no counts,
+   * no sentence, no paragraph - for a store an operator has every reason to
+   * query.
+   */
+  it('answers a query over a store that was read and is empty', () => {
+    const home = scratchHome();
+    mkdirSync(auditRoot(home), { recursive: true });
+
+    const text = report(home, BRANCH);
+
+    expect(text).toContain('Listing      : READ');
+    expect(text).toContain('Entries      : 0 (0 read, 0 not read)');
+    expect(text).toContain(
+      'Matching     : 0 named by this query, 0 naming another branch, 0 not established',
+    );
+    expectOnly(text, 'NO_NAMED_RECORD_PRESENT');
+    expect(text).toContain(AUDIT_QUERY_MEANING);
+  });
+
   it('says which entries name the branch when some do', () => {
     const home = scratchHome();
     record(home, { at: '2026-08-27T12:00:00.000Z' });
@@ -975,7 +1075,32 @@ describe('what a filtered report says', () => {
     expect(selection.named).toBe(2);
     expect(selection.elsewhere).toBe(2);
     expect(selection.unestablished).toBe(2);
+    // Every entry this build read in full and which names another branch is
+    // left out, and nothing else is. Here both of the two were read in full.
     expect(selection.shown).toHaveLength(selection.named + selection.unestablished);
+    expect(selection.shown.every((entry) => !entryWasRead(entry) || entry.record !== null)).toBe(
+      true,
+    );
+  });
+
+  it('shows exactly the entries the store grade is about, plus the matches', () => {
+    const home = scratchHome();
+    record(home, { at: '2026-08-27T12:00:00.000Z' });
+    const damaged = record(home, { at: '2026-08-27T12:01:00.000Z', name: 'OtherRepo' });
+    writeFileSync(join(auditRoot(home), damaged, 'outcome.json'), '{not json', 'utf8');
+    record(home, { at: '2026-08-27T12:02:00.000Z', name: 'OtherRepo', outcome: true });
+    plantFile(home, 'junk.txt', 'x');
+
+    const listing = list(home);
+    const selection = selectQueriedBranch(listing.entries, BRANCH);
+
+    // The one rule, stated as a rule rather than as a list: an entry is left
+    // out exactly when this build read it in full and its record names another
+    // branch. Everything the store grade counts as not-read is on the page.
+    const hidden = listing.entries.filter((entry) => !selection.shown.includes(entry));
+    expect(hidden.every(entryWasRead), 'nothing unread may be hidden').toBe(true);
+    expect(listing.entries.filter((entry) => !entryWasRead(entry)).length).toBe(2);
+    expect(selection.shown.filter((entry) => !entryWasRead(entry)).length).toBe(2);
   });
 
   /**
@@ -1005,15 +1130,15 @@ describe('what a filtered report says', () => {
     const text = report(home, BRANCH);
 
     expect(text).toContain(`Listing      : ${outcome}`);
-    // The query is echoed, and no count and no answer about the branch is
-    // printed: nothing was read, so nothing about the branch is established.
+    // The query is echoed and no count is printed, because nothing was read.
     expect(text).toContain('Query        : ');
     expect(text).not.toContain('Matching     : ');
     expect(text).not.toContain(AUDIT_QUERY_MEANING);
-    for (const reading of HEAD_PUBLICATION_BRANCH_QUERY_READINGS) {
-      expect(text, reading).not.toContain(AUDIT_QUERY_SENTENCES[reading]);
-      expect(text, reading).not.toContain(SENTENCE_FRAGMENT[reading]);
-    }
+    // And the refusal to answer is a printed sentence rather than a missing
+    // line. An operator who has to infer "unanswered" from an absent `Matching`
+    // is being told nothing, and this outcome exits 0 exactly as a clean
+    // negative does.
+    expectOnly(text, 'STORE_NOT_READ');
   });
 
   it('says that the whole store was read to answer the query', () => {
@@ -1277,18 +1402,54 @@ describe('the command line', () => {
     }
   });
 
-  it('has a total, sweepable refusal vocabulary', () => {
+  it('has a total refusal vocabulary, swept the way the report is', () => {
     expect(Object.keys(BRANCH_QUERY_REFUSAL_DETAIL).sort()).toEqual(
       [...BRANCH_QUERY_REFUSALS].sort(),
     );
+    expect(BRANCH_QUERY_PRINTED_TEXT).toHaveLength(BRANCH_QUERY_REFUSALS.length);
+
     for (const refusal of BRANCH_QUERY_REFUSALS) {
-      const sentence = BRANCH_QUERY_REFUSAL_DETAIL[refusal];
-      expect(sentence.length, refusal).toBeGreaterThan(40);
-      // eslint-disable-next-line no-control-regex
-      expect(sentence, refusal).toMatch(/^[\x20-\x7e\n]+$/);
+      // The code, which is a value line and is held to the value-line rule.
       expect(refusal, 'a refusal code is a value line').not.toMatch(
         /publish|attempt|creat|succeed|complete|execut|push|valid|current|verif|trust|proof|sign/i,
       );
+      expect(BRANCH_QUERY_PRINTED_TEXT, refusal).toContain(BRANCH_QUERY_REFUSAL_DETAIL[refusal]);
+    }
+
+    // The sentences, which are prose and are held to the prose rule. An earlier
+    // version of this case applied the rule to `refusal` and never looked at the
+    // sentence at all - so the five strings an operator actually reads were
+    // swept by nothing, which is exactly the blind spot the report's own label
+    // pin exists to close.
+    const printed = [
+      ...BRANCH_QUERY_PRINTED_TEXT,
+      ...(
+        buildProgram()
+          .commands.find((c) => c.name() === 'publication')
+          ?.commands.find((c) => c.name() === 'authorisations')?.options ?? []
+      ).map((option) => option.description),
+    ];
+    expect(printed.length).toBeGreaterThan(8);
+    for (const sentence of printed) {
+      expect(sentence.length, sentence.slice(0, 40)).toBeGreaterThan(40);
+      // eslint-disable-next-line no-control-regex
+      expect(sentence, sentence.slice(0, 40)).toMatch(/^[\x20-\x7e\n]+$/);
+      const flat = sentence.replace(/\s+/g, ' ').toLowerCase();
+      for (const forbidden of [
+        'never authorised',
+        'was published',
+        'were published',
+        'was created',
+        'were created',
+        'created the branch',
+        'complete history',
+        'tamper-proof',
+        'audit trail',
+        'authenticated',
+        'proof of',
+      ]) {
+        expect(flat, `${forbidden} in: ${sentence.slice(0, 60)}`).not.toContain(forbidden);
+      }
     }
   });
 
@@ -1315,17 +1476,18 @@ describe('the query grammar', () => {
   });
 
   /**
-   * The grammar is the writer's own, reached through a module that imports
-   * nothing.
+   * The grammar is the writer's own, in one place, reached through a module
+   * that imports nothing.
    *
-   * Both halves matter. Single-sourced, because a second copy is free to drift
-   * from the first and this repository has already found one; and reached
-   * without importing `delivery-target.ts`, which carries a type edge to
-   * `repo/git-query.ts` and from there to `doctor/exec.ts` — the suite's
-   * closure sweep follows type edges, so that import would put `spawn` in a
-   * read-only command's swept graph.
+   * That is the whole claim, and it is narrower than the one an earlier version
+   * of this case made. It said the module also kept `spawn` out of a swept
+   * graph; a review measured that false and the numbers are in the module's own
+   * header — the command's import graph reached `doctor/exec.ts` before this
+   * slice and still does, and no closure sweep starts at a CLI command. What is
+   * true and is pinned here: the rules exist once, the module that holds them
+   * reaches nothing, and the reader does not import it at all.
    */
-  it('is single-sourced, and reached without importing anything that can start a program', () => {
+  it('is single-sourced, in a module that reaches nothing', () => {
     const users = walkSource('src').filter((file) =>
       /forge-identity-grammar\.js/.test(codeOnly(file)),
     );
@@ -1337,6 +1499,9 @@ describe('the query grammar', () => {
     for (const copy of ['HOST_PATTERN', 'OWNER_PATTERN', 'NAME_PATTERN', 'ALL_DOTS']) {
       expect(codeOnly('src/deliver/delivery-target.ts'), copy).not.toContain(`const ${copy}`);
     }
+    // The query grammar is applied at the command, before anything is read, so
+    // the reader's own closure - the one the suite sweeps - gains nothing.
+    expect(codeOnly(READER)).not.toContain('forge-identity-grammar');
     expect(codeOnly(COMMAND)).not.toContain('delivery-target.js');
   });
 });

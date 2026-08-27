@@ -31,10 +31,12 @@ index, no limit, no page, no retention rule, and no change to the enumeration.
 > not the branch of that name in another, and the record's own schema admits any
 > host and any owner rather than an enum.
 
-> **Everything that could not be judged is still shown.** An entry this build
+> **Everything this build did not read in full is still shown.** An entry it
 > read no record for carries no host, owner, name or ref at all, so it can be
-> neither matched nor ruled out — and hiding it would turn "one of these might be
-> your branch and I cannot tell" into "there is no record for this branch".
+> neither matched nor ruled out; and an entry whose record it read beside a
+> document it could not is one the store's own grade already counts against it.
+> Hiding either would turn "I could not read all of this" into "there is no
+> record for this branch".
 
 > **This is a filter and not an index.** Every entry in the store is still opened
 > and graded to answer the question. `L-V4-14-3` is narrowed again and is not
@@ -130,7 +132,7 @@ The order is the listing's, unchanged: entries read as event directories first,
 then everything else, each group in code-unit order by name. A query removes
 entries from that order and never reorders it.
 
-## 4. Broken evidence: `UNKNOWN_TO_QUERY`, and it is structural
+## 4. Broken evidence: `unestablished`, and it is structural
 
 The listing's entry type carries the record on the `HISTORICAL_AUTHORISATION`
 arm and `null` on the other seven. The only other field those arms carry is the
@@ -141,7 +143,23 @@ absence of anything to have a policy about.
 
 Of the four candidate contracts, **B** was chosen: broken entries are surfaced
 alongside the matches, as evidence that could not be classified against the
-query.
+query. The selection counts them as `unestablished` and the reading
+`NO_NAMED_RECORD_AND_EVIDENCE_UNREAD` is what a negative over such a store says.
+
+**And the rule for what is shown is wider than that count.** Exactly one class
+is left off the page: an entry this build read **in full** — `entryWasRead`, the
+record *and* whatever sits beside it — whose record names a different branch.
+Everything else is printed, including a record naming another branch when the
+outcome document beside it could not be read.
+
+That second half was a shipped defect for one commit and three independent
+reviews reproduced it. The first version hid on "a record was read", while the
+store's grade and the report's tally are `entryWasRead`. The two disagree on
+exactly one class, so a store holding one such entry printed
+`Entries : 1 (0 read, 1 not read)`, printed "each one is listed above with what
+it turned out to be", and listed nothing. One predicate, one question — the rule
+V4 slice 16 already learned once, applied here by removing a second spelling
+rather than adding one.
 
 - **A — exclude every broken event** was rejected. A malformed record could be
   the record for the branch being asked about, and nothing can say it is not.
@@ -171,14 +189,17 @@ binding is an integrity statement and never an authentication one.
 | matches exist | the matching entries, and `NAMED_RECORDS_PRESENT`'s sentence |
 | no match, every entry read | `NO_NAMED_RECORD_PRESENT` |
 | no match, some entries unread | `NO_NAMED_RECORD_AND_EVIDENCE_UNREAD` |
-| store not readable | the store's own sentence, and **no** answer about the branch |
+| store not readable | the store's own sentence, and `STORE_NOT_READ` |
 
 The last row is load-bearing. On `STORE_ABSENT`, `STORE_UNREADABLE`,
 `STORE_PATH_UNSAFE` and `PROFILE_UNAVAILABLE` the entries array is empty because
 nothing was read, so a selection over it would answer "no record names that
-branch" for a store this build could not open. No selection is computed there,
-no `Matching` line is printed and no query sentence is printed — the query is
-still echoed, so an operator can see what was asked.
+branch" for a store this build could not open. No selection is computed there and
+no `Matching` line is printed — but a **sentence** is, and that is the fourth
+reading. The absence of a line is not a sentence, which is the rule the three
+answers already follow; `STORE_ABSENT` needed it most, because it exits 0 exactly
+as a clean negative does. The query is echoed on every outcome, so an operator
+can always see what was asked.
 
 The strongest claim any negative makes is about **records currently present in
 the readable store**. None of the three sentences says a branch was never

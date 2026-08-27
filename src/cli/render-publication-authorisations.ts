@@ -316,16 +316,21 @@ export const AUDIT_QUERY_SENTENCES: Readonly<
     '  shown; what each entry below establishes is what any record here establishes and no\n' +
     '  more.',
   NO_NAMED_RECORD_PRESENT:
-    'No record this build read in this store names that branch, and every entry in the store\n' +
-    '  is one it did read a record for. That is a statement about what is in this store now\n' +
+    'No record this build read in this store names that branch, and there is no entry here\n' +
+    '  whose record it could not read. Whether anything beside those records was readable is\n' +
+    '  the line above. That is a statement about what is in this store now\n' +
     '  and about nothing else: an attended publication records nothing here, another OS user\n' +
     '  has a store of their own, anything running as this one can remove a record without\n' +
     '  trace, and this command asked no forge what any ref holds.',
   NO_NAMED_RECORD_AND_EVIDENCE_UNREAD:
-    'No record this build read in this store names that branch - and the entries listed below\n' +
-    '  are ones it read no record for at all, so whether any of them concerns that branch is\n' +
-    '  not established here. This is weaker than the answer a whole store would give, and it\n' +
-    '  is deliberately not written as the stronger one.',
+    'No record this build read in this store names that branch - and some of the entries\n' +
+    '  listed below are ones it read no record for at all, so whether any of those concerns\n' +
+    '  that branch is not established here. This is weaker than the answer a whole store\n' +
+    '  would give, and it is deliberately not written as the stronger one.',
+  STORE_NOT_READ:
+    'Nothing was read, so nothing about that branch is established here. This is not an\n' +
+    '  answer to what you asked and must not be read as one: what the line above says about\n' +
+    '  the store is the whole of what this command found out.',
 });
 
 /**
@@ -350,6 +355,19 @@ export const AUDIT_QUERY_MEANING = [
   '  An entry this build read no record for carries none of those four values, so it is',
   '  neither named by this query nor shown to name another branch. Any such entry is listed',
   '  below with what it turned out to be, and is counted separately above.',
+  '',
+  '  An entry counted above as naming another branch is listed below anyway when this build',
+  '  did not read all of its evidence - a record it read, beside a document it could not.',
+  '  Leaving those out would make the line about the store say that everything it could not',
+  '  read is listed here while one such entry was not, so each is shown with what it turned',
+  '  out to be and counted where its record puts it. Only an entry read in full and naming',
+  '  another branch is left out.',
+  '',
+  '  "Naming another branch" is the result of that comparison and not a judgement about a',
+  '  forge. A record spelled outside the rules this build records an identity under - which',
+  '  only something else writing here can produce - cannot be named by any query, because the',
+  '  query is bounded by those same rules; it is counted there, and the listing with no query',
+  '  shows it in full.',
   '',
   '  There is no index here. Every entry in the store was read and graded to answer this,',
   '  exactly as it would have been with no query at all; what the query changed is which of',
@@ -584,13 +602,18 @@ function matching(selection: HeadPublicationBranchSelection): string {
  * the query keeps it. So `Listing : READ` goes on meaning "every entry in the
  * store", which is what its own printed sentence says.
  *
- * What a query removes from the page is exactly one class: entries whose record
- * this build **read**, and which name a different branch. Nothing else is
- * removed, and that is why the three paragraphs below stay true under a query —
- * `READ_WITH_UNUSABLE_ENTRIES`'s "each one is listed above", the provenance
- * paragraph's "an entry whose record this build could not read is listed with
- * what it turned out to be", and the order paragraph's two tiers all describe
- * entries a query never hides.
+ * What a query removes from the page is exactly one class: entries this build
+ * read **in full** — `entryWasRead`, the record and whatever sits beside it —
+ * which name a different branch. Nothing else is removed, and that bound is what
+ * keeps `READ_WITH_UNUSABLE_ENTRIES`'s "each one is listed above" true: every
+ * entry that grades the store down is an entry a query shows.
+ *
+ * An earlier version of this paragraph said the removed class was "entries whose
+ * record this build read", and shipped for one commit. It was measured false by
+ * a review: a record this build read, beside an outcome document it could not,
+ * is not `entryWasRead` — so a store holding one of those naming another branch
+ * printed `Entries : 1 (0 read, 1 not read)`, printed "each one is listed above
+ * with what it turned out to be", and listed nothing.
  *
  * The three "print this only where it applies" tests below read the **shown**
  * entries and not the store's, which is the half a first draft got wrong: a
@@ -616,6 +639,14 @@ export function renderPublicationAuthorisations(
   lines.push(line('Listing', listing.outcome));
   // Echoed on every outcome, including the ones that read nothing: an operator
   // who cannot see what was compared cannot tell a typo from an empty store.
+  //
+  // `printable` here is unreachable by construction and kept for symmetry with
+  // the record's own value lines, which carry bytes off a disk anything running
+  // as this OS user can write. Every value reaching it has passed one of the
+  // four query grammars, and none of those admits a character the escaper
+  // rewrites — so a mutant removing it survives, deliberately. Said here so a
+  // later reader does not take it for a live guard, and so a later widening of
+  // the query grammar is told this guard has never been exercised.
   if (query !== null) lines.push(line('Query', printable(queryIdentity(query))));
 
   if (read) lines.push(line('Entries', tally(listing.entries)));
@@ -623,7 +654,11 @@ export function renderPublicationAuthorisations(
   if (listing.errnoCode !== null) lines.push(line('Reason', listing.errnoCode));
 
   lines.push(`  ${AUDIT_LISTING_SENTENCES[listing.outcome]}`);
-  if (selection !== null) lines.push(`  ${AUDIT_QUERY_SENTENCES[branchQueryReading(selection)]}`);
+  // On every outcome where a query was made, including the ones that read
+  // nothing. The fourth reading exists so that "the branch was not asked about
+  // anything" is a printed sentence rather than a missing line — which is the
+  // rule the three answers already follow, applied to the case that escaped it.
+  if (query !== null) lines.push(`  ${AUDIT_QUERY_SENTENCES[branchQueryReading(selection)]}`);
 
   for (const entry of shown) {
     lines.push('', ...entryLines(entry));

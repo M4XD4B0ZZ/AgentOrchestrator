@@ -901,15 +901,31 @@ export interface HeadPublicationBranchSelection {
    */
   readonly unestablished: number;
   /**
-   * What a report prints, in the order the listing established: the named
-   * entries and the unestablished ones, and nothing that was shown to name
-   * another branch.
+   * What a report prints, in the order the listing established.
    *
-   * The unestablished are here and not filtered out, and that is the whole
-   * decision this type exists to record. Dropping them would turn "one of these
+   * **Exactly one class is left out: an entry this build read in full which
+   * names a different branch.** Everything else is here, and that is the whole
+   * decision this type exists to record.
+   *
+   * The unestablished are here because dropping them would turn "one of these
    * might be your branch and I cannot tell" into "there is no record for this
    * branch" — the reassuring absence this command exists to prevent, arriving
    * through a filter instead of through a listing.
+   *
+   * And an entry naming another branch is here too **when this build did not
+   * read all of its evidence** — a record it read beside an outcome document it
+   * could not. That case is not obvious and was a shipped defect for one
+   * commit: the store's grade and the report's tally are `entryWasRead`, which
+   * is "the record was read *and* nothing beside it was a document I could
+   * not", while this selection asked only whether a record was read. The two
+   * disagreed on exactly that entry, so a store of one such record printed
+   * `Entries : 1 (0 read, 1 not read)`, printed "each one is listed above with
+   * what it turned out to be", and listed nothing. Measured, with the real
+   * writers and the real renderer.
+   *
+   * So the rule here is `entryWasRead` and not "a record was read": one
+   * predicate, one question. That is the rule V4 slice 16 already learned once,
+   * and this is its second spelling being removed rather than added.
    */
   readonly shown: readonly HeadPublicationAuditEntry[];
 }
@@ -955,7 +971,12 @@ export function selectQueriedBranch(
       shown.push(entry);
       continue;
     }
+    // Counted as naming another branch, because that is what this build
+    // established about it. Shown anyway unless it was read in full: an entry
+    // that grades the store down is an entry the store's own sentence promises
+    // is listed, and a filter that hid one would make that sentence false.
     elsewhere += 1;
+    if (!entryWasRead(entry)) shown.push(entry);
   }
 
   return Object.freeze({ named, elsewhere, unestablished, shown: Object.freeze(shown) });
@@ -977,20 +998,56 @@ export const HEAD_PUBLICATION_BRANCH_QUERY_READINGS = [
   'NO_NAMED_RECORD_PRESENT',
   /** None does, and at least one entry is one it read no record for at all. */
   'NO_NAMED_RECORD_AND_EVIDENCE_UNREAD',
+  /**
+   * No listing was produced, so the branch was not asked about anything.
+   *
+   * A member rather than a printed silence. The three above are answers; this
+   * one is the refusal to give an answer, and it exists because the absence of
+   * a line is not a sentence — the rule this slice's suite states for the
+   * negatives and which the store-level outcomes escaped in the first version
+   * of this report. `STORE_ABSENT` is the shape that needs it most: it exits 0
+   * like a clean negative does.
+   */
+  'STORE_NOT_READ',
 ] as const;
 
 export type HeadPublicationBranchQueryReading =
   (typeof HEAD_PUBLICATION_BRANCH_QUERY_READINGS)[number];
 
 /**
- * Which of the three a selection is. Total over the counts, and the order of
- * the tests is the contract: a store with a match is reported as having one
- * whatever else is in it, because the entries it could not read are listed
- * beside the match and speak for themselves.
+ * Which of the four a query got. Total, and the order of the tests is the
+ * contract.
+ *
+ * `null` is "no listing was produced", which is why this takes a selection or
+ * nothing rather than only a selection: a selection over the empty entry list
+ * of a store that could not be read would answer the strong negative for a
+ * store nothing was read from.
+ *
+ * A store with a match is reported as having one whatever else is in it,
+ * because everything this build did not read in full is listed beside the match
+ * and speaks for itself.
+ *
+ * **The negatives split on `unestablished` and not on `entryWasRead`**, and a
+ * review proposed the other one. The question these two members answer is
+ * "could something here be the branch I asked about, without this build being
+ * able to tell?", and that is exactly "no record was read". An entry whose
+ * *record* this build read names a different branch as definitely as any record
+ * here names anything — an unreadable document beside it changes what became of
+ * that publication and not which branch it was about. Splitting on
+ * `entryWasRead` would print "whether any of these concerns that branch is not
+ * established" over an entry this build can say does not, which is an overclaim
+ * in the other direction.
+ *
+ * What that entry does change is the store's grade and the tally, and both are
+ * printed above these sentences; the entry itself is listed, because
+ * {@link selectQueriedBranch} shows everything `entryWasRead` is false for. The
+ * clean negative's own wording says only what it means and points at the line
+ * that owns the other question.
  */
 export function branchQueryReading(
-  selection: HeadPublicationBranchSelection,
+  selection: HeadPublicationBranchSelection | null,
 ): HeadPublicationBranchQueryReading {
+  if (selection === null) return 'STORE_NOT_READ';
   if (selection.named > 0) return 'NAMED_RECORDS_PRESENT';
   return selection.unestablished > 0
     ? 'NO_NAMED_RECORD_AND_EVIDENCE_UNREAD'
