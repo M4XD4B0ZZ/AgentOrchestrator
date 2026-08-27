@@ -1452,9 +1452,11 @@ describe('the surface states its own limits', () => {
           before: ABSENT,
           attempt: 'COMPLETED' as PublicationAttempt,
           after: at(HEAD),
+          commandReport: 'RAN_TO_EXIT_ZERO' as const,
         },
         ref: REF,
         remoteName: REMOTE,
+        outcome: null,
       },
     });
 
@@ -1494,9 +1496,11 @@ describe('the surface states its own limits', () => {
           before: ABSENT,
           attempt: 'COMPLETED' as PublicationAttempt,
           after: at(HEAD),
+          commandReport: 'RAN_TO_EXIT_ZERO' as const,
         },
         ref: REF,
         remoteName: REMOTE,
+        outcome: null,
       },
     });
 

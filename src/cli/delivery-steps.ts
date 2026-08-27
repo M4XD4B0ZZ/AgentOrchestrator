@@ -59,6 +59,12 @@ import {
 } from '../deliver/head-publication-authorisation-store.js';
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { publishDeliveryHead, type PublicationResult } from '../deliver/publish-delivery-head.js';
+import { publicationOutcomeFor } from '../deliver/head-publication-outcome.js';
+import type { writeRunArtifact } from '../doctor/safe-write.js';
+import {
+  recordHeadPublicationOutcome,
+  type HeadPublicationOutcomeCode,
+} from '../deliver/head-publication-outcome-store.js';
 import type { GitPublicationRunner } from '../deliver/git-head-publisher.js';
 import type { HeadPublication } from '../deliver/head-publication.js';
 import { isSendableBranchName, mintPullRequestCreationGrant, type PullRequestCreationSubject } from '../deliver/internal/pull-request-creation-grant.js';
@@ -194,6 +200,22 @@ export interface DeliveryCommandSeams {
    * Production never supplies one. Absent, the loader asks `os.userInfo()`.
    */
   readonly pathProvider?: PathProvider;
+  /**
+   * The exclusive create-and-write the post-effect outcome record goes through.
+   *
+   * A seam **beside** the real primitive and never instead of it, and the
+   * distinction matters more here than anywhere else in this interface: the
+   * outcome store's create-once, its refusal of an occupied name and its
+   * read-back are all measured against the real `writeRunArtifact` on a real
+   * scratch profile. What no test can provoke on demand against a real
+   * filesystem is a write that goes out part-way, a flush that fails or a handle
+   * that will not close — and those are exactly the three answers that decide
+   * whether an invocation may report an ordinary result after a possible remote
+   * mutation. This is how they are reached.
+   *
+   * Production never supplies one. Absent, the store uses `writeRunArtifact`.
+   */
+  readonly outcomeWriter?: typeof writeRunArtifact;
 }
 
 /**
@@ -321,6 +343,48 @@ function resolvePublicationAuthority(
 }
 
 /**
+ * One publication, and what became of the durable evidence of it.
+ *
+ * Two fields rather than one wider `PublicationResult`, and the split is the
+ * whole failure-precedence design (V4 slice 16). `result` is the act's own
+ * answer, decided by `publish-delivery-head.ts`, which knows nothing about
+ * stores and must go on knowing nothing about them. `outcome` is the answer of
+ * the store that ran **after** it, which is a different proposition about a
+ * different subject and can fail while the act succeeded.
+ *
+ * Folding the second into `HeadPublication` was measured impossible rather than
+ * merely ugly: the driver settles `EFFECT_ATTEMPTED` on `attempt` alone, before
+ * it reads a single publication member, so a member carrying a post-effect
+ * evidence failure would never be looked at.
+ *
+ * `outcome` is `null` when no outcome was called for — the attended path, and
+ * every automatic path that stopped before the authorisation record existed —
+ * and a store code otherwise. `RECORDED` is the only one of those that means the
+ * evidence is on the disk.
+ */
+export interface PerformedPublication {
+  readonly result: PublicationResult;
+  readonly outcome: HeadPublicationOutcomeCode | null;
+}
+
+/**
+ * Everything the outcome written after the effect needs in order to be the
+ * outcome *of* the authorisation written before it.
+ *
+ * Four values, all taken from the one write that succeeded rather than rebuilt
+ * at the tail: the event the record was filed under, the digest that record
+ * carries, and the two subject halves it names. Carrying them means the two
+ * documents are anchored to each other by identity rather than by an equality
+ * argument spanning a hundred lines.
+ */
+interface AuthorisationEventAnchor {
+  readonly eventId: string;
+  readonly binding: string;
+  readonly taskId: string;
+  readonly repositoryRoot: string;
+}
+
+/**
  * Decides whether one delivery head may be published, and publishes it.
  *
  * The refusal ladder here is the one `HEAD_PUBLICATIONS` declares, in the same
@@ -377,14 +441,23 @@ export async function performPublication(
   resolve: typeof resolveRepository,
   load: typeof loadTaskState,
   seams: DeliveryCommandSeams,
-): Promise<PublicationResult> {
-  const refused = (publication: HeadPublication): PublicationResult =>
-    Object.freeze({
-      publication,
-      before: null,
-      attempt: 'NOT_ATTEMPTED' as const,
-      after: null,
-    });
+): Promise<PerformedPublication> {
+  const performed = (
+    result: PublicationResult,
+    outcome: HeadPublicationOutcomeCode | null,
+  ): PerformedPublication => Object.freeze({ result, outcome });
+
+  const refused = (publication: HeadPublication): PerformedPublication =>
+    performed(
+      Object.freeze({
+        publication,
+        before: null,
+        attempt: 'NOT_ATTEMPTED' as const,
+        after: null,
+        commandReport: 'NOT_CALLED' as const,
+      }),
+      null,
+    );
 
   if (!subject.ok || !taskLoad.ok) return refused('SUBJECT_NOT_ESTABLISHED');
   if (taskLoad.state.state !== 'READY_FOR_PR') return refused('TASK_NOT_READY');
@@ -421,6 +494,24 @@ export async function performPublication(
   // `performPublication` calls it once. Two variables would be two states this
   // function would then have to rank.
   let recheckRefusal: HeadPublication | null = null;
+
+  // The event the closure authorised, carried out of it so the outcome written
+  // after the effect lands in that same event directory and anchors to that same
+  // record (V4 slice 16).
+  //
+  // A second variable rather than another arm of the one above, and the
+  // one-variable argument does **not** extend to it: this is not a refusal
+  // reason, it is not mutually exclusive with one, and it is read at a different
+  // moment — after `publishDeliveryHead` has returned, about a write that
+  // succeeded. Non-null exactly when a record reached the disk, so there is no
+  // shape in which an outcome is written for an authorisation that is not there.
+  // Written as an assertion on the initialiser rather than as an annotation, and
+  // that is not style. The only assignment the compiler can see is this one, in
+  // a callback it does not follow, so an annotated `let` narrows to `null` for
+  // the rest of the function and every field read on it is an error. The
+  // refusal variable above has the same shape and does not show it, because it
+  // is only ever *passed* — and `never` is assignable to anything.
+  let auditEvent = null as AuthorisationEventAnchor | null;
 
   const published = await publishDeliveryHead(grant, repositoryRoot, {
     runner: seams.publicationRunner,
@@ -545,8 +636,9 @@ export async function performPublication(
       // not say that a publication was attempted.
       if (still.grant === 'OPERATOR_DECLARATION') {
         const at = now();
+        const eventId = newHeadPublicationAuditEventId(at);
         const recorded = recordHeadPublicationAuthorisation({
-          eventId: newHeadPublicationAuditEventId(at),
+          eventId,
           taskId: options.task,
           // This pass's root, like every other fact here. A record filed under
           // the root the ladder resolved would name a repository this closure
@@ -562,10 +654,39 @@ export async function performPublication(
           authorisedAt: at.toISOString(),
           ...(seams.pathProvider === undefined ? {} : { pathProvider: seams.pathProvider }),
         });
-        if (recorded.code !== 'RECORDED') {
+        if (recorded.code !== 'RECORDED' || recorded.binding === null) {
           recheckRefusal = 'PUBLICATION_AUDIT_UNWRITTEN';
           return null;
         }
+        // The event identity and the anchor, taken from the store's own answer
+        // about the bytes it just read back — never rebuilt here, and never read
+        // from the disk a second time. The pair travels together because an
+        // outcome needs both and an outcome with one of them is not writable.
+        //
+        // Two conditions above and **only the second is load-bearing at
+        // runtime**, which is measured rather than assumed: a mutant that
+        // removed the first alone, and a companion that removed it together
+        // with the store's own tie, both left the suite green. The mechanism
+        // that actually holds is neither of them — it is the store passing no
+        // digest at all on any path but the recorded one.
+        //
+        // The first is kept because it is the readable statement of the rule and
+        // costs nothing; the second is kept because the type demands it, and it
+        // is what narrows `string | null` to the anchor an outcome needs. Saying
+        // which is which is better than letting a later reader take the pair for
+        // coverage it does not provide.
+        auditEvent = Object.freeze({
+          eventId,
+          binding: recorded.binding,
+          // The two subject halves the record names, carried rather than
+          // re-derived at the tail. The re-check has proved them equal to the
+          // ladder's — that is what the seventh comparison above is for — and
+          // carrying them anyway means the outcome is anchored to the exact
+          // values that went into the authorisation, with no equality argument
+          // standing between the two documents.
+          taskId: options.task,
+          repositoryRoot: again.repository.root,
+        });
       }
 
       return Object.freeze({
@@ -604,7 +725,56 @@ export async function performPublication(
   // into a refusal at all.
   const reason: HeadPublication | null = recheckRefusal;
   if (reason !== null && published.publication === 'SUBJECT_CHANGED') return refused(reason);
-  return published;
+
+  // ── The outcome, written after the publication processing ended ───────────
+  //
+  // Reached on **every** path where an authorisation record was written, and
+  // that totality is the point rather than a convenience. The gap V4 slice 16
+  // closes is that an authorisation alone cannot separate a run that sent
+  // nothing from one that may have created a branch — and it stays open if only
+  // the runs that sent something write one, because then an absent outcome is
+  // ambiguous all over again. Writing one on every such path makes the absence
+  // of an outcome mean exactly one thing: no durable outcome was established.
+  //
+  // Here, and not earlier: everything above this line is either a question put
+  // to Git or the effect itself, so this is the first moment the answer exists.
+  // And not later, because there is nothing after it.
+  //
+  // What it does **not** do is make anything safe to repeat. The record is
+  // historical evidence, it is never an input to an authority, and no path in
+  // this build reads one to decide whether to publish. The one place the effect
+  // path reads a record at all is the read-back it has just made.
+  //
+  // `auditEvent` is null on the attended path and on every automatic path that
+  // did not reach the record, and there is nothing to attach an outcome to on
+  // either.
+  const anchor = auditEvent;
+  if (anchor === null) return performed(published, null);
+
+  const recorded = recordHeadPublicationOutcome({
+    eventId: anchor.eventId,
+    taskId: anchor.taskId,
+    repositoryRoot: anchor.repositoryRoot,
+    authorisationBinding: anchor.binding,
+    // Derived from the same three readings the publication grade came from, and
+    // deliberately not from the grade itself: the grade answers whether the
+    // delivery remote holds this commit under this ref, and this answers what
+    // this invocation called and what its last reading established. Two
+    // questions, one set of readings, and mapping one onto the other would make
+    // a change to either a silent change to the other.
+    outcome: publicationOutcomeFor(
+      subject.subject.commit,
+      published.before,
+      published.attempt,
+      published.after,
+    ),
+    commandReport: published.commandReport,
+    recordedAt: now().toISOString(),
+    ...(seams.pathProvider === undefined ? {} : { pathProvider: seams.pathProvider }),
+    ...(seams.outcomeWriter === undefined ? {} : { writeArtifact: seams.outcomeWriter }),
+  });
+
+  return performed(published, recorded.code);
 }
 
 /**

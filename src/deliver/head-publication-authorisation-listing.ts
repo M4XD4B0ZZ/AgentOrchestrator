@@ -30,8 +30,9 @@
  *
  *  - a name this build would not mint is not an event, and is reported as an
  *    entry rather than skipped;
- *  - a symbolic link or a Windows junction is never followed, at either level:
- *    not as an event directory, and not at the record's own name. A record read
+ *  - a symbolic link or a Windows junction is never followed, at any of the
+ *    three levels: not as an event directory, not at the record's own name, and
+ *    — since V4 slice 16 — not at the outcome's. A record read
  *    through one would be evidence from somewhere else, filed under a name in
  *    the store — which is the one thing an accountability listing may not do.
  *    **A hard link is not a link this can see**, and that bound is stated rather
@@ -114,14 +115,36 @@ import {
   type AuthorisedPublicationRecord,
   type HeadPublicationAuthorisationReading,
 } from './head-publication-authorisation.js';
-// The location, and deliberately not the store: importing the writer to learn a
-// directory name would put the exclusive `mkdir`, the staging write and the
-// publishing `rename` into this module's own import closure, and "this command
-// creates nothing" would stop being a fact about the graph.
+// The location, and deliberately not either store. What that buys, stated
+// exactly, because a review measured the stronger version of this sentence and
+// found it false: **neither store's record-building, size gate or publishing
+// step is reachable from here**, and in particular `state/atomic-file.ts` — the
+// staging write and the `rename` — is not in this module's import closure at
+// all.
+//
+// What it does **not** buy is a closure with no create primitive in it. Two
+// imports below, `doctor/safe-write.ts` carries the exclusive `wx` open that
+// both stores write through, and `doctor/run-directory.ts` carries the exclusive
+// `mkdir` that makes an event directory. This module needs the first for its
+// path-safety helpers and the second for the name grammar it reads by, so they
+// are in the graph and always were. "This command creates nothing" is therefore
+// a fact about what this module *names* — the suite sweeps it for every one of
+// those functions — and the import rule above is what keeps the graph small
+// enough for that sweep to be worth reading.
 import {
   HEAD_PUBLICATION_AUDIT_FILE_NAME,
+  HEAD_PUBLICATION_OUTCOME_FILE_NAME,
   headPublicationAuditRoot,
 } from './internal/head-publication-audit-location.js';
+// The outcome's own contract, and deliberately not its store — the same rule,
+// bought for the same reason, with the same honest bound.
+import {
+  HEAD_PUBLICATION_OUTCOME_RECORD_FIELDS,
+  MAX_HEAD_PUBLICATION_OUTCOME_BYTES,
+  inspectHeadPublicationOutcome,
+  type HeadPublicationOutcomeReading,
+  type RecordedPublicationOutcome,
+} from './head-publication-outcome.js';
 
 /**
  * What one direct child of the store root turned out to be. A closed set of
@@ -256,12 +279,122 @@ const ENTRY_READING: Readonly<
 export type { AuthorisedPublicationRecord };
 export const HEAD_PUBLICATION_AUDIT_RECORD_FIELDS = HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELDS;
 
+/**
+ * The outcome record's own view and field map, re-exported so this module stays
+ * the one place a caller has to import to read the store.
+ */
+export type { RecordedPublicationOutcome };
+export const HEAD_PUBLICATION_OUTCOME_ENTRY_RECORD_FIELDS =
+  HEAD_PUBLICATION_OUTCOME_RECORD_FIELDS;
+
+/**
+ * What sits at one event's outcome name. A closed set of seven, of which
+ * exactly one means "an outcome this build read".
+ *
+ * Built the way the entry vocabulary above it is built, and for the same
+ * reasons. **Five** are the outcome contract's own reading vocabulary, mapped one
+ * for one by {@link OUTCOME_ENTRY_READING} and carrying an `OUTCOME_` prefix
+ * except for the good member, which is named for what it is: they are answers
+ * about a *document*, and deriving them rather than inventing a parallel set
+ * means two spellings of "I cannot read this version" cannot drift.
+ * **Two** are established here, because they are answers about a *name* and the
+ * grader never sees one: `OUTCOME_ABSENT` and `OUTCOME_UNREADABLE` are settled
+ * from an errno and a file test before any bytes exist.
+ *
+ * `OUTCOME_ABSENT` is the ordinary member, not a fault. Every event this build
+ * wrote before V4 slice 16 has it and always will, and nothing backfills them.
+ */
+export const HEAD_PUBLICATION_OUTCOME_ENTRY_READINGS = [
+  /** An outcome this build read, bound to this event and to this authorisation. */
+  'HISTORICAL_OUTCOME',
+  /** Nothing at the outcome's name. Says nothing about what happened. */
+  'OUTCOME_ABSENT',
+  /** A file is at the name and holds no bytes. */
+  'OUTCOME_EMPTY',
+  /** No bytes could be taken from the name: a link, not a file, or an unaskable name. */
+  'OUTCOME_UNREADABLE',
+  /** Something is there and is not an outcome this build declares. */
+  'OUTCOME_MALFORMED',
+  /** An outcome contract version this build does not read. Refused, never guessed. */
+  'OUTCOME_UNSUPPORTED_VERSION',
+  /** Well-formed, and bound to a different event or a different authorisation. */
+  'OUTCOME_NOT_THIS_EVENT',
+] as const;
+
+export type HeadPublicationOutcomeEntryReading =
+  (typeof HEAD_PUBLICATION_OUTCOME_ENTRY_READINGS)[number];
+
+/**
+ * How an outcome reading becomes an entry reading.
+ *
+ * Total by type over the contract's five, so a member added there is a compile
+ * error here rather than an outcome that quietly falls through to something
+ * reassuring. `ABSENT` maps to `OUTCOME_EMPTY` for the reason the record's own
+ * table gives about its twin: the grader answers `ABSENT` for exactly one input,
+ * zero bytes, and it is only ever handed bytes — so it can never mean "nothing
+ * at the name", which is established here from the errno.
+ */
+const OUTCOME_ENTRY_READING: Readonly<
+  Record<HeadPublicationOutcomeReading, HeadPublicationOutcomeEntryReading>
+> = Object.freeze({
+  HISTORICAL_OUTCOME: 'HISTORICAL_OUTCOME',
+  ABSENT: 'OUTCOME_EMPTY',
+  MALFORMED: 'OUTCOME_MALFORMED',
+  UNSUPPORTED_VERSION: 'OUTCOME_UNSUPPORTED_VERSION',
+  NOT_THIS_EVENT: 'OUTCOME_NOT_THIS_EVENT',
+});
+
+/**
+ * The entry readings under which nothing beside the record is a document this
+ * build could not read.
+ *
+ * Two members, and the second is `OUTCOME_ABSENT` because an event with no
+ * outcome is the ordinary shape and always will be: nothing backfills the events
+ * written before V4 slice 16, so counting them against the store would produce a
+ * signal that is permanent, that no invocation of this tool can clear, and that
+ * everybody would learn to ignore.
+ *
+ * Held as a set, and the reason is exactly what a review found in its first
+ * draft: the predicate below read `entry.outcome === 'OUTCOME_ABSENT' ||` a
+ * one-member set's `has`, so half the condition was a string test on a name
+ * beside a comment claiming a set was what stopped that, and the one-member set
+ * had no other consumer. One set, one question, and the suite partitions the
+ * vocabulary against it.
+ */
+export const CLEAN_OUTCOME_ENTRY_READINGS: ReadonlySet<HeadPublicationOutcomeEntryReading> =
+  Object.freeze(
+    new Set<HeadPublicationOutcomeEntryReading>(['HISTORICAL_OUTCOME', 'OUTCOME_ABSENT']),
+  ) as ReadonlySet<HeadPublicationOutcomeEntryReading>;
+
 export type HeadPublicationAuditEntry =
   | {
       readonly reading: 'HISTORICAL_AUTHORISATION';
       /** The directory's own name. Always the name on disk, never a value from the record. */
       readonly name: string;
       readonly record: AuthorisedPublicationRecord;
+      /**
+       * What sits beside this record and says what became of it, if anything.
+       *
+       * On this arm and on no other, and that is enforced by the type rather
+       * than by care (V4 slice 16). An outcome is the outcome **of an
+       * authorisation**, and on every other arm there is no established
+       * authorisation for it to be the outcome of: the record was refused, or
+       * could not be read, or belongs to another event. Rendering one there
+       * would attach a publication history to a document this build declined —
+       * and for `RECORD_NOT_THIS_EVENT`, to one it can prove it did not write.
+       *
+       * The cost is real and is disclosed where it can be: on those arms the
+       * outcome file is not looked at at all, so a readable outcome can be
+       * sitting beside a record this build refused and no line of the report
+       * will mention it. The entry's own sentence cannot carry that — those
+       * eight sentences are about the *record*, and each has to hold for every
+       * producer of its reading — so it is said once, in the paragraph the
+       * report prints about the store itself. An earlier version of this comment
+       * claimed the entry sentences carried it; they never did.
+       */
+      readonly outcome: HeadPublicationOutcomeEntryReading;
+      /** Non-null exactly when `outcome` is `HISTORICAL_OUTCOME`. */
+      readonly outcomeRecord: RecordedPublicationOutcome | null;
     }
   | {
       readonly reading: Exclude<HeadPublicationAuditEntryReading, 'HISTORICAL_AUTHORISATION'>;
@@ -283,9 +416,20 @@ export type HeadPublicationAuditEntry =
  * store.
  */
 export const HEAD_PUBLICATION_AUDIT_LISTINGS = [
-  /** The store was read, and every entry in it is a record this build read. Zero entries included. */
+  /**
+   * The store was read, every entry in it is a record this build read, and
+   * nothing beside one of those records is a document it could not. Zero entries
+   * included.
+   *
+   * Both halves, since V4 slice 16, and {@link entryWasRead} is the one place
+   * the condition is written down — these two sentences are its documentation
+   * and not a second copy of it.
+   */
   'READ',
-  /** The store was read, and at least one entry is not a record this build read. */
+  /**
+   * The store was read, and at least one entry is not a record this build read,
+   * or holds beside that record a document it could not read.
+   */
   'READ_WITH_UNUSABLE_ENTRIES',
   /**
    * There is no store under this profile.
@@ -370,7 +514,7 @@ function listing(
  * sparse file whole succeeds and grades `MALFORMED` exactly as the bounded read
  * does. A mutant that removes the bound therefore survives, deliberately.
  */
-function recordBytes(path: string): Buffer | null {
+function boundedBytes(path: string, bound: number): Buffer | null {
   let handle: number;
   try {
     handle = openSync(path, 'r');
@@ -380,7 +524,7 @@ function recordBytes(path: string): Buffer | null {
   try {
     const stat = fstatSync(handle);
     if (!stat.isFile()) return null;
-    const wanted = Math.min(stat.size, MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES + 1);
+    const wanted = Math.min(stat.size, bound + 1);
     const buffer = Buffer.alloc(wanted);
     let read = 0;
     while (read < buffer.length) {
@@ -399,6 +543,22 @@ function recordBytes(path: string): Buffer | null {
       // nothing to either answer.
     }
   }
+}
+
+/**
+ * The two documents' bounded reads, sharing one implementation.
+ *
+ * A parameter and not a second copy: the body above is a path-safety and
+ * short-read chain, and this repository has already had to pin against that
+ * chain being copied into a fourth module. Two names because two contracts own
+ * two bounds, and neither may be applied to the other's document.
+ */
+function recordBytes(path: string): Buffer | null {
+  return boundedBytes(path, MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES);
+}
+
+function outcomeBytes(path: string): Buffer | null {
+  return boundedBytes(path, MAX_HEAD_PUBLICATION_OUTCOME_BYTES);
 }
 
 /**
@@ -466,9 +626,78 @@ function classifyEntry(root: string, name: string): HeadPublicationAuditEntry {
 
   const inspection = inspectHeadPublicationAuthorisation(bytes, name);
   if (inspection.reading === 'HISTORICAL_AUTHORISATION') {
-    return { reading: 'HISTORICAL_AUTHORISATION', name, record: inspection.record };
+    // The one point at which an authorisation exists, so the one point at which
+    // an outcome can be the outcome of anything. The anchor handed down is the
+    // record's own binding digest — which on this arm is a value the grader has
+    // just *recomputed* and found equal, not merely one it read — so an outcome
+    // moved here out of another event cannot recompute.
+    const outcome = classifyOutcome(root, name, inspection.record);
+    return {
+      reading: 'HISTORICAL_AUTHORISATION',
+      name,
+      record: inspection.record,
+      outcome: outcome.reading,
+      outcomeRecord: outcome.record,
+    };
   }
   return { reading: ENTRY_READING[inspection.reading], name, record: null };
+}
+
+/**
+ * Classifies what sits at one event's outcome name, under the identity its
+ * authorisation establishes.
+ *
+ * The same order of tests as the record above it, for the same reasons: `lstat`
+ * before anything is opened so a link is never followed, absence established
+ * from `ENOENT` alone rather than from any failure, and the bytes graded by the
+ * contract that wrote them.
+ *
+ * All four fields of the subject come from somewhere other than these bytes —
+ * the directory's own name, and three values the authorisation record carries,
+ * one of which is a digest this reader has just recomputed and found equal. That
+ * is what keeps the grading from being evidence for whatever the outcome
+ * happened to say.
+ */
+function classifyOutcome(
+  root: string,
+  name: string,
+  record: AuthorisedPublicationRecord,
+): {
+  readonly reading: HeadPublicationOutcomeEntryReading;
+  readonly record: RecordedPublicationOutcome | null;
+} {
+  const path = join(root, name, HEAD_PUBLICATION_OUTCOME_FILE_NAME);
+
+  let target;
+  try {
+    target = lstatSync(path);
+  } catch (error) {
+    // Absence, and only from this errno. An outcome that is not there is the
+    // ordinary shape for every event written before V4 slice 16 and for every
+    // invocation that ended before it could write one, and those are not told
+    // apart here — see the sentence the report prints for it. Anything else is a
+    // name this build could not ask about, which is not the same thing.
+    return safeErrnoCode(error) === 'ENOENT'
+      ? { reading: 'OUTCOME_ABSENT', record: null }
+      : { reading: 'OUTCOME_UNREADABLE', record: null };
+  }
+  // A link at the outcome's name is never followed, for the reason a link at the
+  // record's name is not: reading through one would file somebody else's bytes
+  // under this event's name as its history.
+  if (target.isSymbolicLink() || !target.isFile()) {
+    return { reading: 'OUTCOME_UNREADABLE', record: null };
+  }
+
+  const bytes = outcomeBytes(path);
+  if (bytes === null) return { reading: 'OUTCOME_UNREADABLE', record: null };
+
+  const inspection = inspectHeadPublicationOutcome(bytes, {
+    eventId: name,
+    taskId: record.taskId,
+    repositoryRoot: record.repositoryRoot,
+    authorisationBinding: record.binding,
+  });
+  return { reading: OUTCOME_ENTRY_READING[inspection.reading], record: inspection.record };
 }
 
 /**
@@ -548,11 +777,29 @@ export function listHeadPublicationAuthorisations(
   ];
 
   return listing(
-    entries.every((entry) => entry.reading === 'HISTORICAL_AUTHORISATION')
-      ? 'READ'
-      : 'READ_WITH_UNUSABLE_ENTRIES',
+    entries.every(entryWasRead) ? 'READ' : 'READ_WITH_UNUSABLE_ENTRIES',
     root,
     entries,
+  );
+}
+
+/**
+ * Whether everything this build found under one entry is something it read.
+ *
+ * The one predicate, exported because the listing's own grade and the report's
+ * tally both need it and a second spelling would let them disagree — which is
+ * exactly what a first draft of V4 slice 16 did: a store whose every outcome was
+ * unreadable was graded `READ_WITH_UNUSABLE_ENTRIES` and counted as
+ * "3 (3 read, 0 not read)", so the line whose whole purpose is that a damaged
+ * store cannot read as a clean one at a glance said it was clean.
+ *
+ * What counts is {@link CLEAN_OUTCOME_ENTRY_READINGS}, which is where the
+ * `OUTCOME_ABSENT` decision is written down.
+ */
+export function entryWasRead(entry: HeadPublicationAuditEntry): boolean {
+  return (
+    entry.reading === 'HISTORICAL_AUTHORISATION' &&
+    CLEAN_OUTCOME_ENTRY_READINGS.has(entry.outcome)
   );
 }
 

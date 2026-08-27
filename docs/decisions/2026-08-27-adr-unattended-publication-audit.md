@@ -6,7 +6,12 @@
 **Supersedes** nothing. **Superseded by** nothing.
 **Amends** one. **Amended by** `2026-08-27-adr-publication-authorisation-listing.md`,
 which takes up this ADR's own non-goal of an operator-facing command that lists
-the store (§13), and narrows `L-V4-14-3`.
+the store (§13), and narrows `L-V4-14-3`; and by
+`2026-08-27-adr-publication-outcome-evidence.md`, which reverses §11 and takes up
+the other non-goal in §13, a post-effect outcome record. That ADR answers §11's
+three arguments one at a time and accepts the third: `(record, no outcome)` says
+exactly what `(record)` alone says, and it is now the uncommon shape rather than
+the only one.
 
 `2026-08-26-adr-unattended-head-publication.md` §12, whose first sentence reads
 "**The publication writes nothing.**" That stops being true for the automatic
@@ -417,6 +422,13 @@ touch.
 
 ## 11. Why there is no second record
 
+> **Reversed by V4 slice 16.** This section decided, at this date, that the pair
+> was refused; the pair shipped, and
+> `2026-08-27-adr-publication-outcome-evidence.md` §0 answers each of the three
+> arguments below one at a time — accepting the third in full and rebutting the
+> fourth paragraph's premise, which is the one that shaped the replacement's
+> design. What follows is left as it was written.
+
 Both independent investigations recommended a pair — an authorisation record
 before and an outcome record after — on the ground that only the *arity* of the
 local evidence separates "authorised and nothing happened" from "authorised and
@@ -441,8 +453,9 @@ either. It is named as a non-goal rather than deferred silently.
 
 ## 12. Retention
 
-**Unbounded, and stated as a decision.** One directory of one small JSON document
-per authorised unattended publication attempt, forever. Nothing deletes it.
+**Unbounded, and stated as a decision.** One directory per authorised unattended
+publication attempt, forever, holding one small JSON document — and, since V4
+slice 16, a second one beside it. Nothing deletes any of it.
 
 That is the same absence `doctor/run-directory.ts` already declares, for another
 directory under the same profile, in the same words: retention is out of scope until there is a
@@ -463,19 +476,23 @@ cross-project orchestration; a generic audit framework for every AO action;
 cryptographic non-repudiation; a retention policy; an operator-facing command that
 searches the store; and auditing the local acts a `--drive` performs.
 
-**One of these was taken up.** "An operator-facing command that lists the store"
+**Two of these were taken up.** "An operator-facing command that lists the store"
 is no longer a non-goal: V4 slice 15 shipped `agent-loop publication
 authorisations` under its own decision, as this section requires. See
-`2026-08-27-adr-publication-authorisation-listing.md`. Searching, filtering and
-indexing the store are still outside, and so is everything else in the list.
+`2026-08-27-adr-publication-authorisation-listing.md`. **"A post-effect outcome
+record" is no longer one either:** V4 slice 16 shipped `outcome.json` beside each
+authorisation, under its own decision and answering §11's three arguments one at
+a time. See `2026-08-27-adr-publication-outcome-evidence.md`. Searching,
+filtering and indexing the store are still outside, and so is everything else in
+the list.
 
 `READY_FOR_PR` remains terminal and the transition table is untouched.
 
 ## 14. What is carried, and what it costs
 
 **`L-V4-14-1` — the store is unbounded.** See §12. Every authorised unattended
-publication attempt adds one directory of one small document, and nothing removes
-it.
+publication attempt adds one directory holding one small document — two since V4
+slice 16 — and nothing removes any of it.
 
 **`L-V4-14-2` — the record is not tamper-proof and its absence proves nothing.**
 See §3. Same-user forgery and same-user deletion are both open, the binding is not

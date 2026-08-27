@@ -1047,14 +1047,19 @@ Konfiguration ab. Notiert als `L-V4-02-6`.
 
 Wenn AO **unbeaufsichtigt** einen Branch auf dem Delivery-Remote anlegen darf
 (`delivery --drive --publish-head --automatic-publish-head-only`, siehe §1),
-schreibt es **vorher** einen unveränderlichen Datensatz. Der liegt außerhalb
-jedes Repositories, in deinem eigenen Benutzerprofil:
+schreibt es **vorher** einen unveränderlichen Datensatz — und seit V4 Slice 16
+**danach** einen zweiten. Beide liegen außerhalb jedes Repositories, in deinem
+eigenen Benutzerprofil:
 
 ```text
 %USERPROFILE%\.agent-orchestrator\head-publication-authorisations\
     <UTC-Zeitpunkt>-<uuid>\
-        authorisation.json
+        authorisation.json   <- vor dem Kontakt zum Delivery-Remote geschrieben
+        outcome.json         <- nach der Veröffentlichungsverarbeitung geschrieben
 ```
+
+Die zweite Datei kam mit V4 Slice 16 dazu. Sie wird **einmal** angelegt und nie
+überschrieben, und `authorisation.json` wird dabei nicht angefasst.
 
 Seit V4 Slice 15 kannst du das lesen:
 
@@ -1071,7 +1076,8 @@ Verzeichnis gar nicht existiert.
 Store        : C:\Users\Max\.agent-orchestrator\head-publication-authorisations
 Listing      : READ
 Entries      : 1 (1 read, 0 not read)
-  Every entry in the store is a record this build read.
+  Every entry in the store is a record this build read, and nothing beside one of them is
+  a document it could not.
 
 Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Reading      : HISTORICAL_AUTHORISATION
@@ -1083,7 +1089,75 @@ Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Ref          : refs/heads/ao/task/V4-14
   Commit       : 10583ee91a5747d0049f563ffaac64b0cf643aeb
   Declaration  : AUTOMATIC_ALLOWED, sha256 f59d285e0c233651c7610df32edf58d0d932a3ada9c50f984ff128ce5c7c5a5b
+  Outcome      : HISTORICAL_OUTCOME
+  Recorded at  : 2026-08-27T12:00:02.140Z
+  Publication  : DISPATCHED_REF_AT_SUBJECT_COMMIT_AFTER
+  Command      : RAN_TO_EXIT_ZERO
 ```
+
+### Was die vier neuen Zeilen heißen (V4 Slice 16)
+
+`Publication` sagt, **was dieser Lauf aufgerufen und was seine letzte Lesung des
+Refs ergeben hat**. Das erste Wort ist die einzige sichere Angabe auf der Zeile:
+`DISPATCHED` heißt, dass der eine Push-Befehl an die Prozessgrenze übergeben
+wurde, `NOT_DISPATCHED` heißt, dass das nicht geschah. Der Rest benennt, was eine
+Lesung zu **einem Zeitpunkt** über den Ref ergeben hat.
+
+Beide Beschriftungen gehören zu **diesem** Bericht. Der Delivery-Bericht hat eine
+eigene `Publication`-Zeile mit einem anderen Vokabular (der Veröffentlichungs-
+Bewertung: `ALREADY_PUBLISHED`, `PUBLISHED`, `OUTCOME_UNCERTAIN`, …) und eine
+`Outcome`-Zeile mit dem Code des Stores. Gleiche Wörter, zwei Berichte, zwei
+Fragen.
+
+`Command` sagt, **was aus diesem einen Befehl wurde**. `NOT_CALLED` heißt: er
+wurde der Prozessgrenze nie übergeben, es gibt also gar keine Meldung. Das ist
+der eigene Kontrollfluss dieses Builds und nicht die Antwort von irgendwem, und
+es sagt dasselbe wie die `NOT_DISPATCHED`-Hälfte der Zeile darüber. Die anderen
+vier sind das, was die
+Prozessgrenze über einen tatsächlich übergebenen Befehl gemeldet hat — eine
+Aussage über einen Prozess, nicht über ein Netzwerk. Von diesen vieren ist
+`NO_PROCESS` das einzige, das ein Negativ festlegt: es gab nichts zu starten,
+also existierte kein Prozess dafür. Eine abgelehnte Prozesserzeugung, ein
+Zeitlimit und eine verlorene Prozessgrenze fallen alle auf
+`ENDING_NOT_ESTABLISHED` — keines davon belegt, dass nie ein Prozess lief.
+
+**Nichts davon sagt, dass AO den Commit auf den Delivery-Remote gebracht hat.**
+Das ist gemessen falsch, nicht bloß unbewiesen: ein Push eines Commits, den der
+Ref schon hält, endet mit 0 und meldet den Remote als aktuell — ohne dass das
+Lease überhaupt geprüft wird. Ein Lauf, der nichts geändert hat, erreicht also
+die stärkste Lesung dieser Zeile.
+
+### Wenn dort `Outcome      : OUTCOME_ABSENT` steht
+
+> **Kein Outcome heißt: es wurde kein dauerhaftes Ergebnis festgehalten. Es heißt
+> nicht, dass nichts passiert ist.**
+
+Zwischen einem Ref-Update auf github.com und einer Datei auf deiner Platte gibt es
+keine Transaktion. Ein Prozess, der dazwischen stirbt, hinterlässt genau diese
+Form — und jeder Lauf jedes Builds vor Slice 16 ebenfalls. Es wird nichts
+nachgetragen und nichts geraten, und ein Eintrag ohne Outcome zieht die Bewertung
+der Liste **nicht** herunter.
+
+### Wenn AO das Ergebnis nicht schreiben konnte
+
+```text
+Drive        : PUBLICATION_OUTCOME_NOT_DURABLE
+```
+
+Exit-Code **3** als Untergrenze: jemand muss hinsehen. Der Store ersetzt die
+Zahl mit seinem eigenen Code, einen nach dem anderen — drei seiner zwölf Codes
+sind interne Fehler und ergeben stattdessen **1**. Bewusst nicht
+`EFFECT_ATTEMPTED` und bewusst nicht Exit 5 ("nochmal aufrufen"), denn ein
+erneuter Aufruf liest den *Remote* und kann den vergangenen Moment nicht
+zurückholen. Es wird nichts ein zweites Mal gesendet, um an einen Datensatz zu
+kommen, und es wird nichts rückgängig gemacht — es gibt nichts, was AO
+rückgängig machen könnte.
+
+**Diese Meldung sagt nicht, dass etwas versucht wurde.** Das Outcome wird auf
+*jedem* Pfad geschrieben, auf dem auch die Autorisierung geschrieben wurde — auch
+auf den vieren, die nichts senden. Was der Lauf aufgerufen und zuletzt gelesen
+hat, steht auf der `Publication`-Zeile daneben, und was aus dem Datensatz wurde,
+auf der `Outcome`-Zeile darunter.
 
 ### Was ein Eintrag heißt — und was nicht
 

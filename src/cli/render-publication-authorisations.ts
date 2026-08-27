@@ -58,11 +58,14 @@
 
 import {
   HEAD_PUBLICATION_AUDIT_ENTRY_READINGS,
+  HEAD_PUBLICATION_OUTCOME_ENTRY_READINGS,
+  entryWasRead,
   type AuthorisedPublicationRecord,
   type HeadPublicationAuditEntry,
   type HeadPublicationAuditEntryReading,
   type HeadPublicationAuditListing,
   type HeadPublicationAuditListingOutcome,
+  type HeadPublicationOutcomeEntryReading,
 } from '../deliver/head-publication-authorisation-listing.js';
 import { line } from './render-attended-run.js';
 
@@ -117,14 +120,104 @@ export const AUDIT_ENTRY_SENTENCES: Readonly<Record<HeadPublicationAuditEntryRea
       '    what it did not recognise would look complete and would not be.',
   });
 
+/**
+ * One static sentence per outcome reading. Closed, and total by type.
+ *
+ * The same rule as the table above: each sentence has to hold for **every**
+ * producer of that reading, so none of them names a cause. And a stricter one on
+ * top, because this is the half of the report that is about an act: no sentence
+ * here says what became of the delivery remote, because no reading here
+ * establishes it.
+ */
+export const AUDIT_OUTCOME_SENTENCES: Readonly<
+  Record<HeadPublicationOutcomeEntryReading, string>
+> = Object.freeze({
+  HISTORICAL_OUTCOME:
+    'An outcome this build read: its digest recomputes from this directory\'s name, from the\n' +
+    '    task and checkout the record above names, and from that record\'s own digest - so it is\n' +
+    '    the outcome filed against this authorisation and not one moved here from elsewhere.',
+  OUTCOME_ABSENT:
+    'Nothing beside this record says what became of it. An invocation that ended before it\n' +
+    '    could write one leaves this; so does one made by a build that wrote none at all; so\n' +
+    '    does one that reached the write and was refused at the name; and so does anything\n' +
+    '    running as this OS user removing one. This build does not tell those apart. It is not\n' +
+    '    a statement that nothing reached the delivery remote - it says only that no durable\n' +
+    '    outcome was established here.',
+  OUTCOME_EMPTY:
+    'A file is at the outcome\'s name and holds no bytes, so there is nothing to read. What\n' +
+    '    became of this authorisation is not established here, and an unreadable outcome is\n' +
+    '    never a statement that nothing reached the delivery remote.',
+  OUTCOME_UNREADABLE:
+    'No bytes could be taken from the outcome\'s name: something is at it that is a link or is\n' +
+    '    not an ordinary file, the read did not finish, or the name could not be asked about at\n' +
+    '    all. Nothing was followed and nothing was touched, and what became of this\n' +
+    '    authorisation is not established here.',
+  OUTCOME_MALFORMED:
+    'Something is beside this record and it is not an outcome this build declares, so it was\n' +
+    '    not read. A write that stopped part-way leaves this, and so does anything else running\n' +
+    '    as this OS user. It is left exactly as it is.',
+  OUTCOME_UNSUPPORTED_VERSION:
+    'The outcome beside this record names a contract version this build does not read. It is\n' +
+    '    refused rather than guessed at, and nothing in it is shown, because none of it has\n' +
+    '    been checked. It is left exactly as it is.',
+  OUTCOME_NOT_THIS_EVENT:
+    'The digest of the outcome beside this record does not recompute for this directory and\n' +
+    '    this record. That is what an outcome copied out of another event looks like, and what\n' +
+    '    one with a field edited in place looks like; this build does not tell the two apart,\n' +
+    '    and it repairs neither. Nothing in it is shown.',
+});
+
+/**
+ * What an outcome's own two words say, printed once beside the record's
+ * meaning rather than per entry.
+ *
+ * Two closed vocabularies and two sentences, because they are two propositions
+ * about two different things: what this build **called** and last **read**, and
+ * what the process boundary **reported**. Neither is a sentence about who
+ * changed the delivery remote, and the closing paragraph says so in as many
+ * words.
+ */
+export const AUDIT_OUTCOME_MEANING = [
+  'What an outcome here says:',
+  '  `Publication` is what that invocation did and what its last reading of the ref found. It',
+  '  begins DISPATCHED when the one create-only publication command was handed to the process',
+  '  boundary and NOT_DISPATCHED when it was not - that half is decided by this build\'s own',
+  '  control flow and is the one certain thing on the line. The rest of it names what this',
+  '  invocation last established about the ref the record above is bound to - which on one',
+  '  member is that no reading of it was taken at all, and on every other is what one reading',
+  '  at one instant found.',
+  '',
+  '  `Command` is what became of that one command. NOT_CALLED means it was never handed to the',
+  '  process boundary at all: no report exists, because there was nothing to report on. It is',
+  '  this build\'s own control flow rather than anybody\'s answer, and it says the same thing the',
+  '  NOT_DISPATCHED half of the line above already says. The other four are what the boundary',
+  '  reported',
+  '  about a command that was handed to it, and they are evidence about a process rather than',
+  '  about a network. Of those four, NO_PROCESS is the only one that settles a negative: there',
+  '  was nothing to run, so no process for it existed. ENDING_NOT_ESTABLISHED is where every',
+  '  uncertain answer folds, including a refused launch and a lost boundary - neither of which',
+  '  is evidence that no process ever started.',
+  '',
+  'What an outcome does not say:',
+  '  not that this build put the commit on the delivery remote. A push of a commit a ref',
+  '  already holds exits zero and reports the remote up to date, so the strongest reading here',
+  '  is reached by an invocation that changed nothing; not that the ref holds this now, since',
+  '  every reading is one reading at one instant; not that bytes reached the delivery remote,',
+  '  which nothing on this machine can establish; and not that anything may be sent again. An',
+  '  outcome is history. No stored record is ever an input that permits a publication.',
+].join('\n');
+
 /** One static sentence per listing outcome. Closed, and total by type. */
 export const AUDIT_LISTING_SENTENCES: Readonly<
   Record<HeadPublicationAuditListingOutcome, string>
 > = Object.freeze({
-  READ: 'Every entry in the store is a record this build read.',
+  READ:
+    'Every entry in the store is a record this build read, and nothing beside one of them is\n' +
+    '  a document it could not.',
   READ_WITH_UNUSABLE_ENTRIES:
-    'At least one entry in the store is not a record this build read. Each one is listed\n' +
-    '  above with what it turned out to be. Nothing was repaired, moved or removed.',
+    'At least one entry in the store is not a record this build read, or holds beside that\n' +
+    '  record a document it could not read. Each one is listed above with what it turned out\n' +
+    '  to be. Nothing was repaired, moved or removed.',
   STORE_ABSENT:
     'There is no store under this user profile, and this command did not create one.',
   STORE_PATH_UNSAFE:
@@ -202,11 +295,19 @@ export const AUDIT_MEANING = [
 export const AUDIT_PROVENANCE = [
   'What this store is:',
   '  one directory per publication this build was permitted to attempt with nobody present,',
-  '  under this OS user\'s own profile. An attended publication records nothing here, and no',
-  '  other act is recorded here at all. Any process running as this OS user can write a record',
-  '  that reads exactly like the rest, and can delete one without trace, so this is what is',
-  '  present now: it is neither a complete history nor evidence of who wrote what. There is no',
-  '  key material in this build and there is nothing here to sign with.',
+  '  under this OS user\'s own profile. Where the invocation that made one got that far, it holds',
+  '  one record of what was permitted, and where it got further still, one outcome beside that.',
+  '  An attended publication',
+  '  records nothing here, and no other act is recorded here at all. Any process running as',
+  '  this OS user can write either document so that it reads exactly like the rest, and can',
+  '  delete one without trace, so this is what is present now: it is neither a complete history',
+  '  nor evidence of who wrote what. There is no key material in this build and there is',
+  '  nothing here to sign with.',
+  '',
+  '  An entry whose record this build could not read is listed with what it turned out to be,',
+  '  and nothing beside that record is looked at: no outcome is read, graded or shown there.',
+  '  So an entry reported that way may have an outcome sitting next to it that this report',
+  '  does not mention, and an outcome is only ever shown against a record that was read.',
 ].join('\n');
 
 /**
@@ -253,6 +354,10 @@ export const AUDIT_REPORT_LABELS = [
   'Ref',
   'Commit',
   'Declaration',
+  'Outcome',
+  'Recorded at',
+  'Publication',
+  'Command',
 ] as const;
 
 /**
@@ -327,15 +432,41 @@ function entryLines(entry: HeadPublicationAuditEntry): readonly string[] {
   }
 
   lines.push(`    ${AUDIT_ENTRY_SENTENCES[entry.reading]}`);
+
+  // The outcome after the record and its sentence, because it is about what
+  // happened after the record was written and because it is only ever printed
+  // where one was read. The union puts these fields on that arm alone, so there
+  // is no branch of this function in which an outcome could appear beside a
+  // record this build refused — the same property `record` itself has, and the
+  // reason both are on the type rather than guarded by care.
+  if (entry.record !== null) {
+    lines.push(field('Outcome', entry.outcome));
+    if (entry.outcomeRecord !== null) {
+      const outcome = entry.outcomeRecord;
+      lines.push(
+        field('Recorded at', outcome.recordedAt),
+        field('Publication', outcome.outcome),
+        field('Command', outcome.commandReport),
+      );
+    }
+    lines.push(`    ${AUDIT_OUTCOME_SENTENCES[entry.outcome]}`);
+  }
+
   return lines;
 }
 
 /**
  * How many entries were read, and how many were not. Both halves always, so a
  * store with one damaged entry cannot be read as a clean one at a glance.
+ *
+ * "Read" is the listing's own predicate, imported rather than restated, and V4
+ * slice 16 is why: this counted records alone, so a store every one of whose
+ * outcomes was unreadable was graded `READ_WITH_UNUSABLE_ENTRIES` and counted
+ * "3 read, 0 not read" three lines above it. Two spellings of one question, and
+ * the reassuring one was this.
  */
 function tally(entries: readonly HeadPublicationAuditEntry[]): string {
-  const read = entries.filter((e) => e.reading === 'HISTORICAL_AUTHORISATION').length;
+  const read = entries.filter(entryWasRead).length;
   const rest = entries.length - read;
   return `${entries.length} (${read} read, ${rest} not read)`;
 }
@@ -373,6 +504,13 @@ export function renderPublicationAuthorisations(listing: HeadPublicationAuditLis
   if (listing.entries.some((entry) => entry.reading === 'HISTORICAL_AUTHORISATION')) {
     lines.push('', AUDIT_MEANING);
   }
+  // The outcome's meaning names the three labels only a read outcome produces, so
+  // it is printed only where one exists — the rule the paragraph above it
+  // learned in review. A store of authorisations with no outcome beside any of
+  // them is not told what `Command` means in a report with no such line.
+  if (listing.entries.some((entry) => entry.record !== null && entry.outcomeRecord !== null)) {
+    lines.push('', AUDIT_OUTCOME_MEANING);
+  }
   const read = listing.outcome === 'READ' || listing.outcome === 'READ_WITH_UNUSABLE_ENTRIES';
   lines.push('', AUDIT_PROVENANCE, '', read ? AUDIT_READ_ONLY_TRAILER : AUDIT_NOTHING_READ_TRAILER);
 
@@ -382,9 +520,11 @@ export function renderPublicationAuthorisations(listing: HeadPublicationAuditLis
 /** Exported so the suite can sweep every printed sentence in one place. */
 export const AUDIT_PRINTED_TEXT: readonly string[] = Object.freeze([
   ...HEAD_PUBLICATION_AUDIT_ENTRY_READINGS.map((r) => AUDIT_ENTRY_SENTENCES[r]),
+  ...HEAD_PUBLICATION_OUTCOME_ENTRY_READINGS.map((r) => AUDIT_OUTCOME_SENTENCES[r]),
   ...Object.values(AUDIT_LISTING_SENTENCES),
   AUDIT_ORDER,
   AUDIT_MEANING,
+  AUDIT_OUTCOME_MEANING,
   AUDIT_PROVENANCE,
   AUDIT_READ_ONLY_TRAILER,
   AUDIT_NOTHING_READ_TRAILER,

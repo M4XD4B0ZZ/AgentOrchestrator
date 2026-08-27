@@ -1029,13 +1029,14 @@ Grant        : ${grants}
         );
         // The driver's own member decides the code, graded one member at a time
         // by `run-exit-codes.ts`.
-        // Both store codes, because the driver has two members whose grade is
-        // the store's own rather than a number chosen for them. Passed as named
-        // fields rather than one value: two closed vocabularies behind one
-        // parameter is a parameter that can take the wrong one.
+        // All three store codes, because the driver has three members whose
+        // grade is the store's own rather than a number chosen for them. Passed
+        // as named fields rather than one value: three closed vocabularies
+        // behind one parameter is a parameter that can take the wrong one.
         const primary = exitCodeForDrive(driven.outcome, {
           conclusion: driven.deliveryConclusion?.record?.code ?? null,
           receipt: driven.reconciliation?.record?.code ?? null,
+          publicationOutcome: driven.publication?.outcome ?? null,
         });
         // …and the lease rule last, over it. `run-exit-codes.ts` states the
         // precedence: an invocation that took this repository's only writer slot
@@ -1136,22 +1137,31 @@ Grant        : ${grants}
       // back out of it: the authority that named them is spent by the time the
       // result exists, deliberately, because an artefact a report could read
       // twice is an artefact that could publish twice.
-      const publication =
+      const performed =
         options.publishHead === true
-          ? {
-              result: await performPublication(
-                options,
-                repository.root,
-                subject,
-                taskLoad,
-                resolve,
-                load,
-                seams,
-              ),
+          ? await performPublication(
+              options,
+              repository.root,
+              subject,
+              taskLoad,
+              resolve,
+              load,
+              seams,
+            )
+          : null;
+      const publication =
+        performed === null
+          ? null
+          : {
+              result: performed.result,
               ref: taskLoad.ok ? publishableRef(taskLoad.state.workBranch) : null,
               remoteName: subject.ok ? subject.remoteName : null,
-            }
-          : null;
+              // Carried for the report, and it changes no exit code on this
+              // path: without `--drive` this command's code answers whether the
+              // observation was settled and never what an act did. `L-V4-05-8`
+              // is unchanged and now covers one more result.
+              outcome: performed.outcome,
+            };
 
       // The second mutation, and it is after the first on purpose. A pull
       // request is created from a branch that must already be on the remote, so
