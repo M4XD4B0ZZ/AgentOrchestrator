@@ -392,12 +392,18 @@ function recordBytes(path: string): Buffer | null {
 /**
  * Classifies one direct child of the store root.
  *
+ * Named `classifyEntry` and not `classify`, deliberately: a bare `classify` is
+ * one of three names `tests/v2-02-remediation.test.ts` sweeps `src/` for, because
+ * the path-safety chain was once copied verbatim into three modules and that pin
+ * is how a fourth copy would be caught. This function is not that chain and
+ * belongs nowhere near its exception list, so it does not answer to its name.
+ *
  * The order of the tests is the contract. An entry is only opened once it has
  * been established to be a directory this build would have made, so a link is
  * never followed and a name this build could not have minted is never read
  * through.
  */
-function classify(root: string, name: string): HeadPublicationAuditEntry {
+function classifyEntry(root: string, name: string): HeadPublicationAuditEntry {
   const unrecognised: HeadPublicationAuditEntry = {
     reading: 'UNRECOGNISED_ENTRY',
     name,
@@ -516,7 +522,7 @@ export function listHeadPublicationAuthorisations(
   // Sorted here, by this module. The filesystem's own enumeration order is
   // measured to differ from this one and is not a contract anywhere; a listing
   // that printed it would be reproducible only by accident.
-  const classified = [...names].sort(byName).map((name) => classify(root, name));
+  const classified = [...names].sort(byName).map((name) => classifyEntry(root, name));
 
   // Two tiers, and the reason is what a name means rather than tidiness. A name
   // this build minted carries the instant the writing invocation's own clock

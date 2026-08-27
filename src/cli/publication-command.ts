@@ -198,12 +198,24 @@ export const AUTHORISATIONS_DESCRIPTION =
  * So the other arm does the reporting itself, through the same safe formatter
  * (AO-002) and the same exit code the caller's own arm would have used.
  */
+let guarded = false;
+
 function writeReport(text: string): void {
-  process.stdout.on('error', (error: NodeJS.ErrnoException) => {
-    if (error.code === 'EPIPE') return;
-    process.stderr.write(`${formatSafeError(error)}\n`);
-    process.exitCode = EXIT_RUN_UNEXPECTED;
-  });
+  // Attached at most once for the life of the process, and never removed. Both
+  // halves are forced by the same fact: the event arrives from a tick, long
+  // after this function has returned, so a listener removed after the write
+  // would not be there when it is needed — and one attached per call is a leak.
+  // The shipped CLI runs this action once, so the difference is invisible there;
+  // it is the suite that drives it repeatedly, and a review measured Node's own
+  // warning at the eleventh listener.
+  if (!guarded) {
+    guarded = true;
+    process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EPIPE') return;
+      process.stderr.write(`${formatSafeError(error)}\n`);
+      process.exitCode = EXIT_RUN_UNEXPECTED;
+    });
+  }
   process.stdout.write(text);
 }
 

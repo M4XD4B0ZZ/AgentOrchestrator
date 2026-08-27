@@ -1234,14 +1234,26 @@ describe('what the report may not say', () => {
    */
   function labelOf(raw: string): string | null {
     for (const indent of [0, 2]) {
-      if (raw.length <= indent + 14) continue;
-      if (raw.slice(indent + 13, indent + 15) !== ': ') continue;
-      // A label never begins with a space, and the indent before it is nothing
-      // else. Without this, a wrapped prose line whose colon happens to land in
-      // the same column reads as a label.
       if (raw.slice(0, indent).trim() !== '' || raw[indent] === ' ') continue;
-      const label = raw.slice(indent, indent + 13).trimEnd();
-      if (label.length > 0) return label;
+      // The FIRST `': '` at or after the indent, not a fixed column. Testing
+      // column 13 was blind to any label longer than the pad, which a review
+      // measured: a value line labelled `Publication at` — fourteen characters,
+      // carrying two outcome words — sailed past this sweep and past the outcome
+      // sweep that depends on it, while a twelve-character label was caught.
+      const at = raw.indexOf(': ', indent);
+      if (at === -1) continue;
+      const label = raw.slice(indent, at).trimEnd();
+      // A label is one run of words, so it never carries a double space and
+      // never ends a sentence. That is what keeps a wrapped prose line whose
+      // colon happens to land here from reading as a label.
+      if (label.length === 0 || label.length > 24) continue;
+      if (label.includes('  ') || label.split(' ').length > 3) continue;
+      // Capitalised, because every label in the report is and a wrapped prose
+      // line's continuation is not. That is what separates `Authorised at` from
+      // `list cannot show a gap`, which is a sentence fragment whose colon
+      // happens to land here.
+      if (!/^[A-Z][A-Za-z ]*$/.test(label)) continue;
+      return label;
     }
     return null;
   }
