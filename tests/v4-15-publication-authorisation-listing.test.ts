@@ -1620,6 +1620,58 @@ describe('a forged record does not get to choose what the report says', () => {
     expect(text).not.toContain('‬');
   });
 
+  it('escapes every character of the class it names, and nothing outside it', () => {
+    // Enumerated from Unicode rather than from a hand list, because a hand list
+    // is what the report's own sentence would then be measured against. A
+    // mutation campaign found the gap this closes: dropping U+061C, the C1
+    // range, the isolates or the separators from the class each left the whole
+    // file green, because only two of the twelve bidi controls were ever named.
+    const mustEscape: string[] = [];
+    for (let code = 0; code <= 0x2069; code += 1) {
+      const character = String.fromCodePoint(code);
+      if (/\p{Bidi_Control}|\p{Cc}|\p{Zl}|\p{Zp}/u.test(character)) mustEscape.push(character);
+    }
+    // The control it needs: the enumeration must actually have found the twelve
+    // bidi controls, or this passes over an empty set.
+    expect(mustEscape.filter((c) => /\p{Bidi_Control}/u.test(c)).length).toBe(12);
+    expect(mustEscape.length).toBeGreaterThan(40);
+
+    const home = scratchHome();
+    const name = eventName('20260827T174000000Z', '6');
+    forge(home, name, { taskId: `T${mustEscape.join('')}` });
+    const text = renderPublicationAuthorisations(list(home));
+
+    expect(list(home).entries[0]?.reading).toBe('HISTORICAL_AUTHORISATION');
+    // The value line, not the whole report: the report is made of lines, so a
+    // newline in it is the renderer's own and proves nothing. What must hold is
+    // that the recorded value occupies exactly one line and carries none of the
+    // class raw.
+    const value = text.split('\n').filter((l) => /^ {2}Task {9}: /.test(l));
+    expect(value.length, 'the value must still be one line').toBe(1);
+    const line = value[0] as string;
+    for (const character of mustEscape) {
+      const code = (character.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0');
+      expect(line, `U+${code} must be escaped`).toContain(`<U+${code}>`);
+      expect(line, `U+${code} must not survive raw`).not.toContain(character);
+    }
+  });
+
+  it('leaves every character outside that class exactly as recorded', () => {
+    const home = scratchHome();
+    const name = eventName('20260827T174500000Z', '7');
+    // Umlauts, CJK, Hebrew, Arabic, an emoji, a zero-width space, a soft hyphen,
+    // a byte-order mark and a combining mark. None of these can forge a line,
+    // and the report's claim is that nothing outside the class is altered.
+    const kept = 'Uber-ümläut/日本/שלום/مرحبا/😀/​/­/﻿/é';
+    forge(home, name, { taskId: kept });
+
+    const text = renderPublicationAuthorisations(list(home));
+
+    expect(list(home).entries[0]?.reading).toBe('HISTORICAL_AUTHORISATION');
+    expect(text).toContain(kept);
+    expect(text).not.toContain('<U+');
+  });
+
   it('shows a recorded instant that is not a date, exactly as recorded', () => {
     const home = scratchHome();
     const name = eventName('20260827T172000000Z', 'f');
@@ -1671,7 +1723,8 @@ describe('the report survives a reader that walks away', () => {
       process.stdout.write = write;
     }
 
-    const added = process.stdout.listeners('error').filter((l) => !before.includes(l));
+    const after = process.stdout.listeners('error');
+    const added = after.filter((l) => !before.includes(l));
     try {
       // This is the first command here whose output is unbounded, so it is the
       // first with an operator who has a reason to pipe it into `head` and close
@@ -1679,8 +1732,31 @@ describe('the report survives a reader that walks away', () => {
       // report exceeds the pipe buffer, and without this listener the stream's
       // `error` event is an uncaught exception - 1,355 bytes of raw Node stack
       // outside the safe formatter, and exit 1 for a normal ending.
-      expect(added.length, 'the write must be guarded').toBe(1);
-      const guard = added[0] as (error: NodeJS.ErrnoException) => void;
+      //
+      // The guard is attached once for the life of the process, so it may have
+      // been attached by an earlier case in this file rather than by the run
+      // above. That is the point of the once-only shape and it must not make
+      // this case order-dependent: what has to hold is that the guard is there,
+      // whoever installed it. `added` is only used to prove the once-only rule
+      // below, which is why a first version of this asserting `added.length ===
+      // 1` failed with "the write must be guarded" on a correctly guarded run.
+      expect(after.length, 'the write must be guarded').toBeGreaterThanOrEqual(1);
+      expect(added.length, 'and guarded at most once per process').toBeLessThanOrEqual(1);
+      const guard = after[after.length - 1] as (error: NodeJS.ErrnoException) => void;
+
+      // Driving it again adds nothing: the leak this replaced warned at Node's
+      // eleventh listener.
+      const program2 = new Command();
+      program2.exitOverride();
+      const write2 = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (() => true) as typeof process.stdout.write;
+      try {
+        registerPublicationCommand(program2, { pathProvider: fixedPathProvider(home) });
+        await program2.parseAsync(['node', 'ao', 'publication', 'authorisations']);
+      } finally {
+        process.stdout.write = write2;
+      }
+      expect(process.stdout.listeners('error').length).toBe(after.length);
 
       const errors: string[] = [];
       const stderr = process.stderr.write.bind(process.stderr);

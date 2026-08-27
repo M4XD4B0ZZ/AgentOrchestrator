@@ -176,8 +176,12 @@ export const HEAD_PUBLICATION_AUDIT_ENTRY_READINGS = [
    */
   'RECORD_EMPTY',
   /**
-   * Something is at the record's name and no bytes could be taken from it: it is
-   * a link, it is not a regular file, or the read did not complete.
+   * No bytes could be taken from the record's name.
+   *
+   * Four producers: something at the name that is a link, something that is not
+   * a regular file, a read that did not complete — and a name this build could
+   * not ask about at all, where nothing is established to be there. The sentence
+   * does not open with "something is at" for that last one's sake.
    */
   'RECORD_UNREADABLE',
   /** Bytes are there and are not a record this build declares. */
@@ -296,7 +300,15 @@ export const HEAD_PUBLICATION_AUDIT_LISTINGS = [
    * could not be inspected. Nothing was read through it.
    */
   'STORE_PATH_UNSAFE',
-  /** Something is at the store's path and its contents could not be listed. */
+  /**
+    * The store could not be listed.
+    *
+    * Three producers, and the first is why this sentence does not say
+    * "something is at the store's path": a directory **on the way** to the
+    * store is not a directory, in which case nothing is at the store's path at
+    * all. The others are something at the path itself that cannot be listed,
+    * and an enumeration that failed for another reason.
+    */
   'STORE_UNREADABLE',
   /** The OS could not be asked where the user profile is, so there is no store to read. */
   'PROFILE_UNAVAILABLE',

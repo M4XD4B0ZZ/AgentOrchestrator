@@ -1120,8 +1120,9 @@ eigenen Zeile `Reading` und einem Satz, was es ist. Die Zählzeile trennt beides
 ```text
 HISTORICAL_AUTHORISATION   gelesen, Digest passt zum Verzeichnisnamen
 RECORD_ABSENT              Event-Verzeichnis ohne Datensatz: Absturz beim Schreiben,
-                           eine Verweigerung danach, oder der Datensatz wurde
-                           geloescht. AO kann das nicht unterscheiden.
+                           eine Verweigerung danach, der Datensatz wurde
+                           geloescht, oder jemand hat hier einfach ein
+                           Verzeichnis angelegt. AO unterscheidet das nicht.
 RECORD_EMPTY               Datei da, 0 Bytes — das schreibt AO nie
 RECORD_UNREADABLE          Link, keine normale Datei, Lesen misslang, oder der
                            Name war gar nicht abfragbar

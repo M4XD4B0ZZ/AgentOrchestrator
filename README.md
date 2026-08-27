@@ -11017,7 +11017,7 @@ it could not read would look complete and would not be. The readings are:
 | Reading | What it is |
 | --- | --- |
 | `HISTORICAL_AUTHORISATION` | a record this build read, bound to the name of the directory it sits in |
-| `RECORD_ABSENT` | an event directory with no record in it — a crash between the directory and the write, a refusal after it, or the record having been deleted. This build cannot tell those apart |
+| `RECORD_ABSENT` | an event directory with no record in it — a crash between the directory and the write, a refusal after it, the record having been deleted, or somebody simply making a directory here. This build cannot tell those apart |
 | `RECORD_EMPTY` | a file at the record's name holding no bytes. The write cannot leave one, so something else made it |
 | `RECORD_UNREADABLE` | a link, something that is not an ordinary file, a read that did not complete, or a name that could not be asked about at all |
 | `RECORD_MALFORMED` | bytes that are not a record this build declares, including one past the size bound |

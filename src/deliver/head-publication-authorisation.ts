@@ -39,12 +39,15 @@
  *    `PENDING`, no expiry and no attempt counter. A record with no mutable field
  *    has no state machine, so there is nothing here for a later slice to resume
  *    from — which is the structural half of "audit is never authority";
- *  - **not "this record permits a publication".** Nothing on any authority path
- *    reads it. A future unattended attempt needs a new invocation that asks, a
- *    declaration that still permits, a freshly resolved subject, a fresh reading
- *    of the remote and a fresh one-shot grant. The record is evidence for a
- *    person, and this build's own history is why that sentence is here: the
- *    delivery observation record carries the same rule for the same reason.
+ *  - **not "this record permits a publication".** No stored record is ever an
+ *    input that permits one. The single place the effect path reads a record at
+ *    all is the write it has just made, read back before the remote is
+ *    contacted, and that read can only refuse. A future unattended attempt
+ *    needs a new invocation that asks, a declaration that still permits, a
+ *    freshly resolved subject, a fresh reading of the remote and a fresh
+ *    one-shot grant. The record is evidence for a person, and this build's own
+ *    history is why that sentence is here: the delivery observation record
+ *    carries the same rule for the same reason.
  *
  * ── The binding digest is integrity structure, not a MAC ───────────────────
  *

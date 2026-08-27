@@ -263,7 +263,7 @@ settled before the record is looked for at all:
 | `HISTORICAL_AUTHORISATION` | a record this build read, bound to the name of the directory it sits in |
 | `RECORD_ABSENT` | an event directory with nothing at the record's name |
 | `RECORD_EMPTY` | a file at the record's name holding no bytes |
-| `RECORD_UNREADABLE` | a link, a non-file, or a read that did not complete |
+| `RECORD_UNREADABLE` | a link, a non-file, a read that did not complete, or a name that could not be asked about at all |
 | `RECORD_MALFORMED` | bytes that are not a record this build declares — including one past the size bound |
 | `RECORD_UNSUPPORTED_VERSION` | a contract version this build does not read |
 | `RECORD_NOT_THIS_EVENT` | the digest does not recompute for this directory |
@@ -590,6 +590,20 @@ event, task and repository". The report's wording is bounded to match — includ
 that three of the binding's inputs are not shown at all: the two contract
 versions, and the event identity the record claims for itself, which is held back
 because §6a makes it unchecked text a forger chooses.
+
+**`L-V4-15-11` — the escaping bounds what can forge a line, not what a terminal
+does.** The class covers the C0 and C1 controls, all twelve Unicode
+bidirectional formatting characters and the line and paragraph separators, and
+the suite enumerates every one from Unicode itself rather than from a hand list.
+What it does not cover, and cannot: a strongly right-to-left character reorders
+the neutrals around it — slashes, hyphens, colons, digits — by the bidirectional
+algorithm alone, with no control character present, so a ref or a checkout path
+containing Hebrew or Arabic can render in an order it was not recorded in. Nor
+does it address a `repositoryRoot` of four thousand characters wrapping across
+fifty terminal rows whose continuations carry no label. Both are properties of
+the display rather than of the bytes, and the report's claim is bounded to
+match: what is shown is what is recorded, character for character, outside one
+named class.
 
 **`L-V4-15-10` — a path whose components do not exist at all reads as an absent
 store.** The walk in §11a stops at the first component that is not there, because
