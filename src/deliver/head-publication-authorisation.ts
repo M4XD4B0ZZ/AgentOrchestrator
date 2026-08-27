@@ -264,6 +264,124 @@ export type HeadPublicationAuthorisationReading =
   (typeof HEAD_PUBLICATION_AUTHORISATION_READINGS)[number];
 
 /**
+ * One readable record, as this module hands it out.
+ *
+ * Every field of the stored document is here, and six of them are **renamed**.
+ * That is not decoration: `mintHeadPublicationGrant` takes a structurally typed
+ * `{host, owner, name, commit}` and the publication re-check seam takes
+ * `{host, owner, name, remoteName, ref, commit}`, so a value carrying the
+ * record's own field names is an argument either of them accepts. Measured,
+ * with the real declarations: a view with the record's names compiles into the
+ * mint; renaming one identity field is enough to make it a type error, and
+ * renaming all of them is what keeps that true when a field is added later.
+ *
+ * Measured too, and the reason this is a rename rather than something cleverer:
+ * a `unique symbol` brand, a branded `commit` string and a class with a
+ * `#private` field were each tried against the mint's parameter and each was
+ * **no defence at all** — excess properties do not break structural
+ * assignability from a variable, and a `#private` field is nominal only when the
+ * class is the target. Names are what work here.
+ *
+ * This is a view and not a second contract. It carries no field the record does
+ * not have, adds no interpretation, and the suite pins the correspondence value
+ * by value rather than key by key.
+ */
+export interface AuthorisedPublicationRecord {
+  readonly authorisationVersion: number;
+  /** The `eventId` the document carries. The name it is filed under is the entry's. */
+  readonly recordedEventId: string;
+  readonly act: AuditedForgeAct;
+  readonly invocationMode: AuditedInvocationMode;
+  readonly taskId: string;
+  /** The local checkout the authorising invocation had resolved. Not resolved, stat'ed or followed here. */
+  readonly repositoryRoot: string;
+  readonly forgeHost: string;
+  readonly forgeOwner: string;
+  readonly forgeName: string;
+  /**
+   * The **local** name of the remote, as the authorising invocation resolved it.
+   *
+   * What this build *writes* here is a remote name and never a URL — the
+   * publication path takes it from the resolved remote and the vector names a
+   * bare remote for exactly that reason. What the contract *admits* is any text
+   * of up to a hundred characters, so a record anything else wrote can carry a
+   * URL, credentials and all, and a report that shows what is recorded will show
+   * it. Measured, and stated here rather than promised away.
+   */
+  readonly declaredRemote: string;
+  readonly authorisedRef: string;
+  readonly authorisedCommit: string;
+  readonly declarationSchemaVersion: number;
+  readonly declaredPermission: string;
+  /** SHA-256 of the declaration's exact bytes, as they were when they were read. */
+  readonly declarationDigest: string;
+  /**
+   * The instant the record says it was built.
+   *
+   * Displayed exactly as recorded and checked against nothing: the contract
+   * bounds this as a string of at most 64 characters, so it is not established
+   * to be a date, and nothing compares it with the instant in the event name.
+   */
+  readonly authorisedAt: string;
+  readonly binding: string;
+}
+
+/**
+ * The rename, one field at a time.
+ *
+ * Typed as a total map over the record's own keys, so a field added to the
+ * record is a compile error here rather than a value that quietly stops being
+ * shown. Completeness is all this proves — that the two sides carry the same
+ * *values* is a separate question, and the suite asks it.
+ */
+const RECORD_FIELD: Readonly<
+  Record<keyof HeadPublicationAuthorisation, keyof AuthorisedPublicationRecord>
+> = Object.freeze({
+  authorisationVersion: 'authorisationVersion',
+  eventId: 'recordedEventId',
+  act: 'act',
+  invocationMode: 'invocationMode',
+  taskId: 'taskId',
+  repositoryRoot: 'repositoryRoot',
+  host: 'forgeHost',
+  owner: 'forgeOwner',
+  name: 'forgeName',
+  declaredRemote: 'declaredRemote',
+  ref: 'authorisedRef',
+  commit: 'authorisedCommit',
+  declarationSchemaVersion: 'declarationSchemaVersion',
+  declaredPermission: 'declaredPermission',
+  declarationDigest: 'declarationDigest',
+  authorisedAt: 'authorisedAt',
+  binding: 'binding',
+});
+
+/** The map, exported so the suite can pin the correspondence rather than restate it. */
+export const HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELD = RECORD_FIELD;
+
+function view(record: HeadPublicationAuthorisation): AuthorisedPublicationRecord {
+  return Object.freeze({
+    authorisationVersion: record.authorisationVersion,
+    recordedEventId: record.eventId,
+    act: record.act,
+    invocationMode: record.invocationMode,
+    taskId: record.taskId,
+    repositoryRoot: record.repositoryRoot,
+    forgeHost: record.host,
+    forgeOwner: record.owner,
+    forgeName: record.name,
+    declaredRemote: record.declaredRemote,
+    authorisedRef: record.ref,
+    authorisedCommit: record.commit,
+    declarationSchemaVersion: record.declarationSchemaVersion,
+    declaredPermission: record.declaredPermission,
+    declarationDigest: record.declarationDigest,
+    authorisedAt: record.authorisedAt,
+    binding: record.binding,
+  });
+}
+
+/**
  * What one grading produced: the answer, and — only on the good answer — the
  * record it read.
  *
@@ -275,7 +393,7 @@ export type HeadPublicationAuthorisationReading =
 export type HeadPublicationAuthorisationInspection =
   | {
       readonly reading: 'HISTORICAL_AUTHORISATION';
-      readonly record: HeadPublicationAuthorisation;
+      readonly record: AuthorisedPublicationRecord;
     }
   | {
       readonly reading: Exclude<HeadPublicationAuthorisationReading, 'HISTORICAL_AUTHORISATION'>;
@@ -301,7 +419,14 @@ type SubjectFor = (
  * answer to "whose identity is this record read under?", so there is a single
  * parser, a single version gate and a single binding comparison in this build.
  */
-function grade(bytes: Buffer, subjectFor: SubjectFor): HeadPublicationAuthorisationInspection {
+type Graded =
+  | { readonly reading: 'HISTORICAL_AUTHORISATION'; readonly record: HeadPublicationAuthorisation }
+  | {
+      readonly reading: Exclude<HeadPublicationAuthorisationReading, 'HISTORICAL_AUTHORISATION'>;
+      readonly record: null;
+    };
+
+function grade(bytes: Buffer, subjectFor: SubjectFor): Graded {
   if (bytes.byteLength === 0) return { reading: 'ABSENT', record: null };
   if (bytes.byteLength > MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES) {
     return { reading: 'MALFORMED', record: null };
@@ -386,9 +511,20 @@ export function inspectHeadPublicationAuthorisation(
   bytes: Buffer,
   eventId: string,
 ): HeadPublicationAuthorisationInspection {
-  return grade(bytes, (payload) => ({
+  const graded = grade(bytes, (payload) => ({
     eventId,
     taskId: payload.taskId,
     repositoryRoot: payload.repositoryRoot,
   }));
+  // The renamed view, never the record itself. Slice 14 exported one grader and
+  // it returned a reading string, so no exported function in this build handed
+  // out a `HeadPublicationAuthorisation` value at all. This entry point is the
+  // first that could, and a review measured what that costs: the record's own
+  // field names satisfy `mintHeadPublicationGrant`'s structurally typed
+  // parameter, so two exported calls would have turned a file on disk into a
+  // claimable grant. The view is refused by the same parameter, and it is the
+  // only shape this function returns.
+  return graded.reading === 'HISTORICAL_AUTHORISATION'
+    ? { reading: 'HISTORICAL_AUTHORISATION', record: view(graded.record) }
+    : { reading: graded.reading, record: null };
 }

@@ -10974,7 +10974,7 @@ user profile and grades every entry in it.
 ```text
 Store        : C:\Users\you\.agent-orchestrator\head-publication-authorisations
 Listing      : READ
-Entries      : 2 (2 read, 0 not read)
+Entries      : 1 (1 read, 0 not read)
   Every entry in the store is a record this build read.
 
 Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
@@ -10986,8 +10986,11 @@ Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator
   Ref          : refs/heads/ao/task/V4-14
   Commit       : 10583ee91a5747d0049f563ffaac64b0cf643aeb
-  Declaration  : AUTOMATIC_ALLOWED, sha256 4c2f...
+  Declaration  : AUTOMATIC_ALLOWED, sha256 4c2f9f0e1b7d3a5c8e2f4a6b0d9c1e3f5a7b9d0c2e4f6a8b1d3e5f7a9c0b2d4e6
 ```
+
+Every identity is whole. The object name and the declaration digest are never
+abbreviated in the report, because a partial identity is a different fact.
 
 ### What a line here means, and what it does not
 
@@ -11014,13 +11017,13 @@ it could not read would look complete and would not be. The readings are:
 | Reading | What it is |
 | --- | --- |
 | `HISTORICAL_AUTHORISATION` | a record this build read, bound to the name of the directory it sits in |
-| `RECORD_ABSENT` | an event directory with no record in it — what a crash between the directory and the write leaves, and what every refusal after it leaves |
+| `RECORD_ABSENT` | an event directory with no record in it — a crash between the directory and the write, a refusal after it, or the record having been deleted. This build cannot tell those apart |
 | `RECORD_EMPTY` | a file at the record's name holding no bytes. The write cannot leave one, so something else made it |
 | `RECORD_UNREADABLE` | a link, something that is not an ordinary file, or a read that did not complete |
 | `RECORD_MALFORMED` | bytes that are not a record this build declares, including one past the size bound |
 | `RECORD_UNSUPPORTED_VERSION` | a record from a build this one cannot read. Refused, never guessed at, and nothing in it is shown |
 | `RECORD_NOT_THIS_EVENT` | the digest does not recompute for the directory it sits in: a record copied out of another event, or a field edited in place |
-| `UNRECOGNISED_ENTRY` | not an event directory at all — a link, a file, or a name this build would not mint |
+| `UNRECOGNISED_ENTRY` | not an event directory at all — a link, a file, a name this build would not mint, or an entry it could not describe at all |
 
 The command exits **0** whenever it produced a listing, including one holding
 entries it could not read: no authority path reads a record, so a damaged one
@@ -11033,9 +11036,12 @@ write into.
 
 ### Why an old record gives no present authority
 
-Nothing on any authority path reads one. Every unattended attempt still needs a
-new invocation that asks, a declaration that still permits, a freshly resolved
-subject, a fresh reading of the remote and a fresh one-shot grant.
+No stored record is ever an input that permits a publication. Every unattended
+attempt still needs a new invocation that asks, a declaration that still permits,
+a freshly resolved subject, a fresh reading of the remote and a fresh one-shot
+grant. The one place the effect path reads a record at all is the write it has
+just made, read back before the remote is contacted — and that read can only
+refuse.
 
 That is structural as well as stated. The type this command hands out has its
 identity fields deliberately renamed — `forgeHost`, `forgeOwner`, `forgeName`,
@@ -11082,6 +11088,16 @@ which is shown exactly as recorded and checked against nothing.
   enumerating reader has one fact that did not come out of the bytes: the
   directory's name. So the check establishes "bound to this directory name", not
   "bound to this event, task and repository", and the wording says exactly that.
+- **L-V4-15-6 — a hard link at a record's name is read.** The refusal is on
+  reparse points, which is what `lstat` can see. A hard link is not one, nothing
+  counts links, and `mklink /H` needs no elevation — so a record's bytes can live
+  under another name outside the store. This is `L-V4-14-4`, and this slice is
+  the first code that reads through the alias.
+- **L-V4-15-7 — a recorded value can be anything its length bound admits.** What
+  this build writes into `declaredRemote` is a remote name; what the contract
+  admits is a hundred characters of text. A record something else wrote can carry
+  a URL with a credential, and a report that shows what is recorded shows it.
+  Redacting would be hiding evidence.
 - **`L-V4-14-3` is narrowed, not closed.** The store is read now; it is still not
   indexed, so finding the record for one branch means reading every entry.
 - **`L-V4-14-1` and `L-V4-14-2` are unchanged and now matter more.** This is the

@@ -78,22 +78,25 @@ import { line } from './render-attended-run.js';
 export const AUDIT_ENTRY_SENTENCES: Readonly<Record<HeadPublicationAuditEntryReading, string>> =
   Object.freeze({
     HISTORICAL_AUTHORISATION:
-      'A record this build read, whose digest recomputes from the values shown and from the\n' +
-      '    name of the directory it sits in.',
+      'A record this build read, whose digest recomputes from the values it records and from\n' +
+      '    the name of the directory it sits in. Three of those values are not shown: the two\n' +
+      '    contract versions, and the event identity the record claims for itself - which is\n' +
+      '    held back deliberately, because it is unchecked text a forger chooses.',
     RECORD_ABSENT:
-      'This event directory holds no record. That is what an invocation that died while\n' +
-      '    staging one leaves behind, and it is what every refusal after the directory was made\n' +
-      '    leaves behind, because nothing in this store is ever deleted or cleaned up. It says\n' +
-      '    nothing about a publication and it authorises nothing.',
+      'This event directory holds no record. Three things leave one: an invocation that died\n' +
+      '    while staging a record, a refusal after the directory was made - this build removes\n' +
+      '    neither - and anything running as this OS user deleting the record afterwards. This\n' +
+      '    build cannot tell those apart. It says nothing about a publication and it authorises\n' +
+      '    nothing.',
     RECORD_EMPTY:
       'A file is at this record\'s name and holds no bytes, so there is no record to read.\n' +
       '    The write protocol publishes by renaming a complete file into place and cannot leave\n' +
       '    an empty one, so something else made this. The absence of a record is never a record\n' +
       '    of absence.',
     RECORD_UNREADABLE:
-      'Something is at this record\'s name and no bytes could be taken from it: it is a link,\n' +
-      '    it is not an ordinary file, or the read did not complete. Nothing was followed and\n' +
-      '    nothing was touched.',
+      'No bytes could be taken from this record\'s name: something is at it that is a link or\n' +
+      '    is not an ordinary file, the read did not complete, or the name could not be asked\n' +
+      '    about at all. Nothing was followed and nothing was touched.',
     RECORD_MALFORMED:
       'Something is here and it is not a record this build declares, so it was not read. A\n' +
       '    record that cannot be read is not a record that says nothing was authorised. It is\n' +
@@ -109,9 +112,10 @@ export const AUDIT_ENTRY_SENTENCES: Readonly<Record<HeadPublicationAuditEntryRea
       '    repairs neither. Nothing in it is shown.',
     UNRECOGNISED_ENTRY:
       'This build does not read this entry as an event directory: it is a link, or it is not\n' +
-      '    a directory, or its name is not one this build mints. It was not opened and not\n' +
-      '    followed. It is listed because a store that quietly ignored what it did not\n' +
-      '    recognise would look complete and would not be.',
+      '    a directory, or its name is not one this build mints - or it could not be described\n' +
+      '    at all, which is refused for the same reason rather than assumed to be harmless. It\n' +
+      '    was not opened and not followed. It is listed because a store that quietly ignored\n' +
+      '    what it did not recognise would look complete and would not be.',
   });
 
 /** One static sentence per listing outcome. Closed, and total by type. */
@@ -132,7 +136,8 @@ export const AUDIT_LISTING_SENTENCES: Readonly<
     'Something is at the store\'s path and its contents could not be listed, so nothing\n' +
     '  here is a list of what is in it.',
   PROFILE_UNAVAILABLE:
-    'The operating system could not be asked where this user\'s profile directory is, so\n' +
+    'This build could not establish where this user\'s profile directory is - the operating\n' +
+    '  system could not be asked, or the answer it gave was not one this build accepts - so\n' +
     '  there is no store to read and no path to name.',
 });
 
@@ -158,13 +163,16 @@ export const AUDIT_LISTING_SENTENCES: Readonly<
  */
 export const AUDIT_ORDER = [
   'How this list is ordered:',
-  '  by the name of each event directory, oldest first, then by name again for anything that',
-  '  is not an event directory. A name this build mints carries the instant the writing',
-  '  invocation\'s own clock reported, so that order is that clock\'s; two events minted in one',
-  '  millisecond are separated by a random identifier and their order between them means',
-  '  nothing. The time shown against a record is the one inside it, exactly as recorded, and it',
-  '  is checked against nothing - not against a calendar, and not against the directory name.',
-  '  A sorted list cannot show a gap: a deleted record leaves nothing behind to be missing.',
+  '  by the name of each entry: first the ones whose names have the shape this build mints,',
+  '  then everything else, each group in the same order. That shape carries the instant the',
+  '  writing invocation\'s own clock reported, so for records this build wrote the first group',
+  '  is that clock\'s order - a name is only what a directory is called, and anything able to',
+  '  write here can choose one. Two events minted in the same millisecond are separated by a',
+  '  random identifier and their order between them means nothing. The time shown against a',
+  '  record is the one inside that record and is checked against nothing - not against a',
+  '  calendar, not against the directory name - and it is shown as recorded except that a',
+  '  control character in it is written as its code point. A sorted list cannot show a gap: a',
+  '  deleted record leaves nothing behind to be missing.',
 ].join('\n');
 
 export const AUDIT_MEANING = [
@@ -180,8 +188,9 @@ export const AUDIT_MEANING = [
   '  anything is sent; not that the ref exists; not that this build put it there; and not that',
   '  the declaration still permits any of it. This command reads the store and nothing else:',
   '  it asks no forge what a ref holds now, and it does not open the declaration as it stands',
-  '  today. A record brings no publication closer to happening - nothing on any authority path',
-  '  reads one.',
+  '  today. A record brings no publication closer to happening: no stored record is ever an',
+  '  input that permits a publication. The one place the effect path reads one is the write it',
+  '  has just made, and that read can only refuse.',
 ].join('\n');
 
 /**
@@ -200,12 +209,25 @@ export const AUDIT_PROVENANCE = [
   '  key material in this build and there is nothing here to sign with.',
 ].join('\n');
 
-/** The closing promise. Narrow and exact, in the shape the read-only reports use. */
-export const AUDIT_READ_ONLY_TRAILER = [
-  'This command read the store and changed nothing: it created no directory and no file, wrote',
-  'nothing, removed nothing, started no git and no forge client, took no execution lease, read',
-  'no task state and opened no declaration.',
-].join('\n');
+/**
+ * The closing promise, in two forms.
+ *
+ * The clause list is true on every outcome; the leading verb is not. A single
+ * trailer saying "This command read the store" printed three lines under
+ * "Something is at the store's path and its contents could not be listed" — two
+ * printed sentences, six lines apart, one denying the other, and the denial was
+ * the reassuring one. That is the failure this whole command exists to prevent,
+ * arriving through the trailer rather than through the listing.
+ */
+const READ_ONLY_CLAUSES =
+  'changed nothing: it created no directory and no file, wrote nothing, removed nothing,\n' +
+  'started no git and no forge client, took no execution lease, read no task state and opened\n' +
+  'no declaration.';
+
+export const AUDIT_READ_ONLY_TRAILER = `This command read the store and ${READ_ONLY_CLAUSES}`;
+
+/** For every outcome where no listing was produced. */
+export const AUDIT_NOTHING_READ_TRAILER = `This command ${READ_ONLY_CLAUSES}`;
 
 /**
  * Every label this report puts a value beside.
@@ -234,6 +256,21 @@ export const AUDIT_REPORT_LABELS = [
 ] as const;
 
 /**
+ * Every character class a recorded value may not put on a line unaltered.
+ *
+ * The C0 and C1 controls, because a newline splits one entry into two and an
+ * escape sequence paints over the lines above it. And the bidirectional
+ * formatting characters, because they do the same damage by another route: an
+ * override reorders what a terminal shows without changing a byte, so a ref or a
+ * checkout path can be made to read as something else entirely. The Unicode line
+ * and paragraph separators are in the set for the first reason.
+ *
+ * Everything else is left exactly as recorded.
+ */
+const UNPRINTABLE =
+  /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+
+/**
  * A recorded value, made safe to put on a line of a report.
  *
  * Seven fields of a record are free text: the task id, the checkout, the host,
@@ -252,7 +289,7 @@ export const AUDIT_REPORT_LABELS = [
  * what the report looks like.
  */
 function printable(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, (character) => {
+  return value.replace(UNPRINTABLE, (character) => {
     const code = (character.codePointAt(0) ?? 0).toString(16).padStart(4, '0');
     return `<U+${code.toUpperCase()}>`;
   });
@@ -324,8 +361,15 @@ export function renderPublicationAuthorisations(listing: HeadPublicationAuditLis
     lines.push('', ...entryLines(entry));
   }
 
-  if (listing.entries.length > 0) lines.push('', AUDIT_ORDER, '', AUDIT_MEANING);
-  lines.push('', AUDIT_PROVENANCE, '', AUDIT_READ_ONLY_TRAILER);
+  if (listing.entries.length > 0) lines.push('', AUDIT_ORDER);
+  // The meaning names the labels of a readable record, so it is printed only
+  // where one exists. A store holding a single stray file used to be told what
+  // "the instant under `Authorised at`" means, in a report with no such line.
+  if (listing.entries.some((entry) => entry.reading === 'HISTORICAL_AUTHORISATION')) {
+    lines.push('', AUDIT_MEANING);
+  }
+  const read = listing.outcome === 'READ' || listing.outcome === 'READ_WITH_UNUSABLE_ENTRIES';
+  lines.push('', AUDIT_PROVENANCE, '', read ? AUDIT_READ_ONLY_TRAILER : AUDIT_NOTHING_READ_TRAILER);
 
   return `${lines.join('\n')}\n\n`;
 }
@@ -338,4 +382,5 @@ export const AUDIT_PRINTED_TEXT: readonly string[] = Object.freeze([
   AUDIT_MEANING,
   AUDIT_PROVENANCE,
   AUDIT_READ_ONLY_TRAILER,
+  AUDIT_NOTHING_READ_TRAILER,
 ]);

@@ -1070,7 +1070,7 @@ Verzeichnis gar nicht existiert.
 ```text
 Store        : C:\Users\Max\.agent-orchestrator\head-publication-authorisations
 Listing      : READ
-Entries      : 2 (2 read, 0 not read)
+Entries      : 1 (1 read, 0 not read)
   Every entry in the store is a record this build read.
 
 Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
@@ -1082,7 +1082,7 @@ Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Delivery     : origin -> github.com/M4XD4B0ZZ/AgentOrchestrator
   Ref          : refs/heads/ao/task/V4-14
   Commit       : 10583ee91a5747d0049f563ffaac64b0cf643aeb
-  Declaration  : AUTOMATIC_ALLOWED, sha256 4c2f…
+  Declaration  : AUTOMATIC_ALLOWED, sha256 4c2f9f0e1b7d3a5c8e2f4a6b0d9c1e3f5a7b9d0c2e4f6a8b1d3e5f7a9c0b2d4e6
 ```
 
 ### Was ein Eintrag heißt — und was nicht
@@ -1111,13 +1111,16 @@ eigenen Zeile `Reading` und einem Satz, was es ist. Die Zählzeile trennt beides
 
 ```text
 HISTORICAL_AUTHORISATION   gelesen, Digest passt zum Verzeichnisnamen
-RECORD_ABSENT              Event-Verzeichnis ohne Datensatz (Absturz beim Schreiben)
+RECORD_ABSENT              Event-Verzeichnis ohne Datensatz: Absturz beim Schreiben,
+                           eine Verweigerung danach, oder der Datensatz wurde
+                           geloescht. AO kann das nicht unterscheiden.
 RECORD_EMPTY               Datei da, 0 Bytes — das schreibt AO nie
 RECORD_UNREADABLE          Link, keine normale Datei, oder Lesen misslang
 RECORD_MALFORMED           kein Datensatz dieses Builds (auch: zu groß)
 RECORD_UNSUPPORTED_VERSION neuere Vertragsversion — verweigert, nichts wird gezeigt
 RECORD_NOT_THIS_EVENT      Digest passt nicht zum Verzeichnis: kopiert oder verändert
-UNRECOGNISED_ENTRY         gar kein Event-Verzeichnis (Link, Datei, fremder Name)
+UNRECOGNISED_ENTRY         gar kein Event-Verzeichnis: Link, Datei, fremder Name -
+                           oder AO konnte den Eintrag gar nicht bestimmen
 ```
 
 ### Exit-Codes
@@ -1149,11 +1152,18 @@ nie etwas erlaubt wurde — eine beaufsichtigte Veröffentlichung schreibt hier
 überhaupt nichts, ein anderer OS-Benutzer hat einen eigenen Store, und Gelöschtes
 hinterlässt keine Lücke.
 
+### Weiterleiten in `head` oder einen Pager ist in Ordnung
+
+Der Bericht ist bewusst unbegrenzt lang. Wenn du ihn in `head`, `more` oder einen
+Pager schickst und den Leser schließt, ist das ein **normales Ende**: AO bricht
+nicht ab und meldet keinen Fehler.
+
 ### Der Store wächst unbegrenzt
 
 Ein Verzeichnis pro erlaubter unbeaufsichtigter Veröffentlichung, dauerhaft.
-Nichts löscht dort etwas, und dieser Befehl auch nicht — er zeigt **alle**
-Einträge, ohne Limit und ohne Filter. Eine Aufbewahrungsregel ist eine eigene
+**AO** löscht dort nie etwas, und dieser Befehl auch nicht — er zeigt **alle**
+Einträge, ohne Limit und ohne Filter. Ein Mensch oder ein anderer Prozess unter
+demselben OS-Benutzer kann sehr wohl löschen; siehe oben. Eine Aufbewahrungsregel ist eine eigene
 Entscheidung und bewusst noch nicht getroffen (`L-V4-14-1`, `L-V4-15-1`).
 
 ---

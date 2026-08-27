@@ -30,9 +30,15 @@
  *
  *  - a name this build would not mint is not an event, and is reported as an
  *    entry rather than skipped;
- *  - a symbolic link or a Windows junction is never followed. A record read
+ *  - a symbolic link or a Windows junction is never followed, at either level:
+ *    not as an event directory, and not at the record's own name. A record read
  *    through one would be evidence from somewhere else, filed under a name in
- *    the store — which is the one thing an accountability listing may not do;
+ *    the store — which is the one thing an accountability listing may not do.
+ *    **A hard link is not a link this can see**, and that bound is stated rather
+ *    than implied: it is not a reparse point, nothing counts links, and a
+ *    hard-linked record is opened and graded like any other, with its bytes
+ *    living under another name outside the store. `L-V4-14-4`, which this slice
+ *    is the first code to read through, and `L-V4-15-6`;
  *  - an event directory with no record in it is `RECORD_ABSENT`, which is a
  *    crash artefact and not a record;
  *  - a record this build cannot read is reported as the kind of unreadable it
@@ -99,14 +105,13 @@ import { join } from 'node:path';
 
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { safeErrnoCode } from '../core/safe-error.js';
-import { inspectLinkChain } from '../doctor/safe-write.js';
+import { inspectLinkChain, pathChain } from '../doctor/safe-write.js';
 import { isValidRunId } from '../doctor/run-directory.js';
 import {
+  HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELD,
   MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES,
   inspectHeadPublicationAuthorisation,
-  type AuditedForgeAct,
-  type AuditedInvocationMode,
-  type HeadPublicationAuthorisation,
+  type AuthorisedPublicationRecord,
   type HeadPublicationAuthorisationReading,
 } from './head-publication-authorisation.js';
 // The location, and deliberately not the store: importing the writer to learn a
@@ -120,15 +125,20 @@ import {
 
 /**
  * What one direct child of the store root turned out to be. A closed set of
- * seven, of which exactly one means "a record this build read".
+ * eight, of which exactly one means "a record this build read".
  *
- * The five that describe a record are the store's own reading vocabulary,
- * renamed with a `RECORD_` prefix and nothing else: they are answers about the
- * document, and the two remaining members are answers about the entry, which is
- * a different kind of fact. Deriving them from that vocabulary rather than
- * inventing a parallel one is deliberate — two spellings of "this record is
- * from a version I cannot read" could drift, and the one that drifted would be
- * the one an operator sees.
+ * They come from two places, and the split is worth stating because a later
+ * member has to be put in the right one. **Four** are the store's own reading
+ * vocabulary under a `RECORD_` prefix, mapped one for one by `ENTRY_READING`:
+ * they are answers about a *document*, and deriving them rather than inventing a
+ * parallel set is deliberate — two spellings of "this record is from a version I
+ * cannot read" could drift, and the one that drifted would be the one an
+ * operator sees. **Four** are established here, because they are answers about
+ * an *entry* and the grader never sees one: it is only ever reached with bytes
+ * in hand. `HISTORICAL_AUTHORISATION` is the good answer and carries no prefix;
+ * `RECORD_ABSENT` and `RECORD_UNREADABLE` are settled from an errno and a file
+ * test before any bytes exist; `UNRECOGNISED_ENTRY` is settled before the record
+ * is looked for at all.
  */
 export const HEAD_PUBLICATION_AUDIT_ENTRY_READINGS = [
   /**
@@ -224,115 +234,6 @@ const ENTRY_READING: Readonly<
 });
 
 /**
- * One readable record, as this module hands it out.
- *
- * Every field of the stored document is here, and six of them are **renamed**.
- * That is not decoration: `mintHeadPublicationGrant` takes a structurally typed
- * `{host, owner, name, commit}` and the publication re-check seam takes
- * `{host, owner, name, remoteName, ref, commit}`, so a value carrying the
- * record's own field names is an argument either of them accepts. Measured,
- * with the real declarations: a view with the record's names compiles into the
- * mint; renaming one identity field is enough to make it a type error, and
- * renaming all of them is what keeps that true when a field is added later.
- *
- * Measured too, and the reason this is a rename rather than something cleverer:
- * a `unique symbol` brand, a branded `commit` string and a class with a
- * `#private` field were each tried against the mint's parameter and each was
- * **no defence at all** — excess properties do not break structural
- * assignability from a variable, and a `#private` field is nominal only when the
- * class is the target. Names are what work here.
- *
- * This is a view and not a second contract. It carries no field the record does
- * not have, adds no interpretation, and the suite pins the correspondence value
- * by value rather than key by key.
- */
-export interface AuthorisedPublicationRecord {
-  readonly authorisationVersion: number;
-  /** The `eventId` the document carries. The name it is filed under is the entry's. */
-  readonly recordedEventId: string;
-  readonly act: AuditedForgeAct;
-  readonly invocationMode: AuditedInvocationMode;
-  readonly taskId: string;
-  /** The local checkout the authorising invocation had resolved. Not resolved, stat'ed or followed here. */
-  readonly repositoryRoot: string;
-  readonly forgeHost: string;
-  readonly forgeOwner: string;
-  readonly forgeName: string;
-  /** The **local** name of the remote. Never a URL. */
-  readonly declaredRemote: string;
-  readonly authorisedRef: string;
-  readonly authorisedCommit: string;
-  readonly declarationSchemaVersion: number;
-  readonly declaredPermission: string;
-  /** SHA-256 of the declaration's exact bytes, as they were when they were read. */
-  readonly declarationDigest: string;
-  /**
-   * The instant the record says it was built.
-   *
-   * Displayed exactly as recorded and checked against nothing: the contract
-   * bounds this as a string of at most 64 characters, so it is not established
-   * to be a date, and nothing compares it with the instant in the event name.
-   */
-  readonly authorisedAt: string;
-  readonly binding: string;
-}
-
-/**
- * The rename, one field at a time.
- *
- * Typed as a total map over the record's own keys, so a field added to the
- * record is a compile error here rather than a value that quietly stops being
- * shown. Completeness is all this proves — that the two sides carry the same
- * *values* is a separate question, and the suite asks it.
- */
-const RECORD_FIELD: Readonly<
-  Record<keyof HeadPublicationAuthorisation, keyof AuthorisedPublicationRecord>
-> = Object.freeze({
-  authorisationVersion: 'authorisationVersion',
-  eventId: 'recordedEventId',
-  act: 'act',
-  invocationMode: 'invocationMode',
-  taskId: 'taskId',
-  repositoryRoot: 'repositoryRoot',
-  host: 'forgeHost',
-  owner: 'forgeOwner',
-  name: 'forgeName',
-  declaredRemote: 'declaredRemote',
-  ref: 'authorisedRef',
-  commit: 'authorisedCommit',
-  declarationSchemaVersion: 'declarationSchemaVersion',
-  declaredPermission: 'declaredPermission',
-  declarationDigest: 'declarationDigest',
-  authorisedAt: 'authorisedAt',
-  binding: 'binding',
-});
-
-/** The map, exported so the suite can pin the correspondence rather than restate it. */
-export const HEAD_PUBLICATION_AUDIT_RECORD_FIELD = RECORD_FIELD;
-
-function view(record: HeadPublicationAuthorisation): AuthorisedPublicationRecord {
-  return Object.freeze({
-    authorisationVersion: record.authorisationVersion,
-    recordedEventId: record.eventId,
-    act: record.act,
-    invocationMode: record.invocationMode,
-    taskId: record.taskId,
-    repositoryRoot: record.repositoryRoot,
-    forgeHost: record.host,
-    forgeOwner: record.owner,
-    forgeName: record.name,
-    declaredRemote: record.declaredRemote,
-    authorisedRef: record.ref,
-    authorisedCommit: record.commit,
-    declarationSchemaVersion: record.declarationSchemaVersion,
-    declaredPermission: record.declaredPermission,
-    declarationDigest: record.declarationDigest,
-    authorisedAt: record.authorisedAt,
-    binding: record.binding,
-  });
-}
-
-/**
  * One entry of the store, as this build reads it.
  *
  * The record is present on exactly one member and is `null` on every other, and
@@ -340,6 +241,17 @@ function view(record: HeadPublicationAuthorisation): AuthorisedPublicationRecord
  * field of a record this build refused, so an unreadable event's values cannot
  * be rendered as though they had been established.
  */
+/**
+ * The renamed view of one readable record, and the map that produced it.
+ *
+ * Both are declared where the grading happens, because the grader is what hands
+ * a record out and the rename is what keeps that value from being an argument to
+ * the publication mint. They are re-exported here so this module stays the one
+ * place a caller has to import to read the store.
+ */
+export type { AuthorisedPublicationRecord };
+export const HEAD_PUBLICATION_AUDIT_RECORD_FIELD = HEAD_PUBLICATION_AUTHORISATION_RECORD_FIELD;
+
 export type HeadPublicationAuditEntry =
   | {
       readonly reading: 'HISTORICAL_AUTHORISATION';
@@ -356,11 +268,15 @@ export type HeadPublicationAuditEntry =
 /**
  * How the listing itself ended. A closed set of six.
  *
- * Two of them mean "the store was read", and they are apart because "everything
- * in it is a record I could read" and "something in it is not" are different
- * answers that a script must be able to tell apart. The other four each mean
- * **I could not establish what is recorded**, which is not the same sentence as
- * "nothing is recorded" and is deliberately not reachable from it.
+ * Three of them are answers *about the store*: two say it was read — "everything
+ * in it is a record I could read" and "something in it is not", which a script
+ * must be able to tell apart — and `STORE_ABSENT` says there is nothing there.
+ * The remaining three each mean **I could not establish what is recorded**,
+ * which is not the same sentence as "nothing is recorded" and is deliberately
+ * not reachable from it. Putting `STORE_ABSENT` in that second group is an error
+ * this header made and this slice shipped once: the listing decided it from an
+ * errno that could not carry it, and reported a blocked path as an empty
+ * store.
  */
 export const HEAD_PUBLICATION_AUDIT_LISTINGS = [
   /** The store was read, and every entry in it is a record this build read. Zero entries included. */
@@ -532,7 +448,7 @@ function classify(root: string, name: string): HeadPublicationAuditEntry {
 
   const inspection = inspectHeadPublicationAuthorisation(bytes, name);
   if (inspection.reading === 'HISTORICAL_AUTHORISATION') {
-    return { reading: 'HISTORICAL_AUTHORISATION', name, record: view(inspection.record) };
+    return { reading: 'HISTORICAL_AUTHORISATION', name, record: inspection.record };
   }
   return { reading: ENTRY_READING[inspection.reading], name, record: null };
 }
@@ -569,15 +485,29 @@ export function listHeadPublicationAuthorisations(
     return listing('STORE_PATH_UNSAFE', root, []);
   }
 
+  // "There is no store" is established from the path itself, never from the
+  // errno the enumeration failed with, and that distinction is a defect this
+  // slice shipped and a review reproduced. Windows collapses "a component of the
+  // path is not a directory" into `ENOENT` — `ERROR_PATH_NOT_FOUND` — so a
+  // profile whose `.agent-orchestrator` is a *file* made `readdir` answer
+  // `ENOENT`, and the listing reported "there is no store under this user
+  // profile" and exited 0. Measured against the writer on the same profile at
+  // the same instant: it answers `STORE_UNAVAILABLE`/`ENOTDIR` and the drive
+  // grades that 3. Two commands, one condition, opposite answers, and the
+  // reassuring one was this.
+  //
+  // `ENOTDIR` reaches the caller only when the *root itself* is the non-
+  // directory, which is exactly the one shape a test covered.
+  const blocked = firstNonDirectoryOnPath(root);
+  if (blocked !== null) return listing('STORE_UNREADABLE', root, [], blocked);
+
   let names: readonly string[];
   try {
     names = readdirSync(root);
   } catch (error) {
     const errnoCode = safeErrnoCode(error);
-    // `ENOENT` is the whole of "there is no store", and every other answer —
-    // including `ENOTDIR` from a file sitting at the path — is "I could not
-    // establish what is recorded". The two are never merged: one is a normal
-    // machine that has published nothing, the other needs a person.
+    // Reached with every existing component of the path already established to
+    // be a directory, so `ENOENT` here really is "the store is not there".
     return errnoCode === 'ENOENT'
       ? listing('STORE_ABSENT', root, [])
       : listing('STORE_UNREADABLE', root, [], errnoCode);
@@ -611,4 +541,34 @@ export function listHeadPublicationAuthorisations(
 /** Code-unit order, written out so no locale, collation or default can enter it. */
 function byName(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * The errno of the first component of `target`'s path that exists and is not a
+ * directory, or `null` when every existing component is one.
+ *
+ * This is what separates "the store is not there" from "something is standing in
+ * the way of it", and it has to be asked of the path rather than of `readdir`,
+ * because on Windows the two arrive as one errno. It walks the same chain
+ * `inspectLinkChain` has already walked and stops at the first component that is
+ * absent: nothing below an absent component can exist either.
+ *
+ * A component this call cannot describe at all is `null` here rather than a
+ * refusal, and that is not a hole: the link inspection runs first and answers
+ * `INSPECTION_FAILED` for exactly that, which is already `STORE_PATH_UNSAFE`.
+ */
+function firstNonDirectoryOnPath(target: string): string | null {
+  for (const segment of pathChain(target)) {
+    let stats;
+    try {
+      stats = lstatSync(segment);
+    } catch {
+      // An absent component ends the walk: nothing below it can exist either.
+      // Any other failure was already refused by the link inspection above,
+      // which answers `INSPECTION_FAILED` for a component it cannot describe.
+      return null;
+    }
+    if (!stats.isDirectory()) return 'ENOTDIR';
+  }
+  return null;
 }

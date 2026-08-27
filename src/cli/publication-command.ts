@@ -155,15 +155,45 @@ export const AUTHORISATIONS_DESCRIPTION =
   'List the head-publication authorisation records under this user profile - one per ' +
   'publication this build was permitted to attempt with nobody present, each written before ' +
   'that invocation contacted a delivery remote and none written afterwards. It reports what ' +
-  'each record says, and whether that record\'s own digest recomputes from the values shown ' +
-  'and from the directory it sits in. It does not ask a forge what any ref holds now, and it ' +
-  'does not compare anything against the declaration as it stands today. A record is evidence ' +
-  'for a person and never an input to an authority: no publication is closer to happening ' +
-  'because one exists. Any process running as this OS user can write a record that reads ' +
+  'each record says, and whether that record\'s own digest recomputes from the values it ' +
+  'records and from the directory it sits in. It does not ask a forge what any ref holds now, ' +
+  'and it does not compare anything against the declaration as it stands today. A record is ' +
+  'evidence for a person and never an input to an authority: no stored record is ever an ' +
+  'input that permits a publication. Any process running as this OS user can write a record that reads ' +
   'exactly like the rest, and can delete one without trace, so this is neither a complete ' +
   'history nor evidence of who wrote what - and an attended publication records nothing here ' +
   'at all. Takes no repository: the store is outside every repository, each record names its ' +
   'own, and a record outlives the checkout it was about.';
+
+/**
+ * Writes the report, and survives the reader going away.
+ *
+ * This is the first command in the build whose output is deliberately unbounded
+ * — one block per event, forever, with no limit flag and no machine-readable
+ * form — so it is the first whose operator has a reason to pipe it into `head`,
+ * `more` or a pager they then close. Measured: past roughly ninety records the
+ * report exceeds the pipe buffer, the reader's exit makes the next write raise
+ * `EPIPE` on this stream, and **an unhandled `error` event on a stream is an
+ * uncaught exception in this process** — a raw Node stack on stderr, outside the
+ * safe formatter, and exit 1 telling an operator the build is defective for
+ * doing exactly what this command's own exit contract says must work in a
+ * script.
+ *
+ * The rule is not new here; this build states it twice, about the streams of the
+ * processes it starts. It had never applied to its own stdout because no command
+ * had produced enough output to reach it.
+ *
+ * A closed reader is a normal end, not a failure: the grade this invocation
+ * already worked out stands, and nothing about the store is in question. Every
+ * other stream error is left to the caller's `catch`, which is the arm that
+ * reports a defect in this build.
+ */
+function writeReport(text: string): void {
+  process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EPIPE') throw error;
+  });
+  process.stdout.write(text);
+}
 
 export function registerPublicationCommand(
   program: Command,
@@ -177,7 +207,7 @@ export function registerPublicationCommand(
     .action(() => {
       try {
         const listing = listHeadPublicationAuthorisations(seams.pathProvider);
-        process.stdout.write(renderPublicationAuthorisations(listing));
+        writeReport(renderPublicationAuthorisations(listing));
         process.exitCode = AUDIT_LISTING_EXIT[listing.outcome];
       } catch (error) {
         // The listing is total and does not throw, so reaching here is a defect

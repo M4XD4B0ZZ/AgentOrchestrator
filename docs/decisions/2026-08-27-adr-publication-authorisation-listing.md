@@ -153,9 +153,13 @@ Each child is classified by one `lstat`, in this order, and the order is the
 contract:
 
 1. `lstat` fails → `UNRECOGNISED_ENTRY`. This build does not read an entry it
-   could not classify. It is the fail-closed direction, and it is the one arm
-   this slice could not construct a fixture for — an `lstat` that fails on a name
-   `readdir` just returned needs a race. Named rather than claimed unreachable.
+   could not classify. It is the fail-closed direction, and it is the one arm no
+   fixture here drives: an `lstat` that fails on a name `readdir` just returned
+   needs a race. It is **not** unreachable, which was measured rather than
+   supposed — a review reached it 189 times in six seconds by churning the store
+   from a worker thread while listing it, with the listing throwing zero times
+   and never leaving its two `READ` outcomes. It is not driven here because a
+   race is not a fixture, and `L-V4-15-2` says so.
 2. a symbolic link or a Windows junction → `UNRECOGNISED_ENTRY`, never followed.
    Measured: both answer `isSymbolicLink()` true and `isDirectory()` false, and
    `mklink /J` needs no elevation.
@@ -336,7 +340,7 @@ comfortable reading standing.
 | --- | --- |
 | a listing was produced — including one containing entries this build could not read | `0` |
 | the store is absent, or present and empty | `0` |
-| the root could not be enumerated, is not a directory, has a link on its path, or the profile could not be resolved | `3` |
+| the root could not be enumerated, **any component of its path is not a directory**, a link sits on that path, or the profile could not be resolved | `3` |
 | an unexpected throw | `1` |
 
 The first draft graded a damaged entry `3`, and three measured facts say that is
@@ -373,6 +377,36 @@ contract before this report is built. An operator inspecting an audit store on
 such a machine sees the gate's message and no listing. Stated because it is a
 plausible case rather than a theoretical one.
 
+## 11a. Two things this decision got wrong first, and what they cost
+
+Both were found by an independent review reproducing them, and both are stated
+here rather than quietly repaired, because each is a shape that will recur.
+
+**The store's absence was read off the wrong signal.** The listing decided
+`STORE_ABSENT` from `readdir`'s errno, on the stated premise that "`ENOTDIR` from
+a file sitting at the path" is the other answer. Measured false on the platform
+this build declares primary: Windows collapses "a component of the path is not a
+directory" into `ENOENT`, and `ENOTDIR` reaches the caller only when the *root
+itself* is the non-directory — which was the one shape a test covered. So a
+profile whose `.agent-orchestrator` is a file reported "there is no store under
+this user profile" and exited 0, while the writer on the same profile at the same
+instant answered `STORE_UNAVAILABLE` and the drive graded it 3. Two commands, one
+condition, opposite answers, and the reassuring one was the read. Absence is now
+established from the path — every existing component must be a directory —
+before `readdir` is asked anything.
+
+**The report could not be piped.** This is the first command in the build whose
+output is deliberately unbounded, and therefore the first with an operator who
+has a reason to send it to `head` or a pager. Measured in a real process: past
+roughly ninety records the report exceeds the pipe buffer, the reader's exit
+raises `EPIPE` on stdout, and an unhandled `error` event on a stream is an
+uncaught exception — 1,355 bytes of raw Node stack outside the safe formatter,
+and exit 1, for the ordinary gesture §11 argues must work in a script. The rule
+is not new: this build states it twice about the streams of the processes it
+starts, and it had never applied to its own stdout because no command produced
+enough output to reach it. A closed reader is now an ending, and every other
+stream error still reaches the arm that reports a defect.
+
 ## 12. Trust
 
 **Any process running as this OS user can write a record that reads exactly like
@@ -398,11 +432,17 @@ command reads it, and nothing runs the other way.
 
 Three pins, and the second is the one that needed measuring:
 
-**The reader is on no authority path.** The suite derives the set of modules that
-call the record graders and requires that none of them is one that decides
-whether a publication may happen. It pins the rule rather than a list of files,
-because slice 14 pinned a two-element literal here and slice 15 would have had to
-widen it by hand — a literal that goes stale is a pin that guards nothing.
+**The reader is on no authority path**, pinned twice and in both directions. The
+suite derives the set of modules that call `listHeadPublicationAuthorisations`
+and requires it to be exactly two — an allow-list, so a third caller fails the
+suite until somebody decides it may exist — and separately requires that no
+module in that set is one that decides whether a publication may happen. A first
+version of this dropped the allow-list for the deny-list alone, on the argument
+that a literal goes stale; a review measured what that cost, which is that a
+future authority module named anything outside the six-name pattern could read
+the store with the whole suite green. A pin that goes stale by refusing is worth
+more than one that goes stale by permitting, so both are kept. Slice 14's own
+pin, which this slice had to touch, is repaired the same way.
 
 **The type handed out cannot be an argument to the mint.**
 `mintHeadPublicationGrant` takes a *structurally typed* `{host, owner, name,
@@ -482,17 +522,22 @@ nothing pruning it. `L-V4-14-1` is its cause and is unchanged.
 
 **`L-V4-15-2` — `UNRECOGNISED_ENTRY` answers two different questions.** It is
 "this build does not read this as an event directory" *and* "this build could not
-classify this at all", because an `lstat` failing on a name `readdir` just
-returned needs a race and no fixture here reaches it. Named rather than claimed
-unreachable, and the member's sentence covers both.
+describe this at all". The member's sentence names both, which it did not in the
+first version of this slice — it stated a closed three-way disjunction and the
+code had a fourth arm. The arm is reachable under concurrent churn (measured:
+189 times in six seconds, listing throwing zero times) and is not driven here,
+because a race is not a fixture.
 
-**`L-V4-15-3` — the reader's import closure still contains writers.** It imports
-`isValidRunId` from the module that owns the exclusive `mkdir`, and
-`inspectLinkChain` from the module that owns the append-only artefact write. Both
-are shared grammar and neither is called, but "this command creates nothing" is
-carried by a source sweep and a byte-level measurement rather than by the import
-graph. Closing it means splitting two `doctor/` modules, which is a change of its
-own.
+**`L-V4-15-3` — the reader's import closure still contains writers.** It calls
+`isValidRunId`, which ships beside the exclusive `mkdir`, and `inspectLinkChain`,
+which ships beside the append-only artefact write. The two *writers* are never
+called and never named, but they are in the closure. Measured: the closure is
+eleven product modules and `zod`, static and runtime agreeing exactly, and those
+two are the only members that can write — nothing in it can spawn, take a lease
+or reach a forge. So "this command creates nothing" is carried by a source sweep
+and by hashing every path and byte under the profile before and after a listing,
+rather than by the import graph. Closing it means splitting two `doctor/`
+modules, which is a change of its own.
 
 **`L-V4-15-4` — a control character in a recorded value is not shown verbatim.**
 It is replaced by `<U+XXXX>` so a forged record cannot forge report lines. Every
@@ -502,7 +547,29 @@ byte-exact echo of what is stored.
 **`L-V4-15-5` — the binding proves less to this reader than to the writer.** See
 §6. `taskId` and `repositoryRoot` are supplied from the document, so the
 comparison establishes "bound to this directory name" rather than "bound to this
-event, task and repository". The report's wording is bounded to match.
+event, task and repository". The report's wording is bounded to match — including
+that three of the binding's inputs are not shown at all: the two contract
+versions, and the event identity the record claims for itself, which is held back
+because §6a makes it unchecked text a forger chooses.
+
+**`L-V4-15-6` — a hard link at a record's name is read.** The refusal is on
+reparse points, which is what `lstat` can see; a hard link is not one, nothing
+counts links, and a hard-linked `authorisation.json` is opened and graded like
+any other with its bytes living under another name outside the store. `mklink /H`
+needs no elevation. This is `L-V4-14-4` — which says a record's name "could be
+made to alias another file" — and this slice is the first code that reads through
+the alias, so it is carried here as well rather than left as unchanged. No
+privilege delta: planting the link already needs write access in the store, and
+§12 concedes what a writer there can do.
+
+**`L-V4-15-7` — a recorded value can be anything the length bound admits.** What
+this build *writes* into `declaredRemote` is a local remote name, and into
+`taskId` a task id; what the contract *admits* is text. So a record anything else
+wrote can carry a URL with a credential in it, and a report that shows what is
+recorded shows that. Redacting would be hiding evidence, so it is not done; the
+only alteration is §6a's control-character escaping, and the record's own field
+documentation says this rather than promising a grammar the schema does not
+enforce.
 
 **`L-V4-14-1`, `L-V4-14-2`, `L-V4-14-4`, `L-V4-14-5`, `L-V4-14-6`, `L-V4-14-7`
 and `L-V4-13-5` are unchanged.** Two of them now matter *more*: this is the first

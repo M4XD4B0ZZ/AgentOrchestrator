@@ -89,6 +89,7 @@ import {
   HEAD_PUBLICATION_AUTHORISATION_READINGS,
   MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES,
   headPublicationAuthorisationBinding,
+  inspectHeadPublicationAuthorisation,
   type HeadPublicationAuthorisation,
 } from '../src/deliver/head-publication-authorisation.js';
 import {
@@ -249,6 +250,34 @@ function readRecord(home: string, eventId: string): HeadPublicationAuthorisation
 function edit(home: string, eventId: string, over: Partial<HeadPublicationAuthorisation>): void {
   const stored = { ...readRecord(home, eventId), ...over };
   writeFileSync(recordPath(home, eventId), `${JSON.stringify(stored, null, 2)}\n`, 'utf8');
+}
+
+/**
+ * Re-seals the record in `eventDirectory` so its binding holds for `underName`.
+ *
+ * A decoy planted outside the store is only a decoy if a build that followed the
+ * link to it would read it as valid. Sealed for its own directory name it would
+ * be refused on the binding whichever way the link question went, and an
+ * assertion that its fields are absent would hold for the wrong reason.
+ */
+function reseal(eventDirectory: string, underName: string): void {
+  const file = join(eventDirectory, HEAD_PUBLICATION_AUDIT_FILE_NAME);
+  const stored = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown> & {
+    binding: string;
+  };
+  const { binding: _replaced, ...payload } = stored;
+  const sealed = {
+    ...payload,
+    binding: headPublicationAuthorisationBinding(
+      {
+        eventId: underName,
+        taskId: String(payload.taskId),
+        repositoryRoot: String(payload.repositoryRoot),
+      },
+      payload as never,
+    ),
+  };
+  writeFileSync(file, `${JSON.stringify(sealed, null, 2)}\n`, 'utf8');
 }
 
 function list(home: string) {
@@ -439,14 +468,28 @@ describe('what one record shows', () => {
     expect(text).toContain('AUTOMATIC_ALLOWED');
   });
 
-  it('carries no URL and no credential out of a record', () => {
+  it('shows a recorded remote as recorded, even when it is not a remote name', () => {
     const home = scratchHome();
-    record(home);
+    // What this build WRITES here is a remote name: the publication path takes
+    // it from the resolved remote and never from a URL. What the contract
+    // ADMITS is a hundred characters of anything, and `L-V4-14-2` concedes that
+    // anything running as this OS user can write a record. So a store can hold
+    // one carrying a URL with a credential in it, and the report shows what is
+    // recorded.
+    //
+    // A first version of this case banned `https://` and `.git` from the output
+    // over a fixture that planted neither. It could not fail, and the guarantee
+    // it named is one this build does not have.
+    record(home, { declaredRemote: 'https://ghp_TOKEN@github.com/o/r.git' });
     const text = report(home);
 
-    for (const forbidden of ['https://', 'http://', '@github.com', '.git']) {
-      expect(text, forbidden).not.toContain(forbidden);
-    }
+    expect(list(home).entries[0]?.reading).toBe('HISTORICAL_AUTHORISATION');
+    expect(text).toContain('https://ghp_TOKEN@github.com/o/r.git -> github.com/');
+    // The report echoes it; nothing about it is treated as a location. No
+    // request is made, nothing is resolved, and the store is untouched.
+    const before = treeDigest(home);
+    report(home);
+    expect(treeDigest(home)).toBe(before);
   });
 
   it('prints the instant the record carries and not one it worked out', () => {
@@ -728,6 +771,63 @@ describe('what is at the path, and what this build will not follow', () => {
     expect(AUDIT_LISTING_EXIT[result.outcome]).toBe(EXIT_RUN_NEEDS_OPERATOR);
   });
 
+  it('does not report a blocked path as an empty store', () => {
+    const home = scratchHome();
+    // The orchestrator home is a FILE, so the store cannot exist and cannot be
+    // created either. Measured: Windows answers `readdir` on the store path with
+    // `ENOENT` here — `ERROR_PATH_NOT_FOUND` — not `ENOTDIR`, which arrives only
+    // when the root itself is the non-directory. A listing that read the outcome
+    // off that errno said "there is no store under this user profile" and exited
+    // zero, while the writer, on the same profile at the same instant, answers
+    // `STORE_UNAVAILABLE` and the drive grades it 3.
+    rmSync(join(home, '.agent-orchestrator'), { recursive: true, force: true });
+    writeFileSync(join(home, '.agent-orchestrator'), 'not a directory', 'utf8');
+
+    const result = list(home);
+
+    expect(result.outcome).toBe('STORE_UNREADABLE');
+    expect(result.errnoCode).toBe('ENOTDIR');
+    expect(AUDIT_LISTING_EXIT[result.outcome]).toBe(EXIT_RUN_NEEDS_OPERATOR);
+    // The writer's own verdict on the same profile, as the control: the two
+    // commands must not disagree about whether this store is usable.
+    const written = recordHeadPublicationAuthorisation({
+      eventId: newHeadPublicationAuditEventId(new Date(AT)),
+      taskId: TASK,
+      repositoryRoot: CHECKOUT,
+      ...IDENTITY,
+      declaredRemote: 'origin',
+      ref: REF,
+      commit: HEAD,
+      declarationDigest: DIGEST,
+      authorisedAt: AT,
+      pathProvider: fixedPathProvider(home),
+    });
+    expect(written.code).not.toBe('RECORDED');
+  });
+
+  it('reports a store it could not place at all, without naming a path', () => {
+    // The one producer of this member is the profile resolver refusing, and it
+    // has five reasons: the OS could not be asked, and four where it answered
+    // and the answer was not one this build accepts.
+    const throwing = Object.freeze({
+      get homeDirectory(): string {
+        throw new Error('the profile is not establishable');
+      },
+    });
+
+    const result = listHeadPublicationAuthorisations(throwing);
+
+    expect(result.outcome).toBe('PROFILE_UNAVAILABLE');
+    expect(result.root).toBeNull();
+    expect(result.entries).toEqual([]);
+    expect(AUDIT_LISTING_EXIT[result.outcome]).toBe(EXIT_RUN_NEEDS_OPERATOR);
+    const text = renderPublicationAuthorisations(result);
+    expect(text).not.toContain('Store        :');
+    // ...and it does not claim to have read anything.
+    expect(text).not.toContain('This command read the store');
+    expect(text).toContain('This command changed nothing');
+  });
+
   it('refuses a store reached through a link, and reads nothing through it', () => {
     const home = scratchHome();
     const elsewhere = scratchRoot('ao-v415-elsewhere-');
@@ -777,6 +877,13 @@ describe('what is at the path, and what this build will not follow', () => {
     }
     if (!linked) return;
 
+    // The decoy is re-sealed for the name the LINK has, which is what makes the
+    // absence below falsifiable: a build that followed the junction would grade
+    // these bytes `HISTORICAL_AUTHORISATION` and print `PLANTED`. Sealed for its
+    // own name instead, the binding would refuse them anyway and the assertion
+    // would hold whether the link was followed or not.
+    reseal(join(auditRoot(decoy), planted), name);
+
     const result = list(home);
 
     expect(result.entries.length).toBe(1);
@@ -791,6 +898,10 @@ describe('what is at the path, and what this build will not follow', () => {
     const decoy = scratchHome();
     const planted = record(decoy, { taskId: 'PLANTED-FILE' });
     const event = plantDirectory(home, eventName('20260827T151000000Z', 'a'));
+
+    // Sealed for the entry's own name, so a build that followed the link would
+    // read it as this event's record and print `PLANTED-FILE`.
+    reseal(join(auditRoot(decoy), planted), event.split(/[\\/]/).pop() as string);
 
     let linked = false;
     try {
@@ -934,7 +1045,12 @@ describe('evidence, and never authority', () => {
     const home = scratchHome();
     record(home);
     const entry = list(home).entries[0];
+    // Without this the case passes against a stub: `record === null` gives an
+    // empty key list and every assertion below holds for free.
+    expect(entry?.reading).toBe('HISTORICAL_AUTHORISATION');
+    expect(entry?.record).not.toBeNull();
     const shown = Object.keys(entry?.record ?? {});
+    expect(shown.length).toBeGreaterThan(10);
 
     // Measured against the real declarations: `mintHeadPublicationGrant` takes a
     // structurally typed `{host, owner, name, commit}` and the re-check seam
@@ -962,6 +1078,28 @@ describe('evidence, and never authority', () => {
     for (const [from, to] of Object.entries(HEAD_PUBLICATION_AUDIT_RECORD_FIELD)) {
       expect(shown[to], `${from} -> ${to}`).toEqual(stored[from]);
     }
+  });
+
+  it('exports no grader that hands out a record the mint would accept', () => {
+    const home = scratchHome();
+    const eventId = record(home);
+    const inspection = inspectHeadPublicationAuthorisation(
+      readFileSync(recordPath(home, eventId)),
+      eventId,
+    );
+
+    expect(inspection.reading).toBe('HISTORICAL_AUTHORISATION');
+    // Slice 14 exported one grader and it returned a reading string, so no
+    // exported function in this build handed out a record VALUE at all. This
+    // slice's refactor added a second entry point that could have, and a review
+    // measured what that would cost: the record's own field names satisfy the
+    // mint's structurally typed parameter, so two exported calls would have
+    // turned a file on disk into a claimable grant with no repository, no
+    // declaration read and no observation. It returns the renamed view instead.
+    for (const forbidden of ['host', 'owner', 'name', 'commit', 'ref', 'remoteName']) {
+      expect(Object.keys(inspection.record ?? {}), forbidden).not.toContain(forbidden);
+    }
+    expect(Object.keys(inspection.record ?? {})).toContain('forgeHost');
   });
 
   it('holds no authority artefact and no way to publish', () => {
@@ -995,19 +1133,34 @@ describe('evidence, and never authority', () => {
     const readers = walkSource('src').filter((file) =>
       /\blistHeadPublicationAuthorisations\s*\(/.test(codeOnly(file)),
     );
-    // The rule, not the list: whoever calls the listing, it is never a module
-    // that decides whether a publication may happen.
+
+    // Fail-closed, and this is the second version of this case. The first was a
+    // deny-list of six module names, which is a pin that goes stale in the
+    // unsafe direction: a future authority module called anything else could
+    // read the store with the whole suite green. An allow-list cannot - a new
+    // caller fails here until somebody decides it may exist.
+    expect(readers).toEqual([
+      'src/cli/publication-command.ts',
+      'src/deliver/head-publication-authorisation-listing.ts',
+    ]);
+
+    // ...and the deny-list is kept as well, because the two fail in different
+    // directions: this one still holds if the list above is ever widened by
+    // somebody who did not think about what they were widening it with.
     for (const file of readers) {
       expect(file, `${file} must not be on the authority path`).not.toMatch(
-        /delivery-steps|delivery-driver|publish-delivery-head|head-publication-grant/,
+        /delivery-steps|delivery-driver|publish-delivery-head|git-head-publisher|head-publication-grant|delivery-automation/,
       );
     }
-    expect(codeOnly('src/cli/delivery-steps.ts')).not.toContain(
-      'listHeadPublicationAuthorisations',
-    );
-    expect(codeOnly('src/cli/delivery-driver.ts')).not.toContain(
-      'listHeadPublicationAuthorisations',
-    );
+    for (const file of [
+      'src/cli/delivery-steps.ts',
+      'src/cli/delivery-driver.ts',
+      'src/deliver/publish-delivery-head.ts',
+      'src/deliver/git-head-publisher.ts',
+      'src/deliver/delivery-automation.ts',
+    ]) {
+      expect(codeOnly(file), file).not.toContain('listHeadPublicationAuthorisations');
+    }
   });
 
   it('offers no flag that could ask for an effect', () => {
@@ -1065,6 +1218,61 @@ describe('what the report may not say', () => {
         AUDIT_REPORT_LABELS.some((label) => raw.trimStart().startsWith(`${label} `) || raw.trimStart().startsWith(`${label}:`)),
       );
   }
+
+  /**
+   * The label of a value line, or `null` for anything else.
+   *
+   * Recognised by the column the colon sits in rather than by a loose pattern:
+   * the report pads every label to thirteen, at column zero or indented by two,
+   * so the colon is at index 13 or 15 and nowhere else. A pattern that only
+   * looked for "capitalised words then a colon" matched the closing sentence
+   * too, which is prose and not a value.
+   */
+  function labelOf(raw: string): string | null {
+    for (const indent of [0, 2]) {
+      if (raw.length <= indent + 14) continue;
+      if (raw.slice(indent + 13, indent + 15) !== ': ') continue;
+      // A label never begins with a space, and the indent before it is nothing
+      // else. Without this, a wrapped prose line whose colon happens to land in
+      // the same column reads as a label.
+      if (raw.slice(0, indent).trim() !== '' || raw[indent] === ' ') continue;
+      const label = raw.slice(indent, indent + 13).trimEnd();
+      if (label.length > 0) return label;
+    }
+    return null;
+  }
+
+  it('sweeps every label the report actually emits, and no more', () => {
+    // The strict sweep below selects lines by prefix-matching a hand-written
+    // constant. Nothing pinned that constant against what the renderer emits, so
+    // a value line under a new label - `Published at`, say - would never have
+    // been swept at all. This is the pin: the two sets are the same set.
+    const home = scratchHome();
+    record(home);
+    plantFile(home, 'junk', 'x');
+    const emitted = new Set<string>();
+    for (const raw of report(home).split('\n')) {
+      const label = labelOf(raw);
+      if (label !== null) emitted.add(label);
+    }
+
+    expect([...emitted].sort()).toEqual(
+      AUDIT_REPORT_LABELS.filter((label) => emitted.has(label))
+        .slice()
+        .sort(),
+    );
+    // ...and every label in the constant is one this report can produce, over
+    // the union of a readable record, an unreadable store and a link refusal, so
+    // the constant cannot quietly grow entries nothing emits.
+    const everyLabel = new Set(emitted);
+    const unreadable = scratchHome();
+    writeFileSync(auditRoot(unreadable), 'not a store', 'utf8');
+    for (const raw of report(unreadable).split('\n')) {
+      const label = labelOf(raw);
+      if (label !== null) everyLabel.add(label);
+    }
+    expect([...everyLabel].sort()).toEqual([...AUDIT_REPORT_LABELS].sort());
+  });
 
   it('states no outcome on any line that carries a value', () => {
     const home = scratchHome();
@@ -1357,6 +1565,23 @@ describe('a forged record does not get to choose what the report says', () => {
     expect(text.split('\n').some((l) => l.trim() === 'Task         : INVENTED')).toBe(false);
   });
 
+  it('cannot reorder a line with a bidirectional override', () => {
+    const home = scratchHome();
+    const name = eventName('20260827T173000000Z', '4');
+    // A right-to-left override does to a line what a newline does to an entry:
+    // it changes what a terminal shows without changing a byte, so a ref or a
+    // checkout path can be made to read as something else entirely. Same class
+    // as the control characters, same treatment.
+    forge(home, name, { taskId: 'T-1‮gnihtemos-esle‬' });
+
+    const text = renderPublicationAuthorisations(list(home));
+
+    expect(text).toContain('<U+202E>');
+    expect(text).toContain('<U+202C>');
+    expect(text).not.toContain('‮');
+    expect(text).not.toContain('‬');
+  });
+
   it('shows a recorded instant that is not a date, exactly as recorded', () => {
     const home = scratchHome();
     const name = eventName('20260827T172000000Z', 'f');
@@ -1372,7 +1597,7 @@ describe('a forged record does not get to choose what the report says', () => {
     expect(text).toContain('Authorised at: yesterday-ish');
     // ...and the report says which of the two instants it sorted by, because the
     // sort key and the printed value are different values that can disagree.
-    expect(text.replace(/\s+/g, ' ')).toContain('by the name of each event directory');
+    expect(text.replace(/\s+/g, ' ')).toContain('by the name of each entry');
     expect(text.replace(/\s+/g, ' ')).toContain('checked against nothing');
   });
 
@@ -1386,6 +1611,53 @@ describe('a forged record does not get to choose what the report says', () => {
     forge(home, second, { authorisedAt: '1999-01-01T00:00:00.000Z' });
 
     expect(list(home).entries.map((e) => e.name)).toEqual([first, second]);
+  });
+});
+
+/* ── the report survives a reader that walks away ─────────────────────────── */
+
+describe('the report survives a reader that walks away', () => {
+  it('treats a closed reader as an ending and not as a defect in this build', async () => {
+    const home = scratchHome();
+    record(home);
+
+    const before = process.stdout.listeners('error').slice();
+    const program = new Command();
+    program.exitOverride();
+    const write = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (() => true) as typeof process.stdout.write;
+    try {
+      registerPublicationCommand(program, { pathProvider: fixedPathProvider(home) });
+      await program.parseAsync(['node', 'ao', 'publication', 'authorisations']);
+    } finally {
+      process.stdout.write = write;
+    }
+
+    const added = process.stdout.listeners('error').filter((l) => !before.includes(l));
+    try {
+      // This is the first command here whose output is unbounded, so it is the
+      // first with an operator who has a reason to pipe it into `head` and close
+      // the reader. Measured in a real process: past roughly ninety records the
+      // report exceeds the pipe buffer, and without this listener the stream's
+      // `error` event is an uncaught exception - 1,355 bytes of raw Node stack
+      // outside the safe formatter, and exit 1 for a normal ending.
+      expect(added.length, 'the write must be guarded').toBe(1);
+      const guard = added[0] as (error: NodeJS.ErrnoException) => void;
+
+      const closed: NodeJS.ErrnoException = new Error('write EPIPE');
+      closed.code = 'EPIPE';
+      expect(() => guard(closed)).not.toThrow();
+
+      // ...and it is a guard on one condition, not a blanket swallow: anything
+      // else is still a defect and still reaches the caller's own handler.
+      const other: NodeJS.ErrnoException = new Error('write EACCES');
+      other.code = 'EACCES';
+      expect(() => guard(other)).toThrow();
+    } finally {
+      for (const listener of added) {
+        process.stdout.removeListener('error', listener as never);
+      }
+    }
   });
 });
 
