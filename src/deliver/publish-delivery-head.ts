@@ -87,6 +87,7 @@ import {
   readUrlAgreement,
   type GitPublicationRunner,
 } from './git-head-publisher.js';
+import type { PublicationCommandReport } from './head-publication-outcome.js';
 
 /**
  * What the local subject still says, read again at the moment of acting.
@@ -108,6 +109,22 @@ export interface PublicationResult {
   readonly before: RemoteRefReading | null;
   readonly attempt: PublicationAttempt;
   readonly after: RemoteRefReading | null;
+  /**
+   * What the process boundary reported about the one publication command, or
+   * `NOT_CALLED` on every path that did not reach it.
+   *
+   * Carried beside `attempt` rather than folded into it, because they are two
+   * facts and only one of them is certain. `attempt` is decided by control flow
+   * — this build either handed the command to the boundary or it did not — while
+   * this is the boundary's own report, which for three of its members
+   * establishes nothing about whether a process existed at all. Collapsing them
+   * would let the weaker one be read as the stronger.
+   *
+   * Nothing in the grade is derived from it beyond what the boolean it replaced
+   * already decided: `RAN_TO_EXIT_ZERO` is `attempt === 'COMPLETED'`, and every
+   * other member is `FAILED`, exactly as before V4 slice 16.
+   */
+  readonly commandReport: PublicationCommandReport;
 }
 
 function result(
@@ -115,8 +132,9 @@ function result(
   before: RemoteRefReading | null,
   attempt: PublicationAttempt,
   after: RemoteRefReading | null,
+  commandReport: PublicationCommandReport = 'NOT_CALLED',
 ): PublicationResult {
-  return Object.freeze({ publication, before, attempt, after });
+  return Object.freeze({ publication, before, attempt, after, commandReport });
 }
 
 function sameSubject(a: HeadPublicationSubject, b: HeadPublicationSubject): boolean {
@@ -186,14 +204,17 @@ export async function publishDeliveryHead(
     );
   }
 
-  const completed = await pushDeliveryHead(
+  const commandReport = await pushDeliveryHead(
     repositoryRoot,
     authorised.remoteName,
     authorised.ref,
     authorised.commit,
     seams.runner,
   );
-  const attempt: PublicationAttempt = completed ? 'COMPLETED' : 'FAILED';
+  // The one member that ever meant "the transport reported success", unchanged
+  // from the boolean it replaced. Everything else the report distinguishes is
+  // carried up for the outcome record and decides nothing here.
+  const attempt: PublicationAttempt = commandReport === 'RAN_TO_EXIT_ZERO' ? 'COMPLETED' : 'FAILED';
 
   const after = await readRemoteRef(
     repositoryRoot,
@@ -202,5 +223,11 @@ export async function publishDeliveryHead(
     seams.runner,
   );
 
-  return result(gradeHeadPublication(authorised.commit, before, attempt, after), before, attempt, after);
+  return result(
+    gradeHeadPublication(authorised.commit, before, attempt, after),
+    before,
+    attempt,
+    after,
+    commandReport,
+  );
 }

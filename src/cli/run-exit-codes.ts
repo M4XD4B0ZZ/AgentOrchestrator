@@ -33,6 +33,7 @@
 import type { BlockStopReason } from '../block/block-ledger.js';
 import type { DeliveryConclusionRecordCode } from '../deliver/delivery-conclusion-store.js';
 import type { MergeReconciliationRecordCode } from '../deliver/merge-reconciliation-store.js';
+import type { HeadPublicationOutcomeCode } from '../deliver/head-publication-outcome-store.js';
 import type { DeliveryTaskSelection } from '../deliver/select-delivery-task.js';
 import type { DeliveryDrive } from './delivery-driver.js';
 import type { AttendedBlockResult, BlockRunOutcome } from '../block/block-runner.js';
@@ -643,6 +644,26 @@ const DRIVE_EXIT_CODES = Object.freeze({
   // Telling an operator "call again" about a store that cannot be written is the
   // worse of the two errors.
   PUBLICATION_AUDIT_NOT_DURABLE: EXIT_RUN_NEEDS_OPERATOR,
+  // A floor, and the first member on the publication path whose write happens
+  // *after* the ladder has run to the end. That is the asymmetry the paragraph
+  // above says the member beside it does not have, so this one is graded the way
+  // the two other post-write stores are: the store's own code replaces this
+  // number whenever there is one — see {@link exitCodeForDrive}.
+  //
+  // The floor is 3 rather than 4, and 4 is what it would be if the rule for it
+  // ("refused or achieved nothing; the state may be fine") held. It does not, on
+  // either half of this member's producers: a record an operator's own
+  // declaration asked for was not established and nothing will ever write it,
+  // and on the half that sent something a ref may have been created with no
+  // established record of it. It is emphatically not 5 either — calling again
+  // reads the remote, and no invocation of anything can write this event's
+  // outcome now.
+  //
+  // "Not established" and not "missing": three of the store's codes leave a
+  // whole document at the name and refuse because the write was not carried to a
+  // confirmed end or could not be read back. Which it was is the store's own
+  // code, one row at a time, below.
+  PUBLICATION_OUTCOME_NOT_DURABLE: EXIT_RUN_NEEDS_OPERATOR,
 
   // This invocation achieved nothing and nothing durable is wrong: a reading
   // could not be taken, the local subject moved under it, or no pull request has
@@ -721,6 +742,66 @@ const RECEIPT_RECORD_EXIT_CODES = Object.freeze({
 }) satisfies Record<MergeReconciliationRecordCode, CliExitCode | null>;
 
 /**
+ * The override for one publication-outcome store code, or `null` to keep the
+ * primary.
+ *
+ * The third of these tables, and graded one code at a time for the reason the
+ * other two are: a run that attempted a forge mutation and could not leave the
+ * evidence of it on disk has a durable problem, and *which* problem it is
+ * decides what a person does about it.
+ *
+ * Every member here is read against the same background: **a record an
+ * operator's own declaration asked for was not established, and no invocation of
+ * anything will ever write it.** Not "is missing" — three of these codes leave a
+ * whole document at the name and refuse because the write was not carried to a
+ * confirmed end or could not be read back, and telling them apart is the whole
+ * reason this table grades one code at a time. On one of the member's producers
+ * an act may also already have changed the delivery remote — which of them it
+ * was is on the `Publication` line and deliberately not in this table, because a
+ * number cannot carry two vocabularies. So nothing here is graded "nothing is
+ * wrong" and nothing is graded "call again".
+ *
+ * Total by type over {@link HeadPublicationOutcomeCode}, so a new store code
+ * fails the build here until somebody grades it. The grades themselves are
+ * pinned by a hand-written table in the slice's test file, which is deliberately
+ * not derived from this one.
+ */
+const PUBLICATION_OUTCOME_EXIT_CODES = Object.freeze({
+  // On disk. Nothing to override — and unreachable through the member this
+  // table serves, whose whole condition is that it is not.
+  RECORDED: null,
+
+  // The machine could not answer where the profile is, or something on the
+  // store's path is not what it has to be, or this event's own directory is
+  // gone. Durable local conditions, and each needs somebody to look.
+  PROFILE_UNAVAILABLE: EXIT_RUN_NEEDS_OPERATOR,
+  STORE_PATH_UNSAFE: EXIT_RUN_NEEDS_OPERATOR,
+  EVENT_DIRECTORY_UNUSABLE: EXIT_RUN_NEEDS_OPERATOR,
+  // Something else is at this event's outcome name. The store never opened it
+  // and never replaced it, and a name in this store that this invocation did not
+  // write is a store somebody has to look at.
+  OUTCOME_ALREADY_PRESENT: EXIT_RUN_NEEDS_OPERATOR,
+  // The name was created and the write did not reach a confirmed end, so the
+  // name is consumed and what is at it was never read back. A later listing may
+  // find a whole outcome there or something it cannot read; this build does not
+  // know which, and says so rather than picking the tidier half.
+  WRITE_UNCONFIRMED: EXIT_RUN_NEEDS_OPERATOR,
+  // Nothing is at the name and nothing ever will be.
+  WRITE_REFUSED: EXIT_RUN_NEEDS_OPERATOR,
+  READBACK_FAILED: EXIT_RUN_NEEDS_OPERATOR,
+  // The disk holds bytes this invocation did not intend, which is the sharpest
+  // signal in this vocabulary that something else writes in this store.
+  READBACK_MISMATCH: EXIT_RUN_NEEDS_OPERATOR,
+
+  // Something is wrong inside the tool: an event name this build minted and
+  // would not accept back, or bytes it built and would not read. Floors, and
+  // graded as such rather than blamed on the machine.
+  EVENT_ID_UNSUITABLE: EXIT_RUN_UNEXPECTED,
+  OUTCOME_TOO_LARGE: EXIT_RUN_UNEXPECTED,
+  OUTCOME_CONTRACT_VIOLATION: EXIT_RUN_UNEXPECTED,
+}) satisfies Record<HeadPublicationOutcomeCode, CliExitCode | null>;
+
+/**
  * Exit code for each delivery-selection outcome. Total; pinned by test.
  *
  * Total over the vocabulary, which is what `satisfies Record<…>` buys and why
@@ -777,19 +858,20 @@ export function exitCodeForDeliverySelection(outcome: DeliveryTaskSelection): Cl
 /**
  * The store codes one driver result reached, or `null` where it reached none.
  *
- * Two fields rather than one, because they are two different closed
- * vocabularies and one parameter that took either would be a parameter that
- * could take the wrong one.
+ * One named field per store rather than one parameter, because they are three
+ * different closed vocabularies and a parameter that took any of them would be a
+ * parameter that could take the wrong one.
  */
 export interface DriveRecordCodes {
   readonly conclusion?: DeliveryConclusionRecordCode | null;
   readonly receipt?: MergeReconciliationRecordCode | null;
+  readonly publicationOutcome?: HeadPublicationOutcomeCode | null;
 }
 
 /**
  * The exit code for one driver result.
  *
- * The store codes are consulted for exactly two members, for the reason
+ * The store codes are consulted for exactly three members, for the reason
  * {@link exitCodeForConclusionRecord} exists: a run that decided something was
  * filed and could not leave it on disk has told a caller yes about something
  * that did not happen, and *which* code that becomes is one store code at a
@@ -811,6 +893,13 @@ export function exitCodeForDrive(
   const receipt = records.receipt ?? null;
   if (outcome === 'RECEIPT_NOT_DURABLE' && receipt !== null) {
     return RECEIPT_RECORD_EXIT_CODES[receipt] ?? DRIVE_EXIT_CODES.RECEIPT_NOT_DURABLE;
+  }
+  const publicationOutcome = records.publicationOutcome ?? null;
+  if (outcome === 'PUBLICATION_OUTCOME_NOT_DURABLE' && publicationOutcome !== null) {
+    return (
+      PUBLICATION_OUTCOME_EXIT_CODES[publicationOutcome] ??
+      DRIVE_EXIT_CODES.PUBLICATION_OUTCOME_NOT_DURABLE
+    );
   }
   return DRIVE_EXIT_CODES[outcome];
 }

@@ -157,7 +157,10 @@ export const PUBLICATION_GROUP_DESCRIPTION =
 export const AUTHORISATIONS_DESCRIPTION =
   'List the head-publication authorisation records under this user profile - one per ' +
   'publication this build was permitted to attempt with nobody present, each written before ' +
-  'that invocation contacted a delivery remote and none written afterwards. It reports what ' +
+  'that invocation contacted a delivery remote. Where the invocation that wrote one went on ' +
+  'to finish its publication processing and could record what it had called and last read, ' +
+  'that is shown beside it as a second, separate document; where no such document is there, ' +
+  'the report says so and says what its absence does not mean. It reports what ' +
   'each record says, and whether that record\'s own digest recomputes from the values it ' +
   'records and from the directory it sits in. It does not ask a forge what any ref holds now, ' +
   'and it does not compare anything against the declaration as it stands today. A record is ' +

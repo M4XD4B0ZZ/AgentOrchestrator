@@ -60,6 +60,7 @@ import {
 } from '../deliver/select-delivery-task.js';
 import type { TaskPlanningFailure } from '../plan/plan-next-task.js';
 import type { PublicationResult } from '../deliver/publish-delivery-head.js';
+import type { HeadPublicationOutcomeCode } from '../deliver/head-publication-outcome-store.js';
 import {
   PULL_REQUEST_CREATION_DETAIL,
   type PullRequestSituation,
@@ -874,6 +875,20 @@ export interface HeadPublicationView {
   readonly result: PublicationResult;
   readonly ref: string | null;
   readonly remoteName: string | null;
+  /**
+   * What became of the durable outcome record, and `null` where none was called
+   * for — the attended path, and every automatic path that stopped before the
+   * authorisation record existed (V4 slice 16).
+   *
+   * Printed rather than only graded. `run-exit-codes.ts` justifies grading this
+   * store one code at a time with "*which* problem it is decides what a person
+   * does about it", and until a review measured it the value reached the exit
+   * code and no report: three conditions with three different remedies — another
+   * writer in the store, a consumed name, a store removed underneath the run —
+   * arrived as one sentence and one number. The merge receipt already prints its
+   * store's code beside its own act, and this follows it.
+   */
+  readonly outcome: HeadPublicationOutcomeCode | null;
 }
 
 /**
@@ -1012,6 +1027,13 @@ export function renderDeliveryObservation(view: DeliveryObservationView): string
         `  Attempt      : ${r.attempt}`,
         `  Remote after : ${r.after === null ? 'not read' : describeReading(r.after)}`,
       );
+    }
+    // And what became of the record of all that, on the one path that writes
+    // one. Absent on every other, because a line reading "Outcome: none" beside
+    // an attended publication would invite the question of why there is no
+    // record when the answer is that a person was there.
+    if (publication.outcome !== null) {
+      lines.push(`  Outcome      : ${publication.outcome}`);
     }
   }
 

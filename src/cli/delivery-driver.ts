@@ -65,7 +65,23 @@
  * first act it calls: a publication that answers `ALREADY_PUBLISHED` sent
  * nothing and is a reading, and the driver may go on to the creation. But the
  * moment a ladder's `attempt` is anything other than `NOT_ATTEMPTED`, this
- * invocation is over and the operator is told to ask again.
+ * invocation is over.
+ *
+ * What the operator is then told is *usually* "ask again", and V4 slice 16 made
+ * that a rule with one exception rather than a fact: an unattended publication
+ * whose durable outcome could not be written stops here too, and is reported as
+ * `PUBLICATION_OUTCOME_NOT_DURABLE` instead. Asking again reads the *remote*,
+ * which cannot recover a moment that has passed, so telling an operator to do it
+ * would be an instruction nothing can carry out.
+ *
+ * That slice also moved **one** stop, and it is named here rather than left to
+ * be discovered. An unattended run whose ref is already at the commit sends
+ * nothing, answers `ALREADY_PUBLISHED` and used to go on to the creation in the
+ * same pass; if its outcome record cannot be established it now stops instead.
+ * That is fail-closed and deliberate — a run that cannot say what it did should
+ * not go on to do something else — and it is the only place where what this
+ * driver stops at changed. Everywhere else the stopping is unchanged and only
+ * the sentence beside it differs.
  *
  * Three things follow, and they are the whole safety argument:
  *
@@ -127,6 +143,7 @@ import type {
   resolveObservationSubject,
 } from '../deliver/observe-delivery.js';
 import type { PublicationResult } from '../deliver/publish-delivery-head.js';
+import type { HeadPublicationOutcomeCode } from '../deliver/head-publication-outcome-store.js';
 import type { CreationResult } from '../deliver/create-pull-request.js';
 import type { MergeResult } from '../deliver/merge-pull-request.js';
 import type { SubjectRevalidation } from '../deliver/delivery-decision.js';
@@ -324,6 +341,54 @@ export const DELIVERY_DRIVES = [
    */
   'ATTENDED_AUTHORITY_REQUIRED',
   /**
+   * An invocation permitted to publish with nobody present reached the end of
+   * the ladder, and the record of what it went on to do was not established on
+   * disk.
+   *
+   * **It does not say that anything was attempted**, and an earlier draft of it
+   * did — which is the defect three independent review lenses found in this
+   * slice, and it is the defect this whole slice exists to prevent, pointing the
+   * other way. The outcome record is written on *every* path where an
+   * authorisation record was written, including the four that send nothing: a
+   * remote whose two URL lists disagree, a ref reading that could not be taken,
+   * a ref already at this commit, and a ref holding another one. This member is
+   * reachable from all of them, so its sentence may claim only what is true of
+   * all of them.
+   *
+   * What separates them is on the `Publication` line beside this, in that
+   * member's own words — the pattern `ATTENDED_AUTHORITY_REQUIRED` already
+   * follows for its three refusals, and for the same reason: a summary that
+   * tried to carry the distinction would be a second vocabulary saying the same
+   * thing one step later, and this one would have to be wrong about one half of
+   * its producers to be short.
+   *
+   * Named and tested **before** `EFFECT_ATTEMPTED`, because the more severe
+   * unresolved condition is the one an operator has to see — an evidence failure
+   * hidden behind an act's own result is the shape this file has already had to
+   * correct twice, once for the merge receipt and once for the conclusion.
+   *
+   * It is **not** `PUBLICATION_AUDIT_NOT_DURABLE`, and the two cannot both be
+   * reached: that one is written before the delivery remote is contacted at all,
+   * says in its own words that nothing was read and nothing was attempted, and
+   * refuses the publication. By the time this one is reachable the ladder has
+   * run to the end, and on four of its paths a reading of the delivery remote
+   * has already been taken.
+   *
+   * It is not "call again" either. Calling again reads the *remote*; it cannot
+   * recover a moment that has passed, and no invocation of anything will ever
+   * write this event's outcome now. Nothing is retried to obtain a record, and
+   * nothing here is undone — there is nothing this build could undo.
+   *
+   * And it does not say the outcome's name is empty. Three of the store's codes
+   * leave the whole document on the disk and refuse only because the write was
+   * not carried to a confirmed end or could not be read back, so a later listing
+   * of this event may well show one. The store says it does not know what is at
+   * the name; this member says the same thing in fewer words — the record was
+   * not *established*, which is what "not durable" means here and is the reason
+   * the `Outcome` line beside it carries the store's own code.
+   */
+  'PUBLICATION_OUTCOME_NOT_DURABLE',
+  /**
    * One act attempted a forge mutation, and this invocation stops there.
    *
    * Whether it succeeded is the act's own result and is reported beside this;
@@ -391,6 +456,13 @@ export const DELIVERY_DRIVE_DETAIL: Readonly<Record<DeliveryDrive, string>> = Ob
     'The delivery is in a state this build will not act on, and a person put it there.',
   ATTENDED_AUTHORITY_REQUIRED:
     'The next act is a forge mutation this invocation was not authorised to perform. Nothing was sent.',
+  PUBLICATION_OUTCOME_NOT_DURABLE:
+    'This invocation was permitted to publish with nobody present, and the record of what it ' +
+    'went on to do was not established on disk. The Publication line in this report says what ' +
+    'it called and what it last read, and the Outcome line under it says what the store ' +
+    'answered - both in this report, not in `agent-loop publication authorisations`. No later ' +
+    'invocation will write this event’s outcome. Nothing was sent a second time and ' +
+    'nothing was undone.',
   EFFECT_ATTEMPTED:
     'One act was attempted on the forge, and this invocation stops there. Ask again: ' +
     'the next invocation reads what happened rather than repeating it.',
@@ -425,6 +497,17 @@ export interface DeliveryDriveResult {
     readonly result: PublicationResult;
     readonly ref: string | null;
     readonly remoteName: string | null;
+    /**
+     * The outcome store's own answer for this publication, and `null` when no
+     * outcome was called for — the attended path, and every automatic path that
+     * stopped before the authorisation record existed.
+     *
+     * Carried up because the exit code for `PUBLICATION_OUTCOME_NOT_DURABLE` is
+     * the store's own, one code at a time, exactly as the conclusion's and the
+     * receipt's are. A single number chosen here would grade "something else is
+     * already at this event's name" and "the flush failed" the same.
+     */
+    readonly outcome: HeadPublicationOutcomeCode | null;
   } | null;
   readonly creation: {
     readonly result: CreationResult;
@@ -852,19 +935,35 @@ export async function driveDelivery(
   // server-side, so a head that is already there answers `ALREADY_PUBLISHED`,
   // sends nothing, and the driver goes on to the creation in the same pass.
   if (mayPerform(options, 'PUBLISH_HEAD')) {
+    const performed = await performPublication(
+      options,
+      repository.root,
+      subject,
+      taskLoad,
+      resolve,
+      load,
+      seams,
+    );
     publication = {
-      result: await performPublication(
-        options,
-        repository.root,
-        subject,
-        taskLoad,
-        resolve,
-        load,
-        seams,
-      ),
+      result: performed.result,
       ref: taskLoad.ok ? publishableRef(taskLoad.state.workBranch) : null,
       remoteName: subject.remoteName,
+      outcome: performed.outcome,
     };
+    // Before the act's own result, and that order is the finding rather than a
+    // preference: the branch below settles on `attempt` alone and never reads a
+    // publication member, so an evidence failure placed after it would be
+    // reported as "one act was attempted, ask again" — an instruction that is
+    // literally false, because asking again reads the remote and cannot recover
+    // a moment that has passed.
+    //
+    // Guarded on the store's own answer and not on the act's: `null` means no
+    // outcome was called for, and `RECORDED` means it is on the disk. Every
+    // other member of that vocabulary is a durable record that is missing after
+    // an act that may have changed the delivery remote.
+    if (performed.outcome !== null && performed.outcome !== 'RECORDED') {
+      return settle('PUBLICATION_OUTCOME_NOT_DURABLE', stage);
+    }
     if (publication.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
     const published = publication.result.publication;
     if (published === 'REF_HOLDS_ANOTHER_COMMIT') return settle('HUMAN_DECISION_REQUIRED', stage);

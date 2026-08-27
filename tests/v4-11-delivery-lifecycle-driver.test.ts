@@ -717,6 +717,10 @@ describe('the driver vocabulary is closed, total and graded', () => {
     CHECKS_FAILED: EXIT_RUN_NEEDS_OPERATOR,
     HUMAN_DECISION_REQUIRED: EXIT_RUN_NEEDS_OPERATOR,
     PUBLICATION_AUDIT_NOT_DURABLE: EXIT_RUN_NEEDS_OPERATOR,
+    // V4 slice 16. A floor of 3 like its sibling above, and for a different
+    // reason: that one stops before the delivery remote is contacted, this one
+    // reports a durable record missing after it may have changed.
+    PUBLICATION_OUTCOME_NOT_DURABLE: EXIT_RUN_NEEDS_OPERATOR,
     FORGE_STATE_UNKNOWN: EXIT_RUN_REFUSED,
     RECEIPT_NOT_DURABLE: EXIT_RUN_REFUSED,
     OBSERVATION_UNSETTLED: EXIT_RUN_REFUSED,

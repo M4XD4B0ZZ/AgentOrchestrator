@@ -4,7 +4,11 @@
 **Status** accepted
 **Slice** V4 slice 15
 **Supersedes** nothing. **Superseded by** nothing.
-**Amends** one.
+**Amends** one. **Amended by** `2026-08-27-adr-publication-outcome-evidence.md`,
+which adds a second document beside each record this command reads, two fields to
+its entry type and four lines to what it prints. Every claim this ADR makes about the command is unchanged: it
+still contacts no forge, starts no Git, takes no lease, reads no declaration and
+creates nothing.
 
 `2026-08-27-adr-unattended-publication-audit.md`, in three places. §13 lists "an
 operator-facing command that lists or searches the store" among that slice's

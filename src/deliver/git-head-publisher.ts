@@ -96,6 +96,7 @@
 import { createProbeEnv } from '../auth/env-guard.js';
 import { runCommand } from '../doctor/exec.js';
 import type { RemoteRefReading } from './head-publication.js';
+import type { PublicationCommandReport } from './head-publication-outcome.js';
 
 /** The program. Named distinctly: the forge client constant belongs to slice 2. */
 export const GIT_PUBLICATION_COMMAND = 'git';
@@ -382,12 +383,67 @@ export async function readRemoteRef(
 }
 
 /**
+ * What the process boundary reported about one publication command.
+ *
+ * Derived from the two fields the seam already carries, and conservative in
+ * every place the boundary's own contract says it must be. Every mapping below
+ * is measured against `doctor/exec.ts` and `boundary/owned-command.ts`:
+ *
+ *  - `COMPLETED` with a zero status is the only shape this build has ever read
+ *    as the transport reporting success, and it is unchanged. Reaching it on the
+ *    owned path additionally requires the boundary to have been established with
+ *    a child pid it verified in its job, so a process existed;
+ *  - `OUTPUT_LIMIT_EXCEEDED` is produced only after ownership held, where the
+ *    boundary answers that the target started. A process existed and something
+ *    here ended it;
+ *  - `NOT_FOUND` has three producers and the negative holds for every one of
+ *    them: nothing was found to run at all, which is decided before either
+ *    platform path is taken; or, on the unowned path, the launch failed with the
+ *    errno for a missing target, synchronously or on the child's own error. All
+ *    three answer `started: false`. **It is the one member of the boundary's
+ *    vocabulary that establishes a negative about the process**;
+ *  - `SPAWN_FAILED` does **not** establish one. A launch the boundary refused
+ *    may have had a target that already began executing, which is why
+ *    `CommandResult.started` is documented as `false` only where the boundary
+ *    *proved* the target never ran;
+ *  - `TIMED_OUT` does not establish a start either, and this is the subtle one:
+ *    one of its two producers is a boundary that was never established in time,
+ *    which carries the refusal's own answer about the target and may be "no";
+ *  - `BOUNDARY_LOST` is by definition a boundary this side cannot account for,
+ *    and the adapter answers `UNKNOWN` about the target;
+ *  - anything else — a value outside the boundary's vocabulary, or an absent
+ *    one — establishes nothing. The seam types `outcome` as a plain string, and
+ *    a substituted runner may return whatever it likes.
+ *
+ * The honest limit, stated here because a member that names a process invites
+ * it: this is a statement about what the **process boundary reported**. A
+ * substituted `GitPublicationRunner` can report a completion having created
+ * nothing, exactly as it can already make this build read a publication as
+ * attempted.
+ */
+export function classifyPublicationCommand(
+  outcome: string,
+  exitCode: number | null,
+): PublicationCommandReport {
+  if (outcome === 'COMPLETED') return exitCode === 0 ? 'RAN_TO_EXIT_ZERO' : 'RAN_TO_ANOTHER_ENDING';
+  if (outcome === 'OUTPUT_LIMIT_EXCEEDED') return 'RAN_TO_ANOTHER_ENDING';
+  if (outcome === 'NOT_FOUND') return 'NO_PROCESS';
+  return 'ENDING_NOT_ESTABLISHED';
+}
+
+/**
  * Runs the create-only push exactly once.
  *
- * Returns only whether the command completed with a zero status. Nothing about
- * *what* it did is read from here — that is the second `ls-remote`'s job — and
- * there is deliberately no retry: a non-idempotent effect whose outcome is
+ * Returns what the process boundary reported about that one command, and
+ * nothing about *what it did* to the remote — that is the second `ls-remote`'s
+ * job. There is deliberately no retry: a non-idempotent effect whose outcome is
  * unknown is re-attempted by a human asking again, which begins with a reading.
+ *
+ * It answered a boolean until V4 slice 16, and the widening is not a change of
+ * behaviour: `RAN_TO_EXIT_ZERO` is exactly the pair of conditions that boolean
+ * tested, and the caller's own grade is derived from it alone. What the other
+ * four members are for is the durable outcome record, which needs to say whether
+ * a process existed and cannot say it from a boolean.
  */
 export async function pushDeliveryHead(
   repositoryRoot: string,
@@ -395,7 +451,7 @@ export async function pushDeliveryHead(
   ref: string,
   commit: string,
   runner: GitPublicationRunner = defaultRunner,
-): Promise<boolean> {
+): Promise<PublicationCommandReport> {
   const result = await runner(publishHeadArgs(remoteName, ref, commit), optionsFor(repositoryRoot));
-  return result.outcome === 'COMPLETED' && result.exitCode === 0;
+  return classifyPublicationCommand(result.outcome, result.exitCode);
 }

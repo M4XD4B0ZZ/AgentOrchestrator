@@ -6,7 +6,12 @@
  *
  *     <OS user profile>/.agent-orchestrator/head-publication-authorisations/
  *         <event id>/
- *             authorisation.json
+ *             authorisation.json   ← this module's, written before the effect
+ *             outcome.json         ← V4 slice 16's, written after the ladder ran
+ *
+ * This module writes the first and never the second, and never reads either
+ * after the read-back below. The second has its own store, its own contract and
+ * its own version, so a build that cannot read one can still read the other.
  *
  * Every other durable delivery record in this build sits inside the repository
  * it describes — the observation, the merge receipt, the verification history,
@@ -218,6 +223,20 @@ export interface HeadPublicationAuditResult {
   readonly recorded: boolean;
   /** The event identity this invocation used. Always present. */
   readonly eventId: string;
+  /**
+   * The binding digest of the record on disk, and `null` on every refusal.
+   *
+   * Handed back, added by V4 slice 16, because the outcome written after the
+   * publication is anchored to it: an outcome that names the digest of the
+   * authorisation it belongs to cannot be moved into another event directory
+   * without failing to recompute. Producing it here rather than re-reading the
+   * record from disk keeps the two documents' facts coming from one place —
+   * a second read could answer about a file something else had since changed.
+   *
+   * `null` unless the bytes were written and read back, so a caller cannot
+   * anchor an outcome to an authorisation that is not on the disk.
+   */
+  readonly binding: string | null;
   /** Allow-listed errno identifier, never a message. */
   readonly errnoCode: string | null;
 }
@@ -226,8 +245,22 @@ function outcome(
   code: HeadPublicationAuditCode,
   eventId: string,
   errnoCode: string | null = null,
+  binding: string | null = null,
 ): HeadPublicationAuditResult {
-  return Object.freeze({ code, recorded: code === 'RECORDED', eventId, errnoCode });
+  return Object.freeze({
+    code,
+    recorded: code === 'RECORDED',
+    eventId,
+    // A stated rule and **not a measurement**: every refusal below reaches this
+    // helper without a digest at all, so removing this conditional changes
+    // nothing a test can see — a mutant that did exactly that left the suite
+    // green. It is kept because a later branch that did pass one beside a
+    // refusal would be handing out an anchor for a record that is not on the
+    // disk, and the rule belongs where the value is built rather than in the
+    // discipline of every future call site.
+    binding: code === 'RECORDED' ? binding : null,
+    errnoCode,
+  });
 }
 
 /**
@@ -386,14 +419,8 @@ export function recordHeadPublicationAuthorisation(
     authorisedAt: request.authorisedAt,
   });
 
-  const bytes = Buffer.from(
-    `${JSON.stringify(
-      { ...payload, binding: headPublicationAuthorisationBinding(subject, payload) },
-      null,
-      2,
-    )}\n`,
-    'utf8',
-  );
+  const binding = headPublicationAuthorisationBinding(subject, payload);
+  const bytes = Buffer.from(`${JSON.stringify({ ...payload, binding }, null, 2)}\n`, 'utf8');
 
   // ── 1. The record this build produced, judged before anything is created ──
   if (bytes.byteLength > MAX_HEAD_PUBLICATION_AUTHORISATION_BYTES) {
@@ -455,5 +482,5 @@ export function recordHeadPublicationAuthorisation(
   // fail while this one passes — a redundancy that reads as coverage and is not.
   if (!stored.equals(bytes)) return outcome('READBACK_MISMATCH', request.eventId);
 
-  return outcome('RECORDED', request.eventId);
+  return outcome('RECORDED', request.eventId, null, binding);
 }

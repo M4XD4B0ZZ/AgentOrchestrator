@@ -98,6 +98,7 @@ import {
   newHeadPublicationAuditEventId,
   recordHeadPublicationAuthorisation,
 } from '../src/deliver/head-publication-authorisation-store.js';
+import { recordHeadPublicationOutcome } from '../src/deliver/head-publication-outcome-store.js';
 import { HEAD_PUBLICATIONS } from '../src/deliver/head-publication.js';
 import { EXIT_RUN_NEEDS_OPERATOR, EXIT_RUN_OK } from '../src/cli/run-exit-codes.js';
 
@@ -217,6 +218,48 @@ function record(home: string, over: RecordOver = {}): string {
     pathProvider: fixedPathProvider(home),
   });
   expect(result.code, 'the fixture writer must succeed').toBe('RECORDED');
+  return eventId;
+}
+
+/**
+ * The same fixture, with a readable outcome beside it (V4 slice 16).
+ *
+ * Here rather than only in the slice-16 file because the label pin below is a
+ * both-directions equality against what this report can emit, and three of its
+ * labels only appear where an outcome was read. Weakening that pin — by moving
+ * it, or by letting the constant carry labels no fixture reaches — would give
+ * back exactly the blind spot it was written to close: a value line under a
+ * label nothing swept.
+ */
+function recordWithOutcome(home: string, over: RecordOver = {}): string {
+  const at = over.at ?? new Date(AT);
+  const eventId = newHeadPublicationAuditEventId(at);
+  const authorised = recordHeadPublicationAuthorisation({
+    eventId,
+    taskId: over.taskId ?? TASK,
+    repositoryRoot: over.repositoryRoot ?? CHECKOUT,
+    host: over.host ?? IDENTITY.host,
+    owner: over.owner ?? IDENTITY.owner,
+    name: over.name ?? IDENTITY.name,
+    declaredRemote: over.declaredRemote ?? 'origin',
+    ref: over.ref ?? REF,
+    commit: over.commit ?? HEAD,
+    declarationDigest: over.declarationDigest ?? DIGEST,
+    authorisedAt: over.authorisedAt ?? at.toISOString(),
+    pathProvider: fixedPathProvider(home),
+  });
+  expect(authorised.code, 'the fixture writer must succeed').toBe('RECORDED');
+  const outcome = recordHeadPublicationOutcome({
+    eventId,
+    taskId: over.taskId ?? TASK,
+    repositoryRoot: over.repositoryRoot ?? CHECKOUT,
+    authorisationBinding: authorised.binding as string,
+    outcome: 'DISPATCHED_REF_AT_SUBJECT_COMMIT_AFTER',
+    commandReport: 'RAN_TO_EXIT_ZERO',
+    recordedAt: at.toISOString(),
+    pathProvider: fixedPathProvider(home),
+  });
+  expect(outcome.code, 'the fixture outcome writer must succeed').toBe('RECORDED');
   return eventId;
 }
 
@@ -1284,6 +1327,16 @@ describe('what the report may not say', () => {
     const unreadable = scratchHome();
     writeFileSync(auditRoot(unreadable), 'not a store', 'utf8');
     for (const raw of report(unreadable).split('\n')) {
+      const label = labelOf(raw);
+      if (label !== null) everyLabel.add(label);
+    }
+    // …and over an event that carries a readable outcome, which is where the
+    // four labels V4 slice 16 added are emitted. Without this the constant
+    // would be free to carry labels nothing produces, which is half of what
+    // this case exists to refuse.
+    const withOutcome = scratchHome();
+    recordWithOutcome(withOutcome);
+    for (const raw of report(withOutcome).split('\n')) {
       const label = labelOf(raw);
       if (label !== null) everyLabel.add(label);
     }

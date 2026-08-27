@@ -46,8 +46,28 @@ import { OS_PATH_PROVIDER, type PathProvider } from '../../config/internal/path-
  */
 export const HEAD_PUBLICATION_AUDIT_DIR_NAME = 'head-publication-authorisations';
 
-/** The one file name inside an event directory. No alternative spelling. */
+/**
+ * The name of the authorisation document inside an event directory. No
+ * alternative spelling.
+ *
+ * It said "the one file name" until V4 slice 16 put a second document beside it,
+ * fifteen lines below this one and in the same edit.
+ */
 export const HEAD_PUBLICATION_AUDIT_FILE_NAME = 'authorisation.json';
+
+/**
+ * The second file name inside an event directory, added by V4 slice 16.
+ *
+ * One event, two documents, and they are two because they are two propositions:
+ * `authorisation.json` says what this invocation was permitted to attempt and
+ * was written before the delivery remote was contacted, and this one says what
+ * that invocation went on to do and see. Neither is ever written over the other,
+ * and neither is written twice.
+ *
+ * Here rather than in either store, for the reason the file name above is here:
+ * the reader has to know both names and may import no writer.
+ */
+export const HEAD_PUBLICATION_OUTCOME_FILE_NAME = 'outcome.json';
 
 /**
  * The store root. A pure function of the OS user identity.

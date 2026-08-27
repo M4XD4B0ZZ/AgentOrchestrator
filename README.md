@@ -10648,12 +10648,15 @@ scheduler. The `up to date` row is
 ### What an unattended invocation can do besides publish
 
 The publication itself writes nothing **in the repository**: no task state, no
-block-ledger entry, no delivery record, no cached permission. Since V4 slice 14
-it does write one thing, and outside every repository — an immutable
-authorisation record under the operator's own profile, before the remote is
-contacted; see [the record that has to exist first](#the-record-that-has-to-exist-first-v4-slice-14).
-Nothing about the grant is durable, and the next invocation reads the
-declaration again.
+block-ledger entry, no delivery record, no cached permission. What it does write
+is outside every repository, under the operator's own profile, and there are two
+of them: an immutable authorisation record before the remote is contacted (V4
+slice 14 — [the record that has to exist
+first](#the-record-that-has-to-exist-first-v4-slice-14)), and an immutable
+outcome record after the publication processing has ended (V4 slice 16 — [what
+happened afterwards](#what-happened-afterwards-v4-slice-16)). Neither is ever
+written over, and neither is ever an input that permits a publication. Nothing
+about the grant is durable, and the next invocation reads the declaration again.
 
 The *invocation* is a `--drive`, and a drive does more than publish. This is not
 new and it is not this grant's doing — `delivery --drive` has done all of it with
@@ -10754,6 +10757,11 @@ the delivery remote at all, and refuses to publish if it cannot.
     <OS user profile>/.agent-orchestrator/head-publication-authorisations/
         20260827T120000000Z-<uuid>/
             authorisation.json
+
+V4 slice 16 puts a second document beside it, written **after** the publication
+processing has ended and describing what happened; this section is about the
+first. See [what happened
+afterwards](#what-happened-afterwards-v4-slice-16).
 
 ```json
 {
@@ -10903,9 +10911,10 @@ disagrees about the payload. All three are driven.
 
 ### Carried forward from V4 slice 14, deliberately
 
-- **L-V4-14-1 — the store is unbounded.** One directory of one small document per
-  authorised unattended publication attempt, forever. Nothing deletes it, which
-  is the same absence the doctor's runs root already declares under the same
+- **L-V4-14-1 — the store is unbounded.** One directory per authorised
+  unattended publication attempt, forever, holding one small document — and
+  since V4 slice 16 a second one beside it. Nothing deletes any of it, which is
+  the same absence the doctor's runs root already declares under the same
   profile. A retention policy is a decision of its own.
 - **L-V4-14-2 — the record is not tamper-proof, and its absence proves nothing.**
   Same-user forgery and same-user deletion are both open. An absent record and a
@@ -10975,7 +10984,8 @@ user profile and grades every entry in it.
 Store        : C:\Users\you\.agent-orchestrator\head-publication-authorisations
 Listing      : READ
 Entries      : 1 (1 read, 0 not read)
-  Every entry in the store is a record this build read.
+  Every entry in the store is a record this build read, and nothing beside one of them is
+  a document it could not.
 
 Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Reading      : HISTORICAL_AUTHORISATION
@@ -10987,7 +10997,15 @@ Entry        : 20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef
   Ref          : refs/heads/ao/task/V4-14
   Commit       : 10583ee91a5747d0049f563ffaac64b0cf643aeb
   Declaration  : AUTOMATIC_ALLOWED, sha256 f59d285e0c233651c7610df32edf58d0d932a3ada9c50f984ff128ce5c7c5a5b
+  Outcome      : HISTORICAL_OUTCOME
+  Recorded at  : 2026-08-27T12:00:02.140Z
+  Publication  : DISPATCHED_REF_AT_SUBJECT_COMMIT_AFTER
+  Command      : RAN_TO_EXIT_ZERO
 ```
+
+The last four lines are V4 slice 16's and are described under [What happened
+afterwards](#what-happened-afterwards-v4-slice-16). Every event written before
+that slice has `Outcome      : OUTCOME_ABSENT` instead, forever.
 
 Every identity is whole. The object name and the declaration digest are never
 abbreviated in the report, because a partial identity is a different fact.
@@ -11115,6 +11133,158 @@ forge a line or reorder one is written as its code point.
   place a forged record would be displayed as `HISTORICAL_AUTHORISATION`.
 
 See [`docs/decisions/2026-08-27-adr-publication-authorisation-listing.md`](docs/decisions/2026-08-27-adr-publication-authorisation-listing.md).
+
+## What happened afterwards (V4 slice 16)
+
+Slices 14 and 15 answered "what was this invocation permitted to attempt?" and
+left the other half open: a record is written **before** the delivery remote is
+contacted, so four rows of slice 14's own crash table look identical from the
+disk. An operator holding a record could not tell a run that sent nothing from
+one that may have created a branch.
+
+So an unattended publication now writes a second document, beside the first, when
+its publication processing has ended:
+
+```text
+<OS user profile>/.agent-orchestrator/head-publication-authorisations/
+    20260827T120000000Z-a64c0f2f-1982-4958-972c-459ac0d678ef/
+        authorisation.json   <- written before the delivery remote was contacted
+        outcome.json         <- written after the publication processing ended
+```
+
+It is created once, with an exclusive create at its final name, and nothing ever
+writes over it. `authorisation.json` is not touched, edited or re-read: it still
+means exactly what it meant at the pre-effect boundary.
+
+### The two things it says
+
+`Publication` is **what this invocation called, and what its last reading of the
+ref established.** The first word is the dispatch fact and is decided by this
+build's own control flow, which is the one certain thing on the record.
+
+| Member | What it establishes | Mutation possible? |
+| --- | --- | --- |
+| `NOT_DISPATCHED_REMOTE_NOT_ASKED` | no command was handed over, and nothing was asked of the delivery remote for this publication | no |
+| `NOT_DISPATCHED_REF_NOT_READ` | a reading was taken and did not establish what the ref held | no |
+| `NOT_DISPATCHED_REF_AT_SUBJECT_COMMIT` | a reading found the ref holding exactly this commit | no |
+| `NOT_DISPATCHED_REF_AT_OTHER_COMMIT` | a reading found another commit there | no |
+| `NOT_DISPATCHED_REF_ABSENT` | a reading found the ref absent, and nothing was handed over | no |
+| `DISPATCHED_REF_NOT_READ_AFTER` | one command was handed over and the reading afterwards did not answer | **yes** |
+| `DISPATCHED_REF_ABSENT_AFTER` | one command was handed over and the ref was read absent afterwards | **yes** |
+| `DISPATCHED_REF_AT_SUBJECT_COMMIT_AFTER` | one command was handed over and the ref was read at this commit afterwards | **yes** |
+| `DISPATCHED_REF_AT_OTHER_COMMIT_AFTER` | one command was handed over and the ref was read at another commit afterwards | **yes** |
+
+Both labels belong to **this** report — `agent-loop publication authorisations`.
+The delivery report has a `Publication` line of its own carrying a different
+vocabulary (the publication grade: `ALREADY_PUBLISHED`, `PUBLISHED`,
+`OUTCOME_UNCERTAIN`, …), and an `Outcome` line carrying the store's code. Same
+words, two reports, two questions.
+
+`Command` is **what became of that one command**. `NOT_CALLED` says it was never
+handed to the process boundary, so no report exists — there was nothing to report
+on. It is this build's own control flow rather than anybody's answer, and it says
+the same thing the `NOT_DISPATCHED` half of the line above already says. The
+other four are the boundary's own words about a command that *was* handed to it,
+and they are
+evidence about a process rather than about a network: `NO_PROCESS`,
+`RAN_TO_EXIT_ZERO`, `RAN_TO_ANOTHER_ENDING`, `ENDING_NOT_ESTABLISHED`.
+
+Of those four, `NO_PROCESS` is the only one that settles a negative — there was
+nothing to run, so no process for this command existed. A refused launch, a run
+that exceeded its deadline and a lost boundary all fold into
+`ENDING_NOT_ESTABLISHED`, because none of them is evidence that no process ever
+started.
+
+### What it still does not say
+
+**Not that this build put the commit on the delivery remote.** That is measured
+false rather than merely unproven: a push of a commit a ref already holds exits
+zero and reports the remote up to date *without the lease being evaluated*, so an
+invocation that changed nothing reaches the strongest reading in the table above.
+There is no member here that names an author of a ref, and there never can be.
+
+Not that the ref holds this now — every reading is one reading at one instant, and
+this command asks no forge anything. Not that bytes reached the delivery remote.
+And not that anything may be sent again: an outcome is history, and no stored
+record is ever an input that permits a publication.
+
+### What an absent outcome means
+
+> **An authorisation with no outcome beside it means no durable outcome was
+> established. It does not mean no effect happened.**
+
+There is no transaction between a ref update on github.com and a file on your
+disk, so a process that dies between the two leaves exactly this shape — and so
+does every invocation of every build older than this slice. Nothing is
+backfilled, nothing is migrated and no forge is consulted to guess. An event with
+no outcome reads as `OUTCOME_ABSENT`, stays legitimate forever, and does **not**
+grade the listing down.
+
+### When the record cannot be written
+
+The outcome is written after an act that cannot be undone, so a failure there is
+reported as itself rather than hidden behind the act's own result:
+
+```text
+Drive        : PUBLICATION_OUTCOME_NOT_DURABLE
+```
+
+Exit code **3** as a floor — a person has to look — replaced by the store's own
+grade one code at a time, exactly as the merge receipt's and the conclusion's
+are. Three of the store's twelve codes are internal floors and grade **1**
+instead; the other nine grade 3. It is deliberately not `EFFECT_ATTEMPTED` and
+deliberately not exit 5, "call again": calling again reads the *remote*, and no
+invocation of anything will write that event's outcome now. Nothing is sent a
+second time to obtain a record, and nothing is undone, because there is nothing
+this build could undo.
+
+**It does not say that anything was attempted**, and it must not: the outcome is
+written on every path where an authorisation was, including the four that send
+nothing. What this invocation called and last read is on the `Publication` line
+beside it, and what became of the record is on the `Outcome` line under that.
+
+Its sibling `PUBLICATION_AUDIT_NOT_DURABLE` is the opposite case and says so in
+its own words: that one stops *before* the remote is contacted, reports that
+nothing was read and nothing was attempted, and refuses the publication. The two
+cannot both be reached.
+
+### Carried forward from V4 slice 16, deliberately
+
+- **L-V4-16-1 — one more file per event, forever.** The store was unbounded
+  before and is unbounded now, with roughly a third more bytes in it.
+  `L-V4-14-1` is unchanged.
+- **L-V4-16-2 — the outcome names no commit it saw.** `..._AT_OTHER_COMMIT` says
+  the ref held something else and never which, so answering "what is in the way?"
+  means reading the remote yourself.
+- **L-V4-16-3 — a prefix can be left at the outcome's name.** The exclusive
+  create writes into the final name, so a crash mid-write can leave part of a
+  document there. It reads as unreadable, never as valid, and nothing removes it.
+- **L-V4-16-4 — four of `Command`'s five members are the boundary's word.** The
+  fifth, `NOT_CALLED`, is this build's own control flow and is the certain one.
+  For the other four: a substituted runner can
+  report a completion having created nothing. The same bound the publication
+  grade already carries.
+- **L-V4-16-5 — the outcome document is meaningless outside its directory.** It
+  names no task, no repository and no ref: those are bound through the
+  authorisation's own digest rather than copied, so there is one place for them
+  to be edited instead of two.
+- **L-V4-16-6 — an outcome beside a record the listing refused is never looked
+  at.** The outcome fields sit on one arm of the entry type, so a readable
+  outcome next to an entry graded `RECORD_MALFORMED` or `RECORD_NOT_THIS_EVENT`
+  is not read, not graded and not named on any line about that entry. The report
+  says so once, in the paragraph about the store. Repairing it would mean reading
+  an outcome under an identity no authorisation established.
+- **L-V4-16-7 — one arm of the outcome reader has no test.**
+  `OUTCOME_UNREADABLE` reached from a failed `lstat` that is not `ENOENT` cannot
+  be provoked on NTFS at a path inside a directory this build just made. Its
+  other producers — a link, a non-file, bytes that would not come back — are
+  measured, and the record's own twin arm has the same gap.
+- **`L-V4-13-5` is unchanged** and is the reason no member names an author.
+- **`L-V4-14-2` is unchanged and now matters twice.** Anything running as your OS
+  user can write an outcome that reads exactly like the rest, and delete one
+  without trace.
+
+See [`docs/decisions/2026-08-27-adr-publication-outcome-evidence.md`](docs/decisions/2026-08-27-adr-publication-outcome-evidence.md).
 
 ## Not implemented yet
 
