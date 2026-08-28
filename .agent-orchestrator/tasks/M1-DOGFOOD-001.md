@@ -3,8 +3,8 @@ id: M1-DOGFOOD-001
 title: Test fixtures leak their memoised Git repository template on every run
 status: OPEN
 kind: NORMAL
-priority: HIGH
-currentFocus: true
+priority: LOW
+currentFocus: false
 dependsOn: []
 ---
 
