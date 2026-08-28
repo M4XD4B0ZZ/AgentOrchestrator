@@ -10528,14 +10528,23 @@ a task was pinned to, precisely so a writer cannot widen its own scope, and
 cannot widen its successor's. That is the right *pattern* and it was the first
 candidate. Two measured facts ruled it out.
 
-In **this** repository the profile is in no commit: `.gitignore` ignores
-`.agent-orchestrator/`, the file is untracked, and
-`git show HEAD:.agent-orchestrator/repo-profile.yaml` answers `fatal: path …
-exists on disk, but not in 'HEAD'`. A permission read from a commit is
-unreadable here, so the only path any test could exercise would be the refusal.
-And a repository profile is repository-authored input — the same trust class the
-publication mint already refuses to take prose from, which is a stronger reason
-to refuse a *permission* from it than a title.
+When this was decided, the profile was in no commit of **this** repository:
+`.gitignore` ignored the whole of `.agent-orchestrator/`, the file was
+untracked, and `git show HEAD:.agent-orchestrator/repo-profile.yaml` answered
+`fatal: path … exists on disk, but not in 'HEAD'`. A permission read from a
+commit was unreadable here, so the only path any test could exercise would have
+been the refusal. And a repository profile is repository-authored input — the
+same trust class the publication mint already refuses to take prose from, which
+is a stronger reason to refuse a *permission* from it than a title.
+
+The first of those two facts has since been reversed, and the second is the one
+that decides. The M1 dogfood had to commit this repository's profile, because
+`src/scope/pinned-scope.ts` reads the scope declaration out of the commit a task
+was pinned to and refuses when it is not there — so a repository this
+orchestrator can drive at all is one whose profile is committed. Only
+`.agent-orchestrator/runtime/` is ignored now. That changes where the profile
+can be read from; it does not change whether a permission may be taken from it,
+because the trust-class argument never depended on where the file lives.
 
 ### Capability is not permission
 

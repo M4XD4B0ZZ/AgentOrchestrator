@@ -1,0 +1,38 @@
+schemaVersion: 1
+repository:
+  id: agent-orchestrator
+  defaultBranch: main
+taskSource:
+  kind: MARKDOWN_DIRECTORY
+  path: .agent-orchestrator/tasks
+context:
+  canonicalSources:
+    - CLAUDE.md
+capabilities:
+  codegraph: OPTIONAL
+verification:
+  phases:
+    # Measured, not assumed: a task worktree and the post-merge verification
+    # checkout are both fresh `git worktree add` trees, and `node_modules/` is
+    # ignored, so neither has one. `npm run verify` begins with
+    # `npm run schema:generate`, which is `tsx scripts/generate-schema.ts`, and
+    # in a tree without dependencies that dies with "tsx konnte nicht gefunden
+    # werden" before a single check runs. The install is therefore part of this
+    # repository's declared gate rather than something the orchestrator is
+    # expected to know about: `verification-profile.ts` states that the digest
+    # identifies the contract and never the toolchain.
+    - phase: BUILD
+      command: [npm, ci]
+    - phase: VERIFY
+      command: [npm, run, verify]
+scope:
+  allowedPaths:
+    - src
+    - tests
+  protectedPaths: []
+completion:
+  maxReviewRounds: 3
+remote:
+  required: true
+delivery:
+  remote: origin

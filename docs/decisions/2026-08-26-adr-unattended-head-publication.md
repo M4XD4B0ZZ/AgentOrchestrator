@@ -79,6 +79,17 @@ this build is dogfooded against. Every unattended publication here would refuse,
 and a mechanism that can only refuse is not a mechanism — it is a feature nobody
 can use, whose refusal path is the only one any test would ever exercise.
 
+> **Addendum, 2026-08-28 (V4 slice 18, the M1 dogfood).** The measurement above
+> was true when this decision was taken and is no longer true. `.gitignore` now
+> ignores `.agent-orchestrator/runtime/` only, and the profile is committed,
+> because `src/scope/pinned-scope.ts` reads a task's scope declaration out of the
+> commit the task was pinned to and refuses when it is not there — so this
+> repository could not have driven a single task of its own until the profile
+> was in a commit. The decision recorded here stands unchanged: it rests on the
+> second reason below, which is about what a repository profile *is* and never
+> about where it happens to live. This paragraph is kept, not corrected, because
+> an ADR records what was measured on the day it was written.
+
 **A repository profile is repository-authored input.** The publication mint
 already refuses to carry repository-authored prose into an argument vector, for
 a reason that applies with more force to a permission than to a title. Pinning
