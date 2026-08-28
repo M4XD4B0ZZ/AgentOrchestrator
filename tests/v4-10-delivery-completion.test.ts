@@ -31,7 +31,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import {
   DeliveryConclusionEvidence,
@@ -1750,6 +1750,18 @@ function repositoryTemplate(): { path: string; mergeCommit: string; baseCommit: 
   templateRepo = { path, mergeCommit, baseCommit };
   return templateRepo;
 }
+
+/** The memoised template's own removal — never the per-case copies. */
+afterAll(() => {
+  const path = templateRepo?.path ?? null;
+  templateRepo = null;
+  if (path === null) return;
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    /* a leftover template directory is not a test failure */
+  }
+});
 
 function realRepo(prefix: string): { root: string; mergeCommit: string; baseCommit: string } {
   const template = repositoryTemplate();
