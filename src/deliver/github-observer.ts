@@ -62,7 +62,16 @@
  * rollup returning `{"data":{…"statusCheckRollup":null},"errors":[…]}`. A
  * reader that took `data` at face value would read that as "this commit has no
  * checks", which is a fail-open produced by the successful path. A REST non-2xx
- * is a non-zero exit and no body this module will parse.
+ * is a non-zero exit, and no body that arrives with one is ever handed to the
+ * parser that turns a response into evidence.
+ *
+ * That last clause said "no body this module will parse" until V4 slice 18R, and
+ * the narrowing is exact rather than cosmetic. One such body is now read — the
+ * locator's own missing-commit error document, by `locatorReportsNoCommit`,
+ * whose whole output is a boolean and which no evidence is built from. The
+ * fail-open the paragraph above describes is still impossible: what would
+ * produce it is a **response parser** consuming an error, and that is the thing
+ * the sentence now names.
  *
  * GraphQL's one real advantage is that `GitObjectID!` refuses anything but a
  * full 40-hex object name at the type level, where REST's `{ref}` accepts an
@@ -82,7 +91,9 @@ import { runCommand, UnsafeArgumentError, type CommandResult } from '../doctor/e
 import {
   aggregateCheckState,
   checkStateRefusal,
+  COMMIT_UNRESOLVED,
   isAddressableSubject,
+  locatorReportsNoCommit,
   matchExactHead,
   parseCheckRuns,
   parseCommitStatuses,
@@ -94,6 +105,7 @@ import {
   type ObservationRefusal,
   type ObservationSubject,
   type PullCandidate,
+  type PullCandidatesRefusal,
   type PullRequestObservation,
 } from './forge-observation.js';
 import type { MergeReading, MergeReadingOutcome } from './pull-request-merge.js';
@@ -273,9 +285,24 @@ export interface ForgeObserverDependencies {
  */
 export const FORGE_CLIENT_WORKING_DIRECTORY = tmpdir();
 
-type RequestResult =
+type RequestResult<E extends string> =
   | { readonly ok: true; readonly body: unknown }
-  | { readonly ok: false; readonly refusal: ObservationRefusal };
+  | { readonly ok: false; readonly refusal: ObservationRefusal | E };
+
+/**
+ * Reads the error document of a request that did not succeed, or `null` for an
+ * endpoint whose error documents this build does not read.
+ *
+ * Required at every call site, with no default, for the reason
+ * {@link ForgeCommandRunner} gives about seams: a parameter with a fallback is
+ * one a new endpoint can forget to think about, and the fallback here would
+ * decide whether a body that came with a failing exit code is read at all.
+ * Three of the four call sites pass `null`, which is what makes "the check
+ * endpoints' errors are never read" a property of this file rather than a
+ * sentence in it — and `E` then infers as `never`, so their results carry
+ * exactly {@link ObservationRefusal} and nothing wider.
+ */
+type ErrorDocumentReader<E extends string> = ((stdout: string) => E | null) | null;
 
 /**
  * One read-only request, classified into the closed vocabulary.
@@ -286,12 +313,13 @@ type RequestResult =
  * wrong moment: this is the moment that matters, because it is the last one
  * before a process exists.
  */
-async function request(
+async function request<E extends string = never>(
   subject: ObservationSubject,
   path: string,
   params: readonly string[],
   deps: ForgeObserverDependencies,
-): Promise<RequestResult> {
+  readError: ErrorDocumentReader<E>,
+): Promise<RequestResult<E>> {
   if (supportedForgeHost(subject.host) === null) {
     return Object.freeze({ ok: false as const, refusal: 'UNSUPPORTED_HOST' as const });
   }
@@ -318,6 +346,11 @@ async function request(
     return Object.freeze({ ok: false as const, refusal: 'ENVIRONMENT_UNUSABLE' as const });
   }
 
+  // The reader below runs only for a `COMPLETED` result whose exit code is a
+  // number other than 0 and 4. Stated as a rule rather than as the list of gates
+  // in front of it, because a review measured three separate enumerations of
+  // those gates going short by one in the same commit that added the fourth.
+  //
   // `runCommand` is documented to throw exactly one error — `UnsafeArgumentError`,
   // for a token outside the argument grammar — and that is a programming error
   // in this repository rather than a runtime condition. The three existing seams
@@ -368,7 +401,35 @@ async function request(
   if (result.exitCode === 4) {
     return Object.freeze({ ok: false as const, refusal: 'NOT_AUTHENTICATED' as const });
   }
+  // A completion this build cannot grade is refused with the failures, and that
+  // includes refusing to read its body: the document on its stdout is not
+  // evidence that the far side answered.
+  //
+  // **This shape does not come from `runCommand` on the supported platform.**
+  // A second review measured the opposite of what the first version of this
+  // comment claimed: `toCommandResultFields` converts a completion carrying a
+  // null exit code to `BOUNDARY_LOST`, and `tests/v3-03-…` pins exactly that. So
+  // the arm above catches it one line earlier, and this guard refuses a
+  // `CommandResult` only a substituted runner can hand in. It is here because
+  // `deps.runner` is a required seam with no default and an arbitrary
+  // implementation — which is precisely the shape the first review reached it
+  // through — and not because the far side produces it.
+  if (typeof result.exitCode !== 'number') {
+    return Object.freeze({ ok: false as const, refusal: 'REQUEST_FAILED' as const });
+  }
   if (result.exitCode !== 0) {
+    // The one place a body that came with a failing exit code is read at all,
+    // and it is read as an **error document** — never handed to the parser
+    // below, which turns a response into evidence. Three of the four call sites
+    // supply no reader, so for them this branch is the same single line it was
+    // before V4 slice 18R.
+    //
+    // Deliberately after the exit-code judgements above and not before them: a
+    // client that timed out, could not be found or reports that it needs an
+    // authentication has produced no answer, and a document on its stdout would
+    // not be one either.
+    const read = readError === null ? null : readError(result.stdout);
+    if (read !== null) return Object.freeze({ ok: false as const, refusal: read });
     return Object.freeze({ ok: false as const, refusal: 'REQUEST_FAILED' as const });
   }
 
@@ -400,7 +461,25 @@ export async function observePullRequestAtHead(
   deps: ForgeObserverDependencies,
 ): Promise<PullRequestObservation> {
   const read = await readPullCandidatesAtHead(subject, deps);
-  if (!read.ok) return pullRequestRefusal(read.refusal);
+  if (!read.ok) {
+    // The locator can now answer one thing this question has no word for: that
+    // the forge would not resolve the subject to a commit at all. It is graded
+    // back down to `REQUEST_FAILED` here, deliberately, and the decision is
+    // narrow rather than lazy.
+    //
+    // This question's vocabulary is `MATCHED`, `NO_MATCHING_PULL_REQUEST`,
+    // `AMBIGUOUS` and the shared refusals, and every member of it is about a
+    // pull request. "The forge would not resolve this object name" is not an
+    // answer about a pull request; it is the refusal to give one, which is what
+    // `REQUEST_FAILED` already says here and says truthfully. Giving it a
+    // member of its own would put a fourth non-refusal word in front of the
+    // settled allow-list and in front of the durable record contract, for the
+    // sake of one report line — and the one caller that needs the distinction
+    // reads the locator directly and gets it unchanged.
+    return pullRequestRefusal(
+      read.refusal === COMMIT_UNRESOLVED ? 'REQUEST_FAILED' : read.refusal,
+    );
+  }
 
   return matchExactHead(read.candidates, subject.commit);
 }
@@ -424,9 +503,24 @@ export async function readPullCandidatesAtHead(
   deps: ForgeObserverDependencies,
 ): Promise<
   | { readonly ok: true; readonly candidates: readonly PullCandidate[] }
-  | { readonly ok: false; readonly refusal: ObservationRefusal }
+  | { readonly ok: false; readonly refusal: PullCandidatesRefusal }
 > {
-  const response = await request(subject, pullCandidatesPath(subject), [PER_PAGE_PARAM], deps);
+  const response = await request(
+    subject,
+    pullCandidatesPath(subject),
+    [PER_PAGE_PARAM],
+    deps,
+    // The one endpoint whose error document is read, and the only reading taken
+    // from one. `locatorReportsNoCommit` says what it establishes and — at
+    // greater length — what it does not; the short form is that it is the
+    // forge's own answer that it will not resolve this object name to a commit
+    // in this repository, and that it is not a statement about the world.
+    //
+    // The subject bound into the closure is the same `subject.commit` the path
+    // above was built from, which is what makes a crossed or replayed answer
+    // unclassifiable rather than accepted.
+    (stdout) => (locatorReportsNoCommit(stdout, subject.commit) ? COMMIT_UNRESOLVED : null),
+  );
   if (!response.ok) return Object.freeze({ ok: false as const, refusal: response.refusal });
 
   const parsed = parsePullCandidates(response.body, OBSERVATION_PAGE_SIZE);
@@ -487,7 +581,10 @@ export async function readPullRequestByNumber(
   // captured `pullRequestNumber` and refused it.
   const path = pullRequestPath(subject, pullRequestNumber);
   // No params at all: this endpoint takes none, so this request carries no `-F`.
-  const response = await request(subject, path, [], deps);
+  // No error document is read here. A pull request addressed by number is a
+  // different question with a different vocabulary, and the one document this
+  // build recognises is the locator's.
+  const response = await request(subject, path, [], deps, null);
   if (!response.ok) return Object.freeze({ ok: false as const, refusal: response.refusal });
 
   const parsed = parsePullRequestRecord(response.body);
@@ -551,12 +648,28 @@ export async function observeCheckStateAtCommit(
     checkRunsPath(subject),
     [PER_PAGE_PARAM, CHECK_RUNS_FILTER_PARAM],
     deps,
+    // **No error document is read here, and that is the guard, not an
+    // omission.** Measured: for a commit the repository cannot resolve, this
+    // endpoint answers the byte-identical missing-commit message the locator
+    // does. Reading it here would put a member this build invented in front of
+    // the settled-check allow-list, which is one refactor away from a commit
+    // with no checks being graded as though it had some. The check state of a commit
+    // the forge will not resolve is not a smaller answer; it is no answer.
+    null,
   );
   if (!runsResponse.ok) return checkStateRefusal(runsResponse.refusal);
   const runs = parseCheckRuns(runsResponse.body, subject.commit);
   if (!runs.ok) return checkStateRefusal(runs.refusal);
 
-  const statusResponse = await request(subject, commitStatusPath(subject), [PER_PAGE_PARAM], deps);
+  const statusResponse = await request(
+    subject,
+    commitStatusPath(subject),
+    [PER_PAGE_PARAM],
+    deps,
+    // And none here either — this endpoint answers HTTP 200 for a commit that
+    // is not in the repository, so it has no error document to read.
+    null,
+  );
   if (!statusResponse.ok) return checkStateRefusal(statusResponse.refusal);
   const statuses = parseCommitStatuses(statusResponse.body, subject.commit);
   if (!statuses.ok) return checkStateRefusal(statuses.refusal);

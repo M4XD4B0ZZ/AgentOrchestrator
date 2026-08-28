@@ -228,6 +228,7 @@ because decoding replaces them. The record carries the digest of the bytes.
 --drive: conclusion, receipt, verification read from disk
         ↓
 fresh observation of github.com, fresh decision -> PULL_REQUEST_REQUIRED
+   (skipped where the forge will not resolve the delivery commit: V4 slice 18R)
         ↓
 mayPerform(PUBLISH_HEAD)
         ↓

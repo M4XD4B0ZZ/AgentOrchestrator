@@ -408,7 +408,9 @@ or a body from a caller.
   such a run fails closed instead of converging on the wrong pull request.
 - **L-V4-06-10 — `--publish-head` and `--create-pr` do not compose in one
   invocation on a first delivery.** Measured: the observation runs before the
-  publication, so the forge has never seen the commit,
+  publication, so the commit has not been pushed yet (an earlier wording read
+  the 422 as "the forge has never seen the commit", which V4 slice 18R measured
+  to be more than that answer says),
   `commits/{sha}/pulls` answers `422 "No commit found for SHA"`, the decision is
   `OBSERVATION_UNSETTLED`, and the creation is refused *after* the branch has
   been created. The outcome is correct — a branch published and nothing else —

@@ -37,9 +37,26 @@
  * as it was before this invocation changed it.
  *
  * Measured for the first pair: `--observe` runs before the publication, the
- * forge has never seen the commit, `commits/{sha}/pulls` answers `422 "No commit
+ * commit has not been pushed yet, `commits/{sha}/pulls` answers `422 "No commit
  * found for SHA"`, and the decision is `OBSERVATION_UNSETTLED` — so the creation
  * is refused after the branch has been created. `L-V4-06-10` records it.
+ *
+ * "Has not been pushed" states the world this run is in, and it is deliberately
+ * not read *out of* the 422. V4 slice 18R measured that answer arriving for a
+ * tree object and a blob object that are both present in the repository, and for
+ * a commit that exists in another one — so "the forge has never seen the commit",
+ * which three copies of this paragraph used to say, is an inference the endpoint
+ * does not support. What the answer supports is that the forge would not resolve
+ * that object name to a commit there.
+ *
+ * `--drive` is the exception, and only for the publication: on that answer it
+ * reaches `--publish-head` without observing, because neither of the
+ * observation's two questions **can be answered** about a commit the forge will
+ * not resolve — `check-runs` refuses the same way, and the combined status
+ * answers HTTP 200 `pending` for a commit it does not have. That is a statement
+ * about what could be established, not about what is there: the answer supports
+ * no claim that there is no pull request and none that there are no checks. It
+ * still stops at that one act.
  *
  * The same shape closes the second pair, and more tightly: `--merge-pr` admits
  * only `PULL_REQUEST_MATCHED_CHECKS_SUCCESS`, which asserts a pull request
@@ -198,11 +215,24 @@ export const PUBLICATION_GRANT_REFUSALS = [
    * The narrowing this slice rests on, and it is not tidiness. Under `--drive`
    * the publication is reached only after this invocation has re-derived the
    * delivery's position from disk and from github.com: a concluded delivery
-   * stops, the merge receipt and verification history are read, the observation
-   * is taken fresh, and the decision must be `PULL_REQUEST_REQUIRED`. Without
-   * it, a bare publication would skip every one of those — and a delivery that
-   * was merged and whose branch the forge deleted presents an absent ref again,
+   * stops, and the merge receipt and verification history are read. Without it,
+   * a bare publication would skip every one of those — and a delivery that was
+   * merged and whose branch the forge deleted presents an absent ref again,
    * which an unattended publisher would answer by re-creating it.
+   *
+   * **The guard against that world is the reconciliation, and V4 slice 18R is
+   * why the distinction is now written down.** This paragraph used to say the
+   * observation is taken fresh and the decision must be
+   * `PULL_REQUEST_REQUIRED`, which was true of every position the driver could
+   * then reach and is no longer true of one: where the forge answers that it
+   * will not resolve the delivery commit at all, neither observation question
+   * can be answered, and the driver reaches the publication from the
+   * reconciliation instead. Nothing is weakened by that — the reconciliation is
+   * the *stronger* guard for the world this paragraph names, because the
+   * observation only ever sees **open** pull requests and a merged one is
+   * closed. Measured, and re-measured on 2026-08-28: a merged pull request whose
+   * head branch was deleted still resolves through the locator, so it never
+   * reaches that position.
    */
   'AUTOMATIC_PUBLICATION_WITHOUT_DRIVE',
   /**
@@ -313,8 +343,11 @@ export const PUBLICATION_GRANT_REFUSAL_DETAIL: Readonly<
   AUTOMATIC_PUBLICATION_WITHOUT_DRIVE:
     '--automatic-publish-head-only requires --drive. Publishing with nobody present is only ' +
     'done from a position this invocation worked out for itself: a concluded delivery stops, ' +
-    'the merge receipt and the verification history are read, and the pull-request situation ' +
-    'is observed fresh. A bare publication would skip all of that.',
+    'the merge receipt and the verification history are read, and this build asks github.com ' +
+    'whether this delivery is already merged. Where the forge can answer about this head, the ' +
+    'pull-request situation is observed fresh as well. A bare publication would skip all of ' +
+    'that. What the asking establishes is bounded by what one repository will answer, which is ' +
+    'what L-V4-08-1 records.',
   AUTOMATIC_PUBLICATION_WITHOUT_ACT:
     '--automatic-publish-head-only is a grant and not an act, and it grants exactly one. Name ' +
     'that act with --publish-head. It is refused rather than left inert, which is where this ' +
@@ -705,8 +738,9 @@ export const AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION =
   'merge, not a comment, not a branch deletion and not an update of a ref that already exists ' +
   '— and it is refused together with --attended, --create-pr or --merge-pr. Requires --drive ' +
   'and --publish-head: publishing with nobody present is done only from a position this ' +
-  'invocation derived for itself, so a concluded delivery stops and the pull-request situation ' +
-  'is observed fresh first. It is not sufficient on its own. This machine’s operator must ' +
+  'invocation derived for itself, so a concluded delivery stops and a delivery that is ' +
+  'already merged on the forge is found first. It is not sufficient on its own. This ' +
+  'machine’s operator must ' +
   'also have declared this exact repository publishable that way, in ' +
   '<user profile>/.agent-orchestrator/delivery-automation.yaml, by host, owner and name; no ' +
   'file, no entry, or an entry saying ATTENDED_ONLY all refuse, and a file that cannot be read ' +

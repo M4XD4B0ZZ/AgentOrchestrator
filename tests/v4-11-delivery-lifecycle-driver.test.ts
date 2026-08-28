@@ -429,6 +429,33 @@ interface Forge {
   readonly atHeadByAsking?: readonly (readonly Record<string, unknown>[])[];
   /** Fail every read-by-number taken after this many locator reads. */
   readonly byNumberFailsAfterLocator?: number;
+  /**
+   * The locator answers GitHub's measured missing-commit error document for
+   * exactly the subject commit — the world a first publication starts in.
+   */
+  readonly locatorMissingSubject?: boolean;
+  /**
+   * An arbitrary locator error body, for the adversarial cases. Wins over the
+   * flag above, and is sent with the same non-zero exit `gh` reports for one.
+   */
+  readonly locatorErrorBody?: string;
+}
+
+/**
+ * GitHub's answer for a commit it cannot address, byte for byte.
+ *
+ * Measured against `github.com` on 2026-08-28 through the installed client, for
+ * `repos/M4XD4B0ZZ/AgentOrchestrator/commits/{sha}/pulls`: exit 1, and this
+ * document on stdout. `status` is a **string**, and the message echoes the ref
+ * that was asked about, verbatim.
+ */
+function missingCommitDocument(sha: string): string {
+  return JSON.stringify({
+    message: `No commit found for SHA: ${sha}`,
+    documentation_url:
+      'https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit',
+    status: '422',
+  });
 }
 
 function openPull(over: Record<string, unknown> = {}) {
@@ -536,6 +563,12 @@ async function drive(
     }
     if (path.endsWith('/pulls')) {
       locatorReads += 1;
+      if (forge.locatorErrorBody !== undefined) {
+        return commandResult({ exitCode: 1, stdout: forge.locatorErrorBody });
+      }
+      if (forge.locatorMissingSubject === true) {
+        return commandResult({ exitCode: 1, stdout: missingCommitDocument(HEAD) });
+      }
       // The locator is asked by three different modules in one drive — the
       // reconciliation, the observation and the creation — and a case that
       // needs them to see different worlds says so by ordinal. Anything past
@@ -734,6 +767,7 @@ describe('the driver vocabulary is closed, total and graded', () => {
     // reports a durable record missing after it may have changed.
     PUBLICATION_OUTCOME_NOT_DURABLE: EXIT_RUN_NEEDS_OPERATOR,
     FORGE_STATE_UNKNOWN: EXIT_RUN_REFUSED,
+  FORGE_READINGS_DISAGREE: EXIT_RUN_REFUSED,
     RECEIPT_NOT_DURABLE: EXIT_RUN_REFUSED,
     OBSERVATION_UNSETTLED: EXIT_RUN_REFUSED,
     SUBJECT_CHANGED: EXIT_RUN_REFUSED,
@@ -742,6 +776,64 @@ describe('the driver vocabulary is closed, total and graded', () => {
     ATTENDED_AUTHORITY_REQUIRED: EXIT_RUN_REFUSED,
     EFFECT_ATTEMPTED: EXIT_RUN_CALL_AGAIN,
     CHECKS_PENDING: EXIT_RUN_CALL_AGAIN,
+  });
+
+  /**
+   * No member may claim that nothing left this machine.
+   *
+   * Stated as a **rule over the whole vocabulary**, not as three literals,
+   * because three literals is what this file had: V4 slice 18R narrowed one
+   * member's doc comment to say "no mutation was sent" and left the sentence an
+   * operator actually reads untouched, and two independent review lenses found
+   * the same defect in the same commit — then found the brand-new member
+   * repeating it.
+   *
+   * The reason it is a rule, and not the reason the first version of this comment
+   * gave. That one said every producer of every member has already sent the
+   * locator request, and a review measured nine members reachable with **zero**
+   * forge requests — the three caller floors, five more from the first
+   * conclusion read, and one from the verification gate, which all run before
+   * the reconciliation exists.
+   *
+   * The real ground is that **a member's sentence is static and its producers
+   * are not**. `SUBJECT_NOT_ESTABLISHED`, `FORGE_STATE_UNKNOWN` and
+   * `SUBJECT_CHANGED` are each produced both before any request exists and from
+   * deep inside the publication ladder, so no fixed sentence for them can claim
+   * that nothing left this machine. What is true of every producer of every
+   * member is that this driver performed no *mutation* — that is the claim the
+   * vocabulary can carry, and this is the floor that keeps it there.
+   *
+   * It is deliberately a floor over the whole vocabulary rather than over the
+   * members that need it. Nine members could truthfully say more; none does, and
+   * a rule that had to name which is which would go stale at the next slice.
+   */
+  it('says no mutation was sent, never that nothing was', () => {
+    for (const member of DELIVERY_DRIVES) {
+      const sentence = DELIVERY_DRIVE_DETAIL[member];
+      // An unqualified claim only. `PUBLICATION_OUTCOME_NOT_DURABLE` says
+      // "Nothing was sent a second time", which is a claim about a RETRY: it
+      // says this run did not repeat the act, and it is true of every producer,
+      // including the ones that sent nothing at all — where it is vacuously
+      // true rather than informative, and the `Publication` and `Outcome` lines
+      // beside it are what tell those apart. (An earlier version of this comment
+      // said the run it describes "did send something", which a review measured
+      // false: the member is reachable with zero pushes.)
+      //
+      // That is the one qualification this rule admits, and it is named rather
+      // than excepted, so a member that grew the bare claim back is still red.
+      for (const m of sentence.matchAll(/[Nn]othing was sent/g)) {
+        const rest = sentence.slice((m.index ?? 0) + m[0].length);
+        expect(rest.startsWith(' a second time'), `${member}: ${sentence}`).toBe(true);
+      }
+    }
+    // …and the three that talk about egress at all say the narrower thing.
+    for (const member of [
+      'ATTENDED_AUTHORITY_REQUIRED',
+      'FORGE_STATE_UNKNOWN',
+      'FORGE_READINGS_DISAGREE',
+    ] as const) {
+      expect(DELIVERY_DRIVE_DETAIL[member], member).toContain('o mutation was sent');
+    }
   });
 
   it('grades every member, against a table written by hand', () => {
@@ -1378,6 +1470,283 @@ describe('the driver asks about a merge before it asks about a pull request', ()
       expect(driven(r)).toBe('HUMAN_DECISION_REQUIRED');
       expect(r.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
       expect(r.counts.create).toBe(0);
+    } finally {
+      repo.dispose();
+    }
+  });
+});
+
+/* ═══ 6b. the first publication: the forge cannot address the head yet ═════ */
+
+/**
+ * V4 slice 18R, and the whole of it.
+ *
+ * The real M1 dogfood found one blocker and this is the world it lives in: a
+ * task at `READY_FOR_PR` whose delivery commit has never been sent anywhere.
+ * The driver asks the merge question first — deliberately, so a delivery that
+ * was merged and closed is not staged as "needs a pull request" — and the
+ * locator answers `422 "No commit found for SHA: <H>"`, because github.com
+ * cannot address a commit it has never received.
+ *
+ * Before this slice that was `REQUEST_FAILED` -> `FORGE_UNREADABLE` ->
+ * `FORGE_STATE_UNKNOWN`, and the driver returned. The publication is
+ * create-only, so the one act whose purpose is to put the commit on the forge
+ * was unreachable **exactly while the commit was not on the forge**. Every case
+ * below is either that circle broken, or a fence that must survive breaking it.
+ */
+describe('the first publication of a delivery head', () => {
+  const MISSING = { locatorMissingSubject: true } as const;
+
+  it('reaches the publication, and pushes exactly once', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive', '--publish-head', '--attended'], repo, {
+        forge: MISSING,
+        remoteRef: 'absent',
+      });
+      // The defect, stated as its own regression: before this slice this was
+      // `FORGE_STATE_UNKNOWN` with `publish === 0`, on every invocation, for ever.
+      expect(driven(r)).toBe('EFFECT_ATTEMPTED');
+      expect(r.exitCode).toBe(EXIT_RUN_CALL_AGAIN);
+      expect(r.counts.publish).toBe(1);
+      // One act, and the two that must not follow it in the same invocation.
+      expect(r.counts.create).toBe(0);
+      expect(r.counts.merge).toBe(0);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  /**
+   * The observation is not merely skipped — it is never asked.
+   *
+   * Measured against `github.com`: `commits/{sha}/check-runs` answers the same
+   * missing-commit refusal for the same subject, and `commits/{sha}/status`
+   * answers HTTP 200 `pending` with zero statuses while echoing a sha it does
+   * not have. So an observation here could only produce a refusal or, if some
+   * future reader trusted the second endpoint alone, an invented `PENDING`.
+   * Counting the requests is what proves neither happened.
+   */
+  it('asks the forge exactly once, and never the check endpoints', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive', '--publish-head', '--attended'], repo, {
+        forge: MISSING,
+        remoteRef: 'absent',
+      });
+      expect(r.counts.forge).toBe(1);
+      // …and no check verdict is invented for a commit nothing was established
+      // about. The report says the forge answered the merge question with the
+      // new member, and says of the checks only that none were observed.
+      expect(r.out).toContain('DELIVERY_COMMIT_UNRESOLVED');
+      expect(r.out).toMatch(/^Checks {7}: not observed/m);
+      expect(r.out).not.toMatch(/^Checks {7}: (SUCCESS|PENDING|FAILED|NO_CHECKS)/m);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('names the publication when the invocation may not perform it', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive'], repo, { forge: MISSING, remoteRef: 'absent' });
+      expect(driven(r)).toBe('ATTENDED_AUTHORITY_REQUIRED');
+      expect(r.exitCode).toBe(EXIT_RUN_REFUSED);
+      expect(r.out).toContain('PUBLISH_HEAD');
+      expect(mutated(r)).toBe(false);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  /**
+   * The race the new branch exists to *not* get wrong.
+   *
+   * The locator says the forge does not resolve this commit; a moment later the
+   * publication's own reading of the delivery remote finds the ref already
+   * holding exactly it, because somebody else pushed it in between. AO sent
+   * nothing — and it also has no observation, because it deliberately did not
+   * take one. So it may not go on to open a pull request, even though this
+   * invocation carries `--create-pr --attended` and the ordinary path would.
+   */
+  it('stops on a ref that appeared underneath it, and opens nothing', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(
+        ['--drive', '--publish-head', '--create-pr', '--attended'],
+        repo,
+        { forge: MISSING, remoteRef: 'at-head' },
+      );
+      expect(driven(r)).toBe('FORGE_READINGS_DISAGREE');
+      expect(r.exitCode).toBe(EXIT_RUN_REFUSED);
+      expect(mutated(r)).toBe(false);
+      // The load-bearing half: a pull request opened here would be opened from
+      // a decision this invocation never took.
+      expect(r.counts.create).toBe(0);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('refuses a delivery ref holding another commit, and pushes nothing', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive', '--publish-head', '--attended'], repo, {
+        forge: MISSING,
+        remoteRef: 'other',
+      });
+      expect(driven(r)).toBe('HUMAN_DECISION_REQUIRED');
+      expect(r.exitCode).toBe(EXIT_RUN_NEEDS_OPERATOR);
+      expect(mutated(r)).toBe(false);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('stops when the delivery remote cannot be read, and pushes nothing', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive', '--publish-head', '--attended'], repo, {
+        forge: MISSING,
+        remoteUnreadable: true,
+      });
+      expect(driven(r)).toBe('FORGE_STATE_UNKNOWN');
+      expect(mutated(r)).toBe(false);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  it('writes no receipt and reads no pull request by number', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive', '--publish-head', '--attended'], repo, {
+        forge: MISSING,
+        remoteRef: 'absent',
+      });
+      // A reading that could not name a pull request cannot be merge evidence,
+      // and nothing durable may be written from it.
+      expect(() => statSync(receiptPath(repo.root))).toThrow();
+      expect(r.counts.forge).toBe(1);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  /**
+   * The recovery property this repair must not break.
+   *
+   * A delivery that was merged and whose work branch was then deleted still
+   * resolves through the locator — measured on this repository, and re-measured
+   * for pull request 74 on 2026-08-28, which answers HTTP 200 with its candidate
+   * despite `origin` no longer carrying the branch. So the missing-commit answer
+   * never fires for it, reconciliation wins, and nothing is republished.
+   */
+  it('still reconciles a merged delivery whose branch was deleted', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive', '--publish-head', '--attended'], repo, {
+        // The branch is gone from the delivery remote; the forge still answers.
+        forge: { atHead: [mergedPull()], byNumber: [mergedPull()] },
+        remoteRef: 'absent',
+      });
+      expect(statSync(receiptPath(repo.root)).isFile()).toBe(true);
+      expect(driven(r)).toBe('VERIFICATION_NOT_ESTABLISHED');
+      expect(mutated(r)).toBe(false);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  /**
+   * The classifier is not "a 422 means publish".
+   *
+   * Each body below is one github.com really produces, or one a stub could
+   * produce, and none of them is the measured missing-commit answer for this
+   * subject. Every one must leave the driver exactly where it was before this
+   * slice: `FORGE_STATE_UNKNOWN`, nothing sent.
+   */
+  it.each([
+    [
+      'a well-formed answer naming a different commit',
+      JSON.stringify({
+        message: `No commit found for SHA: ${'b'.repeat(40)}`,
+        documentation_url:
+          'https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit',
+        status: '422',
+      }),
+    ],
+    [
+      'a repository that is not there',
+      JSON.stringify({
+        message: 'Not Found',
+        documentation_url:
+          'https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit',
+        status: '404',
+      }),
+    ],
+    [
+      'an empty repository',
+      JSON.stringify({
+        message: 'Git Repository is empty.',
+        documentation_url:
+          'https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit',
+        status: '409',
+      }),
+    ],
+    [
+      'a credential the forge rejected',
+      JSON.stringify({
+        message: 'Bad credentials',
+        documentation_url: 'https://docs.github.com/rest',
+        status: '401',
+      }),
+    ],
+    ['a body that is not JSON', 'nope'],
+    ['no body at all', ''],
+  ])('does not publish on %s', async (_label, body) => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(['--drive', '--publish-head', '--attended'], repo, {
+        forge: { locatorErrorBody: body },
+        remoteRef: 'absent',
+      });
+      expect(driven(r)).toBe('FORGE_STATE_UNKNOWN');
+      expect(mutated(r)).toBe(false);
+    } finally {
+      repo.dispose();
+    }
+  });
+
+  /**
+   * The branch adds no authority, and this is the structural half of saying so.
+   *
+   * `mayPerform` is the only gate the driver reads for the publication, and the
+   * new branch calls it exactly as the ordinary path does. Without a flag that
+   * grants the act there is nothing to grant it: the locator's answer is not an
+   * argument to anything the publication computes.
+   */
+  it('cannot merge or open a pull request from the locator reading', async () => {
+    const repo = fixture();
+    try {
+      saveTaskState(taskStateFor(repo.root) as never, { repositoryRoot: repo.root });
+      const r = await drive(
+        ['--drive', '--publish-head', '--create-pr', '--merge-pr', '--attended'],
+        repo,
+        { forge: MISSING, remoteRef: 'absent' },
+      );
+      expect(r.counts.publish).toBe(1);
+      expect(r.counts.create).toBe(0);
+      expect(r.counts.merge).toBe(0);
     } finally {
       repo.dispose();
     }

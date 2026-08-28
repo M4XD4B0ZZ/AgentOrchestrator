@@ -220,12 +220,27 @@ what it is not.
 and it is load-bearing rather than decorative. Under `--drive` the publication is
 reached only after the driver has, in this invocation, re-derived the delivery's
 position from disk and from github.com: the conclusion is read (and a concluded
-delivery stops), the receipt and verification history are read, the observation
-is taken fresh, and the decision must be `PULL_REQUEST_REQUIRED` — no open pull
-request has this head. A bare `--publish-head --automatic-publish-head-only`
-would skip all of that, and the measured consequence is concrete: a delivery that
-has already been merged and whose branch the forge deleted presents an absent ref
-again, and an unattended publisher with no conclusion read would re-create it.
+delivery stops), the receipt and verification history are read, and the forge is
+asked whether this delivery is already merged. A bare `--publish-head
+--automatic-publish-head-only` would skip all of that, and the measured
+consequence is concrete: a delivery that has already been merged and whose branch
+the forge deleted presents an absent ref again, and an unattended publisher with
+no conclusion read would re-create it.
+
+Where the forge can answer about this head, the observation is taken fresh as
+well and the decision must be `PULL_REQUEST_REQUIRED` — no open pull request has
+this head.
+
+> **Narrowed by V4 slice 18R.** This paragraph said the observation is taken
+> fresh, without qualification, and that was true of every position the driver
+> could then reach. It is no longer true of one: where the forge answers that it
+> will not resolve the delivery commit, neither observation question *can* be
+> answered, and the driver publishes from the reconciliation instead. Nothing in
+> the argument above is weakened by that — the reconciliation is the guard for
+> the merged-and-branch-deleted world this paragraph names, and it is the
+> *stronger* one, because the observation only ever sees **open** pull requests
+> and a merged one is closed. See
+> [`2026-08-28-adr-first-publication-locator-absence.md`](2026-08-28-adr-first-publication-locator-absence.md).
 
 Refused before the repository is resolved, each with its own code:
 
@@ -276,6 +291,7 @@ argument refusals (no repository resolved)
 --drive: conclusion, receipt, verification read from disk
         ↓
 fresh observation of github.com, fresh decision -> PULL_REQUEST_REQUIRED
+   (skipped where the forge will not resolve the delivery commit: V4 slice 18R)
         ↓
 mayPerform(PUBLISH_HEAD): --publish-head AND (--attended OR --automatic-publish-head-only)
         ↓
@@ -299,6 +315,11 @@ attempted — the driver reports that creating one is the next missing act and
 settles `ATTENDED_AUTHORITY_REQUIRED`, because `mayPerform` answers `false` for
 `CREATE_PULL_REQUEST` under every invocation that lacks `--attended`, and this
 one is refused for naming `--create-pr` at all.
+
+> **V4 slice 18R adds a second answer here.** Reached from the pre-publication
+> branch, an `ALREADY_PUBLISHED` settles `FORGE_READINGS_DISAGREE` instead: that
+> invocation holds no observation, so it may not name the creation as the next
+> act at all. Still no pull request, and still nothing sent.
 
 ## 9. Freshness, and what "revocation" can honestly mean
 

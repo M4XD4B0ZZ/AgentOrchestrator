@@ -9054,10 +9054,18 @@ takes no execution lease, and `READY_FOR_PR` is still terminal.
 
 **The two flags do not compose in one invocation on a first delivery**, and that
 is measured rather than assumed: `--observe` runs before the publication, so the
-forge has never seen the commit, `commits/{sha}/pulls` answers
+commit has not been pushed yet, `commits/{sha}/pulls` answers
 `422 "No commit found for SHA"`, and the decision is `OBSERVATION_UNSETTLED`.
 The branch is published and the creation is refused. Publish in one invocation,
 then create in the next — `L-V4-06-10`.
+
+Earlier versions of that sentence read the 422 as "the forge has never seen the
+commit". V4 slice 18R measured that it does not say so: the same answer — the
+same message, status and documentation url, each with its own name echoed back —
+comes back for a tree object and a blob object that are both present in this
+repository, and for a commit that exists in another one. What it says is that
+the forge would not resolve that object name **to a commit, there** — which is
+all the new `DELIVERY_COMMIT_UNRESOLVED` outcome claims.
 
 ### `head` is a branch name, and that is why slice 5 had to come first
 
@@ -10131,7 +10139,7 @@ There is no drive-shaped authority.
 `--drive --attended` on its own authorises no mutation at all: `--attended` has
 never been the authority, only the operator's presence. When the next act is one
 this invocation may not perform, the report names it and the flags that would
-grant it, and nothing is sent.
+grant it, and no mutation is sent.
 
 `--drive` does not compose with `--observe`, `--record`, `--decide`,
 `--reconcile-merge`, `--verify-merge` or `--conclude-delivery`. Those name the
@@ -10252,8 +10260,8 @@ conclusion and a task still reported as `READY_FOR_PR` remain the expected set.
 - **L-V4-11-9 — `FORGE_STATE_UNKNOWN` does not say which reading failed.** The
   forge could not answer the merge question, or an act's own reading of the
   remote ref, the pull request or the situation at this head could not be taken.
-  Which one is in the block above it; the driver's member says only that nothing
-  was sent and the next invocation begins with the same reading.
+  Which one is in the block above it; the driver's member says only that no
+  mutation was sent and the next invocation begins with the same reading.
 - **L-V4-11-10 — `HUMAN_DECISION_REQUIRED` is not always a person's doing.** Its
   sentence says one put this delivery where it is, and for most of its producers
   that is true. Three kinds reach it where it is not: `ALREADY_MERGED` from the
@@ -10567,11 +10575,22 @@ is not "no `--attended`", it is a flag of its own.
 Because publishing with nobody present is only done from a position this
 invocation derived for itself. Under `--drive` the publication is reached only
 after this run has read the delivery conclusion from disk (a concluded delivery
-stops), read the merge receipt and the verification history, taken a fresh
-observation of github.com, and reached a decision of `PULL_REQUEST_REQUIRED` — no
-open pull request has this head. A bare `--publish-head` would skip all of that,
-and the concrete failure is not hypothetical: a delivery that was merged and
-whose branch the forge deleted presents an absent ref again.
+stops), read the merge receipt and the verification history, and **asked the
+forge whether this delivery is already merged**. A bare `--publish-head` would
+skip all of that, and the concrete failure is not hypothetical: a delivery that
+was merged and whose branch the forge deleted presents an absent ref again.
+
+Where the forge can answer about this head, the run also takes a fresh
+observation of github.com and reaches a decision of `PULL_REQUEST_REQUIRED` — no
+open pull request has this head — before publishing. There is exactly one
+position where it does not, and V4 slice 18R added it: when the forge answers
+that it will not resolve the delivery commit at all, neither observation question
+*can* be answered, and the reconciliation is the position. That does not weaken
+the guard this section is about. The reconciliation is the **stronger** check for
+a delivery that was merged and had its branch deleted, because the observation
+only ever sees *open* pull requests and a merged one is closed — and measured,
+for pull requests 49, 50 and 74, such a head still resolves through the locator
+and therefore never reaches that position at all.
 
 ### Default deny, and four different ways of not saying yes
 
@@ -11393,6 +11412,99 @@ GitHub client is started, and no lease is taken.
   from the reading side.
 
 See [`docs/decisions/2026-08-27-adr-publication-branch-lookup.md`](docs/decisions/2026-08-27-adr-publication-branch-lookup.md).
+
+## The first publication (V4 slice 18R)
+
+The real M1 dogfood — the product driving its own delivery, end to end — found
+exactly one remaining blocker, and it was a circle. `delivery --drive
+--publish-head` could not perform the **first** publication of a delivery head,
+because the driver asked github.com about that exact commit *before* the commit
+existed there. The answer was a refusal, the refusal was graded "the forge could
+not be read", and the driver returned. The publication is create-only, so the one
+act whose purpose is to put the commit on the forge was unreachable exactly while
+the commit was not on the forge.
+
+The repair is one distinction, made once. Measured against `github.com` on
+2026-08-28:
+
+```
+GET repos/{owner}/{name}/commits/{H}/pulls
+  -> exit 1
+     {"message":"No commit found for SHA: <H>",
+      "documentation_url":"…#list-pull-requests-associated-with-a-commit",
+      "status":"422"}
+```
+
+That is not "the forge could not be read". It is **the forge answering**. So the
+locator's error document is read — the only body in this **transport** that
+arrives with a failing exit code and is read at all, and it is read as an *error
+document*,
+never handed to the parser that turns a response into evidence. It is accepted
+only when the status is exactly `"422"`, the `documentation_url` is the locator's
+own, there is no `errors` member, and the message names **exactly** the object
+name the request was built from. Everything else stays `REQUEST_FAILED`.
+
+The reconciliation gains one outcome, `DELIVERY_COMMIT_UNRESOLVED`, and the
+driver treats it as a **pre-publication position**: it does not observe — the
+check endpoints cannot answer about a commit the forge will not resolve — and it
+goes to the existing publication primitive, with the existing authority, the
+existing operator declaration, the existing audit records and the existing
+create-only server fence. One act, then it stops.
+
+**What the answer does not say.** The word is `UNRESOLVED` and not `ABSENT`,
+because a tree object and a blob object that are both present in this repository
+produce the same answer — the same message, status and documentation url, each
+with its own name echoed back — as does a commit that exists in another one. So the
+member claims only that the forge would not resolve that object name **to a
+commit, there, at that instant** — not that the commit does not exist, not that
+no pull request ever carried it, not that it was never published, and not that it
+is not merged.
+
+**What did not change.** A merged pull request whose head branch was deleted
+still resolves through the locator — measured for pull requests 49, 50 and 74 —
+so that world never reaches this branch and is reconciled, never republished.
+`check-runs` answering the same 422 is still `REQUEST_FAILED` and is never turned
+into `NO_CHECKS`, `PENDING` or `SUCCESS`; the combined-status endpoint's HTTP 200
+`pending` for a commit that is not there is still never read alone. The standalone
+`--observe` surface answers exactly what it answered before. No new grant, no new
+declaration key, no unattended pull request, no unattended merge.
+
+- **L-V4-18R-1 — an empty repository is a different answer.** Measured: a
+  repository with no commits answers the locator `409 "Git Repository is empty."`,
+  not 422. A first publication into one still stops at `FORGE_STATE_UNKNOWN`.
+  That is a claim about a repository rather than about a commit, and closing it
+  is a decision of its own.
+- **L-V4-18R-2 — two GitHub strings are load-bearing.** The message prefix and
+  the locator's `documentation_url` are strings GitHub owns. If either changes,
+  the classifier stops firing and the first publication becomes unreachable again
+  until they are re-measured. Fail-closed, and the first place in this build
+  where a forge message decides behaviour.
+- **L-V4-18R-3 — one repository, one instant, one login.** A delivery merged
+  through a fork, a rename or a transfer answers exactly this way. `L-V4-08-1`
+  already records that this ladder cannot refuse what it cannot see. What bounds
+  the damage is that the act it permits is create-only and fenced server-side.
+- **L-V4-18R-4 — the report still advises `--observe` on this path**, where the
+  omission was deliberate and `--observe` would answer `OBSERVATION_UNSETTLED`
+  for the same reason.
+- **L-V4-18R-6 — two sibling vocabularies still carry the sentence this slice
+  narrowed.** `PullRequestCreation`'s `ALREADY_EXISTS` and `PullRequestMerge`'s
+  `ALREADY_MERGED` each say "nothing was sent" about a member reached after a
+  read. Pre-existing, in vocabularies this blocker fix does not touch, and
+  deliberately not swept here — the rule pinned over `DELIVERY_DRIVES` cannot
+  see them. Named so the class is on the record.
+- **L-V4-18R-5 — a rejected credential arrives on exit 1, not 4.** Measured:
+  `{"message":"Bad credentials",…,"status":"401"}` with `gh` exiting 1, so
+  `NOT_AUTHENTICATED` under-fires and the reading is `REQUEST_FAILED`.
+  Pre-existing, orthogonal, and deliberately not repaired here — both fail
+  closed, and only the operator sentence is less precise than it could be.
+
+The four other findings the slice-18 dogfood recorded are untouched and stay
+open: `stateEnteredAt` reflects a step's start rather than the actual state
+entry; repeat-fingerprint detection can be defeated by a reviewer rewording;
+the delivered template-cleanup change carries no regression assertion; and a
+template-builder failure path can still leak a temporary repository.
+
+See [`docs/decisions/2026-08-28-adr-first-publication-locator-absence.md`](docs/decisions/2026-08-28-adr-first-publication-locator-absence.md).
 
 ## Not implemented yet
 

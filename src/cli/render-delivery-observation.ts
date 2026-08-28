@@ -285,10 +285,11 @@ export const MERGE_TRAILER =
  * ── Every clause is a BOUND, and the first draft's were acts ───────────────
  *
  * This trailer is printed for **every** `--reconcile-merge` run, including the
- * two refusals that never start a process and the three ladder members that
- * contact the forge and still never address a pull request. (This said four,
- * counting `FORGE_UNREADABLE` — which sits on both sides of the second read and
- * carries a number on the far side of it. A review counted.) Its first version said what the run *did* —
+ * two refusals that never start a process and **every** ladder member that
+ * contacts the forge and still never addresses a pull request. The rule rather
+ * than a count: two earlier versions of this sentence counted, one said four and
+ * one said three, a review corrected the first, and V4 slice 18R added a member
+ * that would have made the second wrong in turn. Its first version said what the run *did* —
  * "the reconciliation asked github.com about the commit named above and about
  * the one pull request that answer named", and "this task is still
  * `READY_FOR_PR`" — and a review rendered both over runs where neither was

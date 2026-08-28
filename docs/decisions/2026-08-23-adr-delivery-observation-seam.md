@@ -64,8 +64,17 @@ The deciding property is how each fails. A GraphQL response can be HTTP 200
 carrying `data` **and** `errors` — measured, with an over-paginated rollup
 returning `{"data":{…"statusCheckRollup":null},"errors":[…]}`. A reader taking
 `data` at face value would read that as "this commit has no checks": a fail-open
-on the *successful* path. A REST non-2xx is a non-zero exit and no body this
-build parses.
+on the *successful* path. A REST non-2xx is a non-zero exit, and no body that
+arrives with one is ever handed to the parser that turns a response into
+evidence.
+
+> **Narrowed by V4 slice 18R.** That sentence read "and no body this build
+> parses" until 2026-08-28. One such body is now read — the commit→pull-request
+> locator's own missing-commit error document — by a function whose entire
+> output is a boolean, and from which no evidence is built. The fail-open this
+> paragraph is about is still impossible, because what would cause it is a
+> *response* parser consuming an error, which is what the sentence now names.
+> See [`2026-08-28-adr-first-publication-locator-absence.md`](2026-08-28-adr-first-publication-locator-absence.md).
 
 GraphQL's one real advantage — `GitObjectID!` refuses anything but a full 40-hex
 object name, where REST's `{ref}` accepts an abbreviation or a branch name — is

@@ -79,9 +79,17 @@
  * nothing, answers `ALREADY_PUBLISHED` and used to go on to the creation in the
  * same pass; if its outcome record cannot be established it now stops instead.
  * That is fail-closed and deliberate — a run that cannot say what it did should
- * not go on to do something else — and it is the only place where what this
- * driver stops at changed. Everywhere else the stopping is unchanged and only
- * the sentence beside it differs.
+ * not go on to do something else — and it was, at slice 16, the only place where
+ * what this driver stops at changed.
+ *
+ * V4 slice 18R changes it again, and deliberately does **not** say in how many
+ * places: a world that stopped at `FORGE_STATE_UNKNOWN` before any act now
+ * reaches one, a world with no publication grant now stops at
+ * `ATTENDED_AUTHORITY_REQUIRED` instead, and on the new branch an
+ * `ALREADY_PUBLISHED` does not go on to the creation. A count here was written
+ * once and a review found it short in two directions. The rule that survives
+ * counting is the one above: this driver stops at the first act that reports an
+ * attempt, and at the first condition it cannot legitimately cross.
  *
  * Three things follow, and they are the whole safety argument:
  *
@@ -254,8 +262,13 @@ export const DELIVERY_DRIVES = [
    *
    * The forge could not answer the merge question, or an act's own reading —
    * the remote ref, the pull request by number, the situation at this head —
-   * could not be completed. Nothing was sent on any of those paths, and nothing
-   * durable is wrong: the next invocation begins with the same reading.
+   * could not be completed. **No mutation** was sent on any of those paths, and
+   * nothing durable is wrong: the next invocation begins with the same reading.
+   *
+   * Narrowed from "nothing was sent" in V4 slice 18R, for the reason
+   * {@link ATTENDED_AUTHORITY_REQUIRED} gives about the same words: the
+   * reconciliation's own request has already gone out on the path that produces
+   * this member most often, so a flat claim about egress was false there.
    *
    * It is deliberately **not** `MERGE_NOT_ESTABLISHED`, which this member
    * replaced. A review measured that name covering two unrelated conditions —
@@ -264,6 +277,38 @@ export const DELIVERY_DRIVES = [
    * the second.
    */
   'FORGE_STATE_UNKNOWN',
+  /**
+   * Two readings of github.com taken inside this invocation disagree about this
+   * commit, and no mutation was sent.
+   *
+   * "No mutation" and not "nothing": both readings really did leave this
+   * machine — the locator request, and the `ls-remote` the publication takes of
+   * the delivery remote — and this member exists precisely because they
+   * answered. A review measured the first draft of this sentence saying nothing
+   * was sent, which is the defect two members above corrects, re-committed.
+   *
+   * Reachable from exactly one world, and it is a race rather than a fault. The
+   * locator answered that the forge would not resolve this delivery commit — so
+   * the driver went to the one act that changes that — and the publication's own
+   * fresh reading of the delivery remote found the ref already holding exactly
+   * this commit. Somebody else published it in between, or the forge's two
+   * surfaces had not caught up with each other.
+   *
+   * It is **not** {@link EFFECT_ATTEMPTED}: the publication is create-only and
+   * stops at a ref that is not absent, so nothing was pushed. It is **not**
+   * {@link FORGE_STATE_UNKNOWN} either, and that is the distinction worth
+   * keeping: both readings were taken and both answered. Nothing could not be
+   * read; two things were read and they do not agree.
+   *
+   * Why the invocation stops here rather than going on to open a pull request:
+   * it holds **no observation**. The pull-request and check questions were
+   * deliberately not asked — they cannot be answered about a commit the locator
+   * would not resolve — so there is no decision to act on, and continuing would
+   * mean opening a pull request on the strength of a reading nobody took. The
+   * next invocation begins with a fresh reconciliation and a fresh observation
+   * of the world as it now is, which is exactly what this one could not have.
+   */
+  'FORGE_READINGS_DISAGREE',
   /**
    * The merge was observed and the receipt did not reach the disk.
    *
@@ -336,8 +381,16 @@ export const DELIVERY_DRIVES = [
   'HUMAN_DECISION_REQUIRED',
   /**
    * The next act is a forge mutation this invocation was not authorised to
-   * perform. Nothing was sent. {@link DeliveryDriveResult.requiredEffect} names
-   * which one, and {@link DELIVERY_EFFECT_FLAG} the flags that would grant it.
+   * perform. **No mutation was sent.** {@link DeliveryDriveResult.requiredEffect}
+   * names which one, and {@link DELIVERY_EFFECT_FLAG} the flags that would grant
+   * it.
+   *
+   * "No mutation" rather than "nothing", and the word was narrowed in V4 slice
+   * 18R. Every path to this member has already taken readings — the
+   * reconciliation's locator read at the least, and usually the observation's
+   * two as well — so a flat "nothing was sent" was a sentence about egress that
+   * was false of every producer. What the member claims is what it has always
+   * enforced: no act that changes the forge was performed.
    */
   'ATTENDED_AUTHORITY_REQUIRED',
   /**
@@ -435,7 +488,12 @@ export const DELIVERY_DRIVE_DETAIL: Readonly<Record<DeliveryDrive, string>> = Ob
     'No standing verdict about this merge commit under this profile could be established. ' +
     'That is not the machine saying no — the Verification block above says what stopped it.',
   FORGE_STATE_UNKNOWN:
-    'A reading this invocation needed could not be taken from github.com. Nothing was sent.',
+    'A reading this invocation needed could not be taken from github.com. No mutation was sent.',
+  FORGE_READINGS_DISAGREE:
+    'The pull-request locator answered that github.com does not resolve this commit, and the ' +
+    'delivery ref already holds exactly it. Both readings were taken; no mutation was sent and ' +
+    'nothing was attempted. This invocation took no observation, so it stops rather than acting ' +
+    'on one it does not have. Ask again: the next invocation reads the world as it now is.',
   RECEIPT_NOT_DURABLE:
     'The merge was observed and the receipt did not reach the disk, so this delivery has not moved.',
   PUBLICATION_AUDIT_NOT_DURABLE:
@@ -455,7 +513,7 @@ export const DELIVERY_DRIVE_DETAIL: Readonly<Record<DeliveryDrive, string>> = Ob
   HUMAN_DECISION_REQUIRED:
     'The delivery is in a state this build will not act on, and a person put it there.',
   ATTENDED_AUTHORITY_REQUIRED:
-    'The next act is a forge mutation this invocation was not authorised to perform. Nothing was sent.',
+    'The next act is a forge mutation this invocation was not authorised to perform. No mutation was sent.',
   PUBLICATION_OUTCOME_NOT_DURABLE:
     'This invocation was permitted to publish with nobody present, and the record of what it ' +
     'went on to do was not established on disk. The Publication line in this report says what ' +
@@ -796,145 +854,25 @@ export async function driveDelivery(
     return after.stop ?? settle('VERIFICATION_NOT_ESTABLISHED', after.stage);
   };
 
-  // ── The merge is on disk; what is missing is a verdict about it ───────────
-  if (stage === 'VERIFICATION_ABSENT' || stage === 'PROFILE_NOT_VERIFIED') {
-    return verifyThenConclude(stage);
-  }
-
-  // ── No receipt: ask whether this delivery was already merged ──────────────
-  //
-  // Before anything is published, opened or merged, and before the observation.
-  // A merged pull request is closed, and slice 2's observation only counts open
-  // ones — so a driver that asked the observation first would stage a finished
-  // delivery as "needs a pull request" and, with the authority, open a second
-  // one for a commit that is already on the base branch.
-  reconciliation = await performReconciliation(options, repository.root, subject, taskLoad, {
-    now: seams.now,
-    checkIgnored: seams.checkIgnored,
-    git: seams.git,
-    runner: seams.runner,
-    envSource: seams.envSource,
-  });
-  const reconciled = reconciliation.result.outcome;
-  if (reconciled === 'MERGE_OBSERVED') {
-    // The reading found a merge. Whether the receipt reached the disk decides
-    // whether the delivery moved: every act after this one reads the document
-    // rather than this result, so a reading nobody could store has advanced
-    // nothing.
-    if (reconciliation.record === null || !receiptIsOnDisk(reconciliation.record.code)) {
-      return settle('RECEIPT_NOT_DURABLE', stage);
-    }
-    const after = await askConclusion();
-    if (after.stop !== null) return after.stop;
-    // The receipt is on disk, so the ladder has moved past `RECEIPT_ABSENT` and
-    // is asking for a verdict about M. Run the gate, once — and under the stage
-    // the ladder names **now**, not the one this invocation started from. A
-    // review measured the earlier version reporting `Position: RECEIPT_ABSENT`
-    // on the invocation that had just recorded one, three lines under a
-    // `Completion` line saying otherwise.
-    return verifyThenConclude(after.stage);
-  }
-  if (reconciled === 'FORGE_UNREADABLE') return settle('FORGE_STATE_UNKNOWN', stage);
-  if (
-    reconciled === 'PULL_REQUEST_AMBIGUOUS' ||
-    reconciled === 'MERGE_NOT_THIS_DELIVERY' ||
-    reconciled === 'BASE_NOT_INTENDED'
-  ) {
-    return settle('HUMAN_DECISION_REQUIRED', stage);
-  }
-  if (reconciled === 'SUBJECT_NOT_ESTABLISHED' || reconciled === 'TASK_NOT_READY') {
-    // `TASK_NOT_READY` is a floor — the caller refused it before this function
-    // ran. `SUBJECT_NOT_ESTABLISHED` is **not**, and a review measured why: the
-    // reconciliation has a producer the caller does not check, a `baseBranch`
-    // that is not a sendable branch name. A task at `READY_FOR_PR` carrying
-    // `a..b` reaches it.
-    return settle(reconciled, stage);
-  }
-  // `NOT_MERGED`, `PULL_REQUEST_STILL_OPEN` and `NO_PULL_REQUEST_AT_HEAD` all
-  // mean the same thing to a driver: nothing is merged, so the delivery is
-  // somewhere on the way in.
-
-  // ── Look, and decide ─────────────────────────────────────────────────────
-  const looked = await performObservation(
-    options,
-    { observe: true, proof: true, decide: true },
-    subject,
-    resolve,
-    load,
-    seams,
-  );
-  observation = looked.observation;
-  observationConclusion = looked.conclusion;
-  if (looked.decision === null) {
-    // Unreachable: `decide` is passed as `true` above, and
-    // `concludeDeliveryDecision` is total. It stays because a `null` reaching
-    // the acts below would be a mutation decided from no decision at all.
-    return settle('OBSERVATION_UNSETTLED', stage);
-  }
-  decision = Object.freeze({ decision: looked.decision, revalidation: looked.revalidation });
-  const decided = looked.decision;
-
-  if (decided === 'OBSERVATION_UNSETTLED' || decided === 'NOT_DECIDED') {
-    return settle('OBSERVATION_UNSETTLED', stage);
-  }
-  if (decided === 'SUBJECT_NOT_ESTABLISHED') return settle('SUBJECT_NOT_ESTABLISHED', stage);
-  if (decided === 'SUBJECT_CHANGED' || decided === 'SUBJECT_REVALIDATION_FAILED') {
-    return settle('SUBJECT_CHANGED', stage);
-  }
-  if (decided === 'CHECKS_FAILED') return settle('CHECKS_FAILED', stage);
-  if (decided === 'PULL_REQUEST_AMBIGUOUS') return settle('PULL_REQUEST_AMBIGUOUS', stage);
-
-  // ── The merge, and it is the only act reachable from a positive decision ──
-  if (isPositiveDeliveryDecision(decided)) {
-    if (!mayPerform(options, 'MERGE_PULL_REQUEST')) {
-      return settle('ATTENDED_AUTHORITY_REQUIRED', stage, 'MERGE_PULL_REQUEST');
-    }
-    merge = await performMerge(
-      options,
-      subject,
-      taskLoad,
-      decided,
-      looked.proof,
-      resolve,
-      load,
-      seams,
-    );
-    if (merge.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
-    // Nothing was sent, so the ladder's refusal is the answer — and it is read
-    // member by member rather than collapsed. A review measured the collapsed
-    // version reporting "a person put it there" for a forge that could not be
-    // read, which is the machine-versus-person confusion this vocabulary exists
-    // to keep apart.
-    const merged = merge.result.outcome;
-    if (merged === 'PULL_REQUEST_STATE_UNKNOWN' || merged === 'OBSERVATION_UNAVAILABLE') {
-      return settle('FORGE_STATE_UNKNOWN', stage);
-    }
-    if (merged === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
-    // What is left is mostly states somebody put this delivery in —
-    // `PULL_REQUEST_NOT_OPEN`, `DRAFT_REFUSED`, `WRONG_BASE`, `HEAD_MOVED`,
-    // `POSTCONDITION_MISMATCH`, `ALREADY_MERGED` — plus `AUTHORITY_REFUSED`,
-    // the four floors this path cannot reach, and the three members the
-    // transport can answer before a process exists. **Not every one of them is
-    // a person's doing**, and the sentence this member carries says one is:
-    // that is `L-V4-11-10`, widened. `ALREADY_MERGED` is the race worth naming
-    // — the reconciliation two steps above said otherwise a moment ago, and two
-    // readings that disagree is not a state to act on either.
-    return settle('HUMAN_DECISION_REQUIRED', stage);
-  }
-
-  // ── Everything else means no open pull request has this head ──────────────
-  //
-  // `PULL_REQUEST_REQUIRED`, and the two that mean one exists but has not
-  // settled: `CHECKS_PENDING` and `CHECKS_ABSENT`. The last two are reported
-  // and not acted on — there is no act between a pull request and its checks.
-  if (decided === 'CHECKS_PENDING') return settle('CHECKS_PENDING', stage);
-  if (decided === 'CHECKS_ABSENT') return settle('CHECKS_ABSENT', stage);
-
-  // Publish first, then create: a pull request is opened from a branch that has
-  // to be on the remote already. The publication is create-only and fenced
-  // server-side, so a head that is already there answers `ALREADY_PUBLISHED`,
-  // sends nothing, and the driver goes on to the creation in the same pass.
-  if (mayPerform(options, 'PUBLISH_HEAD')) {
+  /**
+   * Run the publication once, and grade what came back.
+   *
+   * One closure with **one** call site for `performPublication`, called from two
+   * places — the pattern `verifyThenConclude` and `askConclusion` already follow,
+   * and the one `tests/v4-11-…` requires: it reads this file's own source and
+   * asserts each act's step function occurs exactly once, so an act reachable
+   * from two branches has to be a helper rather than a second call.
+   *
+   * `null` means the one thing that is not a stop: the ref already held exactly
+   * this commit, nothing was attempted, and what the caller does next depends on
+   * what the caller knows. The ordinary path has a fresh observation and goes on
+   * to the creation; the pre-publication path has none and may not.
+   *
+   * The caller decides whether it may publish at all. That gate stays outside
+   * this closure, so it is read at each branch in the form that branch needs and
+   * cannot be silently inherited.
+   */
+  const publishOnce = async (): Promise<DeliveryDriveResult | null> => {
     const performed = await performPublication(
       options,
       repository.root,
@@ -1028,8 +966,210 @@ export async function driveDelivery(
       // will not send at all. So the arm is load-bearing on the shape a
       // counter-proof does not reach, which is why the mutant survives and the
       // arm stays.
+      //
+      // V4 slice 18R gave it a second bite that paragraph does not describe:
+      // reached from the pre-publication branch, deleting this arm would send
+      // every non-attempted, non-`ALREADY_PUBLISHED` member out through
+      // `FORGE_READINGS_DISAGREE`, whose sentence says the delivery ref already
+      // holds this commit — about a run where it does not.
       return settle('SUBJECT_NOT_ESTABLISHED', stage);
     }
+    return null;
+  };
+
+  // ── The merge is on disk; what is missing is a verdict about it ───────────
+  if (stage === 'VERIFICATION_ABSENT' || stage === 'PROFILE_NOT_VERIFIED') {
+    return verifyThenConclude(stage);
+  }
+
+  // ── No receipt: ask whether this delivery was already merged ──────────────
+  //
+  // Before anything is published, opened or merged, and before the observation.
+  // A merged pull request is closed, and slice 2's observation only counts open
+  // ones — so a driver that asked the observation first would stage a finished
+  // delivery as "needs a pull request" and, with the authority, open a second
+  // one for a commit that is already on the base branch.
+  reconciliation = await performReconciliation(options, repository.root, subject, taskLoad, {
+    now: seams.now,
+    checkIgnored: seams.checkIgnored,
+    git: seams.git,
+    runner: seams.runner,
+    envSource: seams.envSource,
+  });
+  const reconciled = reconciliation.result.outcome;
+  if (reconciled === 'MERGE_OBSERVED') {
+    // The reading found a merge. Whether the receipt reached the disk decides
+    // whether the delivery moved: every act after this one reads the document
+    // rather than this result, so a reading nobody could store has advanced
+    // nothing.
+    if (reconciliation.record === null || !receiptIsOnDisk(reconciliation.record.code)) {
+      return settle('RECEIPT_NOT_DURABLE', stage);
+    }
+    const after = await askConclusion();
+    if (after.stop !== null) return after.stop;
+    // The receipt is on disk, so the ladder has moved past `RECEIPT_ABSENT` and
+    // is asking for a verdict about M. Run the gate, once — and under the stage
+    // the ladder names **now**, not the one this invocation started from. A
+    // review measured the earlier version reporting `Position: RECEIPT_ABSENT`
+    // on the invocation that had just recorded one, three lines under a
+    // `Completion` line saying otherwise.
+    return verifyThenConclude(after.stage);
+  }
+  if (reconciled === 'FORGE_UNREADABLE') return settle('FORGE_STATE_UNKNOWN', stage);
+  if (
+    reconciled === 'PULL_REQUEST_AMBIGUOUS' ||
+    reconciled === 'MERGE_NOT_THIS_DELIVERY' ||
+    reconciled === 'BASE_NOT_INTENDED'
+  ) {
+    return settle('HUMAN_DECISION_REQUIRED', stage);
+  }
+  if (reconciled === 'DELIVERY_COMMIT_UNRESOLVED') {
+    // ── The first publication of a delivery head ───────────────────────────
+    //
+    // github.com answered, about this exact object name, that it will not
+    // resolve it to a commit in this repository. Exactly one act changes that
+    // world, and it is the one whose whole precondition is that the ref is not
+    // there.
+    //
+    // **The observation is not skipped as a shortcut.** It cannot answer here.
+    // Measured: `commits/{sha}/check-runs` returns the same missing-commit
+    // refusal for the same subject, so `concludeObservation` would answer
+    // `OBSERVATION_INCOMPLETE`, the decision would be `OBSERVATION_UNSETTLED`,
+    // and the driver would stop one branch further down having sent two more
+    // requests and learned nothing. Running it would not be caution; it would
+    // be spending requests to reach the same stop by a longer road — and any
+    // arm that turned those refusals into a check verdict would be inventing
+    // one. This is the branch that makes the fix reach the effect, and a later
+    // reader tempted to delete it as redundant should read this paragraph
+    // first.
+    //
+    // What does **not** happen here: no pull request is opened, no merge is
+    // attempted, and no receipt is written. The publication's own authority,
+    // its operator declaration, its subject re-resolution, its audit record and
+    // its create-only server fence are exactly the ones the direct surface
+    // uses — this branch decides *when* that primitive runs and nothing about
+    // what it is allowed to do.
+    if (!mayPerform(options, 'PUBLISH_HEAD')) {
+      return settle('ATTENDED_AUTHORITY_REQUIRED', stage, 'PUBLISH_HEAD');
+    }
+    const stopped = await publishOnce();
+    if (stopped !== null) return stopped;
+    // `ALREADY_PUBLISHED`: the ref holds this commit after all, and this build
+    // sent nothing. Unlike the ordinary path this invocation has no observation
+    // to go on with, so it stops here rather than opening a pull request from a
+    // decision it never took.
+    return settle('FORGE_READINGS_DISAGREE', stage);
+  }
+  if (reconciled === 'SUBJECT_NOT_ESTABLISHED' || reconciled === 'TASK_NOT_READY') {
+    // `TASK_NOT_READY` is a floor — the caller refused it before this function
+    // ran. `SUBJECT_NOT_ESTABLISHED` is **not**, and a review measured why: the
+    // reconciliation has a producer the caller does not check, a `baseBranch`
+    // that is not a sendable branch name. A task at `READY_FOR_PR` carrying
+    // `a..b` reaches it.
+    return settle(reconciled, stage);
+  }
+  // `NOT_MERGED`, `PULL_REQUEST_STILL_OPEN` and `NO_PULL_REQUEST_AT_HEAD` all
+  // mean the same thing to a driver: nothing is merged, the forge answered the
+  // question it was asked, and the delivery is somewhere on the way in.
+  //
+  // Stated to the compiler rather than left to a fall-through, and V4 slice 18R
+  // is why: this chain is an `if` ladder over a vocabulary that grew, and the
+  // member it grew by is one that must **not** reach the observation. Nothing
+  // told the previous version of this ladder that. An eleventh member added
+  // later would have walked past every arm above and into the acts below, on an
+  // outcome nobody had classified — the same defect `CONCLUSION_MEANING` was
+  // rewritten to close for the other vocabulary this file reads. The assignment
+  // is a compile error the moment that stops being true.
+  const classified: 'NOT_MERGED' | 'PULL_REQUEST_STILL_OPEN' | 'NO_PULL_REQUEST_AT_HEAD' =
+    reconciled;
+  void classified;
+
+  // ── Look, and decide ─────────────────────────────────────────────────────
+  const looked = await performObservation(
+    options,
+    { observe: true, proof: true, decide: true },
+    subject,
+    resolve,
+    load,
+    seams,
+  );
+  observation = looked.observation;
+  observationConclusion = looked.conclusion;
+  if (looked.decision === null) {
+    // Unreachable: `decide` is passed as `true` above, and
+    // `concludeDeliveryDecision` is total. It stays because a `null` reaching
+    // the acts below would be a mutation decided from no decision at all.
+    return settle('OBSERVATION_UNSETTLED', stage);
+  }
+  decision = Object.freeze({ decision: looked.decision, revalidation: looked.revalidation });
+  const decided = looked.decision;
+
+  if (decided === 'OBSERVATION_UNSETTLED' || decided === 'NOT_DECIDED') {
+    return settle('OBSERVATION_UNSETTLED', stage);
+  }
+  if (decided === 'SUBJECT_NOT_ESTABLISHED') return settle('SUBJECT_NOT_ESTABLISHED', stage);
+  if (decided === 'SUBJECT_CHANGED' || decided === 'SUBJECT_REVALIDATION_FAILED') {
+    return settle('SUBJECT_CHANGED', stage);
+  }
+  if (decided === 'CHECKS_FAILED') return settle('CHECKS_FAILED', stage);
+  if (decided === 'PULL_REQUEST_AMBIGUOUS') return settle('PULL_REQUEST_AMBIGUOUS', stage);
+
+  // ── The merge, and it is the only act reachable from a positive decision ──
+  if (isPositiveDeliveryDecision(decided)) {
+    if (!mayPerform(options, 'MERGE_PULL_REQUEST')) {
+      return settle('ATTENDED_AUTHORITY_REQUIRED', stage, 'MERGE_PULL_REQUEST');
+    }
+    merge = await performMerge(
+      options,
+      subject,
+      taskLoad,
+      decided,
+      looked.proof,
+      resolve,
+      load,
+      seams,
+    );
+    if (merge.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
+    // Nothing was sent, so the ladder's refusal is the answer — and it is read
+    // member by member rather than collapsed. A review measured the collapsed
+    // version reporting "a person put it there" for a forge that could not be
+    // read, which is the machine-versus-person confusion this vocabulary exists
+    // to keep apart.
+    const merged = merge.result.outcome;
+    if (merged === 'PULL_REQUEST_STATE_UNKNOWN' || merged === 'OBSERVATION_UNAVAILABLE') {
+      return settle('FORGE_STATE_UNKNOWN', stage);
+    }
+    if (merged === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
+    // What is left is mostly states somebody put this delivery in —
+    // `PULL_REQUEST_NOT_OPEN`, `DRAFT_REFUSED`, `WRONG_BASE`, `HEAD_MOVED`,
+    // `POSTCONDITION_MISMATCH`, `ALREADY_MERGED` — plus `AUTHORITY_REFUSED`,
+    // the four floors this path cannot reach, and the three members the
+    // transport can answer before a process exists. **Not every one of them is
+    // a person's doing**, and the sentence this member carries says one is:
+    // that is `L-V4-11-10`, widened. `ALREADY_MERGED` is the race worth naming
+    // — the reconciliation two steps above said otherwise a moment ago, and two
+    // readings that disagree is not a state to act on either.
+    return settle('HUMAN_DECISION_REQUIRED', stage);
+  }
+
+  // ── Everything else means no open pull request has this head ──────────────
+  //
+  // `PULL_REQUEST_REQUIRED`, and the two that mean one exists but has not
+  // settled: `CHECKS_PENDING` and `CHECKS_ABSENT`. The last two are reported
+  // and not acted on — there is no act between a pull request and its checks.
+  if (decided === 'CHECKS_PENDING') return settle('CHECKS_PENDING', stage);
+  if (decided === 'CHECKS_ABSENT') return settle('CHECKS_ABSENT', stage);
+
+  // Publish first, then create: a pull request is opened from a branch that has
+  // to be on the remote already. The publication is create-only and fenced
+  // server-side, so a head that is already there answers `ALREADY_PUBLISHED`,
+  // sends nothing, and the driver goes on to the creation in the same pass.
+  if (mayPerform(options, 'PUBLISH_HEAD')) {
+    const stopped = await publishOnce();
+    if (stopped !== null) return stopped;
+    // `ALREADY_PUBLISHED`, nothing sent — and on this path the driver goes on to
+    // the creation in the same pass, because it holds a fresh observation and a
+    // decision taken from it.
   }
 
   if (!mayPerform(options, 'CREATE_PULL_REQUEST')) {

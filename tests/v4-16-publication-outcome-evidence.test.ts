@@ -357,6 +357,12 @@ async function drive(
     /** What the process boundary reports about the push command. */
     readonly push?: { readonly outcome?: string; readonly exitCode?: number | null };
     readonly outcomeWrite?: RunArtifactCode;
+    /**
+     * The locator answers github.com's measured missing-commit document for the
+     * subject commit — the world a **first** publication starts in, and the one
+     * V4 slice 18R exists for. Measured 2026-08-28: exit 1, and this body.
+     */
+    readonly locatorMissing?: boolean;
   } = {},
 ): Promise<Run> {
   const counts: Counts = { publish: 0, remoteReads: 0 };
@@ -394,7 +400,20 @@ async function drive(
       runner: (async (_command: string, args: readonly string[]) => {
         const path = args.find((a) => a.startsWith('repos/')) ?? args.join(' ');
         if (/\/pulls\/\d+$/.test(path)) return commandResult({ exitCode: 1, stdout: '{}' });
-        if (path.endsWith('/pulls')) return commandResult({ stdout: '[]' });
+        if (path.endsWith('/pulls')) {
+          if (over.locatorMissing === true) {
+            return commandResult({
+              exitCode: 1,
+              stdout: JSON.stringify({
+                message: `No commit found for SHA: ${HEAD}`,
+                documentation_url:
+                  'https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit',
+                status: '422',
+              }),
+            });
+          }
+          return commandResult({ stdout: '[]' });
+        }
         if (path.endsWith('/check-runs')) {
           return commandResult({ stdout: JSON.stringify({ total_count: 0, check_runs: [] }) });
         }
@@ -1011,6 +1030,144 @@ describe('the outcome store writes once and never over', () => {
     for (const forbidden of ['ALREADY_RECORDED', 'RETRY', 'BRANCH_CREATED', 'PUBLICATION_ATTEMPTED']) {
       expect(HEAD_PUBLICATION_OUTCOME_CODES as readonly string[], forbidden).not.toContain(forbidden);
     }
+  });
+});
+
+
+/**
+ * V4 slice 18R — the first publication, with nobody present.
+ *
+ * The dogfood defect and the accountability contract meet here. On a delivery
+ * head github.com cannot address, the driver now reaches the publication — and
+ * every gate the automatic path has always had must still be the thing that
+ * decides whether anything is sent. The locator's answer changes **when**
+ * `performPublication` runs, and nothing about what it is allowed to do.
+ */
+describe('a first publication is still authorised, recorded and fenced', () => {
+  const MISSING = { locatorMissing: true } as const;
+
+  it('publishes once, and leaves the whole event behind', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home);
+    const run = await drive(AUTOMATIC, root, home, {
+      ...MISSING,
+      before: 'absent',
+      after: 'at-head',
+    });
+
+    expect(run.counts.publish).toBe(1);
+    // The authorisation was durable before the remote was contacted, and the
+    // outcome is beside it afterwards — the two halves of V4 slices 14 and 16,
+    // unchanged by a slice that only moved where the act is reached from.
+    const stored = readOutcome(home, onlyEvent(home));
+    expect(stored.outcome).toBe('DISPATCHED_REF_AT_SUBJECT_COMMIT_AFTER');
+    expect(stored.commandReport).toBe('RAN_TO_EXIT_ZERO');
+    expect(drivenLine(run)).toBe('EFFECT_ATTEMPTED');
+    expect(run.exitCode).toBe(EXIT_RUN_CALL_AGAIN);
+  });
+
+  it('sends nothing where this machine’s operator declared nothing', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    const run = await drive(AUTOMATIC, root, home, { ...MISSING, before: 'absent' });
+
+    expect(run.counts.publish).toBe(0);
+    expect(eventIds(home)).toEqual([]);
+    expect(drivenLine(run)).toBe('ATTENDED_AUTHORITY_REQUIRED');
+  });
+
+  it('sends nothing where the declaration says an operator must be present', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home, 'ATTENDED_ONLY');
+    const run = await drive(AUTOMATIC, root, home, { ...MISSING, before: 'absent' });
+
+    expect(run.counts.publish).toBe(0);
+    expect(eventIds(home)).toEqual([]);
+    expect(drivenLine(run)).toBe('ATTENDED_AUTHORITY_REQUIRED');
+  });
+
+  it('stops for accountability when the outcome cannot be written', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home);
+    const run = await drive(AUTOMATIC, root, home, {
+      ...MISSING,
+      before: 'absent',
+      after: 'at-head',
+      outcomeWrite: 'WRITE_FAILED',
+    });
+
+    // The act happened and the record of it did not. That is the one thing the
+    // driver may not report as "ask again".
+    expect(run.counts.publish).toBe(1);
+    expect(drivenLine(run)).toBe('PUBLICATION_OUTCOME_NOT_DURABLE');
+  });
+
+  /**
+   * The race, with nobody present.
+   *
+   * The locator said the forge does not resolve this commit; the ref already
+   * holds it. Nothing is sent — and the outcome is still recorded, because an
+   * authorisation was written and every authorised run leaves one, including the
+   * four that send nothing.
+   */
+  it('records a run that found the ref already there, and opens nothing', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home);
+    const run = await drive(AUTOMATIC, root, home, { ...MISSING, before: 'at-head' });
+
+    expect(run.counts.publish).toBe(0);
+    expect(readOutcome(home, onlyEvent(home)).outcome).toBe(
+      'NOT_DISPATCHED_REF_AT_SUBJECT_COMMIT',
+    );
+    expect(drivenLine(run)).toBe('FORGE_READINGS_DISAGREE');
+  });
+
+  /**
+   * The precondition, on this path specifically.
+   *
+   * An unattended publication writes its authorisation record and reads it back
+   * *before* the delivery remote is contacted, and refuses if it cannot. The
+   * store's own root name is occupied with an ordinary file, which is the same
+   * real obstruction `tests/v4-14-…` uses — no seam, no stub.
+   *
+   * Added because the ADR claimed this was pinned on the new branch and a review
+   * measured that it was not: the arm lives in the shared closure and is correct
+   * by construction, which is exactly the kind of claim that needs a case rather
+   * than an argument.
+   */
+  it('publishes nothing when the record of the permission cannot be written', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home);
+    writeFileSync(join(home, '.agent-orchestrator', 'head-publication-authorisations'), 'x', 'utf8');
+
+    const run = await drive(AUTOMATIC, root, home, { ...MISSING, before: 'absent' });
+
+    expect(run.counts.publish, 'nothing may be sent').toBe(0);
+    expect(run.counts.remoteReads, 'the remote is not read either').toBe(0);
+    expect(drivenLine(run)).toBe('PUBLICATION_AUDIT_NOT_DURABLE');
+  });
+
+  it('refuses to move a ref that holds another commit', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home);
+    const run = await drive(AUTOMATIC, root, home, { ...MISSING, before: 'other' });
+
+    expect(run.counts.publish).toBe(0);
+    expect(readOutcome(home, onlyEvent(home)).outcome).toBe('NOT_DISPATCHED_REF_AT_OTHER_COMMIT');
+    expect(drivenLine(run)).toBe('HUMAN_DECISION_REQUIRED');
   });
 });
 

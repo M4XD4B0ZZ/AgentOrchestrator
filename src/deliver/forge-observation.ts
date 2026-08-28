@@ -218,6 +218,183 @@ export const OBSERVATION_REFUSAL_DETAIL: Readonly<Record<ObservationRefusal, str
       'The forge returned a full page of records, so a further one cannot be ruled out.',
   });
 
+/// ── The one error document this build reads ────────────────────────────────
+
+/**
+ * The forge answered, about the exact object name this build asked about, that
+ * it found no commit with that name in this repository.
+ *
+ * ── Why this is not a member of {@link OBSERVATION_REFUSALS} ───────────────
+ *
+ * That vocabulary is documented, in its own header, as *the refusals both
+ * questions share*. Only the commit→pull-request locator can produce this one:
+ * it is read out of that endpoint's error document and out of no other. Putting
+ * it in the shared list would make that sentence false, would widen
+ * {@link CheckStateOutcome} with a value the check path can never hold, and
+ * would put a new member in front of `SETTLED_CHECKS` — which is the direction
+ * the check-runs guard in `github-observer.ts` exists to prevent.
+ *
+ * ── What it claims, and the six things it does not ─────────────────────────
+ *
+ * It claims exactly this: *at the instant of the answer, github.com resolved
+ * this repository's path (it did not answer 404), did not call the repository
+ * empty (it did not answer 409), accepted the credential (it did not answer
+ * 401 or 403), and reported that the ref segment it received — which its
+ * message reproduces verbatim — named no commit it would resolve there.*
+ *
+ * It does **not** claim that the object does not exist. Measured against
+ * `github.com` on 2026-08-28: a **tree** object and a **blob** object that are
+ * both demonstrably present in this repository produce the same document — the
+ * same message, status and documentation url, with their own name echoed back —
+ * as does a real commit that exists in another repository. The endpoint is
+ * repository-scoped and commit-typed, and the answer is about resolution, not
+ * about existence. That is why the word is `UNRESOLVED` and not `ABSENT`.
+ *
+ * It does not claim that no pull request ever carried the commit — that is the
+ * endpoint's *success* answer, an empty array, and this is the refusal to give
+ * one. It does not claim the commit is not merged; it does not claim the head
+ * was never published, which is a question about a remote ref and is answered
+ * by `head-publication.ts`; and it does not claim anything about the next
+ * instant, or about any repository other than the one in the path.
+ */
+export const COMMIT_UNRESOLVED = 'COMMIT_UNRESOLVED';
+
+/** The locator's answer when it is not a candidate set: a refusal, or the above. */
+export type PullCandidatesRefusal = ObservationRefusal | typeof COMMIT_UNRESOLVED;
+
+/**
+ * GitHub's message for a ref it will not resolve to a commit, byte for byte.
+ *
+ * Measured 2026-08-28 through the installed client: colon, one space, then the
+ * ref segment the request carried — reproduced **verbatim**, with no
+ * normalisation of any kind. `DEADBEEF…` comes back uppercase, `deadbee` comes
+ * back as seven characters, and `nosuchbranchxyz` comes back unchanged despite
+ * the word "SHA" in the template.
+ */
+export const MISSING_COMMIT_MESSAGE_PREFIX = 'No commit found for SHA: ';
+
+/**
+ * The `documentation_url` GitHub puts in an error from the locator endpoint.
+ *
+ * The only member of the error document this build did **not** send, so it is
+ * the only one that binds the answer to an endpoint rather than to a request.
+ * Measured: the same missing-commit message arrives from `commits/{sha}` with
+ * `#get-a-commit` and from `commits/{sha}/check-runs` with the checks URL, and
+ * requiring this constant is what makes those two documents unclassifiable here
+ * even if a later caller wired the classifier to the wrong endpoint.
+ *
+ * It is a string GitHub owns, so it can change; the failure that produces is
+ * fail-closed — the classifier stops firing and the reading is the
+ * `REQUEST_FAILED` it was before this slice. Carried as `L-V4-18R-2`.
+ */
+export const LOCATOR_DOCUMENTATION_URL =
+  'https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit';
+
+/**
+ * Reads the locator's **error** document, and answers one question about it.
+ *
+ * Called only on a completed request that did not succeed, and only for the
+ * commit→pull-request locator. It is the one place in **this transport** where a
+ * body that came with a failing exit code is read at all — the agent adapter
+ * reads its own child's stream on a non-zero exit to recognise a quota refusal,
+ * which is a different subsystem and a different question — and it is read as an
+ * error document, never handed to the parser that turns a response into
+ * evidence. `true` means the measured missing-commit answer for exactly this
+ * subject; every other document, including a well-formed one naming a different
+ * object name, is `false` and stays the `REQUEST_FAILED` it is today.
+ *
+ * ── The echo is a parrot, not a witness ───────────────────────────────────
+ *
+ * The equality against `commit` is required, and it must not be described the
+ * way `SUBJECT_MISMATCH` is. That member compares our subject against
+ * `head_sha` and `sha` — values the forge computed from records it holds. This
+ * one compares our subject against a string the forge copied out of the URL we
+ * sent it, so it establishes nothing about the commit.
+ *
+ * What it is worth, exactly: it refuses a body naming a **different object
+ * name** — a crossed, cached or replayed answer for another subject, or a path
+ * this build did not build from `subject.commit`. It does **not** bind the
+ * repository: the error document carries no repository identity, and a 422 from
+ * the same object name in a different repository would pass. That is
+ * `L-V4-18R-3`, and it is bounded by the act being create-only. It refuses a
+ * **generic**
+ * 422, of which this repository already documents several (`"The sha parameter
+ * must be exactly 40 characters…"`, `"Validation Failed"`, `"No commits between
+ * main and main"`); and it refuses to keep firing if GitHub ever starts
+ * normalising the ref it echoes. It is trigger specificity, and it is not
+ * evidence about the subject.
+ *
+ * `commit` is required to be a 40-lowercase-hex object name, and the caller is
+ * where that is enforced: `request` re-tests `isAddressableSubject` before a
+ * process can exist, and builds the path from the same string this is compared
+ * against. Stated because the function is exported — with an empty string it
+ * would match the bare prefix, which is a shape no caller can reach and no
+ * assertion here could kill.
+ */
+export function locatorReportsNoCommit(stdout: string, commit: string): boolean {
+  let body: unknown;
+  try {
+    body = JSON.parse(stdout);
+  } catch {
+    return false;
+  }
+  // `typeof null === 'object'`, and an array is an object. Both are refused
+  // before a member is read off them.
+  //
+  // The two halves are not equally load-bearing, and a mutation run measured
+  // which is which. Dropping `body === null` is **killed**: the member reads
+  // below would throw on `null`, which is not a refusal but an exception out of
+  // an observation. Dropping `Array.isArray` **survives**, and it survives
+  // because no array `JSON.parse` can produce carries a string `message` — the
+  // type check three lines down refuses every one of them already. It is kept
+  // as a statement of what shape is expected, and it is recorded here as
+  // unreachable rather than left where a reader would take the surviving mutant
+  // for a gap in the table above.
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+  // Measured: every error document from this client carries exactly these three
+  // members, and `status` is a JSON **string**. A numeric `422` is a document
+  // nobody measured, so it is not one this build recognises. Extra members are
+  // not refused — GitHub adds fields — with one exception below.
+  // Own properties only. Destructuring consults `Object.prototype`, and a review
+  // measured that a polluted prototype makes `{}` classify as the missing-commit
+  // answer. Nothing in this build pollutes it and no JSON body can, so this is
+  // closing a hole rather than fixing a bug — and it costs one predicate.
+  // Note the asymmetry that is deliberate: the `'errors' in record` test below
+  // stays prototype-inclusive, because that one only ever *refuses*.
+  //
+  // Recorded rather than left to be discovered: **reverting these three lines to
+  // a destructure survives the whole suite.** Measured over every body
+  // `JSON.parse` can produce — including `{"__proto__":{…}}`, which becomes an own
+  // data property rather than a prototype — the two forms are identical, so the
+  // difference is observable only by polluting `Object.prototype`, which no test
+  // here does and none should. Same class as the `Array.isArray` note above, and
+  // the same treatment: a guard kept for what it says, with its own
+  // unkillability written down.
+  const message = Object.hasOwn(record, 'message') ? record['message'] : undefined;
+  const docUrl = Object.hasOwn(record, 'documentation_url')
+    ? record['documentation_url']
+    : undefined;
+  const status = Object.hasOwn(record, 'status') ? record['status'] : undefined;
+  if (typeof message !== 'string') return false;
+  if (typeof docUrl !== 'string') return false;
+  if (typeof status !== 'string') return false;
+  if (status !== '422') return false;
+  if (docUrl !== LOCATOR_DOCUMENTATION_URL) return false;
+  // GitHub's *validation* 422 carries an `errors` array beside the message.
+  // Measured on `search/issues` with an empty query. Nothing this endpoint
+  // answers carries one, so its presence means this is a different document.
+  if ('errors' in record) return false;
+  if (!message.startsWith(MISSING_COMMIT_MESSAGE_PREFIX)) return false;
+  // `slice` rather than an equality against a concatenation, so that a document
+  // naming a **different** object name is a reachable, testable case rather
+  // than one indistinguishable from a malformed body. It falls to `false`, and
+  // that fall-through is the decision: the answer is about another subject, and
+  // the honest thing to do with it is what this build already does with an
+  // answer it cannot classify.
+  return message.slice(MISSING_COMMIT_MESSAGE_PREFIX.length) === commit;
+}
+
 // ── The observation subject ────────────────────────────────────────────────
 
 /**

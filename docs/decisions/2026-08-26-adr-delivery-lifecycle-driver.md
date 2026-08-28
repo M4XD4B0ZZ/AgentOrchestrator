@@ -219,6 +219,17 @@ Four kinds, kept apart:
 | **a person** | `HUMAN_DECISION_REQUIRED`, `CHECKS_FAILED`, `CHECKS_ABSENT`, `PULL_REQUEST_AMBIGUOUS`, `DELIVERY_EVIDENCE_UNUSABLE`, `CONCLUSION_NOT_ATTESTED` | 3 |
 | **a record that did not land** | `CONCLUSION_NOT_DURABLE`, `RECEIPT_NOT_DURABLE` | the store's own grade |
 
+This table is a **slice-11 snapshot** and is not maintained as the vocabulary
+grows: it already omitted `PUBLICATION_AUDIT_NOT_DURABLE` and
+`PUBLICATION_OUTCOME_NOT_DURABLE` (V4 slices 14 and 16), and V4 slice 18R adds
+`FORGE_READINGS_DISAGREE` — two readings that answered and disagreed, graded 4
+with the other "achieved nothing and nothing durable is wrong" members. The
+source of truth is `DRIVE_EXIT_CODES` in `src/cli/run-exit-codes.ts`, which is
+total over the vocabulary by type and pinned by a hand-written table in the
+slice's test file. Recorded here rather than silently extended, because a
+snapshot that is quietly kept current stops being a record of what was decided
+when.
+
 `VERIFICATION_NOT_ESTABLISHED` is graded 3 rather than 4, and the trade-off is
 stated rather than absorbed: two of its causes clear on their own — a lease
 another run holds, a workspace that could not be made — and 4 would be right for
@@ -247,6 +258,7 @@ should be, and the nominal member is about a delivery that is already finished.
 | a record that cannot be read | **none** |
 | a standing verdict, pass or fail | **none** |
 | no receipt | the reconciliation's two questions, then the observation's two |
+| no receipt, and the locator will not resolve the delivery commit | the reconciliation's **first** question only, then the publication's own local readings. V4 slice 18R: the observation is not asked, because neither of its questions can be answered about a commit the forge will not resolve |
 | an act that mutates | that act's own readings, one request, one reading |
 
 No path here runs `git fetch`, and the driver adds none — `L-V4-09-3` is the
