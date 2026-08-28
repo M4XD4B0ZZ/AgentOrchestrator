@@ -1131,6 +1131,33 @@ describe('a first publication is still authorised, recorded and fenced', () => {
     expect(drivenLine(run)).toBe('FORGE_READINGS_DISAGREE');
   });
 
+  /**
+   * The precondition, on this path specifically.
+   *
+   * An unattended publication writes its authorisation record and reads it back
+   * *before* the delivery remote is contacted, and refuses if it cannot. The
+   * store's own root name is occupied with an ordinary file, which is the same
+   * real obstruction `tests/v4-14-…` uses — no seam, no stub.
+   *
+   * Added because the ADR claimed this was pinned on the new branch and a review
+   * measured that it was not: the arm lives in the shared closure and is correct
+   * by construction, which is exactly the kind of claim that needs a case rather
+   * than an argument.
+   */
+  it('publishes nothing when the record of the permission cannot be written', async () => {
+    const root = repositoryRoot();
+    const home = scratchHome();
+    writeReadyState(root);
+    declare(home);
+    writeFileSync(join(home, '.agent-orchestrator', 'head-publication-authorisations'), 'x', 'utf8');
+
+    const run = await drive(AUTOMATIC, root, home, { ...MISSING, before: 'absent' });
+
+    expect(run.counts.publish, 'nothing may be sent').toBe(0);
+    expect(run.counts.remoteReads, 'the remote is not read either').toBe(0);
+    expect(drivenLine(run)).toBe('PUBLICATION_AUDIT_NOT_DURABLE');
+  });
+
   it('refuses to move a ref that holds another commit', async () => {
     const root = repositoryRoot();
     const home = scratchHome();

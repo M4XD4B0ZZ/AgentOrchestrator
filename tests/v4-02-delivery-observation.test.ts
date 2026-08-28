@@ -1098,6 +1098,11 @@ describe('the locator’s missing-commit answer is read, and nothing else is', (
     ['a client that is not installed', { outcome: 'NOT_FOUND' as const, started: false }, 'FORGE_CLIENT_ABSENT'],
     ['a client that timed out', { outcome: 'TIMED_OUT' as const }, 'FORGE_CLIENT_UNUSABLE'],
     ['a client that needs an authentication', { exitCode: 4 }, 'NOT_AUTHENTICATED'],
+    // Measured in slice 1: a COMPLETED result can carry a null exit code — a
+    // client killed by something outside this build. It is a completion this
+    // build cannot grade, so it is refused with the failures, and that includes
+    // refusing to read its body. A review found the reader running for it.
+    ['a completion this build cannot grade', { exitCode: null }, 'REQUEST_FAILED'],
   ])('does not read the document for %s', async (_label, over, expected) => {
     const { runner } = recordingRunner({
       pulls: { ...over, stdout: missingCommitBody(HEAD) },

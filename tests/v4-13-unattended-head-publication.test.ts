@@ -976,6 +976,34 @@ describe('the grant is refused on the command line before anything is resolved',
     expect(run.counts.resolves).toBe(0);
   });
 
+  /**
+   * The clause V4 slice 18R had to correct, pinned by fragment.
+   *
+   * Both of these texts said the pull-request situation is "observed fresh"
+   * **first**, unconditionally, as the stated ground for requiring `--drive`.
+   * Slice 18R made that false on one position — the forge answering that it will
+   * not resolve the delivery commit, where neither observation question can be
+   * answered — and the guard that actually covers the world these sentences name
+   * is the *reconciliation*, which runs first on every path and, unlike the
+   * observation, sees merged pull requests as well as open ones.
+   *
+   * The case beside this one compares the registered description against the
+   * exported constant, which is a constant compared with itself and pins no
+   * wording at all. This one reads a fragment, so a revert to the old sentence
+   * is red.
+   */
+  it('names the reconciliation, not only the observation, as the ground for --drive', () => {
+    expect(AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION).toContain('reconciled');
+    expect(PUBLICATION_GRANT_REFUSAL_DETAIL.AUTOMATIC_PUBLICATION_WITHOUT_DRIVE).toContain(
+      'reconciled',
+    );
+    // And neither may put the observation back as an unqualified precondition.
+    expect(AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION).not.toContain('observed fresh first');
+    expect(PUBLICATION_GRANT_REFUSAL_DETAIL.AUTOMATIC_PUBLICATION_WITHOUT_DRIVE).not.toContain(
+      'is observed fresh.',
+    );
+  });
+
   it('registers the flag with the sentence that was pinned', () => {
     const program = new Command();
     registerDeliveryCommand(program, {});

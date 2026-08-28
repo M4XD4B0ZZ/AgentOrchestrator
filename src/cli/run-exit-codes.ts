@@ -678,9 +678,9 @@ const DRIVE_EXIT_CODES = Object.freeze({
   // under the same shell answer as "the checks failed".
   ATTENDED_AUTHORITY_REQUIRED: EXIT_RUN_REFUSED,
   FORGE_STATE_UNKNOWN: EXIT_RUN_REFUSED,
-  // Two readings that answered and disagreed. Nothing was sent, nothing is
-  // durably wrong, and the next invocation reads a world that has moved on —
-  // which is 4's definition above, word for word.
+  // Two readings that answered and disagreed. No mutation was sent, nothing is
+  // durably wrong, and re-invoking against a world that has moved on can differ
+  // — which is what 4 is defined as above.
   //
   // Not 5, and the difference is not a preference. 5 means an act was attempted
   // and the next invocation must read what happened; here nothing was attempted,

@@ -17,13 +17,23 @@
  *
  * *At most* rather than exactly two, because the second request is only sent
  * once the first has produced exactly one pull request. A subject this build
- * will not address sends none at all, and **every** outcome that does not reach
- * the second read stops after the first. The rule rather than a list, because
- * two successive versions of this clause were lists and a review counted both
- * short: it is every member of the vocabulary below ordered before
- * {@link NOT_MERGED} — which now includes one decided before there is any
- * candidate set to look at, {@link DELIVERY_COMMIT_UNRESOLVED}, the forge
- * answering that it will not resolve this object name to a commit here.
+ * will not address sends none at all, and every outcome decided **without
+ * addressing a pull request by number** stops after the first: the locator's own
+ * answers, and everything the candidate set alone settles.
+ *
+ * A rule rather than a list, because three successive versions of this clause
+ * were lists and a review counted every one of them wrong — including the
+ * version this one replaces, which said "every member ordered before
+ * {@link NOT_MERGED}" and was false of {@link FORGE_UNREADABLE}, a member that
+ * sits on both sides of the second read. The vocabulary's order and the reads'
+ * order are different things, and the paragraph at
+ * {@link MergeObservationResult.pullRequestNumber} says so about the same
+ * boundary.
+ *
+ * V4 slice 18R added one more member on the near side —
+ * {@link DELIVERY_COMMIT_UNRESOLVED}, the forge answering that it will not
+ * resolve this object name to a commit here — and the rule covers it without
+ * being re-read.
  *
  * ── Why it does not take a MergeGrant, and must not ────────────────────────
  *
@@ -457,7 +467,12 @@ export async function observeMergeForDelivery(
     // stays one word, for the reason `FORGE_UNREADABLE` gives at its own
     // declaration.
     //
-    // `contacted` is true either way: a process ran and github.com replied.
+    // `contacted` is true either way, and that is this ladder's existing choice
+    // rather than a new claim: the flag has been `true` on this line since slice
+    // 8, including for the refusals where no process ever ran — a client that is
+    // not installed, an environment that could not be built. A review measured
+    // that, and over-claiming egress is the safe direction for a disclosure. The
+    // new member is the one reading here for which the sentence is exactly true.
     return outcome(
       candidates.refusal === COMMIT_UNRESOLVED ? 'DELIVERY_COMMIT_UNRESOLVED' : 'FORGE_UNREADABLE',
       true,

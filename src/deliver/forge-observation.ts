@@ -244,7 +244,8 @@ export const OBSERVATION_REFUSAL_DETAIL: Readonly<Record<ObservationRefusal, str
  *
  * It does **not** claim that the object does not exist. Measured against
  * `github.com` on 2026-08-28: a **tree** object and a **blob** object that are
- * both demonstrably present in this repository produce the identical document,
+ * both demonstrably present in this repository produce the same document — the
+ * same message, status and documentation url, with their own name echoed back —
  * as does a real commit that exists in another repository. The endpoint is
  * repository-scoped and commit-typed, and the answer is about resolution, not
  * about existence. That is why the word is `UNRESOLVED` and not `ABSENT`.
@@ -293,9 +294,11 @@ export const LOCATOR_DOCUMENTATION_URL =
  * Reads the locator's **error** document, and answers one question about it.
  *
  * Called only on a completed request that did not succeed, and only for the
- * commit→pull-request locator. It is the one place in this build where a body
- * that came with a failing exit code is read at all, and it is read as an
- * error document — never handed to the parser that turns a response into
+ * commit→pull-request locator. It is the one place in **this transport** where a
+ * body that came with a failing exit code is read at all — the agent adapter
+ * reads its own child's stream on a non-zero exit to recognise a quota refusal,
+ * which is a different subsystem and a different question — and it is read as an
+ * error document, never handed to the parser that turns a response into
  * evidence. `true` means the measured missing-commit answer for exactly this
  * subject; every other document, including a well-formed one naming a different
  * object name, is `false` and stays the `REQUEST_FAILED` it is today.
@@ -308,13 +311,25 @@ export const LOCATOR_DOCUMENTATION_URL =
  * one compares our subject against a string the forge copied out of the URL we
  * sent it, so it establishes nothing about the commit.
  *
- * What it is worth, exactly: it refuses a body belonging to a **different
- * request** — a crossed, cached or replayed answer; it refuses a **generic**
+ * What it is worth, exactly: it refuses a body naming a **different object
+ * name** — a crossed, cached or replayed answer for another subject, or a path
+ * this build did not build from `subject.commit`. It does **not** bind the
+ * repository: the error document carries no repository identity, and a 422 from
+ * the same object name in a different repository would pass. That is
+ * `L-V4-18R-3`, and it is bounded by the act being create-only. It refuses a
+ * **generic**
  * 422, of which this repository already documents several (`"The sha parameter
  * must be exactly 40 characters…"`, `"Validation Failed"`, `"No commits between
  * main and main"`); and it refuses to keep firing if GitHub ever starts
  * normalising the ref it echoes. It is trigger specificity, and it is not
  * evidence about the subject.
+ *
+ * `commit` is required to be a 40-lowercase-hex object name, and the caller is
+ * where that is enforced: `request` re-tests `isAddressableSubject` before a
+ * process can exist, and builds the path from the same string this is compared
+ * against. Stated because the function is exported — with an empty string it
+ * would match the bare prefix, which is a shape no caller can reach and no
+ * assertion here could kill.
  */
 export function locatorReportsNoCommit(stdout: string, commit: string): boolean {
   let body: unknown;
@@ -341,7 +356,17 @@ export function locatorReportsNoCommit(stdout: string, commit: string): boolean 
   // members, and `status` is a JSON **string**. A numeric `422` is a document
   // nobody measured, so it is not one this build recognises. Extra members are
   // not refused — GitHub adds fields — with one exception below.
-  const { message, documentation_url: docUrl, status } = record;
+  // Own properties only. Destructuring consults `Object.prototype`, and a review
+  // measured that a polluted prototype makes `{}` classify as the missing-commit
+  // answer. Nothing in this build pollutes it and no JSON body can, so this is
+  // closing a hole rather than fixing a bug — and it costs one predicate.
+  // Note the asymmetry that is deliberate: the `'errors' in record` test below
+  // stays prototype-inclusive, because that one only ever *refuses*.
+  const message = Object.hasOwn(record, 'message') ? record['message'] : undefined;
+  const docUrl = Object.hasOwn(record, 'documentation_url')
+    ? record['documentation_url']
+    : undefined;
+  const status = Object.hasOwn(record, 'status') ? record['status'] : undefined;
   if (typeof message !== 'string') return false;
   if (typeof docUrl !== 'string') return false;
   if (typeof status !== 'string') return false;

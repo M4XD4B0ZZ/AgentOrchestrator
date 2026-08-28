@@ -62,7 +62,16 @@
  * rollup returning `{"data":{…"statusCheckRollup":null},"errors":[…]}`. A
  * reader that took `data` at face value would read that as "this commit has no
  * checks", which is a fail-open produced by the successful path. A REST non-2xx
- * is a non-zero exit and no body this module will parse.
+ * is a non-zero exit, and no body that arrives with one is ever handed to the
+ * parser that turns a response into evidence.
+ *
+ * That last clause said "no body this module will parse" until V4 slice 18R, and
+ * the narrowing is exact rather than cosmetic. One such body is now read — the
+ * locator's own missing-commit error document, by `locatorReportsNoCommit`,
+ * whose whole output is a boolean and which no evidence is built from. The
+ * fail-open the paragraph above describes is still impossible: what would
+ * produce it is a **response parser** consuming an error, and that is the thing
+ * the sentence now names.
  *
  * GraphQL's one real advantage is that `GitObjectID!` refuses anything but a
  * full 40-hex object name at the type level, where REST's `{ref}` accepts an
@@ -310,7 +319,8 @@ async function request<E extends string = never>(
   params: readonly string[],
   deps: ForgeObserverDependencies,
   readError: ErrorDocumentReader<E>,
-): Promise<RequestResult<E>> {  if (supportedForgeHost(subject.host) === null) {
+): Promise<RequestResult<E>> {
+  if (supportedForgeHost(subject.host) === null) {
     return Object.freeze({ ok: false as const, refusal: 'UNSUPPORTED_HOST' as const });
   }
   // The commit is re-tested here for a reason that is specific to REST: this
@@ -385,6 +395,15 @@ async function request<E extends string = never>(
   // completion this build cannot grade, so it is refused with the failures.
   if (result.exitCode === 4) {
     return Object.freeze({ ok: false as const, refusal: 'NOT_AUTHENTICATED' as const });
+  }
+  // A completion this build cannot grade is refused with the failures, and that
+  // includes refusing to read its body. `exitCode: null` on a COMPLETED result is
+  // measured — a client killed by something outside AO — and the document on its
+  // stdout is not evidence that the far side answered. A review found the error
+  // reader running for it, three comments away from the sentence saying it does
+  // not, and this is that sentence made true.
+  if (typeof result.exitCode !== 'number') {
+    return Object.freeze({ ok: false as const, refusal: 'REQUEST_FAILED' as const });
   }
   if (result.exitCode !== 0) {
     // The one place a body that came with a failing exit code is read at all,

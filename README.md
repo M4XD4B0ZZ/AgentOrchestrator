@@ -10138,7 +10138,7 @@ There is no drive-shaped authority.
 `--drive --attended` on its own authorises no mutation at all: `--attended` has
 never been the authority, only the operator's presence. When the next act is one
 this invocation may not perform, the report names it and the flags that would
-grant it, and nothing is sent.
+grant it, and no mutation is sent.
 
 `--drive` does not compose with `--observe`, `--record`, `--decide`,
 `--reconcile-merge`, `--verify-merge` or `--conclude-delivery`. Those name the
@@ -10574,11 +10574,22 @@ is not "no `--attended`", it is a flag of its own.
 Because publishing with nobody present is only done from a position this
 invocation derived for itself. Under `--drive` the publication is reached only
 after this run has read the delivery conclusion from disk (a concluded delivery
-stops), read the merge receipt and the verification history, taken a fresh
-observation of github.com, and reached a decision of `PULL_REQUEST_REQUIRED` — no
-open pull request has this head. A bare `--publish-head` would skip all of that,
-and the concrete failure is not hypothetical: a delivery that was merged and
-whose branch the forge deleted presents an absent ref again.
+stops), read the merge receipt and the verification history, and **asked the
+forge whether this delivery is already merged**. A bare `--publish-head` would
+skip all of that, and the concrete failure is not hypothetical: a delivery that
+was merged and whose branch the forge deleted presents an absent ref again.
+
+Where the forge can answer about this head, the run also takes a fresh
+observation of github.com and reaches a decision of `PULL_REQUEST_REQUIRED` — no
+open pull request has this head — before publishing. There is exactly one
+position where it does not, and V4 slice 18R added it: when the forge answers
+that it will not resolve the delivery commit at all, neither observation question
+*can* be answered, and the reconciliation is the position. That does not weaken
+the guard this section is about. The reconciliation is the **stronger** check for
+a delivery that was merged and had its branch deleted, because the observation
+only ever sees *open* pull requests and a merged one is closed — and measured,
+twice, such a head still resolves through the locator and therefore never reaches
+that position at all.
 
 ### Default deny, and four different ways of not saying yes
 
@@ -11424,8 +11435,9 @@ GET repos/{owner}/{name}/commits/{H}/pulls
 ```
 
 That is not "the forge could not be read". It is **the forge answering**. So the
-locator's error document is read — the only body in this build that arrives with
-a failing exit code and is read at all, and it is read as an *error document*,
+locator's error document is read — the only body in this **transport** that
+arrives with a failing exit code and is read at all, and it is read as an *error
+document*,
 never handed to the parser that turns a response into evidence. It is accepted
 only when the status is exactly `"422"`, the `documentation_url` is the locator's
 own, there is no `errors` member, and the message names **exactly** the object
@@ -11440,7 +11452,8 @@ create-only server fence. One act, then it stops.
 
 **What the answer does not say.** The word is `UNRESOLVED` and not `ABSENT`,
 because a tree object and a blob object that are both present in this repository
-produce the identical answer, as does a commit that exists in another one. So the
+produce the same answer — the same message, status and documentation url, each
+with its own name echoed back — as does a commit that exists in another one. So the
 member claims only that the forge would not resolve that object name **to a
 commit, there, at that instant** — not that the commit does not exist, not that
 no pull request ever carried it, not that it was never published, and not that it

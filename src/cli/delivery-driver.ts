@@ -79,9 +79,12 @@
  * nothing, answers `ALREADY_PUBLISHED` and used to go on to the creation in the
  * same pass; if its outcome record cannot be established it now stops instead.
  * That is fail-closed and deliberate — a run that cannot say what it did should
- * not go on to do something else — and it is the only place where what this
- * driver stops at changed. Everywhere else the stopping is unchanged and only
- * the sentence beside it differs.
+ * not go on to do something else — and it was, at slice 16, the only place where
+ * what this driver stops at changed. V4 slice 18R adds the second and last one:
+ * on the pre-publication branch an `ALREADY_PUBLISHED` does **not** go on to the
+ * creation either, because that branch holds no observation to go on with. Both
+ * are the same shape — a run that cannot say what it is looking at stops — and
+ * everywhere else the stopping is unchanged.
  *
  * Three things follow, and they are the whole safety argument:
  *
@@ -254,8 +257,13 @@ export const DELIVERY_DRIVES = [
    *
    * The forge could not answer the merge question, or an act's own reading —
    * the remote ref, the pull request by number, the situation at this head —
-   * could not be completed. Nothing was sent on any of those paths, and nothing
-   * durable is wrong: the next invocation begins with the same reading.
+   * could not be completed. **No mutation** was sent on any of those paths, and
+   * nothing durable is wrong: the next invocation begins with the same reading.
+   *
+   * Narrowed from "nothing was sent" in V4 slice 18R, for the reason
+   * {@link ATTENDED_AUTHORITY_REQUIRED} gives about the same words: the
+   * reconciliation's own request has already gone out on the path that produces
+   * this member most often, so a flat claim about egress was false there.
    *
    * It is deliberately **not** `MERGE_NOT_ESTABLISHED`, which this member
    * replaced. A review measured that name covering two unrelated conditions —
@@ -266,7 +274,13 @@ export const DELIVERY_DRIVES = [
   'FORGE_STATE_UNKNOWN',
   /**
    * Two readings of github.com taken inside this invocation disagree about this
-   * commit, and nothing was sent.
+   * commit, and no mutation was sent.
+   *
+   * "No mutation" and not "nothing": both readings really did leave this
+   * machine — the locator request, and the `ls-remote` the publication takes of
+   * the delivery remote — and this member exists precisely because they
+   * answered. A review measured the first draft of this sentence saying nothing
+   * was sent, which is the defect two members above corrects, re-committed.
    *
    * Reachable from exactly one world, and it is a race rather than a fault. The
    * locator answered that the forge would not resolve this delivery commit — so
@@ -469,12 +483,12 @@ export const DELIVERY_DRIVE_DETAIL: Readonly<Record<DeliveryDrive, string>> = Ob
     'No standing verdict about this merge commit under this profile could be established. ' +
     'That is not the machine saying no — the Verification block above says what stopped it.',
   FORGE_STATE_UNKNOWN:
-    'A reading this invocation needed could not be taken from github.com. Nothing was sent.',
+    'A reading this invocation needed could not be taken from github.com. No mutation was sent.',
   FORGE_READINGS_DISAGREE:
     'The pull-request locator answered that github.com does not resolve this commit, and the ' +
-    'delivery ref already holds exactly it. Nothing was sent and nothing was attempted. This ' +
-    'invocation took no observation, so it stops rather than acting on one it does not have. ' +
-    'Ask again: the next invocation reads the world as it now is.',
+    'delivery ref already holds exactly it. Both readings were taken; no mutation was sent and ' +
+    'nothing was attempted. This invocation took no observation, so it stops rather than acting ' +
+    'on one it does not have. Ask again: the next invocation reads the world as it now is.',
   RECEIPT_NOT_DURABLE:
     'The merge was observed and the receipt did not reach the disk, so this delivery has not moved.',
   PUBLICATION_AUDIT_NOT_DURABLE:
@@ -494,7 +508,7 @@ export const DELIVERY_DRIVE_DETAIL: Readonly<Record<DeliveryDrive, string>> = Ob
   HUMAN_DECISION_REQUIRED:
     'The delivery is in a state this build will not act on, and a person put it there.',
   ATTENDED_AUTHORITY_REQUIRED:
-    'The next act is a forge mutation this invocation was not authorised to perform. Nothing was sent.',
+    'The next act is a forge mutation this invocation was not authorised to perform. No mutation was sent.',
   PUBLICATION_OUTCOME_NOT_DURABLE:
     'This invocation was permitted to publish with nobody present, and the record of what it ' +
     'went on to do was not established on disk. The Publication line in this report says what ' +
@@ -854,101 +868,107 @@ export async function driveDelivery(
    * cannot be silently inherited.
    */
   const publishOnce = async (): Promise<DeliveryDriveResult | null> => {
-  const performed = await performPublication(
-    options,
-    repository.root,
-    subject,
-    taskLoad,
-    resolve,
-    load,
-    seams,
-  );
-  publication = {
-    result: performed.result,
-    ref: taskLoad.ok ? publishableRef(taskLoad.state.workBranch) : null,
-    remoteName: subject.remoteName,
-    outcome: performed.outcome,
-  };
-  // Before the act's own result, and that order is the finding rather than a
-  // preference: the branch below settles on `attempt` alone and never reads a
-  // publication member, so an evidence failure placed after it would be
-  // reported as "one act was attempted, ask again" — an instruction that is
-  // literally false, because asking again reads the remote and cannot recover
-  // a moment that has passed.
-  //
-  // Guarded on the store's own answer and not on the act's: `null` means no
-  // outcome was called for, and `RECORDED` means it is on the disk. Every
-  // other member of that vocabulary is a durable record that is missing after
-  // an act that may have changed the delivery remote.
-  if (performed.outcome !== null && performed.outcome !== 'RECORDED') {
-    return settle('PUBLICATION_OUTCOME_NOT_DURABLE', stage);
-  }
-  if (publication.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
-  const published = publication.result.publication;
-  if (published === 'REF_HOLDS_ANOTHER_COMMIT') return settle('HUMAN_DECISION_REQUIRED', stage);
-  if (published === 'REMOTE_STATE_UNKNOWN') {
-    // A reading that could not be taken, not a head that is not there.
-    return settle('FORGE_STATE_UNKNOWN', stage);
-  }
-  if (published === 'REMOTE_URLS_DIVERGE') {
-    // **Nothing was asked of github.com.** `readUrlAgreement` is two local
-    // `git remote get-url` calls, and this member covers both of its
-    // not-`AGREE` answers: they answered and disagreed, or neither could be
-    // answered. `head-publication.ts` says exactly that, and this build does
-    // not tell the two apart — so the member is right about the act (nothing
-    // sent, nothing attempted, no invocation clears it) while the sentence
-    // beside it, "a person put it there", is true of the first half only.
-    // That is `L-V4-11-13`. A review measured the earlier version, which told
-    // an operator a reading "could not be taken from github.com" about a host
-    // this run had not asked anything.
-    return settle('HUMAN_DECISION_REQUIRED', stage);
-  }
-  if (published === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
-  if (published === 'PUBLICATION_AUDIT_UNWRITTEN') {
-    // Named before the authority arm below, because this run had the
-    // authority. The publication was permitted, this build would not perform
-    // it without leaving durable evidence of that permission, and the evidence
-    // could not be established — so nothing was contacted. An operator sent to
-    // `--attended` here would be sent to work around the gate rather than to
-    // fix the machine.
-    return settle('PUBLICATION_AUDIT_NOT_DURABLE', stage);
-  }
-  if (
-    published === 'AUTOMATIC_PUBLICATION_NOT_DECLARED' ||
-    published === 'AUTOMATIC_PUBLICATION_DENIED' ||
-    published === 'PUBLICATION_POLICY_UNREADABLE'
-  ) {
-    // The invocation asked to publish with nobody present and the authority
-    // for that was not established. Named ahead of the arm below because that
-    // one answers `SUBJECT_NOT_ESTABLISHED`, and there is nothing wrong with
-    // this subject: the work branch is publishable, the task is ready, and an
-    // operator passing `--publish-head --attended` would publish it now.
+    const performed = await performPublication(
+      options,
+      repository.root,
+      subject,
+      taskLoad,
+      resolve,
+      load,
+      seams,
+    );
+    publication = {
+      result: performed.result,
+      ref: taskLoad.ok ? publishableRef(taskLoad.state.workBranch) : null,
+      remoteName: subject.remoteName,
+      outcome: performed.outcome,
+    };
+    // Before the act's own result, and that order is the finding rather than a
+    // preference: the branch below settles on `attempt` alone and never reads a
+    // publication member, so an evidence failure placed after it would be
+    // reported as "one act was attempted, ask again" — an instruction that is
+    // literally false, because asking again reads the remote and cannot recover
+    // a moment that has passed.
     //
-    // `ATTENDED_AUTHORITY_REQUIRED` is the member because it is the true one:
-    // this act was not authorised by this invocation, an attended invocation
-    // would authorise it, and `DELIVERY_EFFECT_FLAG` names both routes.
-    // Which of the three refusals it was is on the `Publication` line beside
-    // this, in that member's own words — a summary that tried to carry it
-    // would be a second vocabulary saying the same thing one step later.
-    return settle('ATTENDED_AUTHORITY_REQUIRED', stage, 'PUBLISH_HEAD');
-  }
-  if (published !== 'ALREADY_PUBLISHED') {
-    // Nothing was pushed and the head is not established. What is left, with
-    // nothing attempted, is a work branch this build will not turn into a ref
-    // and an authority the mint would not grant. No invocation clears either,
-    // so neither is "ask again".
-    //
-    // A floor **only when `--create-pr --attended` was given too**, and a
-    // review measured the difference: with the creation authorised, both
-    // reach its own subject refusal one step later and this function answers
-    // that with the same member. Without it, control falls to the authority
-    // branch below and answers `ATTENDED_AUTHORITY_REQUIRED` — telling an
-    // operator to pass a flag for a delivery whose work branch this build
-    // will not send at all. So the arm is load-bearing on the shape a
-    // counter-proof does not reach, which is why the mutant survives and the
-    // arm stays.
-    return settle('SUBJECT_NOT_ESTABLISHED', stage);
-  }
+    // Guarded on the store's own answer and not on the act's: `null` means no
+    // outcome was called for, and `RECORDED` means it is on the disk. Every
+    // other member of that vocabulary is a durable record that is missing after
+    // an act that may have changed the delivery remote.
+    if (performed.outcome !== null && performed.outcome !== 'RECORDED') {
+      return settle('PUBLICATION_OUTCOME_NOT_DURABLE', stage);
+    }
+    if (publication.result.attempt !== 'NOT_ATTEMPTED') return settle('EFFECT_ATTEMPTED', stage);
+    const published = publication.result.publication;
+    if (published === 'REF_HOLDS_ANOTHER_COMMIT') return settle('HUMAN_DECISION_REQUIRED', stage);
+    if (published === 'REMOTE_STATE_UNKNOWN') {
+      // A reading that could not be taken, not a head that is not there.
+      return settle('FORGE_STATE_UNKNOWN', stage);
+    }
+    if (published === 'REMOTE_URLS_DIVERGE') {
+      // **Nothing was asked of github.com.** `readUrlAgreement` is two local
+      // `git remote get-url` calls, and this member covers both of its
+      // not-`AGREE` answers: they answered and disagreed, or neither could be
+      // answered. `head-publication.ts` says exactly that, and this build does
+      // not tell the two apart — so the member is right about the act (nothing
+      // sent, nothing attempted, no invocation clears it) while the sentence
+      // beside it, "a person put it there", is true of the first half only.
+      // That is `L-V4-11-13`. A review measured the earlier version, which told
+      // an operator a reading "could not be taken from github.com" about a host
+      // this run had not asked anything.
+      return settle('HUMAN_DECISION_REQUIRED', stage);
+    }
+    if (published === 'SUBJECT_CHANGED') return settle('SUBJECT_CHANGED', stage);
+    if (published === 'PUBLICATION_AUDIT_UNWRITTEN') {
+      // Named before the authority arm below, because this run had the
+      // authority. The publication was permitted, this build would not perform
+      // it without leaving durable evidence of that permission, and the evidence
+      // could not be established — so nothing was contacted. An operator sent to
+      // `--attended` here would be sent to work around the gate rather than to
+      // fix the machine.
+      return settle('PUBLICATION_AUDIT_NOT_DURABLE', stage);
+    }
+    if (
+      published === 'AUTOMATIC_PUBLICATION_NOT_DECLARED' ||
+      published === 'AUTOMATIC_PUBLICATION_DENIED' ||
+      published === 'PUBLICATION_POLICY_UNREADABLE'
+    ) {
+      // The invocation asked to publish with nobody present and the authority
+      // for that was not established. Named ahead of the arm below because that
+      // one answers `SUBJECT_NOT_ESTABLISHED`, and there is nothing wrong with
+      // this subject: the work branch is publishable, the task is ready, and an
+      // operator passing `--publish-head --attended` would publish it now.
+      //
+      // `ATTENDED_AUTHORITY_REQUIRED` is the member because it is the true one:
+      // this act was not authorised by this invocation, an attended invocation
+      // would authorise it, and `DELIVERY_EFFECT_FLAG` names both routes.
+      // Which of the three refusals it was is on the `Publication` line beside
+      // this, in that member's own words — a summary that tried to carry it
+      // would be a second vocabulary saying the same thing one step later.
+      return settle('ATTENDED_AUTHORITY_REQUIRED', stage, 'PUBLISH_HEAD');
+    }
+    if (published !== 'ALREADY_PUBLISHED') {
+      // Nothing was pushed and the head is not established. What is left, with
+      // nothing attempted, is a work branch this build will not turn into a ref
+      // and an authority the mint would not grant. No invocation clears either,
+      // so neither is "ask again".
+      //
+      // A floor **only when `--create-pr --attended` was given too**, and a
+      // review measured the difference: with the creation authorised, both
+      // reach its own subject refusal one step later and this function answers
+      // that with the same member. Without it, control falls to the authority
+      // branch below and answers `ATTENDED_AUTHORITY_REQUIRED` — telling an
+      // operator to pass a flag for a delivery whose work branch this build
+      // will not send at all. So the arm is load-bearing on the shape a
+      // counter-proof does not reach, which is why the mutant survives and the
+      // arm stays.
+      //
+      // V4 slice 18R gave it a second bite that paragraph does not describe:
+      // reached from the pre-publication branch, deleting this arm would send
+      // every non-attempted, non-`ALREADY_PUBLISHED` member out through
+      // `FORGE_READINGS_DISAGREE`, whose sentence says the delivery ref already
+      // holds this commit — about a run where it does not.
+      return settle('SUBJECT_NOT_ESTABLISHED', stage);
+    }
     return null;
   };
 

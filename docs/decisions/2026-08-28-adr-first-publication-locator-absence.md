@@ -56,9 +56,9 @@ Nothing was created, pushed or merged.
 | `commits/{H}/pulls` | the same name in **UPPER CASE** | 1 | the message echoes it uppercase, **verbatim** |
 | `commits/{H}/pulls` | a 7-hex abbreviation | 1 | the message echoes `deadbee` |
 | `commits/{H}/pulls` | `nosuchbranchxyz` | 1 | the message echoes it, and still says "SHA" |
-| `commits/{H}/pulls` | a **tree** object that exists here | 1 | the identical 422 document |
-| `commits/{H}/pulls` | a **blob** object that exists here | 1 | the identical 422 document |
-| `commits/{H}/pulls` | a real commit from another repository | 1 | the identical 422 document |
+| `commits/{H}/pulls` | a **tree** object that exists here | 1 | the same document, with its own name echoed |
+| `commits/{H}/pulls` | a **blob** object that exists here | 1 | the same document, with its own name echoed |
+| `commits/{H}/pulls` | a real commit from another repository | 1 | the same document, with its own name echoed |
 | `commits/{H}/pulls` | a repository that does not exist | 1 | `{"message":"Not Found",…,"status":"404"}` |
 | `commits/{H}/pulls` | an **empty** repository | 1 | `{"message":"Git Repository is empty.",…,"status":"409"}` |
 | `commits/{H}/pulls` | with a bad credential | **1** | `{"message":"Bad credentials",…,"status":"401"}` — note: **not** exit 4 |
@@ -81,8 +81,10 @@ out of our own URL. **It is a parrot, not a witness**, and the code says so.
 
 It is still required, and it is worth three specific things:
 
-- it refuses a body belonging to a **different request** — a crossed, cached or
-  replayed answer cannot pass;
+- it refuses a body naming a **different object name** — a crossed, cached or
+  replayed answer for another subject cannot pass. It does **not** bind the
+  repository: the error document carries no repository identity, so a 422 for
+  the same object name in another repository would pass. `L-V4-18R-3`;
 - it refuses every **generic** 422 this repository already documents:
   `"The sha parameter must be exactly 40 characters…"`, `"Validation Failed"`,
   `"No commits between main and main"`;
@@ -98,9 +100,11 @@ later caller wires the reader to the wrong endpoint.
 
 ## 5. The error-body parsing boundary
 
-`locatorReportsNoCommit(stdout, commit)` is the **only** place in this build
-where a body that arrived with a failing exit code is read at all, and it reads
-it as an *error document*. It never hands anything to `parsePullCandidates`,
+`locatorReportsNoCommit(stdout, commit)` is the **only** place in this
+**transport** where a body that arrived with a failing exit code is read at all,
+and it reads it as an *error document*. (Not repository-wide: the agent adapter
+reads its own child’s stream on a non-zero exit to recognise a quota refusal.
+Different subsystem, different question.) It never hands anything to `parsePullCandidates`,
 which is the parser that turns a response into evidence. Its whole output is a
 boolean.
 
@@ -144,7 +148,8 @@ array and would otherwise silently encode any order.
 **`FORGE_READINGS_DISAGREE`** (`delivery-driver.ts`) — see §12.
 
 The word is `UNRESOLVED` and not `ABSENT`, and the measurement is why: a tree and
-a blob that both exist here produce the identical answer. The claim is about
+a blob that both exist here produce the same answer — the same message, status
+and documentation url, each with its own name echoed back. The claim is about
 **resolution**, in **one repository**, at **one instant**.
 
 ## 7. What reconciliation now means
@@ -222,7 +227,10 @@ word. A test asserts the report carries no such line.
 The transport's fail-closed treatment of arbitrary non-zero exits is untouched:
 the classifier runs *after* `NOT_FOUND`, after every non-`COMPLETED` outcome, and
 after `exitCode === 4`, and it returns `false` for everything that is not the one
-measured shape. Twenty-two adversarial bodies are pinned, including a 404, a 409,
+measured shape. Every adversarial body in the table at
+`tests/v4-02-delivery-observation.test.ts` is pinned — a count is deliberately not
+given, because the first version of this paragraph carried one and a review
+measured it three short of the table it described. They include a 404, a 409,
 a 401 (which measurably arrives on exit **1**, not 4), a 403, a validation 422
 with an `errors` array, the same message from two other endpoints, a numeric
 `status`, an array, a JSON null and a body that is not JSON.
@@ -287,7 +295,16 @@ remote is contacted; if it cannot be made durable, nothing is published.
 `outcome.json` is still written **after** publication processing on every path
 where an authorisation was written, including the ones that send nothing; if it
 cannot be established, `PUBLICATION_OUTCOME_NOT_DURABLE` still stops the run and
-still carries the store's own exit grade. Both are pinned on the new path.
+still carries the store's own exit grade.
+
+Both are pinned **on the new path**, by two cases in
+`tests/v4-16-publication-outcome-evidence.test.ts`: one obstructs the
+authorisation store's own root with an ordinary file and requires zero pushes,
+zero remote reads and `PUBLICATION_AUDIT_NOT_DURABLE`; the other fails the
+outcome write after a real push and requires `PUBLICATION_OUTCOME_NOT_DURABLE`.
+The first of those was added by review: the claim in this paragraph was written
+before the case existed, which is exactly the shape a "correct by construction"
+argument hides.
 
 ## 15. One effect per invocation
 
