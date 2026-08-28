@@ -37,9 +37,22 @@
  * as it was before this invocation changed it.
  *
  * Measured for the first pair: `--observe` runs before the publication, the
- * forge has never seen the commit, `commits/{sha}/pulls` answers `422 "No commit
+ * commit has not been pushed yet, `commits/{sha}/pulls` answers `422 "No commit
  * found for SHA"`, and the decision is `OBSERVATION_UNSETTLED` — so the creation
  * is refused after the branch has been created. `L-V4-06-10` records it.
+ *
+ * "Has not been pushed" states the world this run is in, and it is deliberately
+ * not read *out of* the 422. V4 slice 18R measured that answer arriving for a
+ * tree object and a blob object that are both present in the repository, and for
+ * a commit that exists in another one — so "the forge has never seen the commit",
+ * which three copies of this paragraph used to say, is an inference the endpoint
+ * does not support. What the answer supports is that the forge would not resolve
+ * that object name to a commit there.
+ *
+ * `--drive` is the exception, and only for the publication: on that answer it
+ * reaches `--publish-head` without observing, because a commit the forge will
+ * not resolve has no pull request and no checks to observe. It still stops at
+ * that one act.
  *
  * The same shape closes the second pair, and more tightly: `--merge-pr` admits
  * only `PULL_REQUEST_MATCHED_CHECKS_SUCCESS`, which asserts a pull request

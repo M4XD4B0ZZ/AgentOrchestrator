@@ -52,8 +52,10 @@ import {
   CHECK_RUN_CONCLUSIONS,
   CHECK_RUN_STATUSES,
   COMMIT_STATUS_STATES,
+  COMMIT_UNRESOLVED,
   createObservationSubject,
   isAddressableSubject,
+  locatorReportsNoCommit,
   matchExactHead,
   OBSERVATION_REFUSAL_DETAIL,
   OBSERVATION_REFUSALS,
@@ -79,6 +81,7 @@ import {
   observeCheckStateAtCommit,
   observePullRequestAtHead,
   pullCandidatesPath,
+  readPullCandidatesAtHead,
   PER_PAGE_PARAM,
   type ForgeCommandRunner,
 } from '../src/deliver/github-observer.js';
@@ -868,8 +871,15 @@ describe('the transport turns every process outcome into a closed refusal', () =
    * Measured: a 404 from `gh api` still writes GitHub's error document to
    * stdout and exits 1. That document is valid JSON, so a reader that parsed
    * first would have to decide what an object with a `message` key means.
+   *
+   * V4 slice 18R narrowed the claim and this case's name with it. One body that
+   * came with a failing exit code **is** read now — the locator's measured
+   * missing-commit answer, read as an *error document*, by a function whose only
+   * output is a boolean. What still never happens, and what this case pins, is
+   * the thing the sentence above was really about: a failing body reaching the
+   * parser that turns a response into evidence. See section 6b.
    */
-  it('does not parse a body that came with a failing exit code', async () => {
+  it('never reads a failing body as a response', async () => {
     const notFound = { exitCode: 1, stdout: '{"message":"Not Found","status":"404"}' };
     const { runner } = recordingRunner({ pulls: notFound });
     expect((await observePullRequestAtHead(subjectOf(), { runner, envSource: {} })).outcome).toBe(
@@ -941,6 +951,209 @@ describe('the transport turns every process outcome into a closed refusal', () =
     await observePullRequestAtHead(subjectOf(), { runner, envSource: {} });
     expect(calls[0]?.timeoutMs).toBe(OBSERVATION_TIMEOUT_MS);
     expect(calls[0]?.maxStdoutBytes).toBe(OBSERVATION_MAX_RESPONSE_BYTES);
+  });
+});
+
+// ── 6b. The one error document this build reads ────────────────────────────
+
+/**
+ * V4 slice 18R.
+ *
+ * The measured answer, byte for byte, from `github.com` on 2026-08-28:
+ *
+ *     gh api --hostname github.com -X GET \
+ *       repos/M4XD4B0ZZ/AgentOrchestrator/commits/<sha>/pulls -F per_page=100
+ *
+ *     exit 1
+ *     {"message":"No commit found for SHA: <sha>",
+ *      "documentation_url":"https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit",
+ *      "status":"422"}
+ *
+ * `status` is a JSON **string**. The message reproduces the ref segment the URL
+ * carried, verbatim and unnormalised: `DEADBEEF…` comes back uppercase and
+ * `deadbee` comes back as seven characters.
+ *
+ * The fixture below is built from those bytes and its length is asserted, because
+ * a fixture invented from the prose would let a classifier that never fires pass
+ * every case in this file.
+ */
+const LOCATOR_DOC_URL =
+  'https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit';
+
+function missingCommitBody(sha: string, over: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    message: `No commit found for SHA: ${sha}`,
+    documentation_url: LOCATOR_DOC_URL,
+    status: '422',
+    ...over,
+  });
+}
+
+describe('the locator’s missing-commit answer is read, and nothing else is', () => {
+  it('is the measured document, at the measured length', () => {
+    // 205 bytes for a 40-character object name. If GitHub's document ever
+    // changes shape this number moves before any classifier does, which is the
+    // point of asserting it.
+    expect(missingCommitBody('0'.repeat(40)).length).toBe(205);
+    expect(missingCommitBody(HEAD)).toContain(`"status":"422"`);
+    expect(locatorReportsNoCommit(missingCommitBody(HEAD), HEAD)).toBe(true);
+  });
+
+  it('reads the exact answer as its own outcome, and only through the locator', async () => {
+    const { runner } = recordingRunner({ pulls: { exitCode: 1, stdout: missingCommitBody(HEAD) } });
+    const read = await readPullCandidatesAtHead(subjectOf(), { runner, envSource: {} });
+    expect(read).toEqual({ ok: false, refusal: COMMIT_UNRESOLVED });
+  });
+
+  /**
+   * The observation surface is deliberately unchanged.
+   *
+   * `MATCHED` / `NO_MATCHING_PULL_REQUEST` / `AMBIGUOUS` are answers about a pull
+   * request, and "the forge would not resolve this object name" is not one — it
+   * is the refusal to give one, which is what `REQUEST_FAILED` has always said
+   * here. A fourth non-refusal word would sit in front of the settled allow-list
+   * and in front of the durable record contract for the sake of a report line.
+   */
+  it('does not reach the pull-request question’s own vocabulary', async () => {
+    const { runner } = recordingRunner({ pulls: { exitCode: 1, stdout: missingCommitBody(HEAD) } });
+    const observed = await observePullRequestAtHead(subjectOf(), { runner, envSource: {} });
+    expect(observed).toEqual({ outcome: 'REQUEST_FAILED' });
+  });
+
+  /**
+   * The hard constraint. A commit the forge will not resolve has **no** check
+   * state, and this build must never invent one for it.
+   *
+   * The two endpoints disagree about this world by design: `check-runs` answers
+   * the identical missing-commit document, and `status` answers HTTP **200**
+   * with `pending`, zero statuses and the requested sha echoed back. The check
+   * observation asks runs first for exactly that reason, and the classifier is
+   * not wired to either — so the answer here is a refusal and cannot be anything
+   * else.
+   */
+  it('never turns a missing commit into a check verdict', async () => {
+    const { runner } = recordingRunner({
+      'check-runs': { exitCode: 1, stdout: missingCommitBody(HEAD) },
+      status: { stdout: statusBody([]) },
+    });
+    const checks = await observeCheckStateAtCommit(subjectOf(), { runner, envSource: {} });
+    expect(checks).toEqual({ outcome: 'REQUEST_FAILED' });
+    expect(checks.outcome).not.toBe('NO_CHECKS');
+    expect(checks.outcome).not.toBe('PENDING');
+    expect(checks.outcome).not.toBe('SUCCESS');
+  });
+
+  /**
+   * Every adversarial body, and each must fall through to today's answer.
+   *
+   * Nine of these are shapes `github.com` really produces — measured on
+   * 2026-08-28 — and the rest are shapes a stub, a proxy or a future API could.
+   * None of them is the measured answer for this subject, so none of them may
+   * become one.
+   */
+  it.each([
+    ['a different 40-hex object name', missingCommitBody('b'.repeat(40))],
+    ['an abbreviated name', missingCommitBody('10583ee')],
+    ['the same name in upper case', missingCommitBody(HEAD.toUpperCase())],
+    ['a branch name, which the message still calls a SHA', missingCommitBody('main')],
+    ['no name at all', JSON.stringify({ message: 'No commit found for SHA', documentation_url: LOCATOR_DOC_URL, status: '422' })],
+    ['the same 422 with another message', JSON.stringify({ message: 'Validation Failed', documentation_url: LOCATOR_DOC_URL, status: '422' })],
+    ['a validation 422, which carries an errors array', missingCommitBody(HEAD, { errors: [{ resource: 'Search' }] })],
+    // The three that isolate the status check. Every other case in this table
+    // changes the message too, so without these a classifier that never looked
+    // at the status would pass the whole table — measured: that mutant survived
+    // the first version of this file.
+    ['this exact message under a 404', missingCommitBody(HEAD, { status: '404' })],
+    ['this exact message under a 409', missingCommitBody(HEAD, { status: '409' })],
+    ['this exact message under a 500', missingCommitBody(HEAD, { status: '500' })],
+    ['a repository that is not there', JSON.stringify({ message: 'Not Found', documentation_url: LOCATOR_DOC_URL, status: '404' })],
+    ['an empty repository', JSON.stringify({ message: 'Git Repository is empty.', documentation_url: LOCATOR_DOC_URL, status: '409' })],
+    ['a credential the forge rejected', JSON.stringify({ message: 'Bad credentials', documentation_url: 'https://docs.github.com/rest', status: '401' })],
+    ['a permission the login does not have', JSON.stringify({ message: 'You must have repository read permissions', documentation_url: LOCATOR_DOC_URL, status: '403' })],
+    ['the same answer from the check-runs endpoint', missingCommitBody(HEAD).replace(LOCATOR_DOC_URL, 'https://docs.github.com/rest/checks/runs#list-check-runs-for-a-git-reference')],
+    ['the same answer from the single-commit endpoint', missingCommitBody(HEAD).replace(LOCATOR_DOC_URL, 'https://docs.github.com/rest/commits/commits#get-a-commit')],
+    ['a status that is a number rather than a string', JSON.stringify({ message: `No commit found for SHA: ${HEAD}`, documentation_url: LOCATOR_DOC_URL, status: 422 })],
+    ['a document with no status', JSON.stringify({ message: `No commit found for SHA: ${HEAD}`, documentation_url: LOCATOR_DOC_URL })],
+    ['a document with no message', JSON.stringify({ documentation_url: LOCATOR_DOC_URL, status: '422' })],
+    ['a document with no documentation url', JSON.stringify({ message: `No commit found for SHA: ${HEAD}`, status: '422' })],
+    ['an array', JSON.stringify([{ message: `No commit found for SHA: ${HEAD}`, documentation_url: LOCATOR_DOC_URL, status: '422' }])],
+    ['a JSON null', 'null'],
+    ['a JSON string', '"No commit found for SHA"'],
+    ['a body that is not JSON', 'gh: No commit found for SHA (HTTP 422)'],
+    ['no body at all', ''],
+  ])('refuses %s, and stays REQUEST_FAILED', async (_label, stdout) => {
+    expect(locatorReportsNoCommit(stdout, HEAD)).toBe(false);
+    const { runner } = recordingRunner({ pulls: { exitCode: 1, stdout } });
+    const read = await readPullCandidatesAtHead(subjectOf(), { runner, envSource: {} });
+    expect(read).toEqual({ ok: false, refusal: 'REQUEST_FAILED' });
+  });
+
+  /**
+   * The document is read only after the exit code has been judged, and only for
+   * a completion. A client that timed out, was not found, or reports that it
+   * needs an authentication produced no answer, and a document on its stdout is
+   * not one either.
+   */
+  it.each([
+    ['a client that is not installed', { outcome: 'NOT_FOUND' as const, started: false }, 'FORGE_CLIENT_ABSENT'],
+    ['a client that timed out', { outcome: 'TIMED_OUT' as const }, 'FORGE_CLIENT_UNUSABLE'],
+    ['a client that needs an authentication', { exitCode: 4 }, 'NOT_AUTHENTICATED'],
+  ])('does not read the document for %s', async (_label, over, expected) => {
+    const { runner } = recordingRunner({
+      pulls: { ...over, stdout: missingCommitBody(HEAD) },
+    });
+    const read = await readPullCandidatesAtHead(subjectOf(), { runner, envSource: {} });
+    expect(read).toEqual({ ok: false, refusal: expected });
+  });
+
+  /** Nothing about the successful path moves. */
+  it('leaves every successful answer exactly as it was', async () => {
+    const empty = recordingRunner({ pulls: { stdout: '[]' } });
+    expect(await readPullCandidatesAtHead(subjectOf(), { runner: empty.runner, envSource: {} })).toEqual({
+      ok: true,
+      candidates: [],
+    });
+
+    const one = recordingRunner({
+      pulls: { stdout: pullsBody([{ number: 55, state: 'open', sha: HEAD }]) },
+    });
+    const read = await readPullCandidatesAtHead(subjectOf(), { runner: one.runner, envSource: {} });
+    expect(read.ok).toBe(true);
+    expect((await observePullRequestAtHead(subjectOf(), {
+      runner: recordingRunner({ pulls: { stdout: pullsBody([{ number: 55, state: 'open', sha: HEAD }]) } }).runner,
+      envSource: {},
+    })).outcome).toBe('MATCHED');
+
+    // A full page is still a page that may be a prefix, whatever the classifier
+    // does with a failing one.
+    const full = recordingRunner({
+      pulls: {
+        stdout: pullsBody(
+          Array.from({ length: OBSERVATION_PAGE_SIZE }, (_v, i) => ({
+            number: i + 1,
+            state: 'open',
+            sha: HEAD,
+          })),
+        ),
+      },
+    });
+    expect(
+      await readPullCandidatesAtHead(subjectOf(), { runner: full.runner, envSource: {} }),
+    ).toEqual({ ok: false, refusal: 'RESULTS_TRUNCATED' });
+  });
+
+  /**
+   * The shared vocabulary did not grow, and that is a decision rather than an
+   * omission.
+   *
+   * `OBSERVATION_REFUSALS` is documented as the refusals *both* questions share.
+   * This reading is the locator's alone, so putting it in that list would make
+   * the sentence false and would widen the check question's own outcome type
+   * with a value it can never hold.
+   */
+  it('is not a member of the shared refusal vocabulary', () => {
+    expect(OBSERVATION_REFUSALS).not.toContain(COMMIT_UNRESOLVED);
+    expect(OBSERVATION_REFUSALS).toHaveLength(10);
   });
 });
 

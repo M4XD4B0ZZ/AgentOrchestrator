@@ -191,11 +191,16 @@ function sameSubject(a: PullRequestCreationSubject, b: PullRequestCreationSubjec
 /**
  * Reads which pull requests carry this exact commit as their head.
  *
- * A refusal of any kind becomes `UNKNOWN`. The refusal vocabulary is slice 2's
- * and is rich, but every member of it means the same thing here — this build
- * did not establish what is on the forge — and a mutation ladder that branched
- * on *why* it could not see would be a ladder deciding whether to act on the
- * shape of an error.
+ * Anything that is not a candidate set becomes `UNKNOWN`. The locator's answers
+ * are rich — slice 2's refusal vocabulary, plus the one reading V4 slice 18R
+ * added, the forge saying it will not resolve this object name to a commit — and
+ * every one of them means the same thing *here*: this build did not establish
+ * what is on the forge, and a **mutation** ladder that branched on why would be
+ * deciding whether to act on the shape of an error.
+ *
+ * That is a statement about this ladder, not about the vocabulary. The
+ * reconciliation does tell one of them apart, and may: it decides nothing to
+ * mutate, and what it hands back is a *position* rather than a permission.
  */
 async function readSituation(
   subject: PullRequestCreationSubject,

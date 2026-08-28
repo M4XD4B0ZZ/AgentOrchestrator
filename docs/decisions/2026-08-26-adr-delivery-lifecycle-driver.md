@@ -247,6 +247,7 @@ should be, and the nominal member is about a delivery that is already finished.
 | a record that cannot be read | **none** |
 | a standing verdict, pass or fail | **none** |
 | no receipt | the reconciliation's two questions, then the observation's two |
+| no receipt, and the locator will not resolve the delivery commit | the reconciliation's **first** question only, then the publication's own local readings. V4 slice 18R: the observation is not asked, because neither of its questions can be answered about a commit the forge will not resolve |
 | an act that mutates | that act's own readings, one request, one reading |
 
 No path here runs `git fetch`, and the driver adds none — `L-V4-09-3` is the

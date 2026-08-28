@@ -678,6 +678,16 @@ const DRIVE_EXIT_CODES = Object.freeze({
   // under the same shell answer as "the checks failed".
   ATTENDED_AUTHORITY_REQUIRED: EXIT_RUN_REFUSED,
   FORGE_STATE_UNKNOWN: EXIT_RUN_REFUSED,
+  // Two readings that answered and disagreed. Nothing was sent, nothing is
+  // durably wrong, and the next invocation reads a world that has moved on —
+  // which is 4's definition above, word for word.
+  //
+  // Not 5, and the difference is not a preference. 5 means an act was attempted
+  // and the next invocation must read what happened; here nothing was attempted,
+  // and the count in this table's own header — "`EXIT_RUN_CALL_AGAIN` appears
+  // exactly twice, and both times the instruction is literal" — would have
+  // become false as well as wrong.
+  FORGE_READINGS_DISAGREE: EXIT_RUN_REFUSED,
   OBSERVATION_UNSETTLED: EXIT_RUN_REFUSED,
   SUBJECT_CHANGED: EXIT_RUN_REFUSED,
   PULL_REQUEST_REQUIRED: EXIT_RUN_REFUSED,

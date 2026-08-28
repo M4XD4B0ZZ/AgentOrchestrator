@@ -933,8 +933,8 @@ describe('a merged-pull-request claim can only come from a reading', () => {
 // ── 3. The ladder: exact identity, from the forge ──────────────────────────
 
 describe('a merge is established from the delivery commit, and bound to it', () => {
-  it('names ten outcomes, each with its own sentence, and no dead member', () => {
-    expect(MERGE_OBSERVATIONS).toHaveLength(10);
+  it('names eleven outcomes, each with its own sentence, and no dead member', () => {
+    expect(MERGE_OBSERVATIONS).toHaveLength(11);
     expect(new Set(MERGE_OBSERVATIONS).size).toBe(MERGE_OBSERVATIONS.length);
     for (const o of MERGE_OBSERVATIONS) {
       expect(MERGE_OBSERVATION_DETAIL[o], o).toBeTruthy();
@@ -1133,6 +1133,134 @@ describe('a merge is established from the delivery commit, and bound to it', () 
       expect(source, token).not.toContain(token);
     }
     expect(codeOnly('src/cli/delivery-command.ts')).toContain('loadDeliveryEvidence');
+  });
+});
+
+/**
+ * V4 slice 18R — the one locator answer this ladder tells apart.
+ *
+ * Measured against `github.com` on 2026-08-28: a commit the repository cannot
+ * resolve makes `commits/{sha}/pulls` answer HTTP 422 with
+ * `{"message":"No commit found for SHA: <sha>", …, "status":"422"}` and `gh`
+ * exit 1. Before this slice that was one more `FORGE_UNREADABLE`, and the
+ * driver could therefore never reach the act whose whole purpose is to put the
+ * commit on the forge — the real defect the M1 dogfood found.
+ */
+describe('the forge answering that it cannot resolve the delivery commit', () => {
+  const LOCATOR_DOC_URL =
+    'https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit';
+
+  const missing = (sha: string, over: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      message: `No commit found for SHA: ${sha}`,
+      documentation_url: LOCATOR_DOC_URL,
+      status: '422',
+      ...over,
+    });
+
+  /** The locator answers the measured document with the exit code `gh` reports. */
+  function refusingReader(stdout: string): ForgeCommandRunner {
+    return (async (_command, args) => {
+      const path = (args as readonly string[]).find((a) => a.startsWith('repos/')) ?? '';
+      if (path.endsWith('/pulls')) return commandResult({ exitCode: 1, stdout });
+      throw new Error(`unexpected request: ${path}`);
+    }) as ForgeCommandRunner;
+  }
+
+  it('is its own outcome, decided from one request, and mints nothing', async () => {
+    const out = await observeMergeForDelivery(
+      subjectOf(),
+      seamsOf(refusingReader(missing(HEAD))),
+    );
+    expect(out.outcome).toBe('DELIVERY_COMMIT_UNRESOLVED');
+    // A process ran and github.com replied, so the egress disclosure is owed.
+    expect(out.contacted).toBe(true);
+    // Decided before any pull request was addressed, so it carries none of the
+    // fields that only an addressed pull request can fill.
+    expect(out.pullRequestNumber).toBeNull();
+    expect(out.reading).toBeNull();
+    expect(out.proof).toBeNull();
+  });
+
+  it('sits between the refusal and the report, weakest claim first', () => {
+    // `MERGE_OBSERVATIONS` says of itself that it is ordered as the ladder
+    // decides, weakest claim first. This member is decided after
+    // `FORGE_UNREADABLE`'s conditions and before any candidate set exists, so
+    // that is where it belongs — and the position is pinned rather than assumed,
+    // because the report-shape table two sections down is built from this array
+    // and would silently encode whatever order it found.
+    const at = (o: MergeObservationOutcome): number => MERGE_OBSERVATIONS.indexOf(o);
+    expect(at('DELIVERY_COMMIT_UNRESOLVED')).toBe(at('FORGE_UNREADABLE') + 1);
+    expect(at('NO_PULL_REQUEST_AT_HEAD')).toBe(at('DELIVERY_COMMIT_UNRESOLVED') + 1);
+  });
+
+  /**
+   * The sentence, pinned by literal — and, which matters more here, pinned
+   * against the six things it must not grow into.
+   *
+   * This is the one member of this vocabulary that a driver consumes as a
+   * premise for an irreversible act, so an operator sentence that claimed more
+   * than the endpoint established would be the worst kind of drift.
+   */
+  it('claims what the forge answered, and none of the six neighbouring claims', () => {
+    const sentence = MERGE_OBSERVATION_DETAIL.DELIVERY_COMMIT_UNRESOLVED;
+    expect(sentence).toBe(
+      'Asked which pull requests carry this task’s delivery commit, the forge answered that it ' +
+        'found no commit with that object name in this repository. Nothing about a pull request, ' +
+        'about a merge, or about where this commit has been is established.',
+    );
+    // It attributes — "the forge answered" — rather than adopting.
+    expect(sentence).toContain('the forge answered');
+    for (const forbidden of [
+      'does not exist',
+      'never',
+      'not merged',
+      'was not published',
+      'no pull request has',
+      'nowhere',
+    ]) {
+      expect(sentence.toLowerCase(), forbidden).not.toContain(forbidden);
+    }
+  });
+
+  /**
+   * Everything that is not the measured answer for this exact subject stays
+   * `FORGE_UNREADABLE`, which is where it was before this slice.
+   *
+   * The wrong-subject case is the load-bearing one: without the equality against
+   * the object name the request was built from, a crossed or replayed answer
+   * would authorise a publication for somebody else's commit.
+   */
+  it.each([
+    ['an answer naming a different commit', missing('b'.repeat(40))],
+    ['an answer naming an abbreviation', missing('10583ee')],
+    ['an answer naming the same commit in upper case', missing(HEAD.toUpperCase())],
+    ['a validation 422 carrying an errors array', missing(HEAD, { errors: [{ field: 'q' }] })],
+    ['this exact message under a 404', missing(HEAD, { status: '404' })],
+    ['this exact message under a 500', missing(HEAD, { status: '500' })],
+    ['a 404 for a repository that is not there', JSON.stringify({ message: 'Not Found', documentation_url: LOCATOR_DOC_URL, status: '404' })],
+    ['a 409 for an empty repository', JSON.stringify({ message: 'Git Repository is empty.', documentation_url: LOCATOR_DOC_URL, status: '409' })],
+    ['a 401 for a credential the forge rejected', JSON.stringify({ message: 'Bad credentials', documentation_url: 'https://docs.github.com/rest', status: '401' })],
+    ['the same answer from another endpoint', missing(HEAD).replace(LOCATOR_DOC_URL, 'https://docs.github.com/rest/checks/runs#list-check-runs-for-a-git-reference')],
+    ['a body that is not JSON', 'gh: No commit found for SHA (HTTP 422)'],
+    ['no body at all', ''],
+  ])('grades %s as unreadable, exactly as before', async (_label, stdout) => {
+    const out = await observeMergeForDelivery(subjectOf(), seamsOf(refusingReader(stdout)));
+    expect(out.outcome).toBe('FORGE_UNREADABLE');
+    expect(out.proof).toBeNull();
+  });
+
+  /**
+   * The recovery property this member must not eat.
+   *
+   * A merged pull request whose head branch was deleted still resolves through
+   * the locator — measured on this repository for pull requests 49, 50 and, on
+   * 2026-08-28, 74. So the missing-commit answer never arises for it, and the
+   * ladder reconciles rather than concluding the head is not there.
+   */
+  it('never fires for a merged delivery whose head branch was deleted', async () => {
+    const out = await observeMergeForDelivery(subjectOf(), seamsOf(reads().runner));
+    expect(out.outcome).toBe('MERGE_OBSERVED');
   });
 });
 

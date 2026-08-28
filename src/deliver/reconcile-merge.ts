@@ -17,11 +17,13 @@
  *
  * *At most* rather than exactly two, because the second request is only sent
  * once the first has produced exactly one pull request. A subject this build
- * will not address sends none at all, and every outcome decided from the
- * candidate set alone stops after the first: a locator that refused or could not
- * be classified, no pull request at this head, one still open, or more than one.
- * An earlier version of this clause named two of those six and a review counted
- * the rest.
+ * will not address sends none at all, and **every** outcome that does not reach
+ * the second read stops after the first. The rule rather than a list, because
+ * two successive versions of this clause were lists and a review counted both
+ * short: it is every member of the vocabulary below ordered before
+ * {@link NOT_MERGED} — which now includes one decided before there is any
+ * candidate set to look at, {@link DELIVERY_COMMIT_UNRESOLVED}, the forge
+ * answering that it will not resolve this object name to a commit here.
  *
  * ── Why it does not take a MergeGrant, and must not ────────────────────────
  *
@@ -92,6 +94,7 @@
  */
 
 import {
+  COMMIT_UNRESOLVED,
   createObservationSubject,
   type ObservationSubject,
 } from './forge-observation.js';
@@ -180,14 +183,63 @@ export const MERGE_OBSERVATIONS = [
    * same thing here: this build did not establish what the pull request is. A
    * ladder that branched on *why* it could not see would be deciding whether to
    * act on the shape of an error.
+   *
+   * That sentence is about the **refusals**, and V4 slice 18R is why it now has
+   * to say so out loud. The locator can also come back with something that is
+   * not a refusal at all: the forge's own answer, out of its own error document,
+   * that it will not resolve this object name to a commit in this repository.
+   * That is not "could not see" — it is a thing seen, and it is
+   * {@link DELIVERY_COMMIT_UNRESOLVED} below. The line is not the shape of an
+   * error; it is whether the far side answered the question or declined to be
+   * asked.
    */
   'FORGE_UNREADABLE',
+  /**
+   * Asked which pull requests carry this commit, the forge answered that it
+   * found no commit with that object name in this repository.
+   *
+   * The one member decided **before there is a candidate set at all**, and the
+   * reason it is not {@link FORGE_UNREADABLE} is that the forge answered. It is
+   * read out of the locator's error document, bound to the exact object name the
+   * request carried, by `locatorReportsNoCommit` — whose header sets out what
+   * that document establishes and, at greater length, what it does not.
+   *
+   * What it does **not** say. Each of these was a candidate wording, and each is
+   * either false or unestablished:
+   *
+   *  - **not** "this commit does not exist". Measured against `github.com` on
+   *    2026-08-28: a tree object and a blob object that are both present in this
+   *    repository produce the identical answer, as does a commit that exists in
+   *    another repository. The endpoint resolves commits, in one repository, and
+   *    this is its refusal to resolve one;
+   *  - **not** "no pull request has this head". That is
+   *    {@link NO_PULL_REQUEST_AT_HEAD}, and it is a *report* — an empty array,
+   *    read in full. Here there is no array to read;
+   *  - **not** "this delivery is not merged". Nothing was addressed by number,
+   *    and a commit merged through a fork, a rename or a transfer answers exactly
+   *    this way. `L-V4-08-1` already records that this ladder cannot refuse what
+   *    it cannot see, and this member inherits that limit rather than closing it;
+   *  - **not** "the head was never published". A remote ref is a different
+   *    question, asked of the delivery remote by `head-publication.ts`, and this
+   *    member is decided without asking it.
+   *
+   * What it is *for* is narrower than any of those: it is the one condition under
+   * which the driver will consider publishing the head, and the act that follows
+   * is create-only and fenced server-side — so even where this answer is wrong,
+   * what it permits cannot move a ref that is already there.
+   */
+  'DELIVERY_COMMIT_UNRESOLVED',
   /**
    * The forge reports no pull request whose head is this commit.
    *
    * Absence of a pull request, never a claim that the work was not delivered.
    * A delivery landed by some route that never opened one is a real thing, and
    * it is not something this build has any way to see.
+   *
+   * Separate from {@link DELIVERY_COMMIT_UNRESOLVED} above, and the separation is
+   * two different answers on the wire rather than two spellings of one: this is
+   * HTTP 200 with an empty array — the candidate set, read in full — and that one
+   * is the refusal to produce a candidate set at all.
    */
   'NO_PULL_REQUEST_AT_HEAD',
   /**
@@ -267,6 +319,8 @@ export const MERGE_OBSERVATION_DETAIL: Readonly<Record<MergeObservationOutcome, 
       'The task is not at READY_FOR_PR, so its current commit is not a delivery head.',
     FORGE_UNREADABLE:
       'The forge could not be read, or its answer could not be classified. Nothing was established.',
+    DELIVERY_COMMIT_UNRESOLVED:
+      'Asked which pull requests carry this task’s delivery commit, the forge answered that it found no commit with that object name in this repository. Nothing about a pull request, about a merge, or about where this commit has been is established.',
     NO_PULL_REQUEST_AT_HEAD:
       'The forge reports no pull request whose head is this task’s delivery commit.',
     PULL_REQUEST_STILL_OPEN:
@@ -396,7 +450,19 @@ export async function observeMergeForDelivery(
     runner: seams.reader,
     envSource: seams.envSource,
   });
-  if (!candidates.ok) return outcome('FORGE_UNREADABLE', true);
+  if (!candidates.ok) {
+    // One reading of that endpoint is an answer rather than a refusal, and it is
+    // the only one this ladder tells apart. Everything else — not authenticated,
+    // the request failed, the response was malformed, the page may be a prefix —
+    // stays one word, for the reason `FORGE_UNREADABLE` gives at its own
+    // declaration.
+    //
+    // `contacted` is true either way: a process ran and github.com replied.
+    return outcome(
+      candidates.refusal === COMMIT_UNRESOLVED ? 'DELIVERY_COMMIT_UNRESOLVED' : 'FORGE_UNREADABLE',
+      true,
+    );
+  }
 
   const situation = classifyPullRequestSituation(candidates.candidates, subject.deliveryCommit);
   switch (situation.outcome) {
