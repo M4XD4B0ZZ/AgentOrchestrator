@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import {
   mintPostMergeVerification,
@@ -368,6 +368,18 @@ function repositoryTemplate(): { path: string; baseCommit: string; mergeCommit: 
   templateRepo = { path, baseCommit, mergeCommit };
   return templateRepo;
 }
+
+/** The memoised template's own removal — never the per-case copies. */
+afterAll(() => {
+  const path = templateRepo?.path ?? null;
+  templateRepo = null;
+  if (path === null) return;
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    /* a leftover template directory is not a test failure */
+  }
+});
 
 /** A working copy of the template, at a fresh scratch root. */
 function copyTemplate(prefix: string): { root: string; baseCommit: string; mergeCommit: string } {

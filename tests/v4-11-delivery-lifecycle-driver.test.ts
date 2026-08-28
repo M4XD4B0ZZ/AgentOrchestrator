@@ -37,7 +37,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import {
   DELIVERY_DRIVES,
@@ -189,6 +189,18 @@ function repositoryTemplate(): { path: string; gitCommonDir: string; mergeCommit
   };
   return template;
 }
+
+/** The memoised template's own removal — never the per-case copies. */
+afterAll(() => {
+  const path = template?.path ?? null;
+  template = null;
+  if (path === null) return;
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    /* a leftover template directory is not a test failure */
+  }
+});
 
 interface Fixture {
   readonly root: string;
