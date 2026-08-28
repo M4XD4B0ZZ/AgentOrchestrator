@@ -343,10 +343,11 @@ export const PUBLICATION_GRANT_REFUSAL_DETAIL: Readonly<
   AUTOMATIC_PUBLICATION_WITHOUT_DRIVE:
     '--automatic-publish-head-only requires --drive. Publishing with nobody present is only ' +
     'done from a position this invocation worked out for itself: a concluded delivery stops, ' +
-    'the merge receipt and the verification history are read, and a merge already on the forge ' +
-    'is reconciled before anything is published. Where the forge can answer about this head, ' +
-    'the pull-request situation is observed fresh as well. A bare publication would skip all ' +
-    'of that.',
+    'the merge receipt and the verification history are read, and this build asks github.com ' +
+    'whether this delivery is already merged. Where the forge can answer about this head, the ' +
+    'pull-request situation is observed fresh as well. A bare publication would skip all of ' +
+    'that. What the asking establishes is bounded by what one repository will answer, which is ' +
+    'what L-V4-08-1 records.',
   AUTOMATIC_PUBLICATION_WITHOUT_ACT:
     '--automatic-publish-head-only is a grant and not an act, and it grants exactly one. Name ' +
     'that act with --publish-head. It is refused rather than left inert, which is where this ' +
@@ -737,8 +738,9 @@ export const AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION =
   'merge, not a comment, not a branch deletion and not an update of a ref that already exists ' +
   '— and it is refused together with --attended, --create-pr or --merge-pr. Requires --drive ' +
   'and --publish-head: publishing with nobody present is done only from a position this ' +
-  'invocation derived for itself, so a concluded delivery stops and a merge already on the ' +
-  'forge is reconciled first. It is not sufficient on its own. This machine’s operator must ' +
+  'invocation derived for itself, so a concluded delivery stops and a delivery that is ' +
+  'already merged on the forge is found first. It is not sufficient on its own. This ' +
+  'machine’s operator must ' +
   'also have declared this exact repository publishable that way, in ' +
   '<user profile>/.agent-orchestrator/delivery-automation.yaml, by host, owner and name; no ' +
   'file, no entry, or an entry saying ATTENDED_ONLY all refuse, and a file that cannot be read ' +

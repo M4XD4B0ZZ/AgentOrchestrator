@@ -221,7 +221,7 @@ Four kinds, kept apart:
 
 This table is a **slice-11 snapshot** and is not maintained as the vocabulary
 grows: it already omitted `PUBLICATION_AUDIT_NOT_DURABLE` and
-`PUBLICATION_OUTCOME_NOT_DURABLE` (V4 slices 13 and 16), and V4 slice 18R adds
+`PUBLICATION_OUTCOME_NOT_DURABLE` (V4 slices 14 and 16), and V4 slice 18R adds
 `FORGE_READINGS_DISAGREE` — two readings that answered and disagreed, graded 4
 with the other "achieved nothing and nothing durable is wrong" members. The
 source of truth is `DRIVE_EXIT_CODES` in `src/cli/run-exit-codes.ts`, which is

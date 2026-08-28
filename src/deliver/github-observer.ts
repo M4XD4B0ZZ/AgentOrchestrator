@@ -346,6 +346,11 @@ async function request<E extends string = never>(
     return Object.freeze({ ok: false as const, refusal: 'ENVIRONMENT_UNUSABLE' as const });
   }
 
+  // The reader below runs only for a `COMPLETED` result whose exit code is a
+  // number other than 0 and 4. Stated as a rule rather than as the list of gates
+  // in front of it, because a review measured three separate enumerations of
+  // those gates going short by one in the same commit that added the fourth.
+  //
   // `runCommand` is documented to throw exactly one error — `UnsafeArgumentError`,
   // for a token outside the argument grammar — and that is a programming error
   // in this repository rather than a runtime condition. The three existing seams
@@ -397,11 +402,18 @@ async function request<E extends string = never>(
     return Object.freeze({ ok: false as const, refusal: 'NOT_AUTHENTICATED' as const });
   }
   // A completion this build cannot grade is refused with the failures, and that
-  // includes refusing to read its body. `exitCode: null` on a COMPLETED result is
-  // measured — a client killed by something outside AO — and the document on its
-  // stdout is not evidence that the far side answered. A review found the error
-  // reader running for it, three comments away from the sentence saying it does
-  // not, and this is that sentence made true.
+  // includes refusing to read its body: the document on its stdout is not
+  // evidence that the far side answered.
+  //
+  // **This shape does not come from `runCommand` on the supported platform.**
+  // A second review measured the opposite of what the first version of this
+  // comment claimed: `toCommandResultFields` converts a completion carrying a
+  // null exit code to `BOUNDARY_LOST`, and `tests/v3-03-…` pins exactly that. So
+  // the arm above catches it one line earlier, and this guard refuses a
+  // `CommandResult` only a substituted runner can hand in. It is here because
+  // `deps.runner` is a required seam with no default and an arbitrary
+  // implementation — which is precisely the shape the first review reached it
+  // through — and not because the far side produces it.
   if (typeof result.exitCode !== 'number') {
     return Object.freeze({ ok: false as const, refusal: 'REQUEST_FAILED' as const });
   }

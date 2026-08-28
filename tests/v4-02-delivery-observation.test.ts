@@ -1089,10 +1089,15 @@ describe('the locator’s missing-commit answer is read, and nothing else is', (
   });
 
   /**
-   * The document is read only after the exit code has been judged, and only for
-   * a completion. A client that timed out, was not found, or reports that it
-   * needs an authentication produced no answer, and a document on its stdout is
-   * not one either.
+   * The rule: the document is read only for a **completion whose exit code is a
+   * number other than 0 and 4**. A client that timed out, was not found, reports
+   * that it needs an authentication, or completed in a way this build cannot
+   * grade has produced no answer, and a document on its stdout is not one
+   * either.
+   *
+   * Stated as a rule because the first version of this docstring said "only for
+   * a completion" over a three-row table, and the row added directly beneath it
+   * is a completion for which the document is *not* read.
    */
   it.each([
     ['a client that is not installed', { outcome: 'NOT_FOUND' as const, started: false }, 'FORGE_CLIENT_ABSENT'],

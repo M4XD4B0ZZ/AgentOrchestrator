@@ -788,22 +788,39 @@ describe('the driver vocabulary is closed, total and graded', () => {
    * the same defect in the same commit — then found the brand-new member
    * repeating it.
    *
-   * The reason it is a rule: **every** producer of every member below has
-   * already sent at least the reconciliation's locator request by the time it is
-   * reached, and several have read the delivery remote as well. What this driver
-   * can honestly claim about egress is that it performed no *mutation*, so that
-   * is what the sentences say. A member that could truthfully say more would be
-   * one reached before any request exists, and the three of those are the
-   * caller's own floors, whose sentences say "contacted" rather than "sent".
+   * The reason it is a rule, and not the reason the first version of this comment
+   * gave. That one said every producer of every member has already sent the
+   * locator request, and a review measured nine members reachable with **zero**
+   * forge requests — the three caller floors, five more from the first
+   * conclusion read, and one from the verification gate, which all run before
+   * the reconciliation exists.
+   *
+   * The real ground is that **a member's sentence is static and its producers
+   * are not**. `SUBJECT_NOT_ESTABLISHED`, `FORGE_STATE_UNKNOWN` and
+   * `SUBJECT_CHANGED` are each produced both before any request exists and from
+   * deep inside the publication ladder, so no fixed sentence for them can claim
+   * that nothing left this machine. What is true of every producer of every
+   * member is that this driver performed no *mutation* — that is the claim the
+   * vocabulary can carry, and this is the floor that keeps it there.
+   *
+   * It is deliberately a floor over the whole vocabulary rather than over the
+   * members that need it. Nine members could truthfully say more; none does, and
+   * a rule that had to name which is which would go stale at the next slice.
    */
   it('says no mutation was sent, never that nothing was', () => {
     for (const member of DELIVERY_DRIVES) {
       const sentence = DELIVERY_DRIVE_DETAIL[member];
       // An unqualified claim only. `PUBLICATION_OUTCOME_NOT_DURABLE` says
-      // "Nothing was sent a second time", which is a statement about a RETRY
-      // and is true of it — the run it describes did send something. That is
-      // the one qualification this rule admits, and it is named rather than
-      // excepted, so a member that grew the bare claim back is still red.
+      // "Nothing was sent a second time", which is a claim about a RETRY: it
+      // says this run did not repeat the act, and it is true of every producer,
+      // including the ones that sent nothing at all — where it is vacuously
+      // true rather than informative, and the `Publication` and `Outcome` lines
+      // beside it are what tell those apart. (An earlier version of this comment
+      // said the run it describes "did send something", which a review measured
+      // false: the member is reachable with zero pushes.)
+      //
+      // That is the one qualification this rule admits, and it is named rather
+      // than excepted, so a member that grew the bare claim back is still red.
       for (const m of sentence.matchAll(/[Nn]othing was sent/g)) {
         const rest = sentence.slice((m.index ?? 0) + m[0].length);
         expect(rest.startsWith(' a second time'), `${member}: ${sentence}`).toBe(true);

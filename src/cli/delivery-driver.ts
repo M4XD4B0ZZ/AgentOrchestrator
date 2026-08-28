@@ -80,11 +80,16 @@
  * same pass; if its outcome record cannot be established it now stops instead.
  * That is fail-closed and deliberate — a run that cannot say what it did should
  * not go on to do something else — and it was, at slice 16, the only place where
- * what this driver stops at changed. V4 slice 18R adds the second and last one:
- * on the pre-publication branch an `ALREADY_PUBLISHED` does **not** go on to the
- * creation either, because that branch holds no observation to go on with. Both
- * are the same shape — a run that cannot say what it is looking at stops — and
- * everywhere else the stopping is unchanged.
+ * what this driver stops at changed.
+ *
+ * V4 slice 18R changes it again, and deliberately does **not** say in how many
+ * places: a world that stopped at `FORGE_STATE_UNKNOWN` before any act now
+ * reaches one, a world with no publication grant now stops at
+ * `ATTENDED_AUTHORITY_REQUIRED` instead, and on the new branch an
+ * `ALREADY_PUBLISHED` does not go on to the creation. A count here was written
+ * once and a review found it short in two directions. The rule that survives
+ * counting is the one above: this driver stops at the first act that reports an
+ * attempt, and at the first condition it cannot legitimately cross.
  *
  * Three things follow, and they are the whole safety argument:
  *

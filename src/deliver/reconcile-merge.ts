@@ -17,9 +17,14 @@
  *
  * *At most* rather than exactly two, because the second request is only sent
  * once the first has produced exactly one pull request. A subject this build
- * will not address sends none at all, and every outcome decided **without
- * addressing a pull request by number** stops after the first: the locator's own
- * answers, and everything the candidate set alone settles.
+ * will not address sends none at all, and no outcome decided **without
+ * addressing a pull request by number** sends a second request.
+ *
+ * Stated as a bound on requests rather than as a place in the ladder, because
+ * every positional version of it has been wrong: "stops after the first" is
+ * false of the two members the caller owns, which send none, and the version
+ * before that was false of {@link FORGE_UNREADABLE}, which is produced on both
+ * sides of the second read.
  *
  * A rule rather than a list, because three successive versions of this clause
  * were lists and a review counted every one of them wrong — including the
@@ -219,8 +224,9 @@ export const MERGE_OBSERVATIONS = [
    *
    *  - **not** "this commit does not exist". Measured against `github.com` on
    *    2026-08-28: a tree object and a blob object that are both present in this
-   *    repository produce the identical answer, as does a commit that exists in
-   *    another repository. The endpoint resolves commits, in one repository, and
+   *    repository produce the same answer — the same message, status and
+   *    documentation url, each with its **own** name echoed back — as does a
+   *    commit that exists in another repository. The endpoint resolves commits, in one repository, and
    *    this is its refusal to resolve one;
    *  - **not** "no pull request has this head". That is
    *    {@link NO_PULL_REQUEST_AT_HEAD}, and it is a *report* — an empty array,

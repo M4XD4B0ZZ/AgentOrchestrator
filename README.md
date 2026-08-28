@@ -9060,7 +9060,8 @@ The branch is published and the creation is refused. Publish in one invocation,
 then create in the next — `L-V4-06-10`.
 
 Earlier versions of that sentence read the 422 as "the forge has never seen the
-commit". V4 slice 18R measured that it does not say so: the identical answer
+commit". V4 slice 18R measured that it does not say so: the same answer — the
+same message, status and documentation url, each with its own name echoed back —
 comes back for a tree object and a blob object that are both present in this
 repository, and for a commit that exists in another one. What it says is that
 the forge would not resolve that object name **to a commit, there** — which is
@@ -10259,8 +10260,8 @@ conclusion and a task still reported as `READY_FOR_PR` remain the expected set.
 - **L-V4-11-9 — `FORGE_STATE_UNKNOWN` does not say which reading failed.** The
   forge could not answer the merge question, or an act's own reading of the
   remote ref, the pull request or the situation at this head could not be taken.
-  Which one is in the block above it; the driver's member says only that nothing
-  was sent and the next invocation begins with the same reading.
+  Which one is in the block above it; the driver's member says only that no
+  mutation was sent and the next invocation begins with the same reading.
 - **L-V4-11-10 — `HUMAN_DECISION_REQUIRED` is not always a person's doing.** Its
   sentence says one put this delivery where it is, and for most of its producers
   that is true. Three kinds reach it where it is not: `ALREADY_MERGED` from the
@@ -10588,8 +10589,8 @@ that it will not resolve the delivery commit at all, neither observation questio
 the guard this section is about. The reconciliation is the **stronger** check for
 a delivery that was merged and had its branch deleted, because the observation
 only ever sees *open* pull requests and a merged one is closed — and measured,
-twice, such a head still resolves through the locator and therefore never reaches
-that position at all.
+for pull requests 49, 50 and 74, such a head still resolves through the locator
+and therefore never reaches that position at all.
 
 ### Default deny, and four different ways of not saying yes
 
@@ -11485,6 +11486,12 @@ declaration key, no unattended pull request, no unattended merge.
 - **L-V4-18R-4 — the report still advises `--observe` on this path**, where the
   omission was deliberate and `--observe` would answer `OBSERVATION_UNSETTLED`
   for the same reason.
+- **L-V4-18R-6 — two sibling vocabularies still carry the sentence this slice
+  narrowed.** `PullRequestCreation`'s `ALREADY_EXISTS` and `PullRequestMerge`'s
+  `ALREADY_MERGED` each say "nothing was sent" about a member reached after a
+  read. Pre-existing, in vocabularies this blocker fix does not touch, and
+  deliberately not swept here — the rule pinned over `DELIVERY_DRIVES` cannot
+  see them. Named so the class is on the record.
 - **L-V4-18R-5 — a rejected credential arrives on exit 1, not 4.** Measured:
   `{"message":"Bad credentials",…,"status":"401"}` with `gh` exiting 1, so
   `NOT_AUTHENTICATED` under-fires and the reading is `REQUEST_FAILED`.

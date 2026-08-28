@@ -362,6 +362,15 @@ export function locatorReportsNoCommit(stdout: string, commit: string): boolean 
   // closing a hole rather than fixing a bug — and it costs one predicate.
   // Note the asymmetry that is deliberate: the `'errors' in record` test below
   // stays prototype-inclusive, because that one only ever *refuses*.
+  //
+  // Recorded rather than left to be discovered: **reverting these three lines to
+  // a destructure survives the whole suite.** Measured over every body
+  // `JSON.parse` can produce — including `{"__proto__":{…}}`, which becomes an own
+  // data property rather than a prototype — the two forms are identical, so the
+  // difference is observable only by polluting `Object.prototype`, which no test
+  // here does and none should. Same class as the `Array.isArray` note above, and
+  // the same treatment: a guard kept for what it says, with its own
+  // unkillability written down.
   const message = Object.hasOwn(record, 'message') ? record['message'] : undefined;
   const docUrl = Object.hasOwn(record, 'documentation_url')
     ? record['documentation_url']

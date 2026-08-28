@@ -2,8 +2,15 @@
 
 **Status:** accepted, 2026-08-28
 **Slice:** V4 slice 18R — a blocker fix, not a feature
-**Supersedes nothing.** Narrows `docs/decisions/2026-08-23-adr-delivery-observation-seam.md`
-and `docs/decisions/2026-08-26-adr-delivery-lifecycle-driver.md` in one place each.
+**Supersedes nothing.** Narrows four earlier decision records, each with a note
+left in place rather than an edit that would hide what was decided when:
+`2026-08-23-adr-delivery-observation-seam.md`,
+`2026-08-24-adr-pull-request-creation.md`,
+`2026-08-26-adr-delivery-lifecycle-driver.md` and
+`2026-08-26-adr-unattended-head-publication.md` (plus the flow diagram in
+`2026-08-27-adr-unattended-publication-audit.md`). A count of places is not
+given: the first version of this line said "in one place each" and a review
+measured it short in both directions.
 
 ---
 
@@ -224,10 +231,12 @@ word. A test asserts the report carries no such line.
 
 ## 10. Why generic failures still fail closed
 
-The transport's fail-closed treatment of arbitrary non-zero exits is untouched:
-the classifier runs *after* `NOT_FOUND`, after every non-`COMPLETED` outcome, and
-after `exitCode === 4`, and it returns `false` for everything that is not the one
-measured shape. Every adversarial body in the table at
+The transport's fail-closed treatment of arbitrary non-zero exits is untouched.
+The rule, rather than a list of the gates in front of the reader: **it runs only
+for a `COMPLETED` result whose exit code is a number other than 0 and 4**, and it
+returns `false` for everything that is not the one measured shape. The first
+version of this sentence enumerated three gates, and a review found it short by
+the fourth — which the review that found it had itself just added. Every adversarial body in the table at
 `tests/v4-02-delivery-observation.test.ts` is pinned — a count is deliberately not
 given, because the first version of this paragraph carried one and a review
 measured it three short of the table it described. They include a 404, a 409,
@@ -301,7 +310,8 @@ Both are pinned **on the new path**, by two cases in
 `tests/v4-16-publication-outcome-evidence.test.ts`: one obstructs the
 authorisation store's own root with an ordinary file and requires zero pushes,
 zero remote reads and `PUBLICATION_AUDIT_NOT_DURABLE`; the other fails the
-outcome write after a real push and requires `PUBLICATION_OUTCOME_NOT_DURABLE`.
+outcome write after a publication attempt and requires
+`PUBLICATION_OUTCOME_NOT_DURABLE`.
 The first of those was added by review: the claim in this paragraph was written
 before the case existed, which is exactly the shape a "correct by construction"
 argument hides.
@@ -359,6 +369,13 @@ remembered between invocations and nothing is retried inside one.
   the forge about this commit)` — true, but on this one path the omission was
   deliberate and `--observe` would answer `OBSERVATION_UNSETTLED` for the same
   reason. A `--drive`-aware sentence is a renderer change this fix did not make.
+- **`L-V4-18R-6` — two sibling vocabularies still carry the sentence this slice
+  narrowed.** `PullRequestCreation`'s `ALREADY_EXISTS` and `PullRequestMerge`'s
+  `ALREADY_MERGED` each say "nothing was sent" about a member reached after a
+  read. Pre-existing, in vocabularies this slice does not touch, and deliberately
+  not swept here: the rule pinned over `DELIVERY_DRIVES` cannot see them, and
+  widening this blocker fix into two more contracts is a change of its own. Named
+  so the class is on the record rather than rediscovered.
 - **`L-V4-18R-5` — a 401 arrives on exit 1, not 4.** Measured: a bad credential
   produces `{"message":"Bad credentials",…,"status":"401"}` and `gh` exits 1, so
   `NOT_AUTHENTICATED` under-fires and the reading is `REQUEST_FAILED`. Pre-existing,
@@ -368,4 +385,46 @@ remembered between invocations and nothing is retried inside one.
 
 ## What the reviews changed
 
-Recorded after the fact, in this file, when the two bounded review rounds run.
+Two bounded rounds, four independent read-only lenses each — GitHub error
+classification, driver and recovery order, evidence and overclaim, and
+authority/races/audit.
+
+**Neither round found a correctness or safety defect.** Both independently
+confirmed the control flow, the authority chain, the one-effect rule, the
+merged-and-branch-deleted recovery and the classifier's accept set. Everything
+they did find was a sentence — and three of round 1's, and all of round 2's,
+were written by this slice.
+
+Round 1, the one that mattered: the registered `--automatic-publish-head-only`
+help text, the operator-facing refusal detail, that member's doc comment and the
+README all named *the observation taken fresh* as the ground for requiring
+`--drive`. This slice makes that false on exactly one position. The guard that
+actually covers the world those texts name is the **reconciliation**, which runs
+first on every path and, unlike the observation, sees merged pull requests as
+well as open ones. All four now say so, and the existing "pin" on the help text
+compared the exported constant with itself; a fragment pin replaced it, and the
+mutant that reverts the sentence is killed.
+
+Round 1 also found this slice condemning a sentence class in a doc comment and
+leaving the operator-facing copies untouched — "Nothing was sent", in three
+members including the brand-new one, on paths where the reconciliation's request
+had already gone out. All three now say "no mutation was sent", pinned as a rule
+over the whole vocabulary. Two behaviour changes came out of round 1: a
+`COMPLETED` result carrying no exit code is refused before the error reader, and
+the error document's members are read with `Object.hasOwn`.
+
+Round 2 attacked the fixes and found six more false sentences, every one of them
+written by the fix commit: a rule pin justified by a false universal (nine driver
+members are reachable with zero forge requests, not three), an exception
+justified by a claim an existing test refutes, a "second and last" count that was
+short in two directions, a guard justified as "measured" that this build's own
+suite measures the opposite of, an enumeration of gates that went short by the
+gate the same commit added, and four more copies of "the identical answer" and of
+the observation-as-ground claim in three earlier decision records. All corrected;
+the counts and lists that kept going stale were replaced with rules.
+
+Two limits were named rather than closed. `Object.hasOwn` is behaviourally
+identical to the destructure it replaced over every body `JSON.parse` can
+produce, so reverting it survives the suite — recorded in the code, like the
+`Array.isArray` arm. And two sibling vocabularies still carry the unqualified
+egress sentence; that is `L-V4-18R-6`, deliberately out of scope here.

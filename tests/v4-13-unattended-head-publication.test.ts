@@ -993,9 +993,14 @@ describe('the grant is refused on the command line before anything is resolved',
    * is red.
    */
   it('names the reconciliation, not only the observation, as the ground for --drive', () => {
-    expect(AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION).toContain('reconciled');
+    // The phrase, not one word of it: both texts have to name the step that is
+    // actually the guard — asking github.com whether this delivery is already
+    // merged — rather than the observation, which cannot answer on the one
+    // position this slice added. A later edit reworded one of these two and this
+    // case caught it, which is the whole reason it exists.
+    expect(AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION).toContain('already merged');
     expect(PUBLICATION_GRANT_REFUSAL_DETAIL.AUTOMATIC_PUBLICATION_WITHOUT_DRIVE).toContain(
-      'reconciled',
+      'already merged',
     );
     // And neither may put the observation back as an unqualified precondition.
     expect(AUTOMATIC_PUBLISH_HEAD_ONLY_OPTION_DESCRIPTION).not.toContain('observed fresh first');
