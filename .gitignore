@@ -28,8 +28,21 @@ temp/
 *.tmp
 *.log
 
-# Local orchestrator runtime state (should live outside the repo, but be safe)
-.agent-orchestrator/
+# Local orchestrator runtime state. ONLY `runtime/` is ignored, and that is a
+# product requirement rather than a preference: `startTask` asks Git — with
+# `git check-ignore` — whether `.agent-orchestrator/runtime/<taskId>.json` is
+# ignored before it writes anything, and refuses with RUNTIME_NOT_IGNORED when
+# it is not. Every durable machine-written artefact lives under that one
+# directory, delivery evidence included.
+#
+# The two documents beside it are NOT ignored, and must not be: the repository
+# profile is read by the scope gate out of the commit a task was pinned to
+# (`git show <basePinnedCommit>:<profile>`), so an uncommitted profile makes
+# every task park before its writer ever starts. The task files are the
+# repository's own prose for a task, and once the profile is tracked an
+# untracked sibling would fail the next workspace preparation with
+# SOURCE_WORKTREE_DIRTY.
+.agent-orchestrator/runtime/
 
 # OS noise
 Thumbs.db

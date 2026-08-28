@@ -38,16 +38,26 @@
  * Two measured facts stopped it, and they are recorded here rather than in a
  * commit message:
  *
- *  - **in this repository the profile is not in any commit.** `.gitignore`
- *    ignores `.agent-orchestrator/`, the file is untracked, and
- *    `git show HEAD:<that path>` answers `fatal: path … exists on disk, but not
- *    in 'HEAD'`. The path is deliberately not spelled here: exactly two modules
+ *  - **when this was decided, the profile was in no commit of this
+ *    repository.** `.gitignore` ignored the whole of `.agent-orchestrator/`,
+ *    the file was untracked, and `git show HEAD:<that path>` answered
+ *    `fatal: path … exists on disk, but not in 'HEAD'`. The path is
+ *    deliberately not spelled here: exactly two modules
  *    in `src/` may name it, `tests/repo-resolution.test.ts` proves it, and a
  *    third naming it — even in a comment saying it is not used — is a third
  *    place a reader could take the answer from. A permission read from a
- *    commit is therefore unreadable in the one repository this build is
+ *    commit was therefore unreadable in the one repository this build is
  *    dogfooded against, and a mechanism that fails closed everywhere it is used
- *    is not a mechanism;
+ *    is not a mechanism.
+ *
+ *    **That measurement no longer holds, and recording that is the point of
+ *    keeping the bullet.** The M1 dogfood had to commit the profile, because
+ *    `scope/pinned-scope.ts` reads the scope declaration out of the commit a
+ *    task was pinned to and refuses when it is not there - so a repository this
+ *    orchestrator can drive at all is one whose profile is committed. What the
+ *    bullet still records is why the question was asked; it is no longer a
+ *    reason for the answer. The reason is the next one, and it never depended
+ *    on where the file lives;
  *  - **a repository profile is repository-authored input.** The delivery mints
  *    already refuse to carry repository-authored prose into an argument vector.
  *    Taking a *permission* from the same trust class, for an effect performed
