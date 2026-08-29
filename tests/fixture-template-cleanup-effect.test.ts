@@ -52,10 +52,14 @@
  *     `node_modules/vitest/vitest.mjs`. Whether this worktree has an installed
  *     `node_modules` is not asserted here — it is checked at run time, and its
  *     absence is reported as itself rather than as a bare `ENOENT`.
- *  4. **A timeout kills the process tree**, through the trusted `taskkill.exe`
- *     accessor in `src/doctor/internal/windows-system-tools.ts`. `close` does not
- *     wait on the immediate child alone; it waits on every descendant holding the
- *     same pipes, which for a vitest run means its pool workers.
+ *  4. **A timeout *requests* a kill of the process tree**, through the trusted
+ *     `taskkill.exe` accessor in `src/doctor/internal/windows-system-tools.ts`.
+ *     Requested, never observed: that tool's own module records exit code 0 in
+ *     ten of ten rounds while 38 descendants stayed alive, so its report is not
+ *     evidence of a dead tree. The one ending this file can observe is `close`
+ *     arriving on the child handle — and `close` does not wait on the immediate
+ *     child alone; it waits on every descendant holding the same pipes, which
+ *     for a vitest run means its pool workers.
  *  5. **The children run one after another**, each with `--no-file-parallelism`,
  *     with the captured output and the wall clock both bounded, and the private
  *     root is read **after** the child has closed — not polled while it runs.
@@ -98,7 +102,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { superviseWindowsTreeKill } from '../src/doctor/internal/windows-process-tree-termination.js';
+import {
+  superviseWindowsTreeKill,
+  type WindowsTreeKillOutcome,
+} from '../src/doctor/internal/windows-process-tree-termination.js';
 import { windowsSystemTool } from '../src/doctor/internal/windows-system-tools.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -226,8 +233,21 @@ interface ChildRun {
   readonly closed: boolean;
   readonly exitCode: number | null;
   readonly timedOut: boolean;
-  /** The spawn itself failed — a message, never an object that could carry more. */
+  /**
+   * An `error` from the child handle *before* the ceiling fired — in practice a
+   * failed spawn. A message, never an object that could carry more. An error
+   * after the ceiling is a consequence of the kill this file requested, not a
+   * failure to start, and is kept apart in {@link ChildRun.lateError}.
+   */
   readonly startError: string | null;
+  /** An `error` from the child handle after a kill was requested, or `null`. */
+  readonly lateError: string | null;
+  /**
+   * What `taskkill` was reported to have done, or `null` when the ceiling never
+   * fired or the run ended before the supervisor reported. `TREE_KILLED` is that
+   * tool's exit code 0 and nothing more — see this file's constraint 4.
+   */
+  readonly treeKill: WindowsTreeKillOutcome | null;
   readonly output: string;
 }
 
@@ -264,6 +284,8 @@ function runTargetCase(target: Target, tempRoot: string, reportPath: string): Pr
     let timedOut = false;
     let exitCode: number | null = null;
     let startError: string | null = null;
+    let lateError: string | null = null;
+    let treeKill: WindowsTreeKillOutcome | null = null;
     let output = '';
     let wallClock: NodeJS.Timeout | undefined;
     let grace: NodeJS.Timeout | undefined;
@@ -295,12 +317,13 @@ function runTargetCase(target: Target, tempRoot: string, reportPath: string): Pr
       if (wallClock !== undefined) clearTimeout(wallClock);
       if (grace !== undefined) clearTimeout(grace);
       // Settling without an observed `close` means this run is being abandoned
-      // — the ceiling was reached, or the handle itself errored after a kill
-      // was requested. A child that is still alive at that moment would keep
+      // — the ceiling was reached and the grace window after the requested kill
+      // then expired, or the handle errored before the ceiling ever fired. A
+      // child that is still alive at that moment would keep
       // *this* file's process from exiting, so it is released here, at the one
       // point every abandonment passes through. A release is not a termination.
       if (!closed) releaseChild(child);
-      settleRun({ closed, exitCode, timedOut, startError, output });
+      settleRun({ closed, exitCode, timedOut, startError, lateError, treeKill, output });
     };
 
     const absorb = (chunk: string): void => {
@@ -313,6 +336,18 @@ function runTargetCase(target: Target, tempRoot: string, reportPath: string): Pr
     child.stderr?.on('data', absorb);
 
     child.on('error', (error: Error) => {
+      if (timedOut) {
+        // The ceiling has already fired, so a kill has already been requested
+        // and an error on this handle is a consequence of that request rather
+        // than a failure to start. Settling on it here would do two wrong
+        // things: report it through `startError`, which is the before-the-
+        // ceiling field, and abandon the child immediately —
+        // collapsing the grace window that the kill path opens precisely
+        // because a requested kill is not an observed death. Recorded, and
+        // left for that bounded path (or a `close` that beats it) to settle.
+        lateError = error.message;
+        return;
+      }
       startError = error.message;
       settle();
     });
@@ -345,7 +380,8 @@ function runTargetCase(target: Target, tempRoot: string, reportPath: string): Pr
         },
       });
 
-      void supervisor.outcome.then(() => {
+      void supervisor.outcome.then((outcome) => {
+        treeKill = outcome;
         if (settled) return;
         // The supervisor has settled, which is a *requested* kill and not an
         // observed death. Without this second bound an unkillable child would
@@ -399,6 +435,32 @@ function passedCasesNamed(reportPath: string, caseName: string): number {
   return passed;
 }
 
+/**
+ * What the timeout path is entitled to say happened.
+ *
+ * Not "the process tree was terminated": nothing here observes that, and three
+ * separate facts forbid the claim. This file *asks* the supervisor to end the
+ * tree — whether a `taskkill` is even spawned is that module's decision, not an
+ * outcome measured here. `TREE_KILLED` is at most `taskkill`'s exit code 0, and
+ * its own module records ten such zero exits leaving 38 descendants alive on
+ * 2026-08-18. And the wait after it is a grace window, not a confirmation: it
+ * expires whether or not anything died. So the sentence names the request this
+ * file made, quotes what the supervisor reported, and states the one ending it
+ * can genuinely observe — `close` on the child handle.
+ */
+function describeTermination(run: ChildRun): string {
+  const reported =
+    run.treeKill === null
+      ? 'which had not reported by the time this run settled'
+      : `which reported ${run.treeKill} — at most taskkill's own exit status, never an ` +
+        'observed death';
+  const ending = run.closed
+    ? 'and the child was then observed to close'
+    : 'and no close was ever observed for it, so it may still be running';
+  const late = run.lateError === null ? '' : `; the handle then reported: ${run.lateError}`;
+  return `its process tree was handed to the tree-kill supervisor (${reported}), ${ending}${late}`;
+}
+
 function tail(output: string): string {
   const limit = 4_000;
   return output.length <= limit ? output : `...${output.slice(output.length - limit)}`;
@@ -426,11 +488,14 @@ describe('a memoised fixture template does not survive the suite that built it',
 
         const run = await runTargetCase(target, tempRoot, reportPath);
 
-        expect(run.startError, `${target.file}: the vitest child could not be started`).toBeNull();
+        expect(
+          run.startError,
+          `${target.file}: the vitest child handle errored before the ceiling instead of running`,
+        ).toBeNull();
         expect(
           run.timedOut,
-          `${target.file}: the vitest child did not finish within ${CHILD_WALL_CLOCK_MS}ms and ` +
-            `its process tree was terminated\n${tail(run.output)}`,
+          `${target.file}: the vitest child did not finish within ${CHILD_WALL_CLOCK_MS}ms; ` +
+            `${describeTermination(run)}\n${tail(run.output)}`,
         ).toBe(false);
         expect(run.closed, `${target.file}: the vitest child never closed`).toBe(true);
         expect(
