@@ -288,9 +288,13 @@ export type AgentRunner = (
 export interface AgentLaunchHooks {
   /**
    * Called once, with an attestation, when the kernel has confirmed this
-   * launch's job membership. The agent may already be running by then - see
-   * `boundary/owned-command.ts` - and what the confirmation establishes is that
-   * it never existed outside the owner's job.
+   * launch's job membership. The agent may already be running by then - in the
+   * default launch mode it is created into the job rather than created suspended
+   * - and what the confirmation establishes is that no instruction of the agent
+   * executed outside the owner's job. Not "it never existed outside that job":
+   * that is false in `SUSPENDED` mode, where the target exists briefly in no job
+   * before it is assigned and resumed. `core/containment-attestation.ts` carries
+   * the reasoning for both.
    *
    * Not called at all when there was nothing to attest — a POSIX run, a boundary
    * that was never established, a mint that refused. Silence is therefore the

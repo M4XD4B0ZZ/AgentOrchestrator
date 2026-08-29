@@ -7619,8 +7619,9 @@ use** and are not to be read as follow-ups.
   no attendance flag, no operator input — so a scheduler can now clear the
   ordinary crash itself, which is measured against the shipped CLI in
   `npm run test:dist-crash-recovery`. **U1 is therefore narrowed, not resolved**,
-  and unattended operation stays unsupported: the 76 ms window remains, and U2–U4
-  are untouched.
+  and unattended operation stays unsupported: the pre-establishment window
+  remains — naming it "the 76 ms window" would make a single observation into the
+  bound the paragraph above says it is not — and U2–U4 are untouched.
 - **U2 (F-D2) — a failed notification is indistinguishable from a silent run.**
   One bounded attempt, ten seconds, no retry and no second channel. A dropped
   push prints `NOT DELIVERED (<code>)` to a console nobody is reading, and since

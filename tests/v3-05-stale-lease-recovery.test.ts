@@ -432,10 +432,10 @@ describe('the launch history format refuses everything it cannot read', () => {
     // superset of the stronger one — and the recovery would then reach the
     // liveness re-check through a reading that never needed it, which reads as
     // harmless and is how a table stops meaning anything.
-    const atCreation = WRITER_LAUNCH_READINGS.filter((reading) =>
+    const unendedReadings = WRITER_LAUNCH_READINGS.filter((reading) =>
       provesEveryLaunchContainedUnended(reading),
     );
-    expect(atCreation).toEqual(['LAUNCHES_CONTAINED_SOME_UNENDED']);
+    expect(unendedReadings).toEqual(['LAUNCHES_CONTAINED_SOME_UNENDED']);
     for (const reading of WRITER_LAUNCH_READINGS) {
       expect(provesEveryLaunchContainedUnended(reading)).toBe(
         reading === 'LAUNCHES_CONTAINED_SOME_UNENDED',
@@ -1232,6 +1232,46 @@ describe('the leased writer seam announces its launch before it happens', () => 
     // middle step, not a replacement for the one that says the launch ended.
     const after = (ledgerOf(repository)?.entries ?? []) as readonly { readonly state: string }[];
     expect(after.map((entry) => entry.state)).toEqual(['CONTAINED']);
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('refuses a caller that brings its own establishment hook', async () => {
+    // The fence owns that hook because it writes this lease's ledger, so a
+    // second one would be a second writer of the same generation. Silently
+    // dropping it - which is what the seam did once `AgentRunner` grew a fifth
+    // argument - lets a caller believe it was installed.
+    //
+    // Measured rather than argued: deleting the guard leaves the whole suite
+    // green without this case, which is the shape of survivor this file's
+    // neighbours keep finding.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    let started = false;
+    const run = leasedAgent({
+      lease: { repository, evidence },
+      agent: async () => {
+        started = true;
+        return agentResult(attestationFor(process.pid));
+      },
+      containmentNow: tick,
+    });
+
+    const refused = await run('claude', [], process.cwd(), '', {
+      onLaunchEstablished: () => undefined,
+    });
+    // Identity against the exported constant, not a field: the two refusals this
+    // seam produces are byte-identical once serialised, so a field comparison
+    // would pass for either and this case is about which one is returned.
+    expect(refused).toBe(AGENT_LAUNCH_NOT_RECORDED);
+    // The refusal is before the launch, not after it: nothing was started, and
+    // no generation was opened for a launch that never happened.
+    expect(started).toBe(false);
+    expect(ledgerOf(repository)?.entries).toEqual([]);
+
+    // The control: the same runner, with no hooks, runs and records normally.
+    await run('claude', [], process.cwd(), '');
+    expect(started).toBe(true);
+    expect(stateOf(repository, 1)).toBe('CONTAINED');
     releaseRepositoryExecutionLease(evidence);
   });
 

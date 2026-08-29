@@ -162,6 +162,10 @@ export function leasedAgent(deps: SpawnAuthority): AgentRunner {
     // be a second writer of the same generation, and a caller that supplied one
     // would reasonably believe it had been installed.
     if (callersHooks !== undefined) return AGENT_LAUNCH_NOT_RECORDED;
+    // Reusing that member rather than adding one: both are "this launch could not
+    // be recorded the way this lease needs", both are unavailable-with-no-detail
+    // once serialised, and both send the same run to the same human decision. It
+    // is the second producer, and the member's own doc says so.
     // Announced before it happens, for the reason `beginWriterLaunch` gives: a
     // record written afterwards cannot describe a launch that was killed, and
     // that launch is the one a recovery has to know about.

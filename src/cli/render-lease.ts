@@ -206,10 +206,11 @@ export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, str
     LAUNCH_HISTORY_UNPROVEN:
       'At least one writer launch under this lease was announced and never reached the\n' +
       '  point where the kernel confirmed it had been placed in the owner\'s process job.\n' +
-      '  That is the short window between announcing a launch and starting it; it is also\n' +
-      '  what a launch on a platform with no process boundary leaves, and what a launch\n' +
-      '  whose mark could not be written leaves. In all of them nothing at all can be said\n' +
-      '  about the process, so nothing is removed.',
+      '  That happens in the window between announcing a launch and the kernel answering,\n' +
+      '  and it is also what a launch on a platform with no process boundary leaves, and\n' +
+      '  what a launch whose mark could not be written leaves - the last of which lasts as\n' +
+      '  long as the launch does. In all of them nothing at all can be said about the\n' +
+      '  process, so nothing is removed.',
     LAUNCH_TREE_STILL_RUNNING:
       'A writer launch under this lease was placed in the owner\'s process job and never seen\n' +
       '  to end, and a process bearing one of the ids it recorded exists right now. The owner\n' +
@@ -306,8 +307,11 @@ const SAFE_RECOVERY_REASON: Readonly<Record<WriterLaunchReading, readonly string
 /**
  * What is printed for a safe verdict this build cannot explain.
  *
- * Reachable only if the predicate and this table disagree about which readings
- * license a removal. It states the verdict and nothing else — no ending, no
+ * Not reachable today by either of the two paths that lead here: a SAFE verdict
+ * always carries a reading (the predicate's success return sets it), and both
+ * readings that can produce one have a sentence above. It exists for the case
+ * where the predicate and this table stop agreeing about which readings license
+ * a removal. It states the verdict and nothing else — no ending, no
  * probe, no containment — because the one thing that must not happen here is
  * an unexplained safe verdict borrowing the strongest available sentence.
  */

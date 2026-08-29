@@ -2569,9 +2569,11 @@ function ledgerPathFor(location: LeaseLocation): string {
 /**
  * What became of an attempt to open or confirm a writer-launch generation.
  *
- * A closed set. Two members are successes, one is the deliberate *loss* of a
- * history, and one is the only condition in this build under which an
- * enrichment stops productive work — see {@link LAUNCH_MUST_NOT_START}.
+ * A closed set. **Three** members are successes since M2 slice 1 added the
+ * middle mark, one is the deliberate *loss* of a history, and one is the only
+ * condition in this build under which an enrichment stops productive work — see
+ * {@link LAUNCH_MUST_NOT_START}. (It said two, and was not recounted when the
+ * third arrived.)
  */
 export const WRITER_LAUNCH_CODES = [
   /** The generation is on disk as `PENDING`. The launch may proceed. */
@@ -2663,10 +2665,15 @@ export const WRITER_LAUNCH_CODES = [
   /**
    * The ledger could not be written, and the history on disk is unchanged.
    *
-   * Answered by the *confirmation*, where leaving the generation `PENDING` is
-   * already the conservative end state. The opening path never answers it: a
-   * failed open has a launch about to happen and therefore must reach
-   * {@link HISTORY_DISCARDED} or {@link LAUNCH_MUST_NOT_START} instead.
+   * Answered by the two marks that follow an open - the establishment and the
+   * confirmation - where leaving the generation **where it already was** is
+   * already the conservative end state. Since M2 slice 1 that is `PENDING` for a
+   * failed establishment and `ESTABLISHED` for a failed confirmation, and neither
+   * claims the launch ended. (This said "leaving the generation `PENDING`", which
+   * was the third copy of a promise the middle mark made false.) The opening path
+   * never answers it: a failed open has a launch about to happen and therefore
+   * must reach {@link HISTORY_DISCARDED} or {@link LAUNCH_MUST_NOT_START}
+   * instead.
    */
   'LEDGER_WRITE_FAILED',
 ] as const;
