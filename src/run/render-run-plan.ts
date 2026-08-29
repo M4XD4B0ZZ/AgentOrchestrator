@@ -111,6 +111,100 @@ export function renderDeliveryLine(delivery: ResolvedDelivery): string {
  * assuming the operator remembers. See {@link READ_ONLY_TRAILER} for the exact
  * scope of that promise.
  */
+
+/**
+ * What the durable verification evidence says, or why it says nothing.
+ *
+ * ── Every reading gets a sentence, including the ones that are not a record ──
+ *
+ * Five readings and five different lines, because four of them are not "no
+ * diagnostics". `MALFORMED` means a file is on that path and this build cannot
+ * say what it claims; `UNSUPPORTED_VERSION` means a newer build wrote something
+ * this one refuses to interpret; `NOT_THIS_TASK` means an intact record about
+ * somebody else is sitting under this task's name. Each is a thing an operator
+ * should go and look at, and rendering all three as silence is exactly the
+ * defect this whole change exists to remove.
+ *
+ * `ABSENT` gets the most careful wording of the lot. It is **not** evidence that
+ * verification passed, was never run, or was fine — it is the absence of a
+ * record, and a store that could not be written is a store that was not written.
+ *
+ * ── The excerpt, and why printing it here is safe ──────────────────────────
+ *
+ * The lines come out of the store already line-safe: every character that could
+ * forge a line or reorder one was replaced by its code point at the source, in
+ * `verify/verification-attempt.ts`, and the schema refuses a stored line that is
+ * not. They are still quoted with a fixed prefix, so a reader can see where the
+ * repository stops speaking and this report resumes, and they are still
+ * untrusted — redaction is a safety net and never a boundary, which is why the
+ * heading says so rather than implying the text has been cleared.
+ *
+ * Only the latest attempt is rendered in full. The earlier ones are counted and
+ * summarised on one line each, because the thing an operator most needs is
+ * whether two attempts *disagree*, and a wall of excerpts hides that.
+ */
+function verificationAttemptLines(load: RunPlan['verificationAttempts']): readonly string[] {
+  if (load === null) return [];
+
+  if (load.reading === 'ABSENT') {
+    return [
+      line('Verify log', 'no attempt recorded'),
+      '  Not a statement that verification passed or was never run: nothing has been',
+      '  recorded here, and a store that could not be written is one that was not.',
+    ];
+  }
+  if (load.reading !== 'ATTEMPT_HISTORY' || load.record === null) {
+    return [
+      line('Verify log', `${load.reading} — this build will not read it`),
+      '  Something is on that path and this build cannot say what it claims. It was not',
+      '  replaced and it was not repaired. Go and look at it rather than at the task.',
+      ...(load.path === null ? [] : [`  ${load.path}`]),
+    ];
+  }
+
+  const attempts = load.record.attempts;
+  const latest = attempts[attempts.length - 1];
+  if (latest === undefined) return [line('Verify log', 'no attempt recorded')];
+
+  const out: string[] = [
+    line('Verify log', `${String(attempts.length)} attempt(s) recorded`),
+  ];
+  for (const [index, attempt] of attempts.slice(0, -1).entries()) {
+    out.push(
+      `  #${String(index + 1)}  ${attempt.attemptedAt}  ${attempt.verdict}  ` +
+        `stopped at ${attempt.stoppedAt}  commit ${attempt.subjectCommit.slice(0, 12)}`,
+    );
+  }
+  out.push(
+    `  #${String(attempts.length)}  ${latest.attemptedAt}  ${latest.verdict}  ` +
+      `stopped at ${latest.stoppedAt}  commit ${latest.subjectCommit.slice(0, 12)}`,
+  );
+  for (const phase of latest.phases) {
+    out.push(
+      `      ${phase.phase}  ${phase.outcome}` +
+        `  exit=${phase.exitCode === null ? 'none' : String(phase.exitCode)}` +
+        `  signal=${phase.signal ?? 'none'}` +
+        `  truncated=${String(phase.outputTruncated)}` +
+        (phase.failureCode === null ? '' : `  failure=${phase.failureCode}`) +
+        (phase.errnoCode === null ? '' : `  errno=${phase.errnoCode}`) +
+        `  ${String(phase.durationMs)}ms`,
+    );
+  }
+  out.push(
+    '  The lines below are the stopping phase\'s own output: bounded, redacted and',
+    '  stripped of anything that could forge a line. UNTRUSTED, and the head of the',
+    '  stream rather than its end. Redaction is a safety net, not a guarantee.',
+  );
+  out.push(...excerptLines('stdout', latest.stdoutExcerpt));
+  out.push(...excerptLines('stderr', latest.stderrExcerpt));
+  return out;
+}
+
+function excerptLines(label: string, excerpt: readonly string[]): readonly string[] {
+  if (excerpt.length === 0) return [`      ${label}: (nothing recorded)`];
+  return [`      ${label}:`, ...excerpt.map((text) => `      | ${text}`)];
+}
+
 export function renderRunPlan(
   plan: RunPlan,
   repository: { id: string; root: string; delivery: ResolvedDelivery },
@@ -192,6 +286,8 @@ export function renderRunPlan(
   if (plan.resume !== null) {
     lines.push(line('Continuation', `${plan.resume.continuation}  (${plan.resume.classification})`));
   }
+
+  lines.push(...verificationAttemptLines(plan.verificationAttempts));
 
   lines.push(
     line('Reasons', codes(plan.reasonCodes)),

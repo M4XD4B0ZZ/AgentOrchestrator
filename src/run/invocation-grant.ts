@@ -192,6 +192,44 @@ export function mayStartTask(grant: InvocationGrant): boolean {
 }
 
 /**
+ * Whether this invocation may continue a `BLOCKED_VERIFY` task to remediation.
+ *
+ * ── A fourth authority, and why it is not a fourth grant ───────────────────
+ *
+ * The same shape as {@link mayStartTask} and {@link mayRecoverStaleLease}: a
+ * predicate over the grant, conjoined with an explicit request the operator made
+ * *now*, rather than a new member of {@link InvocationGrant}. A new member would
+ * have to be combinable with the existing three, and "attended and
+ * remediating-a-verify-failure" is not a fourth mode — it is `ATTENDED` plus one
+ * decision.
+ *
+ * The distinction it draws is the one `--attended` cannot. `ATTENDED` says a
+ * human is *present for this invocation*; it says nothing about what they
+ * decided, and it is deliberately unconditional at {@link permitsContinuation}
+ * for exactly that reason. Continuing a `BLOCKED_VERIFY` task is a **decision**
+ * — the block's own rationale calls it one — so it needs its own request, and an
+ * operator who runs an ordinary `--attended` run over a repository full of
+ * blocked tasks must not move any of them.
+ *
+ * ── What it cannot do ──────────────────────────────────────────────────────
+ *
+ * `AUTOMATIC_RESUME_ONLY` answers `false`, and that is the invariant this
+ * predicate exists to keep intact: `BLOCKED_VERIFY` stays
+ * `automaticResumeEligible: false`, nothing here produces `AUTOMATIC_ALLOWED`,
+ * and no unattended run can take this edge whatever it is given. `resume-policy`
+ * still says a human decision is required; this is the shape of the human
+ * saying it.
+ *
+ * And it grants nothing by itself. The driver still requires the state to be
+ * `BLOCKED_VERIFY`, the resume point to name `REMEDIATE`, the reconciliation to
+ * be consistent, the worktree to be authorised and the lease to be held — every
+ * gate that stood before stands after.
+ */
+export function mayRemediateVerifyFailure(grant: InvocationGrant): boolean {
+  return grant === 'ATTENDED';
+}
+
+/**
  * Whether this invocation may remove an execution lease it did not create.
  *
  * A third authority, kept apart from the other two because it is destructive

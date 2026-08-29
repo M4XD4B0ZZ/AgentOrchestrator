@@ -140,6 +140,31 @@ export function renderRunResult(result: RunResult): string {
     lines.push(line('Continuation', `${result.resume.continuation}  (${result.resume.classification})`));
   }
   lines.push(line('Reasons', codes(result.reasonCodes)));
+  // What became of this run's attempt to make a verification failure durable.
+  //
+  // Only on a run that produced one, so a clean run gains no line — and the
+  // rendering is deliberately asymmetric. A *recorded* attempt gets one line
+  // naming where it went, because the whole report of it is `run --task <id>`'s
+  // to print, from the disk, on any later invocation. A **failed** recording
+  // gets three, because it is the one condition an operator can never read
+  // afterwards: the store code is not persisted anywhere — `TaskState` is
+  // `.strict()` and has no field for it — so this run is the only place it is
+  // ever said. Losing it here would reproduce, one level up, exactly the
+  // silence this change exists to remove.
+  const evidence = result.lastStep?.verificationEvidence ?? null;
+  if (evidence !== null) {
+    if (evidence.recorded) {
+      lines.push(line('Verify log', `recorded  (${evidence.code})`));
+      if (evidence.path !== null) lines.push(`  ${evidence.path}`);
+    } else {
+      lines.push(
+        line('Verify log', `NOT recorded  (${evidence.code})`),
+        '  The verification result was not durably explained, so this run did not write',
+        '  BLOCKED_VERIFY on the strength of it. This code is reported here and nowhere',
+        '  else — no later invocation can tell you what it was.',
+      );
+    }
+  }
   // Only when there were any. A clean run must not gain a noise line, and an
   // operator who never sees this line has been told something by its absence.
   //

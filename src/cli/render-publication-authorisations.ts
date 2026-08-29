@@ -56,6 +56,7 @@
  * and nothing here resolves it, stats it or follows it.
  */
 
+import { lineSafe } from '../core/line-safe-text.js';
 import {
   HEAD_PUBLICATION_AUDIT_ENTRY_READINGS,
   HEAD_PUBLICATION_BRANCH_QUERY_READINGS,
@@ -464,49 +465,29 @@ export const AUDIT_REPORT_LABELS = [
 ] as const;
 
 /**
- * Every character class a recorded value may not put on a line unaltered.
- *
- * The C0 and C1 controls, because a newline splits one entry into two and an
- * escape sequence paints over the lines above it. The twelve Unicode
- * bidirectional formatting characters, because they do the same damage by
- * another route: an override reorders what a terminal shows without changing a
- * byte, so a ref or a checkout path can be made to read as something else
- * entirely. And the line and paragraph separators, for the first reason.
- *
- * So the class is **not** "control characters" — most of what is in it is
- * `Cf`, not `Cc` — and no sentence here says that any more, because one did and
- * it was false the moment this widened. It is "what can forge a line or reorder
- * one". Everything outside it is left exactly as recorded.
- */
-const UNPRINTABLE =
-  /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
-
-/**
  * A recorded value, made safe to put on a line of a report.
  *
  * Nine fields of a record are bounded in length and in nothing else — the event
  * identity it claims, the task id, the checkout, the host, the owner, the name,
  * the remote, the ref and the recorded instant — and eight of those are printed.
  * (The ninth is refused before anything is printed: a record whose claimed
- * identity is not the directory it sits in is not read at all.) A record is a file under this OS user's
- * profile and `L-V4-14-2` concedes that anything running as this user can write
- * one — so a value carrying a newline would let a single forged record print
- * itself as several plausible entries, and one carrying an escape sequence would
- * let it paint over the lines above it. That is worse than the forgery this
- * build already concedes: it is a forged record misrepresenting the *reading*.
+ * identity is not the directory it sits in is not read at all.) A record is a
+ * file under this OS user's profile and `L-V4-14-2` concedes that anything
+ * running as this user can write one — so a value carrying a newline would let a
+ * single forged record print itself as several plausible entries, and one
+ * carrying an escape sequence would let it paint over the lines above it. That
+ * is worse than the forgery this build already concedes: it is a forged record
+ * misrepresenting the *reading*.
  *
- * So every character in {@link UNPRINTABLE} is replaced by its code point in
- * angle brackets, and **nothing outside that class is changed**. A path with an
- * umlaut, a branch name with a hyphen and a hundred-character owner all print
- * exactly as recorded; a value that could not have come from a name, a path or a
- * ref does not get to choose what the report looks like.
+ * The class and the substitution used to live here, privately. They are now
+ * `core/line-safe-text.ts`, because V4's verification-attempt evidence needs the
+ * same rule for a strictly worse input and `doctor/exec.ts` states the standing
+ * objection to a second copy: it "would be free to drift from this one". The
+ * behaviour is unchanged — every character in `LINE_UNSAFE_PATTERN` is replaced
+ * by its code point in angle brackets, and nothing outside that class is
+ * touched. The reasoning for each range moved with it.
  */
-function printable(value: string): string {
-  return value.replace(UNPRINTABLE, (character) => {
-    const code = (character.codePointAt(0) ?? 0).toString(16).padStart(4, '0');
-    return `<U+${code.toUpperCase()}>`;
-  });
-}
+const printable = lineSafe;
 
 function field(label: string, value: string): string {
   return `  ${label.padEnd(13)}: ${printable(value)}`;

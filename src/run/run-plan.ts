@@ -43,6 +43,10 @@
  * one condition is a second opinion about what it means.
  */
 
+import {
+  loadVerificationAttempts,
+  type VerificationAttemptLoad,
+} from '../verify/verification-attempt-store.js';
 import { isTerminalState, isBlockingState, type TaskStateName } from '../core/states.js';
 import { isValidTaskId } from '../plan/task-id.js';
 import { previewTaskBrief, type TaskBriefPreviewResult } from '../plan/task-brief.js';
@@ -145,6 +149,17 @@ export interface RunPlanDependencies {
   readonly git: GitRunner;
   /** The clock, injected so the decision layer stays pure. */
   readonly now: () => string;
+  /**
+   * Where the durable verification evidence is read. Defaults to the real store.
+   *
+   * A seam of the same class as `git`: a test needs to drive a corrupted record
+   * and an unreadable one, and neither can be produced on demand against a real
+   * filesystem.
+   */
+  readonly loadVerificationAttempts?: (
+    repositoryRoot: string,
+    taskId: string,
+  ) => VerificationAttemptLoad;
 }
 
 export interface RunPlan {
@@ -189,6 +204,24 @@ export interface RunPlan {
    * "reason".
    */
   readonly reasonCodes: readonly string[];
+  /**
+   * What the durable verification-attempt store holds for this task, or `null`
+   * when no task was in hand to ask about.
+   *
+   * The **reading** and not the record, so that "nobody wrote one" and
+   * "something is there and this build cannot read it" reach the report as
+   * different sentences. Collapsing them is the failure mode
+   * `head-publication-authorisation-listing.ts` names for its own store: an
+   * absence rendered as "no diagnostics" reads as "verification was fine", and a
+   * damaged record rendered the same way hides that somebody should go and look.
+   *
+   * Read for **every** task this plan reaches a state for, not only a blocked
+   * one. A task that has been remediated is at `IMPLEMENTING` or `VERIFYING`
+   * with a failure still on disk behind it, and that history is exactly what an
+   * operator comparing two attempts needs. The renderer says which commit each
+   * attempt measured, so a stale one cannot be read as a current verdict.
+   */
+  readonly verificationAttempts: VerificationAttemptLoad | null;
 }
 
 function plan(
@@ -204,6 +237,7 @@ function plan(
     brief: null,
     state: null,
     reasonCodes: Object.freeze([]),
+    verificationAttempts: null,
     ...from,
   });
 }
@@ -375,5 +409,15 @@ export async function planRun(
     brief,
     state: state.state,
     reasonCodes: resume.reasonCodes,
+    // Read here rather than in the renderer, so that a report is a rendering of
+    // a value this module produced and the command stays free of I/O it would
+    // have to be trusted to do correctly. It is a local file read: no Git, no
+    // process, no network, and it cannot change the conclusion — nothing below
+    // consults it, and a store that fails to read leaves the plan exactly as it
+    // was with the reading carried alongside.
+    verificationAttempts: (deps.loadVerificationAttempts ?? loadVerificationAttempts)(
+      repository.root,
+      target.taskId,
+    ),
   });
 }

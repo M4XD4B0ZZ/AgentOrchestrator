@@ -128,12 +128,16 @@ describe('agent-loop run — CLI seam', () => {
     const flags = (run?.options ?? []).map((option) => option.long);
 
     // The full option surface, pinned. V2-05 added two flags, V3-06 added two
-    // more and V3-08 added three, and the list is asserted whole so that a tenth
-    // cannot appear unnoticed. None of them grants anything on its own:
+    // more, V3-08 added three and the M1 verification-recovery fix added one,
+    // and the list is asserted whole so that an eleventh cannot appear
+    // unnoticed. None of them grants anything on its own:
     // `--max-invocations` and `--max-wait-ms` are bounds,
     // `--recover-stale-lease` permits an attempt whose own proof still has to
-    // pass, and `--automatic-resume-only` passes the run driver's gate only
-    // where the canonical resume decision already answered `AUTOMATIC_ALLOWED`.
+    // pass, `--automatic-resume-only` passes the run driver's gate only where
+    // the canonical resume decision already answered `AUTOMATIC_ALLOWED`, and
+    // `--remediate-verify-failure` is conjoined with `ATTENDED`, with the state,
+    // with the resume phase and with a once-per-invocation bound before it moves
+    // anything.
     //
     // This comment previously said there was "deliberately no flag that lets a
     // run wait out a quota reset". V3-08 added the authority that made one
@@ -146,10 +150,18 @@ describe('agent-loop run — CLI seam', () => {
       '--max-steps',
       '--max-invocations',
       '--recover-stale-lease',
+      '--remediate-verify-failure',
       '--automatic-resume-only',
       '--wait-for-reset',
       '--max-wait-ms',
     ]);
+    // The banned substrings, checked against the new flag too rather than only
+    // against the list above: `tests/v2-07lr-lease-recovery.test.ts` scans every
+    // registered option in `src/` for these, and a name is a promise to an
+    // operator whatever its help text says.
+    for (const banned of ['force', 'unattended', 'adopt', 'takeover', 'steal']) {
+      expect(flags.some((flag) => (flag ?? '').includes(banned))).toBe(false);
+    }
     // The refusals `WORKSPACE_COLLISION` and `STATE_NOT_RECORDED` are meant to
     // stand, and adoption is a later slice (V2-06A). No flag may talk an
     // invocation past them.

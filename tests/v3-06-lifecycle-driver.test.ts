@@ -476,6 +476,7 @@ describe('a quota pause stops the run rather than being waited out', () => {
       recoverStaleLease: null,
       maxSteps: null,
       maxInvocations: null,
+      remediateVerifyFailure: null,
     } satisfies Record<keyof LifecycleRequest, null>);
     expect(keys).not.toContain('waitForReset');
     expect(keys).not.toContain('maxWaitMs');

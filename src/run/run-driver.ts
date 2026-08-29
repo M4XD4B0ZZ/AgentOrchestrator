@@ -85,7 +85,11 @@ import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js';
 import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
-import { permitsContinuation, type InvocationGrant } from './invocation-grant.js';
+import {
+  mayRemediateVerifyFailure,
+  permitsContinuation,
+  type InvocationGrant,
+} from './invocation-grant.js';
 import { resumePointToState } from '../core/resume-policy.js';
 import { RESUME_EVIDENCE_SPENT } from '../core/resume-point.js';
 import {
@@ -303,6 +307,23 @@ export interface RunResult {
   /** The loop step the run stopped on, or `null` when none ran. */
   readonly lastStep: LoopStepResult | null;
   /**
+   * Whether this call took a task out of `BLOCKED_VERIFY` on the operator's
+   * decision.
+   *
+   * Reported so the **lifecycle** can bound the cycle across invocations, which
+   * the local `verifyRemediationSpent` cannot: `driveLifecycle` re-enters
+   * `runTask` on `STEP_BUDGET_EXHAUSTED`, and a fresh call gets a fresh local.
+   * Measured rather than assumed — a counter-proof mutant removing the local
+   * bound survived every test, and chasing why found this: with a small
+   * `--max-steps` and a larger `--max-invocations`, the resume and the
+   * remediation can exhaust the budget *before* the failing verification, so the
+   * next invocation meets the block again with nothing spent.
+   *
+   * Never persisted. It is a fact about one call, and a durable one would be a
+   * claim about a decision rather than the decision itself.
+   */
+  readonly remediatedVerifyFailure: boolean;
+  /**
    * What the writing agent was refused, **across every step of this run**.
    *
    * Run-level rather than per-step, and that placement is the whole point.
@@ -352,6 +373,28 @@ export interface RunRequest {
    * on a transition it cannot follow up (V1-07-RR-B1).
    */
   readonly continuationGrant: InvocationGrant;
+  /**
+   * Whether the operator asked, on this invocation, to continue a
+   * `BLOCKED_VERIFY` task to remediation.
+   *
+   * The declared edge `BLOCKED_VERIFY -> REMEDIATING` has existed in
+   * `core/transitions.ts` since V1, and `core/resume-policy.ts` has said all
+   * along that the state is `resumable: true` with `requiresHumanDecision: true`
+   * and a resume phase of `REMEDIATE`. Nothing could take it: the blocking gate
+   * below admits exactly one verdict, `AUTOMATIC_ALLOWED`, which
+   * `BLOCKED_VERIFY` can never carry because it is `automaticResumeEligible:
+   * false`. The contract and the executor disagreed, and the M1 release gate is
+   * where that stopped being a curiosity.
+   *
+   * This is the operator's half of the decision. It is conjoined with
+   * `mayRemediateVerifyFailure(continuationGrant)`, so it does nothing without
+   * `ATTENDED`, and it is spent after one use — see `verifyRemediationSpent`.
+   *
+   * Defaulting is deliberate: absent means no. A field that had to be set to
+   * *refuse* would make every existing caller a caller that continues blocked
+   * tasks.
+   */
+  readonly remediateVerifyFailure?: boolean;
   /**
    * The artefact a *fresh* auth preflight produced, or `null` when none ran.
    *
@@ -435,6 +478,7 @@ function runResult(
     reconciliation: null,
     resume: null,
     lastStep: null,
+    remediatedVerifyFailure: false,
     permissionDenials: NO_PERMISSION_DENIALS,
     ...from,
   });
@@ -476,8 +520,46 @@ export async function runTask(
   // instead of at each return — a rule that holds by being unavoidable rather
   // than by every future exit remembering it.
   let permissionDenials = NO_PERMISSION_DENIALS;
+  /**
+   * Whether this invocation has already taken a task out of `BLOCKED_VERIFY`.
+   *
+   * **The cycle bound, and it is the whole reason this is a variable rather than
+   * a condition.** `VERIFYING -> BLOCKED_VERIFY -> REMEDIATING -> VERIFYING`
+   * touches neither `reviewRound` nor `maxReviewRounds` — remediation rounds are
+   * counted by *reviews*, and a verification failure is not one. Until now that
+   * cycle was bounded by the fact that nothing could leave `BLOCKED_VERIFY` at
+   * all, which is a real bound and the one being removed here. Without a
+   * replacement, an invocation with `--max-steps 8` would traverse it about two
+   * and a half times on its own, and one with a larger budget would keep sending
+   * a writer at a gate that keeps saying no.
+   *
+   * So the operator's decision buys exactly **one** departure. That is the same
+   * shape as `continuingOwnAutomaticResume` above — a local fact in one
+   * `runTask` frame, cleared by the frame ending, never durable and never
+   * assertable by a caller.
+   *
+   * **Declared here, above `stop`, and that placement is not cosmetic.** `stop`
+   * closes over it to report `remediatedVerifyFailure`, and `stop` is called for
+   * the invalid-step-budget refusal a few lines below — before this declaration
+   * stood originally, which is a temporal-dead-zone `ReferenceError` on that
+   * path. Reproduced in isolation, not reasoned about: a `const` arrow reading a
+   * later `let` and invoked before it throws "Cannot access before
+   * initialization". Typecheck does not catch it and no test reached that
+   * refusal.
+   *
+   * **It is a fail-closed floor, and does not fire today.** Two things already
+   * stop the cycle, and a counter-proof mutant removing this variable survived
+   * every test, which is how that was established rather than assumed: a
+   * `BLOCKED` loop step ends the `runTask` call unconditionally, and
+   * `driveLifecycle` re-enters `runTask` only on `STEP_BUDGET_EXHAUSTED`, so a
+   * `BLOCKED_VERIFY` outcome ends the lifecycle too. Either of those changing
+   * would make the cycle reachable, and this is what would stop it then. It is
+   * kept for the same reason the `isLoopDrivenState` floor below is kept, and it
+   * is described as a floor rather than as the bound.
+   */
+  let verifyRemediationSpent = false;
   const stop = (from: Partial<RunResult> & { readonly outcome: RunOutcome }): RunResult =>
-    runResult({ taskId, permissionDenials, ...from });
+    runResult({ taskId, permissionDenials, remediatedVerifyFailure: verifyRemediationSpent, ...from });
 
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) {
     return stop({ outcome: 'NO_PROGRESS', reasonCodes: Object.freeze(['STEP_BUDGET_INVALID']) });
@@ -674,7 +756,38 @@ export async function runTask(
     // `HUMAN_DECISION_REQUIRED` is refused a resume, `BLOCKED_VERIFY` is
     // refused a retry, and a refused quota resume is reported with the checks
     // that denied it.
-    if (isBlockingState(state.state) && resume.continuation !== 'AUTOMATIC_ALLOWED') {
+    // The one blocked-state departure an operator can ask for, and every
+    // conjunct is load-bearing:
+    //
+    //  - the state is `BLOCKED_VERIFY`. No other block is reachable this way;
+    //    `SCOPE_VIOLATION` is not resumable at all, and `HUMAN_DECISION_REQUIRED`
+    //    is a different decision that this flag does not claim to be;
+    //  - the operator asked on *this* invocation;
+    //  - the grant is `ATTENDED`. `mayRemediateVerifyFailure` refuses
+    //    `AUTOMATIC_RESUME_ONLY`, so no unattended run reaches this however it is
+    //    invoked, and `BLOCKED_VERIFY` stays `automaticResumeEligible: false`;
+    //  - the resume point names `REMEDIATE`. The authority is "continue this
+    //    block to remediation", so a record naming any other phase is refused
+    //    rather than followed — a task whose resume point has been hand-edited
+    //    does not get to choose which phase this decision enters;
+    //  - this invocation has not already spent it. See `verifyRemediationSpent`.
+    //
+    // It cannot produce `AUTOMATIC_ALLOWED` and does not try to: `resume` is
+    // still whatever `classifyResume` said, every gate below still runs, and the
+    // resume write at step 6 is still `resumeBlockedTask` unchanged.
+    const remediatingVerifyFailure =
+      state.state === 'BLOCKED_VERIFY' &&
+      request.remediateVerifyFailure === true &&
+      mayRemediateVerifyFailure(request.continuationGrant) &&
+      state.resumeFrom !== null &&
+      state.resumeFrom.phase === 'REMEDIATE' &&
+      !verifyRemediationSpent;
+
+    if (
+      isBlockingState(state.state) &&
+      resume.continuation !== 'AUTOMATIC_ALLOWED' &&
+      !remediatingVerifyFailure
+    ) {
       return stop({
         outcome: BLOCKING_OUTCOME[state.state],
         state: state.state,
@@ -761,7 +874,7 @@ export async function runTask(
     }
 
     // --- 6. A blocked task's resume, once every gate above has passed -------
-    if (resume.continuation === 'AUTOMATIC_ALLOWED') {
+    if (resume.continuation === 'AUTOMATIC_ALLOWED' || remediatingVerifyFailure) {
       // The phase this resume would enter must be one this run can actually
       // continue from, and that is checked *before* the write for the same
       // reason the attended grant is (V1-07-RR-B1).
@@ -838,7 +951,16 @@ export async function runTask(
       // Set **after** the write landed, never before it and never on any path
       // that refused: the flag means "this run really did resume this task",
       // and a run that only intended to must not inherit the permission.
-      continuingOwnAutomaticResume = true;
+      if (resume.continuation === 'AUTOMATIC_ALLOWED') {
+        continuingOwnAutomaticResume = true;
+      } else {
+        // The operator's decision is spent here, and only here: after the write
+        // landed, never before it and never on any path that refused. A run that
+        // only intended to continue must not inherit the permission, and — more
+        // to the point — must not have consumed it either, or a refused write
+        // would silently cost the operator their one departure.
+        verifyRemediationSpent = true;
+      }
       steps += 1;
       remediationPayload = undefined;
       continue;

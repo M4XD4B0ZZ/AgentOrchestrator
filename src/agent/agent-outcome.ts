@@ -135,11 +135,23 @@ export interface AgentProcessEvidence {
 /**
  * The agent's own words, quarantined.
  *
- * Clamped and passed through the redactor, kept in memory for a human reading
- * a failure, and **never persisted**: `TaskStateObjectSchema` is `.strict()`,
- * so there is nowhere in the durable contract for it to go, and that is the
- * design rather than an obstacle. `trusted: false` is a field, not a comment,
- * so a caller that serialises this cannot claim it did not know.
+ * Clamped and passed through the redactor, and kept in memory for a human
+ * reading a failure. `trusted: false` is a field, not a comment, so a caller
+ * that serialises this cannot claim it did not know.
+ *
+ * **No agent's diagnostics are persisted, and `TaskState` holds none at all.**
+ * `TaskStateObjectSchema` is `.strict()`, so there is nowhere in the task's own
+ * durable contract for an excerpt to go, and that is still the design.
+ *
+ * The sentence used to be "never persisted", full stop, and V4's
+ * verification-attempt evidence made that half false rather than false: the
+ * *verification* seam's excerpt is now the input to
+ * `verify/verification-attempt.ts`, which stores a line-safe transformation of
+ * it in its own record — outside `TaskState`, under the repository root, with
+ * its own byte budget and its own bounded history. No claude/codex boundary has
+ * such a store, and this type is still not a persistable shape: that record has
+ * no `trusted` field, holds its excerpt as an array of lines, and reconstitutes
+ * this type on read rather than parsing one off the disk.
  */
 export interface AgentDiagnostics {
   readonly stdoutExcerpt: string;

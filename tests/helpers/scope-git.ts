@@ -136,6 +136,25 @@ export function scriptedGit(script: GitScript = {}): GitRunner {
 export const cleanScopeGit: GitRunner = scriptedGit();
 
 /**
+ * The ignore question V4's verification-attempt store asks before it writes.
+ *
+ * `check-ignore --quiet -- <path>` exiting 0 means IGNORED, which is what a
+ * correctly configured repository answers for `.agent-orchestrator/runtime/**`
+ * — the rule is in this repository's own `.gitignore`, on the directory. These
+ * synthetic roots have no `.gitignore` at all, so a real Git would answer
+ * NOT_IGNORED and every verification failure in every suite would decline to
+ * record its evidence, which is a true answer to a question none of them is
+ * asking.
+ *
+ * A suite that means to exercise the refusal overrides this deliberately, the
+ * same way one that means to exercise the scope guard overrides the three
+ * answers below it.
+ */
+function ignoreAnswer(args: readonly string[]): GitCommandResult | null {
+  return args.includes('check-ignore') ? ok('') : null;
+}
+
+/**
  * The world a writing pass that really did something lives in.
  *
  * ── Why this exists beside {@link cleanScopeAnswer} ────────────────────────
@@ -173,6 +192,8 @@ export function writingPassAnswer(
     return ok(nulJoin(['local', 'core.bare', 'local', 'core.repositoryformatversion']));
   }
   if (args.includes('check-attr')) return ok(nulJoin([path, 'filter', 'unspecified']));
+  const ignored = ignoreAnswer(args);
+  if (ignored !== null) return ignored;
   if (args.includes('add')) return ok('');
   if (args.includes('commit')) return ok('');
   // The commit AO just made, read back — **only** when the caller said what
@@ -220,6 +241,8 @@ export const writingPassGit: GitRunner = async (_cwd, args) =>
  * what makes an unexpected Git invocation visible instead of quietly answered.
  */
 export function cleanScopeAnswer(args: readonly string[]): GitCommandResult | null {
+  const ignored = ignoreAnswer(args);
+  if (ignored !== null) return ignored;
   switch (question(args)) {
     case 'show':
       return ok(e2eProfile());

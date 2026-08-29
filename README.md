@@ -2697,11 +2697,28 @@ intact.
 
 The one cycle `maxReviewRounds` does not bound —
 `VERIFYING → BLOCKED_VERIFY → REMEDIATING → VERIFYING`, which never touches
-`reviewRound` — is bounded instead by the loop refusing to leave
+`reviewRound` — used to be bounded by the loop refusing to leave
 `BLOCKED_VERIFY` at all. That state is `resumable: true` but
 `automaticResumeEligible: false`, and `resume-policy.ts` gives the reason:
 *resuming means handing the failure to the writing agent, which is a decision,
-not an automatic retry.* So the only cycle this loop drives unattended is
+not an automatic retry.* The loop still refuses; what changed with the M1
+verification-recovery fix is that an **operator** may now take that edge, with
+`run --attended --task <id> --remediate-verify-failure`.
+
+What bounds the cycle afterwards was **measured rather than designed**, and the
+answer is not the obvious one. Two pre-existing rules already stop it: a `BLOCKED`
+loop step ends the `runTask` call unconditionally, and `driveLifecycle` re-enters
+`runTask` only on `STEP_BUDGET_EXHAUSTED` — so a `BLOCKED_VERIFY` outcome ends
+the whole lifecycle. One departure per lifecycle therefore holds without anything
+new, and a counter-proof mutant that deleted the new per-invocation limit
+survived every test, which is how this was established rather than assumed.
+
+The limit is kept anyway, at both levels, as a **fail-closed floor**: it does not
+fire today, and it is what would stop the cycle if either of those two rules ever
+changed. It is described as a floor and not as the bound, because a build that
+believed the floor was doing the work would delete one of the two rules that are.
+
+The only cycle this loop drives unattended is still
 `VERIFYING → REVIEWING → REMEDIATING → VERIFYING`, and every traversal of it
 consumes exactly one review round.
 
@@ -2718,6 +2735,55 @@ Entering `REMEDIATING` withdraws `worktreeCleanAtCheckpoint` and
 `currentCommit`, for the reason the interruption path already gives: carrying a
 clean checkpoint into a state whose whole purpose is to modify the worktree
 makes `reconcile.ts` read the writer's own work as divergence.
+
+### Why a failure blocked, on disk
+
+Until the M1 verification-recovery fix a `BLOCKED_VERIFY` task explained nothing
+about itself. `VerificationReport` was computed, handed back to the caller and
+dropped at process exit; nothing in `src/` read it. An operator meeting a blocked
+task the next morning was told `Reasons : none`, and a ten-second typecheck error
+and a twenty-two-minute test failure produced byte-identical durable records. The
+M1 release gate produced five of them.
+
+So a non-passing verification now writes one record before the block:
+
+```
+.agent-orchestrator/runtime/verification-attempts/<taskId>.json
+```
+
+Its own directory under the **repository root** — never the worktree, which is
+where the writing agent's cwd is and where an ignored file it wrote would be
+invisible to the scope guard. A bounded append-only history, oldest first, six
+attempts, refused when full rather than evicting the oldest. Each attempt names
+the commit it measured, the profile digest, the verdict, the stopping phase and
+every phase report including `failureCode` and `errnoCode` — the two fields that
+separate a timeout from an output flood from a program that was never found, all
+three of which arrive as `UNAVAILABLE` with a null exit code.
+
+It carries a bounded excerpt of the failing phase's own output, which its sibling
+`delivery-verification/` deliberately does not. The reason is measured: the
+writing agent has no shell, so a remediating writer **cannot re-run the gate**,
+and a brief naming only a phase and an exit code would send it to change a tree
+it has no way to inspect. Three guarantees hold it, and none of them is "the text
+is safe": bounded (`agentDiagnostics()`'s clamp, then a second bound after
+line-safety expands it), redacted (`auth/redaction.ts`, which its own header
+calls a safety net and never a boundary), and line-safe — every character that
+could forge or reorder a line is replaced by its code point, and the excerpt is
+stored as an **array of lines**, so no stored value can introduce a free-standing
+line into a report or a prompt. There is no `trusted` field on disk: a stored
+flag saying "do not trust this" is a claim by whoever wrote the file.
+
+**The record is written and read back off the disk before the state moves.** A
+`BLOCKED_VERIFY` whose explanation never became durable is the exact defect this
+closes, so where the store refuses the task lands at `HUMAN_DECISION_REQUIRED`
+with `resumeFrom VERIFY` — the existing `UNAVAILABLE` landing, no new state — and
+the store's code is reported on the run that hit it. `run --task <id>` prints
+what was recorded, and prints a damaged or unreadable record as damaged rather
+than as "no diagnostics".
+
+None of it is authority. It never says verification would fail now, never says
+remediation is authorised, never authorises a retry, and **its absence proves
+nothing** — nothing writes a record for a pass.
 
 ### What V1-06 is not
 
@@ -2786,7 +2852,7 @@ never passes it.
 | `IMPLEMENTING` and the setup chain | `NO_PROGRESS`; the loop does not drive them |
 | `READY_FOR_PR` / `ABORTED` | terminal, nothing run |
 | `BLOCKED_USAGE_LIMIT` | resumed **only** on `AUTOMATIC_ALLOWED` *and* an attended grant; otherwise stops with the checks that denied it, writing nothing |
-| `BLOCKED_VERIFY` | stops. Never an automatic retry |
+| `BLOCKED_VERIFY` | stops, unless the invocation carried `--remediate-verify-failure` **and** an attended grant, in which case it takes the declared `REMEDIATING` edge once. Never an automatic retry, and never a re-run of the same verification |
 | `BLOCKED_AUTH`, `HUMAN_DECISION_REQUIRED`, `SCOPE_VIOLATION`, `RESUME_STATE_DIVERGED` | stop; each keeps its own outcome |
 | diverged / unobservable / unusable | stop, fail-closed, repair nothing |
 
@@ -3728,6 +3794,45 @@ and because the failure mode it describes — a command that cannot start is
 
 ### Carried forward, deliberately
 
+- **L-M1-VR-1** — the stored verification excerpt is the **head** of the failing
+  phase's stream, not its end. For a long test run that is the banner rather than
+  the assertion. It comes from `agentDiagnostics()` unchanged, and repairing it
+  means a second representation or a signature change to that function and every
+  caller — neither belongs in a blocker fix. The remediation brief and the
+  operator report both say which end it is, so it is a stated limit rather than a
+  silent one.
+- **L-M1-VR-2** — `HUMAN_DECISION_REQUIRED` has the **same missing executable
+  edge** `BLOCKED_VERIFY` had. Two paths land there: a remediation whose writer
+  changed nothing (`NOTHING_TO_COMMIT` → park, the pre-existing and correct
+  rule), and a verification failure whose evidence did not become durable. Both
+  are then as stuck as `BLOCKED_VERIFY` was. Extending the operator decision to
+  that state is a second decision and was deliberately not taken: it is a
+  different question — "this task needs a human" covers six situations, not one —
+  and answering it with the same flag would make the flag mean less than its name.
+- **L-M1-VR-3** — the verification-attempt record is **not tamper-proof**, the
+  same concession `L-V4-14-2` makes. The binding digest detects an *edit* to a
+  record this build wrote; anything running as this OS user can compute a fresh
+  binding and write a whole record. What it is not is writable by the **writing
+  agent**, which is the threat the placement under the repository root closes.
+- **L-M1-VR-4** — two invocations racing on one task can **lose an attempt**.
+  Read-before-write is not a transaction, `state/atomic-file.ts` replaces one
+  file and claims nothing about two, and the second replace wins. Bounded by the
+  execution lease, not excluded by the store. Identical to
+  `post-merge-verification-store.ts`'s own admission, and recorded rather than
+  papered over.
+- **L-M1-VR-5** — the four parked `M1-RELEASE-*` tasks **predate the store** and
+  have no record, so this fix does not recover them. Their evidence is gone;
+  their worktrees survive, and `tsc --noEmit` still fails in two of them today.
+  Whether to continue, abandon or re-run them is an operator decision this change
+  does not make.
+- **L-M1-VR-6** — the one-departure limits at the run driver and the lifecycle
+  are **fail-closed floors that do not fire today**, and a counter-proof mutant
+  deleting the driver's survived every test, which is how that was established
+  rather than assumed. What actually bounds the verify/remediate cycle is two
+  pre-existing rules: a `BLOCKED` loop step ends the `runTask` call, and
+  `driveLifecycle` re-enters only on `STEP_BUDGET_EXHAUSTED`. The floors are kept
+  because that cycle touches neither `reviewRound` nor `maxReviewRounds`, so if
+  either rule ever changed nothing else would stop it.
 - **L-V3-10-1** — the quota settlement's **scope reads** go through the unleased
   `git ?? runGitCommand`, exactly as the completed-writer path's do. The two
   effects are fenced — the commit through `leasedGit`, the durable write through

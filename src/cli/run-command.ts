@@ -147,6 +147,7 @@ interface RunOptions {
   readonly maxSteps?: string;
   readonly maxInvocations?: string;
   readonly recoverStaleLease?: boolean;
+  readonly remediateVerifyFailure?: boolean;
 }
 
 /**
@@ -213,6 +214,24 @@ function refuseArguments(options: RunOptions): ArgumentRefusal | null {
         'destructive permission an operator gives for now, and a wait can put hours between ' +
         'now and the attempt that would use it. Recover with `agent-loop lease recover` ' +
         'first, then invoke this.',
+    };
+  }
+  if (options.remediateVerifyFailure === true && !attended) {
+    return {
+      code: 'VERIFY_REMEDIATION_WITHOUT_OPERATOR',
+      sentence:
+        '--remediate-verify-failure is an operator decision and requires --attended. ' +
+        'Leaving a failed verification is the one thing the block\'s own contract says ' +
+        'a human has to decide, so a run that claims nobody is present may not decide it.',
+    };
+  }
+  if (options.remediateVerifyFailure === true && options.task === undefined) {
+    return {
+      code: 'VERIFY_REMEDIATION_WITHOUT_TASK',
+      sentence:
+        '--remediate-verify-failure requires --task. The decision is about one blocked ' +
+        'task, and letting the selector choose which one to continue would make the ' +
+        'operator authorise a task they never named.',
     };
   }
   if (unattended && options.recoverStaleLease === true) {
@@ -373,6 +392,7 @@ async function executeAttended(
     readonly maxSteps: number;
     readonly maxInvocations: number;
     readonly recoverStaleLease: boolean;
+    readonly remediateVerifyFailure: boolean;
   },
   seams: RunCommandSeams,
 ): Promise<CliExitCode> {
@@ -399,6 +419,10 @@ async function executeAttended(
       // --max-invocations is the operator extending it across the run, which is
       // what the flag means.
       continuationGrant: 'ATTENDED',
+      // Forwarded, never inferred. `refuseArguments` has already established
+      // that it came with `--attended` and a named task; every remaining
+      // condition belongs to the run driver.
+      remediateVerifyFailure: lifecycle.remediateVerifyFailure,
       recoverStaleLease: lifecycle.recoverStaleLease,
       maxSteps: lifecycle.maxSteps,
       maxInvocations: lifecycle.maxInvocations,
@@ -513,6 +537,17 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
       'Permit removing an execution lease this build can prove is dead before acquiring. ' +
         'Never removes one on a guess, has no override, and grants nothing by itself: a ' +
         'removal is followed by an ordinary acquisition that is allowed to lose.',
+    )
+    .option(
+      '--remediate-verify-failure',
+      'Continue ONE named task out of BLOCKED_VERIFY to REMEDIATING, on your decision. ' +
+        'The edge is the one the transition table has always declared and nothing could ' +
+        'take; this is the operator half of it. It does NOT re-run verification and is not ' +
+        'a retry: it hands the recorded failure to the writing agent, which changes the ' +
+        'tree, after which verification runs again on what the writer left. Requires ' +
+        '--attended and --task, is refused with --automatic-resume-only, and buys exactly ' +
+        'one departure from the block per invocation. A task whose verification failure was ' +
+        'never durably recorded is not in BLOCKED_VERIFY to begin with.',
     )
     // ── Why this is not called `--unattended-…` ─────────────────────────────
     //
@@ -673,6 +708,7 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
             maxSteps,
             maxInvocations,
             recoverStaleLease: options.recoverStaleLease === true,
+            remediateVerifyFailure: options.remediateVerifyFailure === true,
           },
           seams,
         );

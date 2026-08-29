@@ -23,7 +23,7 @@
  *
  * The converse divergence is from `git-command.ts`, which discards stdout on a
  * non-zero exit. Here the output of a failing run is exactly the evidence a
- * human needs, so it is kept — bounded, and never persisted.
+ * human needs, so it is kept — bounded, and never persisted raw.
  *
  * ── What this seam does not do ─────────────────────────────────────────────
  *
@@ -79,8 +79,12 @@ export type VerificationCommandOutcome =
  *
  * `stdout` and `stderr` are the project's own output. They are untrusted text —
  * a repository's test runner may print anything at all, including a secret it
- * read — so they are redacted before they are shown and are **never persisted**:
- * `TaskStateObjectSchema` is `.strict()` and has no field for them.
+ * read — so they are redacted before they are shown, and **the raw text is
+ * never persisted anywhere by this build**. `TaskStateObjectSchema` is
+ * `.strict()` and has no field for them, and neither has the verification-attempt
+ * record V4 added: that store's schema accepts only an excerpt that has already
+ * been through `agentDiagnostics()` and then through line-safety, so there is no
+ * route by which these two strings reach a file.
  */
 export interface VerificationCommandResult {
   readonly outcome: VerificationCommandOutcome;

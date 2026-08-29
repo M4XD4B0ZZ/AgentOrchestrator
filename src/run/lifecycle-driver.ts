@@ -420,6 +420,16 @@ export interface LifecycleRequest {
    */
   readonly continuationGrant: InvocationGrant;
   /**
+   * Whether the operator asked to continue a `BLOCKED_VERIFY` task to
+   * remediation, forwarded verbatim to `RunRequest.remediateVerifyFailure`.
+   *
+   * Forwarded and not interpreted. Every condition on it — the state, the grant,
+   * the resume phase, and the one-per-invocation bound — is checked in
+   * `run-driver.ts`, where the state and the resume decision are, and this layer
+   * would only be a second, weaker copy of that check.
+   */
+  readonly remediateVerifyFailure?: boolean;
+  /**
    * Whether this run may remove a lease it can prove is dead.
    *
    * Off is the safe answer and there is no default. When off, a stale lease
@@ -667,6 +677,14 @@ async function driveUnderLease(
   const runs: RunResult[] = [];
   let permissionDenials = NO_PERMISSION_DENIALS;
   let invocations = 0;
+  /**
+   * Whether any invocation of this lifecycle has already taken the operator's
+   * one departure from `BLOCKED_VERIFY`.
+   *
+   * Set from what the run REPORTS it did, never from what it was offered: a call
+   * that was permitted and refused for some other reason has spent nothing.
+   */
+  let verifyRemediationSpent = false;
   let steps = 0;
   let start: StartTaskResult | null = null;
   // Whether the lease has already been given back. Read only by the `catch`
@@ -791,6 +809,21 @@ async function driveUnderLease(
           repository,
           taskId,
           continuationGrant: request.continuationGrant,
+          // **Offered once, across every invocation of this lifecycle.**
+          //
+          // `run-driver.ts` bounds it within one `runTask` call, and that is not
+          // enough on its own: this loop re-enters `runTask` on
+          // `STEP_BUDGET_EXHAUSTED`, and each call gets a fresh local. With a
+          // small step budget the resume and the remediation can exhaust it
+          // before the failing verification, so the next invocation would meet
+          // the block again with the decision unspent — an unbounded
+          // `VERIFYING -> BLOCKED_VERIFY -> REMEDIATING -> VERIFYING` cycle,
+          // bounded by `--max-invocations` and by nothing about the task. A
+          // counter-proof mutant found this: removing the driver's local bound
+          // survived every test, because within one call the cycle is already
+          // stopped by a blocking step ending the run.
+          remediateVerifyFailure:
+            request.remediateVerifyFailure === true && !verifyRemediationSpent,
           authEvidence,
           lease: evidence,
           maxSteps: request.maxSteps,
@@ -807,6 +840,7 @@ async function driveUnderLease(
         },
       );
       runs.push(run);
+      if (run.remediatedVerifyFailure) verifyRemediationSpent = true;
       steps += run.steps;
       permissionDenials = mergePermissionDenials(permissionDenials, run.permissionDenials);
 

@@ -1911,3 +1911,224 @@ describe('the outcome vocabulary', () => {
     expect(readFileSync).toBeDefined();
   });
 });
+
+/* ═══ Q — the one blocked-state departure an operator can ask for (M1) ════ */
+
+/**
+ * `BLOCKED_VERIFY -> REMEDIATING` has been in the transition table since V1, and
+ * `resume-policy.ts` has said all along that the state is resumable with a human
+ * decision and a resume phase of `REMEDIATE`. Nothing could take it: the
+ * blocking gate admits one verdict, `AUTOMATIC_ALLOWED`, which this state can
+ * never carry. The M1 release gate is where the contract and the executor
+ * disagreeing stopped being a curiosity — four tasks sat in a state with a
+ * declared continuation and no way to take it.
+ *
+ * These cases are written against the four ways making it executable goes wrong:
+ * a departure nobody asked for, a departure an unattended run takes, a departure
+ * from the wrong state, and a cycle nothing bounds.
+ */
+describe('a failed verification is continued only on an explicit decision', () => {
+  function blocked(root: string, overrides: Partial<TaskStateInput> = {}): StateLoadSuccess {
+    return persist(root, {
+      state: 'BLOCKED_VERIFY',
+      blockedAgent: null,
+      resumeFrom: { phase: 'REMEDIATE', round: 1 },
+      currentCommit: null,
+      worktreeCleanAtCheckpoint: false,
+      ...overrides,
+    });
+  }
+
+  it('refuses an unusable step budget without throwing', async () => {
+    // The earliest `stop` in `runTask`, and the one that had no test. It is
+    // reached before the lease, before reconciliation and before anything else,
+    // and `stop` now closes over `verifyRemediationSpent` to report whether this
+    // call took the operator's departure.
+    //
+    // That combination is a temporal-dead-zone hazard rather than a hypothetical
+    // one: the declaration first landed *below* `stop`, and a `const` arrow
+    // reading a later `let` and invoked before it throws "Cannot access before
+    // initialization" — reproduced in isolation. Typecheck does not catch it, and
+    // no existing case reached this refusal, so the crash would have shipped.
+    //
+    // Asserted as a returned outcome rather than with `.rejects`: the property is
+    // that this path answers, and an assertion that it merely does not throw
+    // would also pass for a path that hung or returned the wrong thing.
+    const root = repoRoot();
+    persist(root);
+
+    const run = await runTask(
+      request(root, { maxSteps: 0 }),
+      deps(root, { agent: cappedAgent(agentCommandResult({ stdout: '' }), 0).runner }),
+    );
+
+    expect(run.outcome).toBe('NO_PROGRESS');
+    expect(run.reasonCodes).toEqual(['STEP_BUDGET_INVALID']);
+    expect(run.steps).toBe(0);
+    expect(run.remediatedVerifyFailure).toBe(false);
+  });
+
+  it('stops on the block when nobody asked, writing nothing', async () => {
+    const root = repoRoot();
+    blocked(root);
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+    const verify = cappedVerify(0);
+
+    const run = await runTask(
+      request(root),
+      deps(root, { agent: agent.runner, verify: verify.runner }),
+    );
+
+    expect(run.outcome).toBe('BLOCKED_VERIFY');
+    expect(run.steps).toBe(0);
+    expect(reload(root).state.state).toBe('BLOCKED_VERIFY');
+    // Unchanged in every respect. A run that merely *could* have continued must
+    // not spend the block's resume point on the way past.
+    expect(reload(root).state.resumeFrom).toEqual({ phase: 'REMEDIATE', round: 1 });
+    expect(agent.count()).toBe(0);
+    expect(verify.count()).toBe(0);
+  });
+
+  it('takes the declared edge when the operator asked, and only then', async () => {
+    const root = repoRoot();
+    blocked(root, {
+      reviewRound: 1,
+      findingHistory: [DURABLE_FINDING],
+    });
+    const agent = scriptedAgent(
+      agentCommandResult({ stdout: claudeResultStream({ subtype: 'success', isError: false }) }),
+    );
+    const verify = scriptedVerify({ exitCode: 0 });
+
+    const run = await runTask(
+      request(root, { remediateVerifyFailure: true }),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true }),
+        agent: agent.runner,
+        verify: verify.runner,
+      }),
+    );
+
+    // The resume itself is a durable step, and the loop then drives the phase it
+    // entered: the writer really ran, against the durable cause.
+    expect(run.steps).toBeGreaterThanOrEqual(2);
+    expect(agent.calls.length).toBeGreaterThanOrEqual(1);
+    expect(agent.calls[0]?.agent).toBe('claude');
+    expect(reload(root).state.state).not.toBe('BLOCKED_VERIFY');
+  });
+
+  it('refuses an unattended run whatever it is given', async () => {
+    const root = repoRoot();
+    blocked(root);
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+    const run = await runTask(
+      request(root, {
+        continuationGrant: 'AUTOMATIC_RESUME_ONLY',
+        remediateVerifyFailure: true,
+      }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    // `mayRemediateVerifyFailure` answers false for this grant, so the conjunct
+    // never holds and the blocking gate stops the run exactly as it did before.
+    // `BLOCKED_VERIFY` stays `automaticResumeEligible: false`; nothing about
+    // this flag can make a machine's decision into a human's.
+    expect(run.outcome).toBe('BLOCKED_VERIFY');
+    expect(run.steps).toBe(0);
+    expect(reload(root).state.state).toBe('BLOCKED_VERIFY');
+    expect(agent.count()).toBe(0);
+  });
+
+  it('refuses to move any other blocked state', async () => {
+    for (const state of ['SCOPE_VIOLATION', 'HUMAN_DECISION_REQUIRED'] as const) {
+      const root = repoRoot();
+      persist(root, {
+        state,
+        blockedAgent: null,
+        currentCommit: null,
+        worktreeCleanAtCheckpoint: false,
+        ...(state === 'HUMAN_DECISION_REQUIRED'
+          ? { resumeFrom: { phase: 'REMEDIATE' as const, round: 1 } }
+          : {}),
+      });
+      const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+      const run = await runTask(
+        request(root, { remediateVerifyFailure: true }),
+        deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      );
+
+      // The state is the first conjunct, and it is not a formality. This flag is
+      // one decision about one block; `SCOPE_VIOLATION` is not resumable at all,
+      // and `HUMAN_DECISION_REQUIRED` — which a failed remediation lands on — is
+      // a different decision that this flag does not claim to be, even when its
+      // resume point happens to name the same phase.
+      expect(run.outcome).toBe(state);
+      expect(run.steps).toBe(0);
+      expect(reload(root).state.state).toBe(state);
+      expect(agent.count()).toBe(0);
+    }
+  });
+
+  it('buys exactly one departure, so the verify cycle cannot run away', async () => {
+    const root = repoRoot();
+    blocked(root, { reviewRound: 1, findingHistory: [DURABLE_FINDING] });
+    // A writer that always succeeds and a gate that always says no. Without the
+    // bound this is an unbounded cycle: `VERIFYING -> BLOCKED_VERIFY ->
+    // REMEDIATING -> VERIFYING` touches neither `reviewRound` nor
+    // `maxReviewRounds`, so nothing else in the build stops it, and the step
+    // budget alone would allow roughly two and a half traversals.
+    const agent = cappedAgent(
+      agentCommandResult({ stdout: claudeResultStream({ subtype: 'success', isError: false }) }),
+      4,
+    );
+    const verify = scriptedVerify({ exitCode: 1 });
+
+    const run = await runTask(
+      request(root, { remediateVerifyFailure: true, maxSteps: 12 }),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true }),
+        agent: agent.runner,
+        verify: verify.runner,
+      }),
+    );
+
+    // Back in the block, and the run stopped there rather than leaving again.
+    expect(run.outcome).toBe('BLOCKED_VERIFY');
+    expect(reload(root).state.state).toBe('BLOCKED_VERIFY');
+    // One writer pass. Two would mean the decision was spent twice in one
+    // invocation, which is the runaway this bound exists to prevent.
+    expect(agent.count()).toBe(1);
+  });
+
+  it('leaves the quota block automatic resume exactly as it was', async () => {
+    const root = repoRoot();
+    persist(root, {
+      state: 'BLOCKED_USAGE_LIMIT',
+      blockedAgent: 'claude',
+      resumeFrom: { phase: 'IMPLEMENT', round: 1 },
+      reportedResetAt: '2020-01-01T00:00:00.000Z',
+      currentCommit: SHA_B,
+      worktreeCleanAtCheckpoint: true,
+    });
+    const agent = scriptedAgent(
+      agentCommandResult({ stdout: claudeResultStream({ subtype: 'success', isError: false }) }),
+    );
+
+    // No verification-remediation flag anywhere near this, and the automatic
+    // resume still happens: the new conjunct is additive and touches no other
+    // block's path.
+    const run = await runTask(
+      request(root),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true }),
+        agent: agent.runner,
+        verify: scriptedVerify({ exitCode: 0 }).runner,
+      }),
+    );
+
+    expect(run.steps).toBeGreaterThanOrEqual(1);
+    expect(reload(root).state.state).not.toBe('BLOCKED_USAGE_LIMIT');
+  });
+});
