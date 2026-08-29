@@ -148,6 +148,7 @@ interface RunOptions {
   readonly maxInvocations?: string;
   readonly recoverStaleLease?: boolean;
   readonly remediateVerifyFailure?: boolean;
+  readonly continueHumanDecision?: boolean;
 }
 
 /**
@@ -230,6 +231,25 @@ function refuseArguments(options: RunOptions): ArgumentRefusal | null {
       code: 'VERIFY_REMEDIATION_WITHOUT_TASK',
       sentence:
         '--remediate-verify-failure requires --task. The decision is about one blocked ' +
+        'task, and letting the selector choose which one to continue would make the ' +
+        'operator authorise a task they never named.',
+    };
+  }
+  if (options.continueHumanDecision === true && !attended) {
+    return {
+      code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_OPERATOR',
+      sentence:
+        '--continue-human-decision is an operator decision and requires --attended. The ' +
+        'state is named after the decision: the loop escalated because it had run out of ' +
+        'ways to proceed on its own, so a run that claims nobody is present may not answer ' +
+        'for the person it escalated to.',
+    };
+  }
+  if (options.continueHumanDecision === true && options.task === undefined) {
+    return {
+      code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_TASK',
+      sentence:
+        '--continue-human-decision requires --task. The decision is about one escalated ' +
         'task, and letting the selector choose which one to continue would make the ' +
         'operator authorise a task they never named.',
     };
@@ -393,6 +413,7 @@ async function executeAttended(
     readonly maxInvocations: number;
     readonly recoverStaleLease: boolean;
     readonly remediateVerifyFailure: boolean;
+    readonly continueHumanDecision: boolean;
   },
   seams: RunCommandSeams,
 ): Promise<CliExitCode> {
@@ -423,6 +444,10 @@ async function executeAttended(
       // that it came with `--attended` and a named task; every remaining
       // condition belongs to the run driver.
       remediateVerifyFailure: lifecycle.remediateVerifyFailure,
+      // Forwarded on the same terms as the field above. `refuseArguments` has
+      // established that it came with `--attended` and a named task; the state,
+      // the resume point and the one-per-invocation bound are the driver's.
+      continueHumanDecision: lifecycle.continueHumanDecision,
       recoverStaleLease: lifecycle.recoverStaleLease,
       maxSteps: lifecycle.maxSteps,
       maxInvocations: lifecycle.maxInvocations,
@@ -548,6 +573,17 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
         '--attended and --task, is refused with --automatic-resume-only, and buys exactly ' +
         'one departure from the block per invocation. A task whose verification failure was ' +
         'never durably recorded is not in BLOCKED_VERIFY to begin with.',
+    )
+    .option(
+      '--continue-human-decision',
+      'Continue ONE named task out of HUMAN_DECISION_REQUIRED, on your decision, from the ' +
+        'resume point that task recorded. The four edges out of this state have always been ' +
+        'declared and nothing could take them; this is the operator half. It does not choose ' +
+        'the phase -- the record does -- and it refills nothing: an escalation caused by an ' +
+        'exhausted review budget is continued into the same exhausted budget. Requires ' +
+        '--attended and --task, is refused with --automatic-resume-only, and buys exactly ' +
+        'one departure from the state per invocation. Read what was recorded with ' +
+        '`run --task <id>` before deciding.',
     )
     // ── Why this is not called `--unattended-…` ─────────────────────────────
     //
@@ -709,6 +745,7 @@ export function registerRunCommand(program: Command, seams: RunCommandSeams = {}
             maxInvocations,
             recoverStaleLease: options.recoverStaleLease === true,
             remediateVerifyFailure: options.remediateVerifyFailure === true,
+            continueHumanDecision: options.continueHumanDecision === true,
           },
           seams,
         );

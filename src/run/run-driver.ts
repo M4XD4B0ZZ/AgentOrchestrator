@@ -86,6 +86,7 @@ import type { ExecutionLeaseEvidence } from '../core/execution-lease-evidence.js
 import { verifyExecutionLeaseHeldFor } from '../lease/execution-lease.js';
 import { withdrawnCheckpointFor } from '../core/agent-phases.js';
 import {
+  mayContinueHumanDecision,
   mayRemediateVerifyFailure,
   permitsContinuation,
   type InvocationGrant,
@@ -324,6 +325,15 @@ export interface RunResult {
    */
   readonly remediatedVerifyFailure: boolean;
   /**
+   * Whether this call took a task out of `HUMAN_DECISION_REQUIRED` on the
+   * operator's decision.
+   *
+   * Reported for the same reason as the field above, and read by
+   * `driveLifecycle` to bound the decision across the invocations one lifecycle
+   * makes. Never persisted: it is a fact about one call.
+   */
+  readonly continuedHumanDecision: boolean;
+  /**
    * What the writing agent was refused, **across every step of this run**.
    *
    * Run-level rather than per-step, and that placement is the whole point.
@@ -395,6 +405,34 @@ export interface RunRequest {
    * tasks.
    */
   readonly remediateVerifyFailure?: boolean;
+  /**
+   * Whether the operator asked, on this invocation, to continue a
+   * `HUMAN_DECISION_REQUIRED` task from the resume point it recorded.
+   *
+   * The second half of the same story the field above tells, and it was found
+   * the same way. `core/transitions.ts` has declared
+   * `HUMAN_DECISION_REQUIRED -> IMPLEMENTING | VERIFYING | REVIEWING |
+   * REMEDIATING` since V1, and `core/resume-policy.ts` calls the state
+   * `resumable: true` with `resumeReentry: 'DIRECT'` and a `REQUIRED` resume
+   * point. Nothing could take any of those four edges: the blocking gate admits
+   * `AUTOMATIC_ALLOWED`, which this state can never carry
+   * (`automaticResumeEligible: false`), and the `remediateVerifyFailure`
+   * conjunct is scoped to `BLOCKED_VERIFY` by its first term. Measured on
+   * 2026-08-29 against `87e90ba`: an attended re-run of a task parked here took
+   * `0` steps and left the state untouched.
+   *
+   * This is the operator's half. It is conjoined with
+   * `mayContinueHumanDecision(continuationGrant)`, so it does nothing without
+   * `ATTENDED`, and it is spent after one use — see
+   * `humanDecisionContinuationSpent`.
+   *
+   * It is a *different* field from `remediateVerifyFailure` rather than a wider
+   * spelling of it, and the existing pin that `--remediate-verify-failure`
+   * refuses to move a `HUMAN_DECISION_REQUIRED` task stays true afterwards.
+   *
+   * Defaulting is deliberate: absent means no.
+   */
+  readonly continueHumanDecision?: boolean;
   /**
    * The artefact a *fresh* auth preflight produced, or `null` when none ran.
    *
@@ -479,6 +517,7 @@ function runResult(
     resume: null,
     lastStep: null,
     remediatedVerifyFailure: false,
+    continuedHumanDecision: false,
     permissionDenials: NO_PERMISSION_DENIALS,
     ...from,
   });
@@ -558,8 +597,34 @@ export async function runTask(
    * is described as a floor rather than as the bound.
    */
   let verifyRemediationSpent = false;
+  /**
+   * Whether this call has already taken the operator's one departure from
+   * `HUMAN_DECISION_REQUIRED`.
+   *
+   * A separate variable from `verifyRemediationSpent`, not a shared one. The two
+   * decisions are bought separately and an invocation may legitimately be given
+   * both flags for one task over two states, so a single counter would silently
+   * make the second decision unusable after the first was spent.
+   *
+   * It is the same kind of fail-closed floor its sibling is, and that was
+   * measured rather than assumed: a counter-proof mutant deleting this conjunct
+   * survived the whole of `tests/run-driver.test.ts`, alongside a control mutant
+   * that had to survive and did. The two mechanisms the sibling names — a
+   * `BLOCKED` loop step ending the call unconditionally, and `driveLifecycle`
+   * re-entering only on `STEP_BUDGET_EXHAUSTED` — apply to this state too. It is
+   * kept for the same reason: it is the bound that would stop the cycle if
+   * either of those changed, and a decision the operator buys once must not be
+   * spendable twice by a loop that returns to the state it left.
+   */
+  let humanDecisionContinuationSpent = false;
   const stop = (from: Partial<RunResult> & { readonly outcome: RunOutcome }): RunResult =>
-    runResult({ taskId, permissionDenials, remediatedVerifyFailure: verifyRemediationSpent, ...from });
+    runResult({
+      taskId,
+      permissionDenials,
+      remediatedVerifyFailure: verifyRemediationSpent,
+      continuedHumanDecision: humanDecisionContinuationSpent,
+      ...from,
+    });
 
   if (!Number.isSafeInteger(maxSteps) || maxSteps < 1) {
     return stop({ outcome: 'NO_PROGRESS', reasonCodes: Object.freeze(['STEP_BUDGET_INVALID']) });
@@ -783,10 +848,34 @@ export async function runTask(
       state.resumeFrom.phase === 'REMEDIATE' &&
       !verifyRemediationSpent;
 
+    // The same shape for `HUMAN_DECISION_REQUIRED`, and every conjunct is
+    // load-bearing for the same reasons — with one deliberate difference.
+    //
+    // There is **no phase term**. Its sibling above pins `REMEDIATE` because
+    // `BLOCKED_VERIFY` declares exactly one outgoing edge, so a record naming
+    // any other phase is a record that has been tampered with. This state
+    // declares four, and which one applies is the record's to say, not the
+    // operator's and not this line's. What replaces the pin is the check that
+    // was already there: the write below refuses a resume point that names a
+    // phase the loop does not drive (`RESUME_PHASE_NOT_DRIVEN`), so a nonsense
+    // record is still refused — before the write, and by the gate that owns
+    // that question.
+    //
+    // `state.resumeFrom !== null` is kept and is not redundant with
+    // `resumeFromRequirement: 'REQUIRED'`: that requirement describes what a
+    // valid record carries, and this is a read of one particular record.
+    const continuingHumanDecision =
+      state.state === 'HUMAN_DECISION_REQUIRED' &&
+      request.continueHumanDecision === true &&
+      mayContinueHumanDecision(request.continuationGrant) &&
+      state.resumeFrom !== null &&
+      !humanDecisionContinuationSpent;
+
     if (
       isBlockingState(state.state) &&
       resume.continuation !== 'AUTOMATIC_ALLOWED' &&
-      !remediatingVerifyFailure
+      !remediatingVerifyFailure &&
+      !continuingHumanDecision
     ) {
       return stop({
         outcome: BLOCKING_OUTCOME[state.state],
@@ -874,7 +963,11 @@ export async function runTask(
     }
 
     // --- 6. A blocked task's resume, once every gate above has passed -------
-    if (resume.continuation === 'AUTOMATIC_ALLOWED' || remediatingVerifyFailure) {
+    if (
+      resume.continuation === 'AUTOMATIC_ALLOWED' ||
+      remediatingVerifyFailure ||
+      continuingHumanDecision
+    ) {
       // The phase this resume would enter must be one this run can actually
       // continue from, and that is checked *before* the write for the same
       // reason the attended grant is (V1-07-RR-B1).
@@ -951,15 +1044,24 @@ export async function runTask(
       // Set **after** the write landed, never before it and never on any path
       // that refused: the flag means "this run really did resume this task",
       // and a run that only intended to must not inherit the permission.
+      //
+      // Each arm names the conjunct that actually fired rather than deducing it
+      // from the other two. An `else` that meant "therefore the verify
+      // remediation" was correct while that was the only operator decision here;
+      // with a second one it would mark the wrong decision spent, leaving the
+      // operator's real departure unaccounted for and the one they did not use
+      // consumed.
       if (resume.continuation === 'AUTOMATIC_ALLOWED') {
         continuingOwnAutomaticResume = true;
-      } else {
+      } else if (remediatingVerifyFailure) {
         // The operator's decision is spent here, and only here: after the write
         // landed, never before it and never on any path that refused. A run that
         // only intended to continue must not inherit the permission, and — more
         // to the point — must not have consumed it either, or a refused write
         // would silently cost the operator their one departure.
         verifyRemediationSpent = true;
+      } else {
+        humanDecisionContinuationSpent = true;
       }
       steps += 1;
       remediationPayload = undefined;
