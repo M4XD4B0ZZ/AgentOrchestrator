@@ -206,8 +206,10 @@ export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, str
     LAUNCH_HISTORY_UNPROVEN:
       'At least one writer launch under this lease was announced and never reached the\n' +
       '  point where the kernel confirmed it had been placed in the owner\'s process job.\n' +
-      '  That is the short window between announcing a launch and starting it, and it is\n' +
-      '  the one case where nothing at all can be said about the process. Nothing is removed.',
+      '  Usually that is the short window between announcing a launch and starting it; it\n' +
+      '  is also what a launch on a platform with no process boundary leaves, and what a\n' +
+      '  launch whose mark could not be written leaves. In all of them nothing at all can\n' +
+      '  be said about the process, so nothing is removed.',
     LAUNCH_TREE_STILL_RUNNING:
       'A writer launch under this lease was placed in the owner\'s process job and never seen\n' +
       '  to end, and a process bearing one of the ids it recorded exists right now. The owner\n' +
@@ -248,6 +250,37 @@ export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, str
  * for itself at the moment it runs, so this sentence cannot make a stale fact
  * look like an authorisation.
  */
+/**
+ * Why a lease may be removed, one sentence per arm of the predicate.
+ *
+ * Two entries rather than one string with a clause bolted on, so that adding an
+ * arm to the predicate without deciding what to tell an operator about it is a
+ * compile failure here rather than a sentence that quietly covers a proof
+ * nobody made. The closing half — what the removal grants — is identical in both
+ * and stated once at the call site would have been shorter and would have let
+ * the two drift; it is repeated because it is short and because the difference
+ * between them is the whole point.
+ */
+const SAFE_RECOVERY_REASON: Readonly<Record<'ENDED' | 'UNENDED', readonly string[]>> = Object.freeze(
+  {
+    ENDED: Object.freeze([
+      '  Every writer launch under this lease is proved contained and was seen to end, and its\n' +
+        '  owner process is gone, so no writer process it started can still be running. Remove\n' +
+        '  it with `agent-loop lease recover --repository <path>`. That removes a dead record\n' +
+        '  and grants nothing: the next run takes its own lease through the ordinary path.',
+    ]),
+    UNENDED: Object.freeze([
+      '  Every writer launch under this lease was placed in the owner\'s process job by the\n' +
+        '  kernel, and at least one of them was never seen to end - this run was interrupted\n' +
+        '  while its agent was working. Its owner is gone, and the processes that launch\n' +
+        '  recorded were checked just now and do not exist,\n' +
+        '  so no writer process it started can still be running.\n' +
+        '  Remove it with `agent-loop lease recover --repository <path>`. That check is made\n' +
+        '  again inside the removal, so this report is not what it acts on.',
+    ]),
+  },
+);
+
 export function renderLeaseRecovery(
   assessment: StaleLeaseRecoveryAssessment,
   history: WriterLaunchReading | null,
@@ -266,10 +299,18 @@ export function renderLeaseRecovery(
           // process it started can still be running" — which is the wider claim
           // the ledger's own header refuses to make, printed to the one reader
           // who cannot check it.
-          '  Every writer launch under this lease is proved contained and its owner process is\n' +
-            '  gone, so no writer process it started can still be running. Remove it with\n' +
-            '  `agent-loop lease recover --repository <path>`. That removes a dead record and\n' +
-            '  grants nothing: the next run takes its own lease through the ordinary path.',
+          //
+          // And one sentence per ARM, because the predicate has two and they are
+          // proved differently. A single sentence said "every writer launch is
+          // proved contained" for both, which is precisely the thing that is
+          // *not* proved on the arm this slice added: no ending was observed
+          // there, and the tree's absence was established by probing the
+          // processes the ledger names. Printing the stronger reason under the
+          // weaker one tells the one reader who cannot check it that a proof was
+          // made that was not.
+          ...SAFE_RECOVERY_REASON[
+            history === 'LAUNCHES_CONTAINED_SOME_UNENDED' ? 'UNENDED' : 'ENDED'
+          ],
         ]
       : [
           line('Recovery', assessment.refusal),

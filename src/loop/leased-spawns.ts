@@ -325,12 +325,28 @@ function recordWriterContainment(
   // launch this build cannot attest must take the previous launch's record with
   // it. See the header.
   if (!isContainmentAttestation(result.containment)) {
-    // The generation opened above is deliberately **left `PENDING`**. That is
-    // not an omission and there is no arm here that closes it: an unattested
-    // launch is exactly the launch a recovery must not step over, and the
-    // pending entry is the only durable trace that it happened. Slice 4's
+    // The generation opened above is deliberately **not advanced here**. That is
+    // not an omission and there is no arm that closes it: an unattested ending
+    // is exactly the ending a recovery must not read as an ending, and the
+    // entry as it stands is the only durable trace of what happened. Slice 4's
     // record is removed for its own reason — it would otherwise keep describing
     // the launch before this one — and the two are different obligations.
+    //
+    // ── What "as it stands" now means, since M2 slice 1 changed it ──────────
+    //
+    // This said the generation is "left `PENDING`", and after that slice it
+    // usually is not: an ending that could not be attested most often follows an
+    // establishment that *was* kernel-confirmed, so the entry sits at
+    // `ESTABLISHED`. It reaches `PENDING` only when the establishment mark never
+    // landed either.
+    //
+    // That is a real change in what such a launch licenses, and it is intended
+    // rather than inherited. `ESTABLISHED` does not claim the launch ended — it
+    // claims it was placed in the owner's job — so an unattested ending takes
+    // nothing away from it, and the recovery that builds on it still owes the
+    // liveness proof. The `BOUNDARY_LOST` case where the helper may still be
+    // running is precisely the case that proof refuses:
+    // `LAUNCH_TREE_STILL_RUNNING`.
     return clearContainmentEvidence(deps.lease.repository, deps.lease.evidence);
   }
   const now = deps.containmentNow ?? (() => new Date().toISOString());

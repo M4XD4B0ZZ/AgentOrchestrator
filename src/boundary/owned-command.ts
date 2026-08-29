@@ -808,7 +808,8 @@ class BoundedSink {
 export interface OwnedCommandOptions {
   /**
    * Called once, with an attestation, the moment the kernel has confirmed this
-   * launch's job membership and before the target has produced anything.
+   * launch's job membership - which in the default mode it did at creation, so
+   * the target never existed outside that job.
    *
    * ── Why a callback and not a second return value ───────────────────────────
    *
@@ -1421,26 +1422,31 @@ export async function runOwnedCommand(
     // records: this is an enrichment, the target is already running, and a
     // consumer that throws must not turn a started launch into a failed one.
     if (options.onLaunchEstablished !== undefined) {
-      const atStart = mintContainmentAttestation({
-        ownerPid: process.pid,
-        helperPid: owned.helperPid,
-        childPid: owned.childPid,
-        mode: owned.mode,
-        assignedAtCreation: owned.assignedAtCreation,
-        launchNonce: owned.launchNonce,
-        // The moment membership was confirmed to this module, which is what
-        // `ContainmentFacts.attestedAt` describes. Stamped here rather than
-        // reused from the ending's mint below: they are two different moments
-        // and sharing one would date the earlier record by the later event.
-        attestedAt: new Date().toISOString(),
-        verifiedInJob: owned.verifiedInJob,
-      });
-      if (atStart !== null) {
-        try {
-          options.onLaunchEstablished(atStart);
-        } catch {
-          /* an enrichment may not stop a launch that has already started */
-        }
+      // The whole block is inside the swallowing `try`, not just the callback.
+      // `mintContainmentAttestation` answers `null` rather than throwing and
+      // `toISOString` throws only for an invalid date — so this catches nothing
+      // reachable today, which is the same standing every other defensive `try`
+      // in this file has. What it buys is that the *rule* is enforced by the
+      // code rather than by the argument that the two lines above happen to be
+      // total: an enrichment may not stop a launch that has already started.
+      try {
+        const atStart = mintContainmentAttestation({
+          ownerPid: process.pid,
+          helperPid: owned.helperPid,
+          childPid: owned.childPid,
+          mode: owned.mode,
+          assignedAtCreation: owned.assignedAtCreation,
+          launchNonce: owned.launchNonce,
+          // The moment membership was confirmed to this module, which is what
+          // `ContainmentFacts.attestedAt` describes. Stamped here rather than
+          // reused from the ending's mint below: they are two different moments
+          // and sharing one would date the earlier record by the later event.
+          attestedAt: new Date().toISOString(),
+          verifiedInJob: owned.verifiedInJob,
+        });
+        if (atStart !== null) options.onLaunchEstablished(atStart);
+      } catch {
+        /* an enrichment may not stop a launch that has already started */
       }
     }
 

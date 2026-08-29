@@ -374,7 +374,9 @@ export interface CommandResult {
 export interface RunOptions {
   /**
    * Called once when the kernel has confirmed this launch's job membership, on
-   * Windows, before the target has produced anything.
+   * Windows. The target may already be running by then: in the default launch
+   * mode it is created into the job rather than created suspended, so what the
+   * confirmation establishes is that it never existed outside it.
    *
    * A pass-through to `boundary/owned-command.ts`, whose option carries the
    * reasoning. Nothing here interprets the artefact and nothing here has an

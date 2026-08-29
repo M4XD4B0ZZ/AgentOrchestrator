@@ -5,7 +5,11 @@
 - **Slice:** M2 slice 1
 - **Supersedes nothing.** The M1 release verdict
   (`docs/decisions/2026-08-29-adr-m1-release-gate.md`) is unchanged: `PASS for
-  attended use`, and U2–U4 remain unattended blockers.
+  attended use`, and unattended operation stays unsupported. **U1 is narrowed by
+  this slice and is not resolved** - the window named under Consequences remains -
+  and U2–U4 are untouched. This line said "U2–U4 remain unattended blockers",
+  which by omission read as U1 being closed; it is not, and this ADR's own body
+  says so.
 
 ## The problem, measured rather than described
 
@@ -15,10 +19,13 @@ M1 recorded four unattended blockers. `U1` is the first:
 
 That sentence was already narrower than it read. Since V3 slice 5 the product
 *has* had a command — `agent-loop lease recover` — and that command has no
-attendance gate: it takes `--repository` and nothing else, grants nothing,
-starts nothing, and its own description says a refusal is a normal answer so
-that scripts can ask it. A scheduler could therefore already recover *some*
-crashes.
+attendance gate: it takes `--repository` and nothing else, grants nothing and
+starts nothing, and it exits `EXIT_RUN_OK` for a refusal - the comment above that
+line in `src/cli/lease-command.ts` gives the reason as "a non-zero exit would
+make the command unusable in the scripts that would ask it". (The command's
+printed `--help` description says none of that; an earlier draft of this
+paragraph attributed the sentence to it.) A scheduler could therefore already
+recover *some* crashes.
 
 What it could not recover is the crash that actually happens. The reproduction
 is in this repository's history and was re-run for this slice, with real
@@ -58,7 +65,7 @@ written before and after it.
 ## Decision
 
 Add a third launch state, `ESTABLISHED`, written at the instant the kernel
-confirms job membership and before the target's first instruction — and let the
+confirms job membership — and let the
 recovery predicate accept a history containing it **only** after re-establishing,
 at the removal, that the processes those entries name are gone.
 
@@ -159,8 +166,11 @@ clears itself; there is no direction in which reuse permits a removal.
   same rule `LAUNCH_HISTORY_ABSENT` already applies: no lease from an earlier
   build is retroactively safe.
 - **Two new refusals**, `LAUNCH_TREE_STILL_RUNNING` and
-  `LAUNCH_TREE_LIVENESS_UNDETERMINED`, each with an operator sentence and each
-  produced by its own fixture in the coverage table.
+  `LAUNCH_TREE_LIVENESS_UNDETERMINED`, each with its own operator sentence and
+  each produced in the coverage table. They deliberately share **one** fixture,
+  driven by two probes: what separates them is precisely the liveness answer, and
+  two fixtures would let a defect that mixed the two look like two independent
+  passes.
 - **One existing operator sentence was false and is corrected.**
   `LAUNCH_HISTORY_UNPROVEN` told operators it was "what a run killed while its
   agent was working leaves behind". After this slice that run leaves

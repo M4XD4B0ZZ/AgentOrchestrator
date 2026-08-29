@@ -2966,13 +2966,21 @@ function discardWriterLaunchHistory(
  * It refuses rather than repairs. A ledger it cannot extend, a generation that is
  * not there, one already confirmed, one opened for a different writer — every one
  * of those answers {@link GENERATION_NOT_OPEN} and writes nothing, because the
- * `PENDING` entry *is* the record of a launch and a confirmation that invents one
- * is a confirmation of a launch nobody announced.
+ * entry *is* the record of a launch and a confirmation that invents one is a
+ * confirmation of a launch nobody announced.
  *
- * A failure to publish leaves the generation `PENDING`, which is the answer a
- * killed run leaves and the answer a recovery refuses. Nothing is discarded here:
- * unlike the opening path there is no launch pending on the result, so the
- * conservative end state is already on disk.
+ * A failure to publish leaves the generation **where it already was**. Since M2
+ * slice 1 that is usually `ESTABLISHED` rather than `PENDING`, because the
+ * establishment mark normally landed first; it is `PENDING` only when that mark
+ * did not land either. Both are conservative in the sense that matters — neither
+ * claims the launch ended — and they are not equally strong: `PENDING` refuses a
+ * recovery outright, while `ESTABLISHED` still owes, and is granted only after,
+ * the liveness proof on the processes it names. This paragraph said "leaves the
+ * generation `PENDING` … the answer a recovery refuses", and both halves stopped
+ * being true when the middle state was added.
+ *
+ * Nothing is discarded here: unlike the opening path there is no launch pending
+ * on the result, so a conservative end state is already on disk.
  *
  * Never throws.
  */
@@ -3396,7 +3404,7 @@ const RECOVERY_REFUSAL_FOR_LOCATION: Readonly<Record<LeaseLocationFailureCode, S
  * existed under this lease was created inside a Job Object coupled to the owner,
  * every one of them was observed to end, and the owner is gone.
  *
- * ── And the third conjunct, which the second arm needs and the first does not ─
+ * ── And the extra proof the second arm needs and the first does not ─────────
  *
  * The `ESTABLISHED` arm is missing exactly one of those: no ending was observed.
  * It could be closed by inheritance — a helper dies when its owner does, so the
@@ -3481,7 +3489,7 @@ function assessStaleLeaseRecoveryBound(
   const ledgerRecord = readLedgerRecord(location);
   const history = readWriterLaunchLedger(subject, ledgerRecord);
   if (!provesEveryLaunchContained(history)) {
-    // ── The third conjunct, and it exists for one reading only ─────────────
+    // ── The extra proof, and it exists for one reading only ───────────────
     //
     // `LAUNCHES_CONTAINED_SOME_UNENDED` says every launch was placed in the
     // owner's job by the kernel and at least one was never seen to end. That is
@@ -3500,14 +3508,24 @@ function assessStaleLeaseRecoveryBound(
     if (!provesEveryLaunchContainedAtCreation(history)) {
       return unsafe(refusalForHistory(history), { ...facts, launchHistory: history });
     }
+    // The SAME bytes the reading was taken from, not a second read of the file.
+    // That is what makes the guard below a floor rather than a live branch: both
+    // calls run `readWriterLaunchLedger` over one value, so they cannot disagree,
+    // and the reading that got here requires an `ESTABLISHED` entry — which is
+    // exactly what this returns. Re-reading the file instead would make the two
+    // answers questions about different moments, which is the divergence this
+    // module exists to refuse.
     const unended = unendedLaunchesOf(subject, ledgerRecord);
-    // `null` or empty means this module and `unendedLaunchesOf` disagree about a
-    // ledger they both just read — the reading exists only when an `ESTABLISHED`
-    // entry is present, so neither is producible while they agree. It answers
-    // the undetermined refusal rather than a member of its own, and that is the
-    // truthful word for it: nothing was named, so nothing could be established.
-    // A member nothing can produce would be a vocabulary entry no fixture could
-    // pin, which is how an arm stops being checked at all.
+    // So `null` or empty is unreachable while that holds, and it is a **refusal**
+    // rather than a throw so that a future change which breaks the determinism
+    // above degrades the *reason* and never the decision. Two mutants that make
+    // this arm permit survive the suite for that reason, and they are recorded as
+    // an unreachable floor rather than as coverage.
+    //
+    // It answers the undetermined refusal rather than a member of its own, and
+    // that is the truthful word for it: nothing was named, so nothing could be
+    // established. A member nothing can produce would be a vocabulary entry no
+    // fixture could pin, which is how an arm stops being checked at all.
     if (unended === null || unended.length === 0) {
       return unsafe('LAUNCH_TREE_LIVENESS_UNDETERMINED', { ...facts, launchHistory: history });
     }

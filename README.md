@@ -7603,8 +7603,14 @@ use** and are not to be read as follow-ups.
   removal, that the processes they name are gone
   ([the ADR](docs/decisions/2026-08-30-adr-unattended-crash-recovery.md)). So the
   unprovable window shrinks from a writer's whole runtime to the interval between
-  announcing a launch and the kernel answering — **measured at 76 ms**. An owner
-  killed inside *that* window still refuses, and still needs a human.
+  announcing a launch and the kernel answering. That interval was **observed once
+  at 76 ms**, on the reference machine, by an instrumented reproduction that
+  timed `beginWriterLaunch` returning against `startOwnedProcess` reporting
+  ownership. It is a single observation and not a bound: nothing in this
+  repository measures it, no gate holds it, and a loaded machine will be slower.
+  What the number is offered for is the order of magnitude against the minutes it
+  replaces. An owner killed inside that window still refuses, and still needs a
+  human.
 
   **Attended:** loud, fail-closed and correct — the refusal sentence says exactly
   this, and `lease status` prints the path, so an operator who is present pays one
@@ -7697,9 +7703,11 @@ anything already in the registers above.
 
   **Partly addressed by M2 slice 1.** The finding added "with no instrument
   offered for it", and there is one now for the case that matters: a writer launch
-  records the processes the kernel placed in the owner's job, and the recovery
-  probes them before removing anything, refusing `LAUNCH_TREE_STILL_RUNNING` while
-  any of them exists. That is an instrument for *writer* launches only. The
+  records the processes the kernel placed in the owner's job, and a recovery that
+  rests on such a launch probes them before removing anything, refusing
+  `LAUNCH_TREE_STILL_RUNNING` while any of them exists. Only that arm probes them:
+  a history whose launches were all seen to end reaches the removal on the older
+  argument and asks about no pid at all. That is an instrument for *writer* launches only. The
   reviewer, the verification command and `git` go through the same owned boundary
   and are contained in fact, and none of them is recorded — so for those, the
   judgement is still the operator's and the finding stands as written.
@@ -8149,9 +8157,15 @@ the predicate to accept it kills all three.
 lease acquired      -> history published, historyComplete: true, no entries
 before each launch  -> generation N appended as PENDING, published
 launch happens      -> only after that publish is known to have landed
-kernel-confirmed    -> generation N replaced by CONTAINED, published
-anything else       -> generation N stays PENDING, for good
+kernel confirms job -> generation N replaced by ESTABLISHED, published
+launch seen to end  -> generation N replaced by CONTAINED, published
+anything else       -> generation N stays where it got to, for good
 ```
+
+The middle step is M2 slice 1
+([its ADR](docs/decisions/2026-08-30-adr-unattended-crash-recovery.md)). Before
+it, the two marks sat before and after a launch that lasts minutes, so the whole
+of a writer's runtime read `PENDING` - and `PENDING` names no process.
 
 The ordering is the safety argument and it only works in one direction: a record
 written after a launch cannot describe a launch that was killed mid-flight, and a
@@ -8248,8 +8262,12 @@ a displaced successor is reported as a clean abort    1
 an incomplete history is reported as an absent one    1
 ```
 
-Re-measured against the file as it stands, not carried forward. Two of those
-numbers had drifted, and the coupling is not one-to-one: the case that feeds the
+Re-measured against the file **as it stood at the slice that measured them**,
+not carried forward - and not re-measured since: M2 slice 1 added cases to that
+file, so the counts describe an earlier state of it. A count beside a file that
+anybody may edit is exactly the defect this paragraph goes on to name, and
+pinning the count to a commit is the honest form of it. Two of those numbers had
+drifted, and the coupling is not one-to-one: the case that feeds the
 reader a malformed ledger accounts for the fourth row entirely and for one third
 of the first, whose other two increments come from a hostile-deps block added to
 a different case and from an assertion added for the report's `End state` label.

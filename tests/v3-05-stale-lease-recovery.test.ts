@@ -95,6 +95,7 @@ import {
   assessStaleLeaseRecovery,
   attestWriterLaunchEstablished,
   beginWriterLaunch,
+  type WriterLaunchResult,
   clearContainmentEvidence,
   confirmWriterLaunch,
   CONTAINMENT_EVIDENCE_FILE_NAME,
@@ -270,6 +271,16 @@ function agentResult(attestation: ContainmentAttestation | null): AgentCommandRe
   });
 }
 
+/** One generation's recorded state, read back off disk. Typed, so a case that
+ *  asks about a generation that is not there fails rather than reads undefined
+ *  as a passing comparison. */
+function stateOf(repository: LeaseRepository, generation: number): string {
+  const entries = (ledgerOf(repository)?.entries ?? []) as readonly { readonly state: string }[];
+  const entry = entries[generation - 1];
+  if (entry === undefined) throw new Error(`no generation ${generation} on disk`);
+  return entry.state;
+}
+
 const dead = (): ProcessLiveness => 'NOT_FOUND';
 const alive = (): ProcessLiveness => 'ALIVE';
 const undetermined = (): ProcessLiveness => 'UNDETERMINED';
@@ -426,6 +437,74 @@ describe('the launch history format refuses everything it cannot read', () => {
       expect(
         provesEveryLaunchContained(reading) && provesEveryLaunchContainedAtCreation(reading),
       ).toBe(false);
+    }
+  });
+
+  it('refuses an ESTABLISHED entry relabelled CONTAINED, in both directions', () => {
+    // THE forgery this slice has to refuse. An `ESTABLISHED` entry accepted as
+    // `CONTAINED` makes the reading `ALL_LAUNCHES_CONTAINED`, which takes the
+    // short-circuit in `assessStaleLeaseRecoveryBound` and never probes the
+    // recorded pids at all — one edit, and the liveness proof is skipped.
+    //
+    // The relabel needs the timestamp field renamed too, because the schema is a
+    // strict discriminated union; that is why this is not covered by the
+    // per-field mutation cases, which change values and never keys.
+    const { establishedAt, ...rest } = ESTABLISHED_ENTRY;
+    const relabelledAsContained = {
+      ...rest,
+      state: 'CONTAINED' as const,
+      confirmedAt: establishedAt,
+    };
+    expect(readWriterLaunchLedger(SUBJECT, sealed({ entries: [relabelledAsContained] }))).toBe(
+      'ALL_LAUNCHES_CONTAINED',
+    );
+    // Sealed as itself it reads as a proof — that is the control. Transplanted
+    // into a ledger sealed for the ESTABLISHED shape, the binding refuses it.
+    const sealedAsEstablished = sealed({ entries: [ESTABLISHED_ENTRY] }) as Record<string, unknown>;
+    expect(
+      readWriterLaunchLedger(SUBJECT, {
+        ...sealedAsEstablished,
+        entries: [relabelledAsContained],
+      }),
+    ).toBe('NOT_THIS_LEASE');
+
+    // And the other direction: a CONTAINED entry dressed as ESTABLISHED, which
+    // would be the harmless-looking edit that adds a liveness check nobody owes.
+    const { confirmedAt, ...containedRest } = CONTAINED_ENTRY;
+    const sealedAsContained = sealed({ entries: [CONTAINED_ENTRY] }) as Record<string, unknown>;
+    expect(
+      readWriterLaunchLedger(SUBJECT, {
+        ...sealedAsContained,
+        entries: [{ ...containedRest, state: 'ESTABLISHED' as const, establishedAt: confirmedAt }],
+      }),
+    ).toBe('NOT_THIS_LEASE');
+  });
+
+  it('detects a per-field edit of an ESTABLISHED entry, establishedAt included', () => {
+    // The new state's fields get the same treatment the CONTAINED entry's nine
+    // already had. `establishedAt` is the one the shared digest could most
+    // plausibly have dropped — it is the only field of this state that
+    // `CONTAINED` does not have — so it is asserted rather than assumed.
+    const edits: readonly Partial<Record<keyof typeof ESTABLISHED_ENTRY, unknown>>[] = [
+      { writerId: 'codex' },
+      { openedAt: '2026-08-22T00:00:00.000Z' },
+      { helperPid: 99 },
+      { childPid: 98 },
+      { mode: 'SUSPENDED' },
+      { assignedAtCreation: false },
+      { launchDigest: 'd'.repeat(64) },
+      { attestedAt: '2026-08-22T00:00:01.000Z' },
+      { establishedAt: '2026-08-22T00:00:02.000Z' },
+    ];
+    const sound = sealed({ entries: [ESTABLISHED_ENTRY] }) as Record<string, unknown>;
+    expect(readWriterLaunchLedger(SUBJECT, sound)).toBe('LAUNCHES_CONTAINED_SOME_UNENDED');
+    for (const edit of edits) {
+      expect(
+        readWriterLaunchLedger(SUBJECT, {
+          ...sound,
+          entries: [{ ...ESTABLISHED_ENTRY, ...edit }],
+        }),
+      ).toBe('NOT_THIS_LEASE');
     }
   });
 
@@ -949,6 +1028,113 @@ describe('the launch history is opened before a launch and confirmed after it', 
     expect(assessStaleLeaseRecovery(repository, { processAlive: dead }).refusal).toBe(
       'LAUNCH_HISTORY_UNPROVEN',
     );
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('refuses to establish a generation twice, and to walk one backwards', () => {
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const opened = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    const generation = opened.generation ?? 0;
+    const mark = (nonce: string): WriterLaunchResult =>
+      attestWriterLaunchEstablished(
+        repository,
+        evidence,
+        attestationFor(process.pid, { launchNonce: nonce }),
+        { generation, writerId: 'claude', now: tick },
+      );
+
+    expect(mark('00000000000000a1').code).toBe('ESTABLISHED');
+    // Twice is refused, with its own detail: an established generation is not
+    // re-established, and a caller that could would be free to replace the pids
+    // a later recovery probes.
+    const again = mark('00000000000000a2');
+    expect(again.code).toBe('GENERATION_NOT_OPEN');
+    expect(again.detail).toBe('ALREADY_ESTABLISHED');
+
+    // And backwards is refused too. Confirm it, then try to establish it again.
+    expect(
+      confirmWriterLaunch(
+        repository,
+        evidence,
+        attestationFor(process.pid, { launchNonce: '00000000000000a1' }),
+        { generation, writerId: 'claude', now: tick },
+      ).code,
+    ).toBe('CONFIRMED');
+    const backwards = mark('00000000000000a3');
+    expect(backwards.code).toBe('GENERATION_NOT_OPEN');
+    expect(backwards.detail).toBe('ALREADY_CONFIRMED');
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('refuses a confirmation that is not the launch it is confirming', () => {
+    // The check the code calls load-bearing, measured. Without it an attestation
+    // for launch B confirms generation A: the entry keeps A's `openedAt` and
+    // gains B's pids, and its `CONTAINED` state then claims A ended when nothing
+    // of the kind was observed.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const opened = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    const generation = opened.generation ?? 0;
+    expect(
+      attestWriterLaunchEstablished(
+        repository,
+        evidence,
+        attestationFor(process.pid, { launchNonce: '00000000000000b1' }),
+        { generation, writerId: 'claude', now: tick },
+      ).code,
+    ).toBe('ESTABLISHED');
+
+    const foreign = confirmWriterLaunch(
+      repository,
+      evidence,
+      attestationFor(process.pid, { launchNonce: '00000000000000b2' }),
+      { generation, writerId: 'claude', now: tick },
+    );
+    expect(foreign.code).toBe('ATTESTATION_ALREADY_USED');
+    expect(foreign.detail).toBe('DIGEST_NOT_THIS_LAUNCH');
+    // The entry is untouched, so the refusal cost nothing.
+    expect(stateOf(repository, generation)).toBe('ESTABLISHED');
+
+    // The control: the launch's own attestation confirms it.
+    expect(
+      confirmWriterLaunch(
+        repository,
+        evidence,
+        attestationFor(process.pid, { launchNonce: '00000000000000b1' }),
+        { generation, writerId: 'claude', now: tick },
+      ).code,
+    ).toBe('CONFIRMED');
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('refuses an attestation already standing on an ESTABLISHED generation', () => {
+    // The replay check reads every non-`PENDING` state, not only `CONTAINED`.
+    // Narrowing it to `CONTAINED` lets one kernel-confirmed launch prove two
+    // generations, so long as the first is still established — and a history
+    // whose entries all read as proofs is exactly what a recovery acts on.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const first = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    expect(
+      attestWriterLaunchEstablished(
+        repository,
+        evidence,
+        attestationFor(process.pid, { launchNonce: '00000000000000c1' }),
+        { generation: first.generation ?? 0, writerId: 'claude', now: tick },
+      ).code,
+    ).toBe('ESTABLISHED');
+
+    const second = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+    const replayed = attestWriterLaunchEstablished(
+      repository,
+      evidence,
+      attestationFor(process.pid, { launchNonce: '00000000000000c1' }),
+      { generation: second.generation ?? 0, writerId: 'claude', now: tick },
+    );
+    expect(replayed.code).toBe('ATTESTATION_ALREADY_USED');
+    expect(replayed.detail).toBe('DIGEST_ALREADY_PROVED');
+    expect(stateOf(repository, second.generation ?? 1)).toBe('PENDING');
     releaseRepositoryExecutionLease(evidence);
   });
 
@@ -1484,6 +1670,55 @@ describe('the safety predicate refuses everything it cannot prove', () => {
     releaseRepositoryExecutionLease(held.evidence);
   });
 
+  it('permits a recovery through the established arm when the recorded tree is gone', () => {
+    // The positive case for the arm M2 slice 1 added, in process. Without it the
+    // arm could refuse in every reachable situation and the suite would stay
+    // green: every other case here asserts a REFUSAL, and an arm that never
+    // permits satisfies all of them.
+    const repository = repositoryFixture();
+    const owner = staleLease(repository, (evidence) => {
+      establishedLaunch(repository, evidence, { helperPid: 60_001, childPid: 60_002 });
+    });
+    expect(owner).not.toBe(60_001);
+    expect(owner).not.toBe(60_002);
+
+    const assessed = assessStaleLeaseRecovery(repository, { processAlive: dead });
+    expect(assessed.launchHistory).toBe('LAUNCHES_CONTAINED_SOME_UNENDED');
+    expect(assessed.verdict).toBe('SAFE_TO_RECOVER');
+    expect(assessed.refusal).toBeNull();
+  });
+
+  it('refuses when EITHER recorded process of an unended launch is alive', () => {
+    // Two cases, and they exist because one is not enough. A predicate that
+    // probed only the helper passes the child-alive case; one that probed only
+    // the child passes the helper-alive case; and a single case with both alive
+    // passes for either. Both mutants were measured surviving the whole suite
+    // before these two cases existed.
+    const repository = repositoryFixture();
+    const owner = staleLease(repository, (evidence) => {
+      establishedLaunch(repository, evidence, { helperPid: 60_001, childPid: 60_002 });
+    });
+    /** Dead everywhere except one pid, so each case names exactly one survivor. */
+    const onlyAlive =
+      (target: number) =>
+      (pid: number): ProcessLiveness =>
+        pid === target ? 'ALIVE' : 'NOT_FOUND';
+
+    expect(owner).not.toBe(60_001);
+    expect(owner).not.toBe(60_002);
+    expect(assessStaleLeaseRecovery(repository, { processAlive: onlyAlive(60_001) }).refusal).toBe(
+      'LAUNCH_TREE_STILL_RUNNING',
+    );
+    expect(assessStaleLeaseRecovery(repository, { processAlive: onlyAlive(60_002) }).refusal).toBe(
+      'LAUNCH_TREE_STILL_RUNNING',
+    );
+    // And the control that makes those two attributable: the same lease, the
+    // same ledger, nothing alive.
+    expect(assessStaleLeaseRecovery(repository, { processAlive: dead }).verdict).toBe(
+      'SAFE_TO_RECOVER',
+    );
+  });
+
   it('answers a verdict of SAFE exactly when it answers no refusal', () => {
     // The union is refusals only, so "permitted" has one spelling and cannot be
     // reached by a value somebody added. Pinned by value across every refusal
@@ -1950,6 +2185,35 @@ describe('the recovery vocabulary says what the code does', () => {
     // pin that checks every named command against the real program can see it.
     expect(safe).toContain('`agent-loop lease recover --repository <path>`');
     expect(safe).toContain('Launches     : ALL_LAUNCHES_CONTAINED');
+    // The stronger arm says the endings were seen, because on this arm they were.
+    expect(safe).toContain('was seen to end');
+  });
+
+  it('gives the established arm its own reason, not the one it has not earned', () => {
+    // One sentence covered both arms and said "every writer launch under this
+    // lease is proved contained" for each. On the arm M2 slice 1 added, the
+    // endings were never observed and the tree's absence comes from probing the
+    // recorded pids — so the stronger sentence printed the one thing that arm
+    // does not prove, to the reader least able to check it.
+    const unended = renderLeaseRecovery(
+      {
+        verdict: 'SAFE_TO_RECOVER',
+        refusal: null,
+        path: 'D:\\r\\.git',
+        ownerPid: 7,
+        runId: 'r',
+        launchHistory: 'LAUNCHES_CONTAINED_SOME_UNENDED',
+      },
+      'LAUNCHES_CONTAINED_SOME_UNENDED',
+    );
+    expect(unended).toContain('Launches     : LAUNCHES_CONTAINED_SOME_UNENDED');
+    expect(unended).toContain('never seen to end');
+    expect(unended).toContain('checked just now and do not exist');
+    // The load-bearing negative: it must NOT claim the endings were observed.
+    expect(unended).not.toContain('was seen to end');
+    // The conclusion is the same on both arms, and stays.
+    expect(unended).toContain('no writer process it started can still be running');
+    expect(unended).toContain('`agent-loop lease recover --repository <path>`');
   });
 
   it('reports the launch history even when the predicate stopped before reading one', () => {

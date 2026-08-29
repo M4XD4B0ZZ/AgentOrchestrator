@@ -41,9 +41,9 @@
  * orchestrator in that window and measured the consequence: the writer tree was
  * gone, and no product command could say so, so the repository stayed locked.
  *
- * The kernel's confirmation of job membership happens before the target's first
- * instruction and was already in hand; it was simply not written down until the
- * run ended. Writing it at that instant narrows the unprovable window from a
+ * The kernel's confirmation of job membership was already in hand at the moment
+ * the boundary reported ownership; it was simply not written down until the run
+ * ended. Writing it at that instant narrows the unprovable window from a
  * writer's whole runtime to the milliseconds between the poison and the
  * kernel's answer — measured at 76 ms on the reference machine. It does not
  * close it, and {@link EstablishedLaunchSchema} says what the state does and
@@ -230,8 +230,13 @@ const ContainedLaunchSchema = z
  * ── What it claims, and what it deliberately does not ──────────────────────
  *
  * It claims exactly this: *generation N's target was created inside a Job
- * Object owned by `helperPid`, coupled to the lease's owner, and the kernel
- * confirmed membership before the target executed.*
+ * Object owned by `helperPid`, coupled to the lease's owner, the kernel
+ * confirmed its membership, and it never existed outside that job.*
+ *
+ * Not "confirmed before the target executed". In `JOBLIST`, the production
+ * default, the target is created into the job and is not created suspended, so
+ * it is already running when the kernel is asked; the claim that holds in both
+ * launch modes is the one about never having been outside.
  *
  * It does **not** claim the tree has ended, and that is the whole difference
  * from {@link ContainedLaunchSchema}. `CONTAINED` is written by
@@ -352,9 +357,13 @@ export const WRITER_LAUNCH_READINGS = [
    * A complete, well-bound history in which at least one launch is still
    * `PENDING`.
    *
-   * The state a killed orchestrator leaves behind while its writer was running,
-   * and the state a launch whose confirmation could not be published stays in.
-   * It is the format working, not the format failing.
+   * NOT what a killed orchestrator leaves behind while its writer is running -
+   * that was true of this reading until M2 slice 1 and is now
+   * {@link LAUNCHES_CONTAINED_SOME_UNENDED}. What reaches this one is a launch
+   * that never got as far as the kernel's answer: killed in the window between
+   * the announcement and establishment, established on a platform with no
+   * boundary to confirm, or established and unable to publish the mark. It is
+   * the format working, not the format failing.
    */
   'LAUNCH_UNPROVEN',
   /**

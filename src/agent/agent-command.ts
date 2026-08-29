@@ -288,7 +288,9 @@ export type AgentRunner = (
 export interface AgentLaunchHooks {
   /**
    * Called once, with an attestation, when the kernel has confirmed this
-   * launch's job membership and before the agent has produced anything.
+   * launch's job membership. The agent may already be running by then - see
+   * `boundary/owned-command.ts` - and what the confirmation establishes is that
+   * it never existed outside the owner's job.
    *
    * Not called at all when there was nothing to attest — a POSIX run, a boundary
    * that was never established, a mint that refused. Silence is therefore the

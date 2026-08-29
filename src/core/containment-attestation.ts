@@ -22,7 +22,16 @@ export type { ContainmentFacts };
 
 /**
  * Proof that a process was created inside a Job Object this process owns, with
- * kernel-confirmed membership before the target executed.
+ * kernel-confirmed membership and no moment outside it.
+ *
+ * That wording is narrower than "membership confirmed before the target
+ * executed", which this said and which is false in `JOBLIST` - the production
+ * default. There the target is created *into* the job and is NOT created
+ * suspended (`native/ao-launch/AoLaunch.cs`: `if (!jobList) flags |=
+ * CREATE_SUSPENDED`), so it is running by the time the kernel is asked. What
+ * holds in both modes is the containment-relevant claim: the process never
+ * existed outside the job - assigned at creation in `JOBLIST`, assigned before
+ * its first instruction in `SUSPENDED`.
  *
  * Opaque by construction. Callers hold it, forward it and hand it to the lease
  * recorder; they never build one.
