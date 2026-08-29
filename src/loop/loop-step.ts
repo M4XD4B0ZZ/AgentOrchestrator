@@ -31,11 +31,24 @@
  * `BLOCKED_VERIFY` is `NOT_APPLICABLE` to this module — a human, or a later
  * driver acting on an explicit decision, moves it on.
  *
- * That is also what bounds the one cycle `maxReviewRounds` does not.
+ * Since the M1 verification-recovery fix that second clause is executable
+ * rather than aspirational: `run --attended --task <id>
+ * --remediate-verify-failure` is the decision, and `run-driver.ts` performs the
+ * transition through `resumeBlockedTask`, unchanged. **This module still
+ * refuses to leave the state on its own.**
+ *
+ * The cycle `maxReviewRounds` does not bound was bounded by that refusal.
  * `VERIFYING → BLOCKED_VERIFY → REMEDIATING → VERIFYING` never touches
- * `reviewRound`, so nothing in the state contract limits it — but this loop
- * cannot traverse it unattended, because it refuses to leave `BLOCKED_VERIFY`.
- * The only cycle this module drives on its own is
+ * `reviewRound`, so nothing in the state contract limits it — and this loop
+ * still cannot traverse it unattended. What changed is that an operator now
+ * can, once.
+ *
+ * What holds that "once" was measured rather than designed: a `BLOCKED` step
+ * ends the `runTask` call, and `driveLifecycle` re-enters only on
+ * `STEP_BUDGET_EXHAUSTED`, so a `BLOCKED_VERIFY` outcome ends the lifecycle.
+ * `run-driver.ts` also refuses a second departure per invocation, and that is a
+ * fail-closed floor rather than the bound — a mutant deleting it survives every
+ * test today. The only cycle this module drives on its own is
  * `VERIFYING → REVIEWING → REMEDIATING → VERIFYING`, and every traversal of it
  * passes through `REVIEWING`, which consumes exactly one review round.
  *
@@ -110,7 +123,7 @@ import type { TaskState } from '../core/task-state.js';
 import type { ResumePhase, TaskStateName } from '../core/states.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { assessTaskScope, type ScopeAssessment } from '../scope/assess-scope.js';
-import { leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
+import { leaseHolds, leasedAgent, leasedGit, leasedVerify } from './leased-spawns.js';
 import { commitTaskWork, type CommitTaskWorkResult } from '../worktree/commit-task-work.js';
 import { advanceTaskState, type AdvanceOptions } from '../state/advance-state.js';
 import { observeRuntime } from '../state/observe-runtime.js';
@@ -118,11 +131,27 @@ import type { StateLoadSuccess, StateSaveResult } from '../state/state-store.js'
 import { runGitCommand, type GitRunner } from '../worktree/git-command.js';
 import { observeWorktreeCleanliness } from '../worktree/worktree-cleanliness.js';
 import { runVerification, type VerificationReport } from '../verify/run-verification.js';
+import { verificationProfileDigest } from '../verify/verification-profile.js';
+import {
+  storedDiagnosticsAsAgentDiagnostics,
+  verificationAttemptFrom,
+  type VerificationAttemptRecord,
+} from '../verify/verification-attempt.js';
+import {
+  loadVerificationAttempts as loadVerificationAttemptsFromStore,
+  latestVerificationAttempt,
+  recordVerificationAttempt as recordVerificationAttemptInStore,
+  type VerificationAttemptLoad,
+  type VerificationAttemptRecordResult,
+} from '../verify/verification-attempt-store.js';
+import { askRuntimeIgnored, type RuntimeIgnoreVerdict } from '../state/runtime-ignored.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
 import {
   appendFindings,
   buildRemediationPayload,
   buildResumedRemediationBrief,
+  buildVerificationRemediationPayload,
+  type ResumedRemediationBrief,
   buildReviewPayload,
 } from './findings.js';
 import { buildImplementPayload } from './implement-payload.js';
@@ -168,6 +197,19 @@ export interface LoopStepResult {
   readonly save: StateSaveResult | null;
   /** Present only for a verify step. Never persisted. */
   readonly verification: VerificationReport | null;
+  /**
+   * What became of this step's attempt to make that report durable, present only
+   * on a verify step that did not pass.
+   *
+   * Reported, never persisted — `TaskStateObjectSchema` is `.strict()` and has no
+   * field for it. So an operator reads a store failure on the run that hit it,
+   * and a later invocation reads the *record* instead, or finds none. Those are
+   * different things to know and neither substitutes for the other.
+   *
+   * `recorded` is what the verify step gates its `BLOCKED_VERIFY` on, and it is
+   * the store's answer rather than this step's inference.
+   */
+  readonly verificationEvidence: VerificationEvidenceOutcome | null;
   /**
    * The remediation instructions derived from the review that just ran,
    * present only on the write that enters `REMEDIATING`.
@@ -297,16 +339,47 @@ export interface LoopDependencies extends AdvanceOptions {
   readonly git?: GitRunner;
   /**
    * The remediation prompt a previous review step produced. When absent, the
-   * remediate step rebuilds a weaker one from `findingHistory`.
+   * remediate step rebuilds a weaker one from `findingHistory`, and failing that
+   * from the durable verification-attempt evidence.
    */
   readonly remediationPayload?: string;
+  /**
+   * Where a verification attempt is durably recorded. Defaults to the real store.
+   *
+   * A seam of the same class as `verify` and `git`: a caller may substitute the
+   * process that writes, which is what makes an unwritable store, a full history
+   * and a corrupted document testable at all. It cannot substitute the
+   * *decision* — the verify step reads `recorded` and nothing else, and a
+   * recorder that lies about having written produces a `BLOCKED_VERIFY` this
+   * build would rather not have written, which is the property the ordering
+   * exists to protect and what the counter-proof aims at.
+   */
+  readonly recordVerificationAttempt?: VerificationAttemptRecorder;
+  /** Where durable verification evidence is read back. Defaults to the real store. */
+  readonly loadVerificationAttempts?: VerificationAttemptLoader;
 }
+
+/** The store's write, as a seam. See {@link LoopDependencies.recordVerificationAttempt}. */
+export type VerificationAttemptRecorder = (request: {
+  readonly repositoryRoot: string;
+  readonly taskId: string;
+  readonly attempt: VerificationAttemptRecord;
+  readonly leaseHolds: () => boolean;
+  readonly checkIgnored: (relativePath: string) => Promise<RuntimeIgnoreVerdict>;
+}) => Promise<VerificationAttemptRecordResult>;
+
+/** The store's read, as a seam. See {@link LoopDependencies.loadVerificationAttempts}. */
+export type VerificationAttemptLoader = (
+  repositoryRoot: string,
+  taskId: string,
+) => VerificationAttemptLoad;
 
 function result(from: Partial<LoopStepResult> & { readonly outcome: LoopStepOutcome }): LoopStepResult {
   return Object.freeze({
     state: null,
     save: null,
     verification: null,
+    verificationEvidence: null,
     remediationPayload: null,
     scope: null,
     permissionDenials: null,
@@ -378,9 +451,12 @@ function saved(save: StateSaveResult, state: TaskStateName, outcome: LoopStepOut
     // from `ADVANCED` — but a contract that holds by the caller's good manners
     // is not held here (V1-08).
     //
-    // `verification` and `scope` are deliberately kept: they report what the
-    // repository's own commands and Git said, which is true whether or not the
-    // write landed.
+    // `verification`, `verificationEvidence` and `scope` are deliberately kept:
+    // they report what the repository's own commands, the evidence store and Git
+    // said, which is true whether or not the write landed. The evidence one
+    // matters most here — a refused state write after a *successful* record
+    // leaves an attempt on disk with no block beside it, and an operator who is
+    // not told that will not know to look.
     return result({ ...extra, remediationPayload: null, outcome: 'STATE_NOT_RECORDED', save });
   }
   return result({ outcome, state, save, ...extra });
@@ -998,13 +1074,39 @@ export async function runVerifyStep(
       { ...state, state: 'REVIEWING', stateEnteredAt: now, ...RESUME_EVIDENCE_SPENT },
       advance,
     );
+    // No attempt is recorded for a pass. The store answers one question — why
+    // did AO stop — and a pass is not an answer to it. Spending a bounded
+    // history on the outcome nobody needs to read would push the failures an
+    // operator does need out of the back of it.
     return saved(save, 'REVIEWING', 'ADVANCED', { verification: report });
   }
 
-  // The repository answered "no". `BLOCKED_VERIFY` carries no blocked agent —
+  // -- The explanation becomes durable BEFORE the block does ----------------
+  //
+  // This ordering is the whole of what V4's verification-attempt evidence adds,
+  // and the dangerous world it excludes is the one the M1 release gate actually
+  // produced: five `BLOCKED_VERIFY` states, none of which carried any account of
+  // itself, on a machine where every report had been computed and thrown away.
+  //
+  // Reversing it — state first, record second — puts a durable accusation
+  // against the repository on disk with its evidence still in flight, and a
+  // crash in that window leaves exactly the permanently unexplained block this
+  // exists to prevent. So the record is written and read back off the disk
+  // first, and only a record that came back is allowed to become a block.
+  const evidence = await recordVerificationEvidence(current, report, deps);
+
+  // The repository answered no. `BLOCKED_VERIFY` carries no blocked agent —
   // verification runs no agent — and its only continuation is remediation,
   // which is the one resume phase the contract permits it to name.
-  if (report.verdict === 'FAILED') {
+  //
+  // Only where the explanation is durable. A `BLOCKED_VERIFY` whose evidence
+  // never reached disk is a state whose one continuation cannot be taken:
+  // `runRemediateStep` would have no cause to brief a writer with, and would
+  // park the task at `HUMAN_DECISION_REQUIRED` one durable step later having
+  // started nothing. Landing there directly says the same true thing, one write
+  // sooner, and at the resume phase that re-runs the gate rather than the one
+  // that cannot.
+  if (report.verdict === 'FAILED' && evidence.recorded) {
     const save = advanceTaskState(
       current,
       {
@@ -1017,12 +1119,34 @@ export async function runVerifyStep(
       },
       advance,
     );
-    return saved(save, 'BLOCKED_VERIFY', 'BLOCKED', { verification: report });
+    return saved(save, 'BLOCKED_VERIFY', 'BLOCKED', {
+      verification: report,
+      verificationEvidence: evidence,
+    });
   }
 
-  // Nothing was learned. Distinct from a failure on purpose: "the build is
-  // broken" and "we could not run the build" send an operator to different
-  // places, and only one of them is about the repository.
+  // Everything else. Two conditions arrive here and both are truthfully the
+  // same landing:
+  //
+  //  - `UNAVAILABLE` — nothing was learned. Distinct from a failure on purpose:
+  //    "the build is broken" and "we could not run the build" send an operator
+  //    to different places, and only one of them is about the repository. The
+  //    attempt is still recorded, because "AO tried three times and could never
+  //    start the gate" is exactly the fact that is otherwise unrecoverable; but
+  //    the transition does not depend on that having worked, because it is
+  //    already the truthful state for "we cannot say";
+  //  - a `FAILED` whose evidence did not become durable. Reported through
+  //    `verificationEvidence`, whose code says which of `WRITE_FAILED`,
+  //    `ATTEMPT_HISTORY_FULL`, `EXISTING_HISTORY_UNREADABLE`, `READBACK_FAILED`
+  //    and the rest it was. That code is **not** persisted — `TaskState` is
+  //    `.strict()` and has no field for it — so an operator reads it on the run
+  //    that failed, and a later invocation finds a task at the resume phase that
+  //    re-runs the gate with no attempt recorded, which is a coherent thing to
+  //    find rather than a contradiction.
+  //
+  // No new state was invented for the second. `HUMAN_DECISION_REQUIRED` with
+  // `resumeFrom VERIFY` is a declared edge from `VERIFYING`, its resume phase is
+  // one this loop drives, and re-running the gate is the right continuation.
   const save = advanceTaskState(
     current,
     {
@@ -1035,8 +1159,110 @@ export async function runVerifyStep(
     },
     advance,
   );
-  return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED', { verification: report });
+  return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED', {
+    verification: report,
+    verificationEvidence: evidence,
+  });
 }
+
+/**
+ * Builds one attempt record from a non-passing report and hands it to the store.
+ *
+ * Three inputs the report does not carry, and each is measured rather than
+ * assumed:
+ *
+ *  - **the commit.** `TaskState.currentCommit` is `null` on every task that
+ *    reaches verification — the writing step withdraws it, because a checkpoint
+ *    claim describing the tree as it was before a writer ran is exactly the
+ *    assertion `reconcile.ts` reads as divergence. So HEAD is read from Git here,
+ *    through the fenced seam, and a record that cannot name its subject is not
+ *    written at all. That is not fastidiousness: an attempt with no commit is a
+ *    floating verdict, and the reader that compares it against HEAD later is the
+ *    only thing standing between "this tree failed" and "some tree failed";
+ *  - **the profile.** `verificationProfileDigest` of the policy that just ran, so
+ *    a reader can tell whether a stored failure is about the gate they are
+ *    looking at or an earlier, different one;
+ *  - **the instant.** The loop's injected `now`, which is when the step began.
+ *
+ * Never throws, and never returns a `recorded: true` it did not get from the
+ * store.
+ */
+async function recordVerificationEvidence(
+  current: StateLoadSuccess,
+  report: VerificationReport,
+  deps: LoopDependencies,
+): Promise<VerificationEvidenceOutcome> {
+  const state = current.state;
+  const git = leasedGit(deps);
+
+  const head = await observeSettledWorktree(git, deps.authorisedWorktreePath);
+  if (head.observedCommit === null) return EVIDENCE_SUBJECT_UNREADABLE;
+
+  const attempt = verificationAttemptFrom(report, {
+    attemptedAt: deps.now,
+    subjectCommit: head.observedCommit,
+    profileDigest: verificationProfileDigest(deps.verification),
+  });
+  // A report with no stopping phase — the empty-profile `UNAVAILABLE` — has
+  // nothing to say about a phase, and a record naming none would answer the
+  // store's one question with silence. Reported as its own outcome so a caller
+  // can tell it from a store that refused.
+  if (attempt === null) return EVIDENCE_NOT_APPLICABLE;
+
+  const record = deps.recordVerificationAttempt ?? defaultVerificationAttemptRecorder;
+  const written = await record({
+    repositoryRoot: state.repositoryRoot,
+    taskId: state.taskId,
+    attempt,
+    leaseHolds: () => leaseHolds(deps),
+    checkIgnored: (relativePath) => askRuntimeIgnored(git, state.repositoryRoot, relativePath),
+  });
+
+  return Object.freeze({
+    recorded: written.recorded,
+    code: written.code,
+    path: written.path,
+    attemptedAt: attempt.attemptedAt,
+    subjectCommit: attempt.subjectCommit,
+  });
+}
+
+const defaultVerificationAttemptRecorder: VerificationAttemptRecorder = (request) =>
+  recordVerificationAttemptInStore(request);
+
+/** What the verify step's recording attempt did. Reported, never persisted. */
+export interface VerificationEvidenceOutcome {
+  readonly recorded: boolean;
+  /**
+   * The store's own code, or one of this module's two.
+   *
+   * `SUBJECT_UNREADABLE` — Git could not say what the worktree is at, so no
+   * record could name its subject. `NOT_APPLICABLE` — the report named no
+   * stopping phase, so there was nothing to record. Both are distinct from every
+   * store code, because "we did not try" and "we tried and could not" send an
+   * operator to different places.
+   */
+  readonly code: VerificationAttemptRecordResult['code'] | 'SUBJECT_UNREADABLE' | 'NOT_APPLICABLE';
+  readonly path: string | null;
+  readonly attemptedAt: string | null;
+  readonly subjectCommit: string | null;
+}
+
+const EVIDENCE_SUBJECT_UNREADABLE: VerificationEvidenceOutcome = Object.freeze({
+  recorded: false as const,
+  code: 'SUBJECT_UNREADABLE' as const,
+  path: null,
+  attemptedAt: null,
+  subjectCommit: null,
+});
+
+const EVIDENCE_NOT_APPLICABLE: VerificationEvidenceOutcome = Object.freeze({
+  recorded: false as const,
+  code: 'NOT_APPLICABLE' as const,
+  path: null,
+  attemptedAt: null,
+  subjectCommit: null,
+});
 
 /**
  * Runs the reviewer and routes on what it said.
@@ -1260,6 +1486,64 @@ export async function runReviewStep(
 }
 
 /**
+ * The cause for a remediation pass that was resumed rather than driven straight
+ * through, from whatever durable evidence exists.
+ *
+ * Two sources, in this order, and the order is the policy:
+ *
+ *  1. **the review's findings for this round**, if the durable history holds
+ *     any. A review that reported findings is the ordinary reason to remediate,
+ *     and its record is the stronger cause: it names how many and how severe;
+ *  2. **the latest verification attempt**, if one is on disk *and it is about
+ *     the tree the writer is being sent to*.
+ *
+ * The second condition is not a formality. An attempt names the commit it
+ * measured; a remediating writer moves HEAD; and a brief built from an attempt
+ * about some earlier commit would tell a writer that the tree in front of it
+ * failed, when what failed was a tree that no longer exists. So the record's
+ * subject is compared against HEAD read *now*, and a mismatch produces no brief
+ * at all rather than a plausible one. `NO_DURABLE_FINDINGS` is the honest answer
+ * to "we have evidence, and it is not about this".
+ *
+ * Every non-`ATTEMPT_HISTORY` reading is likewise no brief. `MALFORMED` and
+ * `UNSUPPORTED_VERSION` mean something is on that path and this build cannot say
+ * what it claims, which is emphatically not the same as no cause existing — but
+ * it is the same *decision*, because neither entitles anyone to brief a writer.
+ * The difference is reported to the operator by the read path, not resolved
+ * here.
+ */
+async function resumedBrief(
+  current: StateLoadSuccess,
+  deps: LoopDependencies,
+  round: number,
+): Promise<ResumedRemediationBrief> {
+  const state = current.state;
+
+  const fromReview = buildResumedRemediationBrief(state.findingHistory, round);
+  if (fromReview.kind === 'DURABLE_RECORD') return fromReview;
+
+  const load = (deps.loadVerificationAttempts ?? defaultVerificationAttemptLoader)(
+    state.repositoryRoot,
+    state.taskId,
+  );
+  const attempt = latestVerificationAttempt(load);
+  if (attempt === null) return Object.freeze({ kind: 'NO_DURABLE_FINDINGS' as const });
+
+  const head = await observeSettledWorktree(leasedGit(deps), deps.authorisedWorktreePath);
+  if (head.observedCommit === null || head.observedCommit !== attempt.subjectCommit) {
+    return Object.freeze({ kind: 'NO_DURABLE_FINDINGS' as const });
+  }
+
+  return Object.freeze({
+    kind: 'DURABLE_RECORD' as const,
+    payload: buildVerificationRemediationPayload(attempt, round),
+  });
+}
+
+const defaultVerificationAttemptLoader: VerificationAttemptLoader = (repositoryRoot, taskId) =>
+  loadVerificationAttemptsFromStore(repositoryRoot, taskId);
+
+/**
  * Runs the writer against the current round's findings.
  *
  * A completed writer means the agent finished, not that the task is fixed —
@@ -1298,20 +1582,24 @@ export async function runRemediateStep(
   // The caller's payload is the live one: it exists only on the step that just
   // read a review, and the same write persisted that review's findings. Without
   // it — a restarted driver, or an entry into `REMEDIATING` that came from
-  // somewhere other than `REVIEWING` — the durable history is the only evidence
-  // there is, and where it holds nothing for this round there is no brief to
-  // build. Composing one anyway produces a document in the reviewer's voice
-  // claiming a review reported findings and then listing none of them, which is
-  // a fabricated cause handed to a writing agent with a worktree to modify.
+  // somewhere other than `REVIEWING` — the durable record is the only evidence
+  // there is, and where it holds nothing there is no brief to build. Composing
+  // one anyway produces a document in the reviewer's voice claiming a review
+  // reported findings and then listing none of them, which is a fabricated cause
+  // handed to a writing agent with a worktree to modify.
   //
-  // `BLOCKED_VERIFY → REMEDIATING` is the sharp case: a failed verification is
-  // a real reason to remediate, but the report is deliberately never persisted,
-  // so nothing durable makes it actionable. A caller that has just run the
-  // verification may supply its own brief; one that has not must not invent the
-  // reviewer's.
+  // `BLOCKED_VERIFY → REMEDIATING` used to be the sharp case, and this comment
+  // used to say the report was "deliberately never persisted, so nothing durable
+  // makes it actionable". That was true and it was the release blocker: the one
+  // declared continuation out of `BLOCKED_VERIFY` led here, found no cause, and
+  // parked the task at `HUMAN_DECISION_REQUIRED` without starting a writer.
+  // V4's verification-attempt evidence closes it — the failure is now on disk,
+  // in its own store, and {@link resumedBrief} reads it. The rule the old
+  // sentence protected is unchanged and is what that function still enforces: a
+  // caller that has not established a cause may not invent one.
   const brief =
     remediationPayload === undefined
-      ? buildResumedRemediationBrief(state.findingHistory, round)
+      ? await resumedBrief(current, deps, round)
       : ({ kind: 'DURABLE_RECORD', payload: remediationPayload } as const);
 
   if (brief.kind === 'NO_DURABLE_FINDINGS') {

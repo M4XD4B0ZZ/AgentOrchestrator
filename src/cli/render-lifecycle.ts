@@ -161,7 +161,11 @@ export const LIFECYCLE_OUTCOME_SENTENCES: Readonly<Record<LifecycleOutcome, stri
       '  Otherwise, invoke again once the quota has returned.',
     BLOCKED_VERIFY:
       'The repository\'s verification commands failed and were not retried. The only\n' +
-      '  continuation is remediation, which is a decision.',
+      '  continuation is remediation, which is a decision: re-run with --attended and\n' +
+      '  --remediate-verify-failure to hand the recorded failure to the writing agent.\n' +
+      '  That is not a retry -- verification runs again only on what the writer leaves,\n' +
+      '  and the decision is spent on one departure per invocation. `run --task <id>`\n' +
+      '  prints what was recorded about the failure.',
     BLOCKED_AUTH: 'An agent\'s credentials are missing or expired. Only a human restores them.',
     SCOPE_VIOLATION: 'An agent wrote outside its allowed scope. Not resumable at all.',
     RESUME_STATE_DIVERGED:

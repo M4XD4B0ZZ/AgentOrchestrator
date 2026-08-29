@@ -309,6 +309,11 @@ describe('the repository verdict is the repository\'s', () => {
     expect(run.outcome).toBe('BLOCKED_VERIFY');
     expect(verify.calls.length).toBe(1);
     expect(agent.calls).toEqual([]);
+    // The block came with its explanation, on disk, in the same step. Since the
+    // M1 verification-recovery fix this is not incidental: `BLOCKED_VERIFY` is
+    // written only where the record came back off the filesystem, so a run that
+    // reached it has by construction left something for an operator to read.
+    expect(run.lastStep?.verificationEvidence?.recorded).toBe(true);
 
     const blocked = reload(started.root, TASK_ID);
     expect(blocked.state.state).toBe('BLOCKED_VERIFY');

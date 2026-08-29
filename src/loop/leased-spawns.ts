@@ -124,7 +124,21 @@ export interface SpawnAuthority {
  */
 const CONTAINED_WRITER: AgentId = 'claude';
 
-function leaseHolds(deps: SpawnAuthority): boolean {
+/**
+ * Whether this run is still the repository's writer, asked now.
+ *
+ * Exported since V4's verification-attempt evidence, which needs the same
+ * question answered at a moment none of the seams below covers. A verification
+ * run can take twenty minutes, so the check the *spawn* made is twenty minutes
+ * stale by the time its result is written down, and a durable record produced by
+ * a run that has stopped being the writer is an artefact from an unauthorised
+ * process. The store asks this immediately before its write, which is where
+ * every other effect in this module asks it.
+ *
+ * It is a predicate, never an authorisation: answering `true` grants nothing and
+ * every caller still has its own gates.
+ */
+export function leaseHolds(deps: SpawnAuthority): boolean {
   return verifyExecutionLeaseHeldFor(deps.lease.repository, deps.lease.evidence).code === 'HELD';
 }
 

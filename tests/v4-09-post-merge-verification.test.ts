@@ -175,7 +175,7 @@ function reportOf(over: Partial<VerificationReport> = {}): VerificationReport {
   return {
     verdict: 'PASSED',
     phases: [
-      { phase: 'VERIFY', outcome: 'RAN', exitCode: 0, signal: null, outputTruncated: false, durationMs: 5 },
+      { phase: 'VERIFY', outcome: 'RAN', exitCode: 0, signal: null, outputTruncated: false, failureCode: null, errnoCode: null, durationMs: 5 },
     ],
     stoppedAt: null,
     diagnostics: { stdoutExcerpt: '', stderrExcerpt: '', trusted: false },
@@ -580,7 +580,7 @@ describe('a verification verdict cannot be minted for a run against another comm
           verdict: 'FAILED',
           stoppedAt: 'VERIFY',
           phases: [
-            { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, durationMs: 9 },
+            { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, failureCode: null, errnoCode: null, durationMs: 9 },
           ],
         }),
       }),
@@ -601,6 +601,12 @@ describe('a verification verdict cannot be minted for a run against another comm
               exitCode: null,
               signal: 'SIGTERM',
               outputTruncated: false,
+              // The two fields V4's attempt evidence added, set to what a real
+              // timeout carries rather than to null: this fixture is the
+              // timeout case, and `TIMEOUT` is the only thing that separates it
+              // from an output flood or a program that was never found.
+              failureCode: 'TIMEOUT',
+              errnoCode: null,
               durationMs: 1_800_000,
             },
           ],
@@ -697,7 +703,7 @@ describe('a verification verdict cannot be minted for a run against another comm
           stoppedAt: 'VERIFY',
           diagnostics: { stdoutExcerpt: 'SECRET=hunter2', stderrExcerpt: 'boom', trusted: false },
           phases: [
-            { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, durationMs: 1 },
+            { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, failureCode: null, errnoCode: null, durationMs: 1 },
           ],
         }),
       }),
@@ -1938,7 +1944,7 @@ describe('a verification history is appended to, never rewritten', () => {
               verdict: 'FAILED',
               stoppedAt: 'VERIFY',
               phases: [
-                { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, durationMs: 1 },
+                { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, failureCode: null, errnoCode: null, durationMs: 1 },
               ],
             }),
           }),
@@ -2021,7 +2027,7 @@ describe('a verification history is appended to, never rewritten', () => {
           verdict: 'FAILED',
           stoppedAt: 'VERIFY',
           phases: [
-            { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, durationMs: 1 },
+            { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, failureCode: null, errnoCode: null, durationMs: 1 },
           ],
         }),
       });
@@ -2073,7 +2079,7 @@ describe('a verification history is appended to, never rewritten', () => {
                 verdict: 'FAILED',
                 stoppedAt: 'VERIFY',
                 phases: [
-                  { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, durationMs: 1 },
+                  { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, failureCode: null, errnoCode: null, durationMs: 1 },
                 ],
               }),
             }),
@@ -2090,7 +2096,7 @@ describe('a verification history is appended to, never rewritten', () => {
               verdict: 'FAILED',
               stoppedAt: 'VERIFY',
               phases: [
-                { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, durationMs: 1 },
+                { phase: 'VERIFY', outcome: 'RAN', exitCode: 1, signal: null, outputTruncated: false, failureCode: null, errnoCode: null, durationMs: 1 },
               ],
             }),
           }),

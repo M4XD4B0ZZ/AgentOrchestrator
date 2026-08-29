@@ -197,7 +197,9 @@ const POLICY_DECLARATIONS: Readonly<Record<BlockingState, PolicyDeclaration>> = 
     rationale:
       'The project verification commands failed in a way the loop could not resolve. ' +
       'Blindly re-running them would just fail again, so the only continuation is ' +
-      'remediation by the writing agent, or an operator decision.',
+      'remediation by the writing agent, on an operator decision. The failure itself ' +
+      'is recorded durably beside the task, which is what makes that remediation ' +
+      'actionable and what an operator reads before deciding.',
   },
   SCOPE_VIOLATION: {
     state: 'SCOPE_VIOLATION',

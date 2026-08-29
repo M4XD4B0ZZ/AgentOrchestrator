@@ -43,7 +43,7 @@
 
 import { agentDiagnostics, type AgentDiagnostics } from '../agent/agent-outcome.js';
 import { isComparablePath } from '../core/path-identity.js';
-import { isShellInertArgument } from '../doctor/exec.js';
+import { isShellInertArgument, type CommandFailureCode } from '../doctor/exec.js';
 import type { ResolvedVerificationPolicy } from '../repo/resolve-repository.js';
 import { type VerificationCommandOutcome, type VerificationCommandResult, type VerificationRunner } from './verify-command.js';
 
@@ -53,13 +53,29 @@ export type VerificationVerdict = 'PASSED' | 'FAILED' | 'UNAVAILABLE';
 /** The declared phase names, as the repository profile spells them. */
 export type VerificationPhaseName = ResolvedVerificationPolicy['phases'][number]['phase'];
 
-/** What one phase did. Closed facts only — no repository text. */
+/**
+ * What one phase did. Closed facts only — no repository text.
+ *
+ * `failureCode` and `errnoCode` are carried rather than dropped, and they are
+ * the difference between a diagnosis and a shrug. Three endings that matter to
+ * an operator — a phase that timed out, a phase that flooded its output budget
+ * and a phase whose program was never found — arrive at this module as the same
+ * `UNAVAILABLE` outcome with the same `null` exit code, and without these two
+ * fields nothing downstream can tell them apart. They were computed by
+ * `verify-command.ts` and discarded here until V4's verification-attempt
+ * evidence needed them; both come from closed vocabularies owned by
+ * `doctor/exec.ts` and `core/safe-error.ts`, so neither is foreign text.
+ */
 export interface VerificationPhaseReport {
   readonly phase: VerificationPhaseName;
   readonly outcome: VerificationCommandOutcome;
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly outputTruncated: boolean;
+  /** Why the process did not reach a verdict, or `null` when it did. */
+  readonly failureCode: CommandFailureCode | null;
+  /** The errno behind that, from `safeErrnoCode`'s allow-list, or `null`. */
+  readonly errnoCode: string | null;
   readonly durationMs: number;
 }
 
@@ -72,9 +88,20 @@ export interface VerificationReport {
   /**
    * The failing phase's own output, bounded and redacted, or empty on `PASSED`.
    *
-   * Carried for a human reading a blocked task and **never persisted**:
-   * `TaskStateObjectSchema` is `.strict()` and has no field for it, which is the
-   * design rather than an obstacle. `trusted: false` is a field, not a comment.
+   * Carried for a human reading a blocked task, and **never persisted as it
+   * stands**. `TaskStateObjectSchema` is `.strict()` and has no field for it,
+   * which is the design rather than an obstacle. `trusted: false` is a field,
+   * not a comment.
+   *
+   * Since V4's verification-attempt evidence this value is also the *input* to a
+   * durable record — `verify/verification-attempt.ts` — and the qualifier above
+   * is doing real work rather than hedging. What reaches disk is a line-safe
+   * transformation stored as an array of lines, in a record outside `TaskState`
+   * with its own byte budget; this object, with its newlines and its `trusted`
+   * flag, is not itself a stored shape. The excerpt is the *head* of the failing
+   * phase's stream, which for a long test run is its banner rather than its
+   * failure — an honest limitation of reusing this representation unchanged,
+   * carried as a residual rather than repaired by inventing a second one.
    */
   readonly diagnostics: AgentDiagnostics;
 }
@@ -115,6 +142,8 @@ function phaseReport(
     exitCode: result.exitCode,
     signal: result.signal,
     outputTruncated: result.outputTruncated,
+    failureCode: result.failureCode,
+    errnoCode: result.errnoCode,
     durationMs: result.durationMs,
   });
 }

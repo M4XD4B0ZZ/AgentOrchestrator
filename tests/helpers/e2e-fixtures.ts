@@ -173,7 +173,23 @@ export async function startTask(options: {
   const root = createRepoFixture({
     defaultBranch: 'main',
     profile: options.profile ?? e2eProfile(),
-    files: { [`tasks/${taskId}.md`]: taskFile(taskId), ...options.files },
+    files: {
+      // What a real repository AO drives has, and what `start-task.ts` refuses
+      // to start a task without. These scenarios reach `prepareTaskWorkspace`
+      // directly rather than through `startTask`, so that gate never runs here
+      // and the fixture was quietly unlike a deployment in the one respect the
+      // runtime stores care about.
+      //
+      // The rule is on the **directory**, which is what this repository's own
+      // `.gitignore` carries. That matters: `checkRuntimeIgnored` asks only
+      // about `runtime/<taskId>.json`, so a rule keyed on that file alone would
+      // pass the start gate and then refuse every record a store writes one
+      // directory deeper — `runtime-ignored.ts` names exactly that shape as the
+      // `SOURCE_WORKTREE_DIRTY` stall it exists to prevent.
+      '.gitignore': '.agent-orchestrator/runtime/\n',
+      [`tasks/${taskId}.md`]: taskFile(taskId),
+      ...options.files,
+    },
   });
 
   const repository = await resolveFixture(root);
