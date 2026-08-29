@@ -173,12 +173,35 @@ const TARGETS: readonly Target[] = Object.freeze([
   }),
 ]);
 
-/** This file's own scratch space: one private `TEMP` root and one report per target. */
-const WORK_ROOT = realpathSync.native(mkdtempSync(join(tmpdir(), 'ao-m1r009-')));
+/**
+ * This file's own scratch space: one private `TEMP` root and one report per
+ * target — created on first use by a case, never at module scope.
+ *
+ * A name filter does not stop collection, and collection is what executes this
+ * module's top-level statements. Read from the installed `@vitest/runner`
+ * (4.1.10): `interpretTaskModes` marks a suite `skip` once a `namePattern` has
+ * skipped every test under it, and that verdict propagates to the file task;
+ * `runSuite` then reports a `skip` suite as finished and returns *before* it
+ * calls `beforeAll` or `afterAll`. So any run whose `-t` pattern misses all
+ * three cases here — including the whole-suite name-filtered runs a person
+ * makes while narrowing down a failure — would collect this file, create the
+ * directory, and never reach the hook that removes it.
+ *
+ * Leaving one `ao-m1r009-*` directory behind per such run is exactly the defect
+ * this file exists to catch in three other suites, so the creation is deferred
+ * to a case that is genuinely running and the hook removes only what was made.
+ */
+let workRoot: string | undefined;
+
+function workRootDirectory(): string {
+  workRoot ??= realpathSync.native(mkdtempSync(join(tmpdir(), 'ao-m1r009-')));
+  return workRoot;
+}
 
 afterAll(() => {
+  if (workRoot === undefined) return;
   try {
-    rmSync(WORK_ROOT, { recursive: true, force: true });
+    rmSync(workRoot, { recursive: true, force: true });
   } catch {
     /* a leftover scratch directory is not a test failure */
   }
@@ -479,7 +502,7 @@ describe('a memoised fixture template does not survive the suite that built it',
           );
         }
 
-        const home = join(WORK_ROOT, target.label);
+        const home = join(workRootDirectory(), target.label);
         const tempRoot = join(home, 'temp');
         const reportPath = join(home, 'report.json');
         mkdirSync(tempRoot, { recursive: true });
