@@ -93,6 +93,7 @@ import type { ExecutionLeaseEvidence } from '../src/core/execution-lease-evidenc
 import {
   acquireRepositoryExecutionLease,
   assessStaleLeaseRecovery,
+  attestWriterLaunchEstablished,
   beginWriterLaunch,
   clearContainmentEvidence,
   confirmWriterLaunch,
@@ -117,7 +118,9 @@ import { assessLeaseRecovery } from '../src/lease/lease-recovery.js';
 import {
   MAX_WRITER_LAUNCH_ENTRIES,
   provesEveryLaunchContained,
+  provesEveryLaunchContainedAtCreation,
   readWriterLaunchLedger,
+  unendedLaunchesOf,
   writerLaunchBinding,
   WRITER_LAUNCH_LEDGER_VERSION,
   WRITER_LAUNCH_READINGS,
@@ -294,6 +297,35 @@ function containedLaunch(repository: LeaseRepository, evidence: ExecutionLeaseEv
   expect(confirmed.code).toBe('CONFIRMED');
 }
 
+/**
+ * One writer launch established and left that way: the mark M2 slice 1 writes
+ * while the writer is still running, and the state a mid-writer interrupt leaves.
+ *
+ * The pids are the fixture's whole point, because they are what the recovery
+ * predicate re-probes. A caller passes the pair it wants the probe to be asked
+ * about.
+ */
+function establishedLaunch(
+  repository: LeaseRepository,
+  evidence: ExecutionLeaseEvidence,
+  pids: { readonly helperPid: number; readonly childPid: number },
+): void {
+  const opened = beginWriterLaunch(repository, evidence, { writerId: 'claude', now: tick });
+  expect(opened.code).toBe('OPENED');
+  const generation = opened.generation;
+  if (generation === null) throw new Error('an opened launch carries a generation');
+  const established = attestWriterLaunchEstablished(
+    repository,
+    evidence,
+    attestationFor(process.pid, {
+      ...pids,
+      launchNonce: (launch++).toString(16).padStart(16, '0'),
+    }),
+    { generation, writerId: 'claude', now: tick },
+  );
+  expect(established.code).toBe('ESTABLISHED');
+}
+
 /* ─────────────────────── 1. the format, in isolation ────────────────────── */
 
 const SUBJECT: WriterLaunchSubject = Object.freeze({
@@ -337,6 +369,21 @@ const CONTAINED_ENTRY = Object.freeze({
   confirmedAt: '2026-08-21T00:00:02.000Z',
 });
 
+const ESTABLISHED_ENTRY = Object.freeze({
+  generation: 1,
+  state: 'ESTABLISHED' as const,
+  writerId: 'claude',
+  openedAt: '2026-08-21T00:00:00.000Z',
+  helperPid: 11,
+  childPid: 12,
+  mode: 'JOBLIST',
+  verifiedInJob: true as const,
+  assignedAtCreation: true,
+  launchDigest: 'c'.repeat(64),
+  attestedAt: '2026-08-21T00:00:01.000Z',
+  establishedAt: '2026-08-21T00:00:02.000Z',
+});
+
 const PENDING_ENTRY = Object.freeze({
   generation: 1,
   state: 'PENDING' as const,
@@ -358,6 +405,55 @@ describe('the launch history format refuses everything it cannot read', () => {
     }
   });
 
+  it('keeps the two licensing predicates disjoint, asserted by value', () => {
+    // The second table gets the same treatment as the first, and the *disjoint*
+    // part is the property worth pinning rather than either row on its own. If
+    // `provesEveryLaunchContainedAtCreation` ever answered `true` for
+    // `ALL_LAUNCHES_CONTAINED`, the weaker predicate would have become a
+    // superset of the stronger one — and the recovery would then reach the
+    // liveness re-check through a reading that never needed it, which reads as
+    // harmless and is how a table stops meaning anything.
+    const atCreation = WRITER_LAUNCH_READINGS.filter((reading) =>
+      provesEveryLaunchContainedAtCreation(reading),
+    );
+    expect(atCreation).toEqual(['LAUNCHES_CONTAINED_SOME_UNENDED']);
+    for (const reading of WRITER_LAUNCH_READINGS) {
+      expect(provesEveryLaunchContainedAtCreation(reading)).toBe(
+        reading === 'LAUNCHES_CONTAINED_SOME_UNENDED',
+      );
+      // No reading is admitted by both. Stated as its own assertion because the
+      // two loops above could each pass while one reading satisfied both.
+      expect(
+        provesEveryLaunchContained(reading) && provesEveryLaunchContainedAtCreation(reading),
+      ).toBe(false);
+    }
+  });
+
+  it('names the launches a recovery still owes a proof about, and only for that reading', () => {
+    // `unendedLaunchesOf` is the only way pids leave the ledger module, so what
+    // it refuses matters as much as what it answers. Every reading that is not
+    // the one licensing reading must yield `null` — including
+    // `ALL_LAUNCHES_CONTAINED`, where a non-null answer would be a list a caller
+    // could exhaust and call a proof without ever probing anything.
+    expect(
+      unendedLaunchesOf(
+        SUBJECT,
+        sealed({ entries: [ESTABLISHED_ENTRY, { ...CONTAINED_ENTRY, generation: 2 }] }),
+      ),
+    ).toEqual([{ generation: 1, helperPid: 11, childPid: 12 }]);
+
+    for (const raw of [
+      sealed({ entries: [CONTAINED_ENTRY] }),
+      sealed({ entries: [PENDING_ENTRY] }),
+      sealed({ entries: [ESTABLISHED_ENTRY], historyComplete: false }),
+      sealed({ entries: [ESTABLISHED_ENTRY] }, { ...SUBJECT, ownerNonce: 'b'.repeat(64) }),
+      { ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION, nonsense: true },
+      undefined,
+    ]) {
+      expect(unendedLaunchesOf(SUBJECT, raw)).toBeNull();
+    }
+  });
+
   it('produces every reading in the closed set from a real input', () => {
     const produced = new Map<WriterLaunchReading, unknown>([
       ['ABSENT', undefined],
@@ -368,6 +464,10 @@ describe('the launch history format refuses everything it cannot read', () => {
       ['HISTORY_INCOMPLETE', sealed({ historyComplete: false })],
       ['LAUNCH_UNPROVEN', sealed({ entries: [PENDING_ENTRY] })],
       ['ALL_LAUNCHES_CONTAINED', sealed({ entries: [CONTAINED_ENTRY] })],
+      [
+        'LAUNCHES_CONTAINED_SOME_UNENDED',
+        sealed({ entries: [ESTABLISHED_ENTRY, { ...CONTAINED_ENTRY, generation: 2 }] }),
+      ],
     ]);
     // Every member of the union is produced by something, so no reading is a
     // name with no input behind it.
@@ -858,6 +958,7 @@ describe('the launch history is opened before a launch and confirmed after it', 
         'ATTESTATION_ALREADY_USED',
         'ATTESTATION_INVALID',
         'CONFIRMED',
+        'ESTABLISHED',
         'EVIDENCE_INVALID',
         'GENERATION_NOT_OPEN',
         'HISTORY_DISCARDED',
@@ -896,6 +997,47 @@ describe('the launch history is opened before a launch and confirmed after it', 
 /* ─────────────────── 3. the writer seam opens the generation ────────────── */
 
 describe('the leased writer seam announces its launch before it happens', () => {
+  it('marks the generation established while the writer is still running', async () => {
+    // The production wiring, and the reason this is a *seam* test rather than a
+    // ledger test: what M2 slice 1 adds is a call made from inside the launch,
+    // and the ledger cannot tell who called it. The runner below stands where
+    // `runAgentCommand` stands and does what the boundary does — invoke the hook
+    // once the kernel has confirmed membership — and then asserts the ledger
+    // *during* the run, which is the only moment the new state is observable.
+    //
+    // Deleting the `onLaunchEstablished` wiring in `leased-spawns.ts` leaves the
+    // whole in-process suite green except for this case.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const attestation = attestationFor(process.pid, {
+      helperPid: 777,
+      childPid: 778,
+      launchNonce: 'e57ab11500000001',
+    });
+    let midRun: readonly { readonly state: string }[] = [];
+
+    const run = leasedAgent({
+      lease: { repository, evidence },
+      agent: async (_id, _args, _cwd, _payload, hooks) => {
+        hooks?.onLaunchEstablished?.(attestation);
+        // Read after the hook and before the result: this is the state a crash
+        // in the middle of a writer leaves behind.
+        midRun = (ledgerOf(repository)?.entries ?? []) as readonly { readonly state: string }[];
+        return agentResult(attestation);
+      },
+      containmentNow: tick,
+    });
+
+    await run('claude', [], process.cwd(), '');
+    expect(midRun.map((entry) => entry.state)).toEqual(['ESTABLISHED']);
+
+    // And the ordinary ending still upgrades it. The establishment mark is a
+    // middle step, not a replacement for the one that says the launch ended.
+    const after = (ledgerOf(repository)?.entries ?? []) as readonly { readonly state: string }[];
+    expect(after.map((entry) => entry.state)).toEqual(['CONTAINED']);
+    releaseRepositoryExecutionLease(evidence);
+  });
+
   it('opens a generation for the writer and for nothing else', async () => {
     const repository = repositoryFixture();
     const { evidence } = leaseOf(repository);
@@ -1271,6 +1413,19 @@ describe('the safety predicate refuses everything it cannot prove', () => {
     const legacy = repositoryFixture();
     staleLease(legacy);
     rmSync(ledgerPathOf(legacy));
+    // One fixture for both LAUNCH_TREE_ refusals, because what separates them is
+    // precisely the liveness answer and nothing else: same dead owner, same
+    // established launch, same recorded pids. Two fixtures would let a defect
+    // that mixed the two look like two independent passes.
+    const unended = repositoryFixture();
+    const unendedOwner = staleLease(unended, (evidence) => {
+      establishedLaunch(unended, evidence, { helperPid: 4242, childPid: 4343 });
+    });
+    /** Dead owner, and whatever the caller wants said about the recorded tree. */
+    const treeSays =
+      (tree: ProcessLiveness) =>
+      (pid: number): ProcessLiveness =>
+        pid === unendedOwner ? 'NOT_FOUND' : tree;
     const live = repositoryFixture();
     const held = leaseOf(live);
 
@@ -1300,6 +1455,12 @@ describe('the safety predicate refuses everything it cannot prove', () => {
       LAUNCH_HISTORY_INCOMPLETE: assessStaleLeaseRecovery(incomplete, { processAlive: dead })
         .refusal,
       LAUNCH_HISTORY_UNPROVEN: assessStaleLeaseRecovery(pending, { processAlive: dead }).refusal,
+      LAUNCH_TREE_STILL_RUNNING: assessStaleLeaseRecovery(unended, {
+        processAlive: treeSays('ALIVE'),
+      }).refusal,
+      LAUNCH_TREE_LIVENESS_UNDETERMINED: assessStaleLeaseRecovery(unended, {
+        processAlive: treeSays('UNDETERMINED'),
+      }).refusal,
       LAUNCH_HISTORY_UNSUPPORTED_VERSION: ledgerSays({
         ...sealed({ entries: [] }, subject),
         ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION + 1,

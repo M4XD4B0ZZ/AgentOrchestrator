@@ -76,9 +76,13 @@
  */
 
 import { runAgentCommand, type AgentCommandResult, type AgentRunner } from '../agent/agent-command.js';
-import { isContainmentAttestation } from '../core/containment-attestation.js';
+import {
+  isContainmentAttestation,
+  type ContainmentAttestation,
+} from '../core/containment-attestation.js';
 import type { AgentId } from '../core/states.js';
 import {
+  attestWriterLaunchEstablished,
   beginWriterLaunch,
   clearContainmentEvidence,
   confirmWriterLaunch,
@@ -156,7 +160,13 @@ export function leasedAgent(deps: SpawnAuthority): AgentRunner {
     // that launch is the one a recovery has to know about.
     const generation = openWriterGeneration(deps, id);
     if (generation === 'REFUSED') return AGENT_LAUNCH_NOT_RECORDED;
-    const result = await (deps.agent ?? runAgentCommand)(id, args, cwd, payload);
+    const result = await (deps.agent ?? runAgentCommand)(id, args, cwd, payload, {
+      // The mark that closes U1's dominant case, written while the writer is
+      // still running. See {@link markWriterLaunchEstablished}.
+      onLaunchEstablished: (attestation) => {
+        markWriterLaunchEstablished(deps, id, attestation, generation);
+      },
+    });
     recordWriterContainment(deps, id, result, generation);
     return result;
   };
@@ -199,6 +209,52 @@ function openWriterGeneration(deps: SpawnAuthority, id: AgentId): number | null 
   if (opened.code === 'OPENED') return opened.generation;
   if (opened.code === 'HISTORY_DISCARDED') return null;
   return 'REFUSED';
+}
+
+/**
+ * Records that the kernel placed this writer launch in the owner's job, while
+ * the writer is still running.
+ *
+ * ── Why this call exists, and what it is worth ─────────────────────────────
+ *
+ * Without it, the whole of a writer's runtime — minutes, and the largest window
+ * in a run — is on disk as `PENDING`, which proves nothing. A real reproduction
+ * killed an orchestrator in that window and measured the result: the writer tree
+ * was gone, and no product command could say so, so the repository stayed
+ * locked. That is M1's `U1`, and this line is what closes its dominant case.
+ *
+ * ── Deliberately not a claim about the ending ──────────────────────────────
+ *
+ * `attestWriterLaunchEstablished` writes `ESTABLISHED`, never `CONTAINED`, and
+ * the difference is the whole safety argument: this runs while the writer is
+ * alive, so it cannot say the tree has ended, and a recovery reading it must
+ * re-establish that separately. {@link recordWriterContainment} below is still
+ * the only call that says a launch ended, and it still runs after the run.
+ *
+ * ── And it still cannot fail the run ───────────────────────────────────────
+ *
+ * The result is discarded for the same reason its sibling's is. A generation
+ * that stays `PENDING` because this could not be published is exactly the
+ * conservative state the format already handles: less is proved, nothing untrue
+ * is asserted, and the launch that is already running is not stopped by an
+ * enrichment. The lease is re-proved inside the recorder, against the bytes it
+ * opens, so a run that lost its lease during establishment writes nothing.
+ */
+function markWriterLaunchEstablished(
+  deps: SpawnAuthority,
+  id: AgentId,
+  attestation: ContainmentAttestation,
+  generation: number | null,
+): void {
+  // `null` is the deliberate "there was nothing to confirm" answer from
+  // `openWriterGeneration` — a discarded history, or a non-writer agent — and
+  // both are launches this ledger does not describe.
+  if (id !== CONTAINED_WRITER || generation === null) return;
+  attestWriterLaunchEstablished(deps.lease.repository, deps.lease.evidence, attestation, {
+    generation,
+    writerId: id,
+    now: deps.containmentNow ?? (() => new Date().toISOString()),
+  });
 }
 
 /**

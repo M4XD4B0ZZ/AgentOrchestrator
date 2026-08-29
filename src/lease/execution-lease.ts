@@ -88,11 +88,17 @@
  * exactly where it is.
  *
  * This module ships **no policy for clearing one** other than its owner
- * releasing it, and as of the second withdrawal of the attended break there is no
- * such policy anywhere in the build. The guarded primitive is here —
- * {@link removeVerifiedLease}, whose whole authority is the predicate it is
- * handed — and its four call sites are all in this file: two acquire rollbacks
- * and `release`.
+ * releasing it or {@link recoverStaleLease} proving one dead, and as of the
+ * second withdrawal of the attended break there is no such policy anywhere else
+ * in the build. The guarded primitive is here — {@link removeVerifiedLease},
+ * whose whole authority is the predicate it is handed — and its three call sites
+ * are all in this file: one acquire rollback, `recoverStaleLease` and `release`.
+ *
+ * That sentence said "four call sites … two acquire rollbacks and `release`",
+ * which was wrong twice and in the direction that matters: there are three, and
+ * the enumeration left out the only **destructive** one, which is the call the
+ * whole recovery contract rests on. Counted from `grep -n 'removeVerifiedLease('`
+ * rather than from memory.
  *
  * This paragraph used to say the module ships "no way to clear one", which was
  * false in the plainest sense: it exports the removal primitive and always did.
@@ -170,7 +176,9 @@ import {
   extendableWriterLaunchLedger,
   MAX_WRITER_LAUNCH_ENTRIES,
   provesEveryLaunchContained,
+  provesEveryLaunchContainedAtCreation,
   readWriterLaunchLedger,
+  unendedLaunchesOf,
   writerLaunchBinding,
   WRITER_LAUNCH_LEDGER_VERSION,
   type WriterLaunchEntry,
@@ -2568,6 +2576,15 @@ function ledgerPathFor(location: LeaseLocation): string {
 export const WRITER_LAUNCH_CODES = [
   /** The generation is on disk as `PENDING`. The launch may proceed. */
   'OPENED',
+  /**
+   * The generation is on disk as `ESTABLISHED`: the kernel confirmed job
+   * membership, and the launch has not been seen to end.
+   *
+   * Its own code rather than a shade of {@link CONFIRMED}, because the two mean
+   * different things to a recovery and a caller that could not tell them apart
+   * would report the weaker one as the stronger.
+   */
+  'ESTABLISHED',
   /** The generation is on disk as `CONTAINED`. */
   'CONFIRMED',
   /**
@@ -2965,6 +2982,54 @@ export function confirmWriterLaunch(
   attestation: unknown,
   request: { readonly generation: number; readonly writerId: string; readonly now: () => string },
 ): WriterLaunchResult {
+  return recordLaunchContainment(given, evidence, attestation, request, 'CONTAINED');
+}
+
+/**
+ * Records that the kernel placed this generation's target in the owner's job.
+ *
+ * The middle mark, written **while the writer is still running** — between the
+ * boundary reporting confirmed membership and the target's first instruction —
+ * which is the whole of M2 slice 1. `writer-launch-ledger.ts` carries the
+ * reasoning and the measurement; what matters at this call site is the ordering
+ * it belongs to and the one thing it does not claim.
+ *
+ * It does not claim the tree ended. {@link confirmWriterLaunch} is still the
+ * call that says that, and it is still made after the launch has been seen to
+ * end. This one only moves a generation out of `PENDING`, so a later recovery
+ * has something to re-verify instead of nothing to go on.
+ *
+ * Refuses a generation that is not `PENDING`: an already-established generation
+ * is not established twice, and a confirmed one is not walked backwards. Both
+ * answer `GENERATION_NOT_OPEN` with a detail that says which.
+ */
+export function attestWriterLaunchEstablished(
+  given: LeaseRepository,
+  evidence: unknown,
+  attestation: unknown,
+  request: { readonly generation: number; readonly writerId: string; readonly now: () => string },
+): WriterLaunchResult {
+  return recordLaunchContainment(given, evidence, attestation, request, 'ESTABLISHED');
+}
+
+/**
+ * The one implementation behind both marks.
+ *
+ * Shared rather than copied, and that is a safety decision rather than a tidiness
+ * one: the two differ in four small places — which prior state they accept, which
+ * state they write, which instant field they stamp and which code they answer —
+ * and every other step is the lease gate, the owner check, the replay check, the
+ * read-back and the byte-bound publish. Two copies of that would be two places
+ * for a later slice to strengthen one and forget the other, which is the failure
+ * this file's neighbours keep recording.
+ */
+function recordLaunchContainment(
+  given: LeaseRepository,
+  evidence: unknown,
+  attestation: unknown,
+  request: { readonly generation: number; readonly writerId: string; readonly now: () => string },
+  target: 'ESTABLISHED' | 'CONTAINED',
+): WriterLaunchResult {
   if (!isExecutionLeaseEvidence(evidence)) return launchFailure('EVIDENCE_INVALID');
 
   const facts = containmentFactsOf(attestation);
@@ -3008,8 +3073,17 @@ export function confirmWriterLaunch(
   if (open === undefined || open.generation !== request.generation) {
     return launchFailure('GENERATION_NOT_OPEN', 'NOT_PRESENT', request.generation);
   }
-  if (open.state !== 'PENDING') {
-    return launchFailure('GENERATION_NOT_OPEN', 'ALREADY_CONFIRMED', request.generation);
+  // Which prior state each mark may act on. `ESTABLISHED` is written only over a
+  // freshly announced generation; `CONTAINED` may be written over either, because
+  // the ordinary path now passes through `ESTABLISHED` on its way there and a
+  // launch whose establishment could not be published still has to be
+  // confirmable from `PENDING`.
+  if (open.state === 'CONTAINED' || (target === 'ESTABLISHED' && open.state !== 'PENDING')) {
+    return launchFailure(
+      'GENERATION_NOT_OPEN',
+      open.state === 'CONTAINED' ? 'ALREADY_CONFIRMED' : 'ALREADY_ESTABLISHED',
+      request.generation,
+    );
   }
   if (open.writerId !== request.writerId) {
     return launchFailure('GENERATION_NOT_OPEN', 'ANOTHER_WRITER', request.generation);
@@ -3017,36 +3091,53 @@ export function confirmWriterLaunch(
   // One kernel-confirmed launch proves one launch. The digest is the launch's
   // identity — `core/internal/containment-attestation.ts` derives it per launch —
   // so a digest already standing in this history is an attestation being replayed.
+  //
+  // Every entry **except this generation's own** is examined, and both
+  // containment-bearing states count. Excluding the entry at `index` is what
+  // lets one real launch carry its single digest from `ESTABLISHED` to
+  // `CONTAINED`; it is not a hole, because the check below then requires that
+  // the confirmation is carrying the *same* digest rather than an arbitrary one.
   if (
     existing.entries.some(
-      (entry) => entry.state === 'CONTAINED' && entry.launchDigest === facts.launchDigest,
+      (entry, at) =>
+        at !== index && entry.state !== 'PENDING' && entry.launchDigest === facts.launchDigest,
     )
   ) {
     return launchFailure('ATTESTATION_ALREADY_USED', 'DIGEST_ALREADY_PROVED', request.generation);
   }
+  // Confirming an established generation must be the same launch confirming
+  // itself. Without this, an attestation for launch B could confirm generation
+  // A — leaving an entry whose recorded pids belong to B and whose `CONTAINED`
+  // state claims A ended. The exclusion above is what makes this check
+  // load-bearing rather than implied.
+  if (open.state === 'ESTABLISHED' && open.launchDigest !== facts.launchDigest) {
+    return launchFailure('ATTESTATION_ALREADY_USED', 'DIGEST_NOT_THIS_LAUNCH', request.generation);
+  }
 
-  let confirmedAt: string;
+  let stampedAt: string;
   try {
-    confirmedAt = request.now();
+    stampedAt = request.now();
   } catch {
     return launchFailure('LEDGER_NOT_READABLE_BACK', 'CLOCK_REFUSED', request.generation);
   }
 
-  const entries = [...existing.entries];
-  entries[index] = {
+  const common = {
     generation: open.generation,
-    state: 'CONTAINED',
     writerId: open.writerId,
     openedAt: open.openedAt,
     helperPid: facts.helperPid,
     childPid: facts.childPid,
     mode: facts.mode,
-    verifiedInJob: true,
+    verifiedInJob: true as const,
     assignedAtCreation: facts.assignedAtCreation,
     launchDigest: facts.launchDigest,
     attestedAt: facts.attestedAt,
-    confirmedAt,
   };
+  const entries = [...existing.entries];
+  entries[index] =
+    target === 'ESTABLISHED'
+      ? { ...common, state: 'ESTABLISHED', establishedAt: stampedAt }
+      : { ...common, state: 'CONTAINED', confirmedAt: stampedAt };
 
   const payload: WriterLaunchLedgerPayload = {
     ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION,
@@ -3063,7 +3154,7 @@ export function confirmWriterLaunch(
   // was confirmed, so the assertion has to name the entry.
   const back = ledgerReadBack(bytes);
   const rebuilt = extendableWriterLaunchLedger(subject, back);
-  if (rebuilt === null || rebuilt.entries[index]?.state !== 'CONTAINED') {
+  if (rebuilt === null || rebuilt.entries[index]?.state !== target) {
     return launchFailure('LEDGER_NOT_READABLE_BACK', 'NOT_AS_BUILT', request.generation);
   }
 
@@ -3074,7 +3165,11 @@ export function confirmWriterLaunch(
     return launchFailure('NOT_OWNER', 'LOST_BEFORE_PUBLISH', request.generation);
   }
   return published === null
-    ? Object.freeze({ code: 'CONFIRMED' as const, detail: null, generation: request.generation })
+    ? Object.freeze({
+        code: target === 'ESTABLISHED' ? ('ESTABLISHED' as const) : ('CONFIRMED' as const),
+        detail: null,
+        generation: request.generation,
+      })
     : launchFailure('LEDGER_WRITE_FAILED', published, request.generation);
 }
 
@@ -3151,6 +3246,30 @@ export const STALE_RECOVERY_REFUSALS = [
   'LAUNCH_HISTORY_INCOMPLETE',
   /** At least one writer launch under this lease is not proven contained. */
   'LAUNCH_HISTORY_UNPROVEN',
+  /**
+   * A launch that was contained at creation and never seen to end still has a
+   * process of its recorded tree in existence.
+   *
+   * Its own refusal rather than a shade of {@link OWNER_RUNNING}, because it
+   * names a different process and sends an operator somewhere else: the owner is
+   * gone and something it started is not. The `ESTABLISHED` state records the
+   * helper and the child precisely so this can be asked, and this is the answer
+   * that says asking was worth it.
+   *
+   * Note which direction pid reuse pushes this. A recycled pid now belonging to
+   * an unrelated process reads `ALIVE` and lands here — an over-refusal, and the
+   * only kind of error this comparison can make. The dangerous reading would be
+   * a live process whose pid reads `NOT_FOUND`, and that cannot happen: a
+   * running process's pid is by definition in use.
+   */
+  'LAUNCH_TREE_STILL_RUNNING',
+  /**
+   * Whether a recorded launch's tree still exists could not be established.
+   *
+   * The same rule the owner probe follows one conjunct up — liveness may refuse
+   * and may never permit — applied to the processes an unended launch names.
+   */
+  'LAUNCH_TREE_LIVENESS_UNDETERMINED',
   /** The history was written by a build this one does not understand. */
   'LAUNCH_HISTORY_UNSUPPORTED_VERSION',
   /** Something is there and is not a history this build declares. */
@@ -3175,6 +3294,11 @@ export type StaleRecoveryRefusal = (typeof STALE_RECOVERY_REFUSALS)[number];
 function refusalForHistory(reading: WriterLaunchReading): StaleRecoveryRefusal {
   switch (reading) {
     case 'ALL_LAUNCHES_CONTAINED':
+    // Both licensing readings answer the conservative refusal here, and for the
+    // same reason: this function is reached only when the caller has *already*
+    // decided the reading is not a proof, so an arm that named something
+    // reassuring would be describing a decision that was not made.
+    case 'LAUNCHES_CONTAINED_SOME_UNENDED':
     case 'LAUNCH_UNPROVEN':
       return 'LAUNCH_HISTORY_UNPROVEN';
     case 'HISTORY_INCOMPLETE':
@@ -3248,8 +3372,12 @@ const RECOVERY_REFUSAL_FOR_LOCATION: Readonly<Record<LeaseLocationFailureCode, S
  *     iff  a lease document is at this repository's lease path
  *     and  the process it names does not exist
  *     and  the launch history beside it is complete, bound to this exact lease,
- *          about this exact owner and run, and every launch in it is proven
- *          contained
+ *          and about this exact owner and run
+ *     and  either every launch in it is proven contained **and observed to end**
+ *          or   every launch in it was placed in the owner's job by the kernel
+ *               at creation, and every process the unended ones name — helper
+ *               and child alike — is observed not to exist, now, by this call's
+ *               own probe
  *
  * Anything else — including anything unknown, unreadable, from another build, or
  * merely undecidable — is a refusal. There is no default arm and no "probably".
@@ -3266,8 +3394,23 @@ const RECOVERY_REFUSAL_FOR_LOCATION: Readonly<Record<LeaseLocationFailureCode, S
  *
  * Together they say the one thing a removal needs: every writer tree that ever
  * existed under this lease was created inside a Job Object coupled to the owner,
- * and the kernel destroys that job when the owner dies. Not "probably gone" —
- * gone, because the kernel says so.
+ * every one of them was observed to end, and the owner is gone.
+ *
+ * ── And the third conjunct, which the second arm needs and the first does not ─
+ *
+ * The `ESTABLISHED` arm is missing exactly one of those: no ending was observed.
+ * It could be closed by inheritance — a helper dies when its owner does, so the
+ * job goes, so the tree goes — and it deliberately is not, because that first
+ * step is a *measurement* and not a contract. `boundary/start-owned-process.ts`
+ * says so in as many words, and `native/ao-launch/AoLaunch.cs` says the watcher
+ * "normally wins" while nothing enforces it. Building a removal on a step
+ * described that way would be exactly the reasoning this module's header refuses.
+ *
+ * So the arm asks instead. The helper is probed directly, at the removal, with
+ * the real probe: gone means it has closed the only handle to a job carrying
+ * `KILL_ON_JOB_CLOSE` and neither breakaway flag, and the kernel has destroyed
+ * everything inside it. That inference is a contract — it is what the job flags
+ * *are* — and it does not pass through the owner at all.
  *
  * ── And it still is not authority ──────────────────────────────────────────
  *
@@ -3334,9 +3477,58 @@ function assessStaleLeaseRecoveryBound(
   // The history is read *after* the liveness answer and from the same location,
   // so a report about a running owner never goes looking for one. The reading is
   // the whole of the second conjunct.
-  const history = readWriterLaunchLedger(subjectOf(document), readLedgerRecord(location));
+  const subject = subjectOf(document);
+  const ledgerRecord = readLedgerRecord(location);
+  const history = readWriterLaunchLedger(subject, ledgerRecord);
   if (!provesEveryLaunchContained(history)) {
-    return unsafe(refusalForHistory(history), { ...facts, launchHistory: history });
+    // ── The third conjunct, and it exists for one reading only ─────────────
+    //
+    // `LAUNCHES_CONTAINED_SOME_UNENDED` says every launch was placed in the
+    // owner's job by the kernel and at least one was never seen to end. That is
+    // strictly weaker than `ALL_LAUNCHES_CONTAINED`, so it buys the removal
+    // nothing on its own and is not routed through the predicate above — it owes
+    // the missing half here, freshly, against the same probe the owner was
+    // judged with and inside the same call that removes.
+    //
+    // What is owed is *not* the owner→helper coupling. `start-owned-process.ts`
+    // is explicit that a helper dying with its owner is measured rather than
+    // guaranteed, so this asks the helper directly instead of inheriting that
+    // measurement: a helper that is gone has closed the only handle to a job
+    // carrying `KILL_ON_JOB_CLOSE` and neither breakaway flag, and the kernel
+    // has therefore destroyed everything in it, grandchildren included. A helper
+    // that is *not* gone refuses, whatever the owner did.
+    if (!provesEveryLaunchContainedAtCreation(history)) {
+      return unsafe(refusalForHistory(history), { ...facts, launchHistory: history });
+    }
+    const unended = unendedLaunchesOf(subject, ledgerRecord);
+    // `null` or empty means this module and `unendedLaunchesOf` disagree about a
+    // ledger they both just read — the reading exists only when an `ESTABLISHED`
+    // entry is present, so neither is producible while they agree. It answers
+    // the undetermined refusal rather than a member of its own, and that is the
+    // truthful word for it: nothing was named, so nothing could be established.
+    // A member nothing can produce would be a vocabulary entry no fixture could
+    // pin, which is how an arm stops being checked at all.
+    if (unended === null || unended.length === 0) {
+      return unsafe('LAUNCH_TREE_LIVENESS_UNDETERMINED', { ...facts, launchHistory: history });
+    }
+    for (const launch of unended) {
+      // The helper first: it is the load-bearing one, because it owns the job.
+      // The child is asked too rather than trusted to the same inference — it is
+      // the process that was actually writing, and a build that got the job
+      // coupling wrong would still be caught by its own pid being alive.
+      for (const pid of [launch.helperPid, launch.childPid]) {
+        const seen = liveness(pid);
+        if (seen === 'ALIVE') {
+          return unsafe('LAUNCH_TREE_STILL_RUNNING', { ...facts, launchHistory: history });
+        }
+        if (seen !== 'NOT_FOUND') {
+          return unsafe('LAUNCH_TREE_LIVENESS_UNDETERMINED', {
+            ...facts,
+            launchHistory: history,
+          });
+        }
+      }
+    }
   }
 
   return Object.freeze({
@@ -3349,7 +3541,12 @@ function assessStaleLeaseRecoveryBound(
   });
 }
 
-/** What became of an attempt to recover a stale lease. A closed set of four. */
+/**
+ * What became of an attempt to recover a stale lease. A closed set of **five**.
+ *
+ * This said "four" while the array below had five members. Counted rather than
+ * restated.
+ */
 export const STALE_LEASE_RECOVERY_CODES = [
   /** The stale lease is gone. Nothing is held; acquisition is now possible. */
   'RECOVERED',

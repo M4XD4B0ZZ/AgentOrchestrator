@@ -7584,14 +7584,37 @@ use** and are not to be read as follow-ups.
   unwinding, and the `finally` that returns the lease never runs. The next
   invocation is refused `STALE_LEASE_RECOVERY_UNSAFE`. Since V3 slice 5 a lease
   left this way is recoverable with `agent-loop lease recover` **when its writer
-  launches are all proved contained** — the common case for a run interrupted
-  between spawns, and not the case for one interrupted mid-writer, where the open
-  generation is exactly what refuses. The transcript above predates that command.
+  launches are all proved contained**. The transcript above predates that command.
 
-  **Attended:** loud, fail-closed and correct — the refusal
-  sentence says exactly this, and `lease status` prints the path, so an operator
-  who is present pays one manual step. **Unattended:** a single crash makes the
-  repository permanently unrunnable, which no scheduler recovers from.
+  **Narrowed by M2 slice 1, and not closed. What changed, and by how much.**
+  The paragraph above used to add that the recoverable case was "the common case
+  for a run interrupted between spawns, and not the case for one interrupted
+  mid-writer". The second half was right and the first was not: a `claude` launch
+  lasts minutes and the two ledger marks were written before and after it, so
+  *mid-writer is where an interrupt almost always lands*. A re-run of the
+  reproduction with a real contained writer measured the consequence — the writer
+  tree died with its owner, and the ledger's `PENDING` entry, which names no
+  process at all, left the repository unrunnable by every product command there
+  is.
+
+  The kernel-witnessed facts that settle it existed all along and were simply
+  written down too late. They are now recorded at the instant the kernel confirms
+  job membership, and a recovery may build on them only after re-probing, at the
+  removal, that the processes they name are gone
+  ([the ADR](docs/decisions/2026-08-30-adr-unattended-crash-recovery.md)). So the
+  unprovable window shrinks from a writer's whole runtime to the interval between
+  announcing a launch and the kernel answering — **measured at 76 ms**. An owner
+  killed inside *that* window still refuses, and still needs a human.
+
+  **Attended:** loud, fail-closed and correct — the refusal sentence says exactly
+  this, and `lease status` prints the path, so an operator who is present pays one
+  manual step. **Unattended:** a crash no longer makes the repository permanently
+  unrunnable. `agent-loop lease recover` takes `--repository` and nothing else —
+  no attendance flag, no operator input — so a scheduler can now clear the
+  ordinary crash itself, which is measured against the shipped CLI in
+  `npm run test:dist-crash-recovery`. **U1 is therefore narrowed, not resolved**,
+  and unattended operation stays unsupported: the 76 ms window remains, and U2–U4
+  are untouched.
 - **U2 (F-D2) — a failed notification is indistinguishable from a silent run.**
   One bounded attempt, ten seconds, no retry and no second channel. A dropped
   push prints `NOT DELIVERED (<code>)` to a console nobody is reading, and since
@@ -7668,9 +7691,18 @@ anything already in the registers above.
   reason a stale lease is never taken over automatically, and the liveness
   sentence says so: a dead owner does not prove that no agent survived it. What
   follows from U1 is that the operator clearing the lease by hand is the one
-  making that judgement, with no instrument offered for it. Correct as designed —
-  this is precisely why unattended running needs owned process containment first
-  — and an **operations gap** worth one sentence of operator guidance.
+  making that judgement. Correct as designed — this is precisely why unattended
+  running needs owned process containment first — and an **operations gap** worth
+  one sentence of operator guidance.
+
+  **Partly addressed by M2 slice 1.** The finding added "with no instrument
+  offered for it", and there is one now for the case that matters: a writer launch
+  records the processes the kernel placed in the owner's job, and the recovery
+  probes them before removing anything, refusing `LAUNCH_TREE_STILL_RUNNING` while
+  any of them exists. That is an instrument for *writer* launches only. The
+  reviewer, the verification command and `git` go through the same owned boundary
+  and are contained in fact, and none of them is recorded — so for those, the
+  judgement is still the operator's and the finding stands as written.
 - **A6 — README's historical "verbatim" wording.** Documentation precision,
   carried in as named. No behaviour depends on it.
 
@@ -8046,8 +8078,18 @@ SAFE_TO_RECOVER
 iff  a lease document is at this repository's lease path
 and  the process it names does not exist
 and  the writer-launch history beside it is complete, bound to this exact lease,
-     about this exact owner and run, and every launch in it is proved contained
+     and about this exact owner and run
+and  either every launch in it is proved contained AND observed to end
+     or   every launch in it was placed in the owner's job by the kernel at
+          creation, and every process the unended ones name — helper and child
+          alike — is observed not to exist, now, by this call's own probe
 ```
+
+The fourth conjunct's second arm is M2 slice 1
+([its ADR](docs/decisions/2026-08-30-adr-unattended-crash-recovery.md)). It is not
+a loosening of the first: the two readings are admitted by two **disjoint**
+predicates, asserted by value, so a caller cannot reach the removal through the
+weaker one without also paying the liveness proof it owes.
 
 Anything else is a refusal, and there is no override: no `--force`, no
 environment variable, no API back door. `unknown => do not recover` is the whole
@@ -8068,8 +8110,24 @@ nothing — that is the measurement this repository has been carrying since V2-0
 and it has not been repealed. A complete all-contained history beside a *living*
 owner describes a run that is working perfectly. Together they say the one thing a
 removal needs: every writer tree that ever existed under this lease was created
-inside a Job Object coupled to the owner, and the kernel destroys that job when
-the owner dies. Not "probably gone" — gone, because the kernel says so.
+inside a Job Object coupled to the owner, every one of them was observed to end,
+and the owner is gone.
+
+The second arm is missing exactly one of those — no ending was observed — and it
+supplies the gap by **asking rather than inheriting**. It could have argued that a
+helper dies when its owner does, so the job goes, so the tree goes; that first
+step is a measurement and not a contract, and a removal resting on a step
+described that way is what this whole section exists to refuse. So the helper is
+probed directly, at the removal: gone means it has closed the only handle to a
+job created with `KILL_ON_JOB_CLOSE` and neither breakaway flag, and the kernel
+has destroyed everything inside it. Not "probably gone" — gone, because the job
+flags say so.
+
+Process-id reuse pushes that one way only. A recycled pid now belonging to some
+unrelated process reads `ALIVE` and refuses; the dangerous reading would be a
+live process whose pid reads `NOT_FOUND`, and a running process's pid is by
+definition in use. The cost is an over-refusal that clears itself, and there is no
+direction in which reuse permits a removal.
 
 ### Why slice 4's record could not be the input
 

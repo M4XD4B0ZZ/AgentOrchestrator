@@ -197,11 +197,26 @@ export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, str
     LAUNCH_HISTORY_INCOMPLETE:
       'This lease has a writer launch history that did not begin with the lease itself, so it\n' +
       '  can be missing launches. It is a log and not a proof, and it never becomes one.',
+    // This sentence used to say the state is "what a run killed while its agent
+    // was working leaves behind". That stopped being true when M2 slice 1 added
+    // the `ESTABLISHED` mark: a run killed with its agent working now leaves a
+    // launch the kernel had already placed in the owner's job, and lands on the
+    // two LAUNCH_TREE_ refusals below or on a recovery. What reaches this one is
+    // the narrow window before the kernel answered.
     LAUNCH_HISTORY_UNPROVEN:
-      'At least one writer launch under this lease was announced and never proved contained.\n' +
-      '  That is what a run killed while its agent was working leaves behind, and it is\n' +
-      '  exactly the case where an agent process may have survived the owner. Nothing is\n' +
-      '  removed.',
+      'At least one writer launch under this lease was announced and never reached the\n' +
+      '  point where the kernel confirmed it had been placed in the owner\'s process job.\n' +
+      '  That is the short window between announcing a launch and starting it, and it is\n' +
+      '  the one case where nothing at all can be said about the process. Nothing is removed.',
+    LAUNCH_TREE_STILL_RUNNING:
+      'A writer launch under this lease was placed in the owner\'s process job and never seen\n' +
+      '  to end, and a process bearing one of the ids it recorded exists right now. The owner\n' +
+      '  is gone and something it started may not be. Nothing is removed, and do not stop that\n' +
+      '  process on the strength of this: process ids are reused, so it need not be the one\n' +
+      '  this lease started.',
+    LAUNCH_TREE_LIVENESS_UNDETERMINED:
+      'Whether the processes of an unended writer launch still exist could not be established.\n' +
+      '  An unknown answer is not an absent process, so nothing is removed.',
     LAUNCH_HISTORY_UNSUPPORTED_VERSION:
       'The writer launch history beside this lease was written by a build this one does not\n' +
       '  understand. It is refused rather than guessed at.',

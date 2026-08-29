@@ -354,6 +354,10 @@ function fakeBoundary(
         mode: 'JOBLIST',
         assignedAtCreation: true,
         verifiedInJob: true,
+        // A fixed nonce, because this seam stands in for the boundary and the
+        // nonce is the boundary's. The establishment mint reads it, so a fake
+        // that omitted it would report a launch with no identity.
+        launchNonce: 'fake-launch-nonce',
         jobMembersAtStart: 1,
         workDir,
         terminate,

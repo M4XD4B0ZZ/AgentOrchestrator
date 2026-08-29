@@ -21,8 +21,9 @@
  *     lease acquired      → ledger published, `historyComplete: true`, no entries
  *     before each launch  → generation N appended as PENDING, published
  *     launch happens      → only after that publish is known to have landed
- *     kernel-confirmed    → generation N replaced by CONTAINED, published
- *     anything else       → generation N is left PENDING, for good
+ *     kernel confirms job → generation N replaced by ESTABLISHED, published
+ *     launch seen to end  → generation N replaced by CONTAINED, published
+ *     anything else       → generation N stays where it got to, for good
  *
  * The ordering is the whole safety argument, and it only works in one direction.
  * A record written *after* a launch cannot describe a launch that was killed
@@ -30,6 +31,23 @@
  * a launch whose poison could not be written does not happen at all — see
  * {@link WriterLaunchLedger.historyComplete} for the one escape hatch that
  * exists instead of stopping the run, and why it is still fail-closed.
+ *
+ * ── The middle step, and the window it closes ──────────────────────────────
+ *
+ * `ESTABLISHED` is M2 slice 1 and it is the reason this ledger changed. The two
+ * original marks were written *before* and *after* the writer ran, so the whole
+ * of a writer's runtime — minutes, and by far the largest window in a run — was
+ * recorded as `PENDING`, which proves nothing. A real reproduction killed an
+ * orchestrator in that window and measured the consequence: the writer tree was
+ * gone, and no product command could say so, so the repository stayed locked.
+ *
+ * The kernel's confirmation of job membership happens before the target's first
+ * instruction and was already in hand; it was simply not written down until the
+ * run ended. Writing it at that instant narrows the unprovable window from a
+ * writer's whole runtime to the milliseconds between the poison and the
+ * kernel's answer — measured at 76 ms on the reference machine. It does not
+ * close it, and {@link EstablishedLaunchSchema} says what the state does and
+ * does not claim.
  *
  * ── `historyComplete` is what makes an absent baseline safe to refuse ──────
  *
@@ -55,13 +73,23 @@
  * ── Containment is still not authority ─────────────────────────────────────
  *
  * Repeated here for the same reason `containment-evidence.ts` repeats it, since
- * this is the file whose reading a removal is gated on. A complete, all-contained
- * ledger proves one thing only: **no process tree started as a writer under this
- * lease can still be running**, because every one of them was created inside a
- * Job Object coupled to the lease owner, and that owner is gone. It says nothing
- * about who may write to the repository. The lease that gets removed on the
- * strength of it is removed as a *dead object*, and the next execution acquires
- * its own authority through the ordinary acquisition path.
+ * this is the file whose reading a removal is gated on. A complete ledger whose
+ * every launch is `CONTAINED` proves one thing only: **no process tree started
+ * as a writer under this lease can still be running**, because every one of them
+ * was created inside a Job Object coupled to the lease owner, was observed to
+ * end, and that owner is gone.
+ *
+ * A ledger carrying `ESTABLISHED` entries proves strictly less than that on its
+ * own — the endings were not observed — and the missing half is supplied at the
+ * removal, not here: the predicate re-probes the pids those entries record and
+ * refuses unless every one of them is gone. Stated in both places on purpose,
+ * because this is the file somebody reads while deciding what a reading licenses,
+ * and the two readings license different things.
+ *
+ * Neither says anything about who may write to the repository. The lease that
+ * gets removed on the strength of either is removed as a *dead object*, and the
+ * next execution acquires its own authority through the ordinary acquisition
+ * path.
  *
  * ── What this ledger does not cover, stated rather than implied ────────────
  *
@@ -95,8 +123,17 @@ import { z } from 'zod';
  * record's, for the reason `containment-evidence.ts` gives: a bump here must
  * leave the lease readable and its owner reportable, and must refuse only the
  * history.
+ *
+ * **2** since M2 slice 1 added {@link EstablishedLaunchSchema} to the entry
+ * union. The cost of that bump is stated rather than left to be discovered: a
+ * ledger written by a version-1 build now reads `UNSUPPORTED_VERSION`, so a
+ * stale lease left behind by an older build is refused where it might once have
+ * been recovered. That is the conservative direction and it is the same rule
+ * `LAUNCH_HISTORY_ABSENT` already applies — no lease from an earlier build is
+ * retroactively safe — and the operator's remaining move is unchanged: the lease
+ * path is printed by `agent-loop lease status`.
  */
-export const WRITER_LAUNCH_LEDGER_VERSION = 1;
+export const WRITER_LAUNCH_LEDGER_VERSION = 2;
 
 /**
  * Largest history this build will represent.
@@ -168,13 +205,80 @@ const ContainedLaunchSchema = z
   })
   .strict();
 
+/**
+ * A launch the kernel placed in the owner's job, whose ending was never seen.
+ *
+ * ── Why this state exists, measured rather than reasoned ───────────────────
+ *
+ * `PENDING` and `CONTAINED` were written before and after the writer ran, and
+ * the whole of a writer's runtime sat between them with nothing recorded. That
+ * is the *largest* window in a run — a `claude` launch lasts minutes — and it is
+ * the window an interrupt is most likely to land in. A real reproduction on
+ * this platform (`tests/dist-artifact/crash-recovery-dist-artifact.mjs`) killed
+ * an owner mid-writer and measured the result: the writer tree was **gone**, and
+ * the ledger said `PENDING`, so `agent-loop lease recover` refused
+ * `LAUNCH_HISTORY_UNPROVEN` and the repository was unrunnable by every product
+ * command there is. That is M1's `U1`.
+ *
+ * The fact that would have settled it existed the whole time and was simply not
+ * written down. `boundary/start-owned-process.ts` returns only once the helper
+ * has reported `verifiedInJob` — the kernel confirming job membership **before
+ * the target's first instruction** — so at establishment the launch's
+ * containment is already proven. This state is that proof, recorded at that
+ * instant.
+ *
+ * ── What it claims, and what it deliberately does not ──────────────────────
+ *
+ * It claims exactly this: *generation N's target was created inside a Job
+ * Object owned by `helperPid`, coupled to the lease's owner, and the kernel
+ * confirmed membership before the target executed.*
+ *
+ * It does **not** claim the tree has ended, and that is the whole difference
+ * from {@link ContainedLaunchSchema}. `CONTAINED` is written by
+ * `confirmWriterLaunch` after `runOwnedCommand` has awaited `owned.ending`,
+ * which settles on the helper's close — so a `CONTAINED` entry is written when
+ * the helper is already gone. Nothing of the kind is true here: this entry is
+ * written while the writer is running.
+ *
+ * So a recovery may not treat the two the same, and does not. The predicate in
+ * `execution-lease.ts` accepts a history containing these entries **only** after
+ * re-establishing, against the real liveness probe and inside the call that
+ * removes, that `helperPid` and `childPid` are both gone. That check is what
+ * turns "was contained" into "is not running": the helper holds the job's only
+ * handle, the job carries `KILL_ON_JOB_CLOSE` and neither breakaway flag
+ * (`native/ao-launch/AoLaunch.cs`), so a helper that is gone took its job — and
+ * everything in it, grandchildren included — with it.
+ *
+ * Recording the pids is therefore not decoration: they are the subject of that
+ * later check, and a state that carried the containment without them would be a
+ * claim nothing could re-verify.
+ */
+const EstablishedLaunchSchema = z
+  .object({
+    generation: z.int().positive(),
+    state: z.literal('ESTABLISHED'),
+    writerId: z.string().min(1).max(64),
+    openedAt: z.string().regex(ISO_8601, 'Must be an ISO-8601 instant.'),
+    helperPid: z.int().positive(),
+    childPid: z.int().positive(),
+    mode: z.string().min(1).max(32),
+    verifiedInJob: z.literal(true),
+    assignedAtCreation: z.boolean().nullable(),
+    launchDigest: z.string().regex(HEX_64, 'Must be a launch digest.'),
+    attestedAt: z.string().regex(ISO_8601, 'Must be an ISO-8601 instant.'),
+    establishedAt: z.string().regex(ISO_8601, 'Must be an ISO-8601 instant.'),
+  })
+  .strict();
+
 export const WriterLaunchEntrySchema = z.discriminatedUnion('state', [
   PendingLaunchSchema,
+  EstablishedLaunchSchema,
   ContainedLaunchSchema,
 ]);
 
 export type WriterLaunchEntry = z.infer<typeof WriterLaunchEntrySchema>;
 export type PendingLaunch = z.infer<typeof PendingLaunchSchema>;
+export type EstablishedLaunch = z.infer<typeof EstablishedLaunchSchema>;
 export type ContainedLaunch = z.infer<typeof ContainedLaunchSchema>;
 
 export const WriterLaunchLedgerSchema = z
@@ -220,17 +324,30 @@ export interface WriterLaunchSubject {
 }
 
 /**
- * What a lease's launch history turned out to be. A closed set of eight, of
- * which **one** licenses a recovery.
+ * What a lease's launch history turned out to be. A closed set of nine, of
+ * which **two** can license a recovery and neither does so alone.
  */
 export const WRITER_LAUNCH_READINGS = [
   /**
    * A complete history, bound to this lease, in which every launch is proven
-   * contained. The only reading that may license removing a stale lease — and
-   * only in combination with a dead owner, which this reading says nothing
-   * about.
+   * contained *and observed to end*. The strongest reading — and it still does
+   * not license removing a stale lease by itself, because it says nothing about
+   * whether the owner is alive.
    */
   'ALL_LAUNCHES_CONTAINED',
+  /**
+   * A complete, well-bound history in which every launch was placed in the
+   * owner's job by the kernel, and at least one of them was never seen to end.
+   *
+   * What an orchestrator killed **during** a writer run leaves behind, which the
+   * U1 reproduction measured as the dominant case. It is a weaker reading than
+   * {@link ALL_LAUNCHES_CONTAINED} in exactly one way — no ending was observed
+   * for the `ESTABLISHED` entries — so a recovery built on it owes one further
+   * proof that the other does not: that the trees those entries name are gone.
+   * See `EstablishedLaunchSchema` for why the pids are recorded, and
+   * {@link provesEveryLaunchContainedAtCreation} for how the two are kept apart.
+   */
+  'LAUNCHES_CONTAINED_SOME_UNENDED',
   /**
    * A complete, well-bound history in which at least one launch is still
    * `PENDING`.
@@ -273,6 +390,13 @@ export type WriterLaunchReading = (typeof WRITER_LAUNCH_READINGS)[number];
  */
 const PROVES_EVERY_LAUNCH_CONTAINED: Readonly<Record<WriterLaunchReading, boolean>> = Object.freeze({
   ALL_LAUNCHES_CONTAINED: true,
+  // `false`, and this row is the one worth reading twice. Every launch in that
+  // history *was* contained; what is missing is an observed ending, so the
+  // sentence this predicate answers — "no unproven writer launch exists" — is
+  // not the sentence that reading supports. It gets its own predicate below
+  // rather than a second `true` here, because a caller that reached the removal
+  // through this one would skip the liveness proof the other one owes.
+  LAUNCHES_CONTAINED_SOME_UNENDED: false,
   LAUNCH_UNPROVEN: false,
   HISTORY_INCOMPLETE: false,
   ABSENT: false,
@@ -282,9 +406,98 @@ const PROVES_EVERY_LAUNCH_CONTAINED: Readonly<Record<WriterLaunchReading, boolea
   NOT_THIS_RUN: false,
 });
 
-/** Whether this reading proves every writer launch was contained. Exactly one does. */
+/**
+ * Whether this reading proves every writer launch was contained **and ended**.
+ * Exactly one does.
+ */
 export function provesEveryLaunchContained(reading: WriterLaunchReading): boolean {
   return PROVES_EVERY_LAUNCH_CONTAINED[reading] === true;
+}
+
+/**
+ * Which readings prove every launch was placed in the owner's job at creation,
+ * while leaving at least one ending unobserved.
+ *
+ * Its own table for the same reason the one above is a table rather than an
+ * equality test, and its own *predicate* for a reason that is not style: this
+ * answer is **not sufficient** for a removal on its own. A caller that gets
+ * `true` here still owes a liveness proof about the trees
+ * {@link unendedLaunchesOf} names, and separating the two predicates is what
+ * makes forgetting that owed proof a compile-visible mistake rather than a
+ * silent widening of the stronger one.
+ *
+ * Every row is asserted by value in `tests/v3-05-stale-lease-recovery.test.ts`,
+ * beside the rows of the table above and with the disjointness of the two
+ * asserted as its own claim; completeness is not correctness.
+ */
+const PROVES_CONTAINED_AT_CREATION: Readonly<Record<WriterLaunchReading, boolean>> = Object.freeze({
+  ALL_LAUNCHES_CONTAINED: false,
+  LAUNCHES_CONTAINED_SOME_UNENDED: true,
+  LAUNCH_UNPROVEN: false,
+  HISTORY_INCOMPLETE: false,
+  ABSENT: false,
+  UNSUPPORTED_VERSION: false,
+  MALFORMED: false,
+  NOT_THIS_LEASE: false,
+  NOT_THIS_RUN: false,
+});
+
+/**
+ * Whether this reading proves containment at creation with an ending unseen.
+ *
+ * `false` for {@link WRITER_LAUNCH_READINGS.ALL_LAUNCHES_CONTAINED} on purpose:
+ * the two predicates partition the licensing readings rather than nesting, so
+ * neither answer can be read as the other's superset.
+ */
+export function provesEveryLaunchContainedAtCreation(reading: WriterLaunchReading): boolean {
+  return PROVES_CONTAINED_AT_CREATION[reading] === true;
+}
+
+/** One launch that was contained at creation and never observed to end. */
+export interface UnendedLaunch {
+  readonly generation: number;
+  /** The process that owns the job. Its death destroys the job. */
+  readonly helperPid: number;
+  /** The target the kernel placed in that job before it executed. */
+  readonly childPid: number;
+}
+
+/**
+ * The launches a recovery still owes a liveness proof about, or `null`.
+ *
+ * ── Why it re-reads rather than taking a parsed ledger ─────────────────────
+ *
+ * Because the fail-closed direction has to be the *only* way to get pids out of
+ * this module. This answers non-`null` for exactly one reading — the one
+ * {@link provesEveryLaunchContainedAtCreation} names — so a ledger that is
+ * malformed, transplanted, from another run, incomplete, or carrying a
+ * `PENDING` entry yields nothing to probe rather than yielding a shorter list
+ * that a caller could exhaust and call proven.
+ *
+ * `null` and `[]` are therefore both refusals at the call site, and the caller
+ * treats them that way: an empty list from this reading is impossible by
+ * construction — the reading exists only when an `ESTABLISHED` entry is present
+ * — so producing one would mean this function and the reading disagree, which is
+ * not a state to act on.
+ */
+export function unendedLaunchesOf(
+  lease: WriterLaunchSubject,
+  raw: unknown,
+): readonly UnendedLaunch[] | null {
+  if (!provesEveryLaunchContainedAtCreation(readWriterLaunchLedger(lease, raw))) return null;
+  const parsed = WriterLaunchLedgerSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return Object.freeze(
+    parsed.data.entries
+      .filter((entry): entry is EstablishedLaunch => entry.state === 'ESTABLISHED')
+      .map((entry) =>
+        Object.freeze({
+          generation: entry.generation,
+          helperPid: entry.helperPid,
+          childPid: entry.childPid,
+        }),
+      ),
+  );
 }
 
 /** Domain separation, so this digest can never collide with another one. */
@@ -316,24 +529,34 @@ export function writerLaunchBinding(
   lease: Pick<WriterLaunchSubject, 'leaseKey' | 'ownerNonce'>,
   payload: WriterLaunchLedgerPayload,
 ): string {
-  const entries = payload.entries.map((entry) =>
-    entry.state === 'PENDING'
-      ? [entry.generation, entry.state, entry.writerId, entry.openedAt]
-      : [
-          entry.generation,
-          entry.state,
-          entry.writerId,
-          entry.openedAt,
-          entry.helperPid,
-          entry.childPid,
-          entry.mode,
-          entry.verifiedInJob,
-          entry.assignedAtCreation,
-          entry.launchDigest,
-          entry.attestedAt,
-          entry.confirmedAt,
-        ],
-  );
+  const entries = payload.entries.map((entry) => {
+    if (entry.state === 'PENDING') {
+      return [entry.generation, entry.state, entry.writerId, entry.openedAt];
+    }
+    // The eleven fields the two containment-carrying states share, in one place
+    // rather than two lists that could drift apart. `state` is among them and
+    // is fed in first: a digest that covered only the value fields would let
+    // `ESTABLISHED` be relabelled `CONTAINED` without recomputation, and that
+    // single edit would skip the liveness proof the weaker state owes.
+    const common = [
+      entry.generation,
+      entry.state,
+      entry.writerId,
+      entry.openedAt,
+      entry.helperPid,
+      entry.childPid,
+      entry.mode,
+      entry.verifiedInJob,
+      entry.assignedAtCreation,
+      entry.launchDigest,
+      entry.attestedAt,
+    ];
+    // The twelfth differs by state and is not interchangeable: `establishedAt`
+    // is when the kernel confirmed membership and `confirmedAt` is when the
+    // launch was seen to end. Hashing them into the same slot without the
+    // `state` above would make the two entries collide.
+    return [...common, entry.state === 'ESTABLISHED' ? entry.establishedAt : entry.confirmedAt];
+  });
   return createHash('sha256')
     .update(
       JSON.stringify([
@@ -409,7 +632,14 @@ export function readWriterLaunchLedger(
   if (ledger.runId !== lease.runId) return 'NOT_THIS_RUN';
 
   if (!ledger.historyComplete) return 'HISTORY_INCOMPLETE';
-  if (ledger.entries.some((entry) => entry.state !== 'CONTAINED')) return 'LAUNCH_UNPROVEN';
+  // `PENDING` first, and it dominates: a history with one announced launch that
+  // never reached the kernel's confirmation is unproven whatever else is in it.
+  // Reading the three states in any other order would let a later `ESTABLISHED`
+  // entry describe a history that still hides an unaccounted-for launch.
+  if (ledger.entries.some((entry) => entry.state === 'PENDING')) return 'LAUNCH_UNPROVEN';
+  if (ledger.entries.some((entry) => entry.state === 'ESTABLISHED')) {
+    return 'LAUNCHES_CONTAINED_SOME_UNENDED';
+  }
   return 'ALL_LAUNCHES_CONTAINED';
 }
 
@@ -430,6 +660,12 @@ export function extendableWriterLaunchLedger(
   const reading = readWriterLaunchLedger(lease, raw);
   if (
     reading !== 'ALL_LAUNCHES_CONTAINED' &&
+    // Extendable for the same reason `LAUNCH_UNPROVEN` is: a run whose first
+    // writer is still running is exactly the run that starts a second one, and
+    // refusing to append here would make the *next* launch unrecordable — which
+    // `beginWriterLaunch` answers by discarding the whole history, silently
+    // costing this lease the recoverability this state exists to give it.
+    reading !== 'LAUNCHES_CONTAINED_SOME_UNENDED' &&
     reading !== 'LAUNCH_UNPROVEN' &&
     reading !== 'HISTORY_INCOMPLETE'
   ) {
