@@ -8088,9 +8088,9 @@ and  the process it names does not exist
 and  the writer-launch history beside it is complete, bound to this exact lease,
      and about this exact owner and run
 and  either every launch in it is proved contained AND observed to end
-     or   every launch in it was placed in the owner's job by the kernel at
-          creation, and every process the unended ones name — helper and child
-          alike — is observed not to exist, now, by this call's own probe
+     or   every launch in it was placed in the owner's job by the kernel, and
+          every process the unended ones name — helper and child alike — is
+          observed not to exist, now, by this call's own probe
 ```
 
 The fourth conjunct's second arm is M2 slice 1

@@ -153,8 +153,15 @@ export function leaseHolds(deps: SpawnAuthority): boolean {
  * one shape that reaches production unfenced.
  */
 export function leasedAgent(deps: SpawnAuthority): AgentRunner {
-  return async (id, args, cwd, payload) => {
+  return async (id, args, cwd, payload, callersHooks) => {
     if (!leaseHolds(deps)) return AGENT_NOT_AUTHORISED;
+    // The fence owns the establishment hook, and a caller's is **refused rather
+    // than dropped**. Accepting the parameter and silently ignoring it is what
+    // this did when `AgentRunner` grew a fifth argument, and silence is the
+    // wrong answer: the hook writes this lease's ledger, so a second one would
+    // be a second writer of the same generation, and a caller that supplied one
+    // would reasonably believe it had been installed.
+    if (callersHooks !== undefined) return AGENT_LAUNCH_NOT_RECORDED;
     // Announced before it happens, for the reason `beginWriterLaunch` gives: a
     // record written afterwards cannot describe a launch that was killed, and
     // that launch is the one a recovery has to know about.
@@ -335,10 +342,12 @@ function recordWriterContainment(
     // ── What "as it stands" now means, since M2 slice 1 changed it ──────────
     //
     // This said the generation is "left `PENDING`", and after that slice it
-    // usually is not: an ending that could not be attested most often follows an
-    // establishment that *was* kernel-confirmed, so the entry sits at
-    // `ESTABLISHED`. It reaches `PENDING` only when the establishment mark never
-    // landed either.
+    // need not be. An ending that could not be attested may follow an
+    // establishment that *was* kernel-confirmed, and then the entry sits at
+    // `ESTABLISHED`; it is `PENDING` only when the establishment mark never
+    // landed either. Which of the two is more common is not measured anywhere
+    // and is not claimed here - what matters is that both are possible and the
+    // paragraph below has to hold for each.
     //
     // That is a real change in what such a launch licenses, and it is intended
     // rather than inherited. `ESTABLISHED` does not claim the launch ended — it

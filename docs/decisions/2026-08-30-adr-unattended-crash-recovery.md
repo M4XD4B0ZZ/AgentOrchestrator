@@ -87,9 +87,9 @@ and  the process it names does not exist
 and  the launch history beside it is complete, bound to this exact lease,
      and about this exact owner and run
 and  either every launch in it is proven contained and observed to end
-     or   every launch in it was placed in the owner's job by the kernel at
-          creation, and every process the unended ones name — helper and child
-          alike — is observed not to exist, now, by this call's own probe
+     or   every launch in it was placed in the owner's job by the kernel, and
+          every process the unended ones name — helper and child alike — is
+          observed not to exist, now, by this call's own probe
 ```
 
 The first arm is unchanged. The second is new, and it is deliberately not a
@@ -153,8 +153,10 @@ clears itself; there is no direction in which reuse permits a removal.
 
 - **U1 is narrowed, not closed.** The unprovable window shrinks from a writer's
   whole runtime to the interval between announcing a launch and the kernel
-  confirming it — measured at **76 ms** on the reference machine, against
-  launches that last minutes. An owner killed inside that window still leaves
+  confirming it, which was **observed once at 76 ms** on the reference machine,
+  against launches that last minutes. One observation, not a bound: nothing in
+  the repository measures it and no gate holds it, and a loaded machine will be
+  slower. It is offered for the order of magnitude and for nothing else. An owner killed inside that window still leaves
   `LAUNCH_HISTORY_UNPROVEN`, and that case still needs a human. It is pinned as
   its own phase in the real-process gate rather than left as an implied gap.
 - **Unattended use is still unsupported.** U2, U3 and U4 are untouched. This slice
@@ -186,13 +188,29 @@ clears itself; there is no direction in which reuse permits a removal.
   against it rather than around it. A verification command, the
   reviewer and `git` subprocesses go through the same owned boundary and are
   therefore contained in fact, and none of them is recorded, so no reading here
-  is evidence about them. This is pre-existing — it is equally true of the
-  `ALL_LAUNCHES_CONTAINED` arm that shipped in V3 slice 5 — and this slice does
-  not widen it: the new arm can only fire when an `ESTABLISHED` entry is present,
-  which is exactly the moment a writer launch is in flight, and this build starts
-  those launches sequentially (there is no `Promise.all` or `Promise.race`
-  anywhere under `src/loop`, `src/run` or `src/block`), so no other owned process
-  of that epoch is running then.
+  is evidence about them. The hole is pre-existing and it is largest on the arm
+  that already shipped: a crash *between* writer launches — during the
+  verification command, say — leaves an all-`CONTAINED` history and has been
+  recoverable since V3 slice 5 while an unrecorded subprocess may have been in
+  flight.
+
+  **This slice adds one further, narrow route to it, and the first draft of this
+  paragraph denied that on a false premise.** It argued that the new arm can fire
+  only while a writer launch is in flight, and that launches are sequential
+  (which they are — there is no `Promise.all` or `Promise.race` anywhere under
+  `src/loop`, `src/run` or `src/block`), so nothing else of that epoch could be
+  running. The second half is true and the first is not: an `ESTABLISHED` entry
+  is not evidence that a writer is *now* running. It persists after the launch
+  ends whenever the `CONTAINED` upgrade could not be published, and permanently
+  when the ending could not be attested at all. A run that reached that state and
+  then crashed later — possibly mid-verification — presents an `ESTABLISHED`
+  history, and the new arm may recover it where the old build would have refused
+  `LAUNCH_UNPROVEN`.
+
+  It is narrow: it needs a failed or unattested ending *and* a later crash. It is
+  not a new class, and it does not change what the ledger claims. It is recorded
+  here because an adversarial review had to find it, which means the argument was
+  doing work the code was not.
 - **`R-M2-3` — ledger forgery is bounded exactly as before.** Anyone who can create
   a file in the Git common directory can write a history that reads as a proof.
   The format states this; the new state changes nothing about it, since write

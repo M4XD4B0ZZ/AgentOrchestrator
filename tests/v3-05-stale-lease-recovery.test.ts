@@ -119,7 +119,7 @@ import { assessLeaseRecovery } from '../src/lease/lease-recovery.js';
 import {
   MAX_WRITER_LAUNCH_ENTRIES,
   provesEveryLaunchContained,
-  provesEveryLaunchContainedAtCreation,
+  provesEveryLaunchContainedUnended,
   readWriterLaunchLedger,
   unendedLaunchesOf,
   writerLaunchBinding,
@@ -281,6 +281,14 @@ function stateOf(repository: LeaseRepository, generation: number): string {
   return entry.state;
 }
 
+/** One generation's whole recorded entry, read back off disk. */
+function entryOf(repository: LeaseRepository, generation: number): Readonly<Record<string, unknown>> {
+  const entries = (ledgerOf(repository)?.entries ?? []) as readonly Record<string, unknown>[];
+  const entry = entries[generation - 1];
+  if (entry === undefined) throw new Error(`no generation ${generation} on disk`);
+  return entry;
+}
+
 const dead = (): ProcessLiveness => 'NOT_FOUND';
 const alive = (): ProcessLiveness => 'ALIVE';
 const undetermined = (): ProcessLiveness => 'UNDETERMINED';
@@ -419,23 +427,23 @@ describe('the launch history format refuses everything it cannot read', () => {
   it('keeps the two licensing predicates disjoint, asserted by value', () => {
     // The second table gets the same treatment as the first, and the *disjoint*
     // part is the property worth pinning rather than either row on its own. If
-    // `provesEveryLaunchContainedAtCreation` ever answered `true` for
+    // `provesEveryLaunchContainedUnended` ever answered `true` for
     // `ALL_LAUNCHES_CONTAINED`, the weaker predicate would have become a
     // superset of the stronger one — and the recovery would then reach the
     // liveness re-check through a reading that never needed it, which reads as
     // harmless and is how a table stops meaning anything.
     const atCreation = WRITER_LAUNCH_READINGS.filter((reading) =>
-      provesEveryLaunchContainedAtCreation(reading),
+      provesEveryLaunchContainedUnended(reading),
     );
     expect(atCreation).toEqual(['LAUNCHES_CONTAINED_SOME_UNENDED']);
     for (const reading of WRITER_LAUNCH_READINGS) {
-      expect(provesEveryLaunchContainedAtCreation(reading)).toBe(
+      expect(provesEveryLaunchContainedUnended(reading)).toBe(
         reading === 'LAUNCHES_CONTAINED_SOME_UNENDED',
       );
       // No reading is admitted by both. Stated as its own assertion because the
       // two loops above could each pass while one reading satisfied both.
       expect(
-        provesEveryLaunchContained(reading) && provesEveryLaunchContainedAtCreation(reading),
+        provesEveryLaunchContained(reading) && provesEveryLaunchContainedUnended(reading),
       ).toBe(false);
     }
   });
@@ -455,11 +463,10 @@ describe('the launch history format refuses everything it cannot read', () => {
       state: 'CONTAINED' as const,
       confirmedAt: establishedAt,
     };
-    expect(readWriterLaunchLedger(SUBJECT, sealed({ entries: [relabelledAsContained] }))).toBe(
-      'ALL_LAUNCHES_CONTAINED',
-    );
-    // Sealed as itself it reads as a proof — that is the control. Transplanted
-    // into a ledger sealed for the ESTABLISHED shape, the binding refuses it.
+    // No control is asserted here for the relabelled entry sealed as itself: it
+    // would be a ledger built and read by the same code, which measures the
+    // digest against itself and is already covered by the ALL_LAUNCHES_CONTAINED
+    // row of the readings table. What follows is the attack.
     const sealedAsEstablished = sealed({ entries: [ESTABLISHED_ENTRY] }) as Record<string, unknown>;
     expect(
       readWriterLaunchLedger(SUBJECT, {
@@ -1084,6 +1091,7 @@ describe('the launch history is opened before a launch and confirmed after it', 
         { generation, writerId: 'claude', now: tick },
       ).code,
     ).toBe('ESTABLISHED');
+    const established = entryOf(repository, generation);
 
     const foreign = confirmWriterLaunch(
       repository,
@@ -1093,8 +1101,11 @@ describe('the launch history is opened before a launch and confirmed after it', 
     );
     expect(foreign.code).toBe('ATTESTATION_ALREADY_USED');
     expect(foreign.detail).toBe('DIGEST_NOT_THIS_LAUNCH');
-    // The entry is untouched, so the refusal cost nothing.
-    expect(stateOf(repository, generation)).toBe('ESTABLISHED');
+    // The entry is untouched, and that is checked field by field rather than by
+    // its state alone: a refusal that had rewritten the pids while leaving the
+    // state would satisfy a state-only assertion and would be exactly the defect
+    // this refusal exists to prevent.
+    expect(entryOf(repository, generation)).toEqual(established);
 
     // The control: the launch's own attestation confirms it.
     expect(
@@ -2214,6 +2225,69 @@ describe('the recovery vocabulary says what the code does', () => {
     // The conclusion is the same on both arms, and stays.
     expect(unended).toContain('no writer process it started can still be running');
     expect(unended).toContain('`agent-loop lease recover --repository <path>`');
+  });
+
+  it('chooses the reason from the assessment, never from the reading beside it', () => {
+    // The two inputs are two different reads of the ledger: `lease status` fills
+    // the second from its own `inspectWriterLaunchHistory` call, so they can
+    // disagree, and the sentence must come from the one the verdict was computed
+    // from. Selecting on the parameter instead produced two false prints, both
+    // reproduced by a review: a safe UNENDED verdict whose re-read returned
+    // `null` fell through to the STRONGER sentence, and a safe ENDED verdict
+    // whose re-read had moved on claimed pids had been probed when none were.
+    //
+    // Both cases below pass MISMATCHED inputs on purpose. That pairing cannot
+    // arise from one read, which is exactly why it is the pairing that separates
+    // the two implementations.
+    const safeUnendedWithNoReread = renderLeaseRecovery(
+      {
+        verdict: 'SAFE_TO_RECOVER',
+        refusal: null,
+        path: 'D:\r\.git',
+        ownerPid: 7,
+        runId: 'r',
+        launchHistory: 'LAUNCHES_CONTAINED_SOME_UNENDED',
+      },
+      null,
+    );
+    expect(safeUnendedWithNoReread).toContain('never seen to end');
+    expect(safeUnendedWithNoReread).not.toContain('was seen to end');
+
+    const safeEndedWithMovedReread = renderLeaseRecovery(
+      {
+        verdict: 'SAFE_TO_RECOVER',
+        refusal: null,
+        path: 'D:\r\.git',
+        ownerPid: 7,
+        runId: 'r',
+        launchHistory: 'ALL_LAUNCHES_CONTAINED',
+      },
+      'LAUNCHES_CONTAINED_SOME_UNENDED',
+    );
+    expect(safeEndedWithMovedReread).toContain('was seen to end');
+    expect(safeEndedWithMovedReread).not.toContain('checked just now');
+    // The `Launches` line still reports the fresh read, which is what it is for.
+    expect(safeEndedWithMovedReread).toContain('Launches     : LAUNCHES_CONTAINED_SOME_UNENDED');
+  });
+
+  it('claims no proof at all for a safe verdict it cannot explain', () => {
+    // Reachable only if the predicate and the renderer's table disagree about
+    // which readings license a removal. The direction is the point: an
+    // unexplained safe verdict must not borrow the strongest sentence available.
+    const unexplained = renderLeaseRecovery(
+      {
+        verdict: 'SAFE_TO_RECOVER',
+        refusal: null,
+        path: 'D:\r\.git',
+        ownerPid: 7,
+        runId: 'r',
+        launchHistory: 'LAUNCH_UNPROVEN',
+      },
+      'LAUNCH_UNPROVEN',
+    );
+    expect(unexplained).toContain('cannot say which proof it rests on');
+    expect(unexplained).not.toContain('was seen to end');
+    expect(unexplained).not.toContain('checked just now');
   });
 
   it('reports the launch history even when the predicate stopped before reading one', () => {

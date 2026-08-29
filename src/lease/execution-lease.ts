@@ -176,7 +176,7 @@ import {
   extendableWriterLaunchLedger,
   MAX_WRITER_LAUNCH_ENTRIES,
   provesEveryLaunchContained,
-  provesEveryLaunchContainedAtCreation,
+  provesEveryLaunchContainedUnended,
   readWriterLaunchLedger,
   unendedLaunchesOf,
   writerLaunchBinding,
@@ -2970,9 +2970,9 @@ function discardWriterLaunchHistory(
  * confirmation of a launch nobody announced.
  *
  * A failure to publish leaves the generation **where it already was**. Since M2
- * slice 1 that is usually `ESTABLISHED` rather than `PENDING`, because the
- * establishment mark normally landed first; it is `PENDING` only when that mark
- * did not land either. Both are conservative in the sense that matters — neither
+ * slice 1 that may be `ESTABLISHED` rather than `PENDING` - the establishment
+ * mark is written first, so it is `PENDING` only when that mark did not land
+ * either. Which is more common is not measured and is not claimed. Both are conservative in the sense that matters — neither
  * claims the launch ended — and they are not equally strong: `PENDING` refuses a
  * recovery outright, while `ESTABLISHED` still owes, and is granted only after,
  * the liveness proof on the processes it names. This paragraph said "leaves the
@@ -3255,7 +3255,7 @@ export const STALE_RECOVERY_REFUSALS = [
   /** At least one writer launch under this lease is not proven contained. */
   'LAUNCH_HISTORY_UNPROVEN',
   /**
-   * A launch that was contained at creation and never seen to end still has a
+   * A launch proved contained and never seen to end still has a
    * process of its recorded tree in existence.
    *
    * Its own refusal rather than a shade of {@link OWNER_RUNNING}, because it
@@ -3383,7 +3383,7 @@ const RECOVERY_REFUSAL_FOR_LOCATION: Readonly<Record<LeaseLocationFailureCode, S
  *          and about this exact owner and run
  *     and  either every launch in it is proven contained **and observed to end**
  *          or   every launch in it was placed in the owner's job by the kernel
- *               at creation, and every process the unended ones name — helper
+ *               and every process the unended ones name — helper
  *               and child alike — is observed not to exist, now, by this call's
  *               own probe
  *
@@ -3505,7 +3505,7 @@ function assessStaleLeaseRecoveryBound(
     // carrying `KILL_ON_JOB_CLOSE` and neither breakaway flag, and the kernel
     // has therefore destroyed everything in it, grandchildren included. A helper
     // that is *not* gone refuses, whatever the owner did.
-    if (!provesEveryLaunchContainedAtCreation(history)) {
+    if (!provesEveryLaunchContainedUnended(history)) {
       return unsafe(refusalForHistory(history), { ...facts, launchHistory: history });
     }
     // The SAME bytes the reading was taken from, not a second read of the file.

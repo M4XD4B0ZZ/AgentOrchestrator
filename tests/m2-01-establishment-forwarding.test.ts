@@ -17,9 +17,11 @@
  * boundary. Between them they are the whole feature in production — with either
  * gone, every real writer launch stays `PENDING` and U1 is exactly as it was.
  *
- * Both are pinned here by *observation of the argument*, not by shape. Each case
- * substitutes the layer below and asserts the callback it received is the one
- * that was passed in, and that calling it reaches the caller's own function.
+ * Both are pinned here by *observation of the argument*, not by shape: each case
+ * substitutes the layer below and asserts the callback it received is by
+ * identity the one that was passed in. Neither case calls it - identity is the
+ * stronger check and needs no call, and an earlier version of this paragraph
+ * claimed a call that is not made.
  *
  * `vi.mock` is confined to this file on purpose: it is file-scoped, and
  * `tests/report-safety.test.ts` and `tests/probe-env-policy.test.ts` establish
@@ -81,17 +83,21 @@ describe('the establishment callback reaches the layer below it', () => {
     // caller that asks for nothing must not make the option appear.
     await runAgentCommand('claude', [], process.cwd(), '');
     expect(seenByRunCommand).toHaveLength(2);
-    expect(seenByRunCommand[1]?.onLaunchEstablished).toBeUndefined();
-    expect('onLaunchEstablished' in (seenByRunCommand[1] ?? {})).toBe(false);
+    const second = seenByRunCommand[1];
+    // Named and asserted present first: `seen[1] ?? {}` would let an absent
+    // second call satisfy the `in` check below while measuring nothing.
+    expect(second).toBeDefined();
+    expect('onLaunchEstablished' in (second as object)).toBe(false);
   });
 
   it.runIf(process.platform === 'win32')(
     'runCommand hands its hook to the owned boundary, and withholds it when there is none',
     async () => {
-      // The real `runCommand` this time — the mock above replaced the module's
-      // export, and the import below re-reads it, so this case drives the
-      // substituted one. That is fine for what it measures: what it needs is the
-      // `runOwned` seam the real module exposes, which the mock's spread keeps.
+      // `vi.importActual` bypasses the factory above entirely, so this really is
+      // the unmocked `runCommand` — which is what this case needs, because the
+      // forward it measures lives inside it. (An earlier comment here said the
+      // opposite: that the case drives the substituted one. It does not, and a
+      // case whose comment names the wrong subject is a case nobody can check.)
       const actual = await vi.importActual<typeof import('../src/doctor/exec.js')>(
         '../src/doctor/exec.js',
       );
@@ -139,11 +145,16 @@ describe('the establishment callback reaches the layer below it', () => {
     },
   );
 
-  it('the module under test is really the substituted one', () => {
-    // The control. `vi.mock` failing silently would make the first case above
-    // start a real `claude` process, and its assertions would then be measuring
-    // an empty array rather than a forward.
+  it('the module the agent seam reached really was the substituted one', async () => {
+    // The control, and it has to be one. `expect(runCommand.name).not.toBe('')`
+    // stood here and could not fail: a function has a name whether it is mocked
+    // or real. What distinguishes them is the *identity* of the export, so that
+    // is what is compared - and the sink having been written to is what proves
+    // the agent seam reached this one rather than the real spawn path.
+    const real = await vi.importActual<typeof import('../src/doctor/exec.js')>(
+      '../src/doctor/exec.js',
+    );
+    expect(runCommand).not.toBe(real.runCommand);
     expect(seenByRunCommand.length).toBeGreaterThan(0);
-    expect(runCommand.name).not.toBe('');
   });
 });

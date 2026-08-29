@@ -206,10 +206,10 @@ export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, str
     LAUNCH_HISTORY_UNPROVEN:
       'At least one writer launch under this lease was announced and never reached the\n' +
       '  point where the kernel confirmed it had been placed in the owner\'s process job.\n' +
-      '  Usually that is the short window between announcing a launch and starting it; it\n' +
-      '  is also what a launch on a platform with no process boundary leaves, and what a\n' +
-      '  launch whose mark could not be written leaves. In all of them nothing at all can\n' +
-      '  be said about the process, so nothing is removed.',
+      '  That is the short window between announcing a launch and starting it; it is also\n' +
+      '  what a launch on a platform with no process boundary leaves, and what a launch\n' +
+      '  whose mark could not be written leaves. In all of them nothing at all can be said\n' +
+      '  about the process, so nothing is removed.',
     LAUNCH_TREE_STILL_RUNNING:
       'A writer launch under this lease was placed in the owner\'s process job and never seen\n' +
       '  to end, and a process bearing one of the ids it recorded exists right now. The owner\n' +
@@ -251,35 +251,71 @@ export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, str
  * look like an authorisation.
  */
 /**
- * Why a lease may be removed, one sentence per arm of the predicate.
+ * Why a lease may be removed, one sentence per reading a SAFE verdict can rest
+ * on — and `null` for every reading that cannot produce one.
  *
- * Two entries rather than one string with a clause bolted on, so that adding an
- * arm to the predicate without deciding what to tell an operator about it is a
- * compile failure here rather than a sentence that quietly covers a proof
- * nobody made. The closing half — what the removal grants — is identical in both
- * and stated once at the call site would have been shorter and would have let
- * the two drift; it is repeated because it is short and because the difference
- * between them is the whole point.
+ * ── Total over the readings, which the first version of this was not ───────
+ *
+ * It was a two-member table keyed on a `'ENDED' | 'UNENDED'` union invented in
+ * this file, and its docstring claimed that adding an arm to the predicate
+ * without deciding what to tell an operator would be a compile failure. It would
+ * not have been: nothing tied that union to {@link WriterLaunchReading}, so a
+ * third licensing reading would have compiled here unchanged and silently
+ * printed the strongest sentence. A guarantee a type does not carry is worse
+ * than no guarantee, and this repository's rule is that one must be broken to be
+ * believed. This table is `Record<WriterLaunchReading, …>`, so the failure the
+ * docstring described is now the one that actually happens.
+ *
+ * `null` is "this reading is not a licence to say anything", and the caller
+ * prints {@link SAFE_RECOVERY_UNEXPLAINED} for it rather than the strong
+ * sentence. That direction is the point: an unknown reading beside a safe
+ * verdict is a disagreement inside this build, and it must not be resolved by
+ * claiming the stronger proof.
  */
-const SAFE_RECOVERY_REASON: Readonly<Record<'ENDED' | 'UNENDED', readonly string[]>> = Object.freeze(
-  {
-    ENDED: Object.freeze([
+const SAFE_RECOVERY_REASON: Readonly<Record<WriterLaunchReading, readonly string[] | null>> =
+  Object.freeze({
+    ALL_LAUNCHES_CONTAINED: Object.freeze([
       '  Every writer launch under this lease is proved contained and was seen to end, and its\n' +
         '  owner process is gone, so no writer process it started can still be running. Remove\n' +
         '  it with `agent-loop lease recover --repository <path>`. That removes a dead record\n' +
         '  and grants nothing: the next run takes its own lease through the ordinary path.',
     ]),
-    UNENDED: Object.freeze([
+    LAUNCHES_CONTAINED_SOME_UNENDED: Object.freeze([
+      // No claim about *why* the ending was not seen. An earlier draft said
+      // "this run was interrupted while its agent was working", which is the
+      // common case and is not what the record means: a run that finished
+      // normally and could not attest its last ending leaves the same state, and
+      // so does one whose confirmation could not be published. The operator
+      // would have acted on that clause when deciding whether work was lost.
       '  Every writer launch under this lease was placed in the owner\'s process job by the\n' +
-        '  kernel, and at least one of them was never seen to end - this run was interrupted\n' +
-        '  while its agent was working. Its owner is gone, and the processes that launch\n' +
-        '  recorded were checked just now and do not exist,\n' +
+        '  kernel, and at least one of them was never seen to end. Its owner process is gone,\n' +
+        '  and the processes that launch recorded were checked just now and do not exist,\n' +
         '  so no writer process it started can still be running.\n' +
         '  Remove it with `agent-loop lease recover --repository <path>`. That check is made\n' +
         '  again inside the removal, so this report is not what it acts on.',
     ]),
-  },
-);
+    LAUNCH_UNPROVEN: null,
+    HISTORY_INCOMPLETE: null,
+    ABSENT: null,
+    UNSUPPORTED_VERSION: null,
+    MALFORMED: null,
+    NOT_THIS_LEASE: null,
+    NOT_THIS_RUN: null,
+  });
+
+/**
+ * What is printed for a safe verdict this build cannot explain.
+ *
+ * Reachable only if the predicate and this table disagree about which readings
+ * license a removal. It states the verdict and nothing else — no ending, no
+ * probe, no containment — because the one thing that must not happen here is
+ * an unexplained safe verdict borrowing the strongest available sentence.
+ */
+const SAFE_RECOVERY_UNEXPLAINED: readonly string[] = Object.freeze([
+  '  This lease can be proved removable, and this build cannot say which proof it rests on.\n' +
+    '  Remove it with `agent-loop lease recover --repository <path>`, which proves everything\n' +
+    '  for itself inside the call that removes.',
+]);
 
 export function renderLeaseRecovery(
   assessment: StaleLeaseRecoveryAssessment,
@@ -308,9 +344,22 @@ export function renderLeaseRecovery(
           // processes the ledger names. Printing the stronger reason under the
           // weaker one tells the one reader who cannot check it that a proof was
           // made that was not.
-          ...SAFE_RECOVERY_REASON[
-            history === 'LAUNCHES_CONTAINED_SOME_UNENDED' ? 'UNENDED' : 'ENDED'
-          ],
+          //
+          // Selected from **the assessment's own reading**, not from the
+          // `history` parameter beside it. Those are two different reads of the
+          // ledger — `lease status` fills the parameter from a separate
+          // `inspectWriterLaunchHistory` call — and choosing on the second one
+          // makes the sentence describe a moment the verdict was not taken at.
+          // A review reproduced both prints that follow from it: a safe UNENDED
+          // verdict whose re-read returned `null` fell to the *stronger*
+          // sentence, and a safe ENDED verdict whose re-read had moved on
+          // claimed pids had been probed when none were. The parameter still
+          // decides the `Launches` line, which is what it is for: that line is a
+          // report about the repository now, and this one is a reason for a
+          // verdict already made.
+          ...(assessment.launchHistory === null
+            ? SAFE_RECOVERY_UNEXPLAINED
+            : (SAFE_RECOVERY_REASON[assessment.launchHistory] ?? SAFE_RECOVERY_UNEXPLAINED)),
         ]
       : [
           line('Recovery', assessment.refusal),

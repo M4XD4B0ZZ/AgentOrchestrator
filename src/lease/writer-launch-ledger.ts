@@ -44,10 +44,12 @@
  * The kernel's confirmation of job membership was already in hand at the moment
  * the boundary reported ownership; it was simply not written down until the run
  * ended. Writing it at that instant narrows the unprovable window from a
- * writer's whole runtime to the milliseconds between the poison and the
- * kernel's answer — measured at 76 ms on the reference machine. It does not
- * close it, and {@link EstablishedLaunchSchema} says what the state does and
- * does not claim.
+ * writer's whole runtime to the interval between the poison and the kernel's
+ * answer, which was **observed once at 76 ms** on the reference machine. That is
+ * one observation and not a bound - nothing here measures it and no gate holds
+ * it - and it is offered for its order of magnitude against the minutes it
+ * replaces. It does not close the window, and {@link EstablishedLaunchSchema}
+ * says what the state does and does not claim.
  *
  * ── `historyComplete` is what makes an absent baseline safe to refuse ──────
  *
@@ -229,14 +231,14 @@ const ContainedLaunchSchema = z
  *
  * ── What it claims, and what it deliberately does not ──────────────────────
  *
- * It claims exactly this: *generation N's target was created inside a Job
- * Object owned by `helperPid`, coupled to the lease's owner, the kernel
- * confirmed its membership, and it never existed outside that job.*
+ * It claims exactly this: *generation N's target was created for a Job Object
+ * owned by `helperPid`, coupled to the lease's owner, the kernel confirmed its
+ * membership, and no instruction of the target executed outside that job.*
  *
- * Not "confirmed before the target executed". In `JOBLIST`, the production
- * default, the target is created into the job and is not created suspended, so
- * it is already running when the kernel is asked; the claim that holds in both
- * launch modes is the one about never having been outside.
+ * Neither of the two shorter wordings holds in both launch modes - "confirmed
+ * before the target executed" is false in `JOBLIST` and "never existed outside
+ * the job" is false in `SUSPENDED`. `core/containment-attestation.ts` sets out
+ * why; this file has carried each of them in turn and neither was true.
  *
  * It does **not** claim the tree has ended, and that is the whole difference
  * from {@link ContainedLaunchSchema}. `CONTAINED` is written by
@@ -350,7 +352,7 @@ export const WRITER_LAUNCH_READINGS = [
    * for the `ESTABLISHED` entries — so a recovery built on it owes one further
    * proof that the other does not: that the trees those entries name are gone.
    * See `EstablishedLaunchSchema` for why the pids are recorded, and
-   * {@link provesEveryLaunchContainedAtCreation} for how the two are kept apart.
+   * {@link provesEveryLaunchContainedUnended} for how the two are kept apart.
    */
   'LAUNCHES_CONTAINED_SOME_UNENDED',
   /**
@@ -424,8 +426,14 @@ export function provesEveryLaunchContained(reading: WriterLaunchReading): boolea
 }
 
 /**
- * Which readings prove every launch was placed in the owner's job at creation,
- * while leaving at least one ending unobserved.
+ * Which readings prove every launch was placed in the owner's job, while leaving
+ * at least one ending unobserved.
+ *
+ * Not "at creation". Nothing here reads `assignedAtCreation` - the entry records
+ * it and the digest binds it, and no predicate consults it - so a name or a
+ * sentence promising it would be describing a check that does not happen. What
+ * the reading rests on is `verifiedInJob`, which the schema pins to a literal
+ * `true`.
  *
  * Its own table for the same reason the one above is a table rather than an
  * equality test, and its own *predicate* for a reason that is not style: this
@@ -439,7 +447,7 @@ export function provesEveryLaunchContained(reading: WriterLaunchReading): boolea
  * beside the rows of the table above and with the disjointness of the two
  * asserted as its own claim; completeness is not correctness.
  */
-const PROVES_CONTAINED_AT_CREATION: Readonly<Record<WriterLaunchReading, boolean>> = Object.freeze({
+const PROVES_CONTAINED_UNENDED: Readonly<Record<WriterLaunchReading, boolean>> = Object.freeze({
   ALL_LAUNCHES_CONTAINED: false,
   LAUNCHES_CONTAINED_SOME_UNENDED: true,
   LAUNCH_UNPROVEN: false,
@@ -452,17 +460,17 @@ const PROVES_CONTAINED_AT_CREATION: Readonly<Record<WriterLaunchReading, boolean
 });
 
 /**
- * Whether this reading proves containment at creation with an ending unseen.
+ * Whether this reading proves containment with at least one ending unseen.
  *
  * `false` for {@link WRITER_LAUNCH_READINGS.ALL_LAUNCHES_CONTAINED} on purpose:
  * the two predicates partition the licensing readings rather than nesting, so
  * neither answer can be read as the other's superset.
  */
-export function provesEveryLaunchContainedAtCreation(reading: WriterLaunchReading): boolean {
-  return PROVES_CONTAINED_AT_CREATION[reading] === true;
+export function provesEveryLaunchContainedUnended(reading: WriterLaunchReading): boolean {
+  return PROVES_CONTAINED_UNENDED[reading] === true;
 }
 
-/** One launch that was contained at creation and never observed to end. */
+/** One launch proved contained and never observed to end. */
 export interface UnendedLaunch {
   readonly generation: number;
   /** The process that owns the job. Its death destroys the job. */
@@ -478,7 +486,7 @@ export interface UnendedLaunch {
  *
  * Because the fail-closed direction has to be the *only* way to get pids out of
  * this module. This answers non-`null` for exactly one reading — the one
- * {@link provesEveryLaunchContainedAtCreation} names — so a ledger that is
+ * {@link provesEveryLaunchContainedUnended} names — so a ledger that is
  * malformed, transplanted, from another run, incomplete, or carrying a
  * `PENDING` entry yields nothing to probe rather than yielding a shorter list
  * that a caller could exhaust and call proven.
@@ -493,7 +501,7 @@ export function unendedLaunchesOf(
   lease: WriterLaunchSubject,
   raw: unknown,
 ): readonly UnendedLaunch[] | null {
-  if (!provesEveryLaunchContainedAtCreation(readWriterLaunchLedger(lease, raw))) return null;
+  if (!provesEveryLaunchContainedUnended(readWriterLaunchLedger(lease, raw))) return null;
   const parsed = WriterLaunchLedgerSchema.safeParse(raw);
   if (!parsed.success) return null;
   return Object.freeze(
