@@ -72,6 +72,15 @@ found no `ATTENDED_RELEASE_BLOCKER`; unattended operation stays unsupported unti
 U1–U4 are resolved. See
 [The closing audit](#the-closing-audit-attended-release-gate).
 
+**Autonomous delivery (M1) is closed, `M1_PASS` for attended use, 2026-08-29.**
+The whole chain — writer, review rounds, remediation, a quota interruption and
+its continuation, `READY_FOR_PR`, publish, pull request, checks, merge,
+post-merge verification of the merge commit, conclusion — ran end to end for the
+first time, on a real task in this repository. Eleven of the twelve M1 invariants
+hold on the acting path; the twelfth holds by half and the open half is named.
+Every invocation was attended. See
+[The M1 release gate](#the-m1-release-gate-slice-19).
+
 This README is the design record: what was built, why it was built that way, and
 what each guarantee is actually worth. **If you want to *run* the orchestrator on
 a project, read [`docs/OPERATOR-GUIDE.md`](docs/OPERATOR-GUIDE.md) instead** — how
@@ -3866,6 +3875,17 @@ and because the failure mode it describes — a command that cannot start is
   discarded although the CLI reports one. Not repaired here — recognising
   another CLI's exhaustion is a change to that boundary's parsing, not to this
   edge — and it is the reason this edge had to exist.
+
+  **Measured live on 2026-08-29, in the M1 release gate.** Review round 3 of
+  `M1-RELEASE-009` did not return a verdict: the reviewer CLI ended the turn with
+  `usage_limit_exceeded` and a reset instant in the message text. The run
+  diagnosed it as one of the fail-closed codes and parked at
+  `HUMAN_DECISION_REQUIRED`, discarding the reset time exactly as this entry
+  predicted. Attended, that cost one operator decision and no data — the round
+  was **not** consumed, and after the continuation round 3 ran to a `PASS`. So
+  this is confirmed as *not* an attended blocker, and confirmed as a prerequisite
+  for any unattended build, on a measurement rather than on reasoning. See
+  `2026-08-29-adr-m1-release-gate.md` §7.2.
 - **L-M1-HD-2** — continuing an escalation caused by an **exhausted review
   budget** does not refill it. The continuation re-enters the recorded phase and
   the ordinary budget rule applies again, so such a task escalates a second time
@@ -3885,6 +3905,24 @@ and because the failure mode it describes — a command that cannot start is
   had to survive and did. The two rules that stop the verify cycle apply here
   too. They are kept for the same reason and described as floors rather than as
   the bound.
+- **L-M1-RG-1 — a task brief is clamped to 8192 UTF-8 bytes, and a task file the
+  writer cannot open loses the remainder.** `MAX_TASK_BODY_BYTES = 8_192`
+  (`src/plan/task-brief.ts`) clamps the task body before `buildImplementPayload`
+  ever sees it. The prompt is honest about the cut — it appends *"[The task text
+  above was truncated at the payload budget. Read the task file in the repository
+  for the remainder.]"* — and that instruction is actionable only when the task
+  file is **inside the worktree**. For this repository's own release-gate tasks it
+  is not: every `M1-RELEASE-*` task file is excluded through `.git/info/exclude`,
+  so it is untracked, absent from the worktree, and unopenable by the writer. A
+  truncated brief would silently drop acceptance criteria.
+
+  It did **not** happen in the M1 release gate, and the margin was five bytes:
+  `M1-RELEASE-009`'s body measures **8187** UTF-8 bytes after frontmatter and
+  trim, because the operator shortened it before the run. So the gate's evidence
+  is uncompromised and this is a product limit rather than a finding against that
+  run. Two independent repairs exist — raise or report the bound at the seam that
+  clamps, or refuse a brief whose file the writer cannot reach — and neither
+  belonged in a gate. Recorded by `2026-08-29-adr-m1-release-gate.md` §7.1.
 - **L-V3-10-1** — the quota settlement's **scope reads** go through the unleased
   `git ?? runGitCommand`, exactly as the completed-writer path's do. The two
   effects are fenced — the commit through `leasedGit`, the durable write through
@@ -11662,6 +11700,73 @@ the delivered template-cleanup change carries no regression assertion; and a
 template-builder failure path can still leak a temporary repository.
 
 See [`docs/decisions/2026-08-28-adr-first-publication-locator-absence.md`](docs/decisions/2026-08-28-adr-first-publication-locator-absence.md).
+
+## The M1 release gate (slice 19)
+
+**On 2026-08-29 the whole chain ran end to end for the first time**, on a real
+task, in this repository, against `github.com`. Fifteen slices had built the
+pipeline and every one of them closed with the same admission — that it had never
+been run as a chain. Seven residual ids said so (`L-V4-05-6`, `06-7`, `09-7`,
+`10-10`, `11-8`, `12-9`, `13-8`).
+
+The subject was `M1-RELEASE-009`: one new file,
+`tests/fixture-template-cleanup-effect.test.ts`, 549 lines, delivered as
+`7d4e0c3`, merged as `ec97427` through pull request #79.
+
+```text
+M1 Release Gate: PASS for attended use.
+  writer -> review round 1 (2 medium) -> remediation
+         -> review round 2 (1 low)    -> remediation
+         -> reviewer quota exhausted mid-round 3 -> operator continuation
+         -> review round 3 PASS -> READY_FOR_PR
+         -> publish -> pull request #79 -> checks SUCCESS on that exact head
+         -> merge -> post-merge verification of ec97427 -> conclusion.
+Eleven of twelve M1 invariants held on the acting path.
+Invariant 7 holds by half; the open half is named (L-V4-07-8).
+No M1_BLOCKER found. U1-U4 are unchanged: unattended use is still unsupported.
+```
+
+Four properties of the **chain** came out of this that no single green slice
+could establish, and each is a reading of a durable artefact rather than of a
+plan:
+
+- **every forge act was performed by the product, each under its own flag, in its
+  own invocation** — nine invocations, and none of them made two forge mutations;
+- **a combined invocation is refused rather than accommodated.** Asking one
+  `--drive` for reconcile, verify and conclude together was answered
+  `DRIVE_NOT_COMBINABLE` before anything was contacted;
+- **the merge was gated on the check state of the exact delivered commit**, and
+  the resulting commit was read back from the forge rather than trusted from the
+  merge response;
+- **an outside interruption did not corrupt the run.** The reviewer's
+  subscription allowance ran out mid-round-3; the round was not consumed, and
+  after the operator's continuation it ran to a `PASS`.
+
+Two limits are worth carrying out of it. `L-M1-RG-1` above records the
+8192-byte brief clamp, which this task cleared by five bytes. `L-M1-HD-1` above
+is now measured live rather than only read: a reviewer quota block still parks at
+`HUMAN_DECISION_REQUIRED` with the reset instant discarded, which costs an
+attended run one operator decision and would stop an unattended one for good.
+
+**What the verdict does not say**, in its own words: not that `ec97427` is on
+`main` now or still reachable, not that `main` passes today, not that merge
+eligibility in general was established — draft status, mergeability, required
+reviews, branch protection and rulesets are not observed by this build — and not
+anything at all about a second repository. One repository, one task, every
+invocation attended.
+
+One thing this gate deliberately did **not** measure: whether the delivered test
+actually kills the mutant it was written for. The task's hard requirement was
+that deleting the memoised-template cleanup from any one of three files must make
+`npm run verify` fail. The test that asserts it is merged and CI is green on it,
+which is not the same statement. The slice-18 finding it addresses — *the
+delivered template-cleanup change carries no regression assertion* — therefore
+stays open until someone runs the mutant.
+
+See [`docs/decisions/2026-08-29-adr-m1-release-gate.md`](docs/decisions/2026-08-29-adr-m1-release-gate.md),
+which also restates all twelve invariants at `ec97427`, names the six
+ADR-resident residual ids, and amends the two unimplementable "review state"
+sentences out of the M1 contract ADR.
 
 ## Not implemented yet
 

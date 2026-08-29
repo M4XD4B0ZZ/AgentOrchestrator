@@ -24,9 +24,20 @@ merges. That hand-off is the last large gap in the single-task lifecycle.
 
 ```
 task work -> verify -> review/remediate -> delivery ready
-          -> PR -> CI -> review state -> remediation if required
+          -> PR -> CI -> remediation if required
           -> merge -> post-merge observation -> COMPLETE
 ```
+
+**Amended 2026-08-29, by the M1 release gate
+(`2026-08-29-adr-m1-release-gate.md` §8).** This arrow originally read
+`-> CI -> review state -> remediation if required`. No slice built a review
+state and none was going to: reading a forge's review requirements means reading
+branch protection and repository rulesets, and those endpoints answer
+identically for "there are none" and "you may not read them". A value derived
+from them could not distinguish absence from refusal, which would make invariant
+4 below false in the worst way — by giving "review requirements passed" a
+representation that is sometimes a permission error wearing a green label. The
+arrow is struck rather than left standing as a plan nobody intends to execute.
 
 This ADR does not build that. It writes down the contract the eventual
 capability must satisfy, states the non-goals, and records why the first slice
@@ -60,11 +71,18 @@ needs its own decision, taken when there is a delivery step to transition to.
 
 When the vocabulary does grow, the distinctions it must be able to draw are:
 work ready for delivery; a pull request's identity; that pull request's **exact
-head commit**; the check state **of that exact head**; a review state where the
-repository requires one; remediation required; merge eligibility; the **merged
-commit's** identity; post-merge verification; completion. Whether each becomes a
-state, a field, or an observation is a later decision — the smallest coherent
-addition consistent with the existing model wins, not the longest list.
+head commit**; the check state **of that exact head**; remediation required;
+merge eligibility; the **merged commit's** identity; post-merge verification;
+completion. Whether each becomes a state, a field, or an observation is a later
+decision — the smallest coherent addition consistent with the existing model
+wins, not the longest list.
+
+**Amended 2026-08-29, by the M1 release gate
+(`2026-08-29-adr-m1-release-gate.md` §8).** This list originally also required
+"a review state where the repository requires one". It is struck for the reason
+given at the pipeline diagram above, and invariant 4 is unchanged: it is held
+because **no review state is read, and none is implied** — which is a stronger
+position than holding it with a state that cannot tell absence from refusal.
 
 ### Invariants
 
