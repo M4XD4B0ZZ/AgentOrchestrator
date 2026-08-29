@@ -230,6 +230,46 @@ export function mayRemediateVerifyFailure(grant: InvocationGrant): boolean {
 }
 
 /**
+ * Whether this invocation may continue a `HUMAN_DECISION_REQUIRED` task.
+ *
+ * ── Why a second predicate and not a reuse of the one above ────────────────
+ *
+ * {@link mayRemediateVerifyFailure} answers the same question for a different
+ * block, and the two return the same value today. They are still two functions,
+ * because they are two decisions: an operator who decides to hand a recorded
+ * verification failure to the writer has not thereby decided to continue every
+ * escalation the loop made. Collapsing them into one predicate would make a
+ * single flag authorise both, and the driver's conjuncts — which is where the
+ * distinction is actually kept — would then be reading a permission wider than
+ * the decision that produced it.
+ *
+ * ── What this one continues ───────────────────────────────────────────────
+ *
+ * `HUMAN_DECISION_REQUIRED` differs from `BLOCKED_VERIFY` in one way that
+ * matters here. `BLOCKED_VERIFY` declares exactly one outgoing edge, so its flag
+ * can name the destination. This state declares four — `IMPLEMENTING`,
+ * `VERIFYING`, `REVIEWING`, `REMEDIATING` — and which one applies is not the
+ * operator's to pick: it is recorded in the task's own `resumeFrom`, which
+ * `resume-policy.ts` makes `REQUIRED` for this state. So the decision this
+ * predicate gates is "continue from the point the record names", and the driver
+ * refuses a record that names no point at all.
+ *
+ * ── What it does not do ───────────────────────────────────────────────────
+ *
+ * It does not refill anything. An escalation caused by an exhausted review
+ * budget is continued into the same exhausted budget and will escalate again;
+ * the policy's own rationale says a new invocation does not refill it, and this
+ * is not a new invocation's worth of budget either. It does not weaken
+ * `automaticResumeEligible: false`, and `AUTOMATIC_RESUME_ONLY` answers `false`
+ * here for the same reason it does above. And it grants nothing by itself: the
+ * state, the resume point, the reconciliation, the worktree authority and the
+ * lease are all still checked in `run-driver.ts`.
+ */
+export function mayContinueHumanDecision(grant: InvocationGrant): boolean {
+  return grant === 'ATTENDED';
+}
+
+/**
  * Whether this invocation may remove an execution lease it did not create.
  *
  * A third authority, kept apart from the other two because it is destructive

@@ -2713,6 +2713,19 @@ the whole lifecycle. One departure per lifecycle therefore holds without anythin
 new, and a counter-proof mutant that deleted the new per-invocation limit
 survived every test, which is how this was established rather than assumed.
 
+`HUMAN_DECISION_REQUIRED` has the same shape and got the same treatment one
+change later, with `run --attended --task <id> --continue-human-decision`. Two
+things differ, and both follow from the state rather than from taste.
+`BLOCKED_VERIFY` declares one outgoing edge, so its flag names the destination
+and the driver pins the resume phase to `REMEDIATE`; this state declares four, so
+the flag names no phase and the **record** decides which edge is taken — a resume
+point naming a phase the loop does not drive is refused as
+`RESUME_PHASE_NOT_DRIVEN`, before the write, by the gate that already owned that
+question. And the two decisions are separate all the way down: two flags, two
+predicates, two bounds, two argument refusals. An operator continuing an
+escalation has not thereby agreed to hand a failed verification to a writer, and
+`--remediate-verify-failure` still refuses to move a task in this state.
+
 The limit is kept anyway, at both levels, as a **fail-closed floor**: it does not
 fire today, and it is what would stop the cycle if either of those two rules ever
 changed. It is described as a floor and not as the bound, because a build that
@@ -2853,7 +2866,8 @@ never passes it.
 | `READY_FOR_PR` / `ABORTED` | terminal, nothing run |
 | `BLOCKED_USAGE_LIMIT` | resumed **only** on `AUTOMATIC_ALLOWED` *and* an attended grant; otherwise stops with the checks that denied it, writing nothing |
 | `BLOCKED_VERIFY` | stops, unless the invocation carried `--remediate-verify-failure` **and** an attended grant, in which case it takes the declared `REMEDIATING` edge once. Never an automatic retry, and never a re-run of the same verification |
-| `BLOCKED_AUTH`, `HUMAN_DECISION_REQUIRED`, `SCOPE_VIOLATION`, `RESUME_STATE_DIVERGED` | stop; each keeps its own outcome |
+| `HUMAN_DECISION_REQUIRED` | stops, unless the invocation carried `--continue-human-decision` **and** an attended grant, in which case it re-enters the phase its own `resumeFrom` names, once. It does not choose the phase and it refills no budget |
+| `BLOCKED_AUTH`, `SCOPE_VIOLATION`, `RESUME_STATE_DIVERGED` | stop; each keeps its own outcome |
 | diverged / unobservable / unusable | stop, fail-closed, repair nothing |
 
 **A fresh task is not started here.** Creating the first `TaskState` means
@@ -3801,14 +3815,23 @@ and because the failure mode it describes — a command that cannot start is
   caller — neither belongs in a blocker fix. The remediation brief and the
   operator report both say which end it is, so it is a stated limit rather than a
   silent one.
-- **L-M1-VR-2** — `HUMAN_DECISION_REQUIRED` has the **same missing executable
-  edge** `BLOCKED_VERIFY` had. Two paths land there: a remediation whose writer
-  changed nothing (`NOTHING_TO_COMMIT` → park, the pre-existing and correct
-  rule), and a verification failure whose evidence did not become durable. Both
-  are then as stuck as `BLOCKED_VERIFY` was. Extending the operator decision to
-  that state is a second decision and was deliberately not taken: it is a
-  different question — "this task needs a human" covers six situations, not one —
-  and answering it with the same flag would make the flag mean less than its name.
+- **L-M1-VR-2 — closed.** It said `HUMAN_DECISION_REQUIRED` had the **same
+  missing executable edge** `BLOCKED_VERIFY` had, and that extending the operator
+  decision to it was a second decision, deliberately not taken, because "this
+  task needs a human" covers six situations rather than one and one flag for both
+  would mean less than its name. The reasoning stands and is why the fix is a
+  **separate** flag, `--continue-human-decision`, with its own predicate
+  (`mayContinueHumanDecision`), its own per-invocation bound and its own two
+  argument refusals. `--remediate-verify-failure` still refuses to move a task in
+  this state, and the test that pins that refusal is unchanged.
+
+  What forced it was not the argument but a measurement. On 2026-08-29 the M1
+  release-gate task `M1-RELEASE-009` reached review round 3, the reviewer's
+  subscription allowance ran out mid-review, and the loop escalated here. An
+  attended re-run took **`0` steps** and left the record untouched: with the
+  reviewer being the agent most likely to exhaust a quota, and a reviewer quota
+  block not being recognised as one (see `L-M1-HD-1`), the state a real task most
+  often ends in was the one state nothing could leave.
 - **L-M1-VR-3** — the verification-attempt record is **not tamper-proof**, the
   same concession `L-V4-14-2` makes. The binding digest detects an *edit* to a
   record this build wrote; anything running as this OS user can compute a fresh
@@ -3833,6 +3856,35 @@ and because the failure mode it describes — a command that cannot start is
   `driveLifecycle` re-enters only on `STEP_BUDGET_EXHAUSTED`. The floors are kept
   because that cycle touches neither `reviewRound` nor `maxReviewRounds`, so if
   either rule ever changed nothing else would stop it.
+- **L-M1-HD-1** — a **reviewer quota block is not recognised as one**.
+  `AGENT_USAGE_LIMIT` has exactly one producer, `agent/claude-writer.ts`;
+  `agent/codex-reviewer.ts` has no path to it and its block evidence hard-codes
+  `reportedResetAt: null`. So an exhausted reviewer allowance is diagnosed as one
+  of the four fail-closed codes, becomes `AGENT_NEEDS_ATTENTION`, and parks at
+  `HUMAN_DECISION_REQUIRED` rather than `BLOCKED_USAGE_LIMIT`. Two consequences:
+  `--automatic-resume-only` can never apply to it, and the reset time is
+  discarded although the CLI reports one. Not repaired here — recognising
+  another CLI's exhaustion is a change to that boundary's parsing, not to this
+  edge — and it is the reason this edge had to exist.
+- **L-M1-HD-2** — continuing an escalation caused by an **exhausted review
+  budget** does not refill it. The continuation re-enters the recorded phase and
+  the ordinary budget rule applies again, so such a task escalates a second time
+  having spent the operator's departure. That is deliberate: refilling a budget
+  is a different decision from continuing a task, and the flag's help text and
+  the operator report both say so rather than leaving it to be discovered.
+- **L-M1-HD-3** — the tasks parked in this state **before** the flag existed are
+  continuable by it, and that is not the same as being repaired. Their
+  escalations were not recorded with a reason, so an operator continuing one is
+  acting on the resume point alone. `L-M1-VR-5` still applies to the older
+  `M1-RELEASE-*` tasks for the separate reason that their verification evidence
+  predates the store.
+- **L-M1-HD-4** — the per-invocation and per-lifecycle bounds on this departure
+  are, like `L-M1-VR-6`'s, **fail-closed floors that do not fire today**, and
+  that was established the same way: a counter-proof mutant deleting the driver's
+  survived the whole of `tests/run-driver.test.ts`, beside a control mutant that
+  had to survive and did. The two rules that stop the verify cycle apply here
+  too. They are kept for the same reason and described as floors rather than as
+  the bound.
 - **L-V3-10-1** — the quota settlement's **scope reads** go through the unleased
   `git ?? runGitCommand`, exactly as the completed-writer path's do. The two
   effects are fenced — the commit through `leasedGit`, the durable write through

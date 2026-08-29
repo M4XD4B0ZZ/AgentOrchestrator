@@ -430,6 +430,17 @@ export interface LifecycleRequest {
    */
   readonly remediateVerifyFailure?: boolean;
   /**
+   * Whether the operator asked to continue a `HUMAN_DECISION_REQUIRED` task
+   * from its recorded resume point, forwarded verbatim to
+   * `RunRequest.continueHumanDecision`.
+   *
+   * Forwarded and not interpreted, for the same reason as the field above:
+   * every condition on it — the state, the grant, the presence of a resume
+   * point, and the one-per-invocation bound — is checked in `run-driver.ts`,
+   * where the state and the resume decision already are.
+   */
+  readonly continueHumanDecision?: boolean;
+  /**
    * Whether this run may remove a lease it can prove is dead.
    *
    * Off is the safe answer and there is no default. When off, a stale lease
@@ -685,6 +696,16 @@ async function driveUnderLease(
    * that was permitted and refused for some other reason has spent nothing.
    */
   let verifyRemediationSpent = false;
+  /**
+   * The same bound for the operator's one departure from
+   * `HUMAN_DECISION_REQUIRED`, across every invocation this lifecycle makes.
+   *
+   * Set from what the run REPORTS it did, never from what it was offered. Kept
+   * separate from `verifyRemediationSpent` because they are two decisions: a
+   * lifecycle given both flags must be able to spend each once, and one shared
+   * variable would let the first departure swallow the second.
+   */
+  let humanDecisionContinuationSpent = false;
   let steps = 0;
   let start: StartTaskResult | null = null;
   // Whether the lease has already been given back. Read only by the `catch`
@@ -824,6 +845,9 @@ async function driveUnderLease(
           // stopped by a blocking step ending the run.
           remediateVerifyFailure:
             request.remediateVerifyFailure === true && !verifyRemediationSpent,
+          // The same bound, for the same reason, on the other operator decision.
+          continueHumanDecision:
+            request.continueHumanDecision === true && !humanDecisionContinuationSpent,
           authEvidence,
           lease: evidence,
           maxSteps: request.maxSteps,
@@ -841,6 +865,7 @@ async function driveUnderLease(
       );
       runs.push(run);
       if (run.remediatedVerifyFailure) verifyRemediationSpent = true;
+      if (run.continuedHumanDecision) humanDecisionContinuationSpent = true;
       steps += run.steps;
       permissionDenials = mergePermissionDenials(permissionDenials, run.permissionDenials);
 

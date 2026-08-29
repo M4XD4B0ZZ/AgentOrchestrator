@@ -127,17 +127,19 @@ describe('agent-loop run — CLI seam', () => {
     expect(run).toBeDefined();
     const flags = (run?.options ?? []).map((option) => option.long);
 
-    // The full option surface, pinned. V2-05 added two flags, V3-06 added two
-    // more, V3-08 added three and the M1 verification-recovery fix added one,
-    // and the list is asserted whole so that an eleventh cannot appear
-    // unnoticed. None of them grants anything on its own:
+    // The full option surface, pinned whole rather than counted, so that any
+    // option arriving without a deliberate change to this list fails here. (It
+    // used to be counted, and the count went stale the first time the surface
+    // grew.) None of them grants anything on its own:
     // `--max-invocations` and `--max-wait-ms` are bounds,
     // `--recover-stale-lease` permits an attempt whose own proof still has to
     // pass, `--automatic-resume-only` passes the run driver's gate only where
     // the canonical resume decision already answered `AUTOMATIC_ALLOWED`, and
     // `--remediate-verify-failure` is conjoined with `ATTENDED`, with the state,
     // with the resume phase and with a once-per-invocation bound before it moves
-    // anything.
+    // anything, and `--continue-human-decision` is conjoined with `ATTENDED`,
+    // with its own state and with its own bound. The two are separate flags for
+    // separate decisions: neither can move the other's block.
     //
     // This comment previously said there was "deliberately no flag that lets a
     // run wait out a quota reset". V3-08 added the authority that made one
@@ -151,6 +153,7 @@ describe('agent-loop run — CLI seam', () => {
       '--max-invocations',
       '--recover-stale-lease',
       '--remediate-verify-failure',
+      '--continue-human-decision',
       '--automatic-resume-only',
       '--wait-for-reset',
       '--max-wait-ms',
@@ -337,6 +340,20 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
       args: ['--automatic-resume-only', '--recover-stale-lease'],
       code: 'STALE_RECOVERY_WITHOUT_OPERATOR',
     },
+    // The two operator decisions. Each needs `--attended`, and neither may be
+    // reached by a run that states nobody is present -- checked here as well as
+    // in the driver, because a refusal an operator meets at the CLI never
+    // becomes a durable write at all.
+    { args: ['--remediate-verify-failure'], code: 'VERIFY_REMEDIATION_WITHOUT_OPERATOR' },
+    {
+      args: ['--automatic-resume-only', '--remediate-verify-failure'],
+      code: 'VERIFY_REMEDIATION_WITHOUT_OPERATOR',
+    },
+    { args: ['--continue-human-decision'], code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_OPERATOR' },
+    {
+      args: ['--automatic-resume-only', '--continue-human-decision'],
+      code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_OPERATOR',
+    },
   ];
 
   for (const refusal of REFUSALS) {
@@ -346,6 +363,29 @@ describe('the unattended automatic-resume mode refuses unusable combinations fir
       const text = stdout.join('');
       expect(text).toContain(refusal.code);
       // The repository was never resolved: its own failure code is absent.
+      expect(text).not.toContain('could not be resolved');
+      expect(stderr.join('')).toBe('');
+      expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    });
+  }
+
+  /**
+   * The other half of both operator decisions: each is about **one** task, and
+   * the selector must not be allowed to choose which one gets continued.
+   *
+   * Driven without `--task` and against a path no fixture created, so the
+   * absence of the resolver's own failure text measures the ordering directly
+   * rather than assuming it.
+   */
+  for (const decision of [
+    { flag: '--remediate-verify-failure', code: 'VERIFY_REMEDIATION_WITHOUT_TASK' },
+    { flag: '--continue-human-decision', code: 'HUMAN_DECISION_CONTINUATION_WITHOUT_TASK' },
+  ] as const) {
+    it(`refuses ${decision.flag} without a named task`, async () => {
+      await invoke(['--repository', ABSENT, '--attended', decision.flag]);
+
+      const text = stdout.join('');
+      expect(text).toContain(decision.code);
       expect(text).not.toContain('could not be resolved');
       expect(stderr.join('')).toBe('');
       expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);

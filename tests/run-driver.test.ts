@@ -2132,3 +2132,198 @@ describe('a failed verification is continued only on an explicit decision', () =
     expect(reload(root).state.state).not.toBe('BLOCKED_USAGE_LIMIT');
   });
 });
+
+/* ═════════ Y — the second missing edge, and the second operator half ══════ */
+
+/**
+ * `HUMAN_DECISION_REQUIRED` had the same defect `BLOCKED_VERIFY` had, one change
+ * later and one state over.
+ *
+ * `core/transitions.ts` declares four outgoing edges — `IMPLEMENTING`,
+ * `VERIFYING`, `REVIEWING`, `REMEDIATING` — and `core/resume-policy.ts` calls the
+ * state `resumable: true` with `resumeReentry: 'DIRECT'` and a `REQUIRED` resume
+ * point. Nothing could take any of them: the blocking gate admits
+ * `AUTOMATIC_ALLOWED`, which this state can never carry, and the
+ * `remediateVerifyFailure` conjunct is scoped to `BLOCKED_VERIFY` by its first
+ * term. Measured on 2026-08-29 against `87e90ba`: an attended re-run of a task
+ * parked here took `0` steps.
+ *
+ * That measurement is the first case below, as a regression pin: it is the only
+ * one here that fails on the code as it stood, and the others describe the ways
+ * making the edge executable goes wrong.
+ */
+describe('an escalation is continued only on an explicit decision', () => {
+  /** A task parked at `HUMAN_DECISION_REQUIRED` with a re-entry point. */
+  function escalated(
+    root: string,
+    phase: 'IMPLEMENT' | 'REMEDIATE' | 'REVIEW',
+    overrides: Partial<TaskStateInput> = {},
+  ): StateLoadSuccess {
+    return persist(root, {
+      state: 'HUMAN_DECISION_REQUIRED',
+      blockedAgent: 'codex',
+      resumeFrom: { phase, round: 1 },
+      reviewRound: 1,
+      currentCommit: SHA_B,
+      worktreeCleanAtCheckpoint: true,
+      findingHistory: [DURABLE_FINDING],
+      ...overrides,
+    });
+  }
+
+  it('stops where it always did when nobody asked, writing nothing', async () => {
+    const root = repoRoot();
+    escalated(root, 'REMEDIATE');
+    const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+    const verify = cappedVerify(0);
+
+    // An ordinary attended run. This is the invocation that was measured taking
+    // zero steps, and it must keep taking zero: `--attended` states a human is
+    // present, never what they decided.
+    const run = await runTask(
+      request(root),
+      deps(root, { agent: agent.runner, verify: verify.runner }),
+    );
+
+    expect(run.outcome).toBe('HUMAN_DECISION_REQUIRED');
+    expect(run.steps).toBe(0);
+    expect(run.continuedHumanDecision).toBe(false);
+    // Unchanged in every respect a later run would need. A run that merely
+    // *could* have continued must not spend the resume point on the way past.
+    expect(reload(root).state.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(reload(root).state.resumeFrom).toEqual({ phase: 'REMEDIATE', round: 1 });
+    expect(reload(root).state.blockedAgent).toBe('codex');
+    expect(agent.count()).toBe(0);
+    expect(verify.count()).toBe(0);
+  });
+
+  it('takes the edge the record names when the operator asked', async () => {
+    const root = repoRoot();
+    escalated(root, 'REMEDIATE');
+    const agent = scriptedAgent(
+      agentCommandResult({ stdout: claudeResultStream({ subtype: 'success', isError: false }) }),
+    );
+    // `maxSteps: 2` is deliberate and is what the assertion below depends on:
+    // the resume is one durable step and the remediation is the second, so the
+    // run stops on its budget having left this state. Given more, the loop
+    // carries on into verification and review, and a scripted agent with one
+    // reply escalates *back* to `HUMAN_DECISION_REQUIRED` for an unrelated
+    // reason — which is how the first version of this case failed, asserting the
+    // right property against a run that had gone too far to show it.
+    const run = await runTask(
+      request(root, { continueHumanDecision: true, maxSteps: 2 }),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true }),
+        agent: agent.runner,
+        verify: cappedVerify(0).runner,
+      }),
+    );
+
+    // The resume is a durable step, and the loop then drives the phase it
+    // entered: a real agent ran against the phase the record named. Asserting
+    // that the state merely changed would also pass for a run that resumed and
+    // then failed to do anything.
+    expect(run.steps).toBeGreaterThanOrEqual(2);
+    expect(run.continuedHumanDecision).toBe(true);
+    expect(agent.calls.length).toBeGreaterThanOrEqual(1);
+    expect(agent.calls[0]?.agent).toBe('claude');
+    expect(reload(root).state.state).not.toBe('HUMAN_DECISION_REQUIRED');
+  });
+
+  it('drives the review phase when that is what the record names', async () => {
+    const root = repoRoot();
+    escalated(root, 'REVIEW');
+    // The real case this edge exists for: the reviewer's allowance ran out
+    // mid-review and the loop escalated. The phase is not the flag's to choose,
+    // so a record naming `REVIEW` must reach the reviewer and not the writer.
+    const agent = scriptedAgent(agentCommandResult({ stdout: findingsReview() }));
+
+    const run = await runTask(
+      request(root, { continueHumanDecision: true, maxSteps: 2 }),
+      deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+    );
+
+    expect(run.continuedHumanDecision).toBe(true);
+    expect(agent.calls.length).toBeGreaterThanOrEqual(1);
+    expect(agent.calls[0]?.agent).toBe('codex');
+  });
+
+  it('refuses every grant that is not an attended one', async () => {
+    for (const grant of ['NO_CONTINUATION', 'AUTOMATIC_RESUME_ONLY'] as const) {
+      const root = repoRoot();
+      escalated(root, 'REMEDIATE');
+      const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+      const run = await runTask(
+        request(root, { continuationGrant: grant, continueHumanDecision: true }),
+        deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      );
+
+      // `mayContinueHumanDecision` answers false for both, so the conjunct never
+      // holds and the blocking gate stops the run exactly as it did before. The
+      // state stays `automaticResumeEligible: false`; nothing about this flag
+      // can make a machine's decision into a human's.
+      expect(run.outcome).toBe('HUMAN_DECISION_REQUIRED');
+      expect(run.steps).toBe(0);
+      expect(run.continuedHumanDecision).toBe(false);
+      expect(reload(root).state.state).toBe('HUMAN_DECISION_REQUIRED');
+      expect(agent.count()).toBe(0);
+    }
+  });
+
+  it('refuses to move any other blocked state', async () => {
+    for (const state of ['BLOCKED_VERIFY', 'SCOPE_VIOLATION'] as const) {
+      const root = repoRoot();
+      persist(root, {
+        state,
+        blockedAgent: null,
+        currentCommit: null,
+        worktreeCleanAtCheckpoint: false,
+        ...(state === 'BLOCKED_VERIFY'
+          ? { resumeFrom: { phase: 'REMEDIATE' as const, round: 1 } }
+          : {}),
+      });
+      const agent = cappedAgent(agentCommandResult({ stdout: '' }), 0);
+
+      const run = await runTask(
+        request(root, { continueHumanDecision: true }),
+        deps(root, { agent: agent.runner, verify: cappedVerify(0).runner }),
+      );
+
+      // The state is the first conjunct and it is not a formality. This is the
+      // mirror of the pin its sibling carries: two decisions, two flags, and
+      // neither buys the other. `BLOCKED_VERIFY` is the case that matters —
+      // its resume point names a phase this flag would otherwise accept.
+      expect(run.outcome).toBe(state);
+      expect(run.steps).toBe(0);
+      expect(run.continuedHumanDecision).toBe(false);
+      expect(reload(root).state.state).toBe(state);
+      expect(agent.count()).toBe(0);
+    }
+  });
+
+  it('reports the departure separately from the verify one', async () => {
+    const root = repoRoot();
+    escalated(root, 'REMEDIATE');
+    const agent = scriptedAgent(
+      agentCommandResult({ stdout: claudeResultStream({ subtype: 'success', isError: false }) }),
+    );
+
+    // Both flags on one invocation, one applicable state. The two decisions are
+    // bought and spent separately, so the run must report taking this one and
+    // NOT the other: an `else` that deduced which conjunct fired from the other
+    // two would mark the wrong decision spent, and `driveLifecycle` bounds each
+    // across invocations from exactly these two fields.
+    const run = await runTask(
+      request(root, { continueHumanDecision: true, remediateVerifyFailure: true }),
+      deps(root, {
+        git: scriptedGit(root, { writingPass: true }),
+        agent: agent.runner,
+        verify: scriptedVerify({ exitCode: 0 }).runner,
+      }),
+    );
+
+    expect(run.continuedHumanDecision).toBe(true);
+    expect(run.remediatedVerifyFailure).toBe(false);
+  });
+});
