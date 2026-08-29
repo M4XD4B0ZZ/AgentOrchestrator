@@ -307,8 +307,18 @@ function leaseRecoverCli(root) {
   }
 }
 
-const { acquireRepositoryExecutionLease, assessStaleLeaseRecovery, osProcessLiveness } =
-  await import(pathToFileURL(distLease).href);
+const {
+  acquireRepositoryExecutionLease,
+  assessStaleLeaseRecovery,
+  attestWriterLaunchEstablished,
+  beginWriterLaunch,
+  confirmWriterLaunch,
+  osProcessLiveness,
+  releaseRepositoryExecutionLease,
+} = await import(pathToFileURL(distLease).href);
+const { runOwnedCommand } = await import(
+  pathToFileURL(join(repoRoot, 'dist', 'boundary', 'owned-command.js')).href
+);
 
 const ROUNDS = Number(process.env.AO_CRASH_ROUNDS ?? '2');
 const started = Date.now();
@@ -436,6 +446,67 @@ for (let round = 0; round < ROUNDS; round += 1) {
       Buffer.compare(before, leaseBytes(root) ?? Buffer.alloc(0)) === 0,
       `D${round}: the lease is byte-identical`,
     );
+  }
+}
+
+/* ── E. the two marks describe the same launch, through a real boundary ──── */
+//
+// The upgrade `ESTABLISHED` -> `CONTAINED` is refused unless the confirming
+// attestation carries the same launch digest as the entry already standing. The
+// two are minted at different moments from different reads — the establishment
+// mint takes `owned.launchNonce`, the ending mint takes the nonce echoed back in
+// the status file — and nothing above this case makes them meet.
+//
+// If they ever disagreed, every real launch would stop at `ESTABLISHED` and
+// never reach `CONTAINED`, silently, because the confirmation's result is
+// discarded by design. Phases A-D would all still pass: they never confirm
+// anything. So this case exists, it drives the real ordering through the real
+// boundary, and it is the only place the agreement is measured.
+{
+  const { root, repository } = fixture();
+  const acquired = acquireRepositoryExecutionLease(
+    repository,
+    { runId: 'upgrade-run', blockId: null },
+    { now: () => new Date().toISOString() },
+  );
+  check(acquired.ok === true, 'E: the harness took the lease');
+  if (acquired.ok) {
+    const now = () => new Date().toISOString();
+    const opened = beginWriterLaunch(repository, acquired.evidence, { writerId: 'claude', now });
+    check(opened.code === 'OPENED', `E: a generation was opened (${opened.code})`);
+
+    let stateDuring = null;
+    let hookCalls = 0;
+    const result = await runOwnedCommand({
+      file: process.execPath,
+      args: ['-e', 'process.stdout.write("done")'],
+      onLaunchEstablished: (attestation) => {
+        hookCalls += 1;
+        const marked = attestWriterLaunchEstablished(repository, acquired.evidence, attestation, {
+          generation: opened.generation,
+          writerId: 'claude',
+          now,
+        });
+        check(marked.code === 'ESTABLISHED', `E: the mid-launch mark landed (${marked.code})`);
+        stateDuring = entriesOf(root)[0]?.state ?? null;
+      },
+    });
+
+    check(hookCalls === 1, `E: the boundary reported establishment exactly once (${hookCalls})`);
+    check(stateDuring === 'ESTABLISHED', `E: the ledger said ESTABLISHED while the target ran`);
+    check(result.outcome === 'COMPLETED', `E: the real owned command completed (${result.outcome})`);
+
+    const confirmed = confirmWriterLaunch(repository, acquired.evidence, result.containment, {
+      generation: opened.generation,
+      writerId: 'claude',
+      now,
+    });
+    check(
+      confirmed.code === 'CONFIRMED',
+      `E: the ending upgraded the same generation (${confirmed.code}/${String(confirmed.detail)})`,
+    );
+    check(entriesOf(root)[0]?.state === 'CONTAINED', 'E: the ledger ends at CONTAINED');
+    releaseRepositoryExecutionLease(acquired.evidence);
   }
 }
 
