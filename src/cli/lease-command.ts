@@ -95,7 +95,11 @@
 import type { Command } from 'commander';
 
 import { formatSafeError } from '../core/safe-error.js';
-import { inspectWriterLaunchHistory, recoverStaleLease } from '../lease/execution-lease.js';
+import {
+  inspectOwnedLaunchRegister,
+  inspectWriterLaunchHistory,
+  recoverStaleLease,
+} from '../lease/execution-lease.js';
 import { assessLeaseRecovery } from '../lease/lease-recovery.js';
 import { resolveRepository } from '../repo/resolve-repository.js';
 import {
@@ -159,6 +163,9 @@ export function registerLeaseCommand(program: Command): void {
           renderLeaseRecovery(
             assessment.staleRecovery,
             inspectWriterLaunchHistory(resolution.repository),
+            // And the register of the other subprocesses the run started, read
+            // the same way and for the same reason.
+            inspectOwnedLaunchRegister(resolution.repository),
           ),
         );
         // Reporting always succeeded, whatever it found. A held lease is not an
@@ -177,10 +184,13 @@ export function registerLeaseCommand(program: Command): void {
     .command('recover')
     .description(
       'Remove a stale execution lease, and only one this build can prove is dead: its owner ' +
-        'process is gone and every writer launch under it is proved to have run inside a ' +
-        'process job coupled to that owner. Anything unproved, unreadable, unknown or from an ' +
-        'older build is refused, and there is no override. Removes the lease and nothing else - ' +
-        'it grants no authority, starts nothing, and the next run takes its own lease normally.',
+        'process is gone, every writer launch under it is proved to have run inside a process ' +
+        'job coupled to that owner, and every other subprocess the run started through that ' +
+        'boundary - the verification commands, the reviewer, the Git commands - is recorded as ' +
+        'finished or has the processes it recorded checked and found gone. Anything unproved, ' +
+        'unreadable, unknown or from an older build is refused, and there is no override. ' +
+        'Removes the lease and nothing else - it grants no authority, starts nothing, and the ' +
+        'next run takes its own lease normally.',
     )
     .requiredOption(
       '--repository <path>',

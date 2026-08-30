@@ -21,17 +21,29 @@
  * helper, and putting any there would move authority into the layer that has
  * none.
  *
- * `runCommand` is not a runner — it starts what it is given — and six modules
- * give it something. Three are fenced, and they are the three that *act*: the
- * agent and verification runners, reachable only through
- * `leasedAgent`/`leasedVerify`, and the Git seam, whose mutations are proved
- * against the lease immediately before the effect. The other three —
- * `repo/git-query.ts`, `doctor/capabilities.ts`, `auth/auth-preflight.ts` — are
- * read-only probes and are **not** fenced, exactly as they were not before this
- * slice. Naming them is the point: the boundary now contains them too, and a
- * reader who believes the seams cover every caller would look for the wrong
- * gate. Widening what any of them may do is a lease decision, not this
+ * `runCommand` is not a runner — it starts what it is given — and several
+ * modules give it something. The rule rather than the list, because the list
+ * went stale: this paragraph said "six modules" and named three fenced and
+ * three unfenced, and by V4 the four `deliver/*` modules had been added to
+ * neither count.
+ *
+ * The rule is that being **fenced** and being **contained** are different
+ * questions and only one of them is this module's. Fenced means the lease was
+ * proved immediately before the effect, and it is true of the seams that *act* —
+ * the agent and verification runners, reachable only through
+ * `leasedAgent`/`leasedVerify`, and the Git seam whose mutations are proved
+ * against the lease at the call. It is not true of the read-only probes
+ * (`repo/git-query.ts`, `doctor/capabilities.ts`, `auth/auth-preflight.ts`) and
+ * it is not true of the forge commands under `src/deliver/`, which hold no lease
+ * at all. Widening what any of them may do is a lease decision, not this
  * module's.
+ *
+ * Since M2 slice 2 every one of them is **accounted** whether or not it is
+ * fenced: `doctor/exec.ts` announces each launch to whatever holds the current
+ * execution epoch before anything is created, and closes the record when the
+ * boundary has accounted for the ending. That is not a fence and grants nobody
+ * anything — it is what lets a later stale-lease recovery say whether a
+ * subprocess of a dead epoch might still be running.
  *
  * ── The one guarantee ──────────────────────────────────────────────────────
  *

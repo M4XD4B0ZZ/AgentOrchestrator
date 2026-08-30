@@ -4204,16 +4204,27 @@ and because the failure mode it describes — a command that cannot start is
   Cosmetic: no safety claim is wrong, and the release outcome sentences answer
   the removal question separately. **Scope:** `cli/render-lease.ts`,
   `cli/release-command.ts`.
-- **L-V3-05-1** — the writer-launch history records the productive writer only.
-  The reviewer and the verification command are contained in fact on Windows —
-  `doctor/exec.ts` routes every spawn through `runOwnedCommand` — and no reading
-  of the history is evidence about them, so `SAFE_TO_RECOVER` means "no *writer*
-  tree can still be running" and not "no process of this run can". Deliberate:
-  the prompt's predicate is about writer launches, slice 4 drew the same
-  boundary, and widening it changes what the record claims rather than how it is
-  read. Left open because it is a real narrowing of the sentence an operator will
-  hear as "nothing survives". **Scope:** `lease/writer-launch-ledger.ts`,
-  `loop/leased-spawns.ts`.
+- **L-V3-05-1** — **closed by M2 slice 2.** It said the writer-launch history
+  records the productive writer only, so `SAFE_TO_RECOVER` meant "no *writer*
+  tree can still be running" and not "no process of this run can", and it was
+  left open as a real narrowing of the sentence an operator hears as "nothing
+  survives". It was reproduced on `main` at `fba4cfd` before it was closed: a
+  real lease, a real writer confirmed `CONTAINED`, a real verification subprocess
+  through the production path, the owner killed — and the shipped
+  `agent-loop lease recover` removed the lease having probed one process, the
+  owner. What closes it is the **owned-launch register**: every AO-owned spawn
+  under a lease is announced before it starts and its slot removed when the
+  boundary has accounted for its ending, and the recovery predicate refuses while
+  any slot is open whose recorded processes exist or cannot be probed. The
+  accounting is emitted at `doctor/exec.ts`'s `runCommand`, which is the one
+  function every spawn passes and is already pinned as such, so a future spawn
+  path cannot become invisible without breaking a structural test.
+  [The ADR](docs/decisions/2026-08-30-adr-owned-subprocess-quiescence.md) carries
+  the measurement, including the part that is *not* closed: nothing under
+  `src/deliver/` holds a lease, so `git push` and the `gh` mutations are outside
+  every epoch rather than covered by one. **Scope:**
+  `lease/owned-launch-register.ts`, `lease/execution-lease.ts`,
+  `boundary/owned-launch-accounting.ts`, `doctor/exec.ts`.
 - **L-V3-05-2** — **withdrawn, having been false.** It claimed
   `HISTORY_DISCARDED`, `LAUNCH_MUST_NOT_START` and `LEDGER_WRITE_FAILED` needed a
   filesystem refusal "which nothing single-threaded can produce". An adversarial

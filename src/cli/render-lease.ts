@@ -30,6 +30,7 @@ import type {
   StaleLeaseRecoveryResult,
   StaleRecoveryRefusal,
 } from '../lease/execution-lease.js';
+import type { OwnedLaunchReading } from '../lease/owned-launch-register.js';
 import type { WriterLaunchReading } from '../lease/writer-launch-ledger.js';
 import { SUPPORTED_NODE_MAJORS } from '../platform/runtime-support.js';
 import { line } from './render-attended-run.js';
@@ -53,7 +54,7 @@ export const LEASE_ACQUIRE_SENTENCES: Readonly<Record<LeaseAcquireFailureCode, s
     STALE_LEASE_RECOVERY_UNSAFE:
       'A lease is present and this build cannot prove it is safe to take: its owner process\n' +
       '  is not observably running, or the record cannot be read. It is deliberately not\n' +
-      '  taken over - a dead owner does not prove that no agent process survived it. Run\n' +
+      '  taken over - a dead owner does not prove that no process it started survived it. Run\n' +
       '  `agent-loop lease status` to see what is there, including whether the lease can be\n' +
       '  proved removable. If it can, `agent-loop lease recover` removes it and nothing else;\n' +
       '  the next run then takes its own lease normally. If it cannot, that command refuses\n' +
@@ -232,6 +233,21 @@ export const STALE_RECOVERY_SENTENCES: Readonly<Record<StaleRecoveryRefusal, str
     LAUNCH_HISTORY_NOT_THIS_RUN:
       'The writer launch history beside this lease describes a different run or a different\n' +
       '  owner than the lease does. It proves nothing about this one.',
+    OWNED_LAUNCH_UNPROVEN:
+      'A subprocess this run started - a verification command, a reviewer, a Git command or\n' +
+      '  anything else it launched - was announced and never reached the point where the\n' +
+      '  kernel confirmed it had been placed in the owner\'s process job. Nothing at all can\n' +
+      '  be said about that process, so nothing is removed.',
+    OWNED_LAUNCH_STILL_RUNNING:
+      'A subprocess this run started was placed in the owner\'s process job, was never seen to\n' +
+      '  end, and a process bearing one of the ids it recorded exists right now. The owner is\n' +
+      '  gone and something it started may not be. This is not the writer: it is a\n' +
+      '  verification command, a reviewer, a Git command or another subprocess of the same\n' +
+      '  run. Nothing is removed, and do not stop that process on the strength of this:\n' +
+      '  process ids are reused, so it need not be the one this lease started.',
+    OWNED_LAUNCH_LIVENESS_UNDETERMINED:
+      'Whether the processes of a subprocess this run started still exist could not be\n' +
+      '  established. An unknown answer is not an absent process, so nothing is removed.',
   });
 
 /**
@@ -321,9 +337,56 @@ const SAFE_RECOVERY_UNEXPLAINED: readonly string[] = Object.freeze([
     '  for itself inside the call that removes.',
 ]);
 
+/**
+ * Why the *other* subprocesses of the run are accounted for, one sentence per
+ * register reading.
+ *
+ * Its own table beside {@link SAFE_RECOVERY_REASON}, because the two proofs are
+ * separate: that one is about the productive writer and rests on the writer
+ * launch history, this one is about everything else the run started through its
+ * process boundary and rests on the owned-launch register.
+ *
+ * `null` for the two readings that cannot produce a safe verdict. A reading that
+ * reaches this table without a sentence falls to
+ * {@link SAFE_SUBPROCESS_UNEXPLAINED}, which claims nothing — the direction the
+ * neighbouring table takes, and for the same reason.
+ */
+const SAFE_SUBPROCESS_REASON: Readonly<Record<OwnedLaunchReading, readonly string[] | null>> =
+  Object.freeze({
+    NO_OWNED_LAUNCH_OPEN: Object.freeze([
+      // Deliberately not phrased "was seen to end", and not "checked just now".
+      // Those wordings belong to the writer table above, and
+      // `tests/v3-05-stale-lease-recovery.test.ts` pins the writer sentences by
+      // them - so reusing either here would make those pins match this sentence
+      // and stop measuring the one they name. Two records, two vocabularies.
+      '  Every other subprocess this run started - the verification commands, the reviewer,\n' +
+        '  the Git commands - was recorded before it started and its finish was recorded after,\n' +
+        '  and none is left open. Each ran inside a process job whose only handle its launcher\n' +
+        '  held, so a recorded finish is the kernel having destroyed that job and everything in\n' +
+        '  it.',
+    ]),
+    OWNED_LAUNCHES_OPEN_UNENDED: Object.freeze([
+      // No claim about *why* the finish was not recorded, for the reason the
+      // writer table's own unended sentence gives.
+      '  At least one other subprocess this run started was placed in the owner\'s process job\n' +
+        '  by the kernel and is still recorded as open. The processes it recorded were probed a\n' +
+        '  moment ago and do not exist. That probe is made again inside the removal, so this\n' +
+        '  report is not what it acts on.',
+    ]),
+    OWNED_LAUNCH_UNPROVEN: null,
+    REGISTER_NOT_READABLE: null,
+  });
+
+/** The subprocess half of {@link SAFE_RECOVERY_UNEXPLAINED}, and it claims as little. */
+const SAFE_SUBPROCESS_UNEXPLAINED: readonly string[] = Object.freeze([
+  '  This build cannot say what it established about the other subprocesses this run\n' +
+    '  started. The removal proves that for itself inside the call that removes.',
+]);
+
 export function renderLeaseRecovery(
   assessment: StaleLeaseRecoveryAssessment,
   history: WriterLaunchReading | null,
+  ownedLaunches: OwnedLaunchReading | null,
 ): string {
   const lines = [
     // The reading, on its own line, and read independently of the assessment.
@@ -331,6 +394,11 @@ export function renderLeaseRecovery(
     // carries `launchHistory: null` — and "is this run's bookkeeping intact" is a
     // question an operator has about a *healthy* repository too.
     line('Launches', history ?? 'none'),
+    // The register beside it, on its own line and read the same way: a second
+    // report about the repository now, independent of the verdict. `none` when
+    // no lease document could be read at all, which is what the reader answers
+    // for a path with nothing at it.
+    line('Subprocesses', ownedLaunches ?? 'none'),
     ...(assessment.refusal === null
       ? [
           line('Recovery', 'SAFE_TO_RECOVER'),
@@ -364,6 +432,20 @@ export function renderLeaseRecovery(
           ...(assessment.launchHistory === null
             ? SAFE_RECOVERY_UNEXPLAINED
             : (SAFE_RECOVERY_REASON[assessment.launchHistory] ?? SAFE_RECOVERY_UNEXPLAINED)),
+          // The second proof, printed as its own sentence rather than folded
+          // into the one above. M2 slice 2 added a conjunct about every OTHER
+          // subprocess the run started — the verification command, the reviewer,
+          // every Git command — and it is proved separately from the writer's,
+          // by a separate record. One sentence covering both would have to be
+          // written at the strength of the weaker, and an operator reading it
+          // could not tell which half rested on what.
+          //
+          // Selected from the assessment's own reading, for the reason the
+          // writer sentence is: the parameter beside it is a second read of the
+          // same file taken at another moment.
+          ...(assessment.ownedLaunches === null
+            ? SAFE_SUBPROCESS_UNEXPLAINED
+            : (SAFE_SUBPROCESS_REASON[assessment.ownedLaunches] ?? SAFE_SUBPROCESS_UNEXPLAINED)),
         ]
       : [
           line('Recovery', assessment.refusal),

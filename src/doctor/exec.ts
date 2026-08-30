@@ -94,6 +94,11 @@ import {
   type ContainmentAttestation,
 } from '../core/containment-attestation.js';
 import {
+  closeOwnedLaunch,
+  establishOwnedLaunch,
+  openOwnedLaunch,
+} from '../boundary/owned-launch-accounting.js';
+import {
   InvalidBoundaryRequestError,
   MAX_TIMER_MS,
   runOwnedCommand,
@@ -217,7 +222,22 @@ export type CommandFailureCode =
    */
   | 'PROCESS_TREE_KILL_FAILED'
   /** Windows only. Every way the boundary can be lost, collapsed into one code. */
-  | 'BOUNDARY_LOST';
+  | 'BOUNDARY_LOST'
+  /**
+   * An installed launch accountant could not record this launch, and could not
+   * make what is on disk say nothing either. **Nothing was started.**
+   *
+   * Its own code rather than a plain {@link SPAWN_FAILED}, although the outcome
+   * is that one: nothing about the command, the executable or the environment
+   * was wrong, and reporting the same code for both would send whoever reads it
+   * to look at the command line. The accountant is what refused, and it is what
+   * the operator has to go and look at.
+   *
+   * `boundary/owned-launch-accounting.ts` sets out when an accountant may say
+   * this. With none installed it is unreachable, which is every process that
+   * holds no execution lease.
+   */
+  | 'LAUNCH_NOT_ACCOUNTED';
 
 /**
  * What became of the payload on {@link RunOptions.stdin}.
@@ -1040,6 +1060,38 @@ export function carriesContainment(outcome: CommandOutcome): boolean {
 }
 
 /**
+ * Whether this result is one an owned-launch record may be **closed** on.
+ *
+ * Two answers, and both are about what the *boundary* established rather than
+ * about whether the command succeeded:
+ *
+ *  - `started === false` — nothing was created. `owned-command.ts` sets that
+ *    only for `targetStarted === 'NO'`, which is the boundary saying so, and
+ *    for a plan that never reached a spawn. There is no process to describe;
+ *  - a containment attestation is present — the boundary observed the ending.
+ *    `ATTESTABLE_OUTCOME` withholds one for every outcome where it did not, and
+ *    {@link CONTAINMENT_CARRYING} withholds it a second time in this module's
+ *    own vocabulary, so a result carrying one is a result whose helper closed
+ *    and whose job the kernel therefore destroyed.
+ *
+ * Everything else answers `false`, which leaves the record open and makes a
+ * later recovery probe the processes it names. That includes every
+ * `BOUNDARY_LOST`, the `LAUNCH_REFUSED` that follows a throw out of
+ * the boundary's own start call (whose `targetStarted` is deliberately
+ * `'UNKNOWN'` there, because a throw is not evidence that nothing was created),
+ * and
+ * every POSIX run — which has no boundary, no job and nothing to attest, and
+ * whose leases are therefore not recoverable. The shipped CLI refuses to run
+ * anywhere but `win32`, so no product path reaches that last case.
+ *
+ * Exported so a test can assert the rule directly rather than through a spawn.
+ */
+export function endingWasAccountedFor(result: CommandResult): boolean {
+  if (!result.started) return true;
+  return result.containment !== undefined;
+}
+
+/**
  * The owned adapter's failure code, in `runCommand`'s vocabulary.
  *
  * Four of the adapter's nine codes are ways of losing the boundary, and they
@@ -1252,6 +1304,88 @@ export async function runCommand(
     });
   }
 
+  // ── The launch is announced before anything is created ───────────────────
+  //
+  // Here, and not in a caller, because this is the only function every process
+  // this product starts passes through — pinned structurally in
+  // `tests/v2-07l-execution-lease.test.ts`, which asserts that exactly two
+  // modules import `node:child_process` and that the boundary has exactly one
+  // route into the product, and it is this one. An accounting seam anywhere
+  // above it is a seam some caller can be written around, which is how the
+  // verification command, the reviewer and every Git subprocess came to be
+  // invisible to stale-lease recovery in the first place.
+  //
+  // It is placed **after** the plan and **before** the spawn. After, because a
+  // command that was never resolved never launched and a record of it would
+  // describe nothing; before, because a record written after a launch cannot
+  // describe a launch that was killed, and that launch is the one a recovery
+  // has to know about.
+  //
+  // This module still knows nothing about leases. `openOwnedLaunch` takes no
+  // arguments and answers in a vocabulary with no lease in it; whoever holds an
+  // epoch subscribes from the layer that has the authority to.
+  // Bound once the null check above has run, because the narrowing a `let` gets
+  // out here does not survive into the closure below — and the closure is what
+  // the accounting's `finally` has to wrap.
+  const resolved: SpawnPlan = plan;
+
+  const accounting = openOwnedLaunch();
+  if (accounting.refusal !== null) {
+    return finish({
+      started: false,
+      outcome: 'SPAWN_FAILED',
+      exitCode: null,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      failureCode: 'LAUNCH_NOT_ACCOUNTED',
+      errnoCode: null,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      // Nothing was spawned, so no payload was handed to anything.
+      stdinDelivery: options.stdin === undefined ? 'NOT_REQUESTED' : 'FAILED',
+      processTreeKilled: false,
+    });
+  }
+
+  // ── Closing a record is a claim, so it is not made on every path ─────────
+  //
+  // Closing says *this launch ended*, and a recovery reads that as "nothing of
+  // it can still be running". There is exactly one ending this module is
+  // entitled to say that about: one the boundary accounted for. Everything else
+  // — a lost boundary, a helper whose close could not be observed, a start that
+  // threw where "a throw is not evidence that nothing was created" —
+  // deliberately leaves the record **open**, so the recovery probes the
+  // processes it names instead of taking this module's word for it.
+  //
+  // `boundary/owned-command.ts` is explicit that this distinction is real and
+  // reachable: its `ATTESTABLE_OUTCOME` table withholds an attestation for
+  // `BOUNDARY_LOST` because that is "precisely the case where 'the owner's
+  // death took the writer with it' stops being true". A blanket close on every
+  // path would have deleted the record of exactly the launch that can outlive
+  // its owner.
+  //
+  // The default is therefore to leave it open, and each way out sets its own
+  // answer. A left-open record over-refuses a later recovery and never permits
+  // one.
+  let closing: 'CLOSE' | 'LEAVE_OPEN' = 'LEAVE_OPEN';
+  try {
+    const result = await launch();
+    closing = endingWasAccountedFor(result) ? 'CLOSE' : 'LEAVE_OPEN';
+    return result;
+  } catch (error) {
+    // The one throw this function documents, and the only one `runOwnedCommand`
+    // lets out: a request value the boundary transport cannot represent. It is
+    // refused by `encodeBoundaryRequest` before the request file is written and
+    // before anything is spawned, so nothing was created and the record
+    // describes no process at all.
+    if (error instanceof UnsafeArgumentError) closing = 'CLOSE';
+    throw error;
+  } finally {
+    if (closing === 'CLOSE') for (const record of accounting.records) closeOwnedLaunch(record);
+  }
+
+  async function launch(): Promise<CommandResult> {
   if (process.platform === 'win32') {
     /**
      * The Windows target is created behind the boundary, and only there.
@@ -1273,9 +1407,9 @@ export async function runCommand(
     let owned: OwnedCommandResult;
     try {
       owned = await runOwned({
-        file: plan.file,
-        args: plan.args,
-        verbatim: plan.verbatim,
+        file: resolved.file,
+        args: resolved.args,
+        verbatim: resolved.verbatim,
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         // The block libuv would have produced for the same call, so that moving
         // the mechanism does not move the environment. See the note above.
@@ -1297,9 +1431,26 @@ export async function runCommand(
         // has no job and no boundary to confirm one — so a caller passing this
         // there is simply never called back, which is the same answer it gets
         // for a launch that could not be attested.
-        ...(options.onLaunchEstablished === undefined
-          ? {}
-          : { onLaunchEstablished: options.onLaunchEstablished }),
+        //
+        // ── The hook is now passed unconditionally, and that is the fix ────
+        //
+        // It used to be forwarded only when a caller supplied one, and exactly
+        // one caller ever did: `loop/leased-spawns.ts`, for the writer. So the
+        // kernel's confirmation for a verification command, a reviewer pass or
+        // a Git subprocess reached this module and was dropped on the floor.
+        // Now the accounting records are told first and the caller's hook is
+        // called after, so a caller that passes none changes nothing and a
+        // caller that passes one is unaffected by the accounting.
+        //
+        // The caller's hook goes **second** on purpose. Both write the same
+        // document, each re-reading it first, so either order is correct — and
+        // this one keeps the weaker record on disk before the stronger one, so
+        // an interruption between the two leaves the launch accounted rather
+        // than only proved.
+        onLaunchEstablished: (attestation: ContainmentAttestation): void => {
+          for (const record of accounting.records) establishOwnedLaunch(record, attestation);
+          options.onLaunchEstablished?.(attestation);
+        },
       });
     } catch (error) {
       // `runOwnedCommand` never throws for a failing *command* — but it does
@@ -1332,7 +1483,7 @@ export async function runCommand(
   return await new Promise<CommandResult>((resolvePromise) => {
     let child: ChildProcess;
     try {
-      child = spawn(plan.file, [...plan.args], {
+      child = spawn(resolved.file, [...resolved.args], {
         env: options.env,
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         shell: false,
@@ -1588,4 +1739,5 @@ export async function runCommand(
       settle(closeResult(code, signal));
     });
   });
+  }
 }

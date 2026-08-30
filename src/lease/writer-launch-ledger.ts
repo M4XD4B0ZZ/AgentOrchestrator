@@ -118,6 +118,16 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
+import {
+  admissibleOpenSet,
+  openLaunchBindingFields,
+  openOwnedLaunchesOf,
+  readOpenSet,
+  OWNED_LAUNCH_REGISTER_SHAPE,
+  type OpenOwnedProcess,
+  type OwnedLaunchReading,
+} from './owned-launch-register.js';
+
 /**
  * Contract version of the ledger. Bump on any change to the payload.
  *
@@ -134,8 +144,17 @@ import { z } from 'zod';
  * `LAUNCH_HISTORY_ABSENT` already applies — no lease from an earlier build is
  * retroactively safe — and the operator's remaining move is unchanged: the lease
  * path is printed by `agent-loop lease status`.
+ *
+ * **3** since M2 slice 2 added the owned-launch register — `open` and
+ * `nextSlot`, defined in `lease/owned-launch-register.ts` — to this document.
+ * The cost is the same one, paid again and for the same reason: a document
+ * written by a version-2 build carries no register, so it cannot say whether an
+ * owned subprocess of that epoch was still open, and a lease left behind by
+ * that build now reads `UNSUPPORTED_VERSION` rather than being read as though
+ * it had answered the question. There is deliberately no arm that treats a
+ * missing register as an empty one.
  */
-export const WRITER_LAUNCH_LEDGER_VERSION = 2;
+export const WRITER_LAUNCH_LEDGER_VERSION = 3;
 
 /**
  * Largest history this build will represent.
@@ -305,6 +324,11 @@ export const WriterLaunchLedgerSchema = z
      */
     historyComplete: z.boolean(),
     entries: z.array(WriterLaunchEntrySchema).max(MAX_WRITER_LAUNCH_ENTRIES),
+    // The owned-launch register, defined next door. Required, never optional: an
+    // optional field with an empty default would make a document that never had
+    // a register indistinguishable from one whose register is empty, and those
+    // are the two sentences this slice exists to keep apart.
+    ...OWNED_LAUNCH_REGISTER_SHAPE,
     binding: z.string().regex(HEX_64, 'Must be a binding digest.'),
   })
   .strict();
@@ -574,6 +598,11 @@ export function writerLaunchBinding(
     // `state` above would make the two entries collide.
     return [...common, entry.state === 'ESTABLISHED' ? entry.establishedAt : entry.confirmedAt];
   });
+  // The register's entries, flattened by the module that owns their shape. This
+  // function deliberately does not know the two open states: a second copy of
+  // that field list here is a copy that can drift, and the one it would drift
+  // away from is the one the schema enforces.
+  const open = payload.open.map(openLaunchBindingFields);
   return createHash('sha256')
     .update(
       JSON.stringify([
@@ -585,6 +614,12 @@ export function writerLaunchBinding(
         payload.runId,
         payload.historyComplete,
         entries,
+        // Both fields of the register, and `nextSlot` is not decoration: it is
+        // what makes a slot unique for the life of the register, so an edit that
+        // rolls it back — the edit that lets a stale settlement remove a live
+        // launch's record — has to be a detected one.
+        open,
+        payload.nextSlot,
       ]),
     )
     .digest('hex');
@@ -639,6 +674,19 @@ export function readWriterLaunchLedger(
     if (ledger.entries[index]?.generation !== index + 1) return 'MALFORMED';
   }
 
+  // The register's own structural rule, refused here for the same reason and at
+  // the same moment as the gap above: a well-bound impossible document is still
+  // not a document. It cannot be the positional `1..N` check — slots are removed
+  // in the ordinary course of business — so it is strictly-increasing slots, all
+  // below a `nextSlot` that only grows. `owned-launch-register.ts` sets out
+  // which edit each half refuses.
+  //
+  // Reported as the *writer* reading's `MALFORMED` although it is the
+  // register's rule, and that is deliberate: this is one document with one
+  // binding, and a second vocabulary for "this file is not a file" would give an
+  // operator two names for one fact.
+  if (!admissibleOpenSet(ledger.open, ledger.nextSlot)) return 'MALFORMED';
+
   const { binding, ...payload } = ledger;
   if (writerLaunchBinding(lease, payload) !== binding) return 'NOT_THIS_LEASE';
 
@@ -670,6 +718,78 @@ export function readWriterLaunchLedger(
  * absolutely still the history to append to, and appending to it is the only way
  * an unproven launch stays visible.
  */
+/**
+ * The owned-launch register found in the same document, as a reading.
+ *
+ * ── Why this lives here and not in the module that owns the vocabulary ─────
+ *
+ * `owned-launch-register.ts` defines the shape, the readings and every
+ * predicate over them, and it deliberately imports nothing from this file. The
+ * reverse would be a cycle, and the reason the cycle would exist is that this
+ * function needs the *document*: the version check, the schema, the positional
+ * generation rule, the binding and the two agreement checks are all here, and a
+ * register read without them would be a reading of bytes nobody vouched for.
+ *
+ * ── It re-runs the whole structural chain rather than trusting a caller ────
+ *
+ * {@link readWriterLaunchLedger} is called again, in full, and every reading
+ * that is not one of the three the writer history can license collapses to
+ * {@link OWNED_LAUNCH_READINGS.REGISTER_NOT_READABLE}. That is not wasted work:
+ * it is the fail-closed direction being the *only* way to get an answer out of
+ * this function, which is the same argument `unendedLaunchesOf` makes for
+ * re-reading rather than taking a parsed value. The recovery predicate asks the
+ * writer question first and refuses on all of those conditions before it ever
+ * reaches this one, so the collapse is unreachable from there and is what makes
+ * this function safe to call anywhere else.
+ *
+ * Note which writer readings are *not* collapsed: `LAUNCH_UNPROVEN` and
+ * `LAUNCHES_CONTAINED_SOME_UNENDED` are documents whose writer history is well
+ * formed and merely unproven, and the register in them is a perfectly good
+ * register. Collapsing those would make this answer depend on the writer's
+ * verdict, which is precisely the coupling this slice exists to remove.
+ */
+export function readOwnedLaunchRegister(
+  lease: WriterLaunchSubject,
+  raw: unknown,
+): OwnedLaunchReading {
+  const reading = readWriterLaunchLedger(lease, raw);
+  if (
+    reading !== 'ALL_LAUNCHES_CONTAINED' &&
+    reading !== 'LAUNCHES_CONTAINED_SOME_UNENDED' &&
+    reading !== 'LAUNCH_UNPROVEN'
+  ) {
+    return 'REGISTER_NOT_READABLE';
+  }
+  const parsed = WriterLaunchLedgerSchema.safeParse(raw);
+  if (!parsed.success) return 'REGISTER_NOT_READABLE';
+  return readOpenSet(parsed.data.open);
+}
+
+/**
+ * The owned processes a recovery still owes a liveness proof about, or `null`.
+ *
+ * The register's counterpart to {@link unendedLaunchesOf}, and it re-reads for
+ * the same reason: the fail-closed direction has to be the only way pids leave
+ * this module. It answers non-`null` for exactly one reading, so a document
+ * that is malformed, transplanted, from another run or carrying an announced
+ * launch yields nothing to probe rather than a shorter list a caller could
+ * exhaust and call proven.
+ *
+ * `null` and `[]` are both refusals at the call site. An empty list from the
+ * one licensing reading is impossible by construction — that reading exists
+ * only when an `ESTABLISHED` entry is open — so producing one would mean this
+ * function and the reading disagree, which is not a state to act on.
+ */
+export function openOwnedProcessesOf(
+  lease: WriterLaunchSubject,
+  raw: unknown,
+): readonly OpenOwnedProcess[] | null {
+  if (readOwnedLaunchRegister(lease, raw) === 'REGISTER_NOT_READABLE') return null;
+  const parsed = WriterLaunchLedgerSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return openOwnedLaunchesOf(parsed.data.open);
+}
+
 export function extendableWriterLaunchLedger(
   lease: WriterLaunchSubject,
   raw: unknown,
