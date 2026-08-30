@@ -254,9 +254,34 @@ The `package.json` description said "owned" and now says what it is.
 
 ## Residuals
 
-- **`R-M2-1` — the pre-establishment window.** Untouched. Still the next
-  prerequisite for closing `U1`, and still needs a kernel-authoritative identity
-  for the launch.
+- **`R-M2-1` — the pre-establishment window. Untouched in kind, and widened in
+  frequency. Measured, and accepted with the numbers attached.**
+
+  A slot is `ANNOUNCED` from the announcement until the kernel's confirmation is
+  written, and in that interval it names no process at all. An owner killed
+  there leaves `OWNED_LAUNCH_UNPROVEN`, with nothing to probe and no override:
+  the repository is unrunnable until a human deletes the lease file, whose path
+  `agent-loop lease status` prints. That is exactly `R-M2-1`, and this slice
+  makes every owned spawn pay it rather than only a writer launch.
+
+  **Measured on the reference machine**, from the two stamps on the entry itself
+  (`openedAt` and `establishedAt`), twelve rounds through the production
+  verification path: **min 146 ms, p50 152 ms, p95 165 ms, max 165 ms, mean
+  152.8 ms**. At roughly 45 accounted spawns per step that is about **7 seconds
+  of unprovable exposure per step**, against roughly 0.15 s before — the writer's
+  own window, observed once at 76 ms, paid once or twice.
+
+  It is never *unsafe*: the state refuses. What it costs is recoverability, and
+  it is a real regression against what M2 slice 1 delivered — which is why it is
+  a number here rather than a sentence. It is accepted rather than fixed because
+  the fix is `R-M2-1`'s own: a kernel-authoritative identity for a launch that
+  has been created and not yet confirmed. Recording the helper pid at spawn time
+  would shrink the window to about the spawn call, and its soundness holds only
+  in `JOBLIST` mode — that is a boundary change and a slice of its own.
+
+  **This raises `R-M2-1`'s priority and does not change the milestone contract.**
+  `U1` was narrowed and not resolved before this slice and is narrowed and not
+  resolved after it; unattended operation stays unsupported.
 - **`R-M2-2` / `L-V3-05-1` — closed.** Every AO-owned productive spawn under a
   lease now passes one accounting seam, and a future one cannot avoid it without
   breaking a structural pin that already exists.

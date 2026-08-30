@@ -4220,9 +4220,16 @@ and because the failure mode it describes — a command that cannot start is
   function every spawn passes and is already pinned as such, so a future spawn
   path cannot become invisible without breaking a structural test.
   [The ADR](docs/decisions/2026-08-30-adr-owned-subprocess-quiescence.md) carries
-  the measurement, including the part that is *not* closed: nothing under
+  the measurement, including the two parts that are *not* closed. Nothing under
   `src/deliver/` holds a lease, so `git push` and the `gh` mutations are outside
-  every epoch rather than covered by one. **Scope:**
+  every epoch rather than covered by one. And the price is stated with a number:
+  every accounted spawn now pays the pre-establishment window that only a writer
+  launch used to pay — **152.8 ms mean, twelve rounds**, roughly 45 times a step,
+  so about 7 seconds of unprovable exposure per step against roughly 0.15 s
+  before. An interrupt landing there refuses rather than permits, and the lease
+  then needs a human. That is `R-M2-1` at a higher frequency, it is accepted
+  deliberately, and it raises that residual's priority without changing what
+  `U1` says. **Scope:**
   `lease/owned-launch-register.ts`, `lease/execution-lease.ts`,
   `boundary/owned-launch-accounting.ts`, `doctor/exec.ts`.
 - **L-V3-05-2** — **withdrawn, having been false.** It claimed
