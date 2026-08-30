@@ -31,6 +31,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ContainmentAttestation } from '../src/core/containment-attestation.js';
+import { mintContainmentAttestation } from '../src/core/internal/containment-attestation.js';
 import type { RunOptions } from '../src/doctor/exec.js';
 
 /** What the substituted `runCommand` was handed, for the agent-side case. */
@@ -91,8 +92,25 @@ describe('the establishment callback reaches the layer below it', () => {
   });
 
   it.runIf(process.platform === 'win32')(
-    'runCommand hands its hook to the owned boundary, and withholds it when there is none',
+    'runCommand always hands the boundary a hook, and calls the caller through it',
     async () => {
+      // ── What this case used to pin, and why it changed ──────────────────
+      //
+      // It required the forward to be **conditional**: the option present when a
+      // caller supplied a hook and absent when none did. That was the contract
+      // until M2 slice 2, and it had a consequence nobody had written down —
+      // exactly one caller in the whole build ever supplied one, the writer, so
+      // the kernel's confirmation of job membership for a verification command,
+      // a reviewer pass or a Git subprocess reached this module and was dropped.
+      //
+      // The accounting that closes that gap is not a caller and cannot be one:
+      // it has to see every launch. So the hook is now always passed, and the
+      // caller's is called *through* it. The case below pins both halves,
+      // because "always present" alone would be satisfied by a forward that had
+      // stopped calling the caller at all.
+      //
+      // The conditional forward still exists one layer up, at
+      // `agent-command.ts`, and the case above this one still pins it there.
       // `vi.importActual` bypasses the factory above entirely, so this really is
       // the unmocked `runCommand` — which is what this case needs, because the
       // forward it measures lives inside it. (An earlier comment here said the
@@ -129,7 +147,10 @@ describe('the establishment callback reaches the layer below it', () => {
         } as never;
       };
 
-      const mine = (_attestation: ContainmentAttestation): void => undefined;
+      const told: ContainmentAttestation[] = [];
+      const mine = (attestation: ContainmentAttestation): void => {
+        told.push(attestation);
+      };
       await actual.runCommand(
         process.execPath,
         [],
@@ -137,11 +158,38 @@ describe('the establishment callback reaches the layer below it', () => {
         { runOwned },
       );
       expect(seen).toHaveLength(1);
-      expect(seen[0]?.onLaunchEstablished).toBe(mine);
+      // Present, and NOT the caller's own function: what the boundary is handed
+      // is the composed hook, which tells the accounting first and the caller
+      // after.
+      const forwarded = seen[0]?.onLaunchEstablished;
+      expect(typeof forwarded).toBe('function');
+      expect(forwarded).not.toBe(mine);
 
+      // And the caller really is called through it, with the same artefact. A
+      // forward that had quietly stopped calling the caller would satisfy every
+      // assertion above.
+      const minted = mintContainmentAttestation({
+        ownerPid: process.pid,
+        helperPid: 5101,
+        childPid: 5102,
+        mode: 'JOBLIST',
+        assignedAtCreation: true,
+        launchNonce: 'a1a1a1a1a1a1a1a1',
+        attestedAt: new Date(Date.UTC(2026, 7, 30)).toISOString(),
+        verifiedInJob: true,
+      });
+      expect(minted).not.toBeNull();
+      (forwarded as (a: ContainmentAttestation) => void)(minted as ContainmentAttestation);
+      expect(told).toEqual([minted]);
+
+      // A caller that supplies nothing still causes a hook to be handed down -
+      // that is the whole change - and is simply never called back.
       await actual.runCommand(process.execPath, [], { cwd: process.cwd(), env: {} }, { runOwned });
       expect(seen).toHaveLength(2);
-      expect('onLaunchEstablished' in (seen[1] ?? {})).toBe(false);
+      expect(typeof seen[1]?.onLaunchEstablished).toBe('function');
+      const second = seen[1]?.onLaunchEstablished as (a: ContainmentAttestation) => void;
+      second(minted as ContainmentAttestation);
+      expect(told).toHaveLength(1);
     },
   );
 

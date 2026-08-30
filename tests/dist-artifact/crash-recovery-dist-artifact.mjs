@@ -34,15 +34,36 @@
  *      reached the kernel's answer. Must refuse `LAUNCH_HISTORY_UNPROVEN`, which
  *      is the honest answer and the reason U1 is narrowed rather than closed.
  *   F  the sequence a review blocked this slice on: the writer really ends, its
- *      ending is never proved, a LATER owned subprocess starts and is still
- *      alive when the owner dies. The writer's own pids are gone, so the
- *      liveness re-check cannot save it; what refuses is the withdrawal of the
- *      establishment mark. Must refuse.
+ *      ending is never proved, a LATER subprocess starts and is still alive when
+ *      the owner dies. The writer's own pids are gone, so the liveness re-check
+ *      cannot save it; what refuses is the withdrawal of the establishment mark.
+ *      Must refuse. That later process is a plain DETACHED spawn and goes
+ *      through no owned boundary, which is stated rather than assumed: it is
+ *      therefore in no register, and F's subject is the withdrawal.
  *   G  THE CONTROL FOR F — the identical fixture with the withdrawal switched
  *      off, which must RECOVER. That is the defect reproduced, and it is what
- *      stops F passing in a build that had simply broken the whole arm.
+ *      stops F passing in a build that had simply broken the whole arm. It still
+ *      recovers after M2 slice 2, for the reason F's later process is not owned.
+ *   H  M2 slice 2's counterexample: the writer history is a PROOF, an owned
+ *      launch is recorded through the production functions over processes that
+ *      are really running, and the owner dies. Must refuse
+ *      OWNED_LAUNCH_STILL_RUNNING and leave the lease byte-identical — and the
+ *      SAME lease must become recoverable once those processes are killed.
+ *   I  the wiring proof, and the only case here that dies if the accounting
+ *      stops being emitted: a REAL owned subprocess started by
+ *      runVerificationCommand with no accounting argument of any kind, whose
+ *      helper and child the register on disk must name WHILE IT RUNS.
+ *   J  the other half of the lifecycle: the verification is asked to stop, its
+ *      ending is observed while the owner is alive, and the register must be
+ *      EMPTY afterwards with the slot counter not gone back.
  *   E  runs once, after the rounds: the establishment mint and the ending mint
  *      must describe the same launch.
+ *
+ * Two phases arrange their survivors rather than measuring them: B for the
+ * writer and H for the register. Both say so where they do it, and the reason is
+ * the same measurement — a subprocess started through the real boundary cannot
+ * be made to outlive its owner, because the helper holds the only handle to a
+ * job carrying KILL_ON_JOB_CLOSE and is itself in node's kill-on-close job.
  *
  * Survivors are identified by heartbeat rather than by a process walk, for the
  * reason `launch-boundary-dist-artifact.mjs` records: a terminated process whose
@@ -69,6 +90,8 @@ const distLease = join(repoRoot, 'dist', 'lease', 'execution-lease.js');
 const distStart = join(repoRoot, 'dist', 'boundary', 'start-owned-process.js');
 const distMint = join(repoRoot, 'dist', 'core', 'internal', 'containment-attestation.js');
 const distRepo = join(repoRoot, 'dist', 'repo', 'resolve-repository.js');
+const distVerify = join(repoRoot, 'dist', 'verify', 'verify-command.js');
+const distOwned = join(repoRoot, 'dist', 'boundary', 'owned-command.js');
 const cli = join(repoRoot, 'dist', 'cli', 'index.js');
 
 const LEASE_FILE = 'agent-orchestrator-execution-lease.json';
@@ -96,6 +119,22 @@ if (!existsSync(join(repoRoot, 'dist', 'native', 'ao-launch.exe'))) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * The target the M2 slice 2 phases hand to the PRODUCTION verification seam.
+ *
+ * A FILE rather than `-e`, because every argument reaching `doctor/exec.ts` must
+ * be shell-inert and a JS one-liner cannot be one. Every path in it is relative,
+ * because that seam supplies the child `PATH`/`PATHEXT` and nothing else, so an
+ * environment variable would not arrive. It stops when a `stop` file appears,
+ * which is how phase J observes an ending while its owner is still alive.
+ */
+const OWNED_BEATER =
+  "import{existsSync,writeFileSync}from'node:fs';\n" +
+  "let n=0;\n" +
+  "setInterval(()=>{if(existsSync('stop'))process.exit(0);n+=1;" +
+  "try{writeFileSync('beat',String(n))}catch{}},50);\n" +
+  "setInterval(()=>{},1000);\n";
+
+/**
  * The owner: a real, separate process that takes a real lease and does what
  * `AO_CRASH_PHASE` asks before parking.
  *
@@ -109,11 +148,16 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import {
   acquireRepositoryExecutionLease,
+  announceOwnedLaunch,
+  attestOwnedLaunchEstablished,
   attestWriterLaunchEstablished,
   beginWriterLaunch,
+  confirmWriterLaunch,
   deriveExecutionLeaseLocation,
   retractWriterLaunchEstablishment,
 } from ${JSON.stringify(pathToFileURL(distLease).href)};
+import { runOwnedCommand } from ${JSON.stringify(pathToFileURL(distOwned).href)};
+import { runVerificationCommand } from ${JSON.stringify(pathToFileURL(distVerify).href)};
 import { startOwnedProcess } from ${JSON.stringify(pathToFileURL(distStart).href)};
 import { mintContainmentAttestation } from ${JSON.stringify(pathToFileURL(distMint).href)};
 import { resolveRepository } from ${JSON.stringify(pathToFileURL(distRepo).href)};
@@ -157,7 +201,8 @@ if (phase === 'PENDING') {
 } else if (phase === 'ENDED_THEN_LATER_WORK') {
   // THE SEQUENCE THE REVIEW BLOCKED ON. A real contained writer runs to its end,
   // its ending is never proved (the run does not confirm the generation), and
-  // the run then starts a LATER owned subprocess that is still alive when the
+  // the run then starts a LATER subprocess - detached, and so through no owned
+  // boundary - that is still alive when the
   // owner dies. That later process is not in the writer ledger and never can be.
   const first = await startOwnedProcess({
     file: process.execPath,
@@ -194,7 +239,9 @@ if (phase === 'PENDING') {
     if (retracted.code !== 'RETRACTED') fail('RETRACT ' + retracted.code);
   }
 
-  // And now the later, unrecorded owned subprocess, left running.
+  // And now the later, unrecorded subprocess, left running. Detached on purpose:
+  // it is in no register, which is what keeps F about the withdrawal and G about
+  // the defect the withdrawal closes.
   const later = spawn(process.execPath, ['-e', BEATER], {
     env: { ...process.env, AO_CRASH_BEAT: beat },
     detached: true,
@@ -235,6 +282,84 @@ if (phase === 'PENDING') {
     generation: opened.generation, writerId: 'claude', now,
   });
   if (marked.code !== 'ESTABLISHED') fail('ESTABLISH ' + marked.code);
+} else if (phase === 'OWNED_SURVIVOR' || phase === 'OWNED_LIVE_VERIFY' || phase === 'OWNED_ENDED_VERIFY') {
+  // ── M2 slice 2. The writer is finished and PROVED, so the writer conjunct
+  // permits and the only thing left that can refuse is the owned-launch
+  // register. A history reading anything but ALL_LAUNCHES_CONTAINED would
+  // refuse first and every case below would pass for the wrong reason.
+  const w = await runOwnedCommand({
+    file: process.execPath,
+    args: ['-e', 'process.exit(0)'],
+    onLaunchEstablished: (a) => {
+      const m = attestWriterLaunchEstablished(repository, acquired.evidence, a, {
+        generation: opened.generation, writerId: 'claude', now,
+      });
+      if (m.code !== 'ESTABLISHED') fail('ESTABLISH ' + m.code);
+    },
+  });
+  if (w.outcome !== 'COMPLETED') fail('WRITER ' + w.outcome);
+  const confirmed = confirmWriterLaunch(repository, acquired.evidence, w.containment, {
+    generation: opened.generation, writerId: 'claude', now,
+  });
+  if (confirmed.code !== 'CONFIRMED') fail('CONFIRM ' + confirmed.code);
+
+  if (phase === 'OWNED_SURVIVOR') {
+    // THE NEGATIVE CONTROL, and the counterexample this slice exists for. The
+    // register is made to name processes that are really running and are NOT in
+    // any job of this owner's - started detached, so killing the owner leaves
+    // them alive.
+    //
+    // The same substitution phase B makes for the writer, and for the same
+    // measured reason: an owned subprocess started through the real boundary
+    // CANNOT be made to outlive its owner. The helper holds the only handle to a
+    // job carrying KILL_ON_JOB_CLOSE and is itself in node's kill-on-close job,
+    // and three rounds of 4 ms sampling after a forced kill found the tree
+    // already gone at the first sample, 44-69 ms in. What is real here is
+    // everything the predicate touches: the record is minted and written by the
+    // production functions, and the processes it names are real. What is
+    // arranged is only that they survive.
+    const one = spawn(process.execPath, ['-e', BEATER], {
+      env: { ...process.env, AO_CRASH_BEAT: beat }, detached: true, stdio: 'ignore',
+    });
+    one.unref();
+    const two = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' });
+    two.unref();
+    const announced = announceOwnedLaunch(repository, acquired.evidence, { now });
+    if (announced.code !== 'ANNOUNCED') fail('ANNOUNCE ' + announced.code);
+    const attestation = mintContainmentAttestation({
+      ownerPid: process.pid, helperPid: two.pid, childPid: one.pid, mode: 'JOBLIST',
+      assignedAtCreation: true, launchNonce: 'c0ffee00c0ffee03', attestedAt: now(), verifiedInJob: true,
+    });
+    if (attestation === null) fail('MINT');
+    const est = attestOwnedLaunchEstablished(repository, acquired.evidence, attestation, {
+      slot: announced.slot, now,
+    });
+    if (est.code !== 'ESTABLISHED') fail('OWNED_ESTABLISH ' + est.code);
+    facts = { helperPid: two.pid, childPid: one.pid };
+  } else {
+    // A REAL owned subprocess through the PRODUCTION verification path -
+    // runVerificationCommand, then doctor/exec.ts, then the owned boundary -
+    // with no accounting argument anywhere, because that seam takes none.
+    // Whatever reaches the register here was put there by production code.
+    const running = runVerificationCommand(process.execPath, ['beater.mjs'], root);
+    running.catch(() => {});
+    const deadline = Date.now() + 30000;
+    let beating = false;
+    const { readFileSync } = await import('node:fs');
+    while (Date.now() < deadline) {
+      try { if (Number(readFileSync(beat, 'utf8')) > 0) { beating = true; break; } } catch {}
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (!beating) fail('VERIFY_NEVER_BEAT');
+    if (phase === 'OWNED_ENDED_VERIFY') {
+      // This one is asked to stop, so its ending is observed and its slot is
+      // settled while this owner is still alive. That is the only way to measure
+      // the removal half of the register's lifecycle against a real subprocess.
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(join(root, 'stop'), 'x');
+      await running;
+    }
+  }
 } else {
   // Phases A and C: a REAL contained writer behind the real native boundary, and
   // the establishment mark written from the boundary's own facts — which is
@@ -356,6 +481,7 @@ function fixture() {
       .replace(/^(\s*required:\s*)true\s*$/m, '$1false'),
     'utf8',
   );
+  writeFileSync(join(root, 'beater.mjs'), OWNED_BEATER, 'utf8');
   return { root };
 }
 
@@ -382,6 +508,22 @@ const beatOf = (beat) => {
 };
 const entriesOf = (root) =>
   JSON.parse(readFileSync(join(root, '.git', LEDGER_FILE), 'utf8')).entries;
+/** The owned-launch register on disk: the subprocesses this epoch has open. */
+const openOf = (root) => {
+  try {
+    return JSON.parse(readFileSync(join(root, '.git', LEDGER_FILE), 'utf8')).open ?? [];
+  } catch {
+    return [];
+  }
+};
+/** The slot counter, which only ever goes up. */
+const nextSlotOf = (root) => {
+  try {
+    return JSON.parse(readFileSync(join(root, '.git', LEDGER_FILE), 'utf8')).nextSlot ?? 0;
+  } catch {
+    return 0;
+  }
+};
 
 /** Terminates one pid and waits until the real probe agrees it is gone. */
 async function killAndWait(processAlive, pid) {
@@ -576,7 +718,7 @@ for (let round = 0; round < ROUNDS; round += 1) {
   /* ── F. the sequence a review blocked this slice on ────────────────────── */
   //
   //   ESTABLISHED writer -> the writer really ends -> no CONTAINED upgrade
-  //   -> a LATER owned subprocess starts and stays alive -> the owner dies
+  //   -> a LATER detached subprocess starts and stays alive -> the owner dies
   //   -> recovery MUST refuse
   //
   // The writer's own recorded pids are gone, so the liveness re-check cannot
@@ -598,7 +740,7 @@ for (let round = 0; round < ROUNDS; round += 1) {
     );
     check(
       osProcessLiveness(facts.laterPid) === 'ALIVE',
-      `F${round}: the LATER unrecorded owned process outlived the owner`,
+      `F${round}: the LATER unrecorded process outlived the owner`,
     );
 
     const before = leaseBytes(root);
@@ -646,6 +788,139 @@ for (let round = 0; round < ROUNDS; round += 1) {
     );
     await killAndWait(osProcessLiveness, facts.laterPid);
   }
+
+  /* ── H. M2 slice 2: an owned subprocess of this epoch is still running ──── */
+  //
+  //   writer CONTAINED, so the writer conjunct PERMITS
+  //   -> an owned launch recorded through the production functions
+  //   -> the processes it records are really running
+  //   -> the owner dies
+  //   -> recovery MUST refuse, and the refusal must name the SUBPROCESS
+  //
+  // The counterexample that made `L-V3-05-1` dangerous. Before this slice it was
+  // not reachable at all: nothing recorded a non-writer launch, so the predicate
+  // had nothing to refuse on and the shipped CLI removed the lease — measured on
+  // `main` at `fba4cfd` with a real verification subprocess.
+  {
+    const { root } = fixture();
+    const repository = await resolvedRepository(root);
+    const beat = join(root, 'beat');
+    const facts = await startOwner(root, 'OWNED_SURVIVOR', beat);
+    check(await killAndWait(osProcessLiveness, facts.ownerPid), `H${round}: the owner is gone`);
+    await sleep(600);
+    check(
+      osProcessLiveness(facts.childPid) === 'ALIVE' &&
+        osProcessLiveness(facts.helperPid) === 'ALIVE',
+      `H${round}: the recorded subprocess really outlived the owner`,
+    );
+    const entries = entriesOf(root);
+    check(
+      entries.length === 1 && entries[0]?.state === 'CONTAINED',
+      `H${round}: the writer history is a proof, so only the register can refuse`,
+    );
+
+    const before = leaseBytes(root);
+    const assessed = assessStaleLeaseRecovery(repository);
+    check(
+      assessed.launchHistory === 'ALL_LAUNCHES_CONTAINED',
+      `H${round}: the writer conjunct permitted (got ${String(assessed.launchHistory)})`,
+    );
+    check(
+      assessed.refusal === 'OWNED_LAUNCH_STILL_RUNNING',
+      `H${round}: refused OWNED_LAUNCH_STILL_RUNNING (got ${String(assessed.refusal)})`,
+    );
+    const output = leaseRecoverCli(root);
+    check(!/RECOVERED/.test(output), `H${round}: the shipped CLI does not report a recovery`);
+    check(
+      /OWNED_LAUNCH_STILL_RUNNING/.test(output),
+      `H${round}: and it names the subprocess refusal to the operator`,
+    );
+    check(
+      Buffer.compare(before, leaseBytes(root) ?? Buffer.alloc(0)) === 0,
+      `H${round}: the lease is byte-identical after the refusal`,
+    );
+
+    for (const pid of [facts.helperPid, facts.childPid]) await killAndWait(osProcessLiveness, pid);
+    // And with the recorded processes gone, the very same lease becomes
+    // recoverable. That is what makes the refusal above attributable to liveness
+    // rather than to anything else about the fixture.
+    check(
+      assessStaleLeaseRecovery(repository).verdict === 'SAFE_TO_RECOVER',
+      `H${round}: the same lease is recoverable once the subprocess is gone`,
+    );
+  }
+
+  /* ── I. the seam really records, through the production verification path ─ */
+  //
+  // The wiring proof, and the case that dies if the accounting stops being
+  // emitted. A REAL owned subprocess is started by `runVerificationCommand` with
+  // no accounting argument of any kind — that seam takes none — and the register
+  // on disk must name its helper and child WHILE IT RUNS. Then the owner is
+  // killed, the tree really dies, and the recovery permits having probed the
+  // pids the seam wrote.
+  {
+    const { root } = fixture();
+    const repository = await resolvedRepository(root);
+    const beat = join(root, 'beat');
+    const facts = await startOwner(root, 'OWNED_LIVE_VERIFY', beat);
+    const open = openOf(root);
+    check(
+      open.length === 1 && open[0]?.state === 'ESTABLISHED',
+      `I${round}: the production verification seam recorded its launch (got ${JSON.stringify(open.map((e) => e.state))})`,
+    );
+    const recorded = open[0] ?? {};
+    check(
+      Number.isInteger(recorded.helperPid) &&
+        Number.isInteger(recorded.childPid) &&
+        osProcessLiveness(recorded.childPid) === 'ALIVE',
+      `I${round}: and the child it recorded is the one that is running`,
+    );
+    check(beatOf(beat) !== null, `I${round}: the owned verification target is really running`);
+
+    check(await killAndWait(osProcessLiveness, facts.ownerPid), `I${round}: the owner is gone`);
+    await sleep(2500);
+    const first = beatOf(beat);
+    await sleep(1500);
+    check(beatOf(beat) === first, `I${round}: the verification target stopped when its owner died`);
+    check(
+      osProcessLiveness(recorded.helperPid) === 'NOT_FOUND' &&
+        osProcessLiveness(recorded.childPid) === 'NOT_FOUND',
+      `I${round}: both recorded processes of the subprocess are gone`,
+    );
+    check(
+      assessStaleLeaseRecovery(repository).verdict === 'SAFE_TO_RECOVER',
+      `I${round}: the predicate permits once the recorded subprocess is gone`,
+    );
+    check(/RECOVERED/.test(leaseRecoverCli(root)), `I${round}: the shipped CLI recovers`);
+    check(!existsSync(join(root, '.git', LEASE_FILE)), `I${round}: the stale lease is gone`);
+  }
+
+  /* ── J. a subprocess that ended takes its record with it ────────────────── */
+  //
+  // The other half of the lifecycle, against a real subprocess: the verification
+  // is asked to stop, its ending is observed while the owner is still alive, and
+  // the register must be EMPTY afterwards. A build that stopped settling would
+  // leave the entry standing and fail this line — and would go on passing every
+  // case above it, because a leftover entry naming dead processes still permits.
+  {
+    const { root } = fixture();
+    const repository = await resolvedRepository(root);
+    const beat = join(root, 'beat');
+    const facts = await startOwner(root, 'OWNED_ENDED_VERIFY', beat);
+    check(
+      openOf(root).length === 0,
+      `J${round}: the ended verification took its record with it (left ${JSON.stringify(openOf(root))})`,
+    );
+    // The counter is what does NOT go back, and it is the whole reason a settled
+    // slot can never be handed out again.
+    check(nextSlotOf(root) > 1, `J${round}: the slot counter did not go back`);
+    check(await killAndWait(osProcessLiveness, facts.ownerPid), `J${round}: the owner is gone`);
+    check(
+      assessStaleLeaseRecovery(repository).verdict === 'SAFE_TO_RECOVER',
+      `J${round}: an epoch whose subprocesses all ended is recoverable`,
+    );
+    check(/RECOVERED/.test(leaseRecoverCli(root)), `J${round}: the shipped CLI recovers`);
+  }
 }
 
 /* ── E. the two marks describe the same launch, through a real boundary ──── */
@@ -660,7 +935,11 @@ for (let round = 0; round < ROUNDS; round += 1) {
 // never reach `CONTAINED`, silently, because the confirmation's result is
 // discarded by design. Phases A-D would all still pass: they never confirm
 // anything. So this case exists, it drives the real ordering through the real
-// boundary, and it is the only place the agreement is measured.
+// boundary, and it is the only place the agreement is measured ON ITS OWN.
+// Phases H, I and J each drive begin -> establish -> confirm through a real
+// owned command as well, and fail the owner before it prints `ready` if the two
+// mints disagree - but they do it as a precondition for something else, and a
+// case whose subject is the agreement is what stops that becoming incidental.
 {
   const { root } = fixture();
   const repository = await resolvedRepository(root);

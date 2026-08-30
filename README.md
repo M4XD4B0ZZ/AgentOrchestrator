@@ -4204,16 +4204,34 @@ and because the failure mode it describes — a command that cannot start is
   Cosmetic: no safety claim is wrong, and the release outcome sentences answer
   the removal question separately. **Scope:** `cli/render-lease.ts`,
   `cli/release-command.ts`.
-- **L-V3-05-1** — the writer-launch history records the productive writer only.
-  The reviewer and the verification command are contained in fact on Windows —
-  `doctor/exec.ts` routes every spawn through `runOwnedCommand` — and no reading
-  of the history is evidence about them, so `SAFE_TO_RECOVER` means "no *writer*
-  tree can still be running" and not "no process of this run can". Deliberate:
-  the prompt's predicate is about writer launches, slice 4 drew the same
-  boundary, and widening it changes what the record claims rather than how it is
-  read. Left open because it is a real narrowing of the sentence an operator will
-  hear as "nothing survives". **Scope:** `lease/writer-launch-ledger.ts`,
-  `loop/leased-spawns.ts`.
+- **L-V3-05-1** — **closed by M2 slice 2.** It said the writer-launch history
+  records the productive writer only, so `SAFE_TO_RECOVER` meant "no *writer*
+  tree can still be running" and not "no process of this run can", and it was
+  left open as a real narrowing of the sentence an operator hears as "nothing
+  survives". It was reproduced on `main` at `fba4cfd` before it was closed: a
+  real lease, a real writer confirmed `CONTAINED`, a real verification subprocess
+  through the production path, the owner killed — and the shipped
+  `agent-loop lease recover` removed the lease having probed one process, the
+  owner. What closes it is the **owned-launch register**: every AO-owned spawn
+  under a lease is announced before it starts and its slot removed when the
+  boundary has accounted for its ending, and the recovery predicate refuses while
+  any slot is open whose recorded processes exist or cannot be probed. The
+  accounting is emitted at `doctor/exec.ts`'s `runCommand`, which is the one
+  function every spawn passes and is already pinned as such, so a future spawn
+  path cannot become invisible without breaking a structural test.
+  [The ADR](docs/decisions/2026-08-30-adr-owned-subprocess-quiescence.md) carries
+  the measurement, including the two parts that are *not* closed. Nothing under
+  `src/deliver/` holds a lease, so `git push` and the `gh` mutations are outside
+  every epoch rather than covered by one. And the price is stated with a number:
+  every accounted spawn now pays the pre-establishment window that only a writer
+  launch used to pay — **152.8 ms mean, twelve rounds**, roughly 45 times a step,
+  so about 7 seconds of unprovable exposure per step against roughly 0.15 s
+  before. An interrupt landing there refuses rather than permits, and the lease
+  then needs a human. That is `R-M2-1` at a higher frequency, it is accepted
+  deliberately, and it raises that residual's priority without changing what
+  `U1` says. **Scope:**
+  `lease/owned-launch-register.ts`, `lease/execution-lease.ts`,
+  `boundary/owned-launch-accounting.ts`, `doctor/exec.ts`.
 - **L-V3-05-2** — **withdrawn, having been false.** It claimed
   `HISTORY_DISCARDED`, `LAUNCH_MUST_NOT_START` and `LEDGER_WRITE_FAILED` needed a
   filesystem refusal "which nothing single-threaded can produce". An adversarial
@@ -7583,8 +7601,10 @@ use** and are not to be read as follow-ups.
   the ordinary way an operator stops a run — terminates the process without
   unwinding, and the `finally` that returns the lease never runs. The next
   invocation is refused `STALE_LEASE_RECOVERY_UNSAFE`. Since V3 slice 5 a lease
-  left this way is recoverable with `agent-loop lease recover` **when its writer
-  launches are all proved contained**. The transcript above predates that command.
+  left this way is recoverable with `agent-loop lease recover` when this build can
+  prove it dead — which since M2 slice 2 means **both** that its writer launches
+  are accounted for and that no subprocess the run started is left open in the
+  register beside them. The transcript above predates that command.
 
   **Narrowed by M2 slice 1, and not closed. What changed, and by how much.**
   The paragraph above used to add that the recoverable case was "the common case
@@ -7708,10 +7728,15 @@ anything already in the registers above.
   rests on such a launch probes them before removing anything, refusing
   `LAUNCH_TREE_STILL_RUNNING` while any of them exists. Only that arm probes them:
   a history whose launches were all seen to end reaches the removal on the older
-  argument and asks about no pid at all. That is an instrument for *writer* launches only. The
-  reviewer, the verification command and `git` go through the same owned boundary
-  and are contained in fact, and none of them is recorded — so for those, the
-  judgement is still the operator's and the finding stands as written.
+  argument and asks about no pid at all. That was an instrument for *writer* launches only.
+
+  **Closed by M2 slice 2.** The reviewer, the verification command and `git` go
+  through the same owned boundary, and every one of them is now announced before
+  it starts and settled when the boundary has accounted for its ending — so a
+  recovery refuses `OWNED_LAUNCH_STILL_RUNNING` while any of them is open and
+  names a process that exists. The arm that reaches the removal on a
+  seen-to-end writer history no longer asks about no pid at all: it asks about
+  every subprocess still open in the register.
 - **A6 — README's historical "verbatim" wording.** Documentation precision,
   carried in as named. No behaviour depends on it.
 
@@ -8092,7 +8117,17 @@ and  either every launch in it is proved contained AND observed to end
      or   every launch in it was placed in the owner's job by the kernel, and
           every process the unended ones name — helper and child alike — is
           observed not to exist, now, by this call's own probe
+and  the owned-launch register in the same document has no open slot — or every
+     open slot was placed in the owner's job by the kernel and every process
+     those slots name is observed not to exist, now, by this call's own probe
 ```
+
+The **fifth** conjunct is M2 slice 2
+([its ADR](docs/decisions/2026-08-30-adr-owned-subprocess-quiescence.md)), and it
+is about every subprocess of the run that is *not* the writer — the verification
+commands, the reviewer, the Git commands. It is last on purpose: placed above the
+writer conjunct it would answer for `LAUNCH_HISTORY_ABSENT` and `LAUNCH_HISTORY_UNPROVEN`
+as well, and make the gates that produce those vacuous.
 
 The fourth conjunct's second arm is M2 slice 1
 ([its ADR](docs/decisions/2026-08-30-adr-unattended-crash-recovery.md)). It is not

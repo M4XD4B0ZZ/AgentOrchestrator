@@ -92,7 +92,9 @@ import { mintContainmentAttestation } from '../src/core/internal/containment-att
 import type { ExecutionLeaseEvidence } from '../src/core/execution-lease-evidence.js';
 import {
   acquireRepositoryExecutionLease,
+  announceOwnedLaunch,
   assessStaleLeaseRecovery,
+  attestOwnedLaunchEstablished,
   attestWriterLaunchEstablished,
   beginWriterLaunch,
   type WriterLaunchResult,
@@ -351,6 +353,41 @@ function establishedLaunch(
   expect(established.code).toBe('ESTABLISHED');
 }
 
+/**
+ * One AO-owned subprocess announced under this lease, and left open.
+ *
+ * The register's counterpart to {@link establishedLaunch}, and it goes through
+ * the production functions rather than writing a document: `announceOwnedLaunch`
+ * mints the slot, `attestOwnedLaunchEstablished` puts the pids on it, and both
+ * seal the binding the way production does. A hand-built register would prove
+ * this file can write JSON.
+ *
+ * With `pids` omitted the slot is left `ANNOUNCED` — the state of a subprocess
+ * killed before the kernel answered — and there is nothing to probe.
+ */
+function ownedLaunch(
+  repository: LeaseRepository,
+  evidence: ExecutionLeaseEvidence,
+  pids?: { readonly helperPid: number; readonly childPid: number },
+): number {
+  const announced = announceOwnedLaunch(repository, evidence, { now: tick });
+  expect(announced.code).toBe('ANNOUNCED');
+  const slot = announced.slot;
+  if (slot === null) throw new Error('an announced launch carries a slot');
+  if (pids === undefined) return slot;
+  const established = attestOwnedLaunchEstablished(
+    repository,
+    evidence,
+    attestationFor(process.pid, {
+      ...pids,
+      launchNonce: (launch++).toString(16).padStart(16, '0'),
+    }),
+    { slot, now: tick },
+  );
+  expect(established.code).toBe('ESTABLISHED');
+  return slot;
+}
+
 /* ─────────────────────── 1. the format, in isolation ────────────────────── */
 
 const SUBJECT: WriterLaunchSubject = Object.freeze({
@@ -367,6 +404,13 @@ function payload(over: Partial<WriterLaunchLedgerPayload> = {}): WriterLaunchLed
     runId: SUBJECT.runId,
     historyComplete: true,
     entries: [],
+    // The owned-launch register, defaulted empty here and CARRIED, never
+    // defaulted, by `freezeAsStale`. A fixture that let these default would
+    // silently empty the register of every lease it froze — and an empty
+    // register is the licensing value, so every case in this file would go on
+    // passing while the arm M2 slice 2 added was never exercised.
+    open: [],
+    nextSlot: 1,
     ...over,
   };
 }
@@ -2062,6 +2106,26 @@ describe('the safety predicate refuses everything it cannot prove', () => {
     const live = repositoryFixture();
     const held = leaseOf(live);
 
+    // The register's own pair, built the same way and for the same reason: one
+    // fixture for the two liveness answers, so a defect that mixed them cannot
+    // look like two independent passes. Both carry a CONFIRMED writer launch, so
+    // the writer conjunct permits and only the register can refuse.
+    const ownedOpen = repositoryFixture();
+    const ownedOwner = staleLease(ownedOpen, (evidence) => {
+      containedLaunch(ownedOpen, evidence);
+      ownedLaunch(ownedOpen, evidence, { helperPid: 5252, childPid: 5353 });
+    });
+    /** Dead owner, and whatever the caller wants said about the recorded subprocess. */
+    const ownedSays =
+      (subprocess: ProcessLiveness) =>
+      (pid: number): ProcessLiveness =>
+        pid === ownedOwner ? 'NOT_FOUND' : subprocess;
+    const announcedOnly = repositoryFixture();
+    staleLease(announcedOnly, (evidence) => {
+      containedLaunch(announcedOnly, evidence);
+      ownedLaunch(announcedOnly, evidence);
+    });
+
     const produced: Readonly<Record<StaleRecoveryRefusal, StaleRecoveryRefusal | null>> = {
       NOTHING_TO_RECOVER: assessStaleLeaseRecovery(repositoryFixture()).refusal,
       OWNER_RUNNING: assessStaleLeaseRecovery(live).refusal,
@@ -2105,6 +2169,20 @@ describe('the safety predicate refuses everything it cannot prove', () => {
       LAUNCH_HISTORY_NOT_THIS_RUN: ledgerSays(
         sealed({ entries: [], ownerPid: subject.ownerPid, runId: 'somebody-elses' }, subject),
       ),
+      // The three the register contributes. Each is produced by ITS OWN input,
+      // and each of those inputs carries a writer history that reads
+      // `ALL_LAUNCHES_CONTAINED` — so the writer conjunct permits and the only
+      // thing that can refuse is the arm under test. A fixture whose writer
+      // history also refused would pass this case while measuring the wrong
+      // conjunct.
+      OWNED_LAUNCH_UNPROVEN: assessStaleLeaseRecovery(announcedOnly, { processAlive: dead })
+        .refusal,
+      OWNED_LAUNCH_STILL_RUNNING: assessStaleLeaseRecovery(ownedOpen, {
+        processAlive: ownedSays('ALIVE'),
+      }).refusal,
+      OWNED_LAUNCH_LIVENESS_UNDETERMINED: assessStaleLeaseRecovery(ownedOpen, {
+        processAlive: ownedSays('UNDETERMINED'),
+      }).refusal,
     };
 
     // Every member of the union is produced by something, so no refusal is a name
@@ -2256,6 +2334,13 @@ function freezeAsStale(repository: LeaseRepository, evidence: ExecutionLeaseEvid
   // incomplete history — and this helper is the one that would then be unable to
   // produce the `HISTORY_INCOMPLETE` refusal it exists to be able to produce.
   const historyComplete = ledger?.historyComplete === true;
+  // Carried across for exactly the reason `historyComplete` is: `sealed()`
+  // defaults the register to empty, and empty is the value that licenses a
+  // recovery. A fixture that let it default could not produce any of the
+  // register's refusals, and every case that expected one would pass by
+  // measuring an emptied document.
+  const open = (ledger?.open ?? []) as WriterLaunchLedgerPayload['open'];
+  const nextSlot = typeof ledger?.nextSlot === 'number' ? ledger.nextSlot : 1;
   releaseRepositoryExecutionLease(evidence);
 
   const ownerPid = deadProcessId();
@@ -2277,6 +2362,8 @@ function freezeAsStale(repository: LeaseRepository, evidence: ExecutionLeaseEvid
       {
         entries: entries as WriterLaunchLedgerPayload['entries'],
         historyComplete,
+        open,
+        nextSlot,
         ownerPid,
         runId,
       },
@@ -2619,8 +2706,9 @@ describe('the recovery vocabulary says what the code does', () => {
       ...Object.values(STALE_RECOVERY_SENTENCES),
       ...Object.values(STALE_RECOVERY_OUTCOMES),
       renderLeaseRecovery(
-        { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'D:\\r\\.git', ownerPid: 1, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED' },
+        { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'D:\\r\\.git', ownerPid: 1, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED', ownedLaunches: 'NO_OWNED_LAUNCH_OPEN' },
         'ALL_LAUNCHES_CONTAINED',
+        'NO_OWNED_LAUNCH_OPEN',
       ),
     ]) {
       // eslint-disable-next-line no-control-regex
@@ -2634,8 +2722,9 @@ describe('the recovery vocabulary says what the code does', () => {
     // started can still be running", which is the wider claim the format
     // refuses to make — the reviewer is an agent and is not in the history.
     const safe = renderLeaseRecovery(
-      { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'D:\\r\\.git', ownerPid: 7, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED' },
+      { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'D:\\r\\.git', ownerPid: 7, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED', ownedLaunches: 'NO_OWNED_LAUNCH_OPEN' },
       'ALL_LAUNCHES_CONTAINED',
+        'NO_OWNED_LAUNCH_OPEN',
     );
     expect(safe).toContain('no writer process it started can still be running');
     expect(safe).not.toContain('no agent process');
@@ -2661,8 +2750,10 @@ describe('the recovery vocabulary says what the code does', () => {
         ownerPid: 7,
         runId: 'r',
         launchHistory: 'LAUNCHES_CONTAINED_SOME_UNENDED',
+        ownedLaunches: 'NO_OWNED_LAUNCH_OPEN',
       },
       'LAUNCHES_CONTAINED_SOME_UNENDED',
+      'NO_OWNED_LAUNCH_OPEN',
     );
     expect(unended).toContain('Launches     : LAUNCHES_CONTAINED_SOME_UNENDED');
     expect(unended).toContain('never seen to end');
@@ -2694,8 +2785,10 @@ describe('the recovery vocabulary says what the code does', () => {
         ownerPid: 7,
         runId: 'r',
         launchHistory: 'LAUNCHES_CONTAINED_SOME_UNENDED',
+        ownedLaunches: 'NO_OWNED_LAUNCH_OPEN',
       },
       null,
+      'NO_OWNED_LAUNCH_OPEN',
     );
     expect(safeUnendedWithNoReread).toContain('never seen to end');
     expect(safeUnendedWithNoReread).not.toContain('was seen to end');
@@ -2708,8 +2801,10 @@ describe('the recovery vocabulary says what the code does', () => {
         ownerPid: 7,
         runId: 'r',
         launchHistory: 'ALL_LAUNCHES_CONTAINED',
+        ownedLaunches: 'NO_OWNED_LAUNCH_OPEN',
       },
       'LAUNCHES_CONTAINED_SOME_UNENDED',
+      'NO_OWNED_LAUNCH_OPEN',
     );
     expect(safeEndedWithMovedReread).toContain('was seen to end');
     expect(safeEndedWithMovedReread).not.toContain('checked just now');
@@ -2729,8 +2824,10 @@ describe('the recovery vocabulary says what the code does', () => {
         ownerPid: 7,
         runId: 'r',
         launchHistory: 'LAUNCH_UNPROVEN',
+        ownedLaunches: 'NO_OWNED_LAUNCH_OPEN',
       },
       'LAUNCH_UNPROVEN',
+      'NO_OWNED_LAUNCH_OPEN',
     );
     expect(unexplained).toContain('cannot say which proof it rests on');
     expect(unexplained).not.toContain('was seen to end');
@@ -2742,8 +2839,9 @@ describe('the recovery vocabulary says what the code does', () => {
     // no reading. "Is this run's bookkeeping intact" is a question about a
     // healthy repository too, which is why the report reads it separately.
     const report = renderLeaseRecovery(
-      { verdict: 'UNSAFE', refusal: 'OWNER_RUNNING', path: 'D:\\r\\.git', ownerPid: 7, runId: 'r', launchHistory: null },
+      { verdict: 'UNSAFE', refusal: 'OWNER_RUNNING', path: 'D:\\r\\.git', ownerPid: 7, runId: 'r', launchHistory: null, ownedLaunches: null },
       'LAUNCH_UNPROVEN',
+        'NO_OWNED_LAUNCH_OPEN',
     );
     expect(report).toContain('Launches     : LAUNCH_UNPROVEN');
     expect(report).toContain('Recovery     : OWNER_RUNNING');
@@ -2751,8 +2849,9 @@ describe('the recovery vocabulary says what the code does', () => {
     // And `none` rather than a blank when there is no lease to read one from.
     expect(
       renderLeaseRecovery(
-        { verdict: 'UNSAFE', refusal: 'NOTHING_TO_RECOVER', path: '', ownerPid: null, runId: null, launchHistory: null },
+        { verdict: 'UNSAFE', refusal: 'NOTHING_TO_RECOVER', path: '', ownerPid: null, runId: null, launchHistory: null, ownedLaunches: null },
         null,
+        'NO_OWNED_LAUNCH_OPEN',
       ),
     ).toContain('Launches     : none');
   });
@@ -2793,8 +2892,9 @@ describe('the recovery vocabulary says what the code does', () => {
       ...Object.values(STALE_RECOVERY_SENTENCES),
       ...Object.values(STALE_RECOVERY_OUTCOMES),
       renderLeaseRecovery(
-        { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'p', ownerPid: 1, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED' },
+        { verdict: 'SAFE_TO_RECOVER', refusal: null, path: 'p', ownerPid: 1, runId: 'r', launchHistory: 'ALL_LAUNCHES_CONTAINED', ownedLaunches: 'NO_OWNED_LAUNCH_OPEN' },
         'ALL_LAUNCHES_CONTAINED',
+        'NO_OWNED_LAUNCH_OPEN',
       ),
     ].join('\n');
     const named = [...rendered.matchAll(/agent-loop lease\s+([a-z][a-z-]*)/g)].map((m) => m[1]);

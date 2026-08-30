@@ -196,7 +196,10 @@ clears itself; there is no direction in which reuse permits a removal.
 - **`R-M2-1` — the pre-establishment window.** Above. The next prerequisite for
   closing it is a kernel-authoritative identity for the launch (a named job, or
   pid + creation time), which is a change to the native boundary.
-- **`R-M2-2` — the ledger describes the writer only.** This is not a new item: it
+- **`R-M2-2` — the ledger describes the writer only.** **Closed by M2 slice 2**;
+  see [that ADR](2026-08-30-adr-owned-subprocess-quiescence.md), which reproduced
+  the sequence below on `main` at `fba4cfd` with the shipped CLI before closing
+  it. What follows is the item as it stood. It was not a new one: it
   is the already-open `L-V3-05-1`, restated here because this slice was checked
   against it rather than around it. A verification command, the
   reviewer and `git` subprocesses go through the same owned boundary and are
@@ -232,7 +235,7 @@ clears itself; there is no direction in which reuse permits a removal.
 
   Measured, not argued. `tests/dist-artifact/crash-recovery-dist-artifact.mjs`
   phase **F** builds the sequence with real processes — a real writer that ends
-  unproved, a real later owned subprocess left alive, a real owner death — and
+  unproved, a real later detached subprocess left alive, a real owner death — and
   requires a refusal. Phase **G** is its control: the identical fixture with the
   withdrawal switched off must *recover*, which reproduces the defect and stops F
   passing in a build that had merely broken the arm.

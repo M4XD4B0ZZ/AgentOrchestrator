@@ -173,17 +173,35 @@ import {
   type ExecutionLease,
 } from './lease-document.js';
 import {
+  installOwnedLaunchAccountant,
+  type OwnedLaunchAccountant,
+  type OwnedLaunchOpening,
+} from '../boundary/owned-launch-accounting.js';
+import {
+  MAX_OPEN_OWNED_LAUNCHES,
+  provesNoOwnedLaunchOpen,
+  provesOwnedLaunchesOpenUnended,
+  readOpenSet,
+  type OpenOwnedLaunch,
+  type OwnedLaunchReading,
+} from './owned-launch-register.js';
+import {
   extendableWriterLaunchLedger,
   MAX_WRITER_LAUNCH_ENTRIES,
+  WriterLaunchLedgerSchema,
+  openOwnedProcessesOf,
   provesEveryLaunchContained,
   provesEveryLaunchContainedUnended,
+  readOwnedLaunchRegister,
   readWriterLaunchLedger,
   unendedLaunchesOf,
   writerLaunchBinding,
   WRITER_LAUNCH_LEDGER_VERSION,
   type WriterLaunchEntry,
+  type WriterLaunchLedger,
   type WriterLaunchLedgerPayload,
   type WriterLaunchReading,
+  type WriterLaunchSubject,
 } from './writer-launch-ledger.js';
 
 /** The single file that is one repository's lease. A plain name, never derived. */
@@ -1170,6 +1188,21 @@ export function acquireRepositoryExecutionLease(
   // unrecoverable, which is what every lease before this slice was.
   openWriterLaunchHistory(location, document, evidence);
 
+  // ── And every owned subprocess of this epoch is accounted from here ───────
+  //
+  // Here rather than in a caller, and that is the whole of what makes the
+  // register exhaustive. There are four places in this build that take a lease
+  // — `run/lifecycle-driver.ts`, `cli/block-command.ts`, `cli/delivery-steps.ts`
+  // and `cli/release-command.ts` — and a fifth is a normal thing for a later
+  // slice to add. An install any of them could forget is an epoch whose
+  // subprocesses are invisible to recovery, which is precisely the defect this
+  // slice exists to close; an install the acquisition itself performs cannot be
+  // forgotten by a caller that does not know it happens.
+  //
+  // It changes nothing about the acquisition. The accountant records; it grants
+  // nothing, and it is not consulted by anything that decides who may write.
+  ACCOUNTANT_DISPOSERS.set(evidence, installOwnedLaunchAccountant(accountantFor(repository, evidence)));
+
   return Object.freeze({
     ok: true as const,
     code: 'ACQUIRED' as const,
@@ -1177,6 +1210,164 @@ export function acquireRepositoryExecutionLease(
     path: location.path,
     revision: revisionOfBytes(bytes),
   });
+}
+
+/**
+ * How a lease's own release finds the accountant it installed.
+ *
+ * Keyed by the evidence object, so a release removes exactly the accountant its
+ * acquisition made and can remove no other. A `WeakMap` rather than a `Map`
+ * because the key is the only thing that keeps the entry alive: a process that
+ * loses its evidence without releasing has nothing left that could dispose, and
+ * an accountant that outlives its evidence evicts itself on the next launch it
+ * is asked about.
+ *
+ * The explicit disposal is therefore not the mechanism that bounds the
+ * registry — self-eviction is — and it is here because a lifetime that ends
+ * where it is supposed to end is one an operator and a reviewer can both follow.
+ */
+const ACCOUNTANT_DISPOSERS = new WeakMap<object, () => void>();
+
+/**
+ * What a launch may do, given what the announcement answered. Total, and the
+ * default is the refusing one.
+ *
+ * ── The defect this table replaces ────────────────────────────────────────
+ *
+ * `accountantFor` used to name two codes and send *everything else* to
+ * `EPOCH_ENDED`, which drops the accountant and lets the launch proceed. An
+ * adversarial review reproduced what that costs, and it is the whole of this
+ * slice undone by one failed `readFileSync`:
+ *
+ *   1. the lease is acquired, the document published, the writer runs and is
+ *      confirmed — the document reads `ALL_LAUNCHES_CONTAINED`, register empty;
+ *   2. any later owned spawn announces, and `heldLeaseFor` cannot read the lease
+ *      file for one call — a share violation, `EMFILE` under a loaded gate — so
+ *      the answer is `LEASE_UNREADABLE`;
+ *   3. that fell into `EPOCH_ENDED`: the accountant was evicted **for the life
+ *      of the process**, and nothing re-installs it — only an acquisition does;
+ *   4. the lease and its document were untouched and still license;
+ *   5. every later subprocess, the thirty-minute verification included, ran
+ *      unannounced;
+ *   6. the owner died, and the recovery removed the lease.
+ *
+ * ── The rule the table encodes ────────────────────────────────────────────
+ *
+ * `EPOCH_ENDED` is permitted for exactly the answers that **prove no document
+ * of this epoch can license a recovery**, so an unrecorded launch after one of
+ * them cannot be turned into a removal:
+ *
+ *  - `LEASE_ABSENT` — there is no lease; a recovery answers `NOTHING_TO_RECOVER`;
+ *  - `NOT_OWNER` — a lease was read and its nonce is somebody else's, so this
+ *    epoch's document is gone and any register still on disk reads
+ *    `NOT_THIS_LEASE` for the successor's subject;
+ *  - `LEASE_FOR_ANOTHER_REPOSITORY` and `EVIDENCE_INVALID` — programming errors,
+ *    deterministic, and this accountant can never work;
+ *  - `REGISTER_DISCARDED` — the document was removed; the reading is
+ *    `LAUNCH_HISTORY_ABSENT`, and nothing promotes it back.
+ *
+ * Everything else refuses the launch, **including codes an announcement cannot
+ * produce**, because the alternative is a launch that happened and was not
+ * written down beside a document that still reads as a proof.
+ * `OWNERSHIP_UNCONFIRMED` is the sharp one and is the reason that code exists.
+ *
+ * Every row is asserted by value in
+ * `tests/m2-02-owned-launch-quiescence.test.ts`; a `satisfies` clause would
+ * accept `EPOCH_ENDED` everywhere.
+ */
+export const ANNOUNCEMENT_DISPOSITION: Readonly<
+  Record<OwnedLaunchCode, 'RECORDED' | 'EPOCH_ENDED' | 'LAUNCH_MUST_NOT_START'>
+> = Object.freeze({
+  ANNOUNCED: 'RECORDED',
+  LEASE_ABSENT: 'EPOCH_ENDED',
+  NOT_OWNER: 'EPOCH_ENDED',
+  LEASE_FOR_ANOTHER_REPOSITORY: 'EPOCH_ENDED',
+  EVIDENCE_INVALID: 'EPOCH_ENDED',
+  REGISTER_DISCARDED: 'EPOCH_ENDED',
+  LAUNCH_MUST_NOT_START: 'LAUNCH_MUST_NOT_START',
+  // The rest, and every one of them leaves a document that can still license.
+  OWNERSHIP_UNCONFIRMED: 'LAUNCH_MUST_NOT_START',
+  LEASE_UNREADABLE: 'LAUNCH_MUST_NOT_START',
+  REGISTER_NOT_READABLE_BACK: 'LAUNCH_MUST_NOT_START',
+  REGISTER_WRITE_FAILED: 'LAUNCH_MUST_NOT_START',
+  // Not producible by an announcement, and stated rather than defaulted: a
+  // table with an unstated row is a table with a default, and the default here
+  // is the one that was wrong.
+  ESTABLISHED: 'LAUNCH_MUST_NOT_START',
+  SETTLED: 'LAUNCH_MUST_NOT_START',
+  ALREADY_SETTLED: 'LAUNCH_MUST_NOT_START',
+  ATTESTATION_INVALID: 'LAUNCH_MUST_NOT_START',
+  ATTESTATION_ALREADY_USED: 'LAUNCH_MUST_NOT_START',
+  OWNER_MISMATCH: 'LAUNCH_MUST_NOT_START',
+  SLOT_NOT_OPEN: 'LAUNCH_MUST_NOT_START',
+});
+
+/**
+ * The accountant one lease installs, in the boundary's lease-free vocabulary.
+ *
+ * ── It answers `EPOCH_ENDED` rather than clinging on ───────────────────────
+ *
+ * A process can take many leases over its life — a test file takes hundreds —
+ * and every accountant that stayed installed would be asked about every later
+ * spawn, reading a document that is not its own each time. So the answers that
+ * mean *this lease is no longer this evidence's* are turned into
+ * `EPOCH_ENDED`, and `owned-launch-accounting.ts` drops the accountant that
+ * says it.
+ *
+ * That is not a hole. `EPOCH_ENDED` means there is no document for a later
+ * recovery to read this launch out of, and no lease of this run's for that
+ * recovery to remove. A run that has lost its lease is stopped by the gates
+ * that exist for it — `loop/leased-spawns.ts`'s `leaseHolds`, and
+ * `advanceTaskState` after it.
+ *
+ * ── And a failure to record is not a failure to run, except once ───────────
+ *
+ * `REGISTER_DISCARDED` proceeds: the document is gone, so nothing on disk
+ * claims anything, and this lease is simply never recoverable — the trade
+ * `beginWriterLaunch` already makes. Only `LAUNCH_MUST_NOT_START` stops a
+ * launch, and it is reached only when the document could be neither written nor
+ * removed.
+ */
+function accountantFor(
+  repository: LeaseRepository,
+  evidence: ExecutionLeaseEvidence,
+): OwnedLaunchAccountant {
+  const now = (): string => new Date().toISOString();
+  return {
+    open: (): OwnedLaunchOpening => {
+      // `announceOwnedLaunch` documents that it never throws, and this makes
+      // that true rather than trusted. It reaches `randomBytes` and the
+      // filesystem through `publishCompanionRecord`, and a fault-injection test
+      // in `tests/v3-07-lease-release-fault.test.ts` proved the reachability by
+      // refusing entropy. A throw is an unknown, and an unknown refuses.
+      let announced: OwnedLaunchResult;
+      try {
+        announced = announceOwnedLaunch(repository, evidence, { now });
+      } catch {
+        return { opening: 'LAUNCH_MUST_NOT_START', detail: 'ANNOUNCEMENT_THREW' };
+      }
+      if (announced.code === 'ANNOUNCED' && announced.slot !== null) {
+        const slot = announced.slot;
+        return {
+          opening: 'RECORDED',
+          record: {
+            established: (attestation): void => {
+              attestOwnedLaunchEstablished(repository, evidence, attestation, { slot, now });
+            },
+            ended: (): void => {
+              settleOwnedLaunch(repository, evidence, { slot });
+            },
+          },
+        };
+      }
+      // Everything else through the table, whose default is the refusing one.
+      // An `ANNOUNCED` answer carrying no slot number cannot be settled and is
+      // therefore not a record; it falls here rather than being closed over.
+      return ANNOUNCEMENT_DISPOSITION[announced.code] === 'EPOCH_ENDED'
+        ? { opening: 'EPOCH_ENDED' }
+        : { opening: 'LAUNCH_MUST_NOT_START', detail: announced.detail ?? announced.code };
+    },
+  };
 }
 
 interface ClaimResult {
@@ -1237,18 +1428,55 @@ function claimLeaseFile(
 }
 
 /** Creates `path` exclusively and writes `bytes` into it. `null` on success. */
-function writeRecord(path: string, bytes: Buffer): string | null {
+function writeRecord(path: string, bytes: Buffer, durable = true): string | null {
   let handle: number;
   try {
     handle = openSync(path, 'wx', 0o600);
   } catch (error) {
     return safeErrnoCode(error);
   }
-  return writeInto(handle, bytes);
+  return writeInto(handle, bytes, durable);
 }
 
-/** Writes, flushes and closes. `null` on success, an errno token otherwise. */
-function writeInto(handle: number, bytes: Buffer): string | null {
+/**
+ * Writes, optionally flushes, and closes. `null` on success, an errno token
+ * otherwise.
+ *
+ * ── Why the flush is a choice rather than a rule ──────────────────────────
+ *
+ * `fsyncSync` costs a seek. Measured on this repository's own volume, a
+ * spinning disk, replaying this exact sequence over a 19 KB payload 200 times
+ * in each of three rounds: **73 ms mean with the flush, 6.5 ms without**. The
+ * lease document and the writer history are written a handful of times per run
+ * and pay it gladly. The owned-launch register is written twice per *spawn* —
+ * tens of times per step — and at 73 ms a publish that is seconds of blocked
+ * event loop per step, which is not a cost this accounting may impose.
+ *
+ * ── And what the flush actually protects against ──────────────────────────
+ *
+ * A **power failure**, not a killed process. `taskkill /F` leaves the page
+ * cache alone and the operating system still writes it out, so every case the
+ * recovery predicate exists for — an orchestrator that was killed — is
+ * unaffected by this choice.
+ *
+ * What a power cut can lose, for a non-durable write, is safe in every
+ * direction that matters, and each one is worth stating rather than asserting
+ * as a class:
+ *
+ *  - **a lost announcement** would leave a document that does not mention a
+ *    launch that happened. That is the one fail-open shape this record has —
+ *    and it is unreachable here, because the event that lost it is a power cut,
+ *    which killed that launch too. Permitting a recovery afterwards is correct;
+ *  - **a lost establishment** leaves the slot `ANNOUNCED`, which refuses;
+ *  - **a lost settlement** leaves the slot open, which refuses or over-refuses;
+ *  - **a torn document** — the rename persisted, the bytes did not — reads
+ *    `MALFORMED`, which refuses. Note what that costs: the writer history lives
+ *    in the same document, so a power cut during a register publish can lose a
+ *    durably-written writer history along with it. The lease becomes
+ *    unrecoverable and nothing false is asserted, which is the direction this
+ *    format fails in everywhere else.
+ */
+function writeInto(handle: number, bytes: Buffer, durable = true): string | null {
   try {
     let offset = 0;
     while (offset < bytes.length) {
@@ -1261,8 +1489,10 @@ function writeInto(handle: number, bytes: Buffer): string | null {
       return 'SHORT_WRITE';
     }
     // A lease that survives a power failure without its record would be read as
-    // unsafe forever, so it is flushed before it is published.
-    fsyncSync(handle);
+    // unsafe forever, so it is flushed before it is published — unless the
+    // caller has stated it does not need to be. See this function's header for
+    // the measurement and for what each loss costs.
+    if (durable) fsyncSync(handle);
     closeSync(handle);
     return null;
   } catch (error) {
@@ -2427,9 +2657,10 @@ function publishCompanionRecord(
   path: string,
   bytes: Buffer,
   stillHeld: () => boolean,
+  durable = true,
 ): string | null | 'NOT_OWNER' {
   const staging = `${path}.tmp-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`;
-  const staged = writeRecord(staging, bytes);
+  const staged = writeRecord(staging, bytes, durable);
   if (staged !== null) {
     discard(staging);
     return staged;
@@ -2815,6 +3046,15 @@ function openWriterLaunchHistory(
     runId: document.runId,
     historyComplete: true,
     entries: [],
+    // The register is opened at the same instant and for the same reason: this
+    // is the one moment nothing can have been hidden, because the lease exists,
+    // this process holds it, and no owned subprocess can have been started under
+    // it yet. An empty register minted anywhere later would be a claim this
+    // build cannot make.
+    open: [],
+    // Slots start at 1 and only ever go up. See `owned-launch-register.ts` for
+    // what a rolled-back counter would let a stale settlement do.
+    nextSlot: 1,
   });
   // Read back before it is written, through the reader itself, for the reason
   // the containment record is: a ledger this build would refuse is worse than no
@@ -2912,6 +3152,19 @@ export function beginWriterLaunch(
     runId: document.runId,
     historyComplete,
     entries: [...entries, { generation, state: 'PENDING', writerId: request.writerId, openedAt }],
+    // Carried through untouched. A writer launch is not an owned-launch event,
+    // and a payload built here that dropped the register would erase the record
+    // of every owned subprocess still open — which is the one edit in that
+    // format that turns a refusal into a permission.
+    //
+    // Empty and 1 only where `existing` is `null`, which is a document this
+    // build could not extend. That path also sets `historyComplete: false`, so
+    // the rebuilt register is never read as a proof: every reading of such a
+    // document is `HISTORY_INCOMPLETE`, and `readOwnedLaunchRegister` collapses
+    // that to `REGISTER_NOT_READABLE`. Losing the old register there costs
+    // nothing that was not already lost.
+    open: existing === null ? [] : existing.open,
+    nextSlot: existing === null ? 1 : existing.nextSlot,
   };
   const bytes = ledgerBytesFor(document, payload);
 
@@ -3183,6 +3436,12 @@ export function retractWriterLaunchEstablishment(
     runId: document.runId,
     historyComplete: existing.historyComplete,
     entries,
+    // Carried through untouched, for the reason `beginWriterLaunch` gives: a
+    // writer-history write is not an owned-launch event, and a payload that
+    // dropped the register would erase the record of every owned subprocess
+    // still open.
+    open: existing.open,
+    nextSlot: existing.nextSlot,
   };
   const bytes = ledgerBytesFor(document, payload);
 
@@ -3339,6 +3598,12 @@ function recordLaunchContainment(
     runId: document.runId,
     historyComplete: existing.historyComplete,
     entries,
+    // Carried through untouched, for the reason `beginWriterLaunch` gives: a
+    // writer-history write is not an owned-launch event, and a payload that
+    // dropped the register would erase the record of every owned subprocess
+    // still open.
+    open: existing.open,
+    nextSlot: existing.nextSlot,
   };
   const bytes = ledgerBytesFor(document, payload);
 
@@ -3365,6 +3630,606 @@ function recordLaunchContainment(
         generation: request.generation,
       })
     : launchFailure('LEDGER_WRITE_FAILED', published, request.generation);
+}
+
+/* ────────────────────── the owned-launch register ───────────────────────── */
+
+/**
+ * What became of an attempt to announce, establish or settle an owned launch.
+ *
+ * A closed set. Its own vocabulary rather than {@link WRITER_LAUNCH_CODES},
+ * although several members share a spelling, because the two records answer
+ * different questions and a caller that could pass one result where the other
+ * belongs would be one refactor away from reading `OPENED` as `ANNOUNCED`.
+ * Where a member has a twin next door it means exactly what the twin means.
+ */
+export const OWNED_LAUNCH_CODES = [
+  /** The slot is on disk as `ANNOUNCED`. The launch may proceed. */
+  'ANNOUNCED',
+  /** The slot is on disk as `ESTABLISHED`: the kernel confirmed job membership. */
+  'ESTABLISHED',
+  /** The slot is gone from the register. Nothing of this launch is open. */
+  'SETTLED',
+  /**
+   * There was no such open slot, so the postcondition already holds.
+   *
+   * A success, and the one that is easy to misread. It does not mean a launch
+   * was lost; it means the register does not claim this launch is open — which
+   * is what a settlement is for. Reached when an announcement was discarded, or
+   * when a settlement runs twice.
+   */
+  'ALREADY_SETTLED',
+  /**
+   * The announcement could not be published, so the whole document was
+   * **removed** instead. The launch may proceed; this lease can never be
+   * recovered.
+   *
+   * The same escape hatch {@link HISTORY_DISCARDED} is, reached for the same
+   * hazard: what is on disk would otherwise be a document that reads as a
+   * complete account while a launch happens that it does not mention.
+   */
+  'REGISTER_DISCARDED',
+  /**
+   * Neither the announcement nor the removal was possible. **Productive work
+   * must not go on.**
+   *
+   * The twin of {@link LAUNCH_MUST_NOT_START} next door, and the only condition
+   * under which this register refuses a launch. `doctor/exec.ts` turns it into a
+   * `SPAWN_FAILED` result and nothing is started.
+   */
+  'LAUNCH_MUST_NOT_START',
+  /** The lease artefact was not minted evidence. Nothing was written. */
+  'EVIDENCE_INVALID',
+  /** The containment artefact was not minted. Nothing was written. */
+  'ATTESTATION_INVALID',
+  /** The evidence names a different repository's lease than the record does. */
+  'LEASE_FOR_ANOTHER_REPOSITORY',
+  /** No lease path can be derived, or nothing is at the one derived. */
+  'LEASE_ABSENT',
+  /** Something is at the lease path and could not be read. */
+  'LEASE_UNREADABLE',
+  /** What is there is not this holder's lease — or is not a lease at all. */
+  'NOT_OWNER',
+  /**
+   * Whether this holder still owns the lease could not be confirmed, so nothing
+   * was written and nothing was removed.
+   *
+   * Its own code rather than a shade of {@link NOT_OWNER}, and the distinction
+   * is the one an adversarial review found this format collapsing. `NOT_OWNER`
+   * is a *proved* mismatch: a lease document was read and its nonce is somebody
+   * else's, so this run's epoch has no document left that could license a
+   * recovery. This one comes from `stillHeldBy`, which answers `false` for a
+   * mismatch **and** for any failure to read the file at all — a share
+   * violation, `EMFILE` under a loaded gate, a scanner holding the handle for a
+   * moment. In that second case the licensing document is still there, so
+   * treating the two the same would let one failed read leave a launch
+   * unrecorded beside a document that still reads as a proof.
+   */
+  'OWNERSHIP_UNCONFIRMED',
+  /** The containment was coupled to a process other than the lease's owner. */
+  'OWNER_MISMATCH',
+  /**
+   * The slot named is not open in the register on disk, or is not in the state
+   * this call requires.
+   *
+   * A refusal rather than a repair, for the reason `GENERATION_NOT_OPEN` is: the
+   * entry *is* the record of a launch, and a call that invented one would
+   * establish a launch nobody announced.
+   */
+  'SLOT_NOT_OPEN',
+  /**
+   * This attestation already proves another open slot of this lease.
+   *
+   * One kernel-confirmed launch proves one launch. Replaying an attestation
+   * across two open slots would put one launch's pids on both, and the second
+   * launch's real processes would then be named nowhere — a live process the
+   * predicate cannot see.
+   *
+   * The guard is complete over the **open** set and cannot be complete over a
+   * settled one, because a settled slot leaves nothing behind to compare
+   * against. That is a stated bound rather than a hidden one: it is the same
+   * bound the binding digest has, and it is not reachable from production,
+   * where `doctor/exec.ts` holds one slot and one attestation in one closure.
+   */
+  'ATTESTATION_ALREADY_USED',
+  /** The document this build built is one this build would not accept back. */
+  'REGISTER_NOT_READABLE_BACK',
+  /**
+   * The document could not be written, and what is on disk is unchanged.
+   *
+   * Answered by the establishment and the settlement, never by the
+   * announcement: a failed announcement has a launch about to happen and must
+   * therefore reach {@link REGISTER_DISCARDED} or {@link LAUNCH_MUST_NOT_START}.
+   *
+   * Leaving the slot where it already was is the conservative end state in both
+   * cases, and the direction is the opposite of the writer ledger's. There, a
+   * mark left standing by a launch that is over reads as a **proof** and is a
+   * lie, which is why that path carries a withdrawal and stops the run when it
+   * fails. Here a slot left standing reads as *open*, and open is a **refusal**:
+   * a recovery probes the processes it names, permits only if they are gone, and
+   * over-refuses if they cannot be probed. There is no leftover in this format
+   * that permits anything, which is why nothing here stops a run.
+   */
+  'REGISTER_WRITE_FAILED',
+] as const;
+
+export type OwnedLaunchCode = (typeof OWNED_LAUNCH_CODES)[number];
+
+export interface OwnedLaunchResult {
+  readonly code: OwnedLaunchCode;
+  /** An errno token or a short reason, never free text from anywhere else. */
+  readonly detail: string | null;
+  /**
+   * The slot this call is about, or `null` when none was reached.
+   *
+   * Present on `ANNOUNCED` so the caller can name it back, and deliberately not
+   * re-derived later: "the last slot" read a second time is a different
+   * question from "the slot I announced", and the difference is a settlement
+   * that removes somebody else's launch.
+   */
+  readonly slot: number | null;
+}
+
+function ownedFailure(
+  code: OwnedLaunchCode,
+  detail: string | null = null,
+  slot: number | null = null,
+): OwnedLaunchResult {
+  return Object.freeze({ code, detail, slot });
+}
+
+/** The register vocabulary's answer to each refusal of the shared lease gate. */
+function ownedFailureFor(failure: HeldLeaseFailure): OwnedLaunchResult {
+  switch (failure) {
+    case 'EVIDENCE_INVALID':
+      return ownedFailure('EVIDENCE_INVALID');
+    case 'LEASE_FOR_ANOTHER_REPOSITORY':
+      return ownedFailure('LEASE_FOR_ANOTHER_REPOSITORY');
+    case 'LEASE_ABSENT':
+      return ownedFailure('LEASE_ABSENT');
+    case 'LEASE_UNREADABLE':
+      return ownedFailure('LEASE_UNREADABLE');
+    case 'NOT_OWNER_UNPARSEABLE':
+      return ownedFailure('NOT_OWNER', 'UNPARSEABLE');
+    case 'NOT_OWNER':
+      return ownedFailure('NOT_OWNER');
+  }
+}
+
+/**
+ * Removes this lease's launch document, so that nothing on disk asserts
+ * anything about the owned launch about to happen.
+ *
+ * The register's use of the same destructive fallback the writer ledger has,
+ * reported in this vocabulary. One caller: an announcement that could not be
+ * published. It is emphatically **not** reached by a settlement — see
+ * {@link REGISTER_WRITE_FAILED} for why a slot left open costs nothing and
+ * discarding to tidy it up would trade a harmless refusal for a permanent one.
+ */
+function discardForOwnedLaunch(
+  location: LeaseLocation,
+  holder: ExecutionLeaseEvidence,
+  reason: string,
+): OwnedLaunchResult {
+  if (!stillHeldBy(location, holder)) {
+    return ownedFailure('OWNERSHIP_UNCONFIRMED', 'LOST_BEFORE_DISCARD');
+  }
+  try {
+    unlinkSync(ledgerPathFor(location));
+  } catch (error) {
+    const errno = safeErrnoCode(error);
+    if (errno !== 'ENOENT') return ownedFailure('LAUNCH_MUST_NOT_START', errno);
+  }
+  return ownedFailure('REGISTER_DISCARDED', reason);
+}
+
+/**
+ * Builds the document with a replaced register and publishes it. Never throws.
+ *
+ * The one writer of the register, so the read-back rule, the ownership re-check
+ * and the publish live in one place rather than three copies that can drift.
+ * `expected` is what this build must read back out of its own bytes — stated by
+ * the caller rather than inferred, so a payload that read as something else is a
+ * refusal instead of a file.
+ */
+function publishRegister(
+  location: LeaseLocation,
+  document: ExecutionLease,
+  holder: ExecutionLeaseEvidence,
+  existing: WriterLaunchLedger,
+  open: readonly OpenOwnedLaunch[],
+  nextSlot: number,
+  expected: OwnedLaunchReading,
+  expectSlot: { readonly slot: number; readonly state: OpenOwnedLaunch['state'] | 'ABSENT' },
+): { readonly published: true } | OwnedLaunchResult {
+  const subject = subjectOf(document);
+  const bytes = ledgerBytesFor(document, {
+    ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION,
+    ownerPid: document.ownerPid,
+    runId: document.runId,
+    historyComplete: existing.historyComplete,
+    // Carried through untouched: an owned-launch event is not a writer event,
+    // and this is the mirror of the carry the writer paths make in the other
+    // direction.
+    entries: existing.entries,
+    open: [...open],
+    nextSlot,
+  });
+
+  // Read back through the reader itself, before anything is written. The clock
+  // is a caller-supplied seam, so a `now` returning something the contract
+  // refuses is enough to build a document that would be refused for the rest of
+  // this lease's life; this is what stops it reaching a file.
+  // ── Read back once, and ask three questions of the one answer ───────────
+  //
+  // `readOwnedLaunchRegister` runs the whole structural chain — version, schema,
+  // the positional generation rule, the slot rules, the binding, the owner and
+  // run agreement, `historyComplete` — and answers the register's reading. That
+  // is the expensive part: a schema parse and a digest over every entry and every
+  // open slot.
+  //
+  // This block used to run it FOUR times and compute the digest THREE times, for
+  // a document written twice per spawn. The checks below are the same three
+  // claims taken from one parse, and the third is now *stronger* than the one it
+  // replaces: byte-for-byte identical entries rather than the same verdict about
+  // them.
+  const back = ledgerReadBack(bytes);
+  if (readOwnedLaunchRegister(subject, back) !== expected) {
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'NOT_AS_BUILT');
+  }
+  const parsed = WriterLaunchLedgerSchema.safeParse(back);
+  if (!parsed.success) {
+    // Unreachable while the reading above is not `REGISTER_NOT_READABLE`, which
+    // is what an unparseable document answers. A refusal rather than a throw, so
+    // a future change that breaks that agreement degrades the reason and never
+    // the decision.
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'NOT_PARSEABLE');
+  }
+  // The reading alone is not enough, and this is the assertion that carries the
+  // weight. A register with any announced slot in it reads `OWNED_LAUNCH_UNPROVEN`
+  // whether or not *this* slot reached the state this call is writing, so the
+  // check has to name the entry — the same correction `recordLaunchContainment`
+  // already carries for the writer ledger, and the same defect: without it,
+  // establishing one slot while another was announced was refused outright,
+  // which a test caught before this line existed.
+  const written = parsed.data.open.find((entry) => entry.slot === expectSlot.slot);
+  if ((written?.state ?? 'ABSENT') !== expectSlot.state) {
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'SLOT_NOT_AS_BUILT');
+  }
+  // And the writer history must survive the write untouched. Asserted rather
+  // than assumed: this function rewrites the whole document, so a defect here
+  // would silently weaken the *other* record. Compared field by field through
+  // the schema's own key order — both sides come from the same parser — which
+  // says more than "the two produce the same reading" did.
+  if (JSON.stringify(parsed.data.entries) !== JSON.stringify(existing.entries)) {
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'HISTORY_DISTURBED');
+  }
+
+  // Not flushed to the platter, and {@link writeInto} carries the measurement
+  // and the four losses that choice admits. In short: this is written twice per
+  // spawn rather than a handful of times per run, `fsyncSync` costs 73 ms on
+  // this repository's volume against 6.5 ms without it, and the only event that
+  // can lose an unflushed write is a power cut — which killed the launch the
+  // record was about.
+  const published = publishCompanionRecord(
+    ledgerPathFor(location),
+    bytes,
+    () => stillHeldBy(location, holder),
+    false,
+  );
+  if (published === null) return { published: true };
+  if (published === 'NOT_OWNER') {
+    return ownedFailure('OWNERSHIP_UNCONFIRMED', 'LOST_BEFORE_PUBLISH');
+  }
+  return ownedFailure('REGISTER_WRITE_FAILED', published);
+}
+
+/**
+ * The parsed launch document, when it is one this build may write a register
+ * into. `null` otherwise.
+ *
+ * `extendableWriterLaunchLedger` asks the same question for the writer history
+ * and answers it for four readings; this asks it for the register and answers it
+ * for the same four, because it is the same document. Kept as its own call
+ * rather than reused directly so the two questions cannot silently become one.
+ */
+function registerDocument(
+  subject: WriterLaunchSubject,
+  raw: unknown,
+): WriterLaunchLedger | null {
+  return extendableWriterLaunchLedger(subject, raw);
+}
+
+/**
+ * Announces an AO-owned subprocess launch under this lease, **before** it
+ * happens.
+ *
+ * ── Why the order cannot be the other way round ────────────────────────────
+ *
+ * The record that matters for a recovery is the one describing a launch that
+ * was interrupted. A record written after a launch cannot describe one that
+ * never got that far; a mark written before it can. So the slot goes down as
+ * `ANNOUNCED` first, the launch happens only once that is on disk, and
+ * everything that can go wrong afterwards — a lost boundary, a killed
+ * orchestrator, an unpublishable establishment — leaves the mark exactly where
+ * it is.
+ *
+ * That is what makes {@link LAUNCH_MUST_NOT_START} necessary rather than fussy.
+ * If this call cannot change what is on disk, the document there is one that
+ * accounts for every owned launch **except** the one about to happen. It gets
+ * one fallback — delete the document, which asserts nothing — and if that fails
+ * too the launch is refused.
+ *
+ * ── What it does with a document it cannot use ─────────────────────────────
+ *
+ * Nothing, and that is not the writer path's answer. `beginWriterLaunch`
+ * rebuilds an unusable history from empty as permanently incomplete, because a
+ * writer launch has to be recorded somewhere even when the history is broken.
+ * Here the same rebuild would *create* a register that claims to account for
+ * this epoch's owned launches while knowing nothing about the ones before it —
+ * and a fresh empty register is the licensing value. So an unusable document is
+ * a refusal: {@link REGISTER_DISCARDED} if it can be removed, and the removal is
+ * what makes the lease honestly unrecoverable rather than falsely quiescent.
+ *
+ * Never throws.
+ */
+export function announceOwnedLaunch(
+  given: LeaseRepository,
+  evidence: unknown,
+  request: { readonly now: () => string },
+): OwnedLaunchResult {
+  const held = heldLeaseFor(snapshotRepositoryRecord(given), evidence);
+  if (!isHeldLease(held)) return ownedFailureFor(held);
+  const { location, document, evidence: holder } = held;
+
+  if (request === null || typeof request !== 'object' || typeof request.now !== 'function') {
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'CLOCK_NOT_SUPPLIED');
+  }
+  // The clock is a caller-supplied function, so calling it is calling somebody
+  // else's code, and this module's "never throws" is relied on by not catching.
+  let openedAt: string;
+  try {
+    openedAt = request.now();
+  } catch {
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'CLOCK_REFUSED');
+  }
+
+  const subject = subjectOf(document);
+  const existing = registerDocument(subject, readLedgerRecord(location));
+  if (existing === null) return discardForOwnedLaunch(location, holder, 'REGISTER_UNUSABLE');
+
+  // A register that cannot grow may not be left standing either: it would be a
+  // document that accounts for owned launches and stops mentioning them, which
+  // is the one shape this path exists to prevent.
+  if (existing.open.length >= MAX_OPEN_OWNED_LAUNCHES) {
+    return discardForOwnedLaunch(location, holder, 'REGISTER_FULL');
+  }
+
+  const slot = existing.nextSlot;
+  const published = publishRegister(
+    location,
+    document,
+    holder,
+    existing,
+    [...existing.open, { slot, state: 'ANNOUNCED', openedAt }],
+    slot + 1,
+    // Stated rather than merely "not refused": a freshly announced slot is
+    // unproven by construction whatever else is open, so a build of this payload
+    // that read as a proof would be the format failing in the one direction that
+    // matters.
+    'OWNED_LAUNCH_UNPROVEN',
+    { slot, state: 'ANNOUNCED' },
+  );
+  if ('published' in published) {
+    return Object.freeze({ code: 'ANNOUNCED' as const, detail: null, slot });
+  }
+  // A publish that failed with a launch about to happen. `NOT_OWNER` is not a
+  // reason to discard: the document on disk is the **new** holder's, and this
+  // call has no standing to delete it.
+  if (published.code === 'NOT_OWNER') return published;
+  return discardForOwnedLaunch(location, holder, published.detail ?? published.code);
+}
+
+/**
+ * Records that the kernel placed this owned launch in the owner's job, while it
+ * is still running.
+ *
+ * Without it, the whole of an owned subprocess's runtime is on disk as
+ * `ANNOUNCED`, which proves nothing — and for a verification command that is up
+ * to thirty minutes. This is the mark that makes the interrupted case
+ * recoverable instead of permanently refused, exactly as
+ * `attestWriterLaunchEstablished` is for the writer.
+ *
+ * It writes `ESTABLISHED` and never anything stronger. There is no `CONTAINED`
+ * state in this register, and its absence is the design rather than an omission:
+ * a launch that was seen to end has its slot **removed**, so "ended" is spelled
+ * by the entry not being there.
+ *
+ * A failure to publish leaves the slot `ANNOUNCED`, which refuses. Never throws.
+ */
+export function attestOwnedLaunchEstablished(
+  given: LeaseRepository,
+  evidence: unknown,
+  attestation: unknown,
+  request: { readonly slot: number; readonly now: () => string },
+): OwnedLaunchResult {
+  const held = heldLeaseFor(snapshotRepositoryRecord(given), evidence);
+  if (!isHeldLease(held)) return ownedFailureFor(held);
+  const { location, document, evidence: holder } = held;
+
+  if (
+    request === null ||
+    typeof request !== 'object' ||
+    !Number.isSafeInteger(request.slot) ||
+    request.slot < 1 ||
+    typeof request.now !== 'function'
+  ) {
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'SLOT_NOT_NAMED');
+  }
+
+  const facts = containmentFactsOf(attestation);
+  if (facts === null) return ownedFailure('ATTESTATION_INVALID', null, request.slot);
+  // The containment must be coupled to *this lease's* owner. A record proving a
+  // launch of some other process would be a claim about a tree this lease never
+  // started.
+  if (facts.ownerPid !== document.ownerPid) {
+    return ownedFailure('OWNER_MISMATCH', null, request.slot);
+  }
+
+  let establishedAt: string;
+  try {
+    establishedAt = request.now();
+  } catch {
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'CLOCK_REFUSED', request.slot);
+  }
+
+  const subject = subjectOf(document);
+  const existing = registerDocument(subject, readLedgerRecord(location));
+  if (existing === null) return ownedFailure('SLOT_NOT_OPEN', 'REGISTER_UNUSABLE', request.slot);
+
+  const index = existing.open.findIndex((entry) => entry.slot === request.slot);
+  const target = index < 0 ? undefined : existing.open[index];
+  // `ANNOUNCED` only. A slot already `ESTABLISHED` is not established twice —
+  // that would let a second attestation overwrite the pids of the first, which
+  // is the same hazard as the replay guard below reached from the other side.
+  if (target === undefined || target.state !== 'ANNOUNCED') {
+    return ownedFailure('SLOT_NOT_OPEN', target?.state ?? 'ABSENT', request.slot);
+  }
+  if (
+    existing.open.some(
+      (entry) => entry.state === 'ESTABLISHED' && entry.launchDigest === facts.launchDigest,
+    )
+  ) {
+    return ownedFailure('ATTESTATION_ALREADY_USED', null, request.slot);
+  }
+
+  const open = [...existing.open];
+  open[index] = {
+    slot: target.slot,
+    state: 'ESTABLISHED',
+    openedAt: target.openedAt,
+    helperPid: facts.helperPid,
+    childPid: facts.childPid,
+    mode: facts.mode,
+    verifiedInJob: true as const,
+    assignedAtCreation: facts.assignedAtCreation,
+    launchDigest: facts.launchDigest,
+    attestedAt: facts.attestedAt,
+    establishedAt,
+  };
+
+  const published = publishRegister(
+    location,
+    document,
+    holder,
+    existing,
+    open,
+    existing.nextSlot,
+    // Computed from the set this call built, never asserted as a constant. A
+    // register holding a second, still-announced slot reads `OWNED_LAUNCH_UNPROVEN`
+    // however well this one was established, and a constant here refused exactly
+    // that document.
+    readOpenSet(open),
+    { slot: request.slot, state: 'ESTABLISHED' },
+  );
+  return 'published' in published
+    ? Object.freeze({ code: 'ESTABLISHED' as const, detail: null, slot: request.slot })
+    : Object.freeze({ ...published, slot: request.slot });
+}
+
+/**
+ * Records that an owned launch was seen to end, by removing its slot.
+ *
+ * ── Removal is the whole point, and it is why this record is affordable ────
+ *
+ * Every productive owned spawn under a lease is announced here — the commit's
+ * `git add`, every `rev-parse`, every verification phase, the reviewer — which
+ * is tens of launches per step. An append-only entry for each would rewrite a
+ * document that grows without bound. A removed one leaves a register whose size
+ * is how many launches are open at once, which in this build is one.
+ *
+ * ── What the removal claims, and what it does not ──────────────────────────
+ *
+ * It claims the launch **ended**: the owned-command adapter settles on the helper's
+ * close, and the helper holds the only handle to a job carrying
+ * `KILL_ON_JOB_CLOSE` with neither breakaway flag, so the kernel has destroyed
+ * everything in it, grandchildren included. That inference is a contract of the
+ * job flags — `native/ao-launch/AoLaunch.cs` — and not of this function.
+ *
+ * On a platform with no boundary the ending is the child's exit and nothing
+ * more, so a removal there claims less than it does here. The shipped CLI
+ * refuses to run anywhere but `win32` (`platform/runtime-support.ts`), so no
+ * product path reaches that case; a library caller on POSIX does, and this
+ * sentence is what it is owed.
+ *
+ * A failure to publish leaves the slot where it is, which refuses or
+ * over-refuses and never permits. Nothing is discarded and no run is stopped.
+ * Never throws.
+ */
+export function settleOwnedLaunch(
+  given: LeaseRepository,
+  evidence: unknown,
+  request: { readonly slot: number },
+): OwnedLaunchResult {
+  const held = heldLeaseFor(snapshotRepositoryRecord(given), evidence);
+  if (!isHeldLease(held)) return ownedFailureFor(held);
+  const { location, document, evidence: holder } = held;
+
+  if (
+    request === null ||
+    typeof request !== 'object' ||
+    !Number.isSafeInteger(request.slot) ||
+    request.slot < 1
+  ) {
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'SLOT_NOT_NAMED');
+  }
+
+  const subject = subjectOf(document);
+  const existing = registerDocument(subject, readLedgerRecord(location));
+  // Nothing this build can write a register into asserts that this launch is
+  // open, so the postcondition holds. Not a discard: there is no launch pending
+  // on this answer, and destroying a document to tidy up a slot that is not
+  // there would cost the lease its recoverability for nothing.
+  if (existing === null) return ownedFailure('ALREADY_SETTLED', 'REGISTER_UNUSABLE', request.slot);
+
+  const open = existing.open.filter((entry) => entry.slot !== request.slot);
+  if (open.length === existing.open.length) {
+    return ownedFailure('ALREADY_SETTLED', 'NOT_OPEN', request.slot);
+  }
+
+  // `nextSlot` is carried, never recomputed. A counter derived from the open set
+  // would fall back the moment the set emptied, and the reused slot would let a
+  // late settlement remove a live launch's record.
+  const published = publishRegister(
+    location,
+    document,
+    holder,
+    existing,
+    open,
+    existing.nextSlot,
+    readOpenSet(open),
+    { slot: request.slot, state: 'ABSENT' },
+  );
+  return 'published' in published
+    ? Object.freeze({ code: 'SETTLED' as const, detail: null, slot: request.slot })
+    : Object.freeze({ ...published, slot: request.slot });
+}
+
+/**
+ * Reads a lease's owned-launch register without changing anything. Never
+ * throws.
+ *
+ * Exists for reporting — `lease status` prints it — and it is deliberately not
+ * how {@link recoverStaleLease} obtains its own reading, for the reason
+ * {@link inspectWriterLaunchHistory} gives.
+ */
+export function inspectOwnedLaunchRegister(given: LeaseRepository): OwnedLaunchReading | null {
+  const repository = snapshotRepositoryRecord(given);
+  const location = deriveExecutionLeaseLocation(repository);
+  if (!location.ok) return null;
+  const read = readLeaseFile(location.path, location.key);
+  if (read.document === null) return null;
+  return readOwnedLaunchRegister(subjectOf(read.document), readLedgerRecord(location));
 }
 
 /**
@@ -3472,6 +4337,48 @@ export const STALE_RECOVERY_REFUSALS = [
   'LAUNCH_HISTORY_NOT_THIS_LEASE',
   /** The history describes a different run or a different owner. */
   'LAUNCH_HISTORY_NOT_THIS_RUN',
+  /**
+   * An AO-owned subprocess of this lease was announced and never reached the
+   * point where the kernel confirmed it had been placed in the owner's job.
+   *
+   * The register's counterpart to {@link LAUNCH_HISTORY_UNPROVEN}, and its own
+   * member rather than a reuse of it because the two send an operator to
+   * different places: that one is about the productive writer, this one is
+   * about a verification command, a reviewer pass, a Git subprocess or anything
+   * else this run started through the owned boundary. Nothing at all can be
+   * said about the process, so nothing is removed.
+   */
+  'OWNED_LAUNCH_UNPROVEN',
+  /**
+   * An AO-owned subprocess of this lease was placed in the owner's job, was
+   * never seen to end, and a process bearing one of the ids it recorded exists
+   * right now.
+   *
+   * The refusal this slice exists for. Before it, a lease whose *writer* history
+   * read `ALL_LAUNCHES_CONTAINED` reached `SAFE_TO_RECOVER` having probed
+   * exactly one process — the owner — while a verification or reviewer
+   * subprocess of the same epoch was represented nowhere. Reproduced on `main`
+   * at `fba4cfd` with the shipped CLI, which removed the lease.
+   *
+   * Its own member rather than a shade of {@link LAUNCH_TREE_STILL_RUNNING},
+   * which names a *writer* tree: the two send an operator to different
+   * processes, and one report that could mean either would be a report that
+   * names neither.
+   *
+   * Pid reuse pushes this the same way it pushes its writer twin. A recycled pid
+   * now belonging to an unrelated process reads `ALIVE` and lands here — an
+   * over-refusal, and the only kind of error this comparison can make.
+   */
+  'OWNED_LAUNCH_STILL_RUNNING',
+  /**
+   * Whether the processes of an open owned launch still exist could not be
+   * established.
+   *
+   * The same rule every liveness answer in this module follows — a probe may
+   * refuse and may never permit — applied to the processes an open register
+   * entry names.
+   */
+  'OWNED_LAUNCH_LIVENESS_UNDETERMINED',
 ] as const;
 
 export type StaleRecoveryRefusal = (typeof STALE_RECOVERY_REFUSALS)[number];
@@ -3510,6 +4417,44 @@ function refusalForHistory(reading: WriterLaunchReading): StaleRecoveryRefusal {
   }
 }
 
+/**
+ * The refusal to report for an owned-launch register that is not a proof.
+ *
+ * Total over {@link OwnedLaunchReading}, including the one reading that *is* a
+ * proof and the one that owes a liveness check. Both of those arms are
+ * unreachable while `provesNoOwnedLaunchOpen` and
+ * `provesOwnedLaunchesOpenUnended` are what decide — which they are, at the one
+ * call site — and they answer the conservative refusal rather than throwing, so
+ * a future loosening of those tables degrades the *reason* an operator is shown
+ * and never the *decision*.
+ *
+ * A table rather than a switch, so a reading added to `OWNED_LAUNCH_READINGS`
+ * without a row here fails to compile. Every row is asserted by value in
+ * `tests/m2-02-owned-launch-quiescence.test.ts`; completeness is not
+ * correctness.
+ */
+const REFUSAL_FOR_REGISTER: Readonly<Record<OwnedLaunchReading, StaleRecoveryRefusal>> =
+  Object.freeze({
+    // Both reached only when the caller has already decided the reading is not
+    // the proof it needs, so an arm naming something reassuring would be
+    // describing a decision that was not made.
+    NO_OWNED_LAUNCH_OPEN: 'OWNED_LAUNCH_UNPROVEN',
+    OWNED_LAUNCHES_OPEN_UNENDED: 'OWNED_LAUNCH_UNPROVEN',
+    OWNED_LAUNCH_UNPROVEN: 'OWNED_LAUNCH_UNPROVEN',
+    // No member of its own, deliberately. A register this build cannot read
+    // beside a writer history it *can* is not a document any code here
+    // produces — the two are fields of one record, sealed by one binding and
+    // published in one atomic write, so the reading that reaches this row is
+    // unreachable from the predicate. A member nothing can produce is a
+    // vocabulary entry no fixture can pin, which is how an arm stops being
+    // checked at all; `LAUNCH_TREE_LIVENESS_UNDETERMINED` next door already
+    // records that argument for its own unreachable floor.
+    //
+    // The undetermined refusal is also the truthful word for it: nothing was
+    // named, so nothing could be established.
+    REGISTER_NOT_READABLE: 'OWNED_LAUNCH_LIVENESS_UNDETERMINED',
+  });
+
 export interface StaleLeaseRecoveryAssessment {
   /** `SAFE_TO_RECOVER` exactly when `refusal` is `null`. Never otherwise. */
   readonly verdict: 'SAFE_TO_RECOVER' | 'UNSAFE';
@@ -3522,6 +4467,17 @@ export interface StaleLeaseRecoveryAssessment {
   readonly runId: string | null;
   /** The launch history's reading, or `null` when no lease document was read. */
   readonly launchHistory: WriterLaunchReading | null;
+  /**
+   * The owned-launch register's reading, or `null` when the predicate stopped
+   * before reading it.
+   *
+   * `null` is common and is not a shade of "empty". The conjuncts run in order
+   * and each stops at the first refusal, so a lease with a living owner, or one
+   * whose writer history is unreadable, never reaches the register at all — and
+   * reporting an absent reading as a reading would tell an operator that the
+   * subprocess question was asked and answered when it was not asked.
+   */
+  readonly ownedLaunches: OwnedLaunchReading | null;
 }
 
 /** The assessment, plus the two facts that identify the object it is about. */
@@ -3543,6 +4499,7 @@ function unsafe(
     ownerPid: null,
     runId: null,
     launchHistory: null,
+    ownedLaunches: null,
     revision: null,
     ownerNonce: null,
     ...over,
@@ -3735,11 +4692,75 @@ function assessStaleLeaseRecoveryBound(
     }
   }
 
+  // ── The third conjunct: every OTHER owned subprocess of this epoch ────────
+  //
+  // The writer history above answers one question — "can an unproven *writer*
+  // launch still exist under this lease" — and M2 slice 2 was opened because
+  // that is not the question a removal needs answered. A run starts a
+  // verification, a reviewer and a stream of Git subprocesses through the same
+  // owned boundary, all of them after the writer has ended, and until this
+  // conjunct existed none of them was represented anywhere. Reproduced on
+  // `main` at `fba4cfd`: a real writer confirmed `CONTAINED`, a real
+  // verification subprocess started through the production path, the owner
+  // killed, and `agent-loop lease recover` removed the lease having probed the
+  // owner and nothing else.
+  //
+  // ── Why it is here and not first ──────────────────────────────────────────
+  //
+  // Because the writer conjunct's refusals must keep firing where they already
+  // fire. `LAUNCH_HISTORY_ABSENT`, `LAUNCH_HISTORY_UNPROVEN` and the rest are
+  // what an operator is shown for a lease from an older build, for a launch
+  // killed before the kernel answered, and for a writer whose mark was
+  // withdrawn — and a new conjunct placed above them would answer for all three,
+  // making those refusals unreachable and their gates vacuous. Ordering is the
+  // difference between adding a proof and replacing one.
+  //
+  // ── And it is a separate reading of the same bytes ────────────────────────
+  //
+  // `ledgerRecord` is read once, above, and both readings are taken from that
+  // one value. Two reads of the file would be two questions about two moments,
+  // which is the divergence this module exists to refuse.
+  const register = readOwnedLaunchRegister(subject, ledgerRecord);
+  if (!provesNoOwnedLaunchOpen(register)) {
+    if (!provesOwnedLaunchesOpenUnended(register)) {
+      return unsafe(REFUSAL_FOR_REGISTER[register], { ...facts, launchHistory: history, ownedLaunches: register });
+    }
+    const open = openOwnedProcessesOf(subject, ledgerRecord);
+    // `null` or empty is unreachable while the reading and this function agree —
+    // both run over the one value above, and the reading that gets here requires
+    // an `ESTABLISHED` entry, which is exactly what this returns. It is a
+    // **refusal** rather than a throw so that a future change which breaks that
+    // determinism degrades the reason and never the decision.
+    if (open === null || open.length === 0) {
+      return unsafe('OWNED_LAUNCH_LIVENESS_UNDETERMINED', { ...facts, launchHistory: history, ownedLaunches: register });
+    }
+    for (const launch of open) {
+      // The helper first, and the child too, for the reasons the writer loop one
+      // conjunct up gives. The real probe answers both: a supplied opinion can
+      // only make the answer worse, because `recoverStaleLease` combines the two
+      // with `mostRefusing` rather than substituting one for the other.
+      for (const pid of [launch.helperPid, launch.childPid]) {
+        const seen = liveness(pid);
+        if (seen === 'ALIVE') {
+          return unsafe('OWNED_LAUNCH_STILL_RUNNING', { ...facts, launchHistory: history, ownedLaunches: register });
+        }
+        if (seen !== 'NOT_FOUND') {
+          return unsafe('OWNED_LAUNCH_LIVENESS_UNDETERMINED', {
+            ...facts,
+            launchHistory: history,
+            ownedLaunches: register,
+          });
+        }
+      }
+    }
+  }
+
   return Object.freeze({
     verdict: 'SAFE_TO_RECOVER' as const,
     refusal: null,
     ...facts,
     launchHistory: history,
+    ownedLaunches: register,
     revision: revisionOfBytes(read.bytes),
     ownerNonce: document.ownerNonce,
   });
@@ -4165,6 +5186,23 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   if (removed === 'DETACH_FAILED') {
     return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: 'DETACH_REFUSED' });
   }
+
+  // ── The accountant goes only once the lease really has ───────────────────
+  //
+  // After the removal and only on the one outcome that means it succeeded, and
+  // this ordering is a repair rather than a preference. Disposing first — which
+  // is what this did — hands the lease back to nobody on every arm above: the
+  // removal can be refused, and then the lease document and its register are
+  // still on disk, still licensing, and this process has no accountant left to
+  // announce the subprocesses it goes on starting. That is the same shape as
+  // the `EPOCH_ENDED` defect {@link ANNOUNCEMENT_DISPOSITION} records, reached
+  // from the other end.
+  //
+  // Disposing after opens no window worth the name. Between the removal and
+  // this line an announcement finds no lease, answers `LEASE_ABSENT`, and the
+  // accountant evicts itself — the same end state by a slower route.
+  ACCOUNTANT_DISPOSERS.get(evidence)?.();
+  ACCOUNTANT_DISPOSERS.delete(evidence);
   return Object.freeze({ code: 'RELEASED' as const, detail: null });
 }
 

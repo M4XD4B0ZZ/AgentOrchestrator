@@ -69,7 +69,18 @@ vi.mock('node:crypto', async (importOriginal) => {
     ...actual,
     default: actual,
     randomBytes: (...args: Parameters<typeof actual.randomBytes>): unknown => {
-      if (io.refuseRandomBytes) {
+      // Armed AND aimed. The arming says "some time after the task file was
+      // read"; the aim says "at the call this case is about", and without the
+      // second half the fault lands on whichever other caller happens to be
+      // next.
+      //
+      // That is not hypothetical. M2 slice 2 put an owned-launch announcement in
+      // front of every spawn, and each announcement names a staging file with
+      // `randomBytes(6)` — the same call, the same size, from
+      // `publishCompanionRecord`. The worktree removal between the arming read
+      // and the release spawns git, so the one-shot throw was consumed there and
+      // this case measured a release that never threw.
+      if (io.refuseRandomBytes && new Error().stack?.includes('removeVerifiedLease') === true) {
         io.refuseRandomBytes = false;
         throw new Error('injected: no entropy');
       }
