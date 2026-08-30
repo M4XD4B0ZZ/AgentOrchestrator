@@ -33,6 +33,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -920,6 +921,35 @@ describe('the slice added no new authority', () => {
     // Registered with no second argument: the `PathProvider` seam that could
     // relocate the registry is not reachable from the shipped entry point.
     expect(index).toContain('registerRepositoriesCommand(program);');
+  });
+
+  it('is read from exactly one module, and that module is the command', () => {
+    // The header of `repository-registry.ts` says the registry is read from one
+    // place in `src/`. That is a fact about the tree, so it is enumerated rather
+    // than asserted — an earlier draft of the same sentence named a file that
+    // does not exist, and nothing noticed.
+    const importers: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.isFile() && full.endsWith('.ts')) {
+          const code = readFileSync(full, 'utf8')
+            .replace(/\/\*[\s\S]*?\*\//g, ' ')
+            .replace(/(^|[^:])\/\/.*$/gm, '$1');
+          if (/\bloadRepositoryRegistry\b/.test(code)) {
+            importers.push(relative(PACKAGE_ROOT, full));
+          }
+        }
+      }
+    };
+    walk(join(PACKAGE_ROOT, 'src'));
+    expect(importers.sort()).toEqual(
+      [
+        join('src', 'cli', 'repositories-command.ts'),
+        join('src', 'registry', 'repository-registry.ts'),
+      ].sort(),
+    );
   });
 
   it('keeps the slice modules inside the package', () => {

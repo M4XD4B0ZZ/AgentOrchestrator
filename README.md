@@ -11,8 +11,9 @@ API keys.
 
 > **One command executes, behind one explicit grant.** `agent-loop run
 > --attended` starts a single task and drives it. Everything else is read-only:
-> `agent-loop doctor`, and `agent-loop run` without the grant, which still starts
-> no agent, writes no task state and prepares no workspace. Unattended operation,
+> `agent-loop doctor`, `agent-loop repositories`, and `agent-loop run` without the
+> grant, which still starts no agent, writes no task state and prepares no
+> workspace. Unattended operation,
 > multi-task blocks, scope enforcement and any PR/CI/merge automation are **not**
 > in this build.
 

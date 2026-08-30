@@ -28,8 +28,11 @@
  * `delivery-automation.ts`. Both functions below take a {@link PathProvider}, so
  * a caller inside this package can point the lookup anywhere — that is the test
  * seam. The property that holds is narrower and is a fact about the tree: the
- * registry is read from one place in `src/`, `cli/registry-command.ts`, with no
- * seam at all, and `package.json` exports only the CLI entry.)
+ * registry is read from exactly one place in `src/`, `cli/repositories-command.ts`,
+ * which the shipped entry point registers with no seams at all, and
+ * `package.json` exports only that entry point. That sentence is a pin rather
+ * than a claim — `tests/m2-03-cross-repository-selection.test.ts` enumerates the
+ * importers — because an earlier draft of it named a file that does not exist.)
  *
  * ── What an entry declares, and what it does not ───────────────────────────
  *

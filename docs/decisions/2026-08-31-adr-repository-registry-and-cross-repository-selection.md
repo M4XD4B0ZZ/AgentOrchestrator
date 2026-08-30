@@ -133,6 +133,23 @@ edit orphans the records.
 So the id stays a declared label, carried for display and for the records that
 already hold it.
 
+### It does not live in `src/repo/`
+
+It did, for one round, and a structural pin caught it: `tests/repo-resolution.test.ts`
+sweeps `src/repo/` and refuses any module there that imports `config/paths.js`, because
+
+> a resolver that consulted it would be deriving a target repository's contract
+> from the orchestrator's own checkout, which is the exact coupling V1-01 exists
+> to prevent.
+
+The registry does import it — `orchestratorHome` — and is not a resolver, so the
+letter of the pin caught something its reason does not describe. It was moved to
+`src/registry/` rather than exempted. `src/repo/` is the layer that answers *what
+is this one repository*, from that repository's own committed files and nothing
+else; a module reading a machine-wide operator document does not belong in it
+whatever the pin says, and an exemption would have been the first line of a
+second rule about where a repository's contract may come from.
+
 ### The ranking tuple gains one element, and it goes last
 
 `select-task.ts` ranks by `(kind, currentFocus, priority, -unlockCount, id)` and
@@ -172,6 +189,16 @@ already takes this reading one level down, where an empty task source is
 
 Whether a scheduler should later proceed without a broken repository is a policy
 question with its own consequences. It is not answered here by defaulting.
+
+An empty registry is three different things, and they stay three. No file is
+`NOT_REGISTERED` — this build has not been told which repositories it may
+orchestrate. A file declaring `repositories: []` reads cleanly and yields zero
+entries; the *reader* reports what the file said, and the *planner* answers
+`NO_REPOSITORIES_REGISTERED`. Neither is `ALL_TASKS_COMPLETE`, and neither exits
+0: an operator who has enlisted nothing has a configuration to finish, which is
+the reading `discoverTasks` already takes of an empty task source. Keeping the
+policy in the planner rather than in the reader is what lets the reader stay a
+description of the document.
 
 ### The surface is read-only, and that is a boundary rather than an omission
 
