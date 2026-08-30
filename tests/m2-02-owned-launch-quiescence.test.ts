@@ -885,15 +885,16 @@ describe('a stale lease is not removed while an owned subprocess may be running'
     // Written because a mutant that probed only the helper SURVIVED the rest of
     // this file: every other fixture here makes the two pids alive or dead
     // together, so neither one alone was ever the reason for a refusal.
-    for (const [helper, child] of [
-      [8301, 8302],
-      [8302, 8301],
-    ]) {
+    const pairs: readonly { readonly helperPid: number; readonly childPid: number }[] = [
+      { helperPid: 8301, childPid: 8302 },
+      { helperPid: 8302, childPid: 8301 },
+    ];
+    for (const pair of pairs) {
       const repository = repositoryFixture();
       const owner = (() => {
         const evidence = leaseOf(repository, 'run-stale');
         containedWriter(repository, evidence);
-        ownedLaunch(repository, evidence, { helperPid: helper, childPid: child });
+        ownedLaunch(repository, evidence, pair);
         return freezeAsStale(repository, evidence);
       })();
       // Exactly ONE of the recorded pair exists, and it is a different one each
