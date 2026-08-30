@@ -27,7 +27,7 @@
  * The alternative considered first was a required accounting argument on
  * `RunOptions`, so that every call site had to declare. It is compile-visible,
  * which is the property to want, and it does not work here: an inventory of
- * this build's spawn sites found twenty-two under a lease, and the majority
+ * this build's spawn sites found that most of the ones running under a lease
  * reach `runCommand` from code that holds no evidence. Every one of those would
  * have declared itself unaccounted — a hole by declaration, which is a
  * documented hole rather than a closed one.
@@ -63,11 +63,13 @@
  *    answers {@link OwnedLaunchOpening.EPOCH_ENDED} and is dropped, so a
  *    process that acquires many leases over its life does not accumulate
  *    subscribers to leases it no longer holds;
- *  - **nothing here fails a launch by itself.** With no accountant installed —
- *    the ordinary state of `agent-loop doctor`, of `resolveRepository` before a
+ *  - **an empty registry changes nothing.** With no accountant installed — the
+ *    ordinary state of `agent-loop doctor`, of `resolveRepository` before a
  *    lease exists, and of every process that never takes one — `openOwnedLaunch`
- *    answers a record that does nothing, and the launch proceeds exactly as it
- *    did before this module existed.
+ *    answers no records and no refusal, and the launch proceeds exactly as it
+ *    did before this module existed. This bullet said "nothing here fails a
+ *    launch by itself", which stopped being true when a throwing accountant
+ *    became a refusal rather than an eviction.
  */
 
 import type { ContainmentAttestation } from '../core/containment-attestation.js';
@@ -190,14 +192,19 @@ function evict(accountant: OwnedLaunchAccountant): void {
  * forever for a process that never existed. Conservative, but wrong: the point
  * of the record is to describe launches, and no launch happened.
  *
- * ── Never throws, and that is load-bearing ────────────────────────────────
+ * ── Never throws, and a throw is a refusal ────────────────────────────────
  *
  * An accountant is somebody else's code. A throw out of it here would escape
  * `runCommand`, whose contract is that a failing command is data. So every call
- * is guarded, and a throwing accountant is treated as one whose epoch ended: it
- * is evicted, and it does not stop the launch. It cannot make a launch *happen*
- * that this module would otherwise have refused, because refusal is the only
- * thing it could have said.
+ * is guarded — and the guard answers {@link OwnedLaunchOpening.LAUNCH_MUST_NOT_START}.
+ *
+ * It answered `EPOCH_ENDED` once, on the reasoning that a throwing accountant
+ * "cannot make a launch happen that this module would otherwise have refused,
+ * because refusal is the only thing it could have said". That is false, and a
+ * fault-injection test in `tests/v3-07-lease-release-fault.test.ts` reached it:
+ * a throw makes a launch happen that would otherwise have been **recorded**,
+ * and `EPOCH_ENDED` additionally drops the accountant, so every later launch in
+ * the process goes unrecorded too. An unknown is not an ended epoch. It refuses.
  */
 export function openOwnedLaunch(): {
   readonly refusal: string | null;
@@ -212,8 +219,11 @@ export function openOwnedLaunch(): {
     try {
       opening = accountant.open();
     } catch {
-      evict(accountant);
-      continue;
+      // Not evicted, and not waved through. Nothing is known about this epoch
+      // except that asking failed, and the launch that would have gone
+      // unrecorded is exactly the one a later recovery has to know about.
+      for (const record of records) closeOwnedLaunch(record);
+      return { refusal: 'ACCOUNTANT_THREW', records: [] };
     }
     if (opening.opening === 'RECORDED') {
       records.push(opening.record);

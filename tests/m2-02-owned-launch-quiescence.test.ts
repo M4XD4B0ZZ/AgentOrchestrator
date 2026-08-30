@@ -967,21 +967,53 @@ describe('the execution seam accounts for every launch it starts', () => {
     disposeSecond();
   });
 
-  it('drops an accountant whose epoch has ended, and one that throws', () => {
+  it('drops an accountant whose epoch has ended, and lets the launch through', () => {
     const before = installedOwnedLaunchAccountants();
     const disposeEnded = installOwnedLaunchAccountant({
       open: (): OwnedLaunchOpening => ({ opening: 'EPOCH_ENDED' }),
     });
-    const disposeThrower = installOwnedLaunchAccountant({
-      open: (): OwnedLaunchOpening => {
-        throw new Error('an accountant is somebody else\u2019s code');
-      },
-    });
-    expect(installedOwnedLaunchAccountants()).toBe(before + 2);
-    // Neither stops the launch, and both are gone afterwards.
+    expect(installedOwnedLaunchAccountants()).toBe(before + 1);
+    // It does not stop the launch, and it is gone afterwards: there is no
+    // document of that epoch for a later recovery to read this launch out of.
     expect(openOwnedLaunch().refusal).toBeNull();
     expect(installedOwnedLaunchAccountants()).toBe(before);
     disposeEnded();
+    expect(installedOwnedLaunchAccountants()).toBe(before);
+  });
+
+  it('refuses the launch when an accountant throws, and keeps it installed', () => {
+    // The opposite of its neighbour, and the difference is the whole point. A
+    // throw is an UNKNOWN, not an ended epoch: nothing is known except that
+    // asking failed, and the launch that would have gone unrecorded is exactly
+    // the one a later recovery has to know about.
+    //
+    // This case exists because the first draft treated a throw as EPOCH_ENDED -
+    // waving the launch through AND dropping the accountant, so every later
+    // launch in the process went unrecorded too. A fault-injection case in
+    // `tests/v3-07-lease-release-fault.test.ts` reached it by refusing entropy
+    // to the announcement’s own staging name.
+    const before = installedOwnedLaunchAccountants();
+    const closed: string[] = [];
+    const disposeRecorder = installOwnedLaunchAccountant({
+      open: (): OwnedLaunchOpening => ({
+        opening: 'RECORDED',
+        record: { established: () => {}, ended: () => closed.push('first') },
+      }),
+    });
+    const disposeThrower = installOwnedLaunchAccountant({
+      open: (): OwnedLaunchOpening => {
+        throw new Error('an accountant is somebody else’s code');
+      },
+    });
+    const opened = openOwnedLaunch();
+    expect(opened.refusal).toBe('ACCOUNTANT_THREW');
+    expect(opened.records).toEqual([]);
+    // And what was already opened is closed, so a refused launch leaves no slot
+    // refusing a recovery for ever for a process that never existed.
+    expect(closed).toEqual(['first']);
+    // Still installed. Dropping it is what made the first draft unsafe.
+    expect(installedOwnedLaunchAccountants()).toBe(before + 2);
+    disposeRecorder();
     disposeThrower();
     expect(installedOwnedLaunchAccountants()).toBe(before);
   });

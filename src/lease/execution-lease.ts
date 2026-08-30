@@ -1335,7 +1335,17 @@ function accountantFor(
   const now = (): string => new Date().toISOString();
   return {
     open: (): OwnedLaunchOpening => {
-      const announced = announceOwnedLaunch(repository, evidence, { now });
+      // `announceOwnedLaunch` documents that it never throws, and this makes
+      // that true rather than trusted. It reaches `randomBytes` and the
+      // filesystem through `publishCompanionRecord`, and a fault-injection test
+      // in `tests/v3-07-lease-release-fault.test.ts` proved the reachability by
+      // refusing entropy. A throw is an unknown, and an unknown refuses.
+      let announced: OwnedLaunchResult;
+      try {
+        announced = announceOwnedLaunch(repository, evidence, { now });
+      } catch {
+        return { opening: 'LAUNCH_MUST_NOT_START', detail: 'ANNOUNCEMENT_THREW' };
+      }
       if (announced.code === 'ANNOUNCED' && announced.slot !== null) {
         const slot = announced.slot;
         return {
@@ -1418,18 +1428,55 @@ function claimLeaseFile(
 }
 
 /** Creates `path` exclusively and writes `bytes` into it. `null` on success. */
-function writeRecord(path: string, bytes: Buffer): string | null {
+function writeRecord(path: string, bytes: Buffer, durable = true): string | null {
   let handle: number;
   try {
     handle = openSync(path, 'wx', 0o600);
   } catch (error) {
     return safeErrnoCode(error);
   }
-  return writeInto(handle, bytes);
+  return writeInto(handle, bytes, durable);
 }
 
-/** Writes, flushes and closes. `null` on success, an errno token otherwise. */
-function writeInto(handle: number, bytes: Buffer): string | null {
+/**
+ * Writes, optionally flushes, and closes. `null` on success, an errno token
+ * otherwise.
+ *
+ * ── Why the flush is a choice rather than a rule ──────────────────────────
+ *
+ * `fsyncSync` costs a seek. Measured on this repository's own volume, a
+ * spinning disk, replaying this exact sequence over a 19 KB payload 200 times
+ * in each of three rounds: **73 ms mean with the flush, 6.5 ms without**. The
+ * lease document and the writer history are written a handful of times per run
+ * and pay it gladly. The owned-launch register is written twice per *spawn* —
+ * tens of times per step — and at 73 ms a publish that is seconds of blocked
+ * event loop per step, which is not a cost this accounting may impose.
+ *
+ * ── And what the flush actually protects against ──────────────────────────
+ *
+ * A **power failure**, not a killed process. `taskkill /F` leaves the page
+ * cache alone and the operating system still writes it out, so every case the
+ * recovery predicate exists for — an orchestrator that was killed — is
+ * unaffected by this choice.
+ *
+ * What a power cut can lose, for a non-durable write, is safe in every
+ * direction that matters, and each one is worth stating rather than asserting
+ * as a class:
+ *
+ *  - **a lost announcement** would leave a document that does not mention a
+ *    launch that happened. That is the one fail-open shape this record has —
+ *    and it is unreachable here, because the event that lost it is a power cut,
+ *    which killed that launch too. Permitting a recovery afterwards is correct;
+ *  - **a lost establishment** leaves the slot `ANNOUNCED`, which refuses;
+ *  - **a lost settlement** leaves the slot open, which refuses or over-refuses;
+ *  - **a torn document** — the rename persisted, the bytes did not — reads
+ *    `MALFORMED`, which refuses. Note what that costs: the writer history lives
+ *    in the same document, so a power cut during a register publish can lose a
+ *    durably-written writer history along with it. The lease becomes
+ *    unrecoverable and nothing false is asserted, which is the direction this
+ *    format fails in everywhere else.
+ */
+function writeInto(handle: number, bytes: Buffer, durable = true): string | null {
   try {
     let offset = 0;
     while (offset < bytes.length) {
@@ -1442,8 +1489,10 @@ function writeInto(handle: number, bytes: Buffer): string | null {
       return 'SHORT_WRITE';
     }
     // A lease that survives a power failure without its record would be read as
-    // unsafe forever, so it is flushed before it is published.
-    fsyncSync(handle);
+    // unsafe forever, so it is flushed before it is published — unless the
+    // caller has stated it does not need to be. See this function's header for
+    // the measurement and for what each loss costs.
+    if (durable) fsyncSync(handle);
     closeSync(handle);
     return null;
   } catch (error) {
@@ -2608,9 +2657,10 @@ function publishCompanionRecord(
   path: string,
   bytes: Buffer,
   stillHeld: () => boolean,
+  durable = true,
 ): string | null | 'NOT_OWNER' {
   const staging = `${path}.tmp-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`;
-  const staged = writeRecord(staging, bytes);
+  const staged = writeRecord(staging, bytes, durable);
   if (staged !== null) {
     discard(staging);
     return staged;
@@ -3836,8 +3886,17 @@ function publishRegister(
     return ownedFailure('REGISTER_NOT_READABLE_BACK', 'HISTORY_DISTURBED');
   }
 
-  const published = publishCompanionRecord(ledgerPathFor(location), bytes, () =>
-    stillHeldBy(location, holder),
+  // Not flushed to the platter, and {@link writeInto} carries the measurement
+  // and the four losses that choice admits. In short: this is written twice per
+  // spawn rather than a handful of times per run, `fsyncSync` costs 73 ms on
+  // this repository's volume against 6.5 ms without it, and the only event that
+  // can lose an unflushed write is a power cut — which killed the launch the
+  // record was about.
+  const published = publishCompanionRecord(
+    ledgerPathFor(location),
+    bytes,
+    () => stillHeldBy(location, holder),
+    false,
   );
   if (published === null) return { published: true };
   if (published === 'NOT_OWNER') {
