@@ -8160,8 +8160,16 @@ before each launch  -> generation N appended as PENDING, published
 launch happens      -> only after that publish is known to have landed
 kernel confirms job -> generation N replaced by ESTABLISHED, published
 launch seen to end  -> generation N replaced by CONTAINED, published
+launch over, unproved -> generation N withdrawn to PENDING, published
 anything else       -> generation N stays where it got to, for good
 ```
+
+The withdrawal matters as much as the mark. `ESTABLISHED` proves a recovery only
+while the launch it names is the last thing that happened under the lease - the
+run goes on to a commit, a verification and a reviewer, none of which this ledger
+records. So a writer launch that *ends* without reaching `CONTAINED` has its mark
+withdrawn to `PENDING`, which is exactly the state such a launch was left in
+before the mark existed.
 
 The middle step is M2 slice 1
 ([its ADR](docs/decisions/2026-08-30-adr-unattended-crash-recovery.md)). Before

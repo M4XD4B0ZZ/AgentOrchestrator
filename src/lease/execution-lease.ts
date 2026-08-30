@@ -2569,11 +2569,11 @@ function ledgerPathFor(location: LeaseLocation): string {
 /**
  * What became of an attempt to open or confirm a writer-launch generation.
  *
- * A closed set. **Three** members are successes since M2 slice 1 added the
- * middle mark, one is the deliberate *loss* of a history, and one is the only
- * condition in this build under which an enrichment stops productive work — see
- * {@link LAUNCH_MUST_NOT_START}. (It said two, and was not recounted when the
- * third arrived.)
+ * A closed set. **Four** members are successes since M2 slice 1 added the middle
+ * mark and its withdrawal, one is the deliberate *loss* of a history, and one is
+ * the only condition in this build under which an enrichment stops productive
+ * work — see {@link LAUNCH_MUST_NOT_START}. (It said two, and was not recounted
+ * when the third arrived; it is counted from the array below now.)
  */
 export const WRITER_LAUNCH_CODES = [
   /** The generation is on disk as `PENDING`. The launch may proceed. */
@@ -2589,6 +2589,15 @@ export const WRITER_LAUNCH_CODES = [
   'ESTABLISHED',
   /** The generation is on disk as `CONTAINED`. */
   'CONFIRMED',
+  /**
+   * The generation is on disk as `PENDING` again: an establishment mark was
+   * withdrawn, or there was none to withdraw.
+   *
+   * A success, and the one that is easy to misread. It does not mean a launch
+   * failed; it means this build has stopped claiming a proof it can no longer
+   * support. See {@link retractWriterLaunchEstablishment}.
+   */
+  'RETRACTED',
   /**
    * The generation could not be published, so the whole history was **removed**
    * instead. The launch may proceed; this lease can never be recovered.
@@ -3025,6 +3034,149 @@ export function attestWriterLaunchEstablished(
   request: { readonly generation: number; readonly writerId: string; readonly now: () => string },
 ): WriterLaunchResult {
   return recordLaunchContainment(given, evidence, attestation, request, 'ESTABLISHED');
+}
+
+/**
+ * Puts an `ESTABLISHED` generation back to `PENDING`, withdrawing the recovery
+ * proof it carried.
+ *
+ * ── The hazard this exists for, which a review found and this build owns ───
+ *
+ * `ESTABLISHED` licenses a recovery on the strength of the pids it records, and
+ * that is sound for exactly one situation: the owner died **while that launch
+ * was running**, when nothing else of the epoch could be running either, because
+ * this build starts owned launches one at a time.
+ *
+ * A launch that *ends* without reaching `CONTAINED` breaks that. It happens: the
+ * ending may be unattestable (`BOUNDARY_LOST`), or the confirmation may fail to
+ * publish after a perfectly ordinary run. The entry then stays `ESTABLISHED`
+ * while the run carries on to a commit, a verification and a reviewer — all
+ * owned, none of them in this ledger. If the owner dies during one of *those*,
+ * the recovery probes the old writer's pids, finds them gone, and removes the
+ * lease while an AO-started process may still be alive.
+ *
+ * The ledger cannot see those launches; widening it to record every owned
+ * subprocess is a different contract. What it *can* do is stop claiming
+ * something it no longer knows, at the one moment it learns it: the instant a
+ * writer launch is over without a proof of its ending.
+ *
+ * ── Why `PENDING`, and why that is exactly the right target ────────────────
+ *
+ * Because it is the state this build left such a launch in **before** the
+ * establishment mark existed. Retracting to it does not invent a conservative
+ * answer; it restores the one that shipped, so the new arm cannot license a
+ * recovery the previous build refused. The lease is then unrecoverable for the
+ * same reason and to the same extent as before — no wider, and no narrower.
+ *
+ * The recorded pids go with it. They are not lost information anybody may act
+ * on: they were only ever an input to a proof this call is withdrawing, and
+ * keeping them beside a state that no longer proves anything is how a field
+ * starts being read as one that does.
+ *
+ * ── Fail-closed, twice ─────────────────────────────────────────────────────
+ *
+ * A retraction that cannot be published falls back to discarding the whole
+ * history — the same escape hatch `beginWriterLaunch` uses, and for the same
+ * reason: what is on disk would otherwise be an affirmative claim that is no
+ * longer true, and deleting it asserts nothing. `HISTORY_DISCARDED` is a worse
+ * outcome for this lease and a safe one.
+ *
+ * A `CONTAINED` generation is never walked back. Its ending *was* proved, so
+ * there is nothing stale about it, and a call that could undo a proof is a
+ * capability this module has no use for.
+ */
+export function retractWriterLaunchEstablishment(
+  given: LeaseRepository,
+  evidence: unknown,
+  request: { readonly generation: number; readonly writerId: string },
+): WriterLaunchResult {
+  if (!isExecutionLeaseEvidence(evidence)) return launchFailure('EVIDENCE_INVALID');
+
+  const held = heldLeaseFor(snapshotRepositoryRecord(given), evidence);
+  if (!isHeldLease(held)) return launchFailureFor(held);
+  const { location, document, evidence: holder } = held;
+
+  if (
+    request === null ||
+    typeof request !== 'object' ||
+    !Number.isSafeInteger(request.generation) ||
+    request.generation < 1 ||
+    typeof request.writerId !== 'string' ||
+    request.writerId.length === 0 ||
+    request.writerId.length > 64
+  ) {
+    return launchFailure('LEDGER_NOT_READABLE_BACK', 'GENERATION_NOT_NAMED');
+  }
+
+  const subject = subjectOf(document);
+  const raw = readLedgerRecord(location);
+  const existing = extendableWriterLaunchLedger(subject, raw);
+  if (existing === null) {
+    return launchFailure(
+      'GENERATION_NOT_OPEN',
+      readWriterLaunchLedger(subject, raw),
+      request.generation,
+    );
+  }
+
+  const index = request.generation - 1;
+  const open = existing.entries[index];
+  if (open === undefined || open.generation !== request.generation) {
+    return launchFailure('GENERATION_NOT_OPEN', 'NOT_PRESENT', request.generation);
+  }
+  if (open.writerId !== request.writerId) {
+    return launchFailure('GENERATION_NOT_OPEN', 'ANOTHER_WRITER', request.generation);
+  }
+  if (open.state === 'CONTAINED') {
+    return launchFailure('GENERATION_NOT_OPEN', 'ALREADY_CONFIRMED', request.generation);
+  }
+  if (open.state === 'PENDING') {
+    // Nothing to withdraw, and the postcondition this call exists for already
+    // holds. Answered as a success rather than as a refusal because the caller
+    // asks for a *state*, not for a write: the establishment mark that never
+    // landed is the commonest way to get here.
+    return Object.freeze({
+      code: 'RETRACTED' as const,
+      detail: 'ALREADY_PENDING',
+      generation: request.generation,
+    });
+  }
+
+  const entries = [...existing.entries];
+  entries[index] = {
+    generation: open.generation,
+    state: 'PENDING',
+    writerId: open.writerId,
+    openedAt: open.openedAt,
+  };
+
+  const payload: WriterLaunchLedgerPayload = {
+    ledgerVersion: WRITER_LAUNCH_LEDGER_VERSION,
+    ownerPid: document.ownerPid,
+    runId: document.runId,
+    historyComplete: existing.historyComplete,
+    entries,
+  };
+  const bytes = ledgerBytesFor(document, payload);
+
+  const back = ledgerReadBack(bytes);
+  const rebuilt = extendableWriterLaunchLedger(subject, back);
+  if (rebuilt === null || rebuilt.entries[index]?.state !== 'PENDING') {
+    // Not a plain refusal: what is on disk still claims this launch is a proof,
+    // and this call has just established that it is not. The history goes.
+    return discardWriterLaunchHistory(location, holder, 'RETRACTION_NOT_AS_BUILT');
+  }
+
+  const published = publishCompanionRecord(ledgerPathFor(location), bytes, () =>
+    stillHeldBy(location, holder),
+  );
+  if (published === 'NOT_OWNER') {
+    // Somebody else's lease is at that path now, and this call has no standing
+    // to delete their history. Their ledger describes their run, not this one.
+    return launchFailure('NOT_OWNER', 'LOST_BEFORE_PUBLISH', request.generation);
+  }
+  if (published !== null) return discardWriterLaunchHistory(location, holder, published);
+  return Object.freeze({ code: 'RETRACTED' as const, detail: null, generation: request.generation });
 }
 
 /**

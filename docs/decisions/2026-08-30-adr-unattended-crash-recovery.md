@@ -75,8 +75,14 @@ before each launch  → generation N appended as PENDING, published
 launch happens      → only after that publish is known to have landed
 kernel confirms job → generation N replaced by ESTABLISHED, published   ← new
 launch seen to end  → generation N replaced by CONTAINED, published
+launch over, unproved → generation N withdrawn to PENDING, published   ← new
 anything else       → generation N stays where it got to, for good
 ```
+
+The withdrawal is the second half of the decision and is not optional: an
+`ESTABLISHED` entry proves a recovery only while the launch it names is the last
+thing that happened under the lease. See `R-M2-2` below for the sequence that
+made it necessary and the phases that measure it.
 
 ### The predicate, stated exactly
 
@@ -192,25 +198,39 @@ clears itself; there is no direction in which reuse permits a removal.
   that already shipped: a crash *between* writer launches — during the
   verification command, say — leaves an all-`CONTAINED` history and has been
   recoverable since V3 slice 5 while an unrecorded subprocess may have been in
-  flight.
+  flight. That is `L-V3-05-1` and this slice does not close it.
 
-  **This slice adds one further, narrow route to it, and the first draft of this
-  paragraph denied that on a false premise.** It argued that the new arm can fire
-  only while a writer launch is in flight, and that launches are sequential
-  (which they are — there is no `Promise.all` or `Promise.race` anywhere under
-  `src/loop`, `src/run` or `src/block`), so nothing else of that epoch could be
-  running. The second half is true and the first is not: an `ESTABLISHED` entry
-  is not evidence that a writer is *now* running. It persists after the launch
-  ends whenever the `CONTAINED` upgrade could not be published, and permanently
-  when the ending could not be attested at all. A run that reached that state and
-  then crashed later — possibly mid-verification — presents an `ESTABLISHED`
-  history, and the new arm may recover it where the old build would have refused
-  `LAUNCH_UNPROVEN`.
+  **What this slice added to it, and then closed.** A first draft argued that the
+  new arm could fire only while a writer was in flight, and that launches are
+  sequential, so nothing else could be running. The second half is true and the
+  first is not: an `ESTABLISHED` entry is not evidence that a writer is *now*
+  running. It persists after the launch ends whenever the `CONTAINED` upgrade
+  could not be published, and permanently when the ending could not be attested
+  at all. A run that reached that state and then crashed later — mid-commit,
+  mid-verification, mid-review — presented an `ESTABLISHED` history whose
+  recorded pids were long gone, and the new arm recovered it. A review refused
+  the slice on exactly that, and was right: before this slice such a writer left
+  `PENDING` and the sequence was refused, so it was a widening the slice owned.
 
-  It is narrow: it needs a failed or unattested ending *and* a later crash. It is
-  not a new class, and it does not change what the ledger claims. It is recorded
-  here because an adversarial review had to find it, which means the argument was
-  doing work the code was not.
+  It is closed by {@link retractWriterLaunchEstablishment}: a writer launch that
+  ends without reaching `CONTAINED` has its establishment mark **withdrawn back
+  to `PENDING`**, in a `finally`, before control returns to a step that can start
+  anything. `PENDING` is not a conservative invention — it is the exact state
+  this build left such a launch in before the mark existed — so the arm can no
+  longer license a recovery the previous build refused. The lease is then
+  unrecoverable for the same reason and to the same extent as before: no wider,
+  and no narrower.
+
+  Measured, not argued. `tests/dist-artifact/crash-recovery-dist-artifact.mjs`
+  phase **F** builds the sequence with real processes — a real writer that ends
+  unproved, a real later owned subprocess left alive, a real owner death — and
+  requires a refusal. Phase **G** is its control: the identical fixture with the
+  withdrawal switched off must *recover*, which reproduces the defect and stops F
+  passing in a build that had merely broken the arm.
+
+  What remains is the pre-existing `L-V3-05-1` hole on the `ALL_LAUNCHES_CONTAINED`
+  arm, unchanged and not this slice's to close.
+
 - **`R-M2-3` — ledger forgery is bounded exactly as before.** Anyone who can create
   a file in the Git common directory can write a history that reads as a proof.
   The format states this; the new state changes nothing about it, since write

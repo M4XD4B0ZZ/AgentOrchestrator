@@ -87,8 +87,8 @@ import {
   clearContainmentEvidence,
   confirmWriterLaunch,
   recordContainmentEvidence,
+  retractWriterLaunchEstablishment,
   verifyExecutionLeaseHeldFor,
-  type ContainmentRecordResult,
   type ExecutionLeaseAuthority,
 } from '../lease/execution-lease.js';
 import { runGitCommand, type GitCommandResult, type GitRunner } from '../worktree/git-command.js';
@@ -171,16 +171,66 @@ export function leasedAgent(deps: SpawnAuthority): AgentRunner {
     // that launch is the one a recovery has to know about.
     const generation = openWriterGeneration(deps, id);
     if (generation === 'REFUSED') return AGENT_LAUNCH_NOT_RECORDED;
-    const result = await (deps.agent ?? runAgentCommand)(id, args, cwd, payload, {
-      // The mark that closes U1's dominant case, written while the writer is
-      // still running. See {@link markWriterLaunchEstablished}.
-      onLaunchEstablished: (attestation) => {
-        markWriterLaunchEstablished(deps, id, attestation, generation);
-      },
-    });
-    recordWriterContainment(deps, id, result, generation);
-    return result;
+
+    // ── The establishment mark, and the one thing that must undo it ─────────
+    //
+    // `ESTABLISHED` proves a recovery only while the launch it names is the last
+    // thing that happened under this lease. The moment this call returns, the
+    // step goes on to a commit, a verification and a reviewer - all owned, none
+    // of them in this ledger - so an entry left `ESTABLISHED` by a launch that is
+    // *over* would license removing the lease out from under one of them.
+    //
+    // So the mark is withdrawn here unless the ending was proved, and it is
+    // withdrawn in a `finally`: a throw out of the runner is a path where the
+    // caller may still catch and carry on, and the withdrawal cannot be the
+    // thing that gets skipped. `retractWriterLaunchEstablishment` states the
+    // rest, including why `PENDING` is the exact target.
+    let proved = false;
+    try {
+      const result = await (deps.agent ?? runAgentCommand)(id, args, cwd, payload, {
+        // The mark that closes U1's dominant case, written while the writer is
+        // still running. See {@link markWriterLaunchEstablished}.
+        onLaunchEstablished: (attestation) => {
+          markWriterLaunchEstablished(deps, id, attestation, generation);
+        },
+      });
+      proved = recordWriterContainment(deps, id, result, generation) === 'CONFIRMED';
+      return result;
+    } finally {
+      if (!proved) withdrawWriterLaunchEstablishment(deps, id, generation);
+    }
   };
+}
+
+/**
+ * Withdraws this generation's establishment mark, unless its ending was proved.
+ *
+ * Runs after every writer launch that did not reach `CONTAINED`, and before
+ * anything else of this run can start. The header of
+ * {@link retractWriterLaunchEstablishment} carries the reasoning; what belongs
+ * here is why it is *this* seam's job: this is the only place that knows both
+ * that a writer launch is over and that the lease is still this run's, and it is
+ * the last instruction before control returns to a step that will start
+ * subprocesses this ledger does not describe.
+ *
+ * Its result is discarded, like its siblings'. A withdrawal that could not be
+ * published has already fallen back to discarding the history, which asserts
+ * nothing at all - and a run is not failed by an enrichment. What that leaves is
+ * stated as a residual rather than hidden: if the withdrawal *and* the discard
+ * both fail, an affirmative entry stays on disk. Both are writes to a directory
+ * this run owns, and a failure of both is the same broken administrative
+ * directory that stops the next `beginWriterLaunch` with `LAUNCH_MUST_NOT_START`.
+ */
+function withdrawWriterLaunchEstablishment(
+  deps: SpawnAuthority,
+  id: AgentId,
+  generation: number | null,
+): void {
+  if (id !== CONTAINED_WRITER || generation === null) return;
+  retractWriterLaunchEstablishment(deps.lease.repository, deps.lease.evidence, {
+    generation,
+    writerId: id,
+  });
 }
 
 /**
@@ -324,8 +374,14 @@ function recordWriterContainment(
   id: AgentId,
   result: AgentCommandResult,
   generation: number | null,
-): ContainmentRecordResult | null {
-  if (id !== CONTAINED_WRITER) return null;
+): 'CONFIRMED' | 'NOT_CONFIRMED' {
+  // The answer is what the *caller* needs, not what this function writes. Only
+  // `CONFIRMED` means the launch's ending is proved on disk; everything else -
+  // an agent that is not the writer, an unattestable ending, a confirmation that
+  // would not publish - leaves an establishment mark that has to be withdrawn.
+  // Returning the containment record instead, as this did, made "was the ending
+  // proved" a question no caller could ask.
+  if (id !== CONTAINED_WRITER) return 'NOT_CONFIRMED';
   // The registry gate, not `!== undefined`. A result carrying an explicit
   // `null`, or anything else a JS consumer or a JSON round trip can produce, is
   // not an attestation — and asking the mint is the same discipline
@@ -343,40 +399,48 @@ function recordWriterContainment(
     // record is removed for its own reason — it would otherwise keep describing
     // the launch before this one — and the two are different obligations.
     //
-    // ── What "as it stands" now means, since M2 slice 1 changed it ──────────
+    // ── The generation goes back to `PENDING`, and the caller does it ───────
     //
-    // This said the generation is "left `PENDING`", and after that slice it
-    // need not be. An ending that could not be attested may follow an
-    // establishment that *was* kernel-confirmed, and then the entry sits at
-    // `ESTABLISHED`; it is `PENDING` only when the establishment mark never
-    // landed either. Which of the two is more common is not measured anywhere
-    // and is not claimed here - what matters is that both are possible and the
-    // paragraph below has to hold for each.
+    // A draft of this slice argued that an unattested ending "takes nothing
+    // away" from an `ESTABLISHED` entry, because that state claims containment
+    // rather than an ending. That is true of the *entry* and false of what it
+    // then licenses: the run continues from here into a commit, a verification
+    // and a reviewer, none of which this ledger records, so an entry left
+    // standing would let a later crash remove the lease out from under one of
+    // them. A review found it before it shipped.
     //
-    // That is a real change in what such a launch licenses, and it is intended
-    // rather than inherited. `ESTABLISHED` does not claim the launch ended — it
-    // claims it was placed in the owner's job — so an unattested ending takes
-    // nothing away from it, and the recovery that builds on it still owes the
-    // liveness proof. The `BOUNDARY_LOST` case where the helper may still be
-    // running is precisely the case that proof refuses:
-    // `LAUNCH_TREE_STILL_RUNNING`.
-    return clearContainmentEvidence(deps.lease.repository, deps.lease.evidence);
+    // The withdrawal is `leasedAgent`'s, in a `finally`, so a throw cannot skip
+    // it - see {@link withdrawWriterLaunchEstablishment}. This arm reports the
+    // failure to prove and does not act on it.
+    clearContainmentEvidence(deps.lease.repository, deps.lease.evidence);
+    return 'NOT_CONFIRMED';
   }
   const now = deps.containmentNow ?? (() => new Date().toISOString());
+  let confirmed = false;
   if (generation !== null) {
     // Named back rather than re-derived. `confirmWriterLaunch` refuses a
     // generation that is not open, so a result discarded here is a generation
     // that stays unproven — which is the safe direction and needs no handling.
-    confirmWriterLaunch(deps.lease.repository, deps.lease.evidence, result.containment, {
-      generation,
-      writerId: id,
-      now,
-    });
+    // The result is READ now, and that is the whole of the fix a review asked
+    // for. It used to be discarded, so a confirmation that could not be
+    // published left an `ESTABLISHED` entry standing and nobody knew - which is
+    // the state that licensed removing a lease under a later, unrecorded
+    // subprocess. A generation this call did not prove is withdrawn by the
+    // caller.
+    confirmed =
+      confirmWriterLaunch(deps.lease.repository, deps.lease.evidence, result.containment, {
+        generation,
+        writerId: id,
+        now,
+      }).code === 'CONFIRMED';
   }
-  return recordContainmentEvidence(deps.lease.repository, deps.lease.evidence, result.containment, {
+  // Slice 4's record is still an enrichment and still cannot fail a run, so its
+  // result is still discarded. It is a different obligation from the ledger's.
+  recordContainmentEvidence(deps.lease.repository, deps.lease.evidence, result.containment, {
     writerId: id,
     now,
   });
+  return confirmed ? 'CONFIRMED' : 'NOT_CONFIRMED';
 }
 
 /**

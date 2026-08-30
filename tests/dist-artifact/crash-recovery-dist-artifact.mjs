@@ -17,12 +17,12 @@
  * crashed repository can get it running again. A recovery reached only from a
  * test's import is not that claim.
  *
- * ── The four phases, and which one is the control ─────────────────────────
+ * ── The phases, and which of them are controls ────────────────────────────
  *
  *   A  positive — owner killed mid-writer. The tree must be gone, the shipped
  *      `agent-loop lease recover` must remove the lease, and a fresh acquisition
  *      must then succeed.
- *   B  THE CONTROL — identical, except the processes the ledger records are
+ *   B  A CONTROL — identical, except the processes the ledger records are
  *      deliberately still alive. The recovery must refuse
  *      `LAUNCH_TREE_STILL_RUNNING` and leave the lease byte-identical. Without
  *      this case every `RECOVERED` in phase A could be an instrument that cannot
@@ -30,10 +30,19 @@
  *   C  the owner itself is still alive with an established launch. Must refuse
  *      `OWNER_RUNNING` — the conjunct that comes first — so the new arm cannot
  *      be reached past a living owner.
- *   D  the window this slice does NOT close: killed after the announcement and
- *      before the kernel confirmed membership. Must refuse
- *      `LAUNCH_HISTORY_UNPROVEN`, which is the honest answer and the reason U1 is
- *      narrowed rather than closed.
+ *   D  the window this slice does NOT close: an announced launch that never
+ *      reached the kernel's answer. Must refuse `LAUNCH_HISTORY_UNPROVEN`, which
+ *      is the honest answer and the reason U1 is narrowed rather than closed.
+ *   F  the sequence a review blocked this slice on: the writer really ends, its
+ *      ending is never proved, a LATER owned subprocess starts and is still
+ *      alive when the owner dies. The writer's own pids are gone, so the
+ *      liveness re-check cannot save it; what refuses is the withdrawal of the
+ *      establishment mark. Must refuse.
+ *   G  THE CONTROL FOR F — the identical fixture with the withdrawal switched
+ *      off, which must RECOVER. That is the defect reproduced, and it is what
+ *      stops F passing in a build that had simply broken the whole arm.
+ *   E  runs once, after the rounds: the establishment mint and the ending mint
+ *      must describe the same launch.
  *
  * Survivors are identified by heartbeat rather than by a process walk, for the
  * reason `launch-boundary-dist-artifact.mjs` records: a terminated process whose
@@ -103,6 +112,7 @@ import {
   attestWriterLaunchEstablished,
   beginWriterLaunch,
   deriveExecutionLeaseLocation,
+  retractWriterLaunchEstablishment,
 } from ${JSON.stringify(pathToFileURL(distLease).href)};
 import { startOwnedProcess } from ${JSON.stringify(pathToFileURL(distStart).href)};
 import { mintContainmentAttestation } from ${JSON.stringify(pathToFileURL(distMint).href)};
@@ -144,6 +154,54 @@ if (phase === 'PENDING') {
   // Deliberately nothing. The generation stays announced-and-unconfirmed: the
   // window between the poison and the kernel's answer, which this slice narrows
   // and does not close.
+} else if (phase === 'ENDED_THEN_LATER_WORK') {
+  // THE SEQUENCE THE REVIEW BLOCKED ON. A real contained writer runs to its end,
+  // its ending is never proved (the run does not confirm the generation), and
+  // the run then starts a LATER owned subprocess that is still alive when the
+  // owner dies. That later process is not in the writer ledger and never can be.
+  const first = await startOwnedProcess({
+    file: process.execPath,
+    args: ['-e', 'process.exit(0)'],
+    env: { ...process.env },
+  });
+  if (!first.established) fail('BOUNDARY ' + JSON.stringify(first.ending));
+  const w = first.process;
+  const attestation = mintContainmentAttestation({
+    ownerPid: process.pid,
+    helperPid: w.helperPid,
+    childPid: w.childPid,
+    mode: w.mode,
+    assignedAtCreation: w.assignedAtCreation,
+    launchNonce: w.launchNonce,
+    attestedAt: now(),
+    verifiedInJob: w.verifiedInJob,
+  });
+  if (attestation === null) fail('MINT');
+  const marked = attestWriterLaunchEstablished(repository, acquired.evidence, attestation, {
+    generation: opened.generation, writerId: 'claude', now,
+  });
+  if (marked.code !== 'ESTABLISHED') fail('ESTABLISH ' + marked.code);
+  await first.process.ending;
+  facts = { helperPid: w.helperPid, childPid: w.childPid };
+
+  // The withdrawal the production seam performs. Driven explicitly here because
+  // this harness drives the lease layer rather than the loop; the seam's own
+  // wiring is measured in tests/v3-05-stale-lease-recovery.test.ts.
+  if (process.env.AO_CRASH_WITHDRAW === 'yes') {
+    const retracted = retractWriterLaunchEstablishment(repository, acquired.evidence, {
+      generation: opened.generation, writerId: 'claude',
+    });
+    if (retracted.code !== 'RETRACTED') fail('RETRACT ' + retracted.code);
+  }
+
+  // And now the later, unrecorded owned subprocess, left running.
+  const later = spawn(process.execPath, ['-e', BEATER], {
+    env: { ...process.env, AO_CRASH_BEAT: beat },
+    detached: true,
+    stdio: 'ignore',
+  });
+  later.unref();
+  facts = { ...facts, laterPid: later.pid };
 } else if (phase === 'SURVIVOR') {
   // THE CONTROL. The ledger is made to name processes that are really running
   // and are NOT in any job of this owner's: started detached, so killing the
@@ -220,10 +278,18 @@ process.stdout.write(
 setInterval(() => {}, 1000);
 `;
 
-function startOwner(root, phase, beat) {
+function startOwner(root, phase, beat, options = {}) {
   return new Promise((ok, bad) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', OWNER_SOURCE], {
-      env: { ...process.env, AO_CRASH_DIR: root, AO_CRASH_PHASE: phase, AO_CRASH_BEAT: beat },
+      env: {
+        ...process.env,
+        AO_CRASH_DIR: root,
+        AO_CRASH_PHASE: phase,
+        AO_CRASH_BEAT: beat,
+        // The one switch that separates F from its control G. Present so the two
+        // differ in exactly the withdrawal and in nothing else about the fixture.
+        AO_CRASH_WITHDRAW: options.withdraw === true ? 'yes' : 'no',
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';
@@ -505,6 +571,80 @@ for (let round = 0; round < ROUNDS; round += 1) {
       Buffer.compare(before, leaseBytes(root) ?? Buffer.alloc(0)) === 0,
       `D${round}: the lease is byte-identical`,
     );
+  }
+
+  /* ── F. the sequence a review blocked this slice on ────────────────────── */
+  //
+  //   ESTABLISHED writer -> the writer really ends -> no CONTAINED upgrade
+  //   -> a LATER owned subprocess starts and stays alive -> the owner dies
+  //   -> recovery MUST refuse
+  //
+  // The writer's own recorded pids are gone, so the liveness re-check cannot
+  // save this: nothing in the ledger names the later process, and nothing ever
+  // will. What refuses is the withdrawal of the establishment mark at the moment
+  // the writer ended without a proof.
+  {
+    const { root } = fixture();
+    const repository = await resolvedRepository(root);
+    const beat = join(root, 'beat');
+    const facts = await startOwner(root, 'ENDED_THEN_LATER_WORK', beat, { withdraw: true });
+    check(await killAndWait(osProcessLiveness, facts.ownerPid), `F${round}: the owner is gone`);
+    await sleep(600);
+
+    check(
+      osProcessLiveness(facts.helperPid) === 'NOT_FOUND' &&
+        osProcessLiveness(facts.childPid) === 'NOT_FOUND',
+      `F${round}: the writer's own recorded processes are gone`,
+    );
+    check(
+      osProcessLiveness(facts.laterPid) === 'ALIVE',
+      `F${round}: the LATER unrecorded owned process outlived the owner`,
+    );
+
+    const before = leaseBytes(root);
+    const assessed = assessStaleLeaseRecovery(repository);
+    check(
+      assessed.refusal === 'LAUNCH_HISTORY_UNPROVEN',
+      `F${round}: refused (got ${String(assessed.refusal)})`,
+    );
+    check(!/RECOVERED/.test(leaseRecoverCli(root)), `F${round}: the shipped CLI removes nothing`);
+    check(
+      Buffer.compare(before, leaseBytes(root) ?? Buffer.alloc(0)) === 0,
+      `F${round}: the lease is byte-identical`,
+    );
+    await killAndWait(osProcessLiveness, facts.laterPid);
+    // Stated rather than left to be assumed: killing the later process does NOT
+    // make this lease recoverable. The withdrawal is permanent, which is exactly
+    // the pre-slice behaviour for a writer whose ending was never proved. The
+    // control that makes the refusal attributable is G below, not this line.
+    check(
+      assessStaleLeaseRecovery(repository).refusal === 'LAUNCH_HISTORY_UNPROVEN',
+      `F${round}: still refused once the later process is gone`,
+    );
+  }
+
+  /* ── G. THE CONTROL for F: the same sequence with no withdrawal ─────────── */
+  //
+  // Identical fixture, identical processes, and the establishment mark left
+  // standing. This must RECOVER - which is what the arm did before the
+  // withdrawal existed, and is the defect F exists to keep closed. Without this
+  // case, F would also pass in a build that had simply broken the whole arm.
+  {
+    const { root } = fixture();
+    const repository = await resolvedRepository(root);
+    const beat = join(root, 'beat');
+    const facts = await startOwner(root, 'ENDED_THEN_LATER_WORK', beat, { withdraw: false });
+    check(await killAndWait(osProcessLiveness, facts.ownerPid), `G${round}: the owner is gone`);
+    await sleep(600);
+    check(
+      osProcessLiveness(facts.laterPid) === 'ALIVE',
+      `G${round}: the later unrecorded process is alive here too`,
+    );
+    check(
+      assessStaleLeaseRecovery(repository).verdict === 'SAFE_TO_RECOVER',
+      `G${round}: without the withdrawal the arm permits - which is the defect`,
+    );
+    await killAndWait(osProcessLiveness, facts.laterPid);
   }
 }
 
