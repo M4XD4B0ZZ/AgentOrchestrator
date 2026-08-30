@@ -994,6 +994,10 @@ describe('a refusal after establishment does not wait on the helper’s pipes', 
               mode: 'JOBLIST',
               assignedAtCreation: true,
               verifiedInJob: true,
+              // Present because `OwnedProcess` requires it since M2 slice 1, and
+              // this fake is behind a cast that typecheck cannot see through - so
+              // a missing field here is a shape drift nothing would report.
+              launchNonce: 'fake-owned-runner-nonce',
               jobMembersAtStart: 1,
               workDir: 'C:\\nowhere',
               terminate: () => undefined,

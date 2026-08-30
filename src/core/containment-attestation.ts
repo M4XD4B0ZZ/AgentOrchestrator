@@ -21,8 +21,20 @@ import {
 export type { ContainmentFacts };
 
 /**
- * Proof that a process was created inside a Job Object this process owns, with
- * kernel-confirmed membership before the target executed.
+ * Proof that a process was created for a Job Object this process owns, that the
+ * kernel confirmed its membership, and that **no instruction of the target
+ * executed outside that job**.
+ *
+ * That third clause is the one to read carefully, because the two obvious
+ * wordings are each false in one launch mode and this file has now carried both.
+ * "Membership confirmed before the target executed" is false in `JOBLIST`, the
+ * production default: there the target is created into the job and is *not*
+ * created suspended, so it is already running when the kernel is asked
+ * (`native/ao-launch/AoLaunch.cs`: `if (!jobList) flags |= CREATE_SUSPENDED`).
+ * "It never existed outside the job" is false in `SUSPENDED`: there it is
+ * created suspended, exists briefly in no job, and is assigned before it is
+ * resumed. What holds in **both** is that no code of the target ran outside the
+ * job, which is the claim containment actually needs.
  *
  * Opaque by construction. Callers hold it, forward it and hand it to the lease
  * recorder; they never build one.

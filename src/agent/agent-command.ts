@@ -269,7 +269,39 @@ export type AgentRunner = (
   args: readonly string[],
   cwd: string,
   payload: string,
+  hooks?: AgentLaunchHooks,
 ) => Promise<AgentCommandResult>;
+
+/**
+ * What a caller may ask to be told *during* an agent launch.
+ *
+ * Optional, and last, so every substituted runner already written stays a valid
+ * {@link AgentRunner} — a test runner that ignores it is not weakened by it,
+ * because what it would be told is an enrichment.
+ *
+ * One member, and it exists for one reason. Everything else on this seam is
+ * reported when the run is over, and M2 slice 1 needed a fact recorded while the
+ * run was still going: an orchestrator killed mid-writer never reaches the
+ * result at all, so a containment learned only from the result cannot describe
+ * the launch that was in flight when it died.
+ */
+export interface AgentLaunchHooks {
+  /**
+   * Called once, with an attestation, when the kernel has confirmed this
+   * launch's job membership. The agent may already be running by then - in the
+   * default launch mode it is created into the job rather than created suspended
+   * - and what the confirmation establishes is that no instruction of the agent
+   * executed outside the owner's job. Not "it never existed outside that job":
+   * that is false in `SUSPENDED` mode, where the target exists briefly in no job
+   * before it is assigned and resumed. `core/containment-attestation.ts` carries
+   * the reasoning for both.
+   *
+   * Not called at all when there was nothing to attest — a POSIX run, a boundary
+   * that was never established, a mint that refused. Silence is therefore the
+   * conservative answer and never a claim.
+   */
+  readonly onLaunchEstablished?: (attestation: ContainmentAttestation) => void;
+}
 
 function unavailable(from: Partial<AgentCommandResult> = {}): AgentCommandResult {
   return Object.freeze({
@@ -348,10 +380,15 @@ export function toAgentCommandResult(result: CommandResult): AgentCommandResult 
 }
 
 /** The production {@link AgentRunner}. */
-export const runAgentCommand: AgentRunner = async (agent, args, cwd, payload) => {
+export const runAgentCommand: AgentRunner = async (agent, args, cwd, payload, hooks) => {
   let result: CommandResult;
   try {
     result = await runCommand(agent, args, {
+      // Forwarded only when asked for, so a caller with no interest changes
+      // nothing about the launch. See {@link AgentLaunchHooks}.
+      ...(hooks?.onLaunchEstablished === undefined
+        ? {}
+        : { onLaunchEstablished: hooks.onLaunchEstablished }),
       env: createProbeEnv(agent === 'claude' ? 'agent:claude' : 'agent:codex', process.env),
       // Always explicit. `runCommand` falls back to `process.cwd()` when this
       // is absent, and the directory an agent writes in must come from the

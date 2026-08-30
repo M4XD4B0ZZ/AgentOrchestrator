@@ -92,6 +92,17 @@
  * fabricated probe achieves here is a misleading report, to the caller that
  * fabricated it.
  *
+ * M2 slice 1 gave that probe a second job and the sentence above still holds,
+ * which is worth saying rather than leaving to be re-derived. The predicate now
+ * also asks about the processes an unended launch recorded, and it asks with the
+ * *same* function — so a supplied probe can fake the tree's absence here too,
+ * and here too nothing destructive reads it. On the destructive path that one
+ * function is `mostRefusing(osProcessLiveness(pid), opinionOf(…))`, so the real
+ * probe is consulted for every pid the loop asks about and a supplied opinion
+ * can only make the answer worse. The property is inherited rather than
+ * re-implemented, which is the point of the loop taking the parameter instead of
+ * reaching for `osProcessLiveness` itself.
+ *
  * `tests/v3-05-stale-lease-recovery.test.ts` pins that asymmetry by measuring
  * both halves in one case rather than asserting it.
  */

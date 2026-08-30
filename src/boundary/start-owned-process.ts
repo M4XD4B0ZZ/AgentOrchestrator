@@ -168,6 +168,22 @@ export interface OwnedProcess {
   readonly assignedAtCreation: boolean | null;
   /** The membership check that had to pass before the target could execute. */
   readonly verifiedInJob: boolean;
+  /**
+   * This launch's identity, as generated here and echoed back by the helper.
+   *
+   * Exposed since M2 slice 1, and only because an attestation now has to be
+   * mintable at *establishment* rather than only at the ending. The mint takes
+   * the nonce, and until then the only caller that needed one read it back out of
+   * the ending's status file - a route that does not exist while the target is
+   * still running, which is exactly when the new mark has to be made. (This said
+   * "the only reader of it was the ending's status file", which named a file
+   * rather than a reader and skipped over the two readers inside this module:
+   * the establishment loop's own equality check, and the classifier's `expect`.)
+   * It is this launch's identity and nothing more: it authorises nothing, and
+   * `core/internal/containment-attestation.ts` derives the launch digest from it
+   * rather than treating it as a secret.
+   */
+  readonly launchNonce: string;
   readonly jobMembersAtStart: number | null;
   readonly workDir: string;
   /** Kills the helper; the job, and everything in it, goes with it. */
@@ -456,6 +472,10 @@ export async function startOwnedProcess(
           mode: status.mode ?? mode,
           assignedAtCreation: status.assignedAtCreation,
           verifiedInJob: status.verifiedInJob,
+          // This launch's own nonce, not the status's. The two were compared
+          // above, and the one generated here is the authority about which
+          // launch this is — the same rule `helperPid` follows one field up.
+          launchNonce: nonce,
           jobMembersAtStart: status.jobMembersAtStart,
           workDir,
           terminate,

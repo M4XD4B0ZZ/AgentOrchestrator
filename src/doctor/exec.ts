@@ -373,6 +373,19 @@ export interface CommandResult {
 
 export interface RunOptions {
   /**
+   * Called once when the kernel has confirmed this launch's job membership, on
+   * Windows. The target may already be running by then: in the default launch
+   * mode it is created into the job rather than created suspended, so what the
+   * confirmation establishes is that it never existed outside it.
+   *
+   * A pass-through to `boundary/owned-command.ts`, whose option carries the
+   * reasoning. Nothing here interprets the artefact and nothing here has an
+   * opinion about what it licenses; this module's contract is unchanged for
+   * every caller that does not pass one, and on POSIX passing one is simply
+   * never called back.
+   */
+  readonly onLaunchEstablished?: (attestation: ContainmentAttestation) => void;
+  /**
    * The child's whole environment. Nothing beyond it is inherited, except the
    * eleven names the platform back-fills into every Windows child anyway.
    *
@@ -1274,6 +1287,19 @@ export async function runCommand(
         // termination gets before it is reported as unconfirmed".
         terminationGraceMs: killGraceMs,
         ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+        // Forwarded, never originated here. This module still knows nothing
+        // about leases: it carries an opaque artefact from the boundary to
+        // whoever asked for it, exactly as it already carries the ending's
+        // attestation on the result.
+        //
+        // Windows only, and that is not an omission. The option exists to
+        // report a *job membership* the kernel confirmed, and the POSIX path
+        // has no job and no boundary to confirm one — so a caller passing this
+        // there is simply never called back, which is the same answer it gets
+        // for a launch that could not be attested.
+        ...(options.onLaunchEstablished === undefined
+          ? {}
+          : { onLaunchEstablished: options.onLaunchEstablished }),
       });
     } catch (error) {
       // `runOwnedCommand` never throws for a failing *command* — but it does

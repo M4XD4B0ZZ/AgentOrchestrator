@@ -806,6 +806,33 @@ class BoundedSink {
 }
 
 export interface OwnedCommandOptions {
+  /**
+   * Called once, with an attestation, the moment the kernel has confirmed this
+   * launch's job membership - which in the default mode it did at creation, so
+   * the target never existed outside that job.
+   *
+   * ── Why a callback and not a second return value ───────────────────────────
+   *
+   * Because the fact is only useful *while the run is still going*. This
+   * function returns after the helper has closed; a caller that learned about
+   * containment then could only write it down after the writer had already
+   * finished, which is exactly the ordering M2 slice 1 exists to fix — an owner
+   * killed mid-writer never reaches the return at all. The same reasoning gave
+   * `OwnedProcessRequest.onHelperSpawned` its shape one layer down.
+   *
+   * The attestation handed over is the ordinary minted artefact: unconstructable
+   * outside `core/internal/containment-attestation.ts`, and not authority. It
+   * carries no claim that the target has ended — it cannot, since it is made
+   * while the target is starting — so a consumer that records it must record it
+   * as what it is. `lease/writer-launch-ledger.ts` states what that licenses.
+   *
+   * Never called when the boundary was not established, and never called with
+   * `null`: no attestation means no call. It is invoked inside a `try` that
+   * swallows, so a throwing consumer cannot take down a launch that has already
+   * started — an enrichment may not stop productive work, which is the rule
+   * `loop/leased-spawns.ts` applies to the record it builds from this.
+   */
+  readonly onLaunchEstablished?: (attestation: ContainmentAttestation) => void;
   /** The canonical application path. This module resolves nothing. */
   readonly file: string;
   readonly args?: readonly string[];
@@ -1381,6 +1408,48 @@ export async function runOwnedCommand(
     }
 
     const owned = launch.process;
+
+    // ── The establishment mark (M2 slice 1) ──────────────────────────────────
+    //
+    // Everything the mint needs is already in hand and every input is the
+    // boundary's rather than this module's bookkeeping: the pids and the
+    // membership confirmation are the helper's, and the nonce is this launch's
+    // own. `verifiedInJob` is `true` here by construction — `startOwnedProcess`
+    // does not answer `established` otherwise — and the mint re-checks it
+    // anyway, answering `null` for anything it cannot vouch for.
+    //
+    // The consumer is called inside a swallowing `try` for the reason the option
+    // records: this is an enrichment, the target is already running, and a
+    // consumer that throws must not turn a started launch into a failed one.
+    if (options.onLaunchEstablished !== undefined) {
+      // The whole block is inside the swallowing `try`, not just the callback.
+      // `mintContainmentAttestation` answers `null` rather than throwing and
+      // `toISOString` throws only for an invalid date — so this catches nothing
+      // reachable today, which is the same standing every other defensive `try`
+      // in this file has. What it buys is that the *rule* is enforced by the
+      // code rather than by the argument that the two lines above happen to be
+      // total: an enrichment may not stop a launch that has already started.
+      try {
+        const atStart = mintContainmentAttestation({
+          ownerPid: process.pid,
+          helperPid: owned.helperPid,
+          childPid: owned.childPid,
+          mode: owned.mode,
+          assignedAtCreation: owned.assignedAtCreation,
+          launchNonce: owned.launchNonce,
+          // The moment membership was confirmed to this module, which is what
+          // `ContainmentFacts.attestedAt` describes. Stamped here rather than
+          // reused from the ending's mint below: they are two different moments
+          // and sharing one would date the earlier record by the later event.
+          attestedAt: new Date().toISOString(),
+          verifiedInJob: owned.verifiedInJob,
+        });
+        if (atStart !== null) options.onLaunchEstablished(atStart);
+      } catch {
+        /* an enrichment may not stop a launch that has already started */
+      }
+    }
+
     /**
      * The directory this run leaves behind, from the point of view of a caller
      * deciding what to clean up.

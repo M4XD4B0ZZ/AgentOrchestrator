@@ -52,7 +52,7 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
@@ -73,6 +73,7 @@ import {
 } from '../src/core/execution-lease-evidence.js';
 import {
   EXECUTION_LEASE_FILE_NAME,
+  WRITER_LAUNCH_LEDGER_FILE_NAME,
   acquireRepositoryExecutionLease,
   deriveExecutionLeaseLocation,
   inspectRepositoryExecutionLease,
@@ -81,6 +82,10 @@ import {
   verifyExecutionLeaseHeldFor,
   type LeaseInspection,
 } from '../src/lease/execution-lease.js';
+import type { AgentCommandResult } from '../src/agent/agent-command.js';
+import type { ContainmentAttestation } from '../src/core/containment-attestation.js';
+import { mintContainmentAttestation } from '../src/core/internal/containment-attestation.js';
+import type { GitRunner } from '../src/worktree/git-command.js';
 import type { ResolvedRepository } from '../src/repo/resolve-repository.js';
 import { releaseTaskWorkspace } from '../src/run/release-workspace.js';
 import { runTask } from '../src/run/run-driver.js';
@@ -92,7 +97,12 @@ import {
   exitCodeForRunOutcome,
   exitCodeForStartOutcome,
 } from '../src/cli/run-exit-codes.js';
-import { runImplementStep, runLoopStep, runVerifyStep } from '../src/loop/loop-step.js';
+import {
+  isLoopDrivenState,
+  runImplementStep,
+  runLoopStep,
+  runVerifyStep,
+} from '../src/loop/loop-step.js';
 import { readExecutionBrief } from '../src/plan/task-brief.js';
 import { prepareTaskWorkspace } from '../src/worktree/prepare-workspace.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
@@ -107,6 +117,7 @@ import {
   writerThatEdits,
 } from './helpers/e2e-fixtures.js';
 import { leaseAuthorityAt, releaseTestLeases } from './helpers/lease.js';
+import { releaseAll, shareLockOn, type ShareLock } from './helpers/share-lock.js';
 import {
   removeTrackedWorkspaces,
   resolveFixture,
@@ -2020,6 +2031,183 @@ describe('a step started directly is fenced exactly like one the loop drives', (
 
     expect(spawns).toBe(0);
     expect(step.outcome).toBe('STATE_NOT_RECORDED');
+  });
+});
+
+/* ── 17b. a writer whose mark could not be withdrawn stops its own step ──── */
+
+describe('a step whose establishment mark could not be withdrawn starts nothing else', () => {
+  /**
+   * Drives one real task to `IMPLEMENTING` and runs the implement step with
+   * `agent`, counting every Git command the step makes **after** the writer has
+   * returned.
+   *
+   * Shared by the pair below so the two differ in exactly one thing — whether
+   * the ledger is share-locked while the writer ends — and so neither can drift
+   * into measuring something the other does not.
+   */
+  async function implementWith(
+    write: (ledgerPath: string, markEstablished: () => void, cwd: string) => Promise<AgentCommandResult>,
+  ): Promise<{
+    readonly gitAfterWriter: number;
+    readonly state: string | false;
+    readonly outcome: string;
+    readonly ledgerState: string;
+  }> {
+    const fixture = await leasableRepository();
+    const evidence = heldLease(fixture);
+    const started = await startTask(
+      { repository: fixture.repository, taskId: TASK_ID },
+      { git: runGitCommand, now: tickingClock(), authPreflight: authPreflightPasses, lease: evidence },
+    );
+    expect(started.outcome).toBe('STARTED');
+
+    const authority = { repository: fixture.repository, evidence };
+    let current = loadTaskState(fixture.root, TASK_ID);
+    if (!current.ok) throw new Error('task did not start');
+
+    const location = deriveExecutionLeaseLocation(fixture.repository);
+    if (!location.ok) throw new Error('fixture has no lease location');
+    const ledgerPath = join(dirname(location.path), WRITER_LAUNCH_LEDGER_FILE_NAME);
+
+    const deps = (overrides: Record<string, unknown> = {}) => ({
+      now: tickingClock()(),
+      authorisedWorktreePath: current.ok ? current.state.worktreePath : '',
+      verification: fixture.repository.verification,
+      brief: readExecutionBrief(
+        fixture.repository,
+        TASK_ID,
+        current.ok ? current.state.worktreePath : '',
+      ),
+      lease: authority,
+      ...overrides,
+    });
+
+    for (const expected of ['CONTEXT_LOADING', 'IMPLEMENTING'] as const) {
+      const advanced = await runLoopStep(current, deps({ agent: editingWriter() }));
+      expect(advanced.state).toBe(expected);
+      current = loadTaskState(fixture.root, TASK_ID);
+      if (!current.ok) throw new Error('state vanished');
+    }
+
+    // The mark is minted against THIS process, because the recorder requires the
+    // attestation to be coupled to the lease's own owner.
+    const attestation = mintContainmentAttestation({
+      ownerPid: process.pid,
+      helperPid: 63_001,
+      childPid: 63_002,
+      mode: 'JOBLIST',
+      assignedAtCreation: true,
+      launchNonce: '00000000000000f7',
+      attestedAt: '2026-08-30T00:00:00.000Z',
+      verifiedInJob: true,
+    });
+    if (attestation === null) throw new Error('fixture could not mint an attestation');
+
+    let writerReturned = false;
+    let gitAfterWriter = 0;
+    const countingGit: GitRunner = async (cwd, args) => {
+      if (writerReturned) gitAfterWriter += 1;
+      return runGitCommand(cwd, args);
+    };
+
+    const step = await runImplementStep(
+      current,
+      deps({
+        git: countingGit,
+        agent: async (
+          _id: string,
+          _args: readonly string[],
+          cwd: string,
+          _payload: string,
+          hooks?: { readonly onLaunchEstablished?: (value: ContainmentAttestation) => void },
+        ) => {
+          const result = await write(
+            ledgerPath,
+            () => hooks?.onLaunchEstablished?.(attestation),
+            cwd,
+          );
+          writerReturned = true;
+          return result;
+        },
+      }),
+    );
+
+    const after = loadTaskState(fixture.root, TASK_ID);
+    // Read while the lock is still held - the holder permits readers - because
+    // this is the control that says the instrument was still biting when the
+    // withdrawal ran. Without it a holder that died early would silently turn
+    // the blocked case into a second copy of its own control.
+    const entries = existsSync(ledgerPath)
+      ? ((JSON.parse(readFileSync(ledgerPath, 'utf8')) as { entries?: readonly { state: string }[] })
+          .entries ?? [])
+      : [];
+    return {
+      gitAfterWriter,
+      state: after.ok && after.state.state,
+      outcome: step.outcome,
+      ledgerState: entries[0]?.state ?? 'NO_LEDGER',
+    };
+  }
+
+  it.runIf(process.platform === 'win32')('makes no commit and does not reach VERIFYING', async () => {
+    // REQUIREMENT 7, measured at the step rather than at the seam. The unit case
+    // in `tests/v3-05-stale-lease-recovery.test.ts` proves the seam refuses; this
+    // proves what that refusal is worth, which is a different claim and the one
+    // the hazard is actually about: the run must not go on to the commit, the
+    // verification or the reviewer while an affirmative `ESTABLISHED` entry sits
+    // on disk. Nothing here reads the seam's return value - it counts real Git
+    // commands and reads the durable state.
+    const locks: ShareLock[] = [];
+    let blocked: Awaited<ReturnType<typeof implementWith>>;
+    try {
+      blocked = await implementWith(async (ledgerPath, markEstablished, cwd) => {
+        const result = writerThatEdits('src/blocked.ts', 'export const blocked = true;\n')({ cwd });
+        markEstablished();
+        // Both the retraction's publish and its fallback discard are refused
+        // from here on. See `helpers/share-lock.ts`.
+        locks.push(await shareLockOn(ledgerPath));
+        return result;
+      });
+    } finally {
+      // Never a bare `release()` in a `finally`: a throw from cleanup replaces
+      // the assertion failure the case is about. See `helpers/share-lock.ts`.
+      await releaseAll(locks);
+    }
+
+    // No Git command ran after the writer, so `enforceScope`'s post-pass and
+    // `commitPassOrPark` never happened.
+    expect(blocked.gitAfterWriter).toBe(0);
+    expect(blocked.outcome).toBe('BLOCKED');
+    // And the durable consequence, asserted by name rather than as "not
+    // VERIFYING". `AGENT_PROCESS_UNAVAILABLE` carries the disposition
+    // `AGENT_NEEDS_ATTENTION`, which parks the task here - a state this loop
+    // does not drive, so the *run* stops rather than only this step. An absence
+    // assertion would have been satisfied by several states that keep going.
+    expect(blocked.state).toBe('HUMAN_DECISION_REQUIRED');
+    expect(isLoopDrivenState('HUMAN_DECISION_REQUIRED')).toBe(false);
+    // THE INSTRUMENT'S OWN CONTROL. The affirmative entry really was still on
+    // disk when the step stopped, so the refusal is attributable to the
+    // withdrawal having failed and not to anything else about the fixture.
+    expect(blocked.ledgerState).toBe('ESTABLISHED');
+  });
+
+  it('commits and reaches VERIFYING when the mark comes back', async () => {
+    // THE CONTROL, and without it the case above is satisfied by a build that
+    // stops every writer. Identical fixture, identical establishment mark, and
+    // one difference: nothing holds the ledger, so the withdrawal reaches
+    // `PENDING` and the step does exactly what it always did.
+    const permitted = await implementWith(async (_ledgerPath, markEstablished, cwd) => {
+      const result = writerThatEdits('src/allowed.ts', 'export const allowed = true;\n')({ cwd });
+      markEstablished();
+      return result;
+    });
+
+    expect(permitted.gitAfterWriter).toBeGreaterThan(0);
+    expect(permitted.state).toBe('VERIFYING');
+    // And the same reading, the other way round: the mark came back, so there
+    // was nothing for the seam to refuse. One measurement separates the pair.
+    expect(permitted.ledgerState).toBe('PENDING');
   });
 });
 

@@ -3,8 +3,10 @@
  *
  * ── What this artefact says, and what it emphatically does not ─────────────
  *
- * It says: *a process was created inside a Job Object this process owns, and the
- * kernel confirmed its membership before the target executed.* That is a
+ * It says: *a process was created for a Job Object this process owns, the kernel
+ * confirmed its membership, and no instruction of the target executed outside
+ * that job.* (Not "it never existed outside that job", which is false in
+ * `SUSPENDED` mode - see `core/containment-attestation.ts`.) That is a
  * statement about **lifetime** — when the owner dies, the job dies, and
  * everything in it goes — and the ADR for the native launch boundary is explicit
  * that a job bounds process lifetime and nothing else.
