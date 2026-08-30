@@ -98,11 +98,17 @@
  * **Only the productive writer.** `loop/leased-spawns.ts` opens a generation for
  * `claude` and for nothing else, exactly as slice 4 records containment for
  * `claude` and nothing else. The reviewer and the verification command go
- * through the same owned boundary on Windows — `doctor/exec.ts` routes every
- * spawn through `runOwnedCommand` — so they are contained in fact; they are
- * simply not *recorded*, so no reading here is evidence about them. A reader who
- * needs "no process of any kind survives" needs a wider ledger than this one, and
- * widening it is a contract change rather than a reading of this contract.
+ * through the same owned boundary on Windows, so they are contained in fact;
+ * they are not in *this* record, so no reading here is evidence about them.
+ *
+ * A reader who needs "no process of any kind survives" needs a wider record than
+ * this one, and this paragraph used to end by calling that a contract change
+ * rather than a reading of this contract. The contract **was** changed, by M2
+ * slice 2, in this file: the version below is 3, the document now carries an
+ * owned-launch register beside these entries, and `readOwnedLaunchRegister` at
+ * the foot of this file is how a recovery reads it. What has not changed is what
+ * a *writer* reading claims, which is why these entries and that register are
+ * two records with two vocabularies rather than one widened one.
  *
  * **And forgery is bounded exactly as slice 4's is.** The binding digest below
  * is computed from the lease key and the owner nonce, both of which are

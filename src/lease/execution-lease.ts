@@ -1229,6 +1229,80 @@ export function acquireRepositoryExecutionLease(
 const ACCOUNTANT_DISPOSERS = new WeakMap<object, () => void>();
 
 /**
+ * What a launch may do, given what the announcement answered. Total, and the
+ * default is the refusing one.
+ *
+ * ── The defect this table replaces ────────────────────────────────────────
+ *
+ * `accountantFor` used to name two codes and send *everything else* to
+ * `EPOCH_ENDED`, which drops the accountant and lets the launch proceed. An
+ * adversarial review reproduced what that costs, and it is the whole of this
+ * slice undone by one failed `readFileSync`:
+ *
+ *   1. the lease is acquired, the document published, the writer runs and is
+ *      confirmed — the document reads `ALL_LAUNCHES_CONTAINED`, register empty;
+ *   2. any later owned spawn announces, and `heldLeaseFor` cannot read the lease
+ *      file for one call — a share violation, `EMFILE` under a loaded gate — so
+ *      the answer is `LEASE_UNREADABLE`;
+ *   3. that fell into `EPOCH_ENDED`: the accountant was evicted **for the life
+ *      of the process**, and nothing re-installs it — only an acquisition does;
+ *   4. the lease and its document were untouched and still license;
+ *   5. every later subprocess, the thirty-minute verification included, ran
+ *      unannounced;
+ *   6. the owner died, and the recovery removed the lease.
+ *
+ * ── The rule the table encodes ────────────────────────────────────────────
+ *
+ * `EPOCH_ENDED` is permitted for exactly the answers that **prove no document
+ * of this epoch can license a recovery**, so an unrecorded launch after one of
+ * them cannot be turned into a removal:
+ *
+ *  - `LEASE_ABSENT` — there is no lease; a recovery answers `NOTHING_TO_RECOVER`;
+ *  - `NOT_OWNER` — a lease was read and its nonce is somebody else's, so this
+ *    epoch's document is gone and any register still on disk reads
+ *    `NOT_THIS_LEASE` for the successor's subject;
+ *  - `LEASE_FOR_ANOTHER_REPOSITORY` and `EVIDENCE_INVALID` — programming errors,
+ *    deterministic, and this accountant can never work;
+ *  - `REGISTER_DISCARDED` — the document was removed; the reading is
+ *    `LAUNCH_HISTORY_ABSENT`, and nothing promotes it back.
+ *
+ * Everything else refuses the launch, **including codes an announcement cannot
+ * produce**, because the alternative is a launch that happened and was not
+ * written down beside a document that still reads as a proof.
+ * `OWNERSHIP_UNCONFIRMED` is the sharp one and is the reason that code exists.
+ *
+ * Every row is asserted by value in
+ * `tests/m2-02-owned-launch-quiescence.test.ts`; a `satisfies` clause would
+ * accept `EPOCH_ENDED` everywhere.
+ */
+export const ANNOUNCEMENT_DISPOSITION: Readonly<
+  Record<OwnedLaunchCode, 'RECORDED' | 'EPOCH_ENDED' | 'LAUNCH_MUST_NOT_START'>
+> = Object.freeze({
+  ANNOUNCED: 'RECORDED',
+  LEASE_ABSENT: 'EPOCH_ENDED',
+  NOT_OWNER: 'EPOCH_ENDED',
+  LEASE_FOR_ANOTHER_REPOSITORY: 'EPOCH_ENDED',
+  EVIDENCE_INVALID: 'EPOCH_ENDED',
+  REGISTER_DISCARDED: 'EPOCH_ENDED',
+  LAUNCH_MUST_NOT_START: 'LAUNCH_MUST_NOT_START',
+  // The rest, and every one of them leaves a document that can still license.
+  OWNERSHIP_UNCONFIRMED: 'LAUNCH_MUST_NOT_START',
+  LEASE_UNREADABLE: 'LAUNCH_MUST_NOT_START',
+  REGISTER_NOT_READABLE_BACK: 'LAUNCH_MUST_NOT_START',
+  REGISTER_WRITE_FAILED: 'LAUNCH_MUST_NOT_START',
+  // Not producible by an announcement, and stated rather than defaulted: a
+  // table with an unstated row is a table with a default, and the default here
+  // is the one that was wrong.
+  ESTABLISHED: 'LAUNCH_MUST_NOT_START',
+  SETTLED: 'LAUNCH_MUST_NOT_START',
+  ALREADY_SETTLED: 'LAUNCH_MUST_NOT_START',
+  ATTESTATION_INVALID: 'LAUNCH_MUST_NOT_START',
+  ATTESTATION_ALREADY_USED: 'LAUNCH_MUST_NOT_START',
+  OWNER_MISMATCH: 'LAUNCH_MUST_NOT_START',
+  SLOT_NOT_OPEN: 'LAUNCH_MUST_NOT_START',
+});
+
+/**
  * The accountant one lease installs, in the boundary's lease-free vocabulary.
  *
  * ── It answers `EPOCH_ENDED` rather than clinging on ───────────────────────
@@ -1276,15 +1350,12 @@ function accountantFor(
           },
         };
       }
-      if (announced.code === 'LAUNCH_MUST_NOT_START') {
-        return { opening: 'LAUNCH_MUST_NOT_START', detail: announced.detail };
-      }
-      // Everything else. `REGISTER_DISCARDED` is a launch that may proceed with
-      // nothing left to close, and so is every answer that means this lease is
-      // no longer this run's — those additionally drop the accountant. A single
-      // arm for both, because the *launch's* answer is the same and the only
-      // difference is bookkeeping this module does not do.
-      return { opening: 'EPOCH_ENDED' };
+      // Everything else through the table, whose default is the refusing one.
+      // An `ANNOUNCED` answer carrying no slot number cannot be settled and is
+      // therefore not a record; it falls here rather than being closed over.
+      return ANNOUNCEMENT_DISPOSITION[announced.code] === 'EPOCH_ENDED'
+        ? { opening: 'EPOCH_ENDED' }
+        : { opening: 'LAUNCH_MUST_NOT_START', detail: announced.detail ?? announced.code };
     },
   };
 }
@@ -3569,6 +3640,22 @@ export const OWNED_LAUNCH_CODES = [
   'LEASE_UNREADABLE',
   /** What is there is not this holder's lease — or is not a lease at all. */
   'NOT_OWNER',
+  /**
+   * Whether this holder still owns the lease could not be confirmed, so nothing
+   * was written and nothing was removed.
+   *
+   * Its own code rather than a shade of {@link NOT_OWNER}, and the distinction
+   * is the one an adversarial review found this format collapsing. `NOT_OWNER`
+   * is a *proved* mismatch: a lease document was read and its nonce is somebody
+   * else's, so this run's epoch has no document left that could license a
+   * recovery. This one comes from `stillHeldBy`, which answers `false` for a
+   * mismatch **and** for any failure to read the file at all — a share
+   * violation, `EMFILE` under a loaded gate, a scanner holding the handle for a
+   * moment. In that second case the licensing document is still there, so
+   * treating the two the same would let one failed read leave a launch
+   * unrecorded beside a document that still reads as a proof.
+   */
+  'OWNERSHIP_UNCONFIRMED',
   /** The containment was coupled to a process other than the lease's owner. */
   'OWNER_MISMATCH',
   /**
@@ -3674,7 +3761,9 @@ function discardForOwnedLaunch(
   holder: ExecutionLeaseEvidence,
   reason: string,
 ): OwnedLaunchResult {
-  if (!stillHeldBy(location, holder)) return ownedFailure('NOT_OWNER', 'LOST_BEFORE_DISCARD');
+  if (!stillHeldBy(location, holder)) {
+    return ownedFailure('OWNERSHIP_UNCONFIRMED', 'LOST_BEFORE_DISCARD');
+  }
   try {
     unlinkSync(ledgerPathFor(location));
   } catch (error) {
@@ -3751,7 +3840,9 @@ function publishRegister(
     stillHeldBy(location, holder),
   );
   if (published === null) return { published: true };
-  if (published === 'NOT_OWNER') return ownedFailure('NOT_OWNER', 'LOST_BEFORE_PUBLISH');
+  if (published === 'NOT_OWNER') {
+    return ownedFailure('OWNERSHIP_UNCONFIRMED', 'LOST_BEFORE_PUBLISH');
+  }
   return ownedFailure('REGISTER_WRITE_FAILED', published);
 }
 
@@ -4983,13 +5074,6 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
     return Object.freeze({ code: 'EVIDENCE_INVALID' as const, detail: null });
   }
 
-  // Before the removal, not after: between the two the lease is gone and this
-  // process could still be asked to account a launch against it. The accountant
-  // would answer `EPOCH_ENDED` and evict itself, which is the same end state by
-  // a slower route — this simply does not open the window.
-  ACCOUNTANT_DISPOSERS.get(evidence)?.();
-  ACCOUNTANT_DISPOSERS.delete(evidence);
-
   const removed = removeVerifiedLease(leasePath, (bytes) =>
     ExecutionLeaseProof.matchesNonce(evidence, nonceOfBytes(bytes)),
   );
@@ -5024,6 +5108,23 @@ export function releaseRepositoryExecutionLease(evidence: unknown): LeaseRelease
   if (removed === 'DETACH_FAILED') {
     return Object.freeze({ code: 'LEASE_REMOVE_FAILED' as const, detail: 'DETACH_REFUSED' });
   }
+
+  // ── The accountant goes only once the lease really has ───────────────────
+  //
+  // After the removal and only on the one outcome that means it succeeded, and
+  // this ordering is a repair rather than a preference. Disposing first — which
+  // is what this did — hands the lease back to nobody on every arm above: the
+  // removal can be refused, and then the lease document and its register are
+  // still on disk, still licensing, and this process has no accountant left to
+  // announce the subprocesses it goes on starting. That is the same shape as
+  // the `EPOCH_ENDED` defect {@link ANNOUNCEMENT_DISPOSITION} records, reached
+  // from the other end.
+  //
+  // Disposing after opens no window worth the name. Between the removal and
+  // this line an announcement finds no lease, answers `LEASE_ABSENT`, and the
+  // accountant evicts itself — the same end state by a slower route.
+  ACCOUNTANT_DISPOSERS.get(evidence)?.();
+  ACCOUNTANT_DISPOSERS.delete(evidence);
   return Object.freeze({ code: 'RELEASED' as const, detail: null });
 }
 

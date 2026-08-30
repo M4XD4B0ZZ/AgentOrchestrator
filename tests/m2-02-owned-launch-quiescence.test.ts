@@ -39,6 +39,7 @@ import { mintContainmentAttestation } from '../src/core/internal/containment-att
 import type { ContainmentAttestation } from '../src/core/containment-attestation.js';
 import {
   acquireRepositoryExecutionLease,
+  ANNOUNCEMENT_DISPOSITION,
   announceOwnedLaunch,
   assessStaleLeaseRecovery,
   attestOwnedLaunchEstablished,
@@ -83,6 +84,7 @@ import {
   type OwnedLaunchOpening,
 } from '../src/boundary/owned-launch-accounting.js';
 import { endingWasAccountedFor, runCommand, type CommandResult } from '../src/doctor/exec.js';
+import { renderLeaseRecovery } from '../src/cli/render-lease.js';
 import { createProbeEnv } from '../src/auth/env-guard.js';
 import type { ExecutionLeaseEvidence } from '../src/core/execution-lease-evidence.js';
 
@@ -686,6 +688,7 @@ describe('an owned launch is announced before it happens and settled after it', 
         'LEASE_UNREADABLE',
         'NOT_OWNER',
         'OWNER_MISMATCH',
+        'OWNERSHIP_UNCONFIRMED',
         'REGISTER_DISCARDED',
         'REGISTER_NOT_READABLE_BACK',
         'REGISTER_WRITE_FAILED',
@@ -735,14 +738,12 @@ describe('the execution seam accounts for every launch it starts', () => {
     // none, which is what makes a future spawn path unable to opt out.
     const repository = repositoryFixture();
     const evidence = leaseOf(repository);
-    const seen: string[] = [];
     // `--version` because every argument reaching this seam must be
     // shell-inert; a JS one-liner cannot be one, by design.
     const result = await runCommand(process.execPath, ['--version'], {
       env: createProbeEnv('capability:generic', process.env),
       cwd: repository.root,
     });
-    void seen;
     expect(result.outcome).toBe('COMPLETED');
     // Announced, then removed. What survives is the counter, which only grows.
     expect(openOf(repository)).toEqual([]);
@@ -790,6 +791,157 @@ describe('the execution seam accounts for every launch it starts', () => {
     expect(
       endingWasAccountedFor({ ...base, started: true, outcome: 'COMPLETED' } as CommandResult),
     ).toBe(false);
+  });
+
+
+  it('refuses a launch it could not record, and keeps the accountant', async () => {
+    // THE REGRESSION for the defect an adversarial safety review found in the
+    // first draft of this slice.
+    //
+    // `accountantFor` named two codes and sent everything else to
+    // `EPOCH_ENDED`, which drops the accountant and lets the launch proceed.
+    // One unreadable read of the lease file therefore disabled the accounting
+    // for the life of the process while the document on disk went on reading as
+    // a proof - and every later subprocess, the thirty-minute verification
+    // included, ran unannounced. That is this slice undone by one failed
+    // `readFileSync`.
+    //
+    // The condition is produced by the operating system rather than described
+    // to the code: a DIRECTORY at the lease's own path, which `readFileSync`
+    // refuses with `EISDIR` - not `ENOENT`, so `readLeaseFile` answers
+    // `UNREADABLE` rather than `FREE`.
+    const before = installedOwnedLaunchAccountants();
+    const repository = repositoryFixture();
+    const evidence = leaseOf(repository);
+    expect(installedOwnedLaunchAccountants()).toBe(before + 1);
+
+    rmSync(leasePathOf(repository), { force: true });
+    mkdirSync(leasePathOf(repository), { recursive: true });
+    try {
+      expect(announceOwnedLaunch(repository, evidence, { now: tick }).code).toBe('LEASE_UNREADABLE');
+      // And end to end: the production entry point must refuse to start
+      // anything, and the accountant must still be installed afterwards.
+      const refused = await runCommand(process.execPath, ['--version'], {
+        env: createProbeEnv('capability:generic', process.env),
+        cwd: repository.root,
+      });
+      expect(refused.started).toBe(false);
+      expect(refused.outcome).toBe('SPAWN_FAILED');
+      expect(refused.failureCode).toBe('LAUNCH_NOT_ACCOUNTED');
+      // AND the accountant is still installed. Evicting it here is the defect:
+      // nothing re-installs one, so the next spawn - after the transient has
+      // passed - would go unannounced beside a document that still licenses.
+      expect(installedOwnedLaunchAccountants()).toBe(before + 1);
+    } finally {
+      rmSync(leasePathOf(repository), { recursive: true, force: true });
+    }
+  });
+
+  it('states what each announcement answer lets a launch do, by value', () => {
+    // Total, and the default is the refusing one. `EPOCH_ENDED` is permitted
+    // only for answers that prove no document of this epoch can license a
+    // recovery; everything else leaves one standing, so an unrecorded launch
+    // after it could be turned into a removal.
+    expect(ANNOUNCEMENT_DISPOSITION).toEqual({
+      ANNOUNCED: 'RECORDED',
+      LEASE_ABSENT: 'EPOCH_ENDED',
+      NOT_OWNER: 'EPOCH_ENDED',
+      LEASE_FOR_ANOTHER_REPOSITORY: 'EPOCH_ENDED',
+      EVIDENCE_INVALID: 'EPOCH_ENDED',
+      REGISTER_DISCARDED: 'EPOCH_ENDED',
+      LAUNCH_MUST_NOT_START: 'LAUNCH_MUST_NOT_START',
+      OWNERSHIP_UNCONFIRMED: 'LAUNCH_MUST_NOT_START',
+      LEASE_UNREADABLE: 'LAUNCH_MUST_NOT_START',
+      REGISTER_NOT_READABLE_BACK: 'LAUNCH_MUST_NOT_START',
+      REGISTER_WRITE_FAILED: 'LAUNCH_MUST_NOT_START',
+      ESTABLISHED: 'LAUNCH_MUST_NOT_START',
+      SETTLED: 'LAUNCH_MUST_NOT_START',
+      ALREADY_SETTLED: 'LAUNCH_MUST_NOT_START',
+      ATTESTATION_INVALID: 'LAUNCH_MUST_NOT_START',
+      ATTESTATION_ALREADY_USED: 'LAUNCH_MUST_NOT_START',
+      OWNER_MISMATCH: 'LAUNCH_MUST_NOT_START',
+      SLOT_NOT_OPEN: 'LAUNCH_MUST_NOT_START',
+    });
+    // Every code has a row, so a code added without a decision is visible here
+    // rather than inheriting whatever the last arm answered.
+    expect(Object.keys(ANNOUNCEMENT_DISPOSITION).sort()).toEqual([...OWNED_LAUNCH_CODES].sort());
+  });
+
+  it('leaves the record open when the seam loses the boundary', async () => {
+    // The rule under test lives at the CALL SITE, not only in the predicate: a
+    // mutant that wired `closing = 'CLOSE'` unconditionally survived every other
+    // case here, because no real run in this suite ends without a containment.
+    // The adapter seam is what makes one reachable.
+    const repository = repositoryFixture();
+    const evidence = leaseOf(repository);
+    const lost = await runCommand(
+      process.execPath,
+      ['--version'],
+      { env: createProbeEnv('capability:generic', process.env), cwd: repository.root },
+      {
+        runOwned: async () =>
+          Object.freeze({
+            outcome: 'BOUNDARY_LOST' as const,
+            established: true,
+            exitCode: null,
+            signal: null,
+            stdout: '',
+            stderr: '',
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            failureCode: 'BOUNDARY_LOST' as const,
+            targetStarted: 'UNKNOWN' as const,
+            termination: 'NONE' as const,
+            helperPid: null,
+            childPid: null,
+            retainedWorkDir: null,
+            stdinDelivery: 'NOT_REQUESTED' as const,
+            ending: { ending: 'BOUNDARY_LOST' as const },
+          }) as never,
+      },
+    );
+    expect(lost.outcome).toBe('BOUNDARY_LOST');
+    // The slot is STILL THERE. A closed record says "this launch ended", and
+    // `boundary/owned-command.ts` is explicit that a lost boundary is precisely
+    // the case where that stops being true.
+    expect(openOf(repository)).toHaveLength(1);
+    expect(openOf(repository)[0]?.state).toBe('ANNOUNCED');
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('settles the slot it opened, and not somebody else\u2019s', async () => {
+    // Two launches open at once through the SEAM, which is the only shape in
+    // which a settlement can name the wrong one. Production starts them one at a
+    // time, so nothing else here would notice a settlement hard-wired to slot 1.
+    const repository = repositoryFixture();
+    const evidence = leaseOf(repository);
+    const options = { env: createProbeEnv('capability:generic', process.env), cwd: repository.root };
+    await Promise.all([
+      runCommand(process.execPath, ['--version'], options),
+      runCommand(process.execPath, ['--version'], options),
+    ]);
+    expect(openOf(repository)).toEqual([]);
+    // Two slots were handed out and neither was reused.
+    expect(ledgerOf(repository)?.nextSlot).toBe(3);
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('discards the register rather than grow it past its bound', () => {
+    // The one path that destroys a launch document for a reason other than an
+    // unusable one. Reaching it is a stated outcome rather than a silent state,
+    // and on a platform with no boundary it is the path every lease reaches.
+    const repository = repositoryFixture();
+    const evidence = leaseOf(repository);
+    for (let i = 0; i < MAX_OPEN_OWNED_LAUNCHES; i += 1) {
+      expect(announceOwnedLaunch(repository, evidence, { now: tick }).code).toBe('ANNOUNCED');
+    }
+    expect(openOf(repository)).toHaveLength(MAX_OPEN_OWNED_LAUNCHES);
+    const overflowed = announceOwnedLaunch(repository, evidence, { now: tick });
+    expect(overflowed.code).toBe('REGISTER_DISCARDED');
+    expect(overflowed.detail).toBe('REGISTER_FULL');
+    // Discarded, not truncated: what is left asserts nothing at all.
+    expect(existsSync(ledgerPathOf(repository))).toBe(false);
+    releaseRepositoryExecutionLease(evidence);
   });
 
   it('refuses a launch no installed accountant could record, and closes what it opened', () => {
@@ -978,14 +1130,52 @@ describe('a stale lease is not removed while an owned subprocess may be running'
     expect(assessed.ownedLaunches).toBeNull();
   });
 
-  it('names the three refusals the register contributes, in the closed set', () => {
-    for (const refusal of [
-      'OWNED_LAUNCH_UNPROVEN',
-      'OWNED_LAUNCH_STILL_RUNNING',
-      'OWNED_LAUNCH_LIVENESS_UNDETERMINED',
-    ]) {
-      expect(STALE_RECOVERY_REFUSALS).toContain(refusal);
-    }
+  it('tells the operator what it established about the subprocesses', () => {
+    // The operator half, which nothing rendered before this case: the
+    // `Subprocesses` line, and one sentence per register reading. A safe verdict
+    // now rests on two proofs and they are printed separately, because a single
+    // sentence covering both would have to be written at the strength of the
+    // weaker and a reader could not tell which half rested on what.
+    const base = {
+      verdict: 'SAFE_TO_RECOVER' as const,
+      refusal: null,
+      path: 'D:\\r\\.git',
+      ownerPid: 7,
+      runId: 'r',
+      launchHistory: 'ALL_LAUNCHES_CONTAINED' as const,
+    };
+    const ended = renderLeaseRecovery(
+      { ...base, ownedLaunches: 'NO_OWNED_LAUNCH_OPEN' },
+      'ALL_LAUNCHES_CONTAINED',
+      'NO_OWNED_LAUNCH_OPEN',
+    );
+    expect(ended).toContain('Subprocesses : NO_OWNED_LAUNCH_OPEN');
+    expect(ended).toContain('none is left open');
+    // The writer sentence is still there and is still about the writer: two
+    // records, two claims, and neither borrows the other's word.
+    expect(ended).toContain('no writer process it started can still be running');
+
+    const probed = renderLeaseRecovery(
+      { ...base, ownedLaunches: 'OWNED_LAUNCHES_OPEN_UNENDED' },
+      'ALL_LAUNCHES_CONTAINED',
+      'OWNED_LAUNCHES_OPEN_UNENDED',
+    );
+    expect(probed).toContain('Subprocesses : OWNED_LAUNCHES_OPEN_UNENDED');
+    expect(probed).toContain('probed a\n  moment ago and do not exist');
+    // The two readings do NOT print the same sentence: an arm that printed the
+    // stronger reason under the weaker one would tell the reader least able to
+    // check it that a proof was made that was not.
+    expect(probed).not.toContain('none is left open');
+
+    // And a safe verdict this build cannot explain claims nothing at all.
+    const unexplained = renderLeaseRecovery(
+      { ...base, ownedLaunches: null },
+      'ALL_LAUNCHES_CONTAINED',
+      null,
+    );
+    expect(unexplained).toContain('cannot say what it established about the other subprocesses');
+    expect(unexplained).not.toContain('none is left open');
+    expect(unexplained).toContain('Subprocesses : none');
   });
 
   it('bounds the register rather than letting it grow without one', () => {

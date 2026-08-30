@@ -124,8 +124,10 @@
  * a contract of the job flags and not of this file. It says nothing at all about
  * a process this build never started, and nothing about the unleased delivery
  * surface: `cli/delivery-steps.ts` records that nothing under `src/deliver/`
- * acquires a lease, so `git push` and the three `gh` mutations are not in this
- * epoch and are not represented here.
+ * acquires a lease, so no epoch is held while `git push` and the two `gh`
+ * mutations run. They are announced like every other launch and the
+ * announcement reaches nobody, which is a different sentence from "they are
+ * excluded" and is the true one.
  *
  * And forgery is bounded exactly as the writer ledger's is. The binding is
  * computed from the lease key and the owner nonce, both plaintext in the lease
@@ -148,9 +150,10 @@ const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{
  * topology says nothing reaches: `grep -rn 'Promise.all' src/` finds nothing, so
  * every spawn in this product is awaited before the next begins and the register
  * holds at most one entry. Sixty-four is room for a shape that does not exist
- * yet, and reaching it is a **stated outcome** — the announcement answers
- * {@link OWNED_LAUNCH_CODES.REGISTER_FULL} and falls back to discarding the
- * document — rather than a silent state.
+ * yet, and reaching it is a **stated outcome** — the announcement discards the
+ * document and answers `REGISTER_DISCARDED` with `REGISTER_FULL` as its reason —
+ * rather than a silent state. There is no `REGISTER_FULL` *code*: this sentence
+ * named one for a while, and the closed set the tests pin proves it absent.
  */
 export const MAX_OPEN_OWNED_LAUNCHES = 64;
 

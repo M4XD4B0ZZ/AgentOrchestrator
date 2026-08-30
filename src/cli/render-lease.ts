@@ -360,10 +360,10 @@ const SAFE_SUBPROCESS_REASON: Readonly<Record<OwnedLaunchReading, readonly strin
       // them - so reusing either here would make those pins match this sentence
       // and stop measuring the one they name. Two records, two vocabularies.
       '  Every other subprocess this run started - the verification commands, the reviewer,\n' +
-        '  the Git commands - was recorded before it started and its finish was recorded after,\n' +
-        '  and none is left open. Each ran inside a process job whose only handle its launcher\n' +
-        '  held, so a recorded finish is the kernel having destroyed that job and everything in\n' +
-        '  it.',
+        '  the Git commands - was recorded before it started, and none is left open: each was\n' +
+        '  either never created or ran inside a process job whose only handle its launcher held\n' +
+        '  and whose end that launcher reported, which is the kernel having destroyed that job\n' +
+        '  and everything in it.',
     ]),
     OWNED_LAUNCHES_OPEN_UNENDED: Object.freeze([
       // No claim about *why* the finish was not recorded, for the reason the

@@ -66,7 +66,8 @@ wrote nothing, anywhere.
 
 **A second durable record beside the writer history, in the same document: the
 owned-launch register.** It holds the AO-owned subprocesses that are **open right
-now** under one lease, and the recovery predicate gains a third conjunct over it.
+now** under one lease, and the recovery predicate gains a further conjunct over
+it, after the ones it already had.
 
 ```text
 lease acquired      → register published empty, historyComplete: true
@@ -135,9 +136,8 @@ Git subprocess came to be invisible in the first place.
 
 A required accounting argument on `RunOptions`, so that every call site must
 declare. It is compile-visible, which is the property to want, and it does not
-work here. An inventory of this build's spawn sites found twenty-two under a
-lease, and the majority reach `runCommand` from code that holds no lease
-evidence — `loop/loop-step.ts:276`, `run/run-driver.ts:739`,
+work here. An inventory of this build's spawn sites found that most of the ones
+running under a lease reach `runCommand` from code that holds no lease evidence — `loop/loop-step.ts:276`, `run/run-driver.ts:739`,
 `run/start-task.ts:558`, `block/block-runner.ts:815`,
 `cli/release-command.ts:186`, `cli/delivery-steps.ts:1488`, and the read-only
 probes. Every one of those would have declared itself unaccounted: a hole by
@@ -215,6 +215,29 @@ conservative direction and the same rule `LAUNCH_HISTORY_ABSENT` already applies
     ending is observed while the owner is alive, and the register must be empty
     afterwards with the slot counter not gone back.
 
+### Counter-proof
+
+Nineteen mutants, run against `tests/m2-02-owned-launch-quiescence.test.ts` and
+`tests/v3-05-stale-lease-recovery.test.ts`, with a **green baseline** and one
+known-surviving control (a comment-only edit, which survived as required):
+accounting removed; accounting made opt-in; establishment dropped; settlement
+removed; always-close; liveness ignored; only the helper probed; a permissive
+`OWNED_LAUNCH_UNPROVEN`; a permissive `REGISTER_NOT_READABLE`; the conjunct
+skipped; a foreign register accepted; slot reuse; the positive arm disabled;
+`ANNOUNCED` no longer dominating; the binding dropping the register; the slot
+rules dropped; a writer launch wiping the register; the accountant never
+installed.
+
+Two survived the in-process suite and neither is a pass:
+
+- **establishment dropped** — killed by the dist gate instead, phase I, twelve
+  failures. Measured rather than argued: the mutant was applied to a real tree,
+  built, and the gate run.
+- **only the helper probed** — a genuine gap. Every fixture made the two
+  recorded pids alive or dead together, so neither alone was ever the reason for
+  a refusal. The case that closes it is in the file with a comment saying why it
+  exists, and the mutant is killed after it.
+
 **H's processes are detached, and that is stated rather than hidden.** An owned
 subprocess started through the real boundary cannot be made to outlive its owner
 — see the measurement above — so a live survivor has to be arranged the way phase
@@ -239,10 +262,9 @@ The `package.json` description said "owned" and now says what it is.
   breaking a structural pin that already exists.
 - **`R-M2-2b` — the unleased forge surface, stated rather than closed.** Nothing
   under `src/deliver/` acquires an execution lease, so `git push
-  --force-with-lease` and the three `gh` mutations are not in any epoch and are
-  not represented in any register. They are outside this slice's subject rather
-  than covered by it, and the honest sentence is that a lease's register says
-  nothing about them because there is no lease held while they run.
+  --force-with-lease` and the two `gh` mutations run with no epoch held. They are
+  announced like every other launch and the announcement reaches nobody, which is
+  a different sentence from "they are excluded" and is the true one.
 - **`R-M2-2c` — an attestation replayed across a *settled* slot is not
   detectable.** The guard is complete over the open set and cannot be complete
   over a settled one, because a settled slot leaves nothing to compare against.

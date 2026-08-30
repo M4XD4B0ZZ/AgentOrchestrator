@@ -38,12 +38,14 @@
  * at all. Widening what any of them may do is a lease decision, not this
  * module's.
  *
- * Since M2 slice 2 every one of them is **accounted** whether or not it is
- * fenced: `doctor/exec.ts` announces each launch to whatever holds the current
- * execution epoch before anything is created, and closes the record when the
- * boundary has accounted for the ending. That is not a fence and grants nobody
- * anything — it is what lets a later stale-lease recovery say whether a
- * subprocess of a dead epoch might still be running.
+ * Since M2 slice 2 every one of them is **announced**: `doctor/exec.ts` offers
+ * each launch to whatever holds the current execution epoch before anything is
+ * created, and closes the record when the boundary has accounted for the ending.
+ * Where an epoch is held that announcement becomes a durable record; where none
+ * is — nothing under `src/deliver/` takes a lease at all — it reaches nobody and
+ * changes nothing. That is not a fence and grants nobody anything: it is what
+ * lets a later stale-lease recovery say whether a subprocess of a dead epoch
+ * might still be running.
  *
  * ── The one guarantee ──────────────────────────────────────────────────────
  *

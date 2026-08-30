@@ -235,7 +235,7 @@ clears itself; there is no direction in which reuse permits a removal.
 
   Measured, not argued. `tests/dist-artifact/crash-recovery-dist-artifact.mjs`
   phase **F** builds the sequence with real processes — a real writer that ends
-  unproved, a real later owned subprocess left alive, a real owner death — and
+  unproved, a real later detached subprocess left alive, a real owner death — and
   requires a refusal. Phase **G** is its control: the identical fixture with the
   withdrawal switched off must *recover*, which reproduces the defect and stops F
   passing in a build that had merely broken the arm.

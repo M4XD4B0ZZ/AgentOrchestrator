@@ -34,15 +34,36 @@
  *      reached the kernel's answer. Must refuse `LAUNCH_HISTORY_UNPROVEN`, which
  *      is the honest answer and the reason U1 is narrowed rather than closed.
  *   F  the sequence a review blocked this slice on: the writer really ends, its
- *      ending is never proved, a LATER owned subprocess starts and is still
- *      alive when the owner dies. The writer's own pids are gone, so the
- *      liveness re-check cannot save it; what refuses is the withdrawal of the
- *      establishment mark. Must refuse.
+ *      ending is never proved, a LATER subprocess starts and is still alive when
+ *      the owner dies. The writer's own pids are gone, so the liveness re-check
+ *      cannot save it; what refuses is the withdrawal of the establishment mark.
+ *      Must refuse. That later process is a plain DETACHED spawn and goes
+ *      through no owned boundary, which is stated rather than assumed: it is
+ *      therefore in no register, and F's subject is the withdrawal.
  *   G  THE CONTROL FOR F — the identical fixture with the withdrawal switched
  *      off, which must RECOVER. That is the defect reproduced, and it is what
- *      stops F passing in a build that had simply broken the whole arm.
+ *      stops F passing in a build that had simply broken the whole arm. It still
+ *      recovers after M2 slice 2, for the reason F's later process is not owned.
+ *   H  M2 slice 2's counterexample: the writer history is a PROOF, an owned
+ *      launch is recorded through the production functions over processes that
+ *      are really running, and the owner dies. Must refuse
+ *      OWNED_LAUNCH_STILL_RUNNING and leave the lease byte-identical — and the
+ *      SAME lease must become recoverable once those processes are killed.
+ *   I  the wiring proof, and the only case here that dies if the accounting
+ *      stops being emitted: a REAL owned subprocess started by
+ *      runVerificationCommand with no accounting argument of any kind, whose
+ *      helper and child the register on disk must name WHILE IT RUNS.
+ *   J  the other half of the lifecycle: the verification is asked to stop, its
+ *      ending is observed while the owner is alive, and the register must be
+ *      EMPTY afterwards with the slot counter not gone back.
  *   E  runs once, after the rounds: the establishment mint and the ending mint
  *      must describe the same launch.
+ *
+ * Two phases arrange their survivors rather than measuring them: B for the
+ * writer and H for the register. Both say so where they do it, and the reason is
+ * the same measurement — a subprocess started through the real boundary cannot
+ * be made to outlive its owner, because the helper holds the only handle to a
+ * job carrying KILL_ON_JOB_CLOSE and is itself in node's kill-on-close job.
  *
  * Survivors are identified by heartbeat rather than by a process walk, for the
  * reason `launch-boundary-dist-artifact.mjs` records: a terminated process whose
@@ -180,7 +201,8 @@ if (phase === 'PENDING') {
 } else if (phase === 'ENDED_THEN_LATER_WORK') {
   // THE SEQUENCE THE REVIEW BLOCKED ON. A real contained writer runs to its end,
   // its ending is never proved (the run does not confirm the generation), and
-  // the run then starts a LATER owned subprocess that is still alive when the
+  // the run then starts a LATER subprocess - detached, and so through no owned
+  // boundary - that is still alive when the
   // owner dies. That later process is not in the writer ledger and never can be.
   const first = await startOwnedProcess({
     file: process.execPath,
@@ -217,7 +239,9 @@ if (phase === 'PENDING') {
     if (retracted.code !== 'RETRACTED') fail('RETRACT ' + retracted.code);
   }
 
-  // And now the later, unrecorded owned subprocess, left running.
+  // And now the later, unrecorded subprocess, left running. Detached on purpose:
+  // it is in no register, which is what keeps F about the withdrawal and G about
+  // the defect the withdrawal closes.
   const later = spawn(process.execPath, ['-e', BEATER], {
     env: { ...process.env, AO_CRASH_BEAT: beat },
     detached: true,
@@ -694,7 +718,7 @@ for (let round = 0; round < ROUNDS; round += 1) {
   /* ── F. the sequence a review blocked this slice on ────────────────────── */
   //
   //   ESTABLISHED writer -> the writer really ends -> no CONTAINED upgrade
-  //   -> a LATER owned subprocess starts and stays alive -> the owner dies
+  //   -> a LATER detached subprocess starts and stays alive -> the owner dies
   //   -> recovery MUST refuse
   //
   // The writer's own recorded pids are gone, so the liveness re-check cannot
@@ -716,7 +740,7 @@ for (let round = 0; round < ROUNDS; round += 1) {
     );
     check(
       osProcessLiveness(facts.laterPid) === 'ALIVE',
-      `F${round}: the LATER unrecorded owned process outlived the owner`,
+      `F${round}: the LATER unrecorded process outlived the owner`,
     );
 
     const before = leaseBytes(root);
@@ -911,7 +935,11 @@ for (let round = 0; round < ROUNDS; round += 1) {
 // never reach `CONTAINED`, silently, because the confirmation's result is
 // discarded by design. Phases A-D would all still pass: they never confirm
 // anything. So this case exists, it drives the real ordering through the real
-// boundary, and it is the only place the agreement is measured.
+// boundary, and it is the only place the agreement is measured ON ITS OWN.
+// Phases H, I and J each drive begin -> establish -> confirm through a real
+// owned command as well, and fail the owner before it prints `ready` if the two
+// mints disagree - but they do it as a precondition for something else, and a
+// case whose subject is the agreement is what stops that becoming incidental.
 {
   const { root } = fixture();
   const repository = await resolvedRepository(root);

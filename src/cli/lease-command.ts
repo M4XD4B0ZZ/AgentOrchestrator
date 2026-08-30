@@ -11,12 +11,16 @@
  * ── `recover` ──────────────────────────────────────────────────────────────
  *
  * Removes a stale lease **and only one it has just proved dead**: the owner
- * process is gone *and* every writer launch under that lease is recorded as
- * having run inside a process job coupled to that owner, so the kernel destroyed
- * every one of those trees when the owner died. Anything else — a live owner, an
- * undecidable one, an unreadable lease, a lease from an older build, a launch
- * history that is missing, torn, foreign or has one unproved entry — is refused,
- * and the refusal says which fact is missing.
+ * process is gone, *and* every writer launch under that lease is recorded as
+ * having run inside a process job coupled to that owner, *and* every other
+ * subprocess the run started through that boundary — the verification commands,
+ * the reviewer, the Git commands — is either settled or has the processes it
+ * recorded probed and found gone.
+ *
+ * Anything else is refused and the refusal says which fact is missing. The rule
+ * rather than the list, deliberately: an enumeration here went stale once
+ * already, and the closed set lives in `STALE_RECOVERY_REFUSALS` where a member
+ * added without a sentence fails to compile.
  *
  * The command takes a repository and nothing else. There is no `--force`, no
  * expected revision to type back, and no environment variable. Read the next
