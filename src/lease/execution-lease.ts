@@ -2571,9 +2571,12 @@ function ledgerPathFor(location: LeaseLocation): string {
  *
  * A closed set. **Four** members are successes since M2 slice 1 added the middle
  * mark and its withdrawal, one is the deliberate *loss* of a history, and one is
- * the only condition in this build under which an enrichment stops productive
- * work — see {@link LAUNCH_MUST_NOT_START}. (It said two, and was not recounted
- * when the third arrived; it is counted from the array below now.)
+ * the only condition in this build under which a failure to record stops
+ * productive work — see {@link LAUNCH_MUST_NOT_START}, which two callers reach
+ * and which stops the same run at two different moments. (It said two members,
+ * and was not recounted when the third arrived; it is counted from the array
+ * below now. It also said "an enrichment", which stopped being the right word
+ * for the withdrawal once its answer was consumed.)
  */
 export const WRITER_LAUNCH_CODES = [
   /** The generation is on disk as `PENDING`. The launch may proceed. */
@@ -2612,8 +2615,8 @@ export const WRITER_LAUNCH_CODES = [
    */
   'HISTORY_DISCARDED',
   /**
-   * The history could neither be extended nor removed. **The launch must not
-   * start.**
+   * The history could neither be extended nor removed. **Productive work must
+   * not go on.**
    *
    * The one place in this build where a failure to record stops productive work,
    * and it is deliberate. Every other recording failure has a fail-closed
@@ -2622,6 +2625,17 @@ export const WRITER_LAUNCH_CODES = [
    * anyway would leave a lease that reads *provably recoverable* while an
    * unrecorded writer tree may outlive it. That is the single fail-open state
    * this slice exists to make unreachable, so the launch loses.
+   *
+   * It said "the launch must not start", which named one of its two producers.
+   * {@link beginWriterLaunch} is that one and the sentence is exact there. The
+   * other is {@link retractWriterLaunchEstablishment}, where the launch is
+   * already **over** and there is nothing left to refuse to start: what the code
+   * means there is that the *step* must not go on, because the entry it could
+   * not take back is the one a recovery would remove the lease on. Both
+   * producers are read in `loop/leased-spawns.ts` and both stop the same run;
+   * they simply stop it at different moments, and a reader who took the
+   * launch-shaped wording literally would look for a gate that does not exist
+   * on the commit, the verification or the reviewer.
    *
    * Reached when the ledger path can be neither renamed onto nor unlinked. A
    * read-only or vanished administrative directory does it; so does a
@@ -3073,13 +3087,26 @@ export function attestWriterLaunchEstablished(
  * keeping them beside a state that no longer proves anything is how a field
  * starts being read as one that does.
  *
- * ── Fail-closed, twice ─────────────────────────────────────────────────────
+ * ── Fail-closed twice, and the third ending belongs to the caller ─────────
  *
  * A retraction that cannot be published falls back to discarding the whole
  * history — the same escape hatch `beginWriterLaunch` uses, and for the same
  * reason: what is on disk would otherwise be an affirmative claim that is no
  * longer true, and deleting it asserts nothing. `HISTORY_DISCARDED` is a worse
  * outcome for this lease and a safe one.
+ *
+ * Twice is not always enough, and this heading said so without saying what
+ * follows. When the publish *and* the discard are both refused the answer is
+ * {@link LAUNCH_MUST_NOT_START}, and the affirmative entry is still on disk,
+ * still readable, and still bound to a live lease — so a later recovery reads
+ * it as `LAUNCHES_CONTAINED_SOME_UNENDED` and may remove the lease. Nothing in
+ * this function can prevent that: the two writes it has are the two that were
+ * refused. What it can do is *report* it, which is why the third ending has its
+ * own code, and `loop/leased-spawns.ts` is where that report has to be acted
+ * on — it stops the step rather than returning the writer's result. Measured
+ * rather than argued: with the ledger held open by another process the rename
+ * answers `EPERM`, the unlink answers `EBUSY`, and
+ * `tests/v3-05-stale-lease-recovery.test.ts` drives the whole sequence.
  *
  * A `CONTAINED` generation is never walked back. Its ending *was* proved, so
  * there is nothing stale about it, and a call that could undo a proof is a

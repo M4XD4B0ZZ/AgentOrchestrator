@@ -8171,6 +8171,16 @@ records. So a writer launch that *ends* without reaching `CONTAINED` has its mar
 withdrawn to `PENDING`, which is exactly the state such a launch was left in
 before the mark existed.
 
+The last row of that table is what the ledger *reaches for*, not what it can
+promise. Publishing the withdrawal can be refused, and the fallback - discarding
+the whole history, which asserts nothing - can be refused with it; the file is
+then untouched and still says `ESTABLISHED`. The ledger has no third write to
+try, so it reports `LAUNCH_MUST_NOT_START` and the **agent seam refuses to hand
+the writer's result back**: the step ends there, and the commit, the verification
+and the reviewer never start. That is the whole of what this build can do about
+it. The lease is left carrying an affirmative entry, and the operator's move is
+the printed lease path.
+
 The middle step is M2 slice 1
 ([its ADR](docs/decisions/2026-08-30-adr-unattended-crash-recovery.md)). Before
 it, the two marks sat before and after a launch that lasts minutes, so the whole
@@ -8207,6 +8217,20 @@ Only when even that fails does the launch itself lose, and the agent seam answer
 with its own refusal rather than borrowing the lost-lease one. Every other
 recording failure in this build is an enrichment that may not stop a run; this
 one is not an enrichment, because a stale affirmative history is worse than none.
+
+The same code has a second producer at the other end of a launch, and this
+section named only the first. When a launch is **over** and its establishment
+mark can be neither withdrawn nor discarded, there is no launch left to refuse -
+what must not happen is the rest of the step. The seam answers with a third
+refusal of its own, so the run ends at the interruption record instead of going
+on to commit, verify and review. The cost is stated rather than implied: the
+writer really ran, its edits are left in the worktree, and the task parks at
+`HUMAN_DECISION_REQUIRED` — a state no timer resumes, so the run waits for an
+operator rather than for a retry. A writer refused for quota lands there too,
+instead of at the resumable `BLOCKED_USAGE_LIMIT`, because the ledger cannot be
+written and nothing may be committed while that is true. A stopped run is
+recoverable by a person; a lease removed from under a live commit is not
+recoverable at all.
 
 ### Why the removal can be bound, when the break's could not
 

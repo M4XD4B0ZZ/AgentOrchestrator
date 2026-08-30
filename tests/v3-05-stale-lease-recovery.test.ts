@@ -130,7 +130,12 @@ import {
   type WriterLaunchReading,
   type WriterLaunchSubject,
 } from '../src/lease/writer-launch-ledger.js';
-import { AGENT_LAUNCH_NOT_RECORDED, leasedAgent } from '../src/loop/leased-spawns.js';
+import {
+  AGENT_LAUNCH_NOT_RECORDED,
+  AGENT_LAUNCH_NOT_WITHDRAWN,
+  leasedAgent,
+} from '../src/loop/leased-spawns.js';
+import { releaseAll, shareLockOn, type ShareLock } from './helpers/share-lock.js';
 import {
   renderLeaseRecovery,
   renderLeaseRecoveryResult,
@@ -1266,8 +1271,15 @@ describe('the leased writer seam announces its launch before it happens', () => 
       containmentNow: tick,
     });
 
-    await run('claude', [], process.cwd(), '');
+    const returned = await run('claude', [], process.cwd(), '');
     expect(stateOf(repository, 1)).toBe('PENDING');
+    // POSITIVE CONTROL for the double-failure case further down. The withdrawal
+    // reached `PENDING`, so nothing affirmative is left on disk and the seam
+    // must hand the writer's own result back - the ordinary outcome, not a
+    // refusal. Without this assertion a build that refused *every* unproved
+    // ending would satisfy that case and stop every run this slice permits.
+    expect(returned.outcome).toBe('RAN');
+    expect(returned).not.toBe(AGENT_LAUNCH_NOT_WITHDRAWN);
 
     // Now the owner dies - during the later, unrecorded subprocess this entry
     // used to license removing the lease under. `dead` answers NOT_FOUND for
@@ -1307,8 +1319,9 @@ describe('the leased writer seam announces its launch before it happens', () => 
       containmentNow: tick,
     });
 
+    let returned: AgentCommandResult | null = null;
     try {
-      await run('claude', [], process.cwd(), '');
+      returned = await run('claude', [], process.cwd(), '');
     } finally {
       if (handle !== null) closeSync(handle);
     }
@@ -1319,10 +1332,231 @@ describe('the leased writer seam announces its launch before it happens', () => 
     // it is the one `beginWriterLaunch` already uses for the same reason.
     expect(inspectWriterLaunchHistory(repository)).toBe('ABSENT');
     expect(existsSync(ledgerPathOf(repository))).toBe(false);
+    // THE SECOND POSITIVE CONTROL, and the one that separates the two
+    // filesystem failures from each other. Here the publish was refused and the
+    // discard landed, so `HISTORY_DISCARDED` is a *success of state*: nothing
+    // affirmative survives, and the run carries on with its own result. The case
+    // below differs from this one in exactly one measurable way - the discard is
+    // refused too - so a build that refused on any failed publish would pass
+    // that one and fail this.
+    expect(returned?.outcome).toBe('RAN');
+    expect(returned).not.toBe(AGENT_LAUNCH_NOT_WITHDRAWN);
 
     // `freezeAsStale` releases this lease itself, so it is not released above.
     freezeAsStale(repository, evidence);
     expect(assessStaleLeaseRecovery(repository, { processAlive: dead }).verdict).toBe('UNSAFE');
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'refuses the writer result when neither the withdrawal nor the discard could land',
+    async () => {
+    // THE DOUBLE FAILURE, and the sequence a second review blocked this slice
+    // on. The case above is its near neighbour and stops one step short: there
+    // the publish is refused and the fallback discard lands, so nothing
+    // affirmative survives. Here **both** are refused, which the seam used to
+    // treat as identical because it discarded the answer.
+    //
+    //   ESTABLISHED writer
+    //   -> the writer really ends, unattested
+    //   -> the retraction cannot be published        (rename  -> EPERM)
+    //   -> the fallback discard cannot happen either (unlink  -> EBUSY)
+    //   -> an affirmative entry stays on disk, readable and bound to THIS lease
+    //   -> the run used to carry on into commit, verification and review
+    //
+    // The two filesystem refusals are produced by the operating system, not
+    // described to the code: `helpers/share-lock.ts` holds the ledger open
+    // without delete- or write-sharing, and states which cheaper instruments
+    // were tried and measured not to bite. Nothing in `src` is substituted.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const attestation = attestationFor(process.pid, {
+      helperPid: 62_001,
+      childPid: 62_002,
+      launchNonce: '00000000000000e3',
+    });
+    const locks: ShareLock[] = [];
+    let markedBeforeLock = '';
+    let returned: AgentCommandResult | null = null;
+    let direct: WriterLaunchResult | null = null;
+
+    const run = leasedAgent({
+      lease: { repository, evidence },
+      agent: async (_id, _args, _cwd, _payload, hooks) => {
+        hooks?.onLaunchEstablished?.(attestation);
+        markedBeforeLock = stateOf(repository, 1);
+        // The lock is taken AFTER the mark has landed, so the affirmative entry
+        // this case is about is real and on disk before anything is refused.
+        locks.push(await shareLockOn(ledgerPathOf(repository)));
+        return agentResult(null);
+      },
+      containmentNow: tick,
+    });
+
+    try {
+      returned = await run('claude', [], process.cwd(), '');
+      // Which arm the withdrawal actually took, asked of the same entry point
+      // in the same state rather than inferred from the seam's answer. Without
+      // this the case would pass for any refusal at all - a lost lease, an
+      // unreadable ledger - and would stop measuring the branch it is named for.
+      direct = retractWriterLaunchEstablishment(repository, evidence, {
+        generation: 1,
+        writerId: 'claude',
+      });
+      // The precondition the whole case rests on: the stale mark really is
+      // still there, and still reads as the proof that licenses a removal.
+      expect(stateOf(repository, 1)).toBe('ESTABLISHED');
+      expect(inspectWriterLaunchHistory(repository)).toBe('LAUNCHES_CONTAINED_SOME_UNENDED');
+    } finally {
+      // `releaseAll` rather than a loop of `release()`: a throw out of a
+      // `finally` replaces the exception already travelling, so a cleanup
+      // timeout would be reported instead of the assertion that actually
+      // failed. Its own doc says why swallowing is safe here.
+      await releaseAll(locks);
+    }
+
+    expect(markedBeforeLock).toBe('ESTABLISHED');
+    expect(direct?.code).toBe('LAUNCH_MUST_NOT_START');
+    // Identity against the exported constant, for the reason the hook case
+    // gives: this seam's three refusals are byte-identical once serialised, so
+    // a field comparison would pass for any of them.
+    expect(returned).toBe(AGENT_LAUNCH_NOT_WITHDRAWN);
+
+    // And why the refusal is necessary rather than fussy. The owner dies during
+    // the commit or the reviewer that used to follow, and `dead` answers
+    // NOT_FOUND for every pid - so the writer's own recorded processes are gone
+    // and nothing about liveness saves this lease. The recovery reads the
+    // stale entry and says the lease may be removed, which is the state the run
+    // must never have been allowed to reach.
+    freezeAsStale(repository, evidence);
+    const assessed = assessStaleLeaseRecovery(repository, { processAlive: dead });
+    expect(assessed.launchHistory).toBe('LAUNCHES_CONTAINED_SOME_UNENDED');
+    expect(assessed.verdict).toBe('SAFE_TO_RECOVER');
+    },
+  );
+
+  it('lets the run carry on when the lease itself is gone, mark or no mark', async () => {
+    // THE NARROWING, pinned on purpose rather than left to the quota suite that
+    // found it. The refusal exists for a stale mark bound to a **live** lease.
+    // When the lease is gone the mark is unreadable to every future recovery -
+    // a recovery takes its subject from the lease document beside the ledger -
+    // so refusing here buys nothing and costs the caller its ordinary result.
+    //
+    // Measured consequence of getting this wrong: refusing on `NOT_OWNER` turned
+    // a quota block into `HUMAN_DECISION_REQUIRED` before the settlement could
+    // run, and `tests/v3-10-quota-checkpoint.test.ts` lost the assertion that
+    // proves the commit was attempted and refused.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const attestation = attestationFor(process.pid, { launchNonce: '00000000000000e5' });
+    const ordinary = agentResult(null);
+    const run = leasedAgent({
+      lease: { repository, evidence },
+      agent: async (_id, _args, _cwd, _payload, hooks) => {
+        hooks?.onLaunchEstablished?.(attestation);
+        expect(stateOf(repository, 1)).toBe('ESTABLISHED');
+        // The lease goes while the writer runs, which is what a real loss looks
+        // like: minutes of subprocess time after the step began.
+        releaseRepositoryExecutionLease(evidence);
+        return ordinary;
+      },
+      containmentNow: tick,
+    });
+
+    const returned = await run('claude', [], process.cwd(), '');
+    // The writer's own result, by identity - the seam did not substitute a
+    // refusal - even though the mark could not be withdrawn.
+    expect(returned).toBe(ordinary);
+    expect(returned).not.toBe(AGENT_LAUNCH_NOT_WITHDRAWN);
+    // And the two halves of the reason, measured rather than argued: the mark is
+    // still standing, and nothing can read it, because the lease it was bound to
+    // is not there any more.
+    expect(stateOf(repository, 1)).toBe('ESTABLISHED');
+    expect(existsSync(leasePathOf(repository))).toBe(false);
+    expect(assessStaleLeaseRecovery(repository, { processAlive: dead }).verdict).not.toBe(
+      'SAFE_TO_RECOVER',
+    );
+  });
+
+  it('lets the run carry on when a successor holds the lease, not just when it is gone', async () => {
+    // THE SECOND HALF OF THE NARROWING, and it needed its own case: releasing a
+    // lease DELETES the document, so the case above reaches the withdrawal as
+    // `LEASE_ABSENT` and never as `NOT_OWNER`. A mutant proved it - making
+    // `NOT_OWNER` refuse survived the whole suite, so that arm was shipping
+    // unmeasured while its twin was pinned twice over.
+    //
+    // Here a successor really takes the lease while the writer runs, which is
+    // the only way this build produces `NOT_OWNER` from the retraction.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const attestation = attestationFor(process.pid, { launchNonce: '00000000000000e6' });
+    const ordinary = agentResult(null);
+    let successor: ExecutionLeaseEvidence | null = null;
+    const run = leasedAgent({
+      lease: { repository, evidence },
+      agent: async (_id, _args, _cwd, _payload, hooks) => {
+        hooks?.onLaunchEstablished?.(attestation);
+        expect(stateOf(repository, 1)).toBe('ESTABLISHED');
+        releaseRepositoryExecutionLease(evidence);
+        const taken = acquireRepositoryExecutionLease(
+          repository,
+          { runId: 'run-2', blockId: null },
+          { now: tick },
+        );
+        if (!taken.ok) throw new Error(`the successor could not take the lease: ${taken.code}`);
+        successor = taken.evidence;
+        return ordinary;
+      },
+      containmentNow: tick,
+    });
+
+    const returned = await run('claude', [], process.cwd(), '');
+    expect(returned).toBe(ordinary);
+    expect(returned).not.toBe(AGENT_LAUNCH_NOT_WITHDRAWN);
+    // The successor's own history is what is on disk now, and it describes no
+    // launch at all - so the mark this run could not withdraw is not merely
+    // unreadable, it is not there. Asserted as an effect rather than as the
+    // absence of a refusal.
+    expect(ledgerOf(repository)?.entries).toEqual([]);
+    if (successor !== null) releaseRepositoryExecutionLease(successor);
+  });
+
+  it('withdraws the mark when the writer throws, and cannot report that it did', async () => {
+    // THE PATH THE `finally` STILL OWNS, and the reason it was kept. A throw out
+    // of the runner has no return value to refuse with, so the withdrawal's
+    // answer cannot be consumed there - but it must still HAPPEN, and this is
+    // what measures that it does. Deleting the `finally` arm leaves an
+    // `ESTABLISHED` entry standing behind a throwing writer.
+    const repository = repositoryFixture();
+    const { evidence } = leaseOf(repository);
+    const attestation = attestationFor(process.pid, { launchNonce: '00000000000000e4' });
+    const run = leasedAgent({
+      lease: { repository, evidence },
+      agent: async (_id, _args, _cwd, _payload, hooks) => {
+        hooks?.onLaunchEstablished?.(attestation);
+        expect(stateOf(repository, 1)).toBe('ESTABLISHED');
+        throw new Error('the writer process blew up');
+      },
+      containmentNow: tick,
+    });
+
+    await expect(run('claude', [], process.cwd(), '')).rejects.toThrow(
+      'the writer process blew up',
+    );
+    // The effect, not the absence of one: the mark really came back.
+    expect(stateOf(repository, 1)).toBe('PENDING');
+    releaseRepositoryExecutionLease(evidence);
+  });
+
+  it('gives its three refusals three identities', () => {
+    // The identity checks in this file are only worth what the distinctness of
+    // these constants is worth, and nothing measured that. A review made
+    // `AGENT_LAUNCH_NOT_WITHDRAWN` an alias of `AGENT_LAUNCH_NOT_RECORDED` and
+    // every case here stayed green, because the two are byte-identical once
+    // serialised and every other assertion compares fields.
+    expect(AGENT_LAUNCH_NOT_WITHDRAWN).not.toBe(AGENT_LAUNCH_NOT_RECORDED);
+    // And they really are indistinguishable by value, which is why the identity
+    // checks are the only instrument available.
+    expect({ ...AGENT_LAUNCH_NOT_WITHDRAWN }).toEqual({ ...AGENT_LAUNCH_NOT_RECORDED });
   });
 
   it('refuses to withdraw a generation whose ending was proved', () => {

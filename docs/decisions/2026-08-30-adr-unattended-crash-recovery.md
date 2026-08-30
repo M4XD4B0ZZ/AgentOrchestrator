@@ -84,6 +84,13 @@ The withdrawal is the second half of the decision and is not optional: an
 thing that happened under the lease. See `R-M2-2` below for the sequence that
 made it necessary and the phases that measure it.
 
+The last row is what is attempted, and it can fail. Publishing the withdrawal
+can be refused and so can its fallback — discarding the history — which leaves
+the affirmative entry untouched on disk. The ledger has nothing left to try and
+answers `LAUNCH_MUST_NOT_START`; what closes the hazard there is the *caller*,
+which refuses to return the writer's result, so the step stops before the commit.
+See `R-M2-4`.
+
 ### The predicate, stated exactly
 
 ```text
@@ -214,8 +221,10 @@ clears itself; there is no direction in which reuse permits a removal.
 
   It is closed by {@link retractWriterLaunchEstablishment}: a writer launch that
   ends without reaching `CONTAINED` has its establishment mark **withdrawn back
-  to `PENDING`**, in a `finally`, before control returns to a step that can start
-  anything. `PENDING` is not a conservative invention — it is the exact state
+  to `PENDING`** before control returns to a step that can start anything — on
+  the ordinary path by the code that consumes the withdrawal's answer, and on a
+  throw by a `finally`, so no exit from the runner skips it. `PENDING` is not a
+  conservative invention — it is the exact state
   this build left such a launch in before the mark existed — so the arm can no
   longer license a recovery the previous build refused. The lease is then
   unrecoverable for the same reason and to the same extent as before: no wider,
@@ -235,3 +244,65 @@ clears itself; there is no direction in which reuse permits a removal.
   a file in the Git common directory can write a history that reads as a proof.
   The format states this; the new state changes nothing about it, since write
   access to that directory already subsumes deleting the lease by hand.
+
+- **`R-M2-4` — a withdrawal can fail twice, and then the entry stays.** The
+  retraction has two writes: publish the entry back to `PENDING`, and — if that
+  is refused — discard the whole history. Both can be refused at once; the state
+  was reproduced with the ledger held open by another process (`rename` → `EPERM`,
+  `unlink` → `EBUSY`), and it is what a read-only or vanished administrative
+  directory does. The affirmative `ESTABLISHED` entry then remains, readable and
+  bound to a live lease, and **nothing in this build can remove it** — the two
+  writes that would have are the two that failed.
+
+  What is closed is the *consequence*, not the state. `loop/leased-spawns.ts`
+  consumes the withdrawal's answer and refuses to return the writer's result, so
+  the step stops: no commit, no verification, no reviewer.
+
+  The refusal is aimed at a stale mark bound to a **live** lease, and it is
+  scoped to that. When the withdrawal reports that the lease at the path is not
+  this run's, or that there is none, the mark it could not take back is
+  unreadable to every future recovery — a recovery derives its subject from the
+  lease document beside the ledger — and the run is already fenced by the same
+  gate everywhere else. Refusing there as well was tried and measured wrong: it
+  turned a quota block into `HUMAN_DECISION_REQUIRED` before the settlement
+  could run, and `tests/v3-10-quota-checkpoint.test.ts` lost the assertion that
+  proves the commit was attempted and refused. `LEASE_UNREADABLE` stays with the
+  refusals, because there the lease may still be this run's. A first version of
+  this slice discarded that answer and argued the next `beginWriterLaunch` would
+  catch the broken directory; it would not, because nothing after a writer opens
+  a generation. The sequence was reproduced through the production seam before
+  it was fixed — the run got the ordinary writer result and
+  `assessStaleLeaseRecovery` answered `SAFE_TO_RECOVER` — and both halves are
+  pinned in `tests/v3-05-stale-lease-recovery.test.ts` and
+  `tests/v2-07l-execution-lease.test.ts`, each with a positive control.
+
+  The price is stated rather than left to be found in an incident, because it is
+  higher than "a lost pass". The refusal is an `UNAVAILABLE` result, which
+  `runClaudeWriter` diagnoses as `AGENT_PROCESS_UNAVAILABLE` and
+  `recordAgentInterruption` parks at **`HUMAN_DECISION_REQUIRED`** — a durable
+  move, `automaticResumeEligible: false`, and a state this loop does not drive.
+  So the run stops until an operator continues it by hand, and the writer's edits
+  stay uncommitted in the worktree. In a slice about *unattended* recovery that
+  matters, and it is still the right trade: a stopped run is recoverable by a
+  person, a lease removed from under a live commit is not recoverable at all.
+
+  One case is sharper. A writer refused for quota still carries an attestation,
+  so it can reach this refusal — and `endedUnderOwnControl` is asked above the
+  usage-limit check, so a block that would have parked at `BLOCKED_USAGE_LIMIT`
+  (the one state a timer may resume, and the one whose settlement commits the
+  partial work) parks at `HUMAN_DECISION_REQUIRED` instead. Conservative and
+  correct — nothing may be committed while the ledger cannot be written — and a
+  self-clearing pause becomes a human-only stop.
+
+  Three things are deliberately **not** claimed. If the run is killed before it
+  can stop, the entry is still there and a later recovery may act on it — this
+  build closes a continuation, not a crash window. If the agent runner *throws*,
+  the withdrawal still happens in a `finally` but its answer cannot be returned;
+  the throw is what stops the step, and no caller between the seam and the CLI
+  swallows it today, which is a measurement of this build and not a guarantee
+  about the next one. And the fail-closed value written before the withdrawal —
+  which stops a throwing withdrawal being retried by that `finally` — is
+  defensive code no case pins, because nothing available here can make
+  `retractWriterLaunchEstablishment` throw. The operator's move for a lease left
+  in this state is unchanged: the lease path is printed by
+  `agent-loop lease status`.
