@@ -295,6 +295,30 @@ The `package.json` description said "owned" and now says what it is.
   over a settled one, because a settled slot leaves nothing to compare against.
   Not reachable from production, where one slot and one attestation live in one
   closure; the same bound the binding digest has.
+- **Cost, measured, and accepted as performance debt.** Accounting adds two
+  small publishes per owned spawn. The `fsyncSync` every other record in this
+  module pays is deliberately not paid here — `writeInto` carries the reasoning
+  and the four losses that admits — and what is left is filesystem I/O rather
+  than CPU: reducing the read-back from four schema parses and three digests to
+  one of each changed nothing measurable.
+
+  On the reference machine, solo runs:
+
+  | | base `fba4cfd` | this slice |
+  | --- | --- | --- |
+  | `tests/worktree-lifecycle.test.ts` (Git-heavy) | 124 s | 190 s |
+  | dogfood "accumulates across rounds" | 28.9 s | 31.3 s |
+  | dogfood "actionable finding across the boundary" | 36.5 s | 42.5 s |
+
+  The Git-heavy file pays about +50%; writer-heavy cases pay 8–16%. **The local
+  parallel gate does not pass on this machine, and it does not pass on the base
+  either**: `npm run test:foundation-safe` at `fba4cfd` fails two cases on a 90 s
+  per-test ceiling, and this slice fails those two and one more. All three pass
+  in isolation with a 2–3× margin, and every failure is a timeout with no
+  assertion failure — the environment verdict this repository has recorded
+  before. What this slice owns is the third case, which was already at 36.5 s of
+  a 90 s budget before it was touched. No timeout was raised.
+
 - **POSIX.** A run there has no boundary, no job and nothing to attest, so no
   ending is ever accounted for and slots accumulate until the register is
   discarded — after which the lease is honestly unrecoverable. The shipped CLI

@@ -3860,9 +3860,30 @@ function publishRegister(
   // is a caller-supplied seam, so a `now` returning something the contract
   // refuses is enough to build a document that would be refused for the rest of
   // this lease's life; this is what stops it reaching a file.
+  // ── Read back once, and ask three questions of the one answer ───────────
+  //
+  // `readOwnedLaunchRegister` runs the whole structural chain — version, schema,
+  // the positional generation rule, the slot rules, the binding, the owner and
+  // run agreement, `historyComplete` — and answers the register's reading. That
+  // is the expensive part: a schema parse and a digest over every entry and every
+  // open slot.
+  //
+  // This block used to run it FOUR times and compute the digest THREE times, for
+  // a document written twice per spawn. The checks below are the same three
+  // claims taken from one parse, and the third is now *stronger* than the one it
+  // replaces: byte-for-byte identical entries rather than the same verdict about
+  // them.
   const back = ledgerReadBack(bytes);
   if (readOwnedLaunchRegister(subject, back) !== expected) {
     return ownedFailure('REGISTER_NOT_READABLE_BACK', 'NOT_AS_BUILT');
+  }
+  const parsed = WriterLaunchLedgerSchema.safeParse(back);
+  if (!parsed.success) {
+    // Unreachable while the reading above is not `REGISTER_NOT_READABLE`, which
+    // is what an unparseable document answers. A refusal rather than a throw, so
+    // a future change that breaks that agreement degrades the reason and never
+    // the decision.
+    return ownedFailure('REGISTER_NOT_READABLE_BACK', 'NOT_PARSEABLE');
   }
   // The reading alone is not enough, and this is the assertion that carries the
   // weight. A register with any announced slot in it reads `OWNED_LAUNCH_UNPROVEN`
@@ -3871,18 +3892,16 @@ function publishRegister(
   // already carries for the writer ledger, and the same defect: without it,
   // establishing one slot while another was announced was refused outright,
   // which a test caught before this line existed.
-  const parsed = WriterLaunchLedgerSchema.safeParse(back);
-  const written = parsed.success
-    ? parsed.data.open.find((entry) => entry.slot === expectSlot.slot)
-    : undefined;
+  const written = parsed.data.open.find((entry) => entry.slot === expectSlot.slot);
   if ((written?.state ?? 'ABSENT') !== expectSlot.state) {
     return ownedFailure('REGISTER_NOT_READABLE_BACK', 'SLOT_NOT_AS_BUILT');
   }
   // And the writer history must survive the write untouched. Asserted rather
   // than assumed: this function rewrites the whole document, so a defect here
-  // would silently weaken the *other* record, and the reading is the thing every
-  // recovery asks first.
-  if (readWriterLaunchLedger(subject, back) !== readWriterLaunchLedger(subject, existing)) {
+  // would silently weaken the *other* record. Compared field by field through
+  // the schema's own key order — both sides come from the same parser — which
+  // says more than "the two produce the same reading" did.
+  if (JSON.stringify(parsed.data.entries) !== JSON.stringify(existing.entries)) {
     return ownedFailure('REGISTER_NOT_READABLE_BACK', 'HISTORY_DISTURBED');
   }
 
