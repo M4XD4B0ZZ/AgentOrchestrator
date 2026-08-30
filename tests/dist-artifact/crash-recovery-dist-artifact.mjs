@@ -46,6 +46,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -58,6 +59,7 @@ const repoRoot = resolve(here, '..', '..');
 const distLease = join(repoRoot, 'dist', 'lease', 'execution-lease.js');
 const distStart = join(repoRoot, 'dist', 'boundary', 'start-owned-process.js');
 const distMint = join(repoRoot, 'dist', 'core', 'internal', 'containment-attestation.js');
+const distRepo = join(repoRoot, 'dist', 'repo', 'resolve-repository.js');
 const cli = join(repoRoot, 'dist', 'cli', 'index.js');
 
 const LEASE_FILE = 'agent-orchestrator-execution-lease.json';
@@ -100,16 +102,29 @@ import {
   acquireRepositoryExecutionLease,
   attestWriterLaunchEstablished,
   beginWriterLaunch,
+  deriveExecutionLeaseLocation,
 } from ${JSON.stringify(pathToFileURL(distLease).href)};
 import { startOwnedProcess } from ${JSON.stringify(pathToFileURL(distStart).href)};
 import { mintContainmentAttestation } from ${JSON.stringify(pathToFileURL(distMint).href)};
+import { resolveRepository } from ${JSON.stringify(pathToFileURL(distRepo).href)};
 
 const root = process.env.AO_CRASH_DIR;
 const phase = process.env.AO_CRASH_PHASE;
 const beat = process.env.AO_CRASH_BEAT;
-const repository = { gitCommonDir: join(root, '.git'), root, id: 'crash-fixture' };
 const now = () => new Date().toISOString();
 const fail = (why) => { process.stderr.write(why); process.exit(9); };
+
+// Resolved, never hand-built. A record assembled here from the raw temp path
+// and the resolver's answer for the same directory are two lease KEYS on a
+// GitHub Windows runner, whose temp directory is an 8.3 short alias that the
+// resolver returns in long form. This harness shipped that defect once: every
+// phase passed locally and phase A failed both CI jobs, while B, C and D went
+// green for the wrong reason - the CLI was looking at a path where no lease had
+// ever been written. lifecycle-restart-dist-artifact.mjs records the same
+// regression, and its remedy is the one applied here.
+const resolved = await resolveRepository({ repositoryPath: root });
+if (!resolved.ok) fail('RESOLVE ' + resolved.code + ' ' + String(resolved.detail));
+const repository = resolved.repository;
 
 const acquired = acquireRepositoryExecutionLease(repository, { runId: 'crash-run', blockId: null }, { now });
 if (!acquired.ok) fail('ACQUIRE ' + acquired.code);
@@ -191,7 +206,16 @@ if (phase === 'PENDING') {
   if (marked.code !== 'ESTABLISHED') fail('ESTABLISH ' + marked.code);
 }
 
-process.stdout.write(JSON.stringify({ ownerPid: process.pid, ...facts }) + '\\nready\\n');
+// The lease path this owner will actually use, reported so the harness can
+// require the two sides to name one object before it judges anything.
+const location = deriveExecutionLeaseLocation(repository);
+process.stdout.write(
+  JSON.stringify({
+    ownerPid: process.pid,
+    ...facts,
+    leasePath: location.ok ? location.path : null,
+  }) + '\\nready\\n',
+);
 // Parked, holding the lease. The release in a \`finally\` is what never runs.
 setInterval(() => {}, 1000);
 `;
@@ -226,7 +250,13 @@ const roots = [];
  * directory by hand and failed exactly that way.
  */
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'ao-m2-01-dist-'));
+  // Canonicalised for the reason `tests/helpers/canonical-temp-dir.ts` gives:
+  // `tmpdir()` can be an 8.3 alias, and a fixture that keeps one hands a
+  // different identity to whoever resolves it. This is not what fixes the
+  // identity split - resolving on both sides is - but it keeps this file's own
+  // `join(root, ...)` reads and the `git` cwd on the spelling the resolver
+  // returns.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'ao-m2-01-dist-')));
   roots.push(root);
   // `-b main`, and a first commit, because the profile declares a default branch
   // and `resolveRepository` refuses `DEFAULT_BRANCH_NOT_FOUND` for a repository
@@ -260,7 +290,22 @@ function fixture() {
       .replace(/^(\s*required:\s*)true\s*$/m, '$1false'),
     'utf8',
   );
-  return { root, repository: { gitCommonDir: join(root, '.git'), root, id: 'crash-fixture' } };
+  return { root };
+}
+
+/**
+ * The repository record, obtained the way the product obtains it.
+ *
+ * Both this harness and the owner process call `resolveRepository`, and the
+ * lease path each derives is compared before any phase is judged. That
+ * comparison is this file's own regression control: without it a split identity
+ * makes every refusal phase pass for the wrong reason, which is exactly what
+ * happened on CI while every phase passed locally.
+ */
+async function resolvedRepository(root) {
+  const resolution = await resolveRepository({ repositoryPath: root });
+  check(resolution.ok === true, `fixture resolved (${resolution.ok ? 'ok' : resolution.code})`);
+  return resolution.ok ? resolution.repository : null;
 }
 
 const leaseBytes = (root) => {
@@ -319,6 +364,8 @@ const {
 const { runOwnedCommand } = await import(
   pathToFileURL(join(repoRoot, 'dist', 'boundary', 'owned-command.js')).href
 );
+const { resolveRepository } = await import(pathToFileURL(distRepo).href);
+const { deriveExecutionLeaseLocation } = await import(pathToFileURL(distLease).href);
 
 const ROUNDS = Number(process.env.AO_CRASH_ROUNDS ?? '2');
 const started = Date.now();
@@ -328,9 +375,18 @@ for (let round = 0; round < ROUNDS; round += 1) {
 
   /* ── A. killed mid-writer: the tree dies, and the lease is recoverable ─── */
   {
-    const { root, repository } = fixture();
+    const { root } = fixture();
+  const repository = await resolvedRepository(root);
     const beat = join(root, 'beat');
     const facts = await startOwner(root, 'CONTAINED', beat);
+    // Both sides resolved; both must name the SAME lease. Asserted before any
+    // phase is judged, because a split identity makes the refusal phases pass
+    // while measuring an empty directory.
+    const derived = deriveExecutionLeaseLocation(repository);
+    check(
+      derived.ok === true && derived.path === facts.leasePath,
+      `A${round}: the owner and this harness derive one lease path`,
+    );
     await sleep(500);
     check(beatOf(beat) !== null, `A${round}: the contained writer is really running`);
     check(
@@ -371,7 +427,8 @@ for (let round = 0; round < ROUNDS; round += 1) {
 
   /* ── B. THE CONTROL: the recorded tree is still running ───────────────── */
   {
-    const { root, repository } = fixture();
+    const { root } = fixture();
+  const repository = await resolvedRepository(root);
     const beat = join(root, 'beat');
     const facts = await startOwner(root, 'SURVIVOR', beat);
     check(await killAndWait(osProcessLiveness, facts.ownerPid), `B${round}: the owner is gone`);
@@ -406,7 +463,8 @@ for (let round = 0; round < ROUNDS; round += 1) {
 
   /* ── C. a living owner is refused before the tree is ever asked about ─── */
   {
-    const { root, repository } = fixture();
+    const { root } = fixture();
+  const repository = await resolvedRepository(root);
     const beat = join(root, 'beat');
     const facts = await startOwner(root, 'CONTAINED', beat);
     await sleep(400);
@@ -431,7 +489,8 @@ for (let round = 0; round < ROUNDS; round += 1) {
 
   /* ── D. the window this slice does not close ──────────────────────────── */
   {
-    const { root, repository } = fixture();
+    const { root } = fixture();
+  const repository = await resolvedRepository(root);
     const beat = join(root, 'beat');
     const facts = await startOwner(root, 'PENDING', beat);
     check(await killAndWait(osProcessLiveness, facts.ownerPid), `D${round}: the owner is gone`);
@@ -463,7 +522,8 @@ for (let round = 0; round < ROUNDS; round += 1) {
 // anything. So this case exists, it drives the real ordering through the real
 // boundary, and it is the only place the agreement is measured.
 {
-  const { root, repository } = fixture();
+  const { root } = fixture();
+  const repository = await resolvedRepository(root);
   const acquired = acquireRepositoryExecutionLease(
     repository,
     { runId: 'upgrade-run', blockId: null },
