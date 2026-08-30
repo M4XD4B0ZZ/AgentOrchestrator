@@ -65,7 +65,7 @@ import {
   repositoryRegistryPath,
   resolveRegisteredRepositories,
   type RegisteredRepository,
-} from '../src/repo/repository-registry.js';
+} from '../src/registry/repository-registry.js';
 import { resolveRepository } from '../src/repo/resolve-repository.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
@@ -697,14 +697,27 @@ describe('cross-repository selection', () => {
   });
 
   it('refuses the whole plan when one repository cannot be planned, and publishes nothing', async () => {
-    const good = makeRepository({ id: 'good', tasks: { 't-1': {} } });
-    // A repository whose task source exists and holds no task file: a
-    // configuration problem, and the one `discoverTasks` refuses to read as a
-    // finished plan.
-    const emptySource = makeRepository({ id: 'empty', tasks: {} });
+    // The failing repository must be the one with the HIGHER canonical root, so
+    // that the good repository is planned FIRST and its plan is already in hand
+    // when the refusal fires. Without that, `plans` happens to be empty at the
+    // moment of failure and "publish the partial plans instead of nothing" is
+    // invisible — measured: that mutant survived a fixture which left the order
+    // to `mkdtemp`, and was killed by one run of the same fixture that happened
+    // to order the other way.
+    const first = makeRepository({ id: 'r-first', tasks: { 't-1': {} } });
+    const second = makeRepository({ id: 'r-second', tasks: { 't-1': {} } });
+    const [good, emptySource] = [first, second].sort(compareRepositoryRoots) as [string, string];
+    // A task source that exists and holds no task file: a configuration problem,
+    // and the one `discoverTasks` refuses to read as a finished plan.
+    rmSync(join(emptySource, 'tasks'), { recursive: true, force: true });
     mkdirSync(join(emptySource, 'tasks'), { recursive: true });
+    git(emptySource, ['add', '--all']);
+    git(emptySource, ['commit', '--quiet', '-m', 'empty']);
 
     const { plan } = await planWritten(registryFor([good, emptySource]));
+    // The premise: the good repository really does sort first, so it really was
+    // planned before the refusal.
+    expect(compareRepositoryRoots(good, emptySource)).toBeLessThan(0);
     expect(plan?.code).toBe('REPOSITORY_UNPLANNABLE');
     expect(plan?.selected).toBeNull();
     expect(plan?.planningCode).toBe('TASK_SOURCE_EMPTY');
@@ -851,7 +864,7 @@ describe('the repositories command', () => {
 
 describe('the slice added no new authority', () => {
   const SLICE_MODULES = [
-    join('src', 'repo', 'repository-registry.ts'),
+    join('src', 'registry', 'repository-registry.ts'),
     join('src', 'plan', 'plan-across-repositories.ts'),
     join('src', 'cli', 'repositories-command.ts'),
     join('src', 'cli', 'render-repositories.ts'),

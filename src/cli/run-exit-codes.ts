@@ -45,7 +45,7 @@ import type { CrossRepositoryPlanCode } from '../plan/plan-across-repositories.j
 import type {
   RegistryResolutionRefusal,
   RepositoryRegistryRefusal,
-} from '../repo/repository-registry.js';
+} from '../registry/repository-registry.js';
 import type { RunPlanConclusion } from '../run/run-plan.js';
 import type { StartTaskOutcome } from '../run/start-task.js';
 import type { UnattendedResumeResult } from '../run/unattended-resume.js';

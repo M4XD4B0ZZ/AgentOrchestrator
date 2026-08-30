@@ -35,7 +35,7 @@ import type {
 import type {
   RegistryResolutionFailure,
   RepositoryRegistryOutcome,
-} from '../repo/repository-registry.js';
+} from '../registry/repository-registry.js';
 
 /** One sentence per plan outcome. Static; nothing is interpolated. */
 export const CROSS_REPOSITORY_SENTENCES: Readonly<Record<CrossRepositoryPlanCode, string>> =

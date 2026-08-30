@@ -90,6 +90,25 @@
  * ranking and the refusals key on are the canonical root and the Git common
  * directory, neither of which any repository content can move.
  *
+ * ── Why this is not in `src/repo/` ─────────────────────────────────────────
+ *
+ * It was, for one round, and a structural pin caught it:
+ * `tests/repo-resolution.test.ts` sweeps `src/repo/` and refuses **any** module
+ * there that imports `config/paths.js`, on the grounds that
+ *
+ *   > a resolver that consulted it would be deriving a target repository's
+ *   > contract from the orchestrator's own checkout, which is the exact coupling
+ *   > V1-01 exists to prevent.
+ *
+ * This module does import it — `orchestratorHome` — and it is not a resolver, so
+ * the letter of the pin caught something its reason does not describe. The right
+ * answer is still to move rather than to carve out an exemption: `src/repo/` is
+ * the layer that answers *what is this one repository*, from that repository's
+ * own committed files and nothing else, and a module that reads a machine-wide
+ * operator document does not belong in it whatever the pin says. The exemption
+ * would have been the beginning of a second rule about where a repository's
+ * contract may come from.
+ *
  * ── Not Git's registry ─────────────────────────────────────────────────────
  *
  * "Registry" already names one thing in this build: Git's own worktree registry,
@@ -131,7 +150,7 @@ import {
   resolveRepository as resolveRepositoryProduction,
   type RepositoryResolutionFailureCode,
   type ResolvedRepository,
-} from './resolve-repository.js';
+} from '../repo/resolve-repository.js';
 
 /** The one file name. There is no alternative spelling and no `.yml` fallback. */
 export const REPOSITORY_REGISTRY_FILE_NAME = 'repositories.yaml';

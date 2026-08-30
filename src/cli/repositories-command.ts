@@ -54,7 +54,7 @@ import {
   loadRepositoryRegistry,
   repositoryRegistryPath,
   resolveRegisteredRepositories,
-} from '../repo/repository-registry.js';
+} from '../registry/repository-registry.js';
 import { formatSafeError } from '../core/safe-error.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,

@@ -104,8 +104,8 @@
  * several repositories' plans does not change that.
  */
 
-import type { RegisteredRepository } from '../repo/repository-registry.js';
-import { compareRepositoryRoots } from '../repo/repository-registry.js';
+import type { RegisteredRepository } from '../registry/repository-registry.js';
+import { compareRepositoryRoots } from '../registry/repository-registry.js';
 import type { ResolvedRepository } from '../repo/resolve-repository.js';
 import { compareTaskIds } from './task-id.js';
 import type { TaskDefinition } from './task-definition.js';
