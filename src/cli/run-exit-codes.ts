@@ -41,6 +41,11 @@ import type { ReleaseOutcome } from '../run/release-workspace.js';
 import type { LeaseReleaseResult } from '../lease/execution-lease.js';
 import type { LifecycleOutcome } from '../run/lifecycle-driver.js';
 import type { RunOutcome } from '../run/run-driver.js';
+import type { CrossRepositoryPlanCode } from '../plan/plan-across-repositories.js';
+import type {
+  RegistryResolutionRefusal,
+  RepositoryRegistryRefusal,
+} from '../repo/repository-registry.js';
 import type { RunPlanConclusion } from '../run/run-plan.js';
 import type { StartTaskOutcome } from '../run/start-task.js';
 import type { UnattendedResumeResult } from '../run/unattended-resume.js';
@@ -912,4 +917,81 @@ export function exitCodeForDrive(
     );
   }
   return DRIVE_EXIT_CODES[outcome];
+}
+
+// ── Cross-repository planning (M2 slice 3) ─────────────────────────────────
+
+/**
+ * Exit code for every cross-repository plan outcome. Total; pinned by test.
+ *
+ * Every value here mirrors the decision `PLAN_EXIT_CODES` already made for the
+ * single-repository conclusion that means the same thing, and that is the whole
+ * of the reasoning: an operator's shell must not have to learn a second set of
+ * meanings because a report covered more than one repository.
+ *
+ *  - `TASK_SELECTED` and `ALL_TASKS_COMPLETE` are nominal answers — the operator
+ *    got exactly what they asked for — as `ALL_TASKS_COMPLETE` is there;
+ *  - `NO_ELIGIBLE_TASK` keeps its code 2 from there;
+ *  - `REPOSITORY_UNPLANNABLE` is `PLANNING_FAILED` with a repository named, so
+ *    it takes that code;
+ *  - `NO_REPOSITORIES_REGISTERED` is the input not being planbable, which is
+ *    what code 2 says. It is deliberately **not** 0: an operator who has
+ *    enlisted nothing has a configuration to finish, and answering "success"
+ *    would be the same false reading `discoverTasks` refuses for an empty task
+ *    source.
+ */
+const CROSS_REPOSITORY_PLAN_EXIT_CODES = Object.freeze({
+  TASK_SELECTED: EXIT_RUN_OK,
+  ALL_TASKS_COMPLETE: EXIT_RUN_OK,
+  NO_ELIGIBLE_TASK: EXIT_RUN_INPUT_UNUSABLE,
+  NO_REPOSITORIES_REGISTERED: EXIT_RUN_INPUT_UNUSABLE,
+  REPOSITORY_UNPLANNABLE: EXIT_RUN_INPUT_UNUSABLE,
+}) satisfies Record<CrossRepositoryPlanCode, CliExitCode>;
+
+export function exitCodeForCrossRepositoryPlan(code: CrossRepositoryPlanCode): CliExitCode {
+  return CROSS_REPOSITORY_PLAN_EXIT_CODES[code];
+}
+
+/**
+ * Exit code for every way the registry can be present and unusable. Total;
+ * pinned by test.
+ *
+ * Uniformly 2. Not because the distinction does not matter — it very much does
+ * to the person reading the report, which names the code — but because the
+ * shell-level answer to every one of them is the same: this invocation could not
+ * be planned, nothing durable is wrong, and the fix is to edit one file. A
+ * refusal here is never `EXIT_RUN_NEEDS_OPERATOR`, which this build reserves for
+ * a *durable record* that needs a human.
+ *
+ * `PROFILE_UNAVAILABLE` is the one that could argue for a different code, and it
+ * gets 2 as well: the operating system declining to say where the user profile
+ * is makes the registry path underivable, which is the input being unusable from
+ * this command's point of view.
+ */
+const REPOSITORY_REGISTRY_EXIT_CODES = Object.freeze({
+  PROFILE_UNAVAILABLE: EXIT_RUN_INPUT_UNUSABLE,
+  REGISTRY_UNREADABLE: EXIT_RUN_INPUT_UNUSABLE,
+  REGISTRY_TOO_LARGE: EXIT_RUN_INPUT_UNUSABLE,
+  REGISTRY_MALFORMED: EXIT_RUN_INPUT_UNUSABLE,
+  REGISTRY_FORBIDDEN_KEY: EXIT_RUN_INPUT_UNUSABLE,
+  REGISTRY_CONTRACT_VIOLATION: EXIT_RUN_INPUT_UNUSABLE,
+  REGISTRY_DUPLICATE_PATH: EXIT_RUN_INPUT_UNUSABLE,
+}) satisfies Record<RepositoryRegistryRefusal, CliExitCode>;
+
+export function exitCodeForRepositoryRegistry(code: RepositoryRegistryRefusal): CliExitCode {
+  return REPOSITORY_REGISTRY_EXIT_CODES[code];
+}
+
+/**
+ * Exit code for every way resolving the registry can be refused. Total; pinned
+ * by test. Uniformly 2, for the reason above.
+ */
+const REGISTRY_RESOLUTION_EXIT_CODES = Object.freeze({
+  REPOSITORY_UNRESOLVABLE: EXIT_RUN_INPUT_UNUSABLE,
+  DUPLICATE_REPOSITORY_ROOT: EXIT_RUN_INPUT_UNUSABLE,
+  DUPLICATE_EXECUTION_DOMAIN: EXIT_RUN_INPUT_UNUSABLE,
+}) satisfies Record<RegistryResolutionRefusal, CliExitCode>;
+
+export function exitCodeForRegistryResolution(code: RegistryResolutionRefusal): CliExitCode {
+  return REGISTRY_RESOLUTION_EXIT_CODES[code];
 }

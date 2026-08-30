@@ -22,6 +22,7 @@ import { registerDoctorCommand } from './doctor-command.js';
 import { registerLeaseCommand } from './lease-command.js';
 import { registerPublicationCommand } from './publication-command.js';
 import { registerReleaseCommand } from './release-command.js';
+import { registerRepositoriesCommand } from './repositories-command.js';
 import { registerRunCommand } from './run-command.js';
 import { enforceSupportedRuntime } from './runtime-gate.js';
 
@@ -51,6 +52,13 @@ const DESCRIPTION = [
   '    `--attended` is a grant for all three; `--automatic-publish-head-only`',
   '    is a second one, for the publication alone, and only where this',
   '    machine’s operator declared that repository publishable that way',
+  '  - `repositories`: the read-only listing of the repositories this machine’s',
+  '    operator has enlisted for orchestration, and which single task is next',
+  '    across all of them. It reads one file under this OS user’s profile, takes',
+  '    no `--repository`, and acts on nothing — no execution lease, no agent, no',
+  '    workspace, no task state, no remote. It is the only command that reasons',
+  '    over more than one repository, and it is the only one that cannot change',
+  '    any of them',
   '  - `publication authorisations`: the read-only listing of what this build',
   '    recorded it was permitted to attempt with nobody present. It reads one',
   '    directory under this OS user’s profile, opens no repository and starts no',
@@ -192,6 +200,7 @@ export function buildProgram(): Command {
   registerLeaseCommand(program);
   registerDeliveryCommand(program);
   registerPublicationCommand(program);
+  registerRepositoriesCommand(program);
 
   return program;
 }

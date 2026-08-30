@@ -64,6 +64,13 @@ What *is* implemented:
     a reconciliation that believes the task records rather than the ledger. It
     stores; it does not drive. See
     [The block-run ledger](#the-block-run-ledger-v2-07).
+12. The **repository registry** (M2 slice 3): which repositories this
+    machine’s operator has enlisted, declared in one file outside every
+    repository, and one deterministic selection across all of them. The
+    read-only `agent-loop repositories` shows it. It is the first value in this
+    build that holds more than one repository, and it takes no execution lease,
+    starts no agent and changes nothing. See
+    [The repository registry](#the-repository-registry-m2-slice-3).
 
 ## Status, and where to start
 
@@ -11911,6 +11918,163 @@ See [`docs/decisions/2026-08-29-adr-m1-release-gate.md`](docs/decisions/2026-08-
 which also restates all twelve invariants at `ec97427`, names the six
 ADR-resident residual ids, and amends the two unimplementable "review state"
 sentences out of the M1 contract ADR.
+
+## The repository registry (M2 slice 3)
+
+Every command before this slice named exactly one repository on the command
+line — `--repository <path>`, required and never defaulted. That makes the
+orchestrator repository-*agnostic*, which is not the same thing as
+repository-*plural*: an invocation could act on any repository, and on one.
+
+This slice adds the value the build was missing, and one read-only command that
+shows it.
+
+### The limitation, measured
+
+Against two real repositories, each declaring a task called `shared-id`:
+
+```text
+planNextTask(A)  TASK_SELECTED -> shared-id
+planNextTask(B)  TASK_SELECTED -> shared-id
+A.selected.id === B.selected.id : true
+keys of a selection outcome : code, selected, eligibility, ranking
+keys of a task definition   : id, title, status, kind, priority, currentFocus, dependsOn
+```
+
+`planNextTask` is a function of one repository, and **neither its selection
+outcome nor the task definition carries the repository it came from**. The two
+selected values are equal, field for field, for two different pieces of work. The
+binding that keeps work in the right repository today is entirely the caller
+still holding the `ResolvedRepository` it passed in.
+
+### The registry
+
+    <OS user profile>/.agent-orchestrator/repositories.yaml
+
+    schemaVersion: 1
+    repositories:
+      - path: D:\Some\Repo
+      - path: D:\Other\Repo
+
+Outside every repository, so nothing being orchestrated can enlist itself or
+another repository by committing a file. The shape is
+`delivery-automation.yaml`'s, unchanged: a byte ceiling refused before parsing,
+the shared safe-YAML boundary, `.strict()` objects, a **literal**
+`schemaVersion`, a closed refusal set carrying nothing from the file it refused,
+and a digest over the exact bytes on the accepted member only.
+
+An entry declares a path and nothing else. **Identity is read from each
+repository's own committed profile.** A registry that also named repositories
+would be a second source of truth for the name, and a durable
+`TaskState.repositoryId` would point at whichever of the two wrote it.
+
+### What is refused, and what deliberately is not
+
+| | |
+| --- | --- |
+| `REGISTRY_DUPLICATE_PATH` | the same string twice — a cheap refusal of an obviously self-contradictory document, and explicitly **not** the duplicate guarantee |
+| `DUPLICATE_REPOSITORY_ROOT` | two entries that canonicalise to one directory. This *is* the guarantee: `D:\Repo`, `d:\repo\` and a junction to either are four spellings of one place, and only `realpath` settles them |
+| `DUPLICATE_EXECUTION_DOMAIN` | two entries sharing a `gitCommonDir`. Not implied by the above: two worktrees of one clone are two roots and one execution domain, they contend for one lease, and `deriveTaskWorkspaceIdentity` gives a task of the same id in both the same work branch in one object store |
+| **not refused** | two entries declaring the same `repository.id` |
+
+That last row is the one worth reading twice. Two clones of one remote answer the
+same declared id and are two independent execution domains — the configuration
+`resolve-repository.ts`, `declared-identity.ts` and `lease-document.ts` each
+document as supported. Refusing it would refuse this repository's own working
+practice, and the only remedy would be to edit one `repository.id` — the field
+`block-store.ts` holds durable ledgers to, `automatic-resume.ts` gates a resume
+on, and `reconcile.ts` compares. The edit orphans the records.
+
+The deciding reason is narrower still: `repository.id` is read from a profile
+**inside a repository this orchestrator writes to**. An ordering that depended on
+it could be changed by one driven repository committing an edit to its own file.
+An ordering a subject of the ordering can rewrite is not an ordering.
+
+### Selection
+
+Every enlisted repository is planned by `planNextTask`, unchanged. The eligible
+candidates are merged and ranked by the existing five-element tuple with one
+element appended **last**:
+
+    (kind, currentFocus, priority, -unlockCount, taskId, repositoryRoot)
+
+- within one repository the sixth element is constant, so the answer is
+  bit-for-bit what `selectNextTask` gives today — asserted against
+  `selectNextTask` itself rather than against a remembered list;
+- across repositories no task's rank relative to another changes. The new element
+  decides only the case the old contract had no answer for: two eligible tasks
+  sharing an id;
+- putting the repository anywhere earlier would state that one repository's work
+  outranks another's. That is weighted scheduling, and it is not in this slice.
+
+Totality is not a property of the comparator. It is `DUPLICATE_REPOSITORY_ROOT`:
+because no two enlisted repositories are the same canonical root, no two
+candidates tie on all six elements.
+
+The element is written out rather than left to the engine. `Array.prototype.sort`
+is stable and the resolved list is already root-ordered, so a comparator that
+returned zero would inherit the right answer from its input — which is exactly
+the accidental ordering this slice exists to remove. The test that pins it hands
+the planner a list in the **wrong** order; measured, both "drop the element" and
+"compare the declared id" survive a root-ordered fixture and fail that one.
+
+### One unusable repository refuses the whole plan
+
+`REPOSITORY_UNPLANNABLE` selects nothing and publishes nothing — not the ranking,
+and not the plans of the repositories that succeeded. The winner of a ranking is
+only *the* winner if the candidate set is complete; announcing one computed over
+whichever repositories happened to read cleanly would turn a configuration
+mistake into a scheduling decision, silently. `discoverTasks` already takes this
+reading one level down, where an empty task source is `TASK_SOURCE_EMPTY` and not
+"all tasks complete".
+
+### The command, and what it cannot do
+
+`agent-loop repositories` reads the registry, resolves each repository, plans
+each, and prints. It takes no `--repository`, because its subject is the
+registry. Every repository is shown with both its declared id and its canonical
+root, because the id alone does not identify one.
+
+It acquires **no execution lease**, starts no agent, prepares no workspace,
+writes no task state and touches no remote. It does start `git` children to
+resolve each repository, through the one seam every subprocess in this build goes
+through.
+
+It does **not** reach `run`. That command is unmodified, and every grant on it
+still binds to a repository the operator named. This matters most for
+`--recover-stale-lease`, the one destructive grant on `run` that does not
+require `--task` — precisely because `--repository` has always named its
+subject. A selector choosing the subject of an irreversible lease removal would
+break, on a different axis, the rule that file already states twice in its own
+words: *"letting the selector choose which one to continue would make the
+operator authorise a task they never named."*
+
+Not holding a lease is also how this slice keeps a sentence
+`owned-launch-accounting.ts` relies on true — *"nothing in this build holds two
+leases in one process"*. `openOwnedLaunch()` takes no arguments and broadcasts to
+a process-global array, and is structurally forbidden from knowing what a lease
+is; so an epoch that overlapped a second repository's work in one process would
+account that repository's Git children to the first. Registry resolution and
+cross-repository selection run while no lease is held, and a structural test
+asserts the four new modules name no lease acquisition at all.
+
+### The residual an operator meets first
+
+Eligibility is decided from the task file's `status`, and nothing in this build
+writes a task file. So a task whose durable record is terminal stays the ranking
+head. Measured on this repository: all eleven task files say `status: OPEN` while
+all eleven runtime records are terminal or parked, and `M1-RELEASE-009` —
+`REMEDIATION`, `HIGH`, focused — is the minimum in all four numeric positions.
+Enlisted beside any second repository it is the merged head on every run.
+
+This is not new — the single-repository path selects it today and reports
+`TASK_COMPLETED` — and the report answers it by publishing the full ranking and
+every repository's own first choice, so nothing is hidden. Skipping a settled
+head would read durable state inside selection, which `select-task.ts` refuses in
+its header, and would amend `run-driver.ts`'s one-task-per-call refusal. That is
+a scheduling decision and belongs to the slice that makes one.
+
+See [the ADR](docs/decisions/2026-08-31-adr-repository-registry-and-cross-repository-selection.md).
 
 ## Not implemented yet
 
