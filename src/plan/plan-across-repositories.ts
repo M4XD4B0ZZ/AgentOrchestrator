@@ -310,10 +310,11 @@ function conclusion(
  *
  * ── Independent of the order it is given ──────────────────────────────────
  *
- * The answer does **not** depend on the order of `repositories`. That is a
- * property of this function rather than an obligation on its caller, and the
- * distinction is the whole reason the sixth ranking element exists as a
- * comparator rather than as an accident.
+ * The answer does **not** depend on the order of `repositories` — not the
+ * selection, not the ranking, and not `plans`, which is sorted here for the
+ * same reason. That is a property of this function rather than an obligation on
+ * its caller, and the distinction is the whole reason the sixth ranking element
+ * exists as a comparator rather than as an accident.
  *
  * `resolveRegisteredRepositories` does sort by canonical root, and candidates
  * are accumulated repository by repository, and `Array.prototype.sort` is
@@ -377,6 +378,16 @@ export function planAcrossRepositories(
       });
     }
   }
+
+  // `plans` is accumulated in the order this function was handed, and the
+  // interface promises canonical-root order. Established here rather than
+  // inherited from `resolveRegisteredRepositories`' sort, for the reason the
+  // header gives about the ranking: a guarantee this function's own doc comment
+  // makes, and that `render-repositories.ts` prints as a heading, may not rest
+  // on the one production caller happening to pass a sorted list. Total for the
+  // same reason that sort is: `DUPLICATE_REPOSITORY_ROOT` has already refused
+  // any two entries sharing a root.
+  plans.sort((a, b) => compareRepositoryRoots(a.repository.root, b.repository.root));
 
   ranked.sort((a, b) => compareCrossRepositoryKeys(a.key, b.key));
 

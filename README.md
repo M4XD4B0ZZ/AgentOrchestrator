@@ -68,9 +68,9 @@ What *is* implemented:
 12. The **repository registry** (M2 slice 3): which repositories this
     machine’s operator has enlisted, declared in one file outside every
     repository, and one deterministic selection across all of them. The
-    read-only `agent-loop repositories` shows it. It is the first value in this
-    build that holds more than one repository, and it takes no execution lease,
-    starts no agent and changes nothing. See
+    read-only `agent-loop repositories` shows it. It is the first place in this
+    build where one production value holds more than one *resolved* repository,
+    and it takes no execution lease, starts no agent and changes nothing. See
     [The repository registry](#the-repository-registry-m2-slice-3).
 
 ## Status, and where to start

@@ -257,9 +257,22 @@ The four scenarios, and one preservation claim:
 | repository binding | the selected candidate's `repository` is `toStrictEqual` the one `resolveRepository` returns for that path, and is not `process.cwd()` |
 | **preservation** | with one repository enlisted, the merged ranking equals `selectNextTask`'s own ranking element for element |
 
-Plus, through the shipped CLI on two real repositories — this repository itself
-and a second fixture — a report naming both, the winner, and its root; and the
-sixth element shown to be load-bearing by making every earlier element tie.
+Plus, through the registered `agent-loop repositories` command surface — the
+Commander action, its `try`/`catch` and its `process.exitCode`, reached the way
+an operator reaches it — on two real fixture repositories: a report naming both,
+the winner named in its own `Selected` block, its root, and exit code 0. Its
+three refusal branches are driven too, each to exit code 2: an unreadable
+document, an entry that does not resolve, and a readable registry enlisting
+nothing. And the sixth element is shown to be load-bearing by making every
+earlier element tie.
+
+No test enlists **this** repository. `actions/checkout` fetches one commit and
+leaves a detached HEAD, so `refs/heads/main` — the default branch this
+repository's own profile declares — does not exist on CI, and a test enlisting
+it would be green here and red there. That measurement is made instead as a
+recorded manual run of the shipped CLI against a scratch registry naming this
+repository and one fixture; the evidence is in the slice report, not in the
+suite.
 
 ## Residuals
 

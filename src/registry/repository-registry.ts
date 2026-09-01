@@ -255,8 +255,8 @@ export const REPOSITORY_REGISTRY_REFUSALS = [
    * A cheap document-sanity refusal, and deliberately *not* the duplicate
    * guarantee: it compares the strings as written, so `D:\Repo` and `D:\repo\`
    * are two entries to it. What actually establishes that two entries are not
-   * the same repository is `DUPLICATE_EXECUTION_DOMAIN`, which compares
-   * canonical Git identities after resolution. This one exists so an obviously
+   * the same repository is `DUPLICATE_REPOSITORY_ROOT`, which compares
+   * canonical roots after resolution. This one exists so an obviously
    * self-contradictory document is refused before N Git processes are started
    * to discover the same thing.
    */
@@ -409,8 +409,8 @@ export type RegistryResolutionRefusal = (typeof REGISTRY_RESOLUTION_REFUSALS)[nu
 export interface RegistryResolutionSuccess {
   readonly ok: true;
   /**
-   * The enlisted repositories, in **`repository.id` order** — not in document
-   * order.
+   * The enlisted repositories, in **canonical `repository.root` order** — not
+   * in document order, and deliberately not in `repository.id` order.
    *
    * Sorted here, once, so that no consumer's answer can depend on how the
    * operator happened to order the file. `plan-across-repositories.ts` states
@@ -529,12 +529,25 @@ export async function resolveRegisteredRepositories(
   // `realpathSync.native` established inside the resolver, not things the
   // document states and not things a repository wrote.
   //
-  // `comparePathIdentity` rather than string equality: both are paths, and two
-  // spellings of one path — case, separator form, an 8.3 alias, a junction —
-  // are the same place. Comparing the strings would let exactly the pairs these
-  // refusals exist for through. Both sweeps are O(n^2) over at most
+  // `comparePathIdentity` rather than string equality: both are paths, and it
+  // is lexical only — it folds case, separator form and a trailing separator,
+  // which is the residue `realpathSync.native` leaves behind. The 8.3 alias and
+  // the junction were settled by that call inside the resolver, as the
+  // paragraph above says; what is left is the spelling, and comparing the
+  // strings would let exactly the pairs these refusals exist for through.
+  // Both sweeps are O(n^2) over at most
   // MAX_REGISTERED_REPOSITORIES entries, which is the price of not having a
   // canonical string key for a path identity this build compares structurally.
+  //
+  // Refused on anything that is not `DIFFERENT`, not on `EQUAL`.
+  // `comparePathIdentity` is three-valued, and its third value `NOT_ABSOLUTE`
+  // is a refusal to answer rather than an answer of "no" — `core/path-identity.ts`
+  // states in its own header that *every* caller fails closed on it. Consuming
+  // it as "not a duplicate" would make that sentence false here and would let
+  // an unanswerable pair through the one gate that exists to catch it. It is
+  // unreachable today, because both operands are `realpathSync.native` outputs
+  // taken after an `isAbsolute` check inside `resolveRepository`; a future
+  // producer that relaxed either would meet a refusal rather than a pass.
   //
   // Roots first, then domains, and the order is the reporting decision rather
   // than a correctness one: a pair that is the same root is also the same
@@ -545,7 +558,7 @@ export async function resolveRegisteredRepositories(
       const left = resolved[i]?.repository.root;
       const right = resolved[j]?.repository.root;
       if (left === undefined || right === undefined) continue;
-      if (comparePathIdentity(left, right) === 'EQUAL') {
+      if (comparePathIdentity(left, right) !== 'DIFFERENT') {
         return resolutionFailure('DUPLICATE_REPOSITORY_ROOT', j);
       }
     }
@@ -556,7 +569,7 @@ export async function resolveRegisteredRepositories(
       const left = resolved[i]?.repository.gitCommonDir;
       const right = resolved[j]?.repository.gitCommonDir;
       if (left === undefined || right === undefined) continue;
-      if (comparePathIdentity(left, right) === 'EQUAL') {
+      if (comparePathIdentity(left, right) !== 'DIFFERENT') {
         return resolutionFailure('DUPLICATE_EXECUTION_DOMAIN', j);
       }
     }

@@ -42,6 +42,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 
+import { Command } from 'commander';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
@@ -75,7 +76,10 @@ import {
   exitCodeForRegistryResolution,
   exitCodeForRepositoryRegistry,
 } from '../src/cli/run-exit-codes.js';
-import { reportRepositories } from '../src/cli/repositories-command.js';
+import {
+  registerRepositoriesCommand,
+  reportRepositories,
+} from '../src/cli/repositories-command.js';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -384,6 +388,26 @@ describe('the repository registry document', () => {
     expect(outcome.code).toBe(expected);
   });
 
+  it('accepts a document of exactly the declared byte ceiling and entry count', () => {
+    // The two refusals above prove *a* bound exists; they pass unchanged if the
+    // ceiling is tightened to `>=` or the entry maximum is cut to 2. These pin
+    // the declared bounds themselves, by accepting the largest document this
+    // build promises to accept.
+    const prefix = 'schemaVersion: 1\nrepositories: []\n';
+    const exact = prefix + '#'.repeat(MAX_REPOSITORY_REGISTRY_BYTES - prefix.length);
+    expect(Buffer.byteLength(exact, 'utf8')).toBe(MAX_REPOSITORY_REGISTRY_BYTES);
+    expect(loadWritten(exact).state).toBe('REGISTERED');
+
+    const many = Array.from(
+      { length: MAX_REGISTERED_REPOSITORIES },
+      (_value, index) => `${process.platform === 'win32' ? 'D:\\' : '/'}r${index}`,
+    );
+    const full = loadWritten(registryFor(many));
+    expect(full.state).toBe('REGISTERED');
+    if (full.state !== 'REGISTERED') return;
+    expect(full.entries.length).toBe(MAX_REGISTERED_REPOSITORIES);
+  });
+
   it('refuses a forbidden mapping key before any object exists', () => {
     const outcome = loadWritten('schemaVersion: 1\nrepositories: []\n__proto__:\n  polluted: true\n');
     expect(outcome.state).toBe('UNUSABLE');
@@ -439,7 +463,11 @@ describe('the repository registry document', () => {
 describe('resolving the registry', () => {
   it('refuses the whole registry when one entry does not resolve, and names its index', async () => {
     const good = makeRepository({ id: 'good', tasks: { 't-1': {} } });
-    const absent = join(tmpdir(), 'ao-m2-03-absent-does-not-exist');
+    // Inside a directory this run created, not a fixed name in the shared temp
+    // directory: anything that ever created that name — a stray run, another
+    // harness, an operator — would turn this red for a reason unrelated to the
+    // change under test.
+    const absent = join(scratch('ao-m2-03-absent-'), 'no-such-repository');
     const { resolved } = await planWritten(registryFor([good, absent]));
     expect(resolved?.ok).toBe(false);
     if (resolved === null || resolved.ok) return;
@@ -464,6 +492,14 @@ describe('resolving the registry', () => {
     expect(resolved?.ok).toBe(false);
     if (resolved === null || resolved.ok) return;
     expect(resolved.code).toBe('DUPLICATE_REPOSITORY_ROOT');
+    // The index is the operator's only route back to the offending line — the
+    // refusal deliberately carries no path — so it is the SECOND entry, the one
+    // that collided, not the first.
+    expect(resolved.entryIndex).toBe(1);
+    // And the sentence names what the operator actually did. The two duplicate
+    // refusals are not interchangeable, so their details may not be either.
+    expect(resolved.detail).toContain('the same repository');
+    expect(resolved.detail).not.toContain('execution domain');
   });
 
   it('refuses two worktrees of one clone: two roots, one execution domain', async () => {
@@ -534,6 +570,50 @@ describe('resolving the registry', () => {
     expect(new Set(plan?.ranking.map((entry) => entry.repositoryRoot)).size).toBe(2);
   });
 
+  it('refuses a pair it cannot compare, rather than reading the refusal as “different”', async () => {
+    // `comparePathIdentity` is three-valued, and `core/path-identity.ts` states
+    // in its own header that every caller fails closed on the third value. A
+    // sweep that refuses only on `EQUAL` reads "I cannot answer" as "not a
+    // duplicate" — which is the one reading that lets an ambiguous pair through
+    // the gate that exists to catch it.
+    //
+    // Unreachable through the production resolver, whose `root` is a
+    // `realpathSync.native` output taken after an `isAbsolute` check. The seam
+    // is the only way to produce it, and that is exactly why the pin is here:
+    // a future producer that relaxed either must meet a refusal.
+    const real = makeRepository({ id: 'incomparable', tasks: { 't-1': {} } });
+    const other = join(scratch('ao-m2-03-uncomparable-'), 'second-entry');
+    const registry = loadWritten(registryFor([real, other]));
+    expect(registry.state).toBe('REGISTERED');
+    if (registry.state !== 'REGISTERED') return;
+    const resolvedReal = await resolveRepository({ repositoryPath: real });
+    expect(resolvedReal.ok).toBe(true);
+    if (!resolvedReal.ok) return;
+
+    let call = 0;
+    const resolved = await resolveRegisteredRepositories(registry.entries, {
+      resolveRepository: async () => {
+        call += 1;
+        if (call === 1) return resolvedReal;
+        // A different execution domain, so the second sweep passes it: how the
+        // first sweep reads `NOT_ABSOLUTE` is the only thing left deciding.
+        return {
+          ok: true as const,
+          code: 'RESOLVED' as const,
+          repository: {
+            ...resolvedReal.repository,
+            root: 'not-an-absolute-root',
+            gitCommonDir: join(resolvedReal.repository.gitCommonDir, 'elsewhere'),
+          },
+        };
+      },
+    });
+    expect(call).toBe(2);
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.code).toBe('DUPLICATE_REPOSITORY_ROOT');
+  });
+
   it('orders the resolved repositories by canonical root, never by file order', async () => {
     const one = makeRepository({ id: 'r-one', tasks: { 't-1': {} } });
     const two = makeRepository({ id: 'r-two', tasks: { 't-1': {} } });
@@ -550,6 +630,20 @@ describe('resolving the registry', () => {
 });
 
 // ── 4. Selection across repositories ───────────────────────────────────────
+
+describe('the order on canonical roots', () => {
+  it('is ascending, and says so in literals rather than in its own output', () => {
+    // Every other use of this comparator in this file sorts with it and then
+    // names the result `lowerRoot` — a binding that is equally true under a
+    // reversed comparator, because the fixture and the code flip together. These
+    // three literals are what a reversal fails.
+    const lower = process.platform === 'win32' ? 'D:\\aaa' : '/aaa';
+    const higher = process.platform === 'win32' ? 'D:\\bbb' : '/bbb';
+    expect(compareRepositoryRoots(lower, higher)).toBeLessThan(0);
+    expect(compareRepositoryRoots(higher, lower)).toBeGreaterThan(0);
+    expect(compareRepositoryRoots(lower, lower)).toBe(0);
+  });
+});
 
 describe('cross-repository selection', () => {
   it('scenario 1 — sees eligible work in two repositories through one path', async () => {
@@ -583,6 +677,10 @@ describe('cross-repository selection', () => {
     const beta = makeRepository({ id: 'beta', tasks: { 'b-1': { priority: 'HIGH' }, 'b-2': {} } });
     const forward = await planWritten(registryFor([alpha, beta]));
     const backward = await planWritten(registryFor([beta, alpha]));
+    // Both sides really did select. Without this, every assertion below compares
+    // `undefined` with `undefined` and passes on a registry that refused.
+    expect(forward.plan?.code).toBe('TASK_SELECTED');
+    expect(backward.plan?.code).toBe('TASK_SELECTED');
     expect(forward.plan?.selected?.task.id).toBe(backward.plan?.selected?.task.id);
     expect(forward.plan?.selected?.repository.root).toBe(backward.plan?.selected?.repository.root);
     expect(forward.plan?.ranking).toStrictEqual(backward.plan?.ranking);
@@ -717,8 +815,10 @@ describe('cross-repository selection', () => {
 
     const { plan } = await planWritten(registryFor([good, emptySource]));
     // The premise: the good repository really does sort first, so it really was
-    // planned before the refusal.
-    expect(compareRepositoryRoots(good, emptySource)).toBeLessThan(0);
+    // planned before the refusal. Asserted against string order rather than
+    // against `compareRepositoryRoots`, whose own output chose `good` — that
+    // form holds under a reversed comparator and pins nothing.
+    expect(good < emptySource).toBe(true);
     expect(plan?.code).toBe('REPOSITORY_UNPLANNABLE');
     expect(plan?.selected).toBeNull();
     expect(plan?.planningCode).toBe('TASK_SOURCE_EMPTY');
@@ -753,10 +853,32 @@ describe('cross-repository selection', () => {
     expect(stuckPlan.plan?.code).not.toBe('ALL_TASKS_COMPLETE');
   });
 
+  it('publishes `plans` in canonical root order, whatever order it was handed', async () => {
+    // `plans` is accumulated by iteration, and the interface — and the heading
+    // `render-repositories.ts` prints — promise canonical-root order. Handed the
+    // list backwards, which is the one thing the production caller never does,
+    // a `plans.push` that inherits its order from `resolveRegisteredRepositories`
+    // returns the wrong order and prints a false heading.
+    const first = makeRepository({ id: 'p-first', tasks: { 't-1': {} } });
+    const second = makeRepository({ id: 'p-second', tasks: { 't-2': {} } });
+    const [lowerRoot, higherRoot] = [first, second].sort() as [string, string];
+    const backwards = await registeredInOrder([higherRoot, lowerRoot]);
+    const plan = planAcrossRepositories(backwards);
+    expect(plan.code).toBe('TASK_SELECTED');
+    expect(plan.plans.map((entry) => entry.repository.root)).toStrictEqual([
+      lowerRoot,
+      higherRoot,
+    ]);
+  });
+
   it('never selects a task that is not the head of its own published ranking', async () => {
     const alpha = makeRepository({ id: 'alpha', tasks: { 'a-1': {}, 'a-2': { priority: 'HIGH' } } });
     const beta = makeRepository({ id: 'beta', tasks: { 'b-1': { kind: 'REMEDIATION' } } });
     const { plan } = await planWritten(registryFor([alpha, beta]));
+    // `not.toBeNull()` passes on `undefined`, so it does not establish that a
+    // plan exists. This does, and the two comparisons below stop being
+    // `undefined === undefined` when the registry refuses.
+    expect(plan?.code).toBe('TASK_SELECTED');
     expect(plan?.selected).not.toBeNull();
     expect(plan?.ranking[0]?.taskId).toBe(plan?.selected?.task.id);
     expect(plan?.ranking[0]?.repositoryRoot).toBe(plan?.selected?.repository.root);
@@ -766,6 +888,75 @@ describe('cross-repository selection', () => {
 // ── 5. Counter-proofs ──────────────────────────────────────────────────────
 
 describe('the ranking key', () => {
+  it('carries the unlock count, and orders on it — element 3 is not a constant', async () => {
+    // Every other fixture in this file gives every eligible task an unlock count
+    // of zero, so element 3 is the same value in every comparison and two
+    // mutations survive: replacing it with a literal 0, and shortening the
+    // numeric loop in `compareCrossRepositoryKeys` from 4 elements to 3. Here
+    // `blocker` unlocks two tasks and `loner` unlocks none, and everything
+    // ahead of element 3 is deliberately equal between them.
+    const root = makeRepository({
+      id: 'unlocks',
+      tasks: {
+        'a-blocker': {},
+        'z-loner': {},
+        'm-first-dependent': { dependsOn: ['a-blocker'] },
+        'n-second-dependent': { dependsOn: ['a-blocker'] },
+      },
+    });
+    const resolvedRoot = await resolveRepository({ repositoryPath: root });
+    expect(resolvedRoot.ok).toBe(true);
+    if (!resolvedRoot.ok) return;
+    const discovered = discoverTasks(resolvedRoot.repository);
+    expect(discovered.ok).toBe(true);
+    if (!discovered.ok) return;
+    const graph = normalizeTaskGraph(discovered.tasks);
+    expect(graph.ok).toBe(true);
+    if (!graph.ok) return;
+    const report = selectNextTask(graph.graph).eligibility;
+    const blocker = report.find((entry) => entry.taskId === 'a-blocker');
+    const loner = report.find((entry) => entry.taskId === 'z-loner');
+    expect(blocker).toBeDefined();
+    expect(loner).toBeDefined();
+    if (blocker === undefined || loner === undefined) return;
+
+    const blockerKey = crossRepositoryRankingKey(blocker, graph.graph, root);
+    const lonerKey = crossRepositoryRankingKey(loner, graph.graph, root);
+    // The premise, asserted rather than assumed: the two differ at element 3 and
+    // nowhere before it. A literal 0 in element 3 breaks the first assertion; a
+    // 3-element numeric loop breaks the plan assertion below.
+    expect(blockerKey[3]).not.toBe(lonerKey[3]);
+    expect([blockerKey[0], blockerKey[1], blockerKey[2]]).toStrictEqual([
+      lonerKey[0],
+      lonerKey[1],
+      lonerKey[2],
+    ]);
+
+    // And it decides, through the production path: `a-blocker` wins on element 3
+    // even though `z-loner` would lose to it on element 4 anyway — so the plan
+    // is checked the other way round too, with the ids reversed.
+    const { plan } = await planWritten(registryFor([root]));
+    expect(plan?.code).toBe('TASK_SELECTED');
+    expect(plan?.selected?.task.id).toBe('a-blocker');
+  });
+
+  it('orders on the unlock count even when the task id says otherwise', async () => {
+    // The mirror of the case above. `z-blocker` loses element 4 to `a-loner` and
+    // must still win, because element 3 is compared first. This is the one that
+    // fails when the numeric loop stops at 3.
+    const root = makeRepository({
+      id: 'unlocks-reversed',
+      tasks: {
+        'z-blocker': {},
+        'a-loner': {},
+        'm-dependent': { dependsOn: ['z-blocker'] },
+      },
+    });
+    const { plan } = await planWritten(registryFor([root]));
+    expect(plan?.code).toBe('TASK_SELECTED');
+    expect(plan?.selected?.task.id).toBe('z-blocker');
+  });
+
   it('is the single-repository key with the root appended, not a re-implementation', async () => {
     const only = makeRepository({ id: 'only', tasks: { 't-1': { kind: 'REMEDIATION', priority: 'HIGH' } } });
     const resolvedOnly = await resolveRepository({ repositoryPath: only });
@@ -851,6 +1042,16 @@ describe('the repositories command', () => {
       },
     });
     expect(code).toBe(EXIT_RUN_OK);
+    // `toContain('aaa-1')` over the whole report matches beta's own `first
+    // choice` row whether or not beta won — measured: a plan selecting `zzz-1`
+    // satisfies it. The `Selected` block is the only place the winner is named
+    // as the winner, so the assertion is made there and the loser is excluded.
+    const selected = text.slice(
+      text.indexOf('\nSelected\n'),
+      text.indexOf('\nEnlisted repositories'),
+    );
+    expect(selected).toContain('aaa-1');
+    expect(selected).not.toContain('zzz-1');
     expect(text).toContain('aaa-1');
     // Both identities, on every repository — the id alone does not identify one.
     expect(text).toContain('alpha');
@@ -858,6 +1059,113 @@ describe('the repositories command', () => {
     expect(text).toContain(alpha);
     expect(text).toContain(beta);
     expect(text).toContain('Candidates      : 2');
+  });
+
+  it('reports and exits 2 on a registry document it cannot read', async () => {
+    // The most likely real failure of a hand-written file, and the branch that
+    // decides its exit code was executed by no test: a mutant returning 0 here
+    // tells a wrapper script that a broken registry is fine.
+    const home = makeHome();
+    writeFileSync(home.path, 'schemaVersion: 1\nrepositories:\n  - path: [\n', 'utf8');
+    let text = '';
+    const code = await reportRepositories({
+      loadRepositoryRegistry: () => loadRepositoryRegistry(home.provider),
+      repositoryRegistryPath: () => home.path,
+      write: (value) => {
+        text += value;
+      },
+    });
+    expect(code).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    expect(text).toContain('REGISTRY_MALFORMED');
+    expect(text).not.toContain('Selected');
+  });
+
+  it('reports and exits 2 when an enlisted entry does not resolve, and names its index', async () => {
+    // Drives `renderRegistryResolutionFailure` in full — refusal, entry index
+    // and detail — which no other test reaches, and the exit-code branch behind
+    // it. The second entry is the offending one, so the index is not 0 by luck.
+    const good = makeRepository({ id: 'cli-good', tasks: { 't-1': {} } });
+    const absent = join(scratch('ao-m2-03-cli-absent-'), 'no-such-repository');
+    const home = makeHome();
+    writeFileSync(home.path, registryFor([good, absent]), 'utf8');
+    let text = '';
+    const code = await reportRepositories({
+      loadRepositoryRegistry: () => loadRepositoryRegistry(home.provider),
+      repositoryRegistryPath: () => home.path,
+      write: (value) => {
+        text += value;
+      },
+    });
+    expect(code).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    expect(text).toContain('REPOSITORY_UNRESOLVABLE');
+    expect(text).toContain('REPOSITORY_NOT_FOUND');
+    expect(text).toContain(`${'Entry index'.padEnd(16)}: 1`);
+    expect(text).toContain('The entry index counts from zero');
+    // The refusal is not a channel for the path it refused, and neither is the
+    // report built from it.
+    expect(text).not.toContain('no-such-repository');
+  });
+
+  it('reports and exits 2 when the registry is readable and enlists nothing', async () => {
+    // The third exit-code branch. `TASK_SELECTED` is 0, so a mutant that returns
+    // 0 for every plan code is invisible to the test above; this is the plan
+    // outcome that separates them.
+    const home = makeHome();
+    writeFileSync(home.path, 'schemaVersion: 1\nrepositories: []\n', 'utf8');
+    let text = '';
+    const code = await reportRepositories({
+      loadRepositoryRegistry: () => loadRepositoryRegistry(home.provider),
+      repositoryRegistryPath: () => home.path,
+      write: (value) => {
+        text += value;
+      },
+    });
+    expect(code).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    expect(text).toContain('NO_REPOSITORIES_REGISTERED');
+    expect(text).toContain('a configuration to finish, not a finished plan');
+    expect(text).not.toContain('Selected');
+  });
+
+  it('runs through the registered command surface, over two real repositories', async () => {
+    // Every test above calls `reportRepositories` directly. The Commander action
+    // body — its try/catch and its `process.exitCode` assignment — is reached
+    // only here, the way an operator reaches it.
+    const alpha = makeRepository({ id: 'wired-alpha', tasks: { 'zzz-1': {} } });
+    const beta = makeRepository({ id: 'wired-beta', tasks: { 'aaa-1': {} } });
+    const home = makeHome();
+    writeFileSync(home.path, registryFor([alpha, beta]), 'utf8');
+    let text = '';
+    const program = new Command();
+    program.exitOverride();
+    registerRepositoriesCommand(program, {
+      loadRepositoryRegistry: () => loadRepositoryRegistry(home.provider),
+      repositoryRegistryPath: () => home.path,
+      write: (value) => {
+        text += value;
+      },
+    });
+    expect(program.commands.map((command) => command.name())).toContain('repositories');
+
+    const previous = process.exitCode;
+    try {
+      await program.parseAsync(['repositories'], { from: 'user' });
+      expect(process.exitCode).toBe(EXIT_RUN_OK);
+    } finally {
+      process.exitCode = previous;
+    }
+
+    expect(text).toContain('Enlisted repositories (2)');
+    expect(text).toContain(alpha);
+    expect(text).toContain(beta);
+    const selected = text.slice(
+      text.indexOf('\nSelected\n'),
+      text.indexOf('\nEnlisted repositories'),
+    );
+    // The winner carries beta's own root — not the process's cwd, and not a
+    // path re-derived after selection.
+    expect(selected).toContain('aaa-1');
+    expect(selected).toContain(beta);
+    expect(selected).not.toContain(alpha);
   });
 });
 

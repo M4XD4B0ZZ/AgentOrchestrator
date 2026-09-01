@@ -42,9 +42,17 @@
  *
  * Three things can go wrong before a plan exists — the profile, the registry
  * document, and resolving what it names — and all three are "the input cannot be
- * planned", which this build's exit contract already calls 2. The mappings are
- * total and live in `run-exit-codes.ts` with every other one, rather than being
- * chosen here.
+ * planned", which this build's exit contract already calls 2. The three
+ * refusal vocabularies map to codes in `run-exit-codes.ts` with every other
+ * one, each total over its vocabulary by `satisfies Record<…>`, rather than
+ * being chosen here.
+ *
+ * One outcome is decided here, and it is not a refusal: `NOT_REGISTERED` says
+ * the operator has no registry file at all. That is an absent input rather than
+ * an unusable one, so it carries no refusal code and appears in no vocabulary
+ * there. It is 2 for the same reason the refusals are — there is nothing to
+ * plan — and it is written at the call site because there is no total map for
+ * it to belong to.
  */
 
 import type { Command } from 'commander';
