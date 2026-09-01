@@ -26,12 +26,39 @@
  * repository. The report shows its head — the selection — and each repository's
  * own first choice, and then states the total number of candidates. A report
  * that silently showed the first few would read as "this is all there is".
+ *
+ * ── Waiting work is named, because a count of the runnable does not explain ─
+ *
+ * Each repository line also carries how many of its tasks are blocked, and
+ * names them with the prerequisites they wait for (M2 slice 4). Before that it
+ * carried `eligible: N` and nothing else.
+ *
+ * The case that motivates it is `eligible: 1, blocked: 9`, not `eligible: 0`.
+ * A first draft of this paragraph argued from the latter and a review measured
+ * it unreachable: `eligible` is the length of that repository's own ranking, and
+ * `select-task.ts` establishes that in a graph this build accepts an eligible
+ * task exists whenever any task is not `DONE` — so `eligible: 0` means every
+ * task is finished, and there is no waiting work to name. What an operator
+ * actually meets is a repository offering one candidate while most of its plan
+ * waits, and the old line said nothing about the nine.
+ *
+ * The value was already in hand either way: `RepositoryPlan.eligibility` carries
+ * every verdict and its unsatisfied ids, and this report printed a count of the
+ * eligible ones and dropped the rest.
+ *
+ * The single-repository plan has printed a blocked task's row since **V2-01**
+ * (`run/render-run-plan.ts`; an earlier version of this sentence said V1-02,
+ * which is the slice that built the selector and not the one that built that
+ * report). What slice 3 added was a second report over the same planner, and
+ * this diagnostic did not come with it. Nothing about *selection* changed:
+ * blocked tasks were already absent from the merged ranking, and they still are.
  */
 
 import type {
   CrossRepositoryPlan,
   CrossRepositoryPlanCode,
 } from '../plan/plan-across-repositories.js';
+import type { TaskEligibility } from '../plan/select-task.js';
 import type {
   RegistryResolutionFailure,
   RepositoryRegistryOutcome,
@@ -68,6 +95,87 @@ export const REPOSITORIES_READ_ONLY_TRAILER =
 
 function line(label: string, value: string): string {
   return `${label.padEnd(16)}: ${value}`;
+}
+
+/**
+ * The most blocked tasks named per repository before the report summarises the
+ * rest.
+ *
+ * A registry holds many repositories and a plan many tasks, so "print them all"
+ * is a report of tens of thousands of lines for a configuration that is merely
+ * large. The cap is a real bound rather than taste — and, per this module's own
+ * rule about the ranking, what it drops it counts out loud.
+ */
+export const MAX_REPORTED_BLOCKED_TASKS = 8;
+
+/**
+ * The prerequisites named on one blocked task's row.
+ *
+ * Both caps are needed for the bound to be one. A review of the first draft
+ * measured what capping only the rows leaves: a task may declare 64
+ * dependencies of up to 128 characters, so one *row* could reach about 8 KB and
+ * the report as a whole megabytes — a line count is not a size. The row cap
+ * without this one is a sentence that promises a bound the code does not have.
+ */
+export const MAX_REPORTED_PREREQUISITES = 4;
+
+/**
+ * The waiting work of one repository, named.
+ *
+ * ── Only `BLOCKED_BY_DEPENDENCIES`, never `ALREADY_DONE` ───────────────────
+ *
+ * `select-task.ts` keeps those two reasons apart because "they mean opposite
+ * things to an operator: `ALREADY_DONE` is finished work,
+ * `BLOCKED_BY_DEPENDENCIES` is waiting work". A report that listed both under
+ * one heading would put that distinction back together again, and every
+ * finished task in a mature repository would drown the one prerequisite the
+ * operator is actually looking for.
+ *
+ * ── Ids, and only ids ──────────────────────────────────────────────────────
+ *
+ * Every value printed here — the blocked task's id and each unsatisfied
+ * dependency's id — has passed the grammar in `plan/task-id.ts`, which is
+ * exactly the argument `task-graph.ts` makes for a failure being allowed to
+ * carry one: no whitespace, no control character, no separator, no shell
+ * metacharacter. No title, no path and no file content is printed, so this
+ * block cannot become a channel for repository text.
+ *
+ * ── The row spelling is `render-run-plan.ts`'s, on purpose ────────────────
+ *
+ * The single-repository plan (V2-01) prints a blocked task as
+ * `- <id>  [<reason>; waiting on <ids>]`, and that spelling is reused verbatim.
+ * Inventing a second spelling for one fact would mean an operator reading both
+ * reports had to learn the same thing twice, and the two would drift the first
+ * time one was edited.
+ *
+ * The *report* is not that report, and the difference is deliberate rather than
+ * an omission. `render-run-plan.ts` lists every ineligible task — `ALREADY_DONE`
+ * included — under one heading and without a bound, because it describes one
+ * repository an operator has just named. This describes every enlisted
+ * repository at once, so it filters to the waiting ones and bounds what it
+ * prints. Claiming to have copied that report "exactly" would contradict the
+ * paragraph above, which calls listing both reasons together a defect.
+ */
+function blockedRows(eligibility: readonly TaskEligibility[]): readonly string[] {
+  const blocked = eligibility.filter((entry) => entry.reason === 'BLOCKED_BY_DEPENDENCIES');
+  if (blocked.length === 0) return [`    ${line('blocked', '0')}`];
+
+  const rows = [`    ${line('blocked', String(blocked.length))}`];
+  for (const entry of blocked.slice(0, MAX_REPORTED_BLOCKED_TASKS)) {
+    rows.push(`      - ${entry.taskId}  [BLOCKED_BY_DEPENDENCIES${waitingClause(entry)}]`);
+  }
+  const hidden = blocked.length - Math.min(blocked.length, MAX_REPORTED_BLOCKED_TASKS);
+  if (hidden > 0) rows.push(`      (and ${hidden} more, not shown)`);
+  return rows;
+}
+
+/** The `; waiting on …` half of one blocked row, bounded and counted. */
+function waitingClause(entry: TaskEligibility): string {
+  const waiting = entry.unsatisfiedDependencies;
+  if (waiting.length === 0) return '';
+  const shown = waiting.slice(0, MAX_REPORTED_PREREQUISITES).join(', ');
+  const hidden = waiting.length - Math.min(waiting.length, MAX_REPORTED_PREREQUISITES);
+  return `; waiting on ${shown}${hidden > 0 ? ` (+${hidden} more)` : ''}`;
 }
 
 /** The registry read, rendered. Used for both its refusals and its success. */
@@ -142,7 +250,16 @@ export function renderCrossRepositoryPlan(plan: CrossRepositoryPlan): string {
   if (plan.code === 'REPOSITORY_UNPLANNABLE') {
     rows.push(
       line('Failed at', plan.failedRepositoryRoot ?? '-'),
-      line('Planning', plan.planningCode ?? '-'),
+      // Code and sentence together, in `render-run-plan.ts`'s spelling. The
+      // sentence is the half that says what the refusal *means*, and for a
+      // dependency refusal it is the policy itself — this report printed the
+      // bare enum until M2 slice 4.
+      line(
+        'Planning',
+        plan.planningDetail === null
+          ? (plan.planningCode ?? '-')
+          : `${plan.planningCode ?? '-'} — ${plan.planningDetail}`,
+      ),
     );
   }
 
@@ -169,6 +286,7 @@ export function renderCrossRepositoryPlan(plan: CrossRepositoryPlan): string {
         `    ${line('root', entry.repository.root)}`,
         `    ${line('first choice', first)}`,
         `    ${line('eligible', String(entry.ranking.length))}`,
+        ...blockedRows(entry.eligibility),
       );
     }
   }

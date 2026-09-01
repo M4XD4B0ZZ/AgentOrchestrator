@@ -116,7 +116,12 @@ describe('eligibility', () => {
 });
 
 describe('the unlock metric', () => {
-  it('counts the tasks a completion would release, transitively', () => {
+  // The case title said "counts the tasks a completion would release". M2 slice
+  // 4 measured that reading false — the walk passes *through* a `DONE` task, so
+  // it counts work that is already runnable — and the title is corrected here to
+  // the reading the code implements. The assertions are unchanged; see
+  // `plan/select-task.ts` and `tests/m2-04-dependencies-and-priorities.test.ts`.
+  it('counts the unfinished tasks downstream of one, transitively', () => {
     const graph = graphOf([
       def('A'),
       def('B', { dependsOn: ['A'] }),

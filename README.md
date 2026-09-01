@@ -1753,7 +1753,13 @@ first:
 3. **priority** — `HIGH`, `NORMAL`, `LOW`.
 4. **unlock count**, descending — the number of distinct not-yet-`DONE` tasks
    that *transitively* depend on this one. Between otherwise equal tasks, the
-   one that releases more blocked work goes first.
+   one with more unfinished work downstream goes first. It is a **downstream
+   count and not a release count**, and the two differ: the walk passes
+   *through* a `DONE` task, so on `A → B(DONE) → C`, `unlockCount(A)` is 1 even
+   though `C` is already eligible and finishing `A` releases nothing. M2 slice 4
+   measured that, corrected the sentence in `select-task.ts` that promised the
+   other reading, and left the behaviour alone — which of two *runnable* tasks
+   goes first is a preference, not a safety property.
 5. **id**, ascending by UTF-16 code unit (never `localeCompare`, which would
    make the winner a function of the operator's Windows region setting).
 
@@ -1786,9 +1792,16 @@ exception:
 `TASK_FILE_UNSAFE`, `TASK_FILE_TOO_LARGE`, `TASK_FILE_READ_FAILED`,
 `TASK_FRONTMATTER_MISSING`, `TASK_FRONTMATTER_MALFORMED`,
 `TASK_FRONTMATTER_TOO_LARGE`, `TASK_FRONTMATTER_FORBIDDEN_KEY`,
-`TASK_DEFINITION_INVALID`, `TASK_ID_FILENAME_MISMATCH`, plus the six graph codes
-above. A failure additionally carries the offending `taskId` where there is one,
-and an `issueCount` — a count, not the issues.
+`TASK_DEFINITION_INVALID`, `TASK_DEPENDENCY_CROSS_PROJECT`,
+`TASK_ID_FILENAME_MISMATCH`, plus the six graph codes above. A failure
+additionally carries the offending `taskId` where there is one, and an
+`issueCount` — a count, not the issues.
+
+`TASK_DEPENDENCY_CROSS_PROJECT` (M2 slice 4) is a **narrowing** of
+`TASK_DEFINITION_INVALID`, not a new admission: it is reported only on the
+branch where the contract has already refused the document, and it says that a
+`dependsOn` entry was qualified by a project or a path. See
+[Dependencies are repository-local](#dependencies-are-repository-local-m2-slice-4).
 
 `schemas/task-definition.schema.json` is generated from the same Zod source by
 `npm run schema:generate` and is drift-checked against it, exactly like the
@@ -5094,6 +5107,51 @@ and because the failure mode it describes — a command that cannot start is
   one, and `L-V3-08-3` explains why no real-process harness can drive the cycle.
   The property is held by one line that no test reads. **Scope:**
   `cli/run-command.ts`, `tests/v3-08-unattended-auto-resume.test.ts`.
+- **L-M2-04-1 — `unlockCount` is a downstream count, not a release count.**
+  The walk skips a `DONE` dependent from the count and traverses *through* it, so
+  on `A → B(DONE) → C` the metric says `unlockCount(A) = 1` while finishing `A`
+  releases nothing — `C`'s only dependency is already `DONE`, so it is already
+  eligible. Measured, and the element is decisive: with an unrelated `aa-other`
+  in the plan, `zz-root` wins on the inflated `-2` and would otherwise lose on
+  the id. The behaviour is **kept**: which of two *runnable* tasks goes first is
+  a preference, not a safety property, and `tests/task-selection.test.ts` has
+  pinned this reading since V1-02 with a case written about the `DONE` walk
+  deliberately. What M2 slice 4 changed is the module header, which promised the
+  other reading and was false. **Scope:** `plan/select-task.ts`,
+  `tests/m2-04-dependencies-and-priorities.test.ts`.
+- **L-M2-04-2 — eligibility reads *direct* parents, so a contradictory plan is
+  not refused.** `A` `OPEN`, `B` `DONE` depending on `A`, `C` depending on `B`:
+  `C` is eligible and can be selected and run while `A` has never started.
+  Nothing refuses the state — `task-graph.ts` never reads `status`, and the
+  schema's invariants are within-object. Under the contract's own words this is
+  correct: `C`'s dependency **is** met, because `B` says it is finished. It is
+  reachable only through a human writing a plan that contradicts itself, and the
+  block path already has the stronger rule for the case where it matters
+  (`chain-fitness.ts`, `BASE_MISSING_REQUIRED_PREDECESSOR`). Adding a whole-graph
+  consistency rule would refuse plans that check out today, which is a product
+  decision rather than a side effect of a slice about ordering. **Scope:**
+  `plan/select-task.ts`, `plan/task-graph.ts`.
+- **L-M2-04-3 — one unplannable repository refuses the whole registry's plan.**
+  Deliberate since slice 3 and restated here because M2 slice 4 widens the ways
+  in: one task file with a qualified `dependsOn` now halts cross-repository
+  selection for every enlisted repository until a human edits it. That blast
+  radius is the price of never publishing a winner computed over an incomplete
+  candidate set, and the report names the failing root, the code and — new in
+  this slice — the sentence. Whether a scheduler should later proceed without a
+  broken repository is the policy question slice 3 declined to answer by
+  defaulting, and this slice declines it too. **Scope:**
+  `plan/plan-across-repositories.ts`.
+- **L-M2-04-4 — the multi-repository dogfood cannot use the shipped CLI.**
+  `agent-loop repositories` reads the registry from a path derived through
+  `os.userInfo()`, which consults no environment, so no child process can be
+  pointed at a scratch registry — the property that stops a driven repository
+  enlisting itself. The dogfood therefore drives the **shipped compiled modules**
+  with the `PathProvider` seam redirected, over real Git repositories, and only
+  the single-repository half runs as a real `dist/cli/index.js` process. Stated
+  rather than papered over: the one thing not measured end to end in a real
+  process is Commander's wiring of `repositories`, which
+  `tests/m2-03-cross-repository-selection.test.ts` covers through the registered
+  command surface instead. **Scope:** dogfood method only; no product change.
 
 ### What V1-08 is not
 
@@ -10685,9 +10743,16 @@ It is deliberately **not** `selectNextTask`'s ranking tuple. That tuple ranks
 only *eligible* tasks — `status: OPEN` with every dependency `DONE` — so a task a
 human marked `DONE` in the markdown while its pull request was never merged is
 `ALREADY_DONE`, absent from the ranking, and invisible to it for ever. Selecting
-deliveries that way would starve exactly the delivery that needs attention. Its
-`unlockCount` element is also a statement about releasing blocked *work*, which
-a finished task does not do.
+deliveries that way would starve exactly the delivery that needs attention.
+
+A second reason stood here and M2 slice 4 withdrew it, having measured it false:
+that the `unlockCount` element "is a statement about releasing blocked *work*,
+which a finished task does not do". Both halves are wrong — the metric counts
+unfinished work *downstream* rather than work a completion would release, and a
+`DONE` task carries a non-zero count because `evaluateTaskEligibility` computes
+it before the `ALREADY_DONE` branch. Nothing follows for the delivery selector,
+which reads the topological order and never the tuple; the reason above stood on
+its own.
 
 Dependency order is not decoration here. `F-C4` records that a block produces a
 stack — `B`'s branch contains `A`'s commits, so a pull request for `B` carries
@@ -12076,6 +12141,150 @@ its header, and would amend `run-driver.ts`'s one-task-per-call refusal. That is
 a scheduling decision and belongs to the slice that makes one.
 
 See [the ADR](docs/decisions/2026-08-31-adr-repository-registry-and-cross-repository-selection.md).
+
+## Dependencies are repository-local (M2 slice 4)
+
+### What this slice found before it changed anything
+
+The ordering model M2 slice 4 was asked to build **already existed**. V1-02 gave
+the single-repository path a dependency DAG, an eligibility rule and the
+five-element ranking tuple; slice 3 merged that answer across repositories with a
+sixth element. Measured on `main` at `37ced3e`, every scenario already came out
+right — a blocked task was not selected, a `DONE` dependency released its
+dependent, priority ranked the runnable set, a cycle refused, an unknown
+dependency refused, and the answer did not depend on input order.
+
+So this slice adds **no new ordering semantics**, and does not claim any. What it
+adds is the part that was missing: the contract stated, the true-but-unpinned
+sentences pinned, and two refusals made readable.
+
+### The contract
+
+| question | answer |
+| --- | --- |
+| **dependency identity** | a bare task id, resolved **inside the declaring repository's own graph**. There is no cross-repository lookup, and this slice adds none |
+| **satisfaction** | the depended-on task's `status: DONE`, in the repository's own task file. Not the durable `TaskState`, and `READY_FOR_PR` stays terminal — see [the residual](#the-residual-an-operator-meets-first) |
+| **missing dependency** | `TASK_DEPENDENCY_UNKNOWN`; fail-closed, and it refuses the whole cross-repository plan |
+| **cycle** | `TASK_GRAPH_CYCLE`; never broken by dropping an edge |
+| **self-dependency** | refused twice — `TaskDefinitionSchema`, and again in `normalizeTaskGraph`, which does not trust its input |
+| **duplicate entry** | refused by `TaskDefinitionSchema`, which is the only path a task file can take |
+| **cross-project reference** | **refused, fail-closed, and now by name.** Never resolved, never guessed |
+
+Priority is unchanged: a closed `HIGH`/`NORMAL`/`LOW` enum, ranked third in the
+tuple above (index 2 of `taskRankingKey`),
+never defaulted, and it applies **only to tasks that are already eligible**. The
+filter runs before the comparator in both paths — `select-task.ts`'s
+`.filter((entry) => entry.eligible)` and `plan-across-repositories.ts`'s
+`if (!eligibility.eligible) continue` — so a blocked task is not in the candidate
+set at all and cannot be outranked into it.
+
+### Locality, and why a qualified reference now has its own code
+
+Every task in a graph comes from one repository's task source, and
+`planAcrossRepositories` calls `planNextTask` once per repository and merges the
+*answers*, never the graphs. So a `dependsOn` entry names a task of the same
+repository or it names nothing. Two consequences, both measured:
+
+- a `DONE` task called `shared` in repository A does **not** satisfy a
+  `dependsOn: [shared]` in repository B. B's own `shared` does, and only it;
+- a reference to a task that exists only next door is `TASK_DEPENDENCY_UNKNOWN`,
+  and one unplannable repository refuses the whole plan rather than naming a
+  winner among the rest.
+
+That locality was already enforced — and **anonymously**. `dependsOn:
+[beta:auth-1]` failed because the id grammar admits no `:`, `/` or `\`, and it
+came out as `TASK_DEFINITION_INVALID`: the same code as a mistyped `priority`.
+An operator could not tell a policy this product does not offer from a typo.
+
+`TASK_DEPENDENCY_CROSS_PROJECT` is that sentence. It is a **narrowing and never a
+weakening**, and the ordering is the whole safety argument: the classification
+runs *only* on the branch where `safeParseTaskDefinition` has already refused, so
+both of its outcomes are a refusal and there is nothing to continue to. A test
+pins that it does **not** fire for an ordinary contract violation — a classifier
+that answered "cross-project" for everything would be worse than the anonymous
+refusal it replaced, because it would name a cause that is not there.
+
+The two are told apart when they occur **separately**, which is the honest
+statement of what the code does. A document carrying both — a qualified
+dependency *and* a mistyped `priority` — reports the cross-project code and
+never names the typo; `issueCount` says only that there was more than one
+violation. That is a consequence of classifying on the already-refused branch,
+it is the right way round (fixing the typo would not make the file valid), and it
+is pinned rather than left to be discovered.
+
+An **unqualified** reference to another repository's task stays
+`TASK_DEPENDENCY_UNKNOWN`, deliberately: `auth-1` with no qualifier is
+indistinguishable from a task this repository meant to declare and did not, and
+claiming to know which would be an inference this build does not make.
+
+### The report says what is waiting
+
+The cross-repository report carried `eligible: N` per repository and nothing
+else, while `RepositoryPlan.eligibility` already held every verdict and its
+unsatisfied ids. The case that motivates naming them is `eligible: 1,
+blocked: 9` — a repository offering one candidate while most of its plan waits —
+and **not** `eligible: 0`: a review measured that state unreachable, because in a
+graph this build accepts an eligible task exists whenever any task is not `DONE`,
+so `eligible: 0` means the repository is finished and has no waiting work to
+name. The report now names the blocked tasks and their prerequisites, in
+`render-run-plan.ts`'s row spelling, bounded on both axes and counting what it
+did not print:
+
+```text
+  alpha
+    root            : D:\alpha
+    first choice    : gate
+    eligible        : 1
+    blocked         : 1
+      - aaa-high  [BLOCKED_BY_DEPENDENCIES; waiting on gate]
+```
+
+Only `BLOCKED_BY_DEPENDENCIES` is listed. `ALREADY_DONE` is not blocked work, and
+a report that put both under one heading would undo the distinction
+`select-task.ts` keeps them apart for. That is also why this is not the same
+report as the single-repository one: `render-run-plan.ts` lists every ineligible
+task, `ALREADY_DONE` included and unbounded, because it describes one repository
+an operator has just named. Only the **row spelling** is shared.
+
+Both caps are real bounds. Eight tasks per repository, four prerequisites per
+row, each with the count it dropped — a review found the first draft capped the
+rows and not the ids on a row, which bounds lines and not size: a task may
+declare 64 dependencies of up to 128 characters.
+
+`CrossRepositoryPlan` also gained `planningDetail`. A refusal's static sentence
+was being computed and then dropped: `render-run-plan.ts` prints
+`<code> — <detail>` and this path printed the bare enum, so the two surfaces told
+different amounts of truth about one failure. For a dependency refusal the
+sentence *is* the policy — `TASK_DEPENDENCY_CROSS_PROJECT` alone is a name.
+
+### What this slice deliberately did not do
+
+- **No concurrency, worker pool, quota, persistent scheduler, recurring job,
+  timer, notification, reviewer resilience or PR/merge automation.** Under
+  `src/` the slice changes five files — four in `plan/` and `cli/`, plus one
+  corrected sentence in `deliver/select-delivery-task.ts` — and adds one to ten
+  report rows per enlisted repository. It starts no process and takes no lease;
+- **no fairness or starvation rule.** `unlockCount` is compared across
+  repositories, so at equal kind, focus and priority a larger repository's work
+  tends to win. That is slice 3's stated choice, it is a preference rather than a
+  correctness property, and weighted or fair scheduling is a decision that needs
+  its own slice;
+- **no change to what satisfies a dependency.** `READY_FOR_PR` is still terminal
+  and still not `DONE`. Making a durable state satisfy a prerequisite would put
+  runtime knowledge inside a plan the repository writes, which is the boundary
+  `task-definition.ts` exists to hold;
+- **no transitive satisfaction rule.** Eligibility reads *direct* parents. A
+  human who marks `B` `DONE` while `B`'s own dependency `A` is `OPEN` makes `C`
+  eligible with `A` never run. Under the contract's own words that is correct —
+  `B` is finished, so `C`'s dependency is met — and it is reachable only through
+  a human writing a contradictory plan. Recorded rather than fixed: adding a
+  whole-graph consistency rule would refuse plans that check out today, and that
+  is a product decision, not a side effect;
+- **no change to the unlock metric.** The header sentence that promised a
+  "release count" was false and is corrected; the number is left as it is, and
+  the graph on which the two readings disagree is now pinned by test.
+
+See [the ADR](docs/decisions/2026-09-01-adr-repository-local-dependencies-and-priority.md).
 
 ## Not implemented yet
 

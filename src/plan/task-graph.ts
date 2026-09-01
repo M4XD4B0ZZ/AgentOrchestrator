@@ -21,7 +21,10 @@
  * A must be `DONE` before B may be selected. `node(A).dependents` therefore
  * lists B, and `node(B).dependsOn` lists A. Both directions are stored because
  * both are asked for: eligibility reads *upward* (are my dependencies done?),
- * and the unlock metric reads *downward* (what would finishing me release?).
+ * and the unlock metric reads *downward* (how much unfinished work is below
+ * me?). The downward question is deliberately not "what would finishing me
+ * release?" — M2 slice 4 measured the two apart, and `select-task.ts` says on
+ * which graph they differ and which one is implemented.
  *
  * ── This layer does not trust its input ────────────────────────────────────
  *

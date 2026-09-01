@@ -45,9 +45,18 @@
  * right set for "what should AO implement next" and the wrong one here: a task a
  * human marked `DONE` in the markdown so the next one could start, whose pull
  * request was never merged, is `ALREADY_DONE` to that selector and invisible to
- * its ranking for ever. That is starvation exactly where it matters. Its
- * `unlockCount` element is also a statement about releasing blocked *work*,
- * which a finished task does not do.
+ * its ranking for ever. That is starvation exactly where it matters.
+ *
+ * A second reason stood here and was withdrawn by M2 slice 4, which measured it
+ * false. It said the `unlockCount` element "is a statement about releasing
+ * blocked *work*, which a finished task does not do". Both halves are wrong:
+ * the metric counts unfinished work *downstream* rather than work a completion
+ * would release — the walk passes through a `DONE` task — and
+ * `evaluateTaskEligibility` computes it *before* the `ALREADY_DONE` branch and
+ * returns it there, so a finished task carries a non-zero count. Neither
+ * correction changes anything in this module, which reads
+ * `graph.topologicalOrder` and never the ranking tuple; the reason above is the
+ * whole reason, and it stood on its own.
  *
  * The second is that dependency order is not decoration here. `F-C4` records
  * that a block produces a **stack**: `B`'s branch contains `A`'s commits, so a

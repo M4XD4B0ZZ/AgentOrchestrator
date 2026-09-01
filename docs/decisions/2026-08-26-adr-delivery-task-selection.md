@@ -84,10 +84,19 @@ is `ALREADY_DONE`, absent from the ranking, and invisible to that selector for
 ever. Selecting deliveries with it would starve precisely the delivery that
 needs attention.
 
-The tuple is also the wrong *question*. `unlockCount` ranks by how much blocked
-work a task releases; a finished task releases none. `REMEDIATION` before
-`NORMAL` is a statement about which work to do next, not about which finished
-work to merge first.
+The tuple is also the wrong *question*. `REMEDIATION` before `NORMAL` is a
+statement about which work to do next, not about which finished work to merge
+first.
+
+> **Corrected by M2 slice 4 (2026-09-01).** This paragraph also said
+> "`unlockCount` ranks by how much blocked work a task releases; a finished task
+> releases none." Both halves were measured false: the metric counts unfinished
+> work *downstream* — its walk passes through a `DONE` task — and
+> `evaluateTaskEligibility` computes it before the `ALREADY_DONE` branch, so a
+> finished task carries a non-zero count. The decision this ADR records is
+> unaffected: the remaining sentence is sufficient on its own, and the delivery
+> selector reads `graph.topologicalOrder` rather than the ranking tuple. See
+> `2026-09-01-adr-repository-local-dependencies-and-priority.md`.
 
 ### Why the order is load-bearing and not decoration
 
