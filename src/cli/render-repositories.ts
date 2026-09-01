@@ -63,6 +63,10 @@ import type {
   RegistryResolutionFailure,
   RepositoryRegistryOutcome,
 } from '../registry/repository-registry.js';
+import type {
+  CrossRepositoryRunOutcome,
+  CrossRepositoryRunResult,
+} from '../run/repository-coordinator.js';
 
 /** One sentence per plan outcome. Static; nothing is interpolated. */
 export const CROSS_REPOSITORY_SENTENCES: Readonly<Record<CrossRepositoryPlanCode, string>> =
@@ -90,8 +94,24 @@ const HEADING = 'agent-loop repositories';
  */
 export const REPOSITORIES_READ_ONLY_TRAILER =
   'This report acts on nothing. It acquires no execution lease, starts no agent, prepares no ' +
-  'workspace and writes no task state. To act on one of these repositories, name it: ' +
-  '`agent-loop run --repository <path>`.';
+  'workspace and writes no task state. Execution needs a grant that was not given: ' +
+  '--attended here, or `agent-loop run --repository <path> --attended` for one named ' +
+  'repository.';
+
+/**
+ * The trailer a run that really executed ends with.
+ *
+ * It says the two things the read-only trailer's reader does not need and this
+ * one does: how many repositories were allowed to run at once, and that the
+ * destructive grants are not on this command. The second is not decoration —
+ * an operator who has just watched a selector choose what to start will
+ * reasonably wonder what else it may choose.
+ */
+export const REPOSITORIES_RUN_TRAILER =
+  'Every admission ran under the ordinary attended grant and nothing else. Recovering a stale ' +
+  'lease, continuing a BLOCKED_VERIFY task and continuing a HUMAN_DECISION_REQUIRED task are ' +
+  'not offered here and were not taken: those stay bound to a repository named on the command ' +
+  'line with `agent-loop run --repository <path>`.';
 
 function line(label: string, value: string): string {
   return `${label.padEnd(16)}: ${value}`;
@@ -298,6 +318,82 @@ export function renderCrossRepositoryPlan(plan: CrossRepositoryPlan): string {
     CROSS_REPOSITORY_SENTENCES[plan.code],
     '',
     REPOSITORIES_READ_ONLY_TRAILER,
+    '',
+  );
+  return rows.join('\n');
+}
+
+/** One sentence per coordinator outcome. Static; nothing is interpolated. */
+export const CROSS_REPOSITORY_RUN_SENTENCES: Readonly<
+  Record<CrossRepositoryRunOutcome, string>
+> = Object.freeze({
+  RUN_COMPLETE:
+    'Every admitted task was driven to an ending and nothing further was admissible. What each ' +
+    'one came to is above; this line says only that the run finished.',
+  NOTHING_ADMITTED:
+    'Nothing was ever admissible. The planner’s own answer is on the Plan line, and it is the ' +
+    'answer a read-only report would have given.',
+  PLANNING_REFUSED_MIDRUN:
+    'Planning refused after work had already been admitted. Everything admitted was awaited and ' +
+    'nothing further was started; the configuration now needs a look.',
+  CAPACITY_INVALID:
+    'The concurrency bound is not a usable one. Nothing was planned and nothing ran.',
+  ADMISSION_BUDGET_EXHAUSTED:
+    'The admission ceiling was reached. Everything admitted was awaited; more work may remain, ' +
+    'and another invocation continues.',
+});
+
+/**
+ * A cross-repository run, rendered.
+ *
+ * Admissions in **admission** order, which is the coordinator's own ordering and
+ * not the order they finished in: the report has to be the same document for the
+ * same starting state, and completion order is decided by how long each
+ * repository's work took.
+ */
+export function renderCrossRepositoryRun(result: CrossRepositoryRunResult): string {
+  const rows: string[] = [
+    '',
+    line('Run', result.outcome),
+    line('Plan', result.planCode ?? '-'),
+    line('Capacity', String(result.capacity)),
+    // The product's own measurement, printed rather than inferred. "2" here is
+    // the coordinator saying two repositories were admitted and neither had
+    // settled — which is what "concurrently" means, and is not a claim anybody
+    // has to reconstruct from timings.
+    line('Peak concurrency', String(result.maxObservedConcurrency)),
+    line('Planning passes', String(result.passes)),
+    line('Admissions', String(result.admissions.length)),
+  ];
+
+  if (result.reasonCodes.length > 0) {
+    rows.push(line('Reasons', result.reasonCodes.join(', ')));
+  }
+
+  for (const admission of result.admissions) {
+    rows.push(
+      '',
+      `  #${String(admission.sequence)} ${admission.repositoryId}`,
+      `    ${line('root', admission.repositoryRoot)}`,
+      `    ${line('task', admission.taskId)}`,
+      `    ${line('concurrent', String(admission.concurrencyAtAdmission))}`,
+      // A throw has no outcome to print, and printing one anyway — even a
+      // reassuring dash under an "Outcome" label — is how an ending with no
+      // report gets read as an ending with a nominal one.
+      admission.threw || admission.lifecycle === null
+        ? `    ${line('outcome', 'UNREPORTED — driving this task threw')}`
+        : `    ${line('outcome', admission.lifecycle.outcome)}`,
+    );
+    if (admission.lifecycle !== null && admission.lifecycle.reasonCodes.length > 0) {
+      rows.push(`    ${line('reasons', admission.lifecycle.reasonCodes.join(', '))}`);
+    }
+  }
+
+  rows.push(
+    '',
+    CROSS_REPOSITORY_RUN_SENTENCES[result.outcome],
+    '',
+    REPOSITORIES_RUN_TRAILER,
     '',
   );
   return rows.join('\n');

@@ -98,10 +98,15 @@
  * ── This module executes nothing ───────────────────────────────────────────
  *
  * It starts no process, acquires no lease, creates no workspace and writes no
- * state. It reads files through `planNextTask` and returns a value. In
- * particular it holds no lease — `boundary/owned-launch-accounting.ts` records
- * that nothing in this build holds two leases in one process, and reading
- * several repositories' plans does not change that.
+ * state. It reads files through `planNextTask` and returns a value.
+ *
+ * That is a property of this module and no longer of the build: since M2 slice 5
+ * `run/repository-coordinator.ts` consumes the ranking below and does hold
+ * several leases at once, one per concurrently executing repository. This
+ * paragraph used to lean on the opposite — that nothing in this build holds two
+ * leases in one process — which was `boundary/owned-launch-accounting.ts`'s
+ * sentence to make and is now false. What keeps *this* module's claim true is
+ * that it takes no lease itself, which nothing about a caller can change.
  */
 
 import type { RegisteredRepository } from '../registry/repository-registry.js';

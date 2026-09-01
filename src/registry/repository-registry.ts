@@ -124,10 +124,21 @@
  *
  * `schemaVersion` is a literal, so a document written against a future contract
  * is refused rather than reinterpreted under this build's assumptions. Every
- * object is `.strict()`, so a key this build does not know — including the key
- * some later slice would add for scheduling, priorities or concurrency — refuses
- * the whole document instead of being ignored. There is no default, no coercion,
- * no truthiness test and no `??` fallback anywhere below.
+ * object is `.strict()`, so a key this build does not know refuses the whole
+ * document instead of being ignored. Nothing below coerces a value, tests one
+ * for truthiness, or repairs one it was given: every field is either the shape
+ * the schema demands or a refusal.
+ *
+ * M2 slice 5 added `maxConcurrentRepositories`, and it is the one **optional**
+ * field. Optionality is not a softening of the rule above: the value is bounded
+ * by the schema — `1..{@link MAX_CONCURRENT_REPOSITORIES}`, integer, so `0`, a
+ * negative and a fraction are each refusals rather than clamps — and an absent
+ * field is resolved to {@link DEFAULT_MAX_CONCURRENT_REPOSITORIES} exactly once,
+ * at the read, so that no consumer ever has to decide what absence meant. That
+ * one `??` is the only one in the file, and it stands beside a bound that has
+ * already made its two operands agree. An earlier version of this paragraph said
+ * a later slice's concurrency key would refuse the document; it would have, and
+ * this is that slice, so the sentence is replaced rather than left to go stale.
  *
  * ── What this module does not do ───────────────────────────────────────────
  *
@@ -185,6 +196,29 @@ export const MAX_REPOSITORY_REGISTRY_BYTES = 65_536;
  */
 export const MAX_REGISTERED_REPOSITORIES = 256;
 
+/**
+ * How many repositories this build will execute at once when the operator says
+ * nothing.
+ *
+ * **One**, which is what every build before M2 slice 5 did, and the default is
+ * chosen for that reason rather than for a preference: concurrency is the new
+ * behaviour, so it is the one an operator opts into. A registry written before
+ * this field existed keeps meaning exactly what it meant.
+ */
+export const DEFAULT_MAX_CONCURRENT_REPOSITORIES = 1;
+
+/**
+ * The most repositories one registry may ask to execute at once.
+ *
+ * A bound rather than a policy, and the thing it bounds is a typo: each
+ * concurrent repository is a writer agent, a reviewer and a verification run on
+ * one machine against one operator's subscription window, and a registry field
+ * is not the place from which that number should be able to reach three digits.
+ * It is not a statement about how many an operator *should* run — the honest
+ * answer to that is measured per machine, and the default is 1.
+ */
+export const MAX_CONCURRENT_REPOSITORIES = 8;
+
 /** The character no filesystem path may contain. */
 const NUL = '\u0000';
 
@@ -219,6 +253,28 @@ const RepositoryRegistrySchema = z
      * {@link CrossRepositoryPlanCode}.
      */
     repositories: z.array(RegistryEntrySchema).max(MAX_REGISTERED_REPOSITORIES),
+    /**
+     * How many repositories may execute at once. Optional; absent means
+     * {@link DEFAULT_MAX_CONCURRENT_REPOSITORIES}.
+     *
+     * Bounded **here**, at the contract boundary, rather than clamped later. A
+     * clamp would turn `maxConcurrentRepositories: 0` — which says *run
+     * nothing*, and is a thing an operator might genuinely have meant — into a
+     * silent 1, and `-1` and `2.5` into the same. They are refusals: the
+     * document is not this contract, and the operator is told so before any
+     * repository is opened.
+     *
+     * The schema version does **not** change for this. The field is optional, so
+     * every document written before it existed is still exactly this contract;
+     * a document that carries it meets `REGISTRY_CONTRACT_VIOLATION` on an older
+     * build, which is a refusal rather than a misreading, and bumping the
+     * version would instead invalidate every registry already on disk.
+     */
+    maxConcurrentRepositories: z
+      .int()
+      .min(1, 'At least one repository must be allowed to execute.')
+      .max(MAX_CONCURRENT_REPOSITORIES)
+      .optional(),
   })
   .strict();
 
@@ -290,6 +346,14 @@ export type RepositoryRegistryOutcome =
       readonly registryDigest: string;
       /** The declared entries, in document order. May be empty. */
       readonly entries: readonly RegistryEntry[];
+      /**
+       * How many repositories may execute at once, defaulted here.
+       *
+       * Resolved at the read rather than at the use, so there is one place that
+       * knows what an absent field means. A consumer receives a number in
+       * `1..{@link MAX_CONCURRENT_REPOSITORIES}` and never has to decide.
+       */
+      readonly maxConcurrentRepositories: number;
     };
 
 const unusable = (code: RepositoryRegistryRefusal): RepositoryRegistryOutcome =>
@@ -356,6 +420,11 @@ export function loadRepositoryRegistry(
     entries: Object.freeze(
       contract.data.repositories.map((entry) => Object.freeze({ path: entry.path })),
     ),
+    // `??` and not `||`: the schema has already refused 0, so the two cannot
+    // differ here — and they would differ if that bound were ever relaxed, with
+    // `||` silently turning "run nothing" into "run one".
+    maxConcurrentRepositories:
+      contract.data.maxConcurrentRepositories ?? DEFAULT_MAX_CONCURRENT_REPOSITORIES,
   });
 }
 

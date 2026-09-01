@@ -45,6 +45,37 @@
  * able to say so. Everything after it — {@link OwnedLaunchRecord.established}
  * and {@link OwnedLaunchRecord.ended} — is told, never asked.
  *
+ * ── An announcement has a subject, and it is ambient (M2 slice 5) ──────────
+ *
+ * Until M2 slice 5 the announcement had no subject at all: `openOwnedLaunch`
+ * told every installed accountant about every launch, on the stated ground that
+ * nothing in this build held two leases in one process. The cross-repository
+ * coordinator makes that false, and the consequence was measured rather than
+ * argued — two real repositories leased in one process, one owned subprocess
+ * started for repository A, and repository B's durable register named A's
+ * helper and child pids in B's own Git directory.
+ *
+ * So a launch now carries **which execution domain it belongs to**, and it
+ * carries it the way the rest of this design already carries the fact: not as an
+ * argument threaded through every runner, but ambiently. {@link OwnedLaunchDomain}
+ * is opaque here — this module can mint one and compare two, and can say nothing
+ * whatever about what one *is*, which is the property that keeps the lease out of
+ * a file whose whole point is not to know about leases.
+ *
+ * The rule is one identity comparison and it is total: a launch is announced to
+ * exactly the accountants whose domain is identical to the ambient one, and
+ * `null` is a domain like any other and matches `null`. With no domain
+ * established anywhere — every pre-existing command — that is bit-for-bit the
+ * behaviour this module had before, because every accountant is then installed
+ * for `null` and every launch happens under `null`.
+ *
+ * ── Why not "no domain means announce to everybody" ───────────────────────
+ *
+ * That fallback reads as the conservative one and is not. A register's sentence
+ * is *these launches belong to this epoch*; a launch belonging to no epoch
+ * belongs in no register, and announcing it to every live epoch is exactly the
+ * pollution above, reintroduced for the one case nobody would go and look at.
+ *
  * ── Module-level state, and why that is the honest shape here ──────────────
  *
  * This is a process-wide registry, which is not a thing to reach for lightly.
@@ -72,7 +103,67 @@
  *    became a refusal rather than an eviction.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import type { ContainmentAttestation } from '../core/containment-attestation.js';
+
+/**
+ * One execution domain: the subject an owned launch is announced under.
+ *
+ * Opaque, and deliberately so. This module mints one, stores one and compares
+ * two by identity; it can say nothing about what a domain *means*, and there is
+ * no field on it to read. A caller that holds an epoch decides what a domain
+ * stands for — today, one execution lease — and this file stays a registry that
+ * does not know what a lease is.
+ *
+ * There is no equality but identity. Two domains minted separately are two
+ * domains even if the same epoch minted both, which is the conservative reading:
+ * an accountant answers for the domain it was installed under and for no other.
+ */
+declare const OWNED_LAUNCH_DOMAIN: unique symbol;
+export interface OwnedLaunchDomain {
+  readonly [OWNED_LAUNCH_DOMAIN]: true;
+}
+
+/** Mints a fresh execution domain. Distinct from every other, by identity. */
+export function createOwnedLaunchDomain(): OwnedLaunchDomain {
+  return Object.freeze({}) as unknown as OwnedLaunchDomain;
+}
+
+/**
+ * The ambient domain, and the reason it is ambient rather than an argument.
+ *
+ * `AsyncLocalStorage` carries the value into everything `fn` awaits, so a launch
+ * started twelve frames below {@link runInOwnedLaunchDomain} is announced under
+ * the domain that call established without one signature between them changing.
+ *
+ * The alternative — a required accounting argument on `RunOptions` — is the one
+ * the header records as measured and rejected: most spawn sites running under a
+ * lease reach `runCommand` from code that holds no evidence, so each of them
+ * would have declared itself unaccounted. A documented hole is still a hole.
+ */
+const AMBIENT = new AsyncLocalStorage<OwnedLaunchDomain>();
+
+/**
+ * Runs `fn` with `domain` ambient, and answers whatever `fn` answers.
+ *
+ * Returns `fn`'s value unchanged — including a promise, whose continuations
+ * inherit the domain — so this wraps an existing call rather than replacing it.
+ */
+export function runInOwnedLaunchDomain<T>(domain: OwnedLaunchDomain, fn: () => T): T {
+  return AMBIENT.run(domain, fn);
+}
+
+/**
+ * The domain in force here, or `null` outside every one of them.
+ *
+ * `null` is not an absence to be defaulted away: it is the domain that every
+ * launch of every pre-existing command runs under, and the one that accountants
+ * installed outside a domain answer for.
+ */
+export function currentOwnedLaunchDomain(): OwnedLaunchDomain | null {
+  return AMBIENT.getStore() ?? null;
+}
 
 /**
  * What an accountant answered when asked to record a launch about to happen.
@@ -141,20 +232,36 @@ export interface OwnedLaunchAccountant {
   readonly open: () => OwnedLaunchOpening;
 }
 
+/** One installed accountant, and the execution domain it answers for. */
+interface Subscription {
+  readonly accountant: OwnedLaunchAccountant;
+  readonly domain: OwnedLaunchDomain | null;
+}
+
 /**
  * The installed accountants, in installation order.
  *
- * An array rather than a single slot, and the reason is a hazard rather than a
- * feature: nothing in this build holds two leases in one process, and a
- * single-slot registry would have to *choose* between two if it ever happened —
- * silently accounting a launch to one epoch and not the other. Recording it to
- * both is the conservative answer, so the shape that can hold both is the one to
- * have.
+ * An array rather than a single slot, and the reason is no longer hypothetical:
+ * the cross-repository coordinator holds one lease per concurrently executing
+ * repository, so several accountants really are installed at once. A single-slot
+ * registry would have to *choose* between them.
+ *
+ * What it may **not** do is announce a launch to all of them, which is what this
+ * module did while the array held bare accountants. Each entry now carries the
+ * domain it answers for, and {@link openOwnedLaunch} announces to the entries
+ * whose domain is the launch's own.
  */
-const INSTALLED: OwnedLaunchAccountant[] = [];
+const INSTALLED: Subscription[] = [];
 
 /**
- * Registers `accountant` and answers the function that removes it.
+ * Registers `accountant` for `domain` and answers the function that removes it.
+ *
+ * The domain is a **required** parameter with no default, and that is
+ * enforcement rather than ceremony: an accountant installed for the wrong epoch
+ * writes another repository's subprocesses into its own register, and a
+ * defaulted argument is how a caller ends up not deciding. `null` is a legitimate
+ * answer — it is the one every command that does not establish a domain gives —
+ * but it has to be given.
  *
  * The handle is the only way to remove it, and it removes exactly the one it
  * was made for — by identity, never by position, because an array index means a
@@ -163,8 +270,11 @@ const INSTALLED: OwnedLaunchAccountant[] = [];
  * Idempotent: calling the returned function twice removes nothing the second
  * time.
  */
-export function installOwnedLaunchAccountant(accountant: OwnedLaunchAccountant): () => void {
-  INSTALLED.push(accountant);
+export function installOwnedLaunchAccountant(
+  accountant: OwnedLaunchAccountant,
+  domain: OwnedLaunchDomain | null,
+): () => void {
+  INSTALLED.push({ accountant, domain });
   let removed = false;
   return () => {
     if (removed) return;
@@ -174,15 +284,29 @@ export function installOwnedLaunchAccountant(accountant: OwnedLaunchAccountant):
 }
 
 function evict(accountant: OwnedLaunchAccountant): void {
-  const index = INSTALLED.indexOf(accountant);
+  const index = INSTALLED.findIndex((entry) => entry.accountant === accountant);
   if (index >= 0) INSTALLED.splice(index, 1);
 }
 
 /**
- * Announces a launch to every installed accountant, before anything is created.
+ * Announces a launch to the accountants of its own execution domain, before
+ * anything is created.
  *
  * Answers `null` when the launch may proceed — which is the answer when nothing
- * is installed — and a detail string when it must not.
+ * is installed *for this domain* — and a detail string when it must not.
+ *
+ * ── Which accountants hear it ─────────────────────────────────────────────
+ *
+ * Exactly those installed for {@link currentOwnedLaunchDomain}, compared by
+ * identity, `null` included. A launch under no domain reaches the accountants
+ * installed under no domain and no others; a launch inside a domain reaches that
+ * domain's and no others. The comparison is total — there is no third answer and
+ * no fallback — and with no domain established anywhere it degenerates to
+ * "every installed accountant", which is what this function always did.
+ *
+ * A domain is read **once**, here, and used for the whole announcement. Reading
+ * it per accountant would let a domain that changed mid-loop split one launch
+ * across two epochs.
  *
  * ── The failure path closes what it opened ────────────────────────────────
  *
@@ -211,10 +335,12 @@ export function openOwnedLaunch(): {
   readonly records: readonly OwnedLaunchRecord[];
 } {
   const records: OwnedLaunchRecord[] = [];
+  const domain = currentOwnedLaunchDomain();
   // A copy, taken before the loop: an accountant that evicts itself while this
   // is running would otherwise shorten the array being iterated and skip its
-  // neighbour.
-  for (const accountant of [...INSTALLED]) {
+  // neighbour. Filtered here rather than inside the loop for the same reason —
+  // the membership question is asked once, of the array as it stood.
+  for (const { accountant } of INSTALLED.filter((entry) => entry.domain === domain)) {
     let opening: OwnedLaunchOpening;
     try {
       opening = accountant.open();
@@ -262,8 +388,13 @@ export function closeOwnedLaunch(record: OwnedLaunchRecord): void {
 }
 
 /**
- * How many accountants are installed. For tests and for `doctor`, never for a
- * decision.
+ * How many accountants are installed, across **every** domain. For tests and for
+ * `doctor`, never for a decision.
+ *
+ * Across every domain deliberately: this answers "did an install and a disposal
+ * really happen", which is a question about the registry rather than about one
+ * epoch, and a count filtered by the ambient domain would read as zero from
+ * outside the domain that installed and hide a leak.
  *
  * Exported so a test can prove an install and a disposal really happened,
  * which is the only way to kill a mutant that drops either. It answers a

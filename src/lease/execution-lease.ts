@@ -173,6 +173,7 @@ import {
   type ExecutionLease,
 } from './lease-document.js';
 import {
+  currentOwnedLaunchDomain,
   installOwnedLaunchAccountant,
   type OwnedLaunchAccountant,
   type OwnedLaunchOpening,
@@ -1201,7 +1202,20 @@ export function acquireRepositoryExecutionLease(
   //
   // It changes nothing about the acquisition. The accountant records; it grants
   // nothing, and it is not consulted by anything that decides who may write.
-  ACCOUNTANT_DISPOSERS.set(evidence, installOwnedLaunchAccountant(accountantFor(repository, evidence)));
+  //
+  // The domain is the one ambient at this instant, and it is read here rather
+  // than passed in for the same reason the install is here rather than in a
+  // caller: an epoch belongs to the execution domain it was acquired inside, and
+  // a caller that had to say so could say something else. All four pre-existing
+  // acquisition sites run outside every domain and get `null`, which is the
+  // domain every launch of theirs runs under, so nothing about them changes.
+  ACCOUNTANT_DISPOSERS.set(
+    evidence,
+    installOwnedLaunchAccountant(
+      accountantFor(repository, evidence),
+      currentOwnedLaunchDomain(),
+    ),
+  );
 
   return Object.freeze({
     ok: true as const,
