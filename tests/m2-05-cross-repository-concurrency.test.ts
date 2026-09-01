@@ -84,7 +84,17 @@ import {
 import { runGitCommand } from '../src/worktree/git-command.js';
 import { onceOnlyPreflight } from '../src/cli/run-command.js';
 import { renderCrossRepositoryRun } from '../src/cli/render-repositories.js';
-import { exitCodeForCrossRepositoryRun } from '../src/cli/run-exit-codes.js';
+import {
+  EXIT_CODE_SEVERITY,
+  EXIT_RUN_CALL_AGAIN,
+  EXIT_RUN_INPUT_UNUSABLE,
+  EXIT_RUN_NEEDS_OPERATOR,
+  EXIT_RUN_OK,
+  EXIT_RUN_REFUSED,
+  EXIT_RUN_UNEXPECTED,
+  EXIT_RUNTIME_UNSUPPORTED,
+  exitCodeForCrossRepositoryRun,
+} from '../src/cli/run-exit-codes.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
 
 /* ─────────────────────────── fixtures ───────────────────────────────────── */
@@ -1157,13 +1167,27 @@ describe('M2 slice 5 — refusals and endings', () => {
     // the planner must not abandon the epochs already running. If it did, the
     // process would leave this function with leases held and subprocesses alive
     // and nothing left watching them.
+    //
+    // A first version of this case asserted only that the message came out and
+    // that nothing was live *afterwards*, and a mutant that rethrows
+    // immediately survived it: by the time the rejection was awaited, the gate
+    // had been opened and both epochs had left anyway. What discriminates is
+    // **when** the rejection arrives — while an epoch is still inside the
+    // driver, or after it has left — so this case keeps one epoch inside and
+    // asserts that nothing has rejected yet.
     const alpha = makeRepository('alpha', ['A1']);
     const beta = makeRepository('beta', ['B1']);
     const repositories = [await registered(alpha), await registered(beta)];
     const real = planAcrossRepositories(repositories);
     let passes = 0;
     const held = gate();
-    const seam = recordingDrive({ hold: async () => held.wait });
+    // `beta` finishes on its own; `alpha` stays inside the driver until the gate
+    // is opened, which is what makes "still in flight" observable.
+    const seam = recordingDrive({
+      hold: async (root) => {
+        if (root === alpha) await held.wait;
+      },
+    });
 
     const run = driveRepositories(
       { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
@@ -1177,17 +1201,33 @@ describe('M2 slice 5 — refusals and endings', () => {
         },
       },
     );
-    // The rejection is attached now, so the assertions below cannot pass by the
-    // promise never being awaited.
+    // Attached now, and it records what was still live at the instant of the
+    // rejection. The rejection handler is on the promise from the first turn, so
+    // nothing here can pass by the promise never being awaited.
+    const liveAtRejection: number[] = [];
     const settled = run.then(
       () => 'resolved',
-      (error: unknown) => (error instanceof Error ? error.message : 'unknown'),
+      (error: unknown) => {
+        liveAtRejection.push(seam.live.size);
+        return error instanceof Error ? error.message : 'unknown';
+      },
     );
 
-    await waitFor(() => seam.live.size >= 2);
+    await waitFor(() => seam.started.length >= 2, 30_000, 'both admissions to start');
+    // `beta` has left, `alpha` is held, and the planner has thrown on pass 2.
+    await waitFor(() => passes >= 2, 30_000, 'the second planning pass');
+    await settleMicrotasks();
+    await settleMicrotasks();
+
+    // The discriminator. With the drain, the throw is still being held back
+    // because `alpha` has not finished; without it, this is already `[1]`.
+    expect(seam.live.has(alpha)).toBe(true);
+    expect(liveAtRejection).toEqual([]);
+
     held.open();
     expect(await settled).toBe('the planner threw');
-    // Both epochs left the driver. Nothing was abandoned.
+    // And when it did come out, nothing was left running.
+    expect(liveAtRejection).toEqual([0]);
     expect(seam.live.size).toBe(0);
   });
 
@@ -1736,19 +1776,40 @@ describe('M2 slice 5 — the admission ceiling', () => {
   }, 120_000);
 
   it('does not report the ceiling for a run that merely walked past it', async () => {
-    // The check sits after the `attempted` skip, so a candidate this run already
-    // drove consumes no budget. Before that ordering a finished run could tell a
-    // scheduler to call again.
-    const root = makeRepository('solo', ['T1', 'T2']);
-    const repositories = [await registered(root)];
+    // The check sits **after** the `attempted` skip, so a candidate this run has
+    // already driven consumes no budget.
+    //
+    // Discriminating on exactly the ceiling, not on a small number: with two
+    // tasks the placement makes no difference at all, and a first version of
+    // this case asserted that and let the reordering mutant live. Here the run
+    // admits exactly `MAX_COORDINATOR_ADMISSIONS` and then takes one more pass
+    // over a ranking whose every entry it has already driven. Checked before the
+    // skip, that pass reports the ceiling; checked after it, there is no
+    // candidate left to spend budget on and the run is simply complete.
+    const root = makeRepository('solo', ['T1']);
+    const only = await registered(root);
+    const repositories = [only];
+    const real = planAcrossRepositories(repositories);
+    const ranking = Array.from({ length: MAX_COORDINATOR_ADMISSIONS }, (_, index) =>
+      Object.freeze({
+        repositoryId: only.repository.id,
+        repositoryRoot: only.repository.root,
+        taskId: `T${String(index)}`,
+      }),
+    );
+    const plan: CrossRepositoryPlan = Object.freeze({ ...real, ranking: Object.freeze(ranking) });
     const seam = recordingDrive();
+
     const result = await driveRepositories(
       { repositories, maxConcurrentRepositories: 1, maxSteps: 1, maxInvocations: 1 },
-      { ...BASE_DEPS, driveLifecycle: seam.drive },
+      { ...BASE_DEPS, driveLifecycle: seam.drive, planAcrossRepositories: () => plan },
     );
+
+    expect(result.admissions).toHaveLength(MAX_COORDINATOR_ADMISSIONS);
     expect(result.outcome).toBe('RUN_COMPLETE');
     expect(result.reasonCodes).toEqual([]);
-  });
+    expect(exitCodeForCrossRepositoryRun(result)).toBe(0);
+  }, 120_000);
 });
 
 describe('M2 slice 5 — the exit code a shell branches on', () => {
@@ -1811,6 +1872,27 @@ describe('M2 slice 5 — the exit code a shell branches on', () => {
         ),
       ).toBe(expected);
     }
+  });
+
+  it('ranks every exit code a run can produce, so the fail-closed floor is unreachable', () => {
+    // `worseExitCode` ranks a code the list does not know **worst**, and that
+    // branch cannot be reached by any run — which a mutation campaign confirmed
+    // by inverting it and surviving. It is not dead code to delete: it is the
+    // floor under the assertion below, and the assertion is what makes it
+    // unreachable. Pinned as a set rather than left as a comment, because the
+    // one way it becomes reachable is somebody adding a seventh code.
+    expect([...EXIT_CODE_SEVERITY].sort((a, b) => a - b)).toEqual([
+      EXIT_RUN_OK,
+      EXIT_RUN_UNEXPECTED,
+      EXIT_RUN_INPUT_UNUSABLE,
+      EXIT_RUN_NEEDS_OPERATOR,
+      EXIT_RUN_REFUSED,
+      EXIT_RUN_CALL_AGAIN,
+    ].sort((a, b) => a - b));
+    // And the one code deliberately absent, with its reason: the runtime gate
+    // terminates the process at the CLI entry before any command is dispatched,
+    // so no run can produce it beside another code.
+    expect([...EXIT_CODE_SEVERITY]).not.toContain(EXIT_RUNTIME_UNSUPPORTED);
   });
 
   it('grades a coordinator that admitted nothing and cannot say why as a defect', () => {

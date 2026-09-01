@@ -1018,8 +1018,14 @@ export function exitCodeForRegistryResolution(code: RegistryResolutionRefusal): 
  * `EXIT_RUNTIME_UNSUPPORTED` is deliberately absent: the runtime gate terminates
  * the process at the CLI entry before any command is dispatched, so no run can
  * produce it beside another code.
+ *
+ * Exported so a test can pin the **set**, which is the only way the fail-closed
+ * floor in {@link worseExitCode} stays unreachable. A mutation campaign inverted
+ * that floor and survived, which is the honest verdict on a branch no run can
+ * reach — so what is measured is the property that makes it unreachable, rather
+ * than a behaviour that does not exist.
  */
-const EXIT_CODE_SEVERITY: readonly CliExitCode[] = Object.freeze([
+export const EXIT_CODE_SEVERITY: readonly CliExitCode[] = Object.freeze([
   EXIT_RUN_UNEXPECTED,
   EXIT_RUN_NEEDS_OPERATOR,
   EXIT_RUN_INPUT_UNUSABLE,

@@ -72,6 +72,13 @@ What *is* implemented:
     build where one production value holds more than one *resolved* repository,
     and it takes no execution lease, starts no agent and changes nothing. See
     [The repository registry](#the-repository-registry-m2-slice-3).
+13. **Bounded cross-repository concurrency** (M2 slice 5): with
+    `agent-loop repositories --attended`, several enlisted repositories execute
+    at once — at most one task of each at a time, up to a bound the operator
+    writes into that same file, admitted from that same ranking. It is the first
+    thing in this build that holds more than one execution lease at once, and
+    the accounting seam had to gain a subject before it could. See
+    [Several repositories at once](#several-repositories-at-once-m2-slice-5).
 
 ## Status, and where to start
 
@@ -12116,13 +12123,21 @@ words: *"letting the selector choose which one to continue would make the
 operator authorise a task they never named."*
 
 Not holding a lease is also how this slice keeps a sentence
-`owned-launch-accounting.ts` relies on true — *"nothing in this build holds two
-leases in one process"*. `openOwnedLaunch()` takes no arguments and broadcasts to
+`owned-launch-accounting.ts` relied on true — *"nothing in this build holds two
+leases in one process"*. `openOwnedLaunch()` took no arguments and broadcast to
 a process-global array, and is structurally forbidden from knowing what a lease
 is; so an epoch that overlapped a second repository's work in one process would
 account that repository's Git children to the first. Registry resolution and
 cross-repository selection run while no lease is held, and a structural test
-asserts the four new modules name no lease acquisition at all.
+asserts the deciding modules name no lease acquisition at all.
+
+**M2 slice 5 made that sentence false and closed the hazard it named.** The
+prediction was right, and it was reproduced on disk before anything was changed:
+one repository's helper and child pids written into another's register. The fix
+is not to keep refusing two leases — the coordinator holds one per concurrently
+executing repository — but to give the announcement a subject, so an accountant
+answers only for its own epoch. See [Several repositories at once (M2 slice
+5)](#several-repositories-at-once-m2-slice-5).
 
 ### The residual an operator meets first
 
@@ -12285,6 +12300,225 @@ sentence *is* the policy — `TASK_DEPENDENCY_CROSS_PROJECT` alone is a name.
   the graph on which the two readings disagree is now pinned by test.
 
 See [the ADR](docs/decisions/2026-09-01-adr-repository-local-dependencies-and-priority.md).
+
+## Several repositories at once (M2 slice 5)
+
+Slice 3 gave the orchestrator a registry and a ranking across it. Slice 4 gave a
+repository dependencies and priorities. Neither made anything run: `agent-loop
+repositories` planned across every enlisted repository and stopped at a printed
+report, and every command that acts still bound itself to one `--repository` the
+operator named.
+
+This slice makes the plan executable, for more than one repository at a time,
+under a bound the operator writes down. It is answerable for exactly three
+sentences:
+
+> Different repositories may execute concurrently.
+> The same repository must never receive overlapping owned task execution.
+> Global concurrency must be bounded and deterministic.
+
+### Most of the ownership design was already right, and that was measured
+
+Before anything was changed, every surface that decides *authority* was checked
+against the code rather than assumed, and the finding is what keeps this slice
+small:
+
+- the **execution lease** is keyed on the normalised absolute Git *common
+  directory*, never on the process and never on `repository.id`. Two different
+  repositories are two different lease files. Measured: two
+  `acquireRepositoryExecutionLease` calls for two repositories in one process
+  both answered `ACQUIRED`;
+- **release** takes only opaque evidence and removes by nonce, so no parameter
+  can be aimed at another repository's lease;
+- **stale recovery** derives its location from the repository it is handed, and
+  reads and removes at that key alone;
+- the **writer fence** is a pure function of the `(repository, evidence)` pair
+  and refuses a mismatched one as `LEASE_FOR_ANOTHER_REPOSITORY`;
+- **containment** is per *launch*: each owned launch spawns its own helper,
+  which creates its own Job Object and holds the only handle to it. Two
+  repositories' launches share no kernel structure;
+- **task state, worktrees, branches, block ledgers, delivery and verification
+  evidence** are already qualified by canonical repository root;
+- `process.chdir` appears nowhere in `src/`, and `process.env` is never written.
+
+So the lease model is not redesigned here.
+
+### The one thing that was not, and what it cost on disk
+
+`boundary/owned-launch-accounting.ts` kept a process-wide array of accountants
+and announced **every** launch to **every** one of them, through an interface
+carrying no subject. An accountant is installed by the lease acquisition itself
+and closes over its own `(repository, evidence)`, so it wrote whatever it was
+told about into *its* register.
+
+That is fine while nothing holds two leases in one process — which the module's
+own header gave as the reason its registry is an array rather than a slot. This
+slice makes it false, so it was measured rather than argued. On `main` at
+`86028bd`, against the **built** artefact, two real repositories and one real
+owned subprocess started for repository A only:
+
+```text
+Q1  two leases in ONE process
+    A: ACQUIRED          key: …\repo-a\.git
+    B: ACQUIRED          key: …\repo-b\.git
+
+Q2  one owned subprocess started FOR REPOSITORY A only
+    WHILE RUNNING  register A: open=1  helperPid 4148  childPid 18860
+    WHILE RUNNING  register B: open=1  helperPid 4148  childPid 18860
+```
+
+Repository B's durable register named repository A's helper and child, with A's
+launch digest, inside B's own Git directory. Three consequences, of different
+severity: **pollution** (certain — B's register is a lie, and a crash recovery
+for B probes processes that are not B's); **cross-repository refusal** (live — a
+refusal from any accountant refuses the launch for all of them, so a transient
+share violation on B's lease file kills A's next `git`, verification or agent
+subprocess mid-run); and **destruction** (conditional — the announcement's
+discard fallback unlinks the launch document at its own location, and that
+document holds the writer history too).
+
+### An owned launch now has an execution domain, and it is ambient
+
+The announcement gains a subject, and the subject travels the way this design
+already makes facts travel: the boundary layer still does not learn what a lease
+is, and no runner signature is widened.
+
+`OwnedLaunchDomain` is opaque — the accounting module can mint one and compare
+two by identity, and can say nothing about what one *is*.
+`runInOwnedLaunchDomain(domain, fn)` establishes it for `fn` and everything `fn`
+awaits, through `AsyncLocalStorage`. `installOwnedLaunchAccountant` takes the
+domain as a **required** argument, so a caller that does not decide does not
+compile. `openOwnedLaunch()` announces to exactly the accountants whose domain
+is identical to the ambient one, `null` included.
+
+Threading an explicit accounting argument through `RunOptions` was rejected on
+the inventory the module already records: most spawn sites running under a lease
+reach `runCommand` from code that holds no evidence, so each would have declared
+itself unaccounted — a documented hole rather than a closed one.
+
+**"No domain means announce to everybody" was considered and refused.** It reads
+as the conservative fallback and is not: a register's sentence is *these launches
+belong to this epoch*, and a launch belonging to no epoch belongs in no register.
+The rule is one identity comparison, and with no domain established anywhere it
+is bit-for-bit the old behaviour — which is what every pre-existing command gets,
+because none of them establishes one.
+
+The lease reads the domain for itself at acquisition, so no lease call site
+changed.
+
+### A coordinator, not a scheduler
+
+`run/repository-coordinator.ts` is the whole of the new execution machinery: an
+active set, a capacity, an admission rule, and `await`. No queue outlives the
+call, no timer, no poll, no persistence.
+
+**The exclusion key is the lease's own key** — the canonical Git common
+directory, compared with `comparePathIdentity`. Not the root and not
+`repository.id`. Policy and authority therefore agree by construction.
+
+**And the coordinator is not the guarantee.** If every admission rule in it were
+deleted, two tasks of one repository would still not both execute: the second
+acquisition meets the first's lease file, probes its owner — this very process,
+alive — and refuses `LEASE_HELD`. That is measured by a test that bypasses the
+coordinator entirely. What the active set buys is not safety; it is not wasting
+a slot on work the lease would refuse.
+
+**Capacity** is `maxConcurrentRepositories` in the operator's
+`repositories.yaml`, an integer in `1..8`, **defaulting to 1** — what every
+earlier build did. `0`, a negative and a fraction are refusals rather than
+clamps: `maxConcurrentRepositories: 0` says *run nothing*, and silently reading
+it as 1 would be the opposite of what was written.
+
+**Admission** walks the merged ranking best-first, admitting a candidate when its
+repository is neither active nor already driven this run. No new priority
+semantics: the ranking is slice 3's and slice 4's, consumed in the order it was
+published, and the only decision made here ever *skips*. So a repository whose
+next task ranks first does not stall the others — priority orders work inside a
+repository, and the cross-repository ranking has always said no repository
+outranks another.
+
+**A slot is freed when the lifecycle promise settles**, resolved or rejected —
+strictly after the lease is given back and after `runCommand`'s own `finally` has
+closed every owned launch of the epoch.
+
+**Termination is proved**: a `(repository, task)` pair is admitted at most once
+per run, and the candidate set is finite. That rule is also what lets a
+repository move on: eligibility comes from a task file's own `status`, which no
+run rewrites — [the residual slice 3
+recorded](#the-repository-registry-m2-slice-3) — so a finished task stays at the
+head of its repository's ranking and would otherwise be admitted for ever.
+`MAX_COORDINATOR_ADMISSIONS` is a floor under that argument, not the argument.
+
+### The command, and the rule it keeps
+
+`agent-loop repositories --attended`, mirroring `run` exactly: without the grant
+it is the read-only report it has always been. It carries `--max-steps` and
+`--max-invocations` with `run`'s own vocabulary and refusals, and **none** of the
+three destructive grants. A selector may now choose what *starts*; it still may
+not choose the subject of a destructive act, which is the half of slice 3's rule
+that was load-bearing.
+
+### What review found, and it was a blocker
+
+Four adversarial reviewers were given the finished diff. The finding that
+mattered was not in the new code:
+
+`onceOnlyPreflight` memoised a **flag and a value**, and flipped the flag before
+awaiting. Correct for a sequential caller, and this slice made the callers
+concurrent: a second caller arriving while the first attempt was in flight took
+the early return and got `null` — which that seam's contract reads as *the
+preflight produced no evidence*. With capacity 2, exactly one repository ran and
+the other reported `AUTH_PREFLIGHT_FAILED` after taking and releasing a real
+lease, while the report still said two were admitted. The slice's first headline
+sentence failed on the only path an operator uses, and every test passed, because
+every coordinator test supplied its own preflight.
+
+It now memoises the **attempt**. The sequential contract is unchanged.
+
+Three smaller ones from the same round: the planner was called unguarded and a
+driver that threw synchronously escaped, so a throw on either path abandoned
+every sibling epoch unawaited — the one thing the module's header forbids; `reap`
+freed only the race's winner, so the number the report prints as measured
+concurrency could count executions that were over; and four sentences this slice
+made false, in `owned-launch-register.ts`, `execution-lease.ts`, the `--help`
+network list and the read-only trailer, were corrected rather than left standing.
+
+A 40-mutant campaign runs beside the reviews. Two survivors in the first round
+were both signal: one was an **equivalent** mutant with a proof (`admitted > 0`
+and `admissions.length > 0` cannot differ, because a second pass is only reached
+through a reap), and one was a real hole — the test claiming to cover the
+read-only default returned before reaching the branch it named.
+
+### What this slice deliberately does not do
+
+No persistent scheduler, daemon, recurring job or cron semantics. No restart-safe
+external waits and no persisted queue. No notifications. No reviewer or API quota
+resilience, no backoff, no provider health scoring, no concurrency that adapts to
+a rate limit. No cross-machine orchestration, distributed lock or worker pool. No
+general CPU or memory scheduling, no weighted queues, no resource classes. No
+merge automation. No change to dependency or priority semantics. `READY_FOR_PR`
+remains terminal.
+
+### The costs, stated rather than discovered later
+
+- **the shared subscription window.** Two concurrent repositories mean two writer
+  agents and two reviewers against one operator's quota. Quota resilience is a
+  later M2 slice; until it lands, capacity above 1 spends a shared budget faster.
+  The default of 1 is what keeps that a choice;
+- **fixed wall-clock budgets.** The 20-second default for `git` and owned
+  commands, and the 30-minute budgets for agents and verification, were
+  calibrated for one repository per machine and are unchanged;
+- **the lease module is synchronous by contract**, and its publish retry spins
+  for up to ~8 ms. Under two epochs that is a stall for the sibling. The safety
+  argument is untouched — nothing can interleave with a synchronous sequence —
+  and the cost is latency;
+- **one scope gate cannot see another repository's tree.** A writing agent is
+  sandboxed to its worktree by `--permission-mode acceptEdits` and nothing else;
+  a stray write into a *second* repository's tree would be graded as that
+  repository's scope violation rather than as this one's. Both directions
+  fail closed — the delivery is refused — and neither is silent.
+
+See [the ADR](docs/decisions/2026-09-01-adr-bounded-cross-repository-concurrency.md).
 
 ## Not implemented yet
 

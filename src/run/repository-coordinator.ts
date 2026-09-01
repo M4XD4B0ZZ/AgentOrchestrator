@@ -302,11 +302,8 @@ interface ActiveExecution {
    * the same task id in different repositories can, and a race keyed on either
    * would pick the wrong one.
    *
-   * Mutable, and assigned immediately after construction, because the promise
-   * has to name the entry that carries it. Nothing outside {@link admit} writes
-   * it.
    */
-  settled: Promise<ActiveExecution>;
+  readonly settled: Promise<ActiveExecution>;
   /** Whether the driver has settled. Written before {@link settled} resolves. */
   readonly isDone: () => boolean;
   readonly record: () => AdmissionRecord;
@@ -654,11 +651,13 @@ function admit(
 
   const entry: ActiveExecution = {
     gitCommonDir: repository.gitCommonDir,
-    // Replaced on the next line. The promise has to resolve to the entry that
-    // carries it, and the entry cannot name itself while it is being built.
-    // Nothing can observe the placeholder: `admit` is synchronous from here to
-    // its `return`, and the entry reaches the caller only after both.
-    settled: outcome as unknown as Promise<ActiveExecution>,
+    // The promise resolves to the entry that carries it, which is what lets
+    // `Promise.race` say *which* execution finished. Naming `entry` inside its
+    // own initialiser is safe and not a trick: the callback is a `.then`
+    // continuation, so it cannot run before this statement completes, however
+    // long ago `outcome` settled. An earlier version assigned a cast placeholder
+    // and overwrote it on the next line — unobservable, and a lie in the type.
+    settled: outcome.then(() => entry),
     isDone: () => state.done,
     record: () =>
       Object.freeze({
@@ -671,7 +670,5 @@ function admit(
         threw: state.threw,
       }),
   };
-  entry.settled = outcome.then(() => entry);
-
   return entry;
 }
