@@ -258,21 +258,25 @@ The four scenarios, and one preservation claim:
 | **preservation** | with one repository enlisted, the merged ranking equals `selectNextTask`'s own ranking element for element |
 
 Plus, through the registered `agent-loop repositories` command surface — the
-Commander action, its `try`/`catch` and its `process.exitCode`, reached the way
-an operator reaches it — on two real fixture repositories: a report naming both,
-the winner named in its own `Selected` block, its root, and exit code 0. Its
-three refusal branches are driven too, each to exit code 2: an unreadable
+Commander action, reached the way an operator reaches it, with its
+`process.exitCode` read back — on two real fixture repositories: a report naming
+both, the winner named in its own `Selected` block, its root, and exit code 0;
+an unreadable registry driven the same way to exit code 2; and the action's
+`catch` entered by a seam that throws, to `EXIT_RUN_UNEXPECTED` with the
+exception text routed through `formatSafeError`. Three refusal branches are
+driven through `reportRepositories` directly, each to exit code 2: an unreadable
 document, an entry that does not resolve, and a readable registry enlisting
 nothing. And the sixth element is shown to be load-bearing by making every
 earlier element tie.
 
-No test enlists **this** repository. `actions/checkout` fetches one commit and
-leaves a detached HEAD, so `refs/heads/main` — the default branch this
-repository's own profile declares — does not exist on CI, and a test enlisting
-it would be green here and red there. That measurement is made instead as a
-recorded manual run of the shipped CLI against a scratch registry naming this
-repository and one fixture; the evidence is in the slice report, not in the
-suite.
+No test enlists **this** repository. Its own profile declares
+`defaultBranch: main`, and `resolveRepository` refuses `DEFAULT_BRANCH_NOT_FOUND`
+when that ref is absent, so such a test asserts something about the CI
+checkout's shape rather than about this slice. That is a property of an external
+tool this repository cannot measure, and the rule here is not to claim one — so
+the test is not written. The measurement is made instead as a recorded manual
+run of the shipped CLI against a scratch registry naming this repository and one
+fixture; the evidence is in the slice report, not in the suite.
 
 ## Residuals
 

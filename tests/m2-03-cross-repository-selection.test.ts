@@ -43,7 +43,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 
 import { Command } from 'commander';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import { fixedPathProvider } from '../src/config/internal/path-provider.js';
 import { PACKAGE_ROOT } from '../src/config/paths.js';
@@ -72,6 +72,7 @@ import { resolveRepository } from '../src/repo/resolve-repository.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_OK,
+  EXIT_RUN_UNEXPECTED,
   exitCodeForCrossRepositoryPlan,
   exitCodeForRegistryResolution,
   exitCodeForRepositoryRegistry,
@@ -362,9 +363,14 @@ describe('the repository registry document', () => {
   });
 
   it('refuses an over-large document before parsing it', () => {
-    // Valid YAML that would parse, and one byte too many.
-    const filler = '#'.repeat(MAX_REPOSITORY_REGISTRY_BYTES);
-    const outcome = loadWritten(`schemaVersion: 1\nrepositories: []\n${filler}`);
+    // Valid YAML that would parse, and exactly one byte too many. Sized
+    // against the prefix rather than ignoring it: the previous fixture was 34
+    // bytes over under a comment claiming one, so `> MAX + 33` survived it.
+    const prefix = 'schemaVersion: 1\nrepositories: []\n';
+    const filler = '#'.repeat(MAX_REPOSITORY_REGISTRY_BYTES + 1 - prefix.length);
+    const document = `${prefix}${filler}`;
+    expect(Buffer.byteLength(document, 'utf8')).toBe(MAX_REPOSITORY_REGISTRY_BYTES + 1);
+    const outcome = loadWritten(document);
     expect(outcome.state).toBe('UNUSABLE');
     if (outcome.state !== 'UNUSABLE') return;
     expect(outcome.code).toBe('REGISTRY_TOO_LARGE');
@@ -393,6 +399,13 @@ describe('the repository registry document', () => {
     // ceiling is tightened to `>=` or the entry maximum is cut to 2. These pin
     // the declared bounds themselves, by accepting the largest document this
     // build promises to accept.
+    // The declared values themselves. Every other assertion in this file
+    // computes its fixture FROM these constants, so all of them survive a
+    // bound being changed to any other number — including one that falsifies
+    // the shipped sentence about how many paths 64 KiB holds.
+    expect(MAX_REPOSITORY_REGISTRY_BYTES).toBe(65_536);
+    expect(MAX_REGISTERED_REPOSITORIES).toBe(256);
+
     const prefix = 'schemaVersion: 1\nrepositories: []\n';
     const exact = prefix + '#'.repeat(MAX_REPOSITORY_REGISTRY_BYTES - prefix.length);
     expect(Buffer.byteLength(exact, 'utf8')).toBe(MAX_REPOSITORY_REGISTRY_BYTES);
@@ -498,8 +511,8 @@ describe('resolving the registry', () => {
     expect(resolved.entryIndex).toBe(1);
     // And the sentence names what the operator actually did. The two duplicate
     // refusals are not interchangeable, so their details may not be either.
-    expect(resolved.detail).toContain('the same repository');
-    expect(resolved.detail).not.toContain('execution domain');
+    expect(resolved.detail).toContain('repository roots');
+    expect(resolved.detail).not.toContain('execution domains');
   });
 
   it('refuses two worktrees of one clone: two roots, one execution domain', async () => {
@@ -533,6 +546,12 @@ describe('resolving the registry', () => {
     expect(resolved?.ok).toBe(false);
     if (resolved === null || resolved.ok) return;
     expect(resolved.code).toBe('DUPLICATE_EXECUTION_DOMAIN');
+    expect(resolved.entryIndex).toBe(1);
+    // Its own sentence, not the root refusal's. The two say different things
+    // to an operator: one directory enlisted twice, versus two worktrees of
+    // one clone that would contend for a single execution lease.
+    expect(resolved.detail).toContain('execution domains');
+    expect(resolved.detail).not.toContain('repository roots');
   });
 
   it('ACCEPTS two clones declaring the same repository id', async () => {
@@ -614,6 +633,43 @@ describe('resolving the registry', () => {
     expect(resolved.code).toBe('DUPLICATE_REPOSITORY_ROOT');
   });
 
+  it('refuses an execution domain it cannot compare, for the same reason', async () => {
+    // The other half of the fail-closed change. Here the two ROOTS are
+    // genuinely different, so the first sweep passes and the second one is the
+    // only thing left: its operand is not a comparable path, and reading that
+    // as "different domains" would accept the pair.
+    const real = makeRepository({ id: 'incomparable-domain', tasks: { 't-1': {} } });
+    const other = join(scratch('ao-m2-03-uncomparable-domain-'), 'second-entry');
+    const registry = loadWritten(registryFor([real, other]));
+    expect(registry.state).toBe('REGISTERED');
+    if (registry.state !== 'REGISTERED') return;
+    const resolvedReal = await resolveRepository({ repositoryPath: real });
+    expect(resolvedReal.ok).toBe(true);
+    if (!resolvedReal.ok) return;
+
+    let call = 0;
+    const resolved = await resolveRegisteredRepositories(registry.entries, {
+      resolveRepository: async () => {
+        call += 1;
+        if (call === 1) return resolvedReal;
+        return {
+          ok: true as const,
+          code: 'RESOLVED' as const,
+          repository: {
+            ...resolvedReal.repository,
+            root: join(resolvedReal.repository.root, 'elsewhere'),
+            gitCommonDir: 'not-an-absolute-common-dir',
+          },
+        };
+      },
+    });
+    expect(call).toBe(2);
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    // Named by the sweep that actually refused, not by the first one.
+    expect(resolved.code).toBe('DUPLICATE_EXECUTION_DOMAIN');
+  });
+
   it('orders the resolved repositories by canonical root, never by file order', async () => {
     const one = makeRepository({ id: 'r-one', tasks: { 't-1': {} } });
     const two = makeRepository({ id: 'r-two', tasks: { 't-1': {} } });
@@ -642,6 +698,14 @@ describe('the order on canonical roots', () => {
     expect(compareRepositoryRoots(lower, higher)).toBeLessThan(0);
     expect(compareRepositoryRoots(higher, lower)).toBeGreaterThan(0);
     expect(compareRepositoryRoots(lower, lower)).toBe(0);
+    // And it is code-unit order, not a collation. The module refuses
+    // `localeCompare` because the answer would then depend on the machine's
+    // region setting — and every assertion above passes under `localeCompare`
+    // too. This pair is the one that does not: uppercase sorts first by code
+    // unit and last by the default collation.
+    const upper = process.platform === 'win32' ? 'D:\\Ab' : '/Ab';
+    const mixed = process.platform === 'win32' ? 'D:\\aB' : '/aB';
+    expect(compareRepositoryRoots(upper, mixed)).toBeLessThan(0);
   });
 });
 
@@ -1050,6 +1114,9 @@ describe('the repositories command', () => {
       text.indexOf('\nSelected\n'),
       text.indexOf('\nEnlisted repositories'),
     );
+    // Non-empty first: `slice` does not throw on a missing marker, and an
+    // empty slice would satisfy every `not.toContain` below it.
+    expect(selected.length).toBeGreaterThan(0);
     expect(selected).toContain('aaa-1');
     expect(selected).not.toContain('zzz-1');
     expect(text).toContain('aaa-1');
@@ -1163,9 +1230,77 @@ describe('the repositories command', () => {
     );
     // The winner carries beta's own root — not the process's cwd, and not a
     // path re-derived after selection.
+    expect(selected.length).toBeGreaterThan(0);
     expect(selected).toContain('aaa-1');
     expect(selected).toContain(beta);
     expect(selected).not.toContain(alpha);
+
+    // And the enlisted block is printed in the order its heading claims. The
+    // heading is a sentence about the value, so reversing the loop, reversing
+    // the sort, or dropping the claim from the heading each fail here.
+    const enlisted = text.slice(text.indexOf('\nEnlisted repositories'));
+    const [lowerRoot, higherRoot] = [alpha, beta].sort() as [string, string];
+    expect(enlisted).toContain('in canonical root order');
+    expect(enlisted.indexOf(lowerRoot)).toBeGreaterThanOrEqual(0);
+    expect(enlisted.indexOf(lowerRoot)).toBeLessThan(enlisted.indexOf(higherRoot));
+  });
+
+  it('carries a refusal out through the registered surface, not only a success', async () => {
+    // The Commander test above only ever reaches exit 0, so an action that
+    // ignored `reportRepositories`' answer and assigned `EXIT_RUN_OK`
+    // unconditionally survived it — at the one surface an operator actually
+    // invokes. This is the same defect the direct refusal tests exist for.
+    const home = makeHome();
+    writeFileSync(home.path, 'schemaVersion: 1\nrepositories:\n  - path: [\n', 'utf8');
+    let text = '';
+    const program = new Command();
+    program.exitOverride();
+    registerRepositoriesCommand(program, {
+      loadRepositoryRegistry: () => loadRepositoryRegistry(home.provider),
+      repositoryRegistryPath: () => home.path,
+      write: (value) => {
+        text += value;
+      },
+    });
+
+    const previous = process.exitCode;
+    try {
+      await program.parseAsync(['repositories'], { from: 'user' });
+      expect(process.exitCode).toBe(EXIT_RUN_INPUT_UNUSABLE);
+    } finally {
+      process.exitCode = previous;
+    }
+    expect(text).toContain('REGISTRY_MALFORMED');
+  });
+
+  it('routes an exception through the safe formatter and exits 1', async () => {
+    // The action's `catch`, which no test entered. It is the only non-2 answer
+    // this command can give, and the exception text is the one place a raw
+    // path or file fragment could reach a terminal — so both halves are
+    // asserted: the code, and that the message went through `formatSafeError`
+    // rather than out as `error.message`.
+    const program = new Command();
+    program.exitOverride();
+    registerRepositoriesCommand(program, {
+      loadRepositoryRegistry: () => {
+        throw new Error('D:\\secret\\path-that-must-not-be-printed');
+      },
+      repositoryRegistryPath: () => 'registry',
+      write: () => {},
+    });
+
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const previous = process.exitCode;
+    try {
+      await program.parseAsync(['repositories'], { from: 'user' });
+      expect(process.exitCode).toBe(EXIT_RUN_UNEXPECTED);
+      const written = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(written).toContain('agent-loop: ');
+      expect(written).not.toContain('path-that-must-not-be-printed');
+    } finally {
+      process.exitCode = previous;
+      stderr.mockRestore();
+    }
   });
 });
 

@@ -311,10 +311,13 @@ function conclusion(
  * ── Independent of the order it is given ──────────────────────────────────
  *
  * The answer does **not** depend on the order of `repositories` — not the
- * selection, not the ranking, and not `plans`, which is sorted here for the
- * same reason. That is a property of this function rather than an obligation on
- * its caller, and the distinction is the whole reason the sixth ranking element
- * exists as a comparator rather than as an accident.
+ * selection, not the ranking, and not `plans`, which is sorted here for the same
+ * reason — for any list whose entries have distinct canonical roots. That
+ * proviso is the caller's, and `resolveRegisteredRepositories` discharges it by
+ * refusing `DUPLICATE_REPOSITORY_ROOT` before production ever reaches here.
+ * Given it, the ordering is this function's own property rather than something
+ * inherited from that module's sort, and the distinction is the whole reason the
+ * sixth ranking element exists as a comparator rather than as an accident.
  *
  * `resolveRegisteredRepositories` does sort by canonical root, and candidates
  * are accumulated repository by repository, and `Array.prototype.sort` is
@@ -384,9 +387,14 @@ export function planAcrossRepositories(
   // inherited from `resolveRegisteredRepositories`' sort, for the reason the
   // header gives about the ranking: a guarantee this function's own doc comment
   // makes, and that `render-repositories.ts` prints as a heading, may not rest
-  // on the one production caller happening to pass a sorted list. Total for the
-  // same reason that sort is: `DUPLICATE_REPOSITORY_ROOT` has already refused
-  // any two entries sharing a root.
+  // on the one production caller happening to pass a sorted list.
+  //
+  // Total on any list whose entries have distinct canonical roots. That is a
+  // proviso on the input and not something this line establishes — unlike
+  // `repository-registry.ts`, which sorts inside the very function that just
+  // refused `DUPLICATE_REPOSITORY_ROOT`. The production caller reaches here
+  // through that refusal; a caller that does not gets a tie, and a tie falls
+  // back to the order it gave, here and in the ranking alike.
   plans.sort((a, b) => compareRepositoryRoots(a.repository.root, b.repository.root));
 
   ranked.sort((a, b) => compareCrossRepositoryKeys(a.key, b.key));

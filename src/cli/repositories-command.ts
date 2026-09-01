@@ -42,17 +42,22 @@
  *
  * Three things can go wrong before a plan exists — the profile, the registry
  * document, and resolving what it names — and all three are "the input cannot be
- * planned", which this build's exit contract already calls 2. The three
- * refusal vocabularies map to codes in `run-exit-codes.ts` with every other
- * one, each total over its vocabulary by `satisfies Record<…>`, rather than
- * being chosen here.
+ * planned", which this build's exit contract already calls 2. Two refusal
+ * vocabularies carry them — the registry document's, which carries
+ * `PROFILE_UNAVAILABLE` as well, and resolution's — and both map to codes in
+ * `run-exit-codes.ts` with every other one, each total over its vocabulary by
+ * `satisfies Record<…>`, rather than being chosen here. The plan's own codes map
+ * there too; that one is not a refusal vocabulary, because `TASK_SELECTED` and
+ * `ALL_TASKS_COMPLETE` are 0.
  *
- * One outcome is decided here, and it is not a refusal: `NOT_REGISTERED` says
- * the operator has no registry file at all. That is an absent input rather than
- * an unusable one, so it carries no refusal code and appears in no vocabulary
- * there. It is 2 for the same reason the refusals are — there is nothing to
- * plan — and it is written at the call site because there is no total map for
- * it to belong to.
+ * Two outcomes are decided in this file, and neither is a refusal in that sense.
+ * `NOT_REGISTERED` says the operator has no registry file at all: an absent
+ * input rather than an unusable one, so it carries no refusal code and appears
+ * in no vocabulary there. It is 2 for the same reason the refusals are — there
+ * is nothing to plan — and it is written at the call site because there is no
+ * total map for it to belong to. The other is `EXIT_RUN_UNEXPECTED`, written in
+ * the Commander action's `catch`: the only non-2 failure this command can
+ * produce, and the one an operator most needs told apart from a refusal.
  */
 
 import type { Command } from 'commander';

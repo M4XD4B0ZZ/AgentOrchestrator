@@ -386,7 +386,11 @@ export const REGISTRY_RESOLUTION_REFUSALS = [
    */
   'REPOSITORY_UNRESOLVABLE',
   /**
-   * Two entries canonicalised to the same repository root.
+   * Two entries were not established as different repository roots.
+   *
+   * Two spellings of one directory, and also a pair this build could not
+   * compare at all — the sweep refuses on anything that is not `DIFFERENT`, so
+   * the refusal means "not told apart" rather than "proved identical".
    *
    * This is the authoritative duplicate check, and `REGISTRY_DUPLICATE_PATH` is
    * not: the strings `D:\Repo`, `d:\repo\` and a junction pointing at either are
@@ -395,7 +399,10 @@ export const REGISTRY_RESOLUTION_REFUSALS = [
    */
   'DUPLICATE_REPOSITORY_ROOT',
   /**
-   * Two entries resolved into the same local Git execution domain.
+   * Two entries were not established as different local Git execution domains.
+   *
+   * Same reading as `DUPLICATE_REPOSITORY_ROOT`: the sweep refuses on anything
+   * that is not `DIFFERENT`, so an unanswerable comparison lands here too.
    *
    * Distinct from `DUPLICATE_REPOSITORY_ROOT` and not implied by it: two Git
    * worktrees of one clone are two different canonical roots and one execution
@@ -437,11 +444,11 @@ export type RegistryResolutionResult = RegistryResolutionSuccess | RegistryResol
 const RESOLUTION_DETAIL: Readonly<Record<RegistryResolutionRefusal, string>> = Object.freeze({
   REPOSITORY_UNRESOLVABLE: 'A registered repository could not be resolved.',
   DUPLICATE_REPOSITORY_ROOT:
-    'Two registered entries are the same repository. One directory enlisted twice would be ' +
-    'planned twice and would contend with itself.',
+    'Two registered entries were not established as different repository roots. One directory ' +
+    'enlisted twice would be planned twice and would contend with itself.',
   DUPLICATE_EXECUTION_DOMAIN:
-    'Two registered entries are the same local Git execution domain. They would contend for ' +
-    'one execution lease and derive the same work branch.',
+    'Two registered entries were not established as different local Git execution domains. ' +
+    'They would contend for one execution lease and derive the same work branch.',
 });
 
 function resolutionFailure(
@@ -529,12 +536,13 @@ export async function resolveRegisteredRepositories(
   // `realpathSync.native` established inside the resolver, not things the
   // document states and not things a repository wrote.
   //
-  // `comparePathIdentity` rather than string equality: both are paths, and it
-  // is lexical only — it folds case, separator form and a trailing separator,
-  // which is the residue `realpathSync.native` leaves behind. The 8.3 alias and
-  // the junction were settled by that call inside the resolver, as the
-  // paragraph above says; what is left is the spelling, and comparing the
-  // strings would let exactly the pairs these refusals exist for through.
+  // `comparePathIdentity` rather than string equality, and not because string
+  // equality would miss anything today: both operands are `realpathSync.native`
+  // outputs, which carry the on-disk casing, one separator form and no trailing
+  // separator, so one directory reached by two spellings yields two identical
+  // strings and `===` would catch it. This is defence in depth against a future
+  // producer whose output is less canonical, plus the one property `===` does
+  // not have — it is three-valued, which the arm below depends on.
   // Both sweeps are O(n^2) over at most
   // MAX_REGISTERED_REPOSITORIES entries, which is the price of not having a
   // canonical string key for a path identity this build compares structurally.
