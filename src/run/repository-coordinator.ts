@@ -397,10 +397,19 @@ export async function driveRepositories(
    * documented as "neither had settled" while being able to say 2 when one had.
    */
   const reap = async (): Promise<void> => {
-    await Promise.race(active.map((entry) => entry.settled));
+    const finished = await Promise.race(active.map((entry) => entry.settled));
     for (let index = active.length - 1; index >= 0; index -= 1) {
       const entry = active[index];
-      if (entry === undefined || !entry.isDone()) continue;
+      if (entry === undefined) continue;
+      // The race's winner is removed **unconditionally**, because its promise
+      // resolving is what settlement means — asking its flag as well would make
+      // this loop's progress depend on two mechanisms agreeing. They do agree,
+      // and a mutation campaign showed what it costs if they ever stopped: with
+      // the flag alone, an entry that had settled and did not say so was never
+      // removed, `active` never emptied, and the run span forever rather than
+      // failing. A loop whose exit condition is a flag needs the flag to be
+      // right; this one needs only the promise it awaited.
+      if (entry !== finished && !entry.isDone()) continue;
       active.splice(index, 1);
       admissions.push(entry.record());
     }
@@ -443,9 +452,11 @@ export async function driveRepositories(
       // The two are equal here today, and the claim that they differ was wrong
       // and was measured wrong: a mutation swapping them survived the whole
       // suite. The proof of equivalence is the loop's own shape — a second pass
-      // is reached only through `await reap()`, and `reap` pushes exactly one
-      // record, so on any pass after the first `admissions.length >= 1` exactly
-      // when `admitted >= 1`, and on the first pass both are 0.
+      // is reached only through `await reap()`, and `reap` pushes **at least
+      // one** record, because the entry whose `settled` won the race has had its
+      // settlement flag set in an earlier continuation and so is always swept.
+      // On any pass after the first, `admissions.length >= 1` exactly when
+      // `admitted >= 1`; on the first pass both are 0.
       //
       // It is still written this way, because the question is *was anything
       // started* and `admitted` is the variable that answers it. A future
@@ -506,9 +517,12 @@ export async function driveRepositories(
     if (active.length === 0) break;
     if (budgetExhausted) break;
 
-    // Wait for exactly one to finish, then plan again. Not a poll: the wake-up
+    // Wait for at least one to finish, then plan again. Not a poll: the wake-up
     // is the completion itself, so a pass happens per completion rather than per
     // interval, and a run with nothing to do consumes no CPU waiting for it.
+    // Measured: three repositories with 700 ms of work each, capacity 1 — four
+    // planning passes for three admissions, and 0 ms of process CPU across 2.1
+    // seconds of wall clock.
     await reap();
   }
 

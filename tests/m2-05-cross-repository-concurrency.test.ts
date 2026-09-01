@@ -984,6 +984,40 @@ describe('M2 slice 5 — global concurrency is bounded and admission is determin
     expect(result.admissions).toHaveLength(3);
   });
 
+  it('frees every settled slot, not only the one the race named', async () => {
+    // The number this run reports as its concurrency is `active.length`, and an
+    // execution that has finished must not still be occupying a slot when the
+    // next admission counts them.
+    //
+    // Three repositories, capacity 2, nothing held: A and B are admitted
+    // together and both settle before the first reap returns. C is admitted on
+    // the next pass, and by then **both** slots are free — so C's own record
+    // must say `1`. Freeing only the race's winner leaves one settled execution
+    // in the set and C reads `2`, which is the report claiming an overlap that
+    // was over.
+    const alpha = makeRepository('alpha', ['A1']);
+    const beta = makeRepository('beta', ['B1']);
+    const gamma = makeRepository('gamma', ['C1']);
+    const repositories = [
+      await registered(alpha),
+      await registered(beta),
+      await registered(gamma),
+    ];
+    const seam = recordingDrive();
+    const result = await driveRepositories(
+      { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
+      { ...BASE_DEPS, driveLifecycle: seam.drive },
+    );
+
+    expect(result.admissions).toHaveLength(3);
+    const third = result.admissions.find((entry) => entry.sequence === 3);
+    expect(third?.repositoryRoot).toBe(gamma);
+    expect(third?.concurrencyAtAdmission).toBe(1);
+    // And the first two really were admitted together, so this is not passing
+    // because nothing ever overlapped.
+    expect(result.admissions.find((entry) => entry.sequence === 2)?.concurrencyAtAdmission).toBe(2);
+  });
+
   it('capacity 1 is the default and never overlaps', async () => {
     expect(DEFAULT_MAX_CONCURRENT_REPOSITORIES).toBe(1);
     const { repositories } = await threeRepositories();
