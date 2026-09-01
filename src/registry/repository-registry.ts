@@ -496,7 +496,7 @@ export interface RegistryResolutionDependencies {
 
 /**
  * Resolves every entry, and refuses the whole registry if any of them is
- * unusable or if two of them are the same repository.
+ * unusable or if two of them were not established as different repositories.
  *
  * ── Sequential, and that is the contract ───────────────────────────────────
  *
