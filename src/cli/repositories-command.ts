@@ -128,18 +128,25 @@ const DESCRIPTION = [
   '',
   'If any enlisted repository cannot be planned, nothing is selected and the refusal names it. A',
   'selection made over the repositories that happened to read cleanly would turn a configuration',
-  'mistake into a scheduling decision.',
+  'mistake into a scheduling decision. Under --attended that holds for every admission decision',
+  'the run makes: a planning refusal stops it admitting anything further. It cannot un-start what',
+  'is already running, so a refusal that arrives mid-run is reported as one — the run waits for',
+  'what it started, and says the configuration needs a look.',
   '',
   'Without --attended this command acts on nothing: no execution lease, no agent, no workspace,',
   'no task state and no remote. It does start `git` children to resolve each repository, through',
   'the same seam every subprocess in this build goes through.',
   '',
-  'With --attended it drives them. Several repositories may execute at once, at most one task',
-  'per repository, up to the maxConcurrentRepositories written in repositories.yaml — an integer',
-  'from 1 to 8, and 1 when the file does not say, which is what every earlier build did. Slots',
-  'are filled from the same ranking this report prints, best first, skipping any repository that',
-  'is already executing; a repository whose next task ranks first therefore does not stall the',
-  'others, and no repository’s own task order is reinterpreted.',
+  'With --attended it drives them, and it keeps going until nothing is left to admit. At most',
+  'one task of a repository runs at a time; over the whole invocation a repository may be driven',
+  'through as many of its tasks as become admissible, one after another. What is bounded is how',
+  'many repositories run at once: maxConcurrentRepositories in repositories.yaml, an integer from',
+  '1 to 8, and 1 when the file does not say, which is what every earlier build did.',
+  '',
+  'Slots are filled from the same ranking this report prints, best first, skipping any repository',
+  'that is already executing and any task this invocation has already driven. A repository whose',
+  'next task ranks first therefore does not stall the others, and no repository’s own task order',
+  'is reinterpreted.',
   '',
   'Only the ordinary attended grant is available here. Recovering a stale lease, continuing a',
   'BLOCKED_VERIFY task and continuing a HUMAN_DECISION_REQUIRED task each authorise a',
@@ -313,9 +320,10 @@ export function registerRepositoriesCommand(
     .description(DESCRIPTION)
     .option(
       '--attended',
-      'Drive the enlisted repositories instead of reporting. Several may execute at once, at ' +
-        'most one task each, bounded by maxConcurrentRepositories in repositories.yaml. Without ' +
-        'this the command writes nothing.',
+      'Drive the enlisted repositories instead of reporting, until nothing is left to admit. ' +
+        'Several repositories may execute at once — at most one task of each at a time, and as ' +
+        'many of that repository’s tasks over the invocation as become admissible — bounded by ' +
+        'maxConcurrentRepositories in repositories.yaml. Without this the command writes nothing.',
     )
     .option(
       '--max-steps <n>',

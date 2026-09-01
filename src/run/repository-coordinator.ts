@@ -182,13 +182,21 @@ export interface AdmissionRecord {
   /** Admission order, from 1. Deterministic given the same on-disk state. */
   readonly sequence: number;
   /**
-   * How many repositories were executing at the instant this one was admitted,
-   * counting this one.
+   * How many execution **slots** this run held at the instant this one was
+   * admitted, counting this one. Never greater than the capacity.
    *
-   * The product's own measurement of its concurrency, recorded so that a proof
-   * of overlap can be an assertion on a value rather than an inference from wall
-   * clock time. `2` here means two repositories really were admitted and neither
-   * had settled.
+   * A slot is held from admission until {@link reap} frees it, and `reap` frees
+   * every execution that has settled — so this is the number of repositories
+   * admitted and not yet seen to end. It is an *upper bound* on how many were
+   * still running: an execution that settles between one sweep and the next is
+   * still holding its slot, and the number says so rather than pretending to
+   * observe the machine.
+   *
+   * That distinction is deliberate and was a review finding. The field is
+   * evidence of overlap and it is not the only evidence: the tests that claim
+   * two repositories ran at once hold both inside a barrier, so what makes them
+   * simultaneous is program order rather than this counter. What this adds is
+   * that the *product* says so too, without anybody inferring it from a clock.
    */
   readonly concurrencyAtAdmission: number;
   /**
@@ -299,6 +307,8 @@ interface ActiveExecution {
    * it.
    */
   settled: Promise<ActiveExecution>;
+  /** Whether the driver has settled. Written before {@link settled} resolves. */
+  readonly isDone: () => boolean;
   readonly record: () => AdmissionRecord;
 }
 
@@ -376,16 +386,52 @@ export async function driveRepositories(
   let budgetExhausted = false;
   let refusedMidRun = false;
 
-  /** Awaits exactly one settlement, frees its slot and keeps its record. */
+  /**
+   * Awaits at least one settlement, then frees the slot of **every** execution
+   * that has settled and keeps its record.
+   *
+   * Every settled one and not only the race's winner, and that is a correction
+   * rather than an optimisation. Freeing one per call leaves a finished
+   * execution occupying a slot until some later call happens to name it, so
+   * `active.length` — which is the capacity bound *and* the number this run
+   * reports as its measured concurrency — counts executions that are over. The
+   * bound stayed safe either way (it can only over-count, so it under-admits),
+   * and the reported number did not: a review found `concurrencyAtAdmission`
+   * documented as "neither had settled" while being able to say 2 when one had.
+   */
   const reap = async (): Promise<void> => {
-    const finished = await Promise.race(active.map((entry) => entry.settled));
-    const index = active.indexOf(finished);
-    if (index >= 0) active.splice(index, 1);
-    admissions.push(finished.record());
+    await Promise.race(active.map((entry) => entry.settled));
+    for (let index = active.length - 1; index >= 0; index -= 1) {
+      const entry = active[index];
+      if (entry === undefined || !entry.isDone()) continue;
+      active.splice(index, 1);
+      admissions.push(entry.record());
+    }
   };
 
+  /**
+   * The planner's own thrown error, kept so it can be rethrown after the drain.
+   *
+   * `planAcrossRepositories` documents that it never throws for an expected
+   * condition, and this does not rely on that. An unexpected throw escaping the
+   * loop would abandon every sibling epoch's promise unawaited — which is the
+   * one thing this module's header promises cannot happen — so the throw is
+   * caught, admissions stop, everything in flight is awaited, and only then is
+   * it rethrown unchanged. Swallowing it would be worse than either: a defect
+   * in the planner would read as a run that simply found nothing to do.
+   */
+  let plannerThrew: unknown = undefined;
+  let plannerDidThrow = false;
+
   for (;;) {
-    const current = plan(request.repositories);
+    let current: CrossRepositoryPlan;
+    try {
+      current = plan(request.repositories);
+    } catch (error: unknown) {
+      plannerThrew = error;
+      plannerDidThrow = true;
+      break;
+    }
     passes += 1;
     planCode = current.code;
 
@@ -394,10 +440,20 @@ export async function driveRepositories(
       // below: abandoning a live epoch to report a configuration problem would
       // leave a lease held by a process that has stopped looking at it.
       //
-      // On `admitted` rather than on `admissions.length`, and the two differ:
-      // `admissions` is filled as work *settles*, so at this line it is empty
-      // for a run whose every admission is still in flight — which is exactly
-      // the run this member exists to distinguish from one that never started.
+      // On `admitted` — what was started — rather than on `admissions.length`,
+      // which is what has *settled*.
+      //
+      // The two are equal here today, and the claim that they differ was wrong
+      // and was measured wrong: a mutation swapping them survived the whole
+      // suite. The proof of equivalence is the loop's own shape — a second pass
+      // is reached only through `await reap()`, and `reap` pushes exactly one
+      // record, so on any pass after the first `admissions.length >= 1` exactly
+      // when `admitted >= 1`, and on the first pass both are 0.
+      //
+      // It is still written this way, because the question is *was anything
+      // started* and `admitted` is the variable that answers it. A future
+      // change that admits without reaping between passes would keep this line
+      // meaning what it says and would silently break the other spelling.
       if (admitted > 0) refusedMidRun = true;
       break;
     }
@@ -408,12 +464,16 @@ export async function driveRepositories(
     // then sees it.
     for (const entry of current.ranking) {
       if (active.length >= capacity) break;
+      const key = attemptKey(entry.repositoryRoot, entry.taskId);
+      if (attempted.has(key)) continue;
+
+      // After the `attempted` skip, not before it. A candidate this run has
+      // already driven consumes no budget, so a run that finished everything
+      // does not report having been stopped by a ceiling it merely walked past.
       if (admitted >= MAX_COORDINATOR_ADMISSIONS) {
         budgetExhausted = true;
         break;
       }
-      const key = attemptKey(entry.repositoryRoot, entry.taskId);
-      if (attempted.has(key)) continue;
 
       const repository = repositoryOf(current, entry.repositoryRoot);
       // Not reachable through `planAcrossRepositories`, whose ranking is built
@@ -455,9 +515,12 @@ export async function driveRepositories(
     await reap();
   }
 
-  // Drain. Reached on the two paths that stop admitting with work still in
-  // flight — a mid-run planning refusal and the admission budget.
+  // Drain. Reached on the three paths that stop admitting with work still in
+  // flight — a mid-run planning refusal, the admission budget, and a planner
+  // that threw. Before the rethrow, deliberately.
   while (active.length > 0) await reap();
+
+  if (plannerDidThrow) throw plannerThrew;
 
   // Admission order, not completion order. `admissions` is filled as work
   // settles, and that order is decided by how long each repository's work took:
@@ -523,10 +586,24 @@ function admit(
   deps: CrossRepositoryRunDependencies,
   drive: typeof driveLifecycleProduction,
 ): ActiveExecution {
-  let lifecycle: LifecycleResult | null = null;
-  let threw = false;
+  // One box rather than three closed-over `let`s, so that the settlement flag is
+  // written in the *first* continuation after the driver settles — before the
+  // promise the caller races on resolves. `reap` sweeps on that flag, and a flag
+  // set a turn later would leave a finished execution counted as running.
+  const state: { lifecycle: LifecycleResult | null; threw: boolean; done: boolean } = {
+    lifecycle: null,
+    threw: false,
+    done: false,
+  };
 
-  const started = runInOwnedLaunchDomain(createOwnedLaunchDomain(), () =>
+  // `(async () => …)()` and not a bare call, so a driver that throws
+  // **synchronously** becomes a rejected promise instead of an exception out of
+  // this function. `driveLifecycle` is an `async function` and cannot do it;
+  // the injected seam is somebody else's code and can, and a throw here would
+  // escape the admission loop and abandon every sibling epoch unawaited.
+  //
+  // The wrap is inside the domain, so the driver still runs inside it.
+  const started = runInOwnedLaunchDomain(createOwnedLaunchDomain(), async () =>
     drive(
       {
         repository,
@@ -566,10 +643,12 @@ function admit(
   // subprocesses running.
   const outcome = started.then(
     (value) => {
-      lifecycle = value;
+      state.lifecycle = value;
+      state.done = true;
     },
     () => {
-      threw = true;
+      state.threw = true;
+      state.done = true;
     },
   );
 
@@ -577,7 +656,10 @@ function admit(
     gitCommonDir: repository.gitCommonDir,
     // Replaced on the next line. The promise has to resolve to the entry that
     // carries it, and the entry cannot name itself while it is being built.
+    // Nothing can observe the placeholder: `admit` is synchronous from here to
+    // its `return`, and the entry reaches the caller only after both.
     settled: outcome as unknown as Promise<ActiveExecution>,
+    isDone: () => state.done,
     record: () =>
       Object.freeze({
         repositoryId,
@@ -585,8 +667,8 @@ function admit(
         taskId,
         sequence,
         concurrencyAtAdmission,
-        lifecycle,
-        threw,
+        lifecycle: state.lifecycle,
+        threw: state.threw,
       }),
   };
   entry.settled = outcome.then(() => entry);

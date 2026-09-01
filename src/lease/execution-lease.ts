@@ -1206,9 +1206,16 @@ export function acquireRepositoryExecutionLease(
   // The domain is the one ambient at this instant, and it is read here rather
   // than passed in for the same reason the install is here rather than in a
   // caller: an epoch belongs to the execution domain it was acquired inside, and
-  // a caller that had to say so could say something else. All four pre-existing
-  // acquisition sites run outside every domain and get `null`, which is the
-  // domain every launch of theirs runs under, so nothing about them changes.
+  // a caller that had to say so could say something else.
+  //
+  // Which domain that is depends on the *invocation*, not on the call site. Every
+  // pre-existing command establishes none, so its acquisition gets `null` — the
+  // domain every launch of that invocation also runs under, so nothing about it
+  // changes. `run/repository-coordinator.ts` establishes one per admitted
+  // repository, and the acquisition it reaches is `run/lifecycle-driver.ts`'s,
+  // which is one of those same four sites: the site is not the thing that decides.
+  // An earlier version of this comment said all four "run outside every domain",
+  // which reads as a property of the sites and is false of that one.
   ACCOUNTANT_DISPOSERS.set(
     evidence,
     installOwnedLaunchAccountant(
@@ -3326,7 +3333,15 @@ export function attestWriterLaunchEstablished(
  * `ESTABLISHED` licenses a recovery on the strength of the pids it records, and
  * that is sound for exactly one situation: the owner died **while that launch
  * was running**, when nothing else of the epoch could be running either, because
- * this build starts owned launches one at a time.
+ * this build starts the owned launches *of one epoch* one at a time.
+ *
+ * That qualifier was absent until M2 slice 5 and the sentence read "this build
+ * starts owned launches one at a time", which the cross-repository coordinator
+ * makes false — it drives several repositories at once. What carries the safety
+ * is the narrower clause, "nothing else **of the epoch**", and that is still
+ * true: an epoch is one execution lease, one lease is one Git common directory,
+ * and at most one execution of a common directory is admitted at a time. The
+ * conclusion is unchanged; the reason a reader is handed had to be.
  *
  * A launch that *ends* without reaching `CONTAINED` breaks that. It happens: the
  * ending may be unattestable (`BOUNDARY_LOST`), or the confirmation may fail to

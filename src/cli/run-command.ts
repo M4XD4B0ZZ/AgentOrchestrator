@@ -340,11 +340,37 @@ export interface RunCommandSeams {
  * question already answered, and "it failed and then it passed" is not a state
  * this command should be able to reach inside one invocation.
  *
- * Exported for `block-command.ts`, which needs exactly this and must not write
- * its own. Two memoising preflights in one binary are two chances for one
- * invocation to start the subscription CLIs twice — and the second copy would be
- * free to differ on the one decision that matters here, which is that a failure
- * is remembered rather than retried.
+ * Exported for `block-command.ts` and `repositories-command.ts`, which need
+ * exactly this and must not write their own. Two memoising preflights in one
+ * binary are two chances for one invocation to start the subscription CLIs
+ * twice — and the second copy would be free to differ on the one decision that
+ * matters here, which is that a failure is remembered rather than retried.
+ *
+ * ── It memoises the attempt, not the answer (M2 slice 5) ──────────────────
+ *
+ * The first version memoised a flag and a value:
+ *
+ *     let done = false; let evidence = null;
+ *     return async () => { if (done) return evidence; done = true;
+ *                          evidence = await run(); return evidence; };
+ *
+ * which is correct for a **sequential** caller and wrong for a concurrent one,
+ * and M2 slice 5 made the callers concurrent. The flag flips before the `await`,
+ * so a second call that arrives while the first is still in flight takes the
+ * early return and gets `null` — the value the field happens to hold before any
+ * answer exists. `null` from this seam means *the preflight produced no
+ * evidence*, so every repository but the first was told its authentication had
+ * failed when it had not, after taking and releasing a real execution lease.
+ * With capacity 2 exactly one repository ran, and the report still said two
+ * were admitted.
+ *
+ * Memoising the promise makes it single-flight: concurrent callers await the
+ * one attempt and all see its answer. Nothing about the sequential contract
+ * changes — the same artefact comes back on every later call, and a failure is
+ * still remembered rather than retried, because the same settled promise is
+ * returned. A **rejection** is likewise shared, which is the honest reading: an
+ * exception out of the preflight is not "auth failed", and turning it into
+ * `null` for the callers that arrive later would say it was.
  */
 export function onceOnlyPreflight(
   override?: () => Promise<AuthPreflightEvidence | null>,
@@ -360,13 +386,13 @@ export function onceOnlyPreflight(
       return assessment.evidence;
     });
 
-  let done = false;
-  let evidence: AuthPreflightEvidence | null = null;
+  let attempt: Promise<AuthPreflightEvidence | null> | null = null;
   return async () => {
-    if (done) return evidence;
-    done = true;
-    evidence = await run();
-    return evidence;
+    // `??=` and not `if (attempt === null)` followed by an await: the
+    // assignment happens in the same synchronous step as the read, so two
+    // callers in one turn cannot both start the subscription CLIs.
+    attempt ??= run();
+    return await attempt;
   };
 }
 

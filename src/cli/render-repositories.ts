@@ -94,18 +94,32 @@ const HEADING = 'agent-loop repositories';
  */
 export const REPOSITORIES_READ_ONLY_TRAILER =
   'This report acts on nothing. It acquires no execution lease, starts no agent, prepares no ' +
-  'workspace and writes no task state. Execution needs a grant that was not given: ' +
-  '--attended here, or `agent-loop run --repository <path> --attended` for one named ' +
-  'repository.';
+  'workspace and writes no task state. Execution needs `--attended` here, or ' +
+  '`agent-loop run --repository <path> --attended` for one named repository.';
 
 /**
- * The trailer a run that really executed ends with.
+ * The trailer every rendering of a cross-repository run ends with, whether or
+ * not anything was admitted.
  *
- * It says the two things the read-only trailer's reader does not need and this
- * one does: how many repositories were allowed to run at once, and that the
- * destructive grants are not on this command. The second is not decoration —
- * an operator who has just watched a selector choose what to start will
- * reasonably wonder what else it may choose.
+ * ── Why the read-only trailer above does not say "the grant was not given" ──
+ *
+ * It did for one round, and it was wrong on three paths: this trailer is
+ * printed by `renderRegistryOutcome` and `renderRegistryResolutionFailure` as
+ * well, which are reached when the registry is missing, unusable, or names
+ * something that will not resolve. An operator who typed `--attended` and hit
+ * one of those was told the grant was withheld when it was given and the input
+ * was the problem. The trailer says what execution *needs*, which is true
+ * whether or not this invocation asked for it.
+ *
+ * ── What this one says, and what it deliberately does not ─────────────────
+ *
+ * It states that the destructive grants are not on this command and were not
+ * taken. That is not decoration: an operator who has just watched a selector
+ * choose what to start will reasonably wonder what else it may choose.
+ *
+ * It does **not** state the capacity. The `Capacity` row does, above it, from
+ * the run's own value; a constant string cannot, and an earlier version of this
+ * comment claimed it did.
  */
 export const REPOSITORIES_RUN_TRAILER =
   'Every admission ran under the ordinary attended grant and nothing else. Recovering a stale ' +

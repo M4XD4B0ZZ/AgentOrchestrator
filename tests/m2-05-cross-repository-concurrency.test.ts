@@ -82,12 +82,18 @@ import {
   type CrossRepositoryRunResult,
 } from '../src/run/repository-coordinator.js';
 import { runGitCommand } from '../src/worktree/git-command.js';
+import { onceOnlyPreflight } from '../src/cli/run-command.js';
+import { renderCrossRepositoryRun } from '../src/cli/render-repositories.js';
 import { exitCodeForCrossRepositoryRun } from '../src/cli/run-exit-codes.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
 
 /* ─────────────────────────── fixtures ───────────────────────────────────── */
 
 const created: string[] = [];
+
+/** Comment strippers, so a structural pin measures code rather than prose. */
+const BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g;
+const LINE_COMMENT = /(^|[^:])\/\/.*$/gm;
 
 const GIT_ENV: NodeJS.ProcessEnv = {
   ...process.env,
@@ -210,6 +216,24 @@ function openSlots(root: string): unknown[] {
   }
   const open = (document as { open?: unknown[] }).open;
   return Array.isArray(open) ? open : [];
+}
+
+/**
+ * Whether a repository's launch document exists and parses.
+ *
+ * The other half of every "nothing leaked" assertion. {@link openSlots} answers
+ * `[]` for three different worlds - no document, an unparseable one, and an
+ * empty one - and only the third is the healthy state a leak check means.
+ */
+function registerIsReadable(root: string): boolean {
+  const path = join(root, '.git', 'agent-orchestrator-execution-lease.launches.json');
+  if (!existsSync(path)) return false;
+  try {
+    const document: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    return Array.isArray((document as { open?: unknown }).open);
+  } catch {
+    return false;
+  }
 }
 
 /** A promise plus the function that settles it. The barrier every proof uses. */
@@ -657,14 +681,22 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
     expect(reached).toBeGreaterThan(0);
     expect(observation.leases).toEqual({ alpha: true, beta: true });
 
-    // Nothing leaked. Both leases are gone and both registers are empty.
+    // Nothing leaked. Both leases are gone, and both registers are still there
+    // and still readable and hold nothing open.
+    //
+    // The two halves are asserted separately on purpose: `openSlots` answers
+    // `[]` for a register that is absent or will not parse as well as for one
+    // that is genuinely empty, so `toEqual([])` alone would grade a document
+    // this build failed to write as the healthy state.
     expect(existsSync(leasePathOf(alpha))).toBe(false);
     expect(existsSync(leasePathOf(beta))).toBe(false);
+    expect(registerIsReadable(alpha)).toBe(true);
+    expect(registerIsReadable(beta)).toBe(true);
     expect(openSlots(alpha)).toEqual([]);
     expect(openSlots(beta)).toEqual([]);
     expect(run.maxObservedConcurrency).toBe(2);
     expect(run.admissions).toHaveLength(2);
-  }, 90_000);
+  }, 180_000);
 
   it('keeps a real owned launch out of the other repository’s register', async () => {
     // The defect this slice exists to close, measured end to end on disk, with
@@ -729,6 +761,10 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
 
       if (leaseA.ok) releaseRepositoryExecutionLease(leaseA.evidence);
       if (leaseB.ok) releaseRepositoryExecutionLease(leaseB.evidence);
+      // Readable first, then empty - see the sibling case: `[]` also means
+      // "there is no document", which is not the thing being asserted.
+      expect(registerIsReadable(alpha)).toBe(true);
+      expect(registerIsReadable(beta)).toBe(true);
       expect(openSlots(alpha)).toEqual([]);
       expect(openSlots(beta)).toEqual([]);
       return reading;
@@ -743,7 +779,7 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
     // in no other, with both leases held at the same moment.
     const domained = await measure(true);
     expect(domained).toEqual({ own: 1, other: 0 });
-  }, 120_000);
+  }, 240_000);
 
   it('binds each admission to its own repository', async () => {
     const alpha = makeRepository('alpha', ['A1']);
@@ -1116,6 +1152,73 @@ describe('M2 slice 5 — refusals and endings', () => {
     expect(seam.peak()).toBe(1);
   });
 
+  it('awaits everything in flight before letting a planner’s throw out', async () => {
+    // The header's promise, on the one path that could break it: a throw out of
+    // the planner must not abandon the epochs already running. If it did, the
+    // process would leave this function with leases held and subprocesses alive
+    // and nothing left watching them.
+    const alpha = makeRepository('alpha', ['A1']);
+    const beta = makeRepository('beta', ['B1']);
+    const repositories = [await registered(alpha), await registered(beta)];
+    const real = planAcrossRepositories(repositories);
+    let passes = 0;
+    const held = gate();
+    const seam = recordingDrive({ hold: async () => held.wait });
+
+    const run = driveRepositories(
+      { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
+      {
+        ...BASE_DEPS,
+        driveLifecycle: seam.drive,
+        planAcrossRepositories: (): CrossRepositoryPlan => {
+          passes += 1;
+          if (passes === 1) return real;
+          throw new Error('the planner threw');
+        },
+      },
+    );
+    // The rejection is attached now, so the assertions below cannot pass by the
+    // promise never being awaited.
+    const settled = run.then(
+      () => 'resolved',
+      (error: unknown) => (error instanceof Error ? error.message : 'unknown'),
+    );
+
+    await waitFor(() => seam.live.size >= 2);
+    held.open();
+    expect(await settled).toBe('the planner threw');
+    // Both epochs left the driver. Nothing was abandoned.
+    expect(seam.live.size).toBe(0);
+  });
+
+  it('turns a driver that throws synchronously into a settled record', async () => {
+    // `driveLifecycle` is an async function and cannot do this; the injected
+    // seam can, and a synchronous throw out of the admission loop would abandon
+    // every sibling epoch.
+    const alpha = makeRepository('alpha', ['A1']);
+    const beta = makeRepository('beta', ['B1']);
+    const repositories = [await registered(alpha), await registered(beta)];
+    const drive = ((request: Parameters<typeof driveLifecycle>[0]) => {
+      if (request.repository.root === alpha) throw new Error('synchronous');
+      return Promise.resolve(lifecycleResult());
+    }) as unknown as typeof driveLifecycle;
+
+    const result = await driveRepositories(
+      { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
+      { ...BASE_DEPS, driveLifecycle: drive },
+    );
+
+    expect(result.outcome).toBe('RUN_COMPLETE');
+    expect(result.admissions).toHaveLength(2);
+    const failed = result.admissions.find((entry) => entry.repositoryRoot === alpha);
+    expect(failed?.threw).toBe(true);
+    expect(failed?.lifecycle).toBeNull();
+    // And the sibling still ran and still reported.
+    const ok = result.admissions.find((entry) => entry.repositoryRoot === beta);
+    expect(ok?.threw).toBe(false);
+    expect(ok?.lifecycle?.outcome).toBe('COMPLETED');
+  });
+
   it('has an admission ceiling that is a floor under the termination argument', () => {
     // Not exercised by driving 4096 tasks — that would be a test of patience.
     // What is worth pinning is that the ceiling exists, is a whole number, and
@@ -1219,9 +1322,23 @@ describe('M2 slice 5 — the command surface', () => {
   }
 
   it('writes nothing without the grant', async () => {
+    // The registry must be USABLE here, and that is not a detail: a first draft
+    // of this case answered `NOT_REGISTERED`, which returns long before the
+    // grant is consulted, so removing the grant check entirely left it green.
+    // A mutation campaign found that — `M28-read-only-default-executes`
+    // survived — and the fix is to make the case actually reach the branch it
+    // claims to be about.
     let drove = 0;
     const program = commandFor({
-      loadRepositoryRegistry: () => Object.freeze({ state: 'NOT_REGISTERED' as const }),
+      loadRepositoryRegistry: () =>
+        Object.freeze({
+          state: 'REGISTERED' as const,
+          registryDigest: 'a'.repeat(64),
+          entries: Object.freeze([]),
+          maxConcurrentRepositories: 2,
+        }),
+      resolveRegisteredRepositories: async () =>
+        Object.freeze({ ok: true as const, repositories: Object.freeze([]) }),
       driveRepositories: (async () => {
         drove += 1;
         throw new Error('the read-only default must not reach the coordinator');
@@ -1229,7 +1346,10 @@ describe('M2 slice 5 — the command surface', () => {
     });
     const output = await runCli(program, ['repositories']);
     expect(drove).toBe(0);
-    expect(output).toContain('NOT_REGISTERED');
+    // The read-only report, and its own trailer — not the run one.
+    expect(output).toContain('NO_REPOSITORIES_REGISTERED');
+    expect(output).toContain('acts on nothing');
+    expect(output).not.toContain('Peak concurrency');
     process.exitCode = 0;
   });
 
@@ -1356,19 +1476,25 @@ describe('M2 slice 5 — scope', () => {
     join(process.cwd(), 'src', 'run', 'repository-coordinator.ts'),
     'utf8',
   )
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    .replace(BLOCK_COMMENT, ' ')
+    .replace(LINE_COMMENT, '$1');
 
   it('adds no scheduler, no persistence, no notification and no quota handling', () => {
     // Each of these is a later slice or an explicit non-goal. A structural pin
     // rather than a promise, because the promise is what goes stale.
     for (const forbidden of [
+      // Timers, in every spelling this runtime offers. A first draft banned
+      // three, and a review pointed out that `setImmediate` and
+      // `node:fs/promises` are the natural way to add the two banned things to
+      // an async module - so the pin measured less than its own title claimed.
       'setInterval',
       'setTimeout',
+      'setImmediate',
       'node:timers',
+      'node:fs',
+      'writeFile',
+      'readFile',
       'notify',
-      'writeFileSync',
-      'readFileSync',
       'cron',
       'quota',
       'backoff',
@@ -1387,14 +1513,417 @@ describe('M2 slice 5 — scope', () => {
   });
 
   it('takes no lease and starts no process itself', () => {
-    expect(coordinator).not.toContain('acquireRepositoryExecutionLease');
-    expect(coordinator).not.toContain('child_process');
-    expect(coordinator).not.toContain('start-owned-process');
+    // `runCommand` included, and that is the pin a review found missing on both
+    // this module and `repositories-command.ts`: a second execution chokepoint
+    // beside `driveLifecycle` is exactly the shape both headers forbid, and
+    // nothing anywhere turned red for it.
+    for (const forbidden of [
+      'acquireRepositoryExecutionLease',
+      'releaseRepositoryExecutionLease',
+      'child_process',
+      'start-owned-process',
+      'runCommand',
+    ]) {
+      expect(coordinator).not.toContain(forbidden);
+    }
+    const command = readFileSync(
+      join(process.cwd(), 'src', 'cli', 'repositories-command.ts'),
+      'utf8',
+    )
+      .replace(BLOCK_COMMENT, ' ')
+      .replace(LINE_COMMENT, '$1');
+    expect(command).not.toContain('runCommand');
+    expect(command).not.toContain('child_process');
   });
 
   it('leaves READY_FOR_PR terminal', async () => {
     const { getAllowedTransitions } = await import('../src/core/transitions.js');
     expect(getAllowedTransitions('READY_FOR_PR')).toEqual([]);
+  });
+});
+
+/* ─────────── 7. what the first round of review found missing ────────────── */
+
+describe('M2 slice 5 — the shared auth preflight is single-flight', () => {
+  it('gives every concurrent caller the one attempt’s answer, not null', async () => {
+    // The defect this case exists for was a BLOCKER, and it defeated the slice's
+    // first headline sentence on the only path an operator uses. The memo held a
+    // flag and a value and flipped the flag *before* awaiting, so a second
+    // caller arriving while the first was still in flight took the early return
+    // and got `null` — which this seam's contract reads as "the preflight
+    // produced no evidence". With capacity 2 exactly one repository ran; the
+    // other reported AUTH_PREFLIGHT_FAILED after taking and releasing a lease,
+    // and the report still said two were admitted.
+    let runs = 0;
+    const release = gate();
+    const preflight = onceOnlyPreflight(async () => {
+      runs += 1;
+      await release.wait;
+      return provenAuthEvidence();
+    });
+
+    // Three callers, all inside the one attempt's window.
+    const first = preflight();
+    const second = preflight();
+    const third = preflight();
+    release.open();
+    const answers = await Promise.all([first, second, third]);
+
+    expect(runs).toBe(1);
+    for (const answer of answers) expect(answer).not.toBeNull();
+    // And the same artefact, not three equal ones.
+    expect(answers[1]).toBe(answers[0]);
+    expect(answers[2]).toBe(answers[0]);
+
+    // The sequential contract is unchanged: a later call still gets the same
+    // answer and still starts nothing.
+    expect(await preflight()).toBe(answers[0]);
+    expect(runs).toBe(1);
+  });
+
+  it('remembers a failure rather than retrying it, for concurrent callers too', async () => {
+    let runs = 0;
+    const release = gate();
+    const preflight = onceOnlyPreflight(async () => {
+      runs += 1;
+      await release.wait;
+      return null;
+    });
+    const both = Promise.all([preflight(), preflight()]);
+    release.open();
+    expect(await both).toEqual([null, null]);
+    expect(await preflight()).toBeNull();
+    expect(runs).toBe(1);
+  });
+
+  it('drives every admitted repository when the real memo is in the way', async () => {
+    // The end-to-end shape of the blocker, through the coordinator with the
+    // production memo wired exactly as `repositories-command.ts` wires it.
+    // Before the fix this ended with one COMPLETED and one AUTH_PREFLIGHT_FAILED.
+    const alpha = makeRepository('alpha', ['A1']);
+    const beta = makeRepository('beta', ['B1']);
+    const repositories = [await registered(alpha), await registered(beta)];
+    let runs = 0;
+    const release = gate();
+    const seen: Array<ReturnType<typeof provenAuthEvidence> | null> = [];
+    const drive = (async (
+      _request: Parameters<typeof driveLifecycle>[0],
+      dependencies: Parameters<typeof driveLifecycle>[1],
+    ) => {
+      seen.push(await dependencies.authPreflight());
+      return lifecycleResult();
+    }) as unknown as typeof driveLifecycle;
+
+    const run = driveRepositories(
+      { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
+      {
+        now: (): string => new Date().toISOString(),
+        git: runGitCommand,
+        authPreflight: onceOnlyPreflight(async () => {
+          runs += 1;
+          await release.wait;
+          return provenAuthEvidence();
+        }),
+        driveLifecycle: drive,
+      },
+    );
+    // Both admissions are inside the memo before it answers.
+    await waitFor(() => seen.length === 0 && runs === 1, 10_000, 'the memo to be entered once');
+    release.open();
+    const result = await run;
+
+    expect(runs).toBe(1);
+    expect(seen).toHaveLength(2);
+    for (const evidence of seen) expect(evidence).not.toBeNull();
+    expect(result.admissions.every((entry) => entry.lifecycle?.outcome === 'COMPLETED')).toBe(true);
+  });
+});
+
+describe('M2 slice 5 — the coordinator establishes a domain per admission', () => {
+  it('gives each admitted lifecycle its own non-null execution domain', async () => {
+    // The single production line that closes the measured defect, pinned. A
+    // review found it covered by nothing: the register measurement above calls
+    // `runInOwnedLaunchDomain` itself, so dropping the wrap in `admit` would not
+    // have failed anything.
+    //
+    // Read at the driver, which is where a launch would be announced from.
+    const alpha = makeRepository('alpha', ['A1']);
+    const beta = makeRepository('beta', ['B1']);
+    const repositories = [await registered(alpha), await registered(beta)];
+    const domains: Array<object | null> = [];
+    const held = gate();
+    const drive = (async () => {
+      domains.push(currentOwnedLaunchDomain());
+      await held.wait;
+      return lifecycleResult();
+    }) as unknown as typeof driveLifecycle;
+
+    const run = driveRepositories(
+      { repositories, maxConcurrentRepositories: 2, maxSteps: 1, maxInvocations: 1 },
+      { ...BASE_DEPS, driveLifecycle: drive },
+    );
+    await waitFor(() => domains.length >= 2, 10_000, 'both admissions to enter the driver');
+    held.open();
+    await run;
+
+    expect(domains).toHaveLength(2);
+    // Non-null: the wrap happened at all.
+    for (const domain of domains) expect(domain).not.toBeNull();
+    // Distinct: it happened per admission rather than once for the run. One
+    // shared domain would put both repositories' launches in both registers,
+    // which is the defect with an extra step.
+    expect(domains[0]).not.toBe(domains[1]);
+    // And the domain does not leak out of the coordinator.
+    expect(currentOwnedLaunchDomain()).toBeNull();
+  });
+
+  it('carries the domain into a lifecycle that awaits before launching', async () => {
+    // The property `AsyncLocalStorage` is here for: a launch twelve frames and
+    // several awaits below the wrap is still that admission's.
+    const alpha = makeRepository('alpha', ['A1']);
+    const repositories = [await registered(alpha)];
+    let deep: object | null = null;
+    const drive = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      await Promise.resolve();
+      deep = await (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        return currentOwnedLaunchDomain();
+      })();
+      return lifecycleResult();
+    }) as unknown as typeof driveLifecycle;
+
+    await driveRepositories(
+      { repositories, maxConcurrentRepositories: 1, maxSteps: 1, maxInvocations: 1 },
+      { ...BASE_DEPS, driveLifecycle: drive },
+    );
+    expect(deep).not.toBeNull();
+  });
+});
+
+describe('M2 slice 5 — the admission ceiling', () => {
+  it('stops at MAX_COORDINATOR_ADMISSIONS and awaits what it started', async () => {
+    // Reachable without 4096 real tasks: the planner is a seam, so the ranking
+    // is handed in. One real repository, and one ranking entry per admission the
+    // ceiling allows plus one more.
+    const root = makeRepository('solo', ['T1']);
+    const only = await registered(root);
+    const repositories = [only];
+    const real = planAcrossRepositories(repositories);
+    const ranking = Array.from({ length: MAX_COORDINATOR_ADMISSIONS + 1 }, (_, index) =>
+      Object.freeze({
+        repositoryId: only.repository.id,
+        repositoryRoot: only.repository.root,
+        taskId: `T${String(index)}`,
+      }),
+    );
+    const plan: CrossRepositoryPlan = Object.freeze({ ...real, ranking: Object.freeze(ranking) });
+    const seam = recordingDrive();
+
+    const result = await driveRepositories(
+      { repositories, maxConcurrentRepositories: 1, maxSteps: 1, maxInvocations: 1 },
+      { ...BASE_DEPS, driveLifecycle: seam.drive, planAcrossRepositories: () => plan },
+    );
+
+    expect(result.outcome).toBe('ADMISSION_BUDGET_EXHAUSTED');
+    expect(result.reasonCodes).toEqual(['MAX_COORDINATOR_ADMISSIONS_REACHED']);
+    expect(result.admissions).toHaveLength(MAX_COORDINATOR_ADMISSIONS);
+    // Everything it started was awaited, and the ceiling is what stopped it —
+    // not an exception and not a silent end.
+    expect(seam.live.size).toBe(0);
+    // `EXIT_RUN_CALL_AGAIN`: progress was made and more may remain.
+    expect(exitCodeForCrossRepositoryRun(result)).toBe(5);
+  }, 120_000);
+
+  it('does not report the ceiling for a run that merely walked past it', async () => {
+    // The check sits after the `attempted` skip, so a candidate this run already
+    // drove consumes no budget. Before that ordering a finished run could tell a
+    // scheduler to call again.
+    const root = makeRepository('solo', ['T1', 'T2']);
+    const repositories = [await registered(root)];
+    const seam = recordingDrive();
+    const result = await driveRepositories(
+      { repositories, maxConcurrentRepositories: 1, maxSteps: 1, maxInvocations: 1 },
+      { ...BASE_DEPS, driveLifecycle: seam.drive },
+    );
+    expect(result.outcome).toBe('RUN_COMPLETE');
+    expect(result.reasonCodes).toEqual([]);
+  });
+});
+
+describe('M2 slice 5 — the exit code a shell branches on', () => {
+  function admission(
+    outcome: LifecycleResult['outcome'] | 'THREW',
+  ): { threw: boolean; lifecycle: { outcome: LifecycleResult['outcome']; start: null } | null } {
+    return outcome === 'THREW'
+      ? { threw: true, lifecycle: null }
+      : { threw: false, lifecycle: { outcome, start: null } };
+  }
+
+  const run = (
+    outcome: CrossRepositoryRunResult['outcome'],
+    planCode: CrossRepositoryRunResult['planCode'],
+    admissions: ReturnType<typeof admission>[],
+  ): Parameters<typeof exitCodeForCrossRepositoryRun>[0] => ({ outcome, planCode, admissions });
+
+  it.each([
+    ['every admission completed', 'RUN_COMPLETE', [admission('COMPLETED')], 0],
+    ['one needs an operator', 'RUN_COMPLETE', [admission('BLOCKED_VERIFY')], 3],
+    ['one was refused by a live owner', 'RUN_COMPLETE', [admission('LIVE_OWNER_PRESENT')], 4],
+    ['one has budget left', 'RUN_COMPLETE', [admission('INVOCATION_BUDGET_EXHAUSTED')], 5],
+    ['one threw', 'RUN_COMPLETE', [admission('THREW')], 1],
+    ['a bad bound', 'RUN_COMPLETE', [admission('INVOCATION_BUDGET_INVALID')], 2],
+  ] as const)('exits %s -> %i', (_name, outcome, admissions, code) => {
+    expect(exitCodeForCrossRepositoryRun(run(outcome, 'TASK_SELECTED', [...admissions]))).toBe(code);
+  });
+
+  it('folds several answers to the most demanding one, in a stated order', () => {
+    // The scenario a review named: repository A leaves a durable record a human
+    // has to look at (3), repository B is refused because somebody else holds
+    // its lease (4). Reporting 4 — "try later" — would leave A's record unread.
+    expect(
+      exitCodeForCrossRepositoryRun(
+        run('RUN_COMPLETE', 'TASK_SELECTED', [
+          admission('LIVE_OWNER_PRESENT'),
+          admission('BLOCKED_VERIFY'),
+        ]),
+      ),
+    ).toBe(3);
+    // And the whole ranking, worst first, each pair asserted rather than the
+    // list being asserted against itself.
+    const pairs: ReadonlyArray<readonly [LifecycleResult['outcome'] | 'THREW', LifecycleResult['outcome'] | 'THREW', number]> = [
+      ['THREW', 'BLOCKED_VERIFY', 1],
+      ['BLOCKED_VERIFY', 'INVOCATION_BUDGET_INVALID', 3],
+      ['INVOCATION_BUDGET_INVALID', 'LIVE_OWNER_PRESENT', 2],
+      ['LIVE_OWNER_PRESENT', 'INVOCATION_BUDGET_EXHAUSTED', 4],
+      ['INVOCATION_BUDGET_EXHAUSTED', 'COMPLETED', 5],
+    ];
+    for (const [worse, better, expected] of pairs) {
+      expect(
+        exitCodeForCrossRepositoryRun(
+          run('RUN_COMPLETE', 'TASK_SELECTED', [admission(worse), admission(better)]),
+        ),
+      ).toBe(expected);
+      // Order of the admissions must not decide it.
+      expect(
+        exitCodeForCrossRepositoryRun(
+          run('RUN_COMPLETE', 'TASK_SELECTED', [admission(better), admission(worse)]),
+        ),
+      ).toBe(expected);
+    }
+  });
+
+  it('grades a coordinator that admitted nothing and cannot say why as a defect', () => {
+    // Not reachable — a run that planned at all records the code — and graded as
+    // 1 rather than 0, because a coordinator with no answer has not answered.
+    expect(exitCodeForCrossRepositoryRun(run('NOTHING_ADMITTED', null, []))).toBe(1);
+  });
+});
+
+describe('M2 slice 5 — the operator’s report of a run', () => {
+  it('renders every admission, in admission order, and names an unreported one', () => {
+    const rendered = renderCrossRepositoryRun(
+      Object.freeze({
+        outcome: 'RUN_COMPLETE' as const,
+        planCode: 'TASK_SELECTED' as const,
+        capacity: 2,
+        passes: 3,
+        maxObservedConcurrency: 2,
+        reasonCodes: Object.freeze([]),
+        admissions: Object.freeze([
+          Object.freeze({
+            repositoryId: 'alpha',
+            repositoryRoot: 'C:\\repos\\alpha',
+            taskId: 'A1',
+            sequence: 1,
+            concurrencyAtAdmission: 1,
+            threw: false,
+            lifecycle: lifecycleResult('COMPLETED'),
+          }),
+          Object.freeze({
+            repositoryId: 'beta',
+            repositoryRoot: 'C:\\repos\\beta',
+            taskId: 'B1',
+            sequence: 2,
+            concurrencyAtAdmission: 2,
+            threw: true,
+            lifecycle: null,
+          }),
+        ]),
+      }) as unknown as CrossRepositoryRunResult,
+    );
+
+    expect(rendered).toContain('Capacity        : 2');
+    expect(rendered).toContain('Peak concurrency: 2');
+    expect(rendered).toContain('#1 alpha');
+    expect(rendered).toContain('A1');
+    expect(rendered).toContain('COMPLETED');
+    expect(rendered).toContain('#2 beta');
+    // An ending with no report is named as one rather than rendered as a dash.
+    expect(rendered).toContain('UNREPORTED');
+    expect(rendered).toContain('driving this task threw');
+    // Admission order in the text, not completion order.
+    expect(rendered.indexOf('#1 alpha')).toBeLessThan(rendered.indexOf('#2 beta'));
+    // The run trailer, not the read-only one.
+    expect(rendered).toContain('not offered here and were not taken');
+    expect(rendered).not.toContain('This report acts on nothing');
+  });
+
+  it('prints the run report and the run’s exit code through the command', async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+    registerRepositoriesCommand(program, {
+      loadRepositoryRegistry: () =>
+        Object.freeze({
+          state: 'REGISTERED' as const,
+          registryDigest: 'b'.repeat(64),
+          entries: Object.freeze([]),
+          maxConcurrentRepositories: 2,
+        }),
+      resolveRegisteredRepositories: async () =>
+        Object.freeze({ ok: true as const, repositories: Object.freeze([]) }),
+      driveRepositories: (async () =>
+        Object.freeze({
+          outcome: 'RUN_COMPLETE' as const,
+          planCode: 'TASK_SELECTED' as const,
+          capacity: 2,
+          passes: 2,
+          maxObservedConcurrency: 2,
+          reasonCodes: Object.freeze([]),
+          admissions: Object.freeze([
+            Object.freeze({
+              repositoryId: 'alpha',
+              repositoryRoot: 'C:\\repos\\alpha',
+              taskId: 'A1',
+              sequence: 1,
+              concurrencyAtAdmission: 2,
+              threw: false,
+              lifecycle: lifecycleResult('BLOCKED_VERIFY'),
+            }),
+          ]),
+        })) as unknown as typeof driveRepositories,
+    });
+
+    const out: string[] = [];
+    const original = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((text: string): boolean => {
+      out.push(String(text));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      await program.parseAsync(['repositories', '--attended'], { from: 'user' });
+    } finally {
+      process.stdout.write = original;
+    }
+
+    const output = out.join('');
+    expect(output).toContain('Run             : RUN_COMPLETE');
+    expect(output).toContain('BLOCKED_VERIFY');
+    // The shell answer an unattended caller branches on. A run whose only
+    // admission left a durable record for a human is 3, not 0.
+    expect(process.exitCode).toBe(3);
+    process.exitCode = 0;
   });
 });
 
@@ -1413,11 +1942,21 @@ async function settleMicrotasks(): Promise<void> {
  * assertion that follows one of these is about program order, and the timeout is
  * only here so a broken build fails instead of hanging.
  */
-async function waitFor(condition: () => boolean, timeoutMs = 10_000): Promise<void> {
+async function waitFor(
+  condition: () => boolean,
+  timeoutMs = 30_000,
+  what = 'an unnamed condition',
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (condition()) return;
-    if (Date.now() > deadline) throw new Error('condition did not hold within the budget');
+    if (Date.now() > deadline) {
+      // Named, because the alternative is a failure that says only "the budget
+      // ran out" - and in the register measurement below, a reader following
+      // this file's own comment would then diagnose "the instrument is blind"
+      // when the truth was "this box is slow".
+      throw new Error(`waited ${String(timeoutMs)}ms for ${what} and it did not hold`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
