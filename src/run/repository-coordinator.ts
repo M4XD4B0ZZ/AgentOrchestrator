@@ -326,6 +326,13 @@ function result(
 /**
  * Whether two absolute paths name the same thing.
  *
+ * Not called `samePath`, and the name is load-bearing rather than a preference:
+ * `tests/v2-02-remediation.test.ts` sweeps `src/` for modules that define a
+ * function of that name, because three copies of one containment chain once
+ * shipped under it. This is not that chain — it is one line of delegation to
+ * `core/path-identity.ts` — and taking the name would have added a module with
+ * nothing to do with containment to a list whose whole job is to be short.
+ *
  * `comparePathIdentity` rather than `===`, so the comparison is the one the
  * registry's own duplicate refusals and `core/path-identity.ts` make, and a
  * non-absolute operand is not silently equal to anything.
@@ -338,7 +345,7 @@ function result(
  * backwards here would exclude a repository nothing is running, and getting it
  * backwards there would admit two spellings of one.
  */
-function samePath(a: string, b: string): boolean {
+function sameCanonicalPath(a: string, b: string): boolean {
   return comparePathIdentity(a, b) === 'EQUAL';
 }
 
@@ -493,7 +500,7 @@ export async function driveRepositories(
       // The exclusion, and it is the whole of the second sentence this module is
       // answerable for. On the Git common directory — the lease's own key —
       // never on the root and never on `repository.id`.
-      if (active.some((held) => samePath(held.gitCommonDir, repository.gitCommonDir))) continue;
+      if (active.some((held) => sameCanonicalPath(held.gitCommonDir, repository.gitCommonDir))) continue;
 
       attempted.add(key);
       admitted += 1;
@@ -576,7 +583,7 @@ export async function driveRepositories(
  */
 function repositoryOf(plan: CrossRepositoryPlan, repositoryRoot: string): ResolvedRepository | null {
   for (const entry of plan.plans) {
-    if (samePath(entry.repository.root, repositoryRoot)) return entry.repository;
+    if (sameCanonicalPath(entry.repository.root, repositoryRoot)) return entry.repository;
   }
   return null;
 }

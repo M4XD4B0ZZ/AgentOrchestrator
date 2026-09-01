@@ -18,6 +18,9 @@
  *    controls sit next to their negatives throughout.
  */
 
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -1746,6 +1749,15 @@ describe('the operator sentences are pinned by literal, not by reading the map',
     // string would make every assertion hostage to where a sentence wraps.
     const flat = description.replace(/\s+/g, ' ');
 
+    // The one paragraph that calls itself exhaustive, isolated so the claims
+    // below are checked where the claim is made rather than anywhere in a
+    // 400-line description.
+    const networkStart = flat.indexOf('Network access, stated in full');
+    const networkEnd = flat.indexOf('Given none of the flags named above');
+    expect(networkStart).toBeGreaterThan(-1);
+    expect(networkEnd).toBeGreaterThan(networkStart);
+    const networkParagraph = flat.slice(networkStart, networkEnd);
+
     // Positive control, and stronger than the previous one: this reads the
     // description through `buildProgram()`, so a `.description(DESCRIPTION)`
     // that was deleted — which the old file-slice version could not have seen —
@@ -1776,9 +1788,45 @@ describe('the operator sentences are pinned by literal, not by reading the map',
       'notify.yaml',
       '`delivery --observe` starts the GitHub CLI',
       '`doctor` starts the agent CLIs',
-      '`run --attended`, `run --automatic-resume-only` and `block --attended`',
     ]) {
       expect(flat).toContain(claim);
+    }
+
+    // The fourth claim was a literal — `` `run --attended`, `run
+    // --automatic-resume-only` and `block --attended` `` — and it went stale
+    // exactly as this comment's own history predicted: M2 slice 5 registered
+    // `repositories --attended`, a fourth invocation that starts the agent CLIs,
+    // and the sentence still named three.
+    //
+    // So it is a rule now, bound to the code rather than to a memory. The
+    // property the sentence claims is *starts the agent CLIs*, and the thing
+    // that starts them is the auth preflight — so a command module that reaches
+    // `onceOnlyPreflight` or `runAuthPreflight` is exactly a command that does,
+    // and the paragraph headed "stated in full" must name an invocation of it.
+    //
+    // Deliberately NOT `--attended`, which is the obvious sweep and is wrong:
+    // five commands carry that flag and only three start an agent. `delivery
+    // --attended` grants three forge acts and `release --attended` removes a
+    // workspace; neither goes near a subscription CLI, and a rule that named
+    // them would be a fifth false version of this paragraph.
+    const commandsThatStartAgents = readdirSync(join(import.meta.dirname, '..', 'src', 'cli'))
+      .filter((file) => file.endsWith('-command.ts'))
+      .filter((file) => {
+        const code = readFileSync(join(import.meta.dirname, '..', 'src', 'cli', file), 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, ' ')
+          .replace(/(^|[^:])\/\/.*$/gm, '$1');
+        return /\b(onceOnlyPreflight|runAuthPreflight)\b/.test(code);
+      })
+      .map((file) => file.replace('-command.ts', ''))
+      .sort();
+
+    // Positive control: the sweep really finds commands, and it finds the ones
+    // this paragraph is about rather than every command in the directory.
+    expect(commandsThatStartAgents).toEqual(['block', 'repositories', 'run']);
+    for (const name of commandsThatStartAgents) {
+      // A named invocation, in backticks, inside the network paragraph itself —
+      // not merely the word somewhere in a 400-line description.
+      expect(new RegExp('`' + name + ' --[a-z-]+`').test(networkParagraph)).toBe(true);
     }
 
     // The client's own calls are disclosed on the flag's help (L-V4-02-6). A
