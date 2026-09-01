@@ -185,6 +185,12 @@ describe('discovery: the task source itself', () => {
       'TASK_FRONTMATTER_TOO_LARGE',
       'TASK_FRONTMATTER_FORBIDDEN_KEY',
       'TASK_DEFINITION_INVALID',
+      // M2 slice 4. A narrowing of the code above it, never a new admission:
+      // it is reported only on the branch where the contract has already
+      // refused the document. See
+      // `tests/m2-04-dependencies-and-priorities.test.ts` for the case that
+      // pins it does not fire for an ordinary contract violation.
+      'TASK_DEPENDENCY_CROSS_PROJECT',
       'TASK_ID_FILENAME_MISMATCH',
     ]);
   });

@@ -225,6 +225,23 @@ export interface CrossRepositoryPlan {
   readonly failedRepositoryRoot: string | null;
   /** On `REPOSITORY_UNPLANNABLE`, the planner's own closed code. */
   readonly planningCode: TaskPlanningFailureCode | null;
+  /**
+   * On `REPOSITORY_UNPLANNABLE`, the failing step's own static sentence.
+   *
+   * Carried because dropping it made this report say strictly less than the
+   * single-repository one about the same failure. `render-run-plan.ts` prints
+   * `<code> — <detail>`; before M2 slice 4 this path forwarded only the code,
+   * so an operator who ran `repositories` instead of `run` got the enum and
+   * nothing else — and for a dependency refusal the sentence *is* the policy.
+   * `TASK_DEPENDENCY_CROSS_PROJECT` without it is a name; with it, it says that
+   * dependencies are repository-local.
+   *
+   * Safe to carry for the reason `discover-tasks.ts` and `task-graph.ts` both
+   * give about their own details: every one is a constant written in this
+   * repository, and none interpolates a path, a filename, frontmatter text or
+   * an exception's message.
+   */
+  readonly planningDetail: string | null;
 }
 
 /**
@@ -287,6 +304,7 @@ function conclusion(
   ranking: readonly CrossRepositoryRankingEntry[],
   failedRepositoryRoot: string | null = null,
   planningCode: TaskPlanningFailureCode | null = null,
+  planningDetail: string | null = null,
 ): CrossRepositoryPlan {
   return Object.freeze({
     code,
@@ -295,6 +313,7 @@ function conclusion(
     ranking: Object.freeze(ranking),
     failedRepositoryRoot,
     planningCode,
+    planningDetail,
   });
 }
 
@@ -355,7 +374,15 @@ export function planAcrossRepositories(
       // Nothing is published: not this repository's plan, not the plans of the
       // repositories that already succeeded, and no ranking. A partial set is
       // what this refusal exists to withhold.
-      return conclusion('REPOSITORY_UNPLANNABLE', null, [], [], repository.root, planned.code);
+      return conclusion(
+        'REPOSITORY_UNPLANNABLE',
+        null,
+        [],
+        [],
+        repository.root,
+        planned.code,
+        planned.detail,
+      );
     }
 
     const selection = planned.selection;

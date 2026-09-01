@@ -469,6 +469,31 @@ dependsOn:
 ---
 ```
 
+**`dependsOn` ist repository-lokal.** Ein Eintrag benennt eine Task desselben
+Repositories oder gar nichts. Es gibt keine repository-übergreifende Auflösung,
+auch nicht bei mehreren registrierten Repositories: `agent-loop repositories`
+plant jedes Repository einzeln und führt nur die *Antworten* zusammen. Eine
+Task `shared`, die in Repository A auf `DONE` steht, erfüllt daher **nicht** ein
+`dependsOn: [shared]` in Repository B — dort zählt nur B's eigene `shared`.
+
+Zwei Schreibweisen, zwei verschiedene Refusals:
+
+| Eintrag | Code |
+| --- | --- |
+| `dependsOn: ["beta:auth-1"]`, `["beta/auth-1"]`, `["../beta/auth-1"]`, `['beta\auth-1']` | `TASK_DEPENDENCY_CROSS_PROJECT` — qualifizierte Referenz, wird nie aufgelöst |
+| `dependsOn: ["auth-1"]`, wenn `auth-1` nur im Nachbar-Repository existiert | `TASK_DEPENDENCY_UNKNOWN` — nicht von einem Tippfehler zu unterscheiden, und der Orchestrator rät nicht |
+
+Beide sind fail-closed und beide verweigern den **gesamten** Cross-Repository-Plan
+(`REPOSITORY_UNPLANNABLE`), nicht nur das betroffene Repository.
+
+**Achtung beim Backslash.** In YAML ist `\a` innerhalb *doppelter* Anführungszeichen
+die Escape-Sequenz für BELL (U+0007), nicht für `\` + `a`. `dependsOn: ["beta\auth-1"]`
+enthält also gar keinen Backslash und wird als gewöhnlicher Vertragsverstoss
+(`TASK_DEFINITION_INVALID`) abgelehnt — fail-closed, aber ohne die passende
+Begründung. Für einen echten Windows-Pfad einfache Anführungszeichen (`'beta\auth-1'`),
+einen Plain-Scalar (`beta\auth-1`) oder einen doppelten Backslash (`"beta\\auth-1"`)
+schreiben. Gemessen, nicht vermutet.
+
 Der Body sollte nur den Kontext enthalten, den der Coding-Agent wirklich braucht:
 
 1. präzises Ziel bzw. Defekt;

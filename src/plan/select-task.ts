@@ -33,8 +33,10 @@
  *      remaining elements then decide between them.
  *   3. **priority** — `HIGH`, `NORMAL`, `LOW`.
  *   4. **unlock count** — descending. Between two otherwise equal tasks, the
- *      one whose completion releases more blocked work goes first; that is the
- *      choice that keeps the most of the plan reachable.
+ *      one with more unfinished work downstream of it goes first. Read the
+ *      metric's own section below before relying on that: it is *not* the same
+ *      as "releases more blocked work", and the two differ on a graph this
+ *      build can be given.
  *   5. **id** — ascending, by UTF-16 code unit. The tie-breaker of last resort.
  *
  * The order of the first three is a judgement, and it is stated here rather
@@ -43,10 +45,39 @@
  * ── The unlock metric ──────────────────────────────────────────────────────
  *
  * `unlockCount` is the number of **distinct, not-yet-`DONE`** tasks that
- * transitively depend on this one. Transitive, because releasing a task that
- * releases a chain is worth more than releasing a leaf; distinct, because a
- * diamond must not count its tip twice; and not-yet-`DONE`, because finished
- * work cannot be released by anything.
+ * transitively depend on this one. Transitive, because a task that releases a
+ * chain is worth more than one that releases a leaf; distinct, because a
+ * diamond must not count its tip twice; and not-yet-`DONE`, because a finished
+ * task is not work anyone is waiting to do.
+ *
+ * ── It is a downstream count, and not a release count ──────────────────────
+ *
+ * Those two readings are the same on every graph whose `DONE` tasks are leaves,
+ * which is what a plan worked through in dependency order looks like. They come
+ * apart the moment a `DONE` task sits in the **middle** of a chain, and this
+ * says which one is implemented, because an earlier version of this paragraph
+ * asserted the other one and was measured false:
+ *
+ *     A (OPEN)  ──▶  B (DONE)  ──▶  C (OPEN)
+ *
+ * `C` is already eligible — its only dependency is `DONE` — so finishing `A`
+ * releases nothing at all. The walk below nevertheless counts `C`, because it
+ * does not stop at `B`: `B` is skipped from the *count* and still traversed
+ * *through*. So `unlockCount(A)` is 1, and it is 1 under the definition above
+ * — `C` is a not-yet-`DONE` task that transitively depends on `A` — while a
+ * "how much would finishing this release" reading would give 0.
+ *
+ * The downstream reading is the one this build ships and the one
+ * `tests/task-selection.test.ts` has pinned since V1-02. It is left alone here
+ * deliberately: which of two *runnable* tasks goes first is a preference, not a
+ * safety property — neither reading can make a blocked task eligible, and
+ * nothing about repository binding, containment or recovery depends on it — and
+ * changing a ranking a repository's plan has been written against is a decision
+ * that deserves its own slice rather than a side effect of correcting a
+ * sentence. What is fixed here is the sentence, which claimed a property the
+ * code does not have. The divergence is pinned by
+ * `tests/m2-04-dependencies-and-priorities.test.ts`, so it is now a stated
+ * choice rather than an accident.
  */
 
 import { compareTaskIds } from './task-id.js';
@@ -160,6 +191,13 @@ function compareRankingKeys(a: TaskRankingKey, b: TaskRankingKey): number {
  *
  * A breadth-first walk down the `dependents` edges with a visited set, so a
  * diamond counts its tip once and a long chain costs one visit per node.
+ *
+ * A `DONE` dependent is **skipped from the count and still walked through** —
+ * `queue.push` happens for every unvisited dependent, and only `unlocked += 1`
+ * is conditional. That one line is the whole difference between this metric and
+ * a "what would finishing this release" metric; the module header names the
+ * graph on which they disagree and says why the behaviour is not being changed
+ * here.
  */
 function countUnlocked(graph: NormalizedTaskGraph, taskId: string): number {
   const visited = new Set<string>([taskId]);

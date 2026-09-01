@@ -43,6 +43,27 @@
  * therefore *which* malformed file is reported first, is a property of the
  * repository rather than of the filesystem.
  *
+ * ── A dependency is repository-local, and that is a refusal ────────────────
+ *
+ * Every task this module returns was read out of **one** repository's task
+ * source, and `normalizeTaskGraph` resolves each `dependsOn` entry inside that
+ * one set. So a dependency names a task of the same repository or it names
+ * nothing: there is no cross-repository lookup here, and M2 slice 3 added none
+ * — `planAcrossRepositories` calls `planNextTask` once per repository and
+ * merges the *answers*, never the graphs.
+ *
+ * That locality was already enforced, and it was enforced anonymously. A
+ * qualified reference like `dependsOn: [beta:auth-1]` fails `TaskIdSchema`
+ * because the id grammar admits no `:`, `/` or `\`, and an unqualified
+ * reference to another repository's task fails `TASK_DEPENDENCY_UNKNOWN`
+ * because that id is not in this set. Both are fail-closed and neither could
+ * ever mis-resolve. What neither said is *why*: a refused cross-project
+ * dependency and a mistyped field arrived as one code, so an operator could not
+ * tell "this product does not offer that" from "you made a typo".
+ * `TASK_DEPENDENCY_CROSS_PROJECT` is that sentence, and it is a narrowing of
+ * `TASK_DEFINITION_INVALID` rather than a new admission — see
+ * {@link declaresQualifiedDependency}.
+ *
  * ── An empty directory is not a finished plan ──────────────────────────────
  *
  * A task source with no task files fails with `TASK_SOURCE_EMPTY`. This is the
@@ -71,7 +92,12 @@ import {
   type DirectoryRefusal,
   type ReadRefusal,
 } from '../repo/internal/contained-file.js';
-import { compareTaskIds, taskIdFromFileName, TASK_FILE_EXTENSION } from './task-id.js';
+import {
+  compareTaskIds,
+  isValidTaskId,
+  taskIdFromFileName,
+  TASK_FILE_EXTENSION,
+} from './task-id.js';
 import { readTaskFrontmatter } from './task-frontmatter.js';
 import { safeParseTaskDefinition, type TaskDefinition } from './task-definition.js';
 
@@ -131,6 +157,12 @@ export const TASK_DISCOVERY_FAILURE_CODES = [
   'TASK_FRONTMATTER_FORBIDDEN_KEY',
   /** The frontmatter parses but violates the task-definition contract. */
   'TASK_DEFINITION_INVALID',
+  /**
+   * A dependency reference names another project, not a task of this
+   * repository. A narrowing of `TASK_DEFINITION_INVALID` and never a weakening
+   * of it — see {@link declaresQualifiedDependency}.
+   */
+  'TASK_DEPENDENCY_CROSS_PROJECT',
   /** The frontmatter's `id` is not the filename's id. */
   'TASK_ID_FILENAME_MISMATCH',
 ] as const;
@@ -163,6 +195,9 @@ const FAILURE_DETAIL: Readonly<Record<TaskDiscoveryFailureCode, string>> = Objec
   TASK_FRONTMATTER_FORBIDDEN_KEY:
     'A task file’s frontmatter carries a mapping key this contract refuses by name.',
   TASK_DEFINITION_INVALID: 'A task file’s frontmatter does not satisfy the task-definition contract.',
+  TASK_DEPENDENCY_CROSS_PROJECT:
+    'A task file declares a dependency qualified by a project or a path. Dependencies are ' +
+    'repository-local: a task may depend only on a task the same repository declares.',
   TASK_ID_FILENAME_MISMATCH:
     'A task file’s declared identifier is not the identifier its filename states.',
 });
@@ -199,6 +234,55 @@ function failure(
     taskId,
     issueCount,
   });
+}
+
+/**
+ * The characters a dependency reference uses to name something that is not a
+ * task of this repository: a namespace (`beta:auth-1`) or a path
+ * (`beta/auth-1`, `..\beta\auth-1`).
+ *
+ * None of the three is in the task-id grammar, so a reference carrying one is
+ * *already* refused by `TaskIdSchema`. The set exists only to decide **which
+ * sentence** that refusal prints.
+ */
+const DEPENDENCY_QUALIFIER_PATTERN = /[:/\\]/;
+
+/**
+ * `true` when a refused frontmatter document refused *because* it named a
+ * dependency in another project.
+ *
+ * ── This function may only narrow a refusal, never grant one ───────────────
+ *
+ * It is called on one branch only — after `safeParseTaskDefinition` has already
+ * said no — and both of its outcomes are a refusal. That placement is the whole
+ * safety argument and it is deliberate: a check that ran *before* the contract
+ * could be made to answer "not cross-project" about a document the contract
+ * would also have refused, and the temptation would then be to continue. Here
+ * there is nothing to continue to.
+ *
+ * ── Why a legal id is excluded explicitly ──────────────────────────────────
+ *
+ * `isValidTaskId` is redundant today: no id admitted by the grammar contains
+ * `:`, `/` or `\`. It is written out anyway, so that a later widening of that
+ * grammar cannot make a *legal* local dependency start reporting itself as a
+ * cross-project reference. The narrowing has to stay attached to references the
+ * contract rejects.
+ *
+ * The input is the raw parsed YAML, so every field is `unknown` and is treated
+ * as such. A `dependsOn` that is not an array, or whose entries are not
+ * strings, is not this refusal's business — the contract has its own answer for
+ * those, and it has already given it.
+ */
+function declaresQualifiedDependency(document: unknown): boolean {
+  if (typeof document !== 'object' || document === null) return false;
+  const dependsOn = (document as { readonly dependsOn?: unknown }).dependsOn;
+  if (!Array.isArray(dependsOn)) return false;
+  return dependsOn.some(
+    (entry: unknown) =>
+      typeof entry === 'string' &&
+      !isValidTaskId(entry) &&
+      DEPENDENCY_QUALIFIER_PATTERN.test(entry),
+  );
 }
 
 /**
@@ -240,6 +324,16 @@ function readTaskFile(
 
   const parsed = safeParseTaskDefinition(frontmatter.data);
   if (!parsed.success) {
+    // Both arms refuse. The only thing decided here is which sentence the
+    // operator reads, and "you named a task in another project" is a different
+    // mistake from "you mistyped a field" — one is a policy this product does
+    // not offer, the other is a typo. Reporting them alike made the policy
+    // unreadable: `dependsOn: [beta:auth-1]` and `priority: URGENT` produced
+    // the same code, so an operator could not tell a refused *feature* from a
+    // refused *value*.
+    if (declaresQualifiedDependency(frontmatter.data)) {
+      return failure('TASK_DEPENDENCY_CROSS_PROJECT', expectedId, parsed.error.issues.length);
+    }
     return failure('TASK_DEFINITION_INVALID', expectedId, parsed.error.issues.length);
   }
   if (parsed.data.id !== expectedId) {
