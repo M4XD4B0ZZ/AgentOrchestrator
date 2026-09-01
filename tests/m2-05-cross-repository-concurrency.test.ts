@@ -96,6 +96,7 @@ import {
   exitCodeForCrossRepositoryRun,
 } from '../src/cli/run-exit-codes.js';
 import { provenAuthEvidence } from './helpers/auth-evidence.js';
+import { makeCanonicalTempDir } from './helpers/canonical-temp-dir.js';
 
 /* ─────────────────────────── fixtures ───────────────────────────────────── */
 
@@ -174,9 +175,8 @@ body
 
 /** A real Git repository with a profile and the named tasks. */
 function makeRepository(id: string, tasks: readonly string[]): string {
-  const raw = mkdtempSync(join(tmpdir(), 'ao-m2s5-'));
-  created.push(raw);
-  const root = realpathSync.native(raw);
+  const root = makeCanonicalTempDir('ao-m2s5-');
+  created.push(root);
   git(root, ['init', '-b', 'main', '--quiet']);
   write(root, '.gitattributes', '* -text\n');
   write(root, '.gitignore', '.agent-orchestrator/runtime/\n');
@@ -724,7 +724,13 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
     // command in this build still does — and REQUIRES the contamination to
     // appear. An instrument that cannot see the defect cannot be trusted to
     // report its absence.
-    const scratch = mkdtempSync(join(tmpdir(), 'ao-m2s5-sleeper-'));
+    // `makeCanonicalTempDir` and not a bare `mkdtempSync`, and the helper exists
+    // for exactly the failure this line caused on CI: a GitHub Actions Windows
+    // runner reports an 8.3 alias for the profile directory (`RUNNER~1`), and
+    // `SAFE_ARG_PATTERN` deliberately excludes `~` — so the product refused the
+    // sleeper's path as an argument, correctly, before this test's own subject
+    // was reached. It passed on a developer machine whose profile name is short.
+    const scratch = makeCanonicalTempDir('ao-m2s5-sleeper-');
     created.push(scratch);
     const sleeper = join(scratch, 'sleeper.cjs');
     writeFileSync(sleeper, 'setTimeout(function () {}, 2500);\n', 'utf8');
@@ -1306,9 +1312,9 @@ describe('M2 slice 5 — refusals and endings', () => {
 
 describe('M2 slice 5 — the capacity the operator writes down', () => {
   function profileDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'ao-m2s5-profile-'));
+    const dir = makeCanonicalTempDir('ao-m2s5-profile-');
     created.push(dir);
-    return realpathSync.native(dir);
+    return dir;
   }
 
   function readRegistry(body: string): ReturnType<typeof loadRepositoryRegistry> {

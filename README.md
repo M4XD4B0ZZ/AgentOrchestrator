@@ -219,11 +219,17 @@ npm run verify
 order: `schema:generate`, `typecheck`, `build`, `test:dist-doctor`,
 `test:dist-trusted-profile`, `test:dist-lease-race`, `test:dist-lease-release`,
 `test:dist-runtime-gate`, `test:dist-notify-egress`, `test:dist-boundary`,
-`test:foundation-safe`, `test:windows-tree-kill-tool-release`. `build` runs
-immediately before the seven dist artefact checks, so all of them always run
-against a fresh build, never a stale or missing one, and there is only ever one
-build per `verify` run. The two vitest gates run **sequentially**, in that order
-— the real-process harness never runs alongside the foundation set.
+`test:foundation-safe`, and then each heavy real-process file in a serial gate
+of its own. `build` runs immediately before the dist artefact checks, so all of
+them always run against a fresh build, never a stale or missing one, and there
+is only ever one build per `verify` run.
+
+The vitest gates run **sequentially**, in that order — a real-process harness
+never runs alongside the foundation set. *Which* files have their own gate is
+not listed here: this paragraph said "the two vitest gates" while there were
+three, having said "the two" while there were two and never been corrected when
+V4 slice 9 made it three. The set, and a measured reason for each entry, lives
+in `package.json` beside the scripts, which is where it is maintained.
 
 `build` itself now produces two artefacts: the TypeScript `dist/`, and
 `dist/native/ao-launch.exe`, the Windows launch boundary compiled from
@@ -288,15 +294,22 @@ negative cases assert that the lease report is **absent** from stdout, which is
 what proves the action never ran rather than merely that a message was printed.
 
 **`test:foundation-safe` is not "all tests", but it is the full regression
-set.** It runs every vitest file except one:
-`tests/windows-tree-kill-tool-release.test.ts`. That file is excluded (via
-vitest's `--exclude` flag) not because it is unstable, but because it drives
-real-process churn of its own — a child Node harness process per case plus a
-detached, deliberately surviving Node helper — which intermittently
-destabilised unrelated files running in parallel beside it (AO-008-S2-R1-F1).
-It runs in its own serial gate, `test:windows-tree-kill-tool-release`, with
-`--no-file-parallelism`, and never alongside the foundation set. Together the
-two gates cover every vitest file exactly once.
+set.** It runs every vitest file except the handful that are excluded (via
+vitest's `--exclude` flag) and given a serial gate of their own.
+
+None of them is excluded for being *unstable*. Each drives real-process churn —
+child processes, real Git repositories, real execution leases, real owned
+subprocesses — which intermittently destabilised unrelated files running in
+parallel beside it. The first was `tests/windows-tree-kill-tool-release.test.ts`
+(AO-008-S2-R1-F1); V4 slice 9 and M2 slice 5 each added one more, and each time
+the reason was a measurement rather than a suspicion: a file that passed on
+`main` and failed beside the new one.
+
+Each excluded file runs in full, on its own, with `--no-file-parallelism`, and
+never alongside the foundation set. Together the gates cover every vitest file
+exactly once. The list is in `package.json`, with the measurement that put each
+entry there — deliberately not duplicated here, because this paragraph has
+already been wrong about the count once.
 
 `tests/exec.test.ts` — the real exec-lifecycle suite — is **no longer
 excluded**. It is a regular part of `test:foundation-safe`, and therefore of
@@ -319,12 +332,14 @@ npm run schema:generate     # regenerate schemas/task-state.schema.json from Zod
 npm run typecheck           # tsc --noEmit, strict
 npm test                    # vitest, unrestricted — every file, including the
                              # real-process tool-release harness, in one run
-npm run test:foundation-safe  # vitest, excluding only the tool-release harness —
+npm run test:foundation-safe  # vitest, excluding the heavy real-process files —
                                # the set `verify` runs first
+npm run test:m2-05-cross-repository-concurrency
+npm run test:v4-09-post-merge-verification
 npm run test:windows-tree-kill-tool-release
-                              # the real-process tool-release harness on its own,
-                              # serially (--no-file-parallelism); the gate
-                              # `verify` runs last
+                              # each excluded file on its own, serially
+                              # (--no-file-parallelism); the gates `verify` runs
+                              # after the foundation set
 npm run build                # emit dist/ (Node-executable CLI) and the native
                              # launch boundary, dist/native/ao-launch.exe
 npm run build:boundary       # only the native launch boundary

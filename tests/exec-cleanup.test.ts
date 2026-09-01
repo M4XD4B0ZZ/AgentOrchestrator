@@ -2,13 +2,18 @@
  * AO-008-S1-R1: the teardown contract of `tests/exec.test.ts`, proven on its own.
  *
  * `tests/exec.test.ts` starts real, deliberately unkillable child processes, and
- * it is a regular part of `test:foundation-safe` — the gate two files are
- * excluded from, each running serially in its own afterwards:
- * `tests/windows-tree-kill-tool-release.test.ts`, and, since V4 slice 9,
- * `tests/v4-09-post-merge-verification.test.ts`. (This said "only" the first
- * until that slice added the second; the count is in `package.json`'s own
- * comment, which is where it is maintained.) Its *teardown* is what makes that
- * safe, so the
+ * it is a regular part of `test:foundation-safe` — the gate that the heaviest
+ * real-process files are excluded from, each running serially in its own gate
+ * afterwards.
+ *
+ * Which files those are is **not** stated here, and the reason is this sentence's
+ * own history: it said "only one" until V4 slice 9 added a second, then "two"
+ * until M2 slice 5 added a third, and each time the count was corrected by the
+ * slice that had already falsified it. The set lives in `package.json`, beside
+ * the scripts, with a measured reason per exclusion — one place, maintained
+ * where the change is made.
+ *
+ * Its *teardown* is what makes that safe, so the
  * teardown lives in an injectable registry and is asserted here — with mocked
  * filesystem, process and timer seams, and never against a real foreign PID.
  * Two findings are locked down:
