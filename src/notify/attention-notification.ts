@@ -47,6 +47,7 @@
  */
 
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
+import type { RunAttentionReason } from '../core/run-attention.js';
 import type { AttentionReason } from '../core/task-attention.js';
 import type { TaskStateName } from '../core/states.js';
 import type { UsageLimitContinuationReading } from '../core/usage-limit-continuation.js';
@@ -55,15 +56,39 @@ import { loadNotificationConfig, type NotificationConfig } from './notify-config
 import type { TransportResult } from './notification.js';
 import { createNtfyAttentionTransport } from './ntfy-transport.js';
 
-/** Everything that goes on the wire for one open item. Nothing else, ever. */
+/**
+ * Everything that goes on the wire for one open item. Nothing else, ever.
+ *
+ * The two subjects are one payload shape rather than two, and the fields that
+ * belong to only one of them are `null` on the other. A transport that had to
+ * branch on the subject to know which fields exist would be a second place the
+ * record's shape is encoded; keeping one shape means a new subject is a value
+ * change here and not a new code path in every notifier.
+ *
+ * `subject` is on the wire because the reader needs it: "no task id" is not a
+ * self-describing statement about a repository-wide condition, and a message
+ * that simply omitted the field would read as a truncated task message.
+ */
 export interface AttentionPush {
   /** The identity of the item, so two messages about one thing are recognisable. */
   readonly attentionId: string;
+  /** Which kind of thing this item is about. */
+  readonly subject: AttentionRecord['subject'];
   /** The repository's *declared* identity. Never its root, never a path. */
   readonly repositoryId: string;
-  readonly taskId: string;
-  readonly state: TaskStateName;
-  readonly reason: AttentionReason;
+  /** The task, or `null` for a condition that belongs to the repository. */
+  readonly taskId: string | null;
+  /** The task's state, or `null` for a repository condition. */
+  readonly state: TaskStateName | null;
+  /**
+   * The lifecycle outcome, or `null` for a task item.
+   *
+   * Closed vocabulary in both directions: a `RunCondition` is a member of a
+   * fixed list, and `RUN_THREW` is the *name* of a throw rather than anything
+   * the throw said. No exception text reaches this payload.
+   */
+  readonly condition: string | null;
+  readonly reason: AttentionReason | RunAttentionReason;
   readonly detail: UsageLimitContinuationReading | null;
   readonly reportedResetAt: string | null;
   /** The one sentence saying what the operator has to do. */
@@ -81,11 +106,30 @@ export type AttentionTransport = (notification: AttentionPush) => Promise<Transp
  * make the next durable field an egress decision nobody made.
  */
 export function attentionPushFor(record: AttentionRecord): AttentionPush {
+  // Switched on the discriminant rather than read with `?.`, so that a field
+  // added to one subject and not the other is a compile error here instead of
+  // an `undefined` on the wire.
+  if (record.subject === 'REPOSITORY') {
+    return Object.freeze({
+      attentionId: record.attentionId,
+      subject: record.subject,
+      repositoryId: record.repositoryId,
+      taskId: null,
+      state: null,
+      condition: record.condition,
+      reason: record.reason,
+      detail: null,
+      reportedResetAt: null,
+      action: record.action,
+    });
+  }
   return Object.freeze({
     attentionId: record.attentionId,
+    subject: record.subject,
     repositoryId: record.repositoryId,
     taskId: record.taskId,
     state: record.state,
+    condition: null,
     reason: record.reason,
     detail: record.detail,
     reportedResetAt: record.reportedResetAt,

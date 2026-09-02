@@ -18,9 +18,10 @@
  * an ordinary `repositories --attended` still enumerates no runtime directory
  * and still prints the report it always printed, graded by the same codes.
  *
- * No authority was added. Every admission still runs under the ordinary attended
- * grant with all four destructive permissions `false`; the wait changes *when*
- * passes happen and nothing about what a pass may do.
+ * No authority was added by M3-01. Every admission runs under the ordinary
+ * attended grant; the wait changes *when* passes happen and nothing about what a
+ * pass may do. (M4 changed one of the four permissions the admission carries —
+ * see "The one that moved" below — and it was not this slice that changed it.)
  *
  * The scheduler is the only place in this build that installs a process signal
  * handler, and it does so only for an invocation that can sleep. See
@@ -94,12 +95,40 @@
  * used to carry — that no path exists from a selector to execution — is retired
  * rather than quietly left standing.
  *
- * What is *not* dropped is the rule that sentence was protecting. The three
- * grants that authorise a destructive departure — `--recover-stale-lease`,
- * `--remediate-verify-failure`, `--continue-human-decision` — are not options on
- * this command and are passed as `false` on every admission. A selector may
- * choose what to start; it may still not choose the subject of a destructive
- * act, and that is the half of the old rule that was load-bearing.
+ * What is *not* dropped is the rule that sentence was protecting.
+ * `--remediate-verify-failure`, `--continue-human-decision` and
+ * `--continue-usage-limit` are not options on this command and are passed as
+ * `false` on every admission. A selector may choose what to start; it may still
+ * not choose the subject of a decision that **departs from what the record
+ * says**, and that is the half of the old rule that was load-bearing.
+ *
+ * ── The one that moved, and why it is not the same kind of thing (M4) ──────
+ *
+ * This paragraph used to name a fourth, `--recover-stale-lease`, and say it was
+ * passed `false` too. It is now passed `true`, and the reason it does not belong
+ * beside the other three is the difference between removing an object and
+ * departing from a record.
+ *
+ * The three above each overrule something durable: a verification the record
+ * calls failed, a decision the record reserved for a human, a quota decision
+ * only a human may spend. Stale-lease recovery overrules nothing. It removes an
+ * object every available instrument has just proven dead — and if any instrument
+ * cannot prove it, it removes nothing and the repository is skipped exactly as
+ * before. There is no world in which it takes a lease from a live owner, because
+ * `SAFE_TO_RECOVER` is the only verdict that reaches the removal and the
+ * processes it names are re-probed at the removal itself.
+ *
+ * What made it necessary is `L-M3-F-1`: a recurring invocation whose own
+ * predecessor died inside a pass met that predecessor's lease, naming a dead
+ * pid, and refused that repository on **every cycle for as long as its budget
+ * lasted**. The repository was recoverable the whole time, by a command taking
+ * no attendance flag and no operator input — and nothing in AgentOrchestrator
+ * called it. That is a scheduler doing nothing for days about a condition it
+ * could have cleared in one call, which is the shape of `U1` for unattended use.
+ *
+ * There is still no `--recover-stale-lease` option here, and `M2-05` pins its
+ * absence. An option would make self-recovery something an operator has to
+ * remember to switch on, which is the opposite of the property being bought.
  *
  * The other retired sentence is about accounting. This header used to note that
  * holding no lease keeps "nothing in this build holds two leases in one process"
@@ -151,6 +180,7 @@ import {
   pushAttentionItems,
   type AttentionNotifier,
 } from '../notify/attention-notification.js';
+import { RUN_THREW, type RunCondition } from '../core/run-attention.js';
 import { settleAttention } from '../notify/attention-outbox.js';
 import { renderAttention, type AttentionReport } from './render-attention.js';
 import {
@@ -225,11 +255,18 @@ const DESCRIPTION = [
   'next task ranks first therefore does not stall the others, and no repository’s own task order',
   'is reinterpreted.',
   '',
-  'Only the ordinary attended grant is available here. Recovering a stale lease, continuing a',
-  'BLOCKED_VERIFY task and continuing a HUMAN_DECISION_REQUIRED task each authorise a',
-  'destructive departure and stay bound to a repository named on the command line with',
+  'Only the ordinary attended grant is available here. Continuing a BLOCKED_VERIFY task,',
+  'continuing a HUMAN_DECISION_REQUIRED task and spending a quota decision each depart from what',
+  'a durable record says, and stay bound to a repository named on the command line with',
   '`agent-loop run --repository <path>`: a selector may choose what starts and may not choose',
   'the subject of one of those.',
+  '',
+  'A stale execution lease is the exception, and it is not one of those. A lease whose owner',
+  'this build can prove dead — every owned launch accounted for, and every process they name',
+  'gone, re-checked at the moment of removal — is cleared automatically, because a lease left by',
+  'this command’s own crashed predecessor would otherwise make it skip that repository on every',
+  'cycle. Anything it cannot prove dead is left exactly where it is and that repository is',
+  'skipped for this pass. There is no option for this and it is not something you switch on.',
   '',
   'With --wait-for-reset it keeps going across quota resets. After every pass — whatever that',
   'pass came to — it reads every enlisted repository’s durable task states, takes the soonest',
@@ -452,12 +489,41 @@ export async function reportRepositories(
     ? (seams.attentionNotifier ?? createAttentionNotifier())
     : null;
 
-  const observePass = async ({ repositories: driven }: PassObservation): Promise<void> => {
+  const observePass = async ({ run, repositories: driven }: PassObservation): Promise<void> => {
     if (notifier === null) return;
+
+    // ── how the pass ended, per repository (`U3`, `L-M3-F-3`) ─────────────
+    //
+    // The coordinator already carries this and the outbox never asked for it,
+    // which is the whole of `L-M3-F-3`: the scan reads durable task states, and
+    // the conditions that keep a repository from running leave no task state at
+    // all. A lease that could not be taken, a gate that refused before any work,
+    // a driver that threw — every one of them was, until here, visible only on a
+    // console that a recurring invocation prints nothing to until it ends.
+    //
+    // Keyed on `repositoryRoot`, because that is what an admission records and
+    // what the lease itself keys on: two clones declare one id and are two
+    // execution domains, so keying on the declared id would merge them.
+    const conditions = new Map<string, RunCondition[]>();
+    for (const admission of run.admissions) {
+      // `threw` first. An admission that threw has `lifecycle: null` — there is
+      // no outcome, which is exactly the condition `RUN_THREW` names — and
+      // reading the outcome first would find nothing and say nothing, which is
+      // the half of `U3` about exceptions.
+      const condition: RunCondition | null = admission.threw
+        ? RUN_THREW
+        : (admission.lifecycle?.outcome ?? null);
+      if (condition === null) continue;
+      const open = conditions.get(admission.repositoryRoot);
+      if (open === undefined) conditions.set(admission.repositoryRoot, [condition]);
+      else open.push(condition);
+    }
+
     const settlement = (seams.settleAttention ?? settleAttention)(
       driven.map((entry) => ({
         repositoryId: entry.repository.id,
         repositoryRoot: entry.repository.root,
+        conditions: conditions.get(entry.repository.root) ?? [],
       })),
       new Date().toISOString(),
     );

@@ -826,7 +826,7 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
       [`${alpha}::A1`, `${beta}::B1`].sort(),
     );
     // The rule the command's help states: only the ordinary attended grant, and
-    // every one-use or destructive decision refused on every admission.
+    // every decision that departs from the record refused on every admission.
     //
     // `continueUsageLimit` is here because it was NOT, and a counter-proof
     // measured the cost. M2 slice 6 added that flag and this list was not
@@ -836,10 +836,18 @@ describe('M2 slice 5 — different repositories execute concurrently', () => {
     // principle rather than in code: the coordinator now runs unattended across
     // days rather than for one invocation. An exhaustive list only measures
     // while it stays exhaustive.
+    //
+    // `recoverStaleLease` moved to `true` in the M4 completion slice and is the
+    // one member of this object that is *not* of that shape. The other three
+    // depart from what the record says; recovery removes an object proven dead
+    // and departs from nothing, and refusing it left a recurring run skipping
+    // its own predecessor's repository on every cycle (`L-M3-F-1`). It is
+    // asserted by value here, beside the three that must stay `false`, so that
+    // flipping any of *them* still turns this red.
     for (const entry of seen) {
       expect(entry.grants).toEqual({
         continuationGrant: 'ATTENDED',
-        recoverStaleLease: false,
+        recoverStaleLease: true,
         remediateVerifyFailure: false,
         continueHumanDecision: false,
         continueUsageLimit: false,

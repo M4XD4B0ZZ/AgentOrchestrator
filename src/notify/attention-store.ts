@@ -88,6 +88,11 @@ import { z } from 'zod';
 
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { safeErrnoCode } from '../core/safe-error.js';
+import {
+  RUN_ATTENTION_JUDGED_CONDITIONS,
+  RUN_ATTENTION_REASONS,
+  type RunAttentionReason,
+} from '../core/run-attention.js';
 import { ATTENTION_REASONS, type AttentionReason } from '../core/task-attention.js';
 import { ALL_STATES, type TaskStateName } from '../core/states.js';
 import { USAGE_LIMIT_CONTINUATION_READINGS } from '../core/usage-limit-continuation.js';
@@ -114,12 +119,35 @@ export const ATTENTION_RECORD_VERSION = 1;
  */
 export const MAX_ATTENTION_RECORD_BYTES = 8192;
 
-const AttentionRecordSchema = z
+/**
+ * The fields both subjects carry, and they mean the same thing in both.
+ *
+ * Split out rather than repeated so that "every record names a repository, an
+ * id, a reason, an instant and an action" is one statement in one place. A
+ * second copy is how the two halves start disagreeing about `observedAt`.
+ */
+const commonFields = {
+  attentionVersion: z.literal(ATTENTION_RECORD_VERSION),
+  attentionId: z.string().regex(/^[0-9a-f]{32}$/),
+  repositoryId: z.string().min(1),
+  repositoryRoot: z.string().min(1),
+  /** When this item was first written down. Not part of the identity. */
+  observedAt: z.string().min(1),
+  action: z.string().min(1),
+} as const;
+
+/**
+ * A record about one **task**, unchanged from M3-02 down to the field names.
+ *
+ * `subject` is new and is the only addition. It is not redundant with the
+ * presence of `taskId`: a reader that decided the kind by sniffing which
+ * optional fields were present would be inferring the contract instead of
+ * reading it, and the first record that gained a field would break the sniff.
+ */
+const TaskAttentionRecordSchema = z
   .object({
-    attentionVersion: z.literal(ATTENTION_RECORD_VERSION),
-    attentionId: z.string().regex(/^[0-9a-f]{32}$/),
-    repositoryId: z.string().min(1),
-    repositoryRoot: z.string().min(1),
+    ...commonFields,
+    subject: z.literal('TASK'),
     taskId: z.string().min(1),
     state: z.enum(ALL_STATES),
     reason: z.enum(ATTENTION_REASONS),
@@ -128,12 +156,38 @@ const AttentionRecordSchema = z
     stateEnteredAt: z.string().min(1),
     /** The reset the diagnosis mentions, when there is one. */
     reportedResetAt: z.string().min(1).nullable(),
-    /** When this item was first written down. Not part of the identity. */
-    observedAt: z.string().min(1),
-    action: z.string().min(1),
   })
   .strict();
 
+/**
+ * A record about a **repository**, for a condition no task record was written
+ * for (`U3`, `L-M3-F-3`).
+ *
+ * It carries no `taskId` and no `state` — not `null` versions of them, no field
+ * at all — because `.strict()` then makes "a repository record that names a task
+ * state" unrepresentable rather than merely discouraged. That is the same reason
+ * `core/task-attention.ts` discriminates its judgement instead of pairing a
+ * disposition with an optional action.
+ *
+ * `condition` is the exact lifecycle outcome, or `RUN_THREW`. It is closed
+ * vocabulary, never a message: an exception's text is not a document field.
+ */
+const RepositoryAttentionRecordSchema = z
+  .object({
+    ...commonFields,
+    subject: z.literal('REPOSITORY'),
+    condition: z.enum(RUN_ATTENTION_JUDGED_CONDITIONS as readonly [string, ...string[]]),
+    reason: z.enum(RUN_ATTENTION_REASONS),
+  })
+  .strict();
+
+const AttentionRecordSchema = z.discriminatedUnion('subject', [
+  TaskAttentionRecordSchema,
+  RepositoryAttentionRecordSchema,
+]);
+
+export type TaskAttentionRecord = z.infer<typeof TaskAttentionRecordSchema>;
+export type RepositoryAttentionRecord = z.infer<typeof RepositoryAttentionRecordSchema>;
 export type AttentionRecord = z.infer<typeof AttentionRecordSchema>;
 
 /** Every way writing one record can end. A closed set. */

@@ -50,6 +50,7 @@ import { readdirSync } from 'node:fs';
 
 import { OS_PATH_PROVIDER, type PathProvider } from '../config/internal/path-provider.js';
 import { safeErrnoCode } from '../core/safe-error.js';
+import { attentionForRunCondition, type RunCondition } from '../core/run-attention.js';
 import { attentionForTaskState } from '../core/task-attention.js';
 import { compareTaskIds } from '../plan/task-id.js';
 import {
@@ -65,7 +66,10 @@ import {
   type AttentionRecord,
   type AttentionWriteCode,
 } from './attention-store.js';
-import { attentionIdFor } from './internal/attention-location.js';
+import {
+  attentionIdFor,
+  repositoryAttentionIdFor,
+} from './internal/attention-location.js';
 
 /**
  * A repository this scan may look at.
@@ -78,6 +82,23 @@ import { attentionIdFor } from './internal/attention-location.js';
 export interface AttentionSubject {
   readonly repositoryId: string;
   readonly repositoryRoot: string;
+  /**
+   * How the pass that is settling this outbox **ended** for this repository, if
+   * it drove it at all (`U3`, `L-M3-F-3`).
+   *
+   * The second source, and the reason it rides on the subject rather than
+   * arriving as a separate list: removal is scoped to the repositories this scan
+   * read, and a condition that arrived through a different door would either
+   * escape that scoping or need a second copy of it. One list, one scope.
+   *
+   * Optional, and absent is not the same as empty. A caller that passes nothing
+   * — every caller before this slice, and every caller that is not a coordinator
+   * pass — gets exactly the M3-02 behaviour: task states, and nothing else.
+   *
+   * Usually empty or one member. It is a list because one admission can end once
+   * and a repository can be admitted more than once in a pass.
+   */
+  readonly conditions?: readonly RunCondition[];
 }
 
 /** Anything the scan could not read. Diagnostic; never a failure. */
@@ -146,16 +167,35 @@ function taskIdOf(fileName: string): string {
 }
 
 /**
- * Ascending by repository root, then by task id. Total.
+ * Ascending by repository root, then repository items before task items, then
+ * by task id. Total.
  *
  * Total for the reason `durable-wake.ts` gives about its own comparator: within
  * one repository the names are read in **file-name** order, which is not the
  * order of the ids they carry, and a report whose order came from the
  * filesystem is a report nobody can pin.
+ *
+ * A repository item sorts **before** that repository's task items, and the order
+ * is a judgement rather than a convenience: an item saying the lease could not
+ * be taken explains why the task items beneath it have stopped moving, and a
+ * reader who meets the explanation first does not have to reconstruct it. Ties
+ * inside one repository cannot happen — one condition is one record, and the
+ * digest is the condition — so this comparator never has to break one.
  */
 function compareItems(a: AttentionItem, b: AttentionItem): number {
   if (a.record.repositoryRoot !== b.record.repositoryRoot) {
     return a.record.repositoryRoot < b.record.repositoryRoot ? -1 : 1;
+  }
+  if (a.record.subject !== b.record.subject) {
+    return a.record.subject === 'REPOSITORY' ? -1 : 1;
+  }
+  if (a.record.subject !== 'TASK' || b.record.subject !== 'TASK') {
+    // Two repository items for one repository: ordered by the condition they
+    // name, which is closed vocabulary and therefore stable across runs.
+    const left = a.record.subject === 'REPOSITORY' ? a.record.condition : '';
+    const right = b.record.subject === 'REPOSITORY' ? b.record.condition : '';
+    if (left === right) return 0;
+    return left < right ? -1 : 1;
   }
   return compareTaskIds(a.record.taskId, b.record.taskId);
 }
@@ -182,6 +222,40 @@ export function scanAttention(
   let statesRead = 0;
 
   for (const subject of subjects) {
+    // ── the pass's own ending, judged first and deliberately so ───────────
+    //
+    // Before the durable read, and *outside* every branch that `continue`s out
+    // of it. The condition this exists to announce is a repository nothing could
+    // run in, and a repository nothing has ever run in has **no runtime
+    // directory** — so judging these after the read would drop exactly the case
+    // `U3` is about: the first cycle of the first day, the lease unreachable, no
+    // task record anywhere, and nothing said.
+    //
+    // De-duplicated within the pass, because two admissions of one repository
+    // that ended the same way are one condition and would otherwise derive the
+    // same identity twice and race themselves for the same file name.
+    for (const condition of new Set(subject.conditions ?? [])) {
+      const judgement = attentionForRunCondition(condition);
+      if (!judgement.attention) continue;
+      items.push({
+        record: Object.freeze({
+          attentionVersion: 1 as const,
+          attentionId: repositoryAttentionIdFor({
+            repositoryRoot: subject.repositoryRoot,
+            condition,
+            reason: judgement.reason,
+          }),
+          subject: 'REPOSITORY' as const,
+          repositoryId: subject.repositoryId,
+          repositoryRoot: subject.repositoryRoot,
+          condition,
+          reason: judgement.reason,
+          observedAt: now,
+          action: judgement.action,
+        }),
+      });
+    }
+
     /** Whether this repository's durable state was read in full. See `settled`. */
     let complete = true;
     let names: readonly string[];
@@ -233,6 +307,7 @@ export function scanAttention(
         record: Object.freeze({
           attentionVersion: 1 as const,
           attentionId,
+          subject: 'TASK' as const,
           repositoryId: subject.repositoryId,
           repositoryRoot: subject.repositoryRoot,
           taskId: state.taskId,

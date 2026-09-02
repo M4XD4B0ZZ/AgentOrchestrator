@@ -628,16 +628,47 @@ function admit(
         taskId,
         // The grant, and only this one. `run --attended` means an operator
         // started this foreground process and can stop it, and that is exactly
-        // what is true here. The three grants that authorise a *destructive*
-        // departure — stale-lease recovery, verify remediation and continuing a
-        // human decision — are not offered by the command that reaches this and
-        // are hard-refused here, so a selector can never become the subject of
-        // one.
+        // what is true here. The grants that authorise a *destructive departure
+        // from the record* — verify remediation and continuing a human decision,
+        // and beside them the one-use quota decision — are not offered by the
+        // command that reaches this and are hard-refused here, so a selector can
+        // never become the subject of one.
         continuationGrant: 'ATTENDED',
         remediateVerifyFailure: false,
         continueHumanDecision: false,
         continueUsageLimit: false,
-        recoverStaleLease: false,
+        // Stale-lease recovery is the one that changed, and it is a
+        // product-contract decision rather than a widening of the paragraph
+        // above (`L-M3-F-1`, closed here).
+        //
+        // The three refusals beside it share a shape this one does not have:
+        // each of them *departs from what the record says* — it remediates a
+        // verification the record calls failed, continues a decision the record
+        // reserved for a human, or spends a quota decision only a human may
+        // spend. Recovery departs from nothing. It removes an object every
+        // available instrument has just proven dead, and the module that does it
+        // says so: "Recovery grants nothing. `recoverStaleLease` removes a dead
+        // object". The acquisition that follows is the ordinary one, subject to
+        // every gate that stood before it.
+        //
+        // Why it must be here rather than behind an option: the condition it
+        // answers is a *predecessor of this very loop* dying inside a pass. The
+        // lease then names a dead pid, and until M3 the successor refused that
+        // repository on every cycle for as long as its budget lasted — a
+        // multi-day run doing nothing, for a repository nothing was wrong with.
+        // An option would make self-recovery something an operator switches on,
+        // which is the opposite of the property being bought; and `M2-05` pins
+        // that no `--recover-stale-lease` flag exists, deliberately.
+        //
+        // What keeps it safe is that `recoverStaleLease` is fail-closed and
+        // stays fail-closed: it removes nothing unless the assessment answers
+        // `SAFE_TO_RECOVER`, which requires the owner gone, every owned launch
+        // in the register accounted for, and the processes those launches name
+        // re-probed *at the removal* rather than earlier. Anything less refuses
+        // and this repository is skipped this cycle, exactly as before. A live
+        // owner, an undetermined liveness and an open subprocess are all still
+        // "leave it alone".
+        recoverStaleLease: true,
         maxSteps: request.maxSteps,
         maxInvocations: request.maxInvocations,
       },

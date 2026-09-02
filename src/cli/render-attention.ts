@@ -71,23 +71,47 @@ export const ATTENTION_PUSH_SENTENCES = {
     'a send is never retried.',
 } as const;
 
+/**
+ * One item, printed.
+ *
+ * Two shapes, because the two subjects are two different things to say. A
+ * repository item is headed by the repository alone and has no `state` and no
+ * `since`: it is a condition of the repository *now*, and there is no instant it
+ * entered — inventing one out of `observedAt` would print the time this
+ * invocation looked as though it were the time the condition began.
+ *
+ * The tail rows are shared and in the same order in both, because `item` and
+ * `do` are what an operator acts on and they must not move depending on which
+ * kind of item they are reading.
+ */
 function renderRecord(record: AttentionRecord): string {
-  const rows = [
-    `  ${record.repositoryId} / ${record.taskId}`,
-    `    state           : ${record.state}`,
-    `    reason          : ${record.reason}`,
-  ];
-  if (record.detail !== null) {
-    rows.push(
-      `    reading         : ${record.detail}`,
-      `      ${USAGE_LIMIT_CONTINUATION_SENTENCES[record.detail]}`,
-    );
+  const rows: string[] =
+    record.subject === 'REPOSITORY'
+      ? [
+          `  ${record.repositoryId}`,
+          `    condition       : ${record.condition}`,
+          `    reason          : ${record.reason}`,
+        ]
+      : [
+          `  ${record.repositoryId} / ${record.taskId}`,
+          `    state           : ${record.state}`,
+          `    reason          : ${record.reason}`,
+        ];
+
+  if (record.subject === 'TASK') {
+    if (record.detail !== null) {
+      rows.push(
+        `    reading         : ${record.detail}`,
+        `      ${USAGE_LIMIT_CONTINUATION_SENTENCES[record.detail]}`,
+      );
+    }
+    if (record.reportedResetAt !== null) {
+      rows.push(`    reported reset  : ${record.reportedResetAt}`);
+    }
+    rows.push(`    since           : ${record.stateEnteredAt}`);
   }
-  if (record.reportedResetAt !== null) {
-    rows.push(`    reported reset  : ${record.reportedResetAt}`);
-  }
+
   rows.push(
-    `    since           : ${record.stateEnteredAt}`,
     `    item            : ${record.attentionId}`,
     `    do              : ${record.action}`,
   );
