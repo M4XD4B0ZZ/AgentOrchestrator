@@ -110,8 +110,33 @@ import { runGitCommand } from '../src/worktree/git-command.js';
 
 const created: string[] = [];
 
+/**
+ * Git for the fixtures here, with an identity and with the machine shut out.
+ *
+ * Both halves are load-bearing and the first draft had neither, which CI found
+ * on the first run: `git commit` exits 128 on a machine with no `user.name`, and
+ * every case that builds a repository failed there while passing locally on the
+ * strength of a developer's global config.
+ *
+ * So the identity is supplied — the same one `tests/helpers/e2e-fixtures.ts` and
+ * the artefact harnesses supply — and the global and system config files are
+ * pointed at nothing, which is the half that stops the *reverse* mistake: a
+ * fixture that reads a developer's `core.autocrlf`, `commit.gpgsign` or
+ * `init.defaultBranch` is a fixture that behaves differently on two machines and
+ * tells you so only from CI.
+ */
+const GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+  GIT_CONFIG_SYSTEM: process.platform === 'win32' ? 'NUL' : '/dev/null',
+  GIT_AUTHOR_NAME: 'fixture',
+  GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+  GIT_COMMITTER_NAME: 'fixture',
+  GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+};
+
 function git(root: string, args: readonly string[]): void {
-  execFileSync('git', [...args], { cwd: root, stdio: 'pipe' });
+  execFileSync('git', [...args], { cwd: root, env: GIT_ENV, stdio: 'pipe' });
 }
 
 function write(root: string, relative: string, content: string): void {
@@ -889,7 +914,7 @@ describe('M4 / U4 — the next cycle continues what the last one left', () => {
     const reachable = execFileSync(
       'git',
       ['merge-base', '--is-ancestor', before.currentCommit ?? '', 'HEAD'],
-      { cwd: before.worktreePath, stdio: 'pipe' },
+      { cwd: before.worktreePath, env: GIT_ENV, stdio: 'pipe' },
     );
     expect(reachable.toString()).toBe('');
   });
