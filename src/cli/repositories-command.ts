@@ -527,10 +527,20 @@ export async function reportRepositories(
       })),
       new Date().toISOString(),
     );
-    // Only what this pass newly wrote down is announced. An item already in the
-    // store was already said, by this process or another one, and saying it
-    // again on every cycle is the spam this design exists to avoid.
-    const push = await pushAttentionItems(notifier, settlement.raised);
+    // What is announced is every open item **nobody has acknowledged**, which is
+    // not the same as every item this pass newly wrote down (`U2`, M4).
+    //
+    // It used to be `settlement.raised`, and the sentence here used to say that
+    // an item already in the store "was already said". That was true only of an
+    // item whose send had *worked*. A send that failed was said once, into
+    // nothing, and the name was then taken for ever — so no later pass tried
+    // again, and a quiet phone meant either "nothing is wrong" or "the one
+    // message you needed was dropped eight hours ago", with no way to tell.
+    //
+    // A delivered item carries a receipt and is not in this set, so the
+    // repeated-pass silence the original sentence was protecting is intact: an
+    // item that arrived is never sent twice.
+    const push = await pushAttentionItems(notifier, settlement.undelivered);
     attentionReports.push({ settlement, push });
   };
 

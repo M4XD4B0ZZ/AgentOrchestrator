@@ -11,15 +11,39 @@
  * while it still matters.
  *
  * The ordering follows from which of the two is load-bearing. The record is
- * written **first**, and only a record this call actually created — the
- * exclusive create said `RECORDED` rather than `ALREADY_RECORDED` — is pushed.
- * That makes the push exactly-once in the ordinary case and at-most-once in
- * every other: a process that dies between the write and the POST leaves an item
- * that is discoverable and was never announced, which is a delay rather than a
- * loss, and no later pass re-announces it because the name is already taken.
- * Recorded as a stated limit rather than repaired with a delivery marker, for
- * the reason `ntfy-transport.ts` gives about its own missing retry: a retry is a
- * second decision, and this slice is not the place to take it.
+ * written **first**, and the push follows it. A process that dies in between
+ * leaves an item that is discoverable and was never announced, which is a delay
+ * rather than a loss.
+ *
+ * ── What M4 changed, and why it had to (`U2`) ──────────────────────────────
+ *
+ * Until M4 only a record this call had just *created* was ever pushed, and this
+ * header recorded the consequence as a stated limit: a send that failed was said
+ * once, into nothing, and no later pass re-announced it because the name was
+ * already taken. The closing audit called that `U2` — "a failed notification is
+ * indistinguishable from a silent run" — and marked it fatal to unsupervised
+ * running, because for an operator who is not watching a console, a quiet phone
+ * then carries no information at all.
+ *
+ * The repair is a second exclusive create. A successful send writes a **delivery
+ * receipt** beside the record, and what a pass pushes is now every open item
+ * that has no receipt — not every item it newly raised. So:
+ *
+ *  - a send that failed is retried on the next cycle, and the one after, for as
+ *    long as the condition stands;
+ *  - and the set of items that were written down and never acknowledged is a
+ *    fact on disk that `agent-loop attention` prints, rather than the absence of
+ *    a fact.
+ *
+ * That is what makes silence mean something. It is deliberately **not** an
+ * acknowledgement by a person: a receipt says an endpoint accepted the message,
+ * and nothing in this build claims anybody read it.
+ *
+ * The receipt is written the instant the endpoint answers, inside the loop
+ * rather than after it, so a crash mid-batch loses at most the one item in
+ * flight. A mark that fails is not reported and not retried: it costs one
+ * duplicate push next cycle, and the alternative — treating a failed mark as a
+ * failed delivery — would be an item recorded as undelivered that had arrived.
  *
  * ── A consequence, never a truth ───────────────────────────────────────────
  *
@@ -51,7 +75,7 @@ import type { RunAttentionReason } from '../core/run-attention.js';
 import type { AttentionReason } from '../core/task-attention.js';
 import type { TaskStateName } from '../core/states.js';
 import type { UsageLimitContinuationReading } from '../core/usage-limit-continuation.js';
-import type { AttentionRecord } from './attention-store.js';
+import { markAttentionDelivered, type AttentionRecord } from './attention-store.js';
 import { loadNotificationConfig, type NotificationConfig } from './notify-config.js';
 import type { TransportResult } from './notification.js';
 import { createNtfyAttentionTransport } from './ntfy-transport.js';
@@ -202,6 +226,12 @@ export const ATTENTION_PUSH_OUTCOMES = [
 
 export type AttentionPushOutcome = (typeof ATTENTION_PUSH_OUTCOMES)[number];
 
+/** INTERNAL seams. Production passes nothing; a test drives the receipt write. */
+export interface AttentionPushDependencies {
+  readonly pathProvider?: PathProvider;
+  readonly markDelivered?: typeof markAttentionDelivered;
+}
+
 export interface AttentionPushResult {
   readonly outcome: AttentionPushOutcome;
   readonly attempted: number;
@@ -236,7 +266,10 @@ const pushResult = (
 export async function pushAttentionItems(
   notifier: AttentionNotifier,
   records: readonly AttentionRecord[],
+  deps: AttentionPushDependencies = {},
 ): Promise<AttentionPushResult> {
+  const mark = deps.markDelivered ?? markAttentionDelivered;
+  const provider = deps.pathProvider ?? OS_PATH_PROVIDER;
   if (records.length === 0) return pushResult('NOTHING_TO_SEND', 0, 0, []);
   if (notifier.state === 'NOT_CONFIGURED') return pushResult('NOT_CONFIGURED', 0, 0, []);
   if (notifier.state === 'CONFIG_UNUSABLE') {
@@ -254,8 +287,19 @@ export async function pushAttentionItems(
   for (const record of records) {
     try {
       const sent = await transport(attentionPushFor(record));
-      if (sent.ok) delivered += 1;
-      else failures.push(sent.code);
+      if (sent.ok) {
+        delivered += 1;
+        // The receipt, written the instant the endpoint acknowledged and not at
+        // the end of the loop (`U2`, M4). A batch that marked its successes
+        // after the last attempt would lose every receipt to a crash in the
+        // middle of it, and the next cycle would re-send items that had already
+        // arrived. Marking here bounds that loss to the one item in flight.
+        //
+        // Its own outcome is not reported. A mark that failed costs one
+        // duplicate push next cycle; a *delivery* that failed is a different
+        // fact and is the one this result is about.
+        mark(record.attentionId, provider);
+      } else failures.push(sent.code);
     } catch {
       // The thrown value is dropped rather than formatted: it comes from a
       // network stack and routinely carries hosts, ports and system messages.

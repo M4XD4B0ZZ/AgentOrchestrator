@@ -117,6 +117,50 @@ export function attentionIdOf(name: string): string | null {
 }
 
 /**
+ * The suffix of a **delivery receipt** — this item reached a configured endpoint
+ * and the endpoint acknowledged it (`U2`, M4).
+ *
+ * A separate file beside the record rather than a field inside it, and the
+ * reason is the record's own design. A record is created once by `link` and is
+ * never rewritten: that is what makes "already recorded" and "somebody else
+ * recorded it" the same answer with no lock and no lost update. A mutable
+ * `delivered` field would put a read-then-write back into the one document the
+ * whole store's concurrency argument rests on being immutable.
+ *
+ * Two files, each created exclusively, keeps both facts and keeps the argument:
+ * the condition is one atomic create, the acknowledgement is another, and
+ * neither can half-happen.
+ *
+ * A **fourth** grammar in this directory, so the listing can still tell apart a
+ * record, a receipt, this build's own staging leftover, and a file somebody else
+ * put there. The id is a fixed-length hex digest, so `<id>.delivered` is
+ * unambiguous — no id can contain the separator, which is the property a
+ * `<id>.<kind>` name needs and does not always have.
+ */
+const ATTENTION_DELIVERY_NAME = new RegExp(
+  `^[0-9a-f]{${String(ATTENTION_ID_LENGTH)}}\\.delivered$`,
+);
+
+/** `true` for a delivery receipt name this build would itself have written. */
+export function isAttentionDeliveryName(name: string): boolean {
+  return ATTENTION_DELIVERY_NAME.test(name);
+}
+
+/** The id inside a delivery receipt name this build wrote, or `null`. */
+export function deliveredAttentionIdOf(name: string): string | null {
+  if (!isAttentionDeliveryName(name)) return null;
+  return name.slice(0, ATTENTION_ID_LENGTH);
+}
+
+/** The full path of one item's delivery receipt. Joins; touches no filesystem. */
+export function attentionDeliveryPath(
+  attentionId: string,
+  provider: PathProvider = OS_PATH_PROVIDER,
+): string {
+  return join(operatorAttentionRoot(provider), `${attentionId}.delivered`);
+}
+
+/**
  * The store root. A pure function of the OS user identity, and it creates
  * nothing.
  *

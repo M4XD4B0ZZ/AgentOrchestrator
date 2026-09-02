@@ -16,10 +16,15 @@
  * nothing about a repository this invocation did not look at, or could not read,
  * whose items are still in the store and are neither shown nor removed.
  *
- * *Raised* is what this invocation newly wrote down and, where a notification
- * endpoint was configured, said out loud. It is a subset of the open set and it
- * is what makes repeated passes quiet: the second pass over an unchanged
- * repository raises nothing and prints the same open list.
+ * *Raised* is what this invocation newly wrote down. It is a subset of the open
+ * set and it is what makes repeated passes quiet: the second pass over an
+ * unchanged repository raises nothing and prints the same open list.
+ *
+ * *Raised* is deliberately **not** what was sent. Since M4 a pass announces every
+ * open item that carries no delivery receipt, which includes items an earlier
+ * pass raised and failed to send — see `notify/attention-notification.ts` for
+ * why `U2` required that. So the delivery lines below talk about items awaiting
+ * delivery rather than about newly raised ones, and the two counts can differ.
  *
  * The delivery line is deliberately explicit about what "notification" means
  * here, because the honest answer is layered: a durable file always, a push only
@@ -30,7 +35,7 @@
 import { USAGE_LIMIT_CONTINUATION_SENTENCES } from '../core/usage-limit-continuation.js';
 import type { AttentionPushResult } from '../notify/attention-notification.js';
 import type { AttentionSettlement } from '../notify/attention-outbox.js';
-import type { AttentionRecord } from '../notify/attention-store.js';
+import type { AttentionListing, AttentionRecord } from '../notify/attention-store.js';
 import { line } from './render-attended-run.js';
 
 /** What one settle-and-announce produced. Accumulated per cycle by the command. */
@@ -62,13 +67,14 @@ export const ATTENTION_PUSH_SENTENCES = {
   CONFIG_UNUSABLE:
     'A notification configuration exists and could not be used, so nothing was sent. The items ' +
     'above are recorded either way.',
-  DELIVERED: 'Every newly raised item was also sent to the configured endpoint.',
+  DELIVERED: 'Every item still awaiting delivery reached the configured endpoint.',
   PARTIALLY_DELIVERED:
-    'Some newly raised items reached the configured endpoint and some did not. All of them are ' +
-    'recorded; a send is never retried, so the ones that failed were said once and only here.',
+    'Some items awaiting delivery reached the configured endpoint and some did not. All of them ' +
+    'are recorded either way, and the ones that did not are tried again on the next pass for as ' +
+    'long as their condition stands.',
   FAILED:
-    'Nothing reached the configured endpoint. The items above are recorded and discoverable; ' +
-    'a send is never retried.',
+    'Nothing reached the configured endpoint. The items above are recorded and discoverable ' +
+    'with `agent-loop attention`, and are tried again on the next pass.',
 } as const;
 
 /**
@@ -234,3 +240,82 @@ export const ATTENTION_TRAILER =
   'this invocation checks by re-reading the task’s own durable state — never by being told. A ' +
   'task that leaves a human-action state and later returns to one through a new event is a new ' +
   'item, deliberately.';
+
+/* ═════════════════ the store as a reader sees it (M4, `U2`) ═══════════════ */
+
+/**
+ * One sentence per condition the store itself can be in.
+ *
+ * Separate from the item list because they are different claims. The items say
+ * what is open; these say whether the list can be believed — and "the store
+ * could not be read" must never render as "nothing is open", which is the one
+ * confusion that would make this report worse than no report.
+ */
+export const ATTENTION_STORE_SENTENCES = {
+  ABSENT:
+    'no outbox exists on this machine yet, which is ordinary — nothing has ever needed you',
+  UNREADABLE_ROOT:
+    'the outbox directory exists and could not be read, so this list is not an answer about ' +
+    'what is open',
+  READ: 'the outbox was read in full',
+} as const;
+
+export type AttentionStoreReading = keyof typeof ATTENTION_STORE_SENTENCES;
+
+/** Which of the three readings this listing is. Total, and derived not guessed. */
+export function attentionStoreReading(listing: AttentionListing): AttentionStoreReading {
+  if (listing.unreadableRoot) return 'UNREADABLE_ROOT';
+  if (listing.absent) return 'ABSENT';
+  return 'READ';
+}
+
+/**
+ * The whole `agent-loop attention` report.
+ *
+ * Always a string, never `null`. The scheduler's section is omitted when there
+ * is nothing to say because it is a *part* of a larger report; this one is the
+ * whole answer to a question somebody asked, and answering "nothing" out loud is
+ * the point of asking.
+ *
+ * The undelivered set is printed as its own list rather than as a flag on each
+ * item, because it is the thing an operator came to find out and a flag column
+ * is something they would have to scan for. An item can appear in both lists;
+ * that is not duplication, it is one condition seen through two questions.
+ */
+export function renderAttentionStore(listing: AttentionListing): string {
+  const reading = attentionStoreReading(listing);
+  const delivered = new Set(listing.delivered);
+  const undelivered = listing.records.filter((record) => !delivered.has(record.attentionId));
+
+  const lines = [
+    '',
+    line('Outbox', reading),
+    `  ${ATTENTION_STORE_SENTENCES[reading]}`,
+    line('Open', String(listing.records.length)),
+    line('Not delivered', String(undelivered.length)),
+  ];
+
+  if (listing.foreignNames > 0 || listing.unreadable > 0) {
+    lines.push(
+      line('Not ours', `${String(listing.foreignNames)} named, ${String(listing.unreadable)} unreadable`),
+      '  files in the outbox this build did not write or could not read back. Left alone.',
+    );
+  }
+
+  if (listing.records.length > 0) {
+    lines.push('', 'Open items', ...listing.records.map(renderRecord));
+  }
+
+  if (undelivered.length > 0) {
+    lines.push(
+      '',
+      'Not delivered to any endpoint',
+      '  These were written down and no notification endpoint has acknowledged them. A recurring',
+      '  invocation retries them on every pass, so this list emptying is the retry working, and',
+      '  this list standing while a pass runs means the endpoint is refusing or none is set up.',
+      ...undelivered.map(renderRecord),
+    );
+  }
+
+  return `${lines.join('\n')}\n\n`;
+}

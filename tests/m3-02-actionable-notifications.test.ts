@@ -449,9 +449,26 @@ describe('M3 slice 2 — the durable outbox store', () => {
       .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .replace(/(^|[^:])\/\/.*$/gm, '$1');
     expect(source).toContain('linkSync(staging, target)');
-    // Exactly one `openSync`, and its subject is the staging name.
-    expect([...source.matchAll(/openSync\(/g)]).toHaveLength(1);
-    expect(source).toContain("openSync(staging, 'wx'");
+    // Every `openSync` in the module, and what each one opens. Counting them was
+    // the first spelling and it measured the wrong thing: the property is "the
+    // record's own name is never opened", not "there is one open call". M4 added
+    // a second — the delivery receipt, which is a different file with its own
+    // name and its own exclusive create — and a count would have had to be
+    // bumped, which is the moment a pin stops being a measurement.
+    //
+    // So the subjects are enumerated instead. `staging` is the record's content
+    // under a name nothing reads; `target` inside `markAttentionDelivered` is the
+    // *receipt's* name, and a torn create there can only produce an empty file
+    // that already carries the whole fact. Neither is the record's own name.
+    const opened = [...source.matchAll(/openSync\((\w+),\s*'(\w+)'/g)].map(
+      (match) => `${match[1] ?? ''}:${match[2] ?? ''}`,
+    );
+    expect(opened).toEqual(['staging:wx', 'target:wx']);
+    // And the record's own name reaches exactly one write call in the module,
+    // which is the `link`. A `writeSync`, an `openSync` or a `writeFileSync` on
+    // it would be the defect this case exists to refuse.
+    expect(source).not.toContain('writeFileSync(target');
+    expect(source).not.toContain('writeSync(target');
   });
 
   it('leaves nothing behind on a successful write', () => {

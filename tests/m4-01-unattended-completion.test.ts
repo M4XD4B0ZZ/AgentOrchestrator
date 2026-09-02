@@ -66,8 +66,20 @@ import {
   releaseRepositoryExecutionLease,
   type LeaseRepository,
 } from '../src/lease/execution-lease.js';
-import { settleAttention } from '../src/notify/attention-outbox.js';
+import {
+  pushAttentionItems,
+  type AttentionNotifier,
+} from '../src/notify/attention-notification.js';
+import {
+  MAX_ANNOUNCED_ITEMS_PER_SETTLE,
+  settleAttention,
+} from '../src/notify/attention-outbox.js';
 import { listAttentionRecords } from '../src/notify/attention-store.js';
+import {
+  ATTENTION_STORE_SENTENCES,
+  attentionStoreReading,
+  renderAttentionStore,
+} from '../src/cli/render-attention.js';
 import { resolveRepository } from '../src/repo/resolve-repository.js';
 import type { RegisteredRepository } from '../src/registry/repository-registry.js';
 import { LIFECYCLE_OUTCOMES } from '../src/run/lifecycle-driver.js';
@@ -510,5 +522,226 @@ describe('M4 / U3 — the condition reaches the durable outbox', () => {
     expect(settlement.scan.items).toHaveLength(1);
     expect(settlement.raised).toHaveLength(1);
     expect(settlement.refusals).toEqual([]);
+  });
+});
+
+/* ═════════ 3. U2 — a failed notification is no longer silence ═════════════ */
+
+/** A notifier whose transport answers however the test says, and counts. */
+function notifier(answers: readonly boolean[]): {
+  readonly notifier: AttentionNotifier;
+  readonly sent: string[];
+} {
+  const sent: string[] = [];
+  let call = 0;
+  return {
+    sent,
+    notifier: {
+      state: 'ARMED',
+      configCode: null,
+      transport: async (push) => {
+        const ok = answers[Math.min(call, answers.length - 1)] ?? true;
+        call += 1;
+        sent.push(push.attentionId);
+        return ok ? { ok: true } : { ok: false, code: 'REJECTED_BY_SERVER' };
+      },
+    },
+  };
+}
+
+describe('M4 / U2 — a send that failed is tried again', () => {
+  it('offers the item again on the next pass when the endpoint refused', async () => {
+    // The defect, and its repair, in one case. Before this slice a pass pushed
+    // `settlement.raised`, which is what the *exclusive create* returned — so an
+    // item whose send failed had its name taken for ever, and no later pass
+    // could ever try it again. A dropped message was permanent.
+    const provider = fixedPathProvider(store());
+    const root = makeRepository('u2-retry', ['T1']);
+    const subject = {
+      repositoryId: 'u2-retry',
+      repositoryRoot: root,
+      conditions: ['RECOVERY_UNSAFE'] as const,
+    };
+
+    const refusing = notifier([false]);
+    const first = settleAttention([subject], NOW, { pathProvider: provider });
+    await pushAttentionItems(refusing.notifier, first.undelivered, { pathProvider: provider });
+
+    const second = settleAttention([subject], LATER, { pathProvider: provider });
+
+    // The store deduplicated the *record* — that half is unchanged and must be.
+    expect(second.raised).toEqual([]);
+    expect(second.alreadyOpen).toBe(1);
+    // And the item is still offered, because nobody ever acknowledged it.
+    expect(second.undelivered.map((entry) => entry.attentionId)).toEqual([
+      first.undelivered[0]?.attentionId,
+    ]);
+    expect(second.undeliveredTotal).toBe(1);
+  });
+
+  it('stops offering it once an endpoint has acknowledged it', async () => {
+    // The other half, and the one that keeps repeated passes quiet. A retry that
+    // never stopped would be the notification spam this store exists to prevent,
+    // arriving once per cycle for as long as the condition stood.
+    const provider = fixedPathProvider(store());
+    const root = makeRepository('u2-once', ['T1']);
+    const subject = {
+      repositoryId: 'u2-once',
+      repositoryRoot: root,
+      conditions: ['RECOVERY_UNSAFE'] as const,
+    };
+
+    const accepting = notifier([true]);
+    const first = settleAttention([subject], NOW, { pathProvider: provider });
+    const push = await pushAttentionItems(accepting.notifier, first.undelivered, {
+      pathProvider: provider,
+    });
+
+    expect(push.outcome).toBe('DELIVERED');
+    expect(accepting.sent).toHaveLength(1);
+
+    const second = settleAttention([subject], LATER, { pathProvider: provider });
+    expect(second.undelivered).toEqual([]);
+    expect(second.undeliveredTotal).toBe(0);
+
+    // Nothing is sent on the second pass, measured on the transport rather than
+    // on the offer: a set that was empty and a transport that was called anyway
+    // would be the same defect wearing a different value.
+    await pushAttentionItems(accepting.notifier, second.undelivered, { pathProvider: provider });
+    expect(accepting.sent).toHaveLength(1);
+  });
+
+  it('writes the receipt where a reader can find it, and takes it away with the record', async () => {
+    // The receipt is a file, and the whole of `U2`'s readable half rests on the
+    // listing seeing it. It must also not outlive its record: an orphan receipt
+    // would make a recurrence of the same condition — which re-uses the same
+    // identity — be born already acknowledged and never sent.
+    const provider = fixedPathProvider(store());
+    const root = makeRepository('u2-receipt', ['T1']);
+    const subject = {
+      repositoryId: 'u2-receipt',
+      repositoryRoot: root,
+      conditions: ['RECOVERY_UNSAFE'] as const,
+    };
+
+    const accepting = notifier([true]);
+    const first = settleAttention([subject], NOW, { pathProvider: provider });
+    await pushAttentionItems(accepting.notifier, first.undelivered, { pathProvider: provider });
+
+    const id = first.undelivered[0]?.attentionId ?? '';
+    expect(listAttentionRecords(provider).delivered).toEqual([id]);
+
+    // The condition clears, so the record is removed — and the receipt with it.
+    settleAttention(
+      [{ repositoryId: 'u2-receipt', repositoryRoot: root, conditions: ['COMPLETED'] }],
+      LATER,
+      { pathProvider: provider },
+    );
+    const after = listAttentionRecords(provider);
+    expect(after.records).toEqual([]);
+    expect(after.delivered).toEqual([]);
+
+    // And the same condition, recurring, is announced again rather than being
+    // silently treated as already delivered.
+    const again = settleAttention([subject], LATER, { pathProvider: provider });
+    expect(again.raised).toHaveLength(1);
+    expect(again.undelivered).toHaveLength(1);
+  });
+
+  it('bounds one pass and still reports the true backlog', () => {
+    // The bound exists so that a large inherited store cannot turn one pass into
+    // an unbounded run of ten-second network attempts. What it must not do is
+    // make the *number* look smaller than it is: an operator reading "16" when
+    // 20 things are unacknowledged would be told a comforting lie.
+    const provider = fixedPathProvider(store());
+    const roots = Array.from({ length: MAX_ANNOUNCED_ITEMS_PER_SETTLE + 4 }, (_, index) =>
+      makeRepository(`u2-many-${String(index)}`, ['T1']),
+    );
+
+    const settlement = settleAttention(
+      roots.map((root, index) => ({
+        repositoryId: `u2-many-${String(index)}`,
+        repositoryRoot: root,
+        conditions: ['RECOVERY_UNSAFE'] as const,
+      })),
+      NOW,
+      { pathProvider: provider },
+    );
+
+    expect(settlement.undelivered).toHaveLength(MAX_ANNOUNCED_ITEMS_PER_SETTLE);
+    expect(settlement.undeliveredTotal).toBe(MAX_ANNOUNCED_ITEMS_PER_SETTLE + 4);
+  });
+});
+
+describe('M4 / U2 — the outbox can be read without a notification endpoint', () => {
+  it('prints the open items and which of them nobody was told about', async () => {
+    // The second channel, which is what makes the first one's silence readable.
+    // A machine with no `notify.yaml` at all still has this, and it is the only
+    // thing that distinguishes "quiet because nothing is wrong" from "quiet
+    // because the endpoint has been refusing since Tuesday".
+    const provider = fixedPathProvider(store());
+    const quiet = makeRepository('u2-read-quiet', ['T1']);
+    const loud = makeRepository('u2-read-loud', ['T1']);
+
+    const settlement = settleAttention(
+      [
+        { repositoryId: 'u2-read-quiet', repositoryRoot: quiet, conditions: ['RECOVERY_UNSAFE'] },
+        { repositoryId: 'u2-read-loud', repositoryRoot: loud, conditions: ['NO_PROGRESS'] },
+      ],
+      NOW,
+      { pathProvider: provider },
+    );
+    // Exactly one of the two is acknowledged, so the report has to separate them.
+    const partial = notifier([true, false]);
+    await pushAttentionItems(partial.notifier, settlement.undelivered, { pathProvider: provider });
+
+    const report = renderAttentionStore(listAttentionRecords(provider));
+
+    expect(report).toContain('Outbox       : READ');
+    expect(report).toContain('Open         : 2');
+    expect(report).toContain('Not delivered: 1');
+    expect(report).toContain('Not delivered to any endpoint');
+    // The one that got through is in the open list and not in the undelivered
+    // one. Asserted by counting the item ids rather than by eye: both records
+    // appear once under "Open items", and only the unacknowledged one appears a
+    // second time.
+    const ids = settlement.undelivered.map((entry) => entry.attentionId);
+    const occurrences = ids.map((id) => report.split(id).length - 1);
+    expect(occurrences.filter((count) => count === 2)).toHaveLength(1);
+    expect(occurrences.filter((count) => count === 1)).toHaveLength(1);
+  });
+
+  it('never reports an unreadable store as an empty one', () => {
+    // The one confusion that would make this report worse than no report. "I
+    // could not look" and "nothing is open" both produce an empty record list,
+    // and only one of them is an answer.
+    const listing = {
+      records: [],
+      delivered: [],
+      foreignNames: 0,
+      unreadable: 0,
+      staging: 0,
+      absent: false,
+      unreadableRoot: true,
+    } as const;
+
+    const report = renderAttentionStore(listing);
+    expect(attentionStoreReading(listing)).toBe('UNREADABLE_ROOT');
+    expect(report).toContain('Outbox       : UNREADABLE_ROOT');
+    expect(report).toContain('is not an answer about what is open');
+  });
+
+  it('has a sentence for every reading the store can be in', () => {
+    // Total at runtime as well as by type, the way every other table here is
+    // measured: a reading added without a sentence would print `undefined` to an
+    // operator who came here to be told something.
+    for (const reading of ['ABSENT', 'UNREADABLE_ROOT', 'READ'] as const) {
+      expect(ATTENTION_STORE_SENTENCES[reading].length).toBeGreaterThan(0);
+    }
+    expect(Object.keys(ATTENTION_STORE_SENTENCES).sort()).toEqual([
+      'ABSENT',
+      'READ',
+      'UNREADABLE_ROOT',
+    ]);
   });
 });
