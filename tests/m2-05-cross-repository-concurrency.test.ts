@@ -1531,7 +1531,20 @@ describe('M2 slice 5 — the command surface', () => {
     registerRepositoriesCommand(program);
     const repositories = program.commands.find((entry) => entry.name() === 'repositories');
     const flags = (repositories?.options ?? []).map((option) => option.long);
-    expect(flags).toEqual(['--attended', '--max-steps', '--max-invocations']);
+    // M3 slice 1 appended three, and every one of them bounds *when* a pass
+    // happens rather than what a pass may do. The exhaustive list is kept — it
+    // is what makes a fourth, quietly destructive one turn this red — and the
+    // named negatives below are kept beside it for the same reason they were
+    // written: an exhaustive list says which options exist, and those say which
+    // authorities may never appear whatever the list grows to.
+    expect(flags).toEqual([
+      '--attended',
+      '--max-steps',
+      '--max-invocations',
+      '--wait-for-reset',
+      '--max-wait-ms',
+      '--max-cycles',
+    ]);
     expect(flags).not.toContain('--recover-stale-lease');
     expect(flags).not.toContain('--remediate-verify-failure');
     expect(flags).not.toContain('--continue-human-decision');

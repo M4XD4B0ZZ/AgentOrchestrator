@@ -1,6 +1,12 @@
 /**
- * The bounded quota-reset wait, and the only unattended path on which AO runs an AGENT
- * (V3-08).
+ * The bounded quota-reset wait for ONE named task, and the only path on which AO
+ * runs an agent under the `AUTOMATIC_RESUME_ONLY` grant (V3-08).
+ *
+ * The sentence here used to read "the only unattended path on which AO runs an
+ * AGENT", which M3-01 made false: `repositories --attended --wait-for-reset`
+ * runs agents hours after the operator walked away. That one is a different
+ * claim — it carries the ordinary attended grant and this one does not — so the
+ * distinction is spelled by the grant rather than by the word "unattended".
  *
  * ── What this module is, in one sentence ───────────────────────────────────
  *
@@ -61,7 +67,10 @@
  * At most one sleep per call, unconditionally, by construction rather than by a
  * counter that could be miscounted: there is no loop in this file. A second
  * quota block after a successful automatic resume ends the run. Recurring
- * operation belongs to a supervisor layer that does not exist yet.
+ * operation belongs to a layer above this one, and since M3-01 that layer
+ * exists: `schedule/scheduler.ts` waits between cross-repository coordinator
+ * passes. It never reaches inside this module, and this module still has no
+ * loop.
  *
  * ── What this module deliberately cannot do ────────────────────────────────
  *

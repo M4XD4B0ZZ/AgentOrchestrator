@@ -1,7 +1,30 @@
 /**
  * `agent-loop repositories` — which repositories this operator enlisted, what is
- * next across all of them (M2 slice 3), and, with `--attended`, driving several
- * of them at once under a bound the operator wrote down (M2 slice 5).
+ * next across all of them (M2 slice 3), with `--attended`, driving several of
+ * them at once under a bound the operator wrote down (M2 slice 5), and with
+ * `--wait-for-reset`, waiting out durably recorded quota resets between passes
+ * (M3 slice 1).
+ *
+ * ── What M3-01 added here, and what it deliberately did not ────────────────
+ *
+ * One loop, above the coordinator: `schedule/scheduler.ts`. Given the wait
+ * grant, the command runs a coordinator pass, reads every enlisted repository's
+ * durable task states through `schedule/durable-wake.ts`, and — if any of them
+ * records a quota reset still ahead — sleeps until just past the soonest and
+ * plans again.
+ *
+ * The invocation **without** `--wait-for-reset` is unchanged, and unchanged down
+ * to what it opens: the scheduler refuses the wait before it scans anything, so
+ * an ordinary `repositories --attended` still enumerates no runtime directory
+ * and still prints the report it always printed, graded by the same codes.
+ *
+ * No authority was added. Every admission still runs under the ordinary attended
+ * grant with all four destructive permissions `false`; the wait changes *when*
+ * passes happen and nothing about what a pass may do.
+ *
+ * The scheduler is the only place in this build that installs a process signal
+ * handler, and it does so only for an invocation that can sleep. See
+ * `shutdownRequest`.
  *
  * ── No `--repository`, and that is the point ───────────────────────────────
  *
@@ -88,16 +111,27 @@ import { formatSafeError } from '../core/safe-error.js';
 import type { AgentRunner } from '../agent/agent-command.js';
 import type { AuthPreflightEvidence } from '../core/auth-preflight-evidence.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
-import { driveRepositories } from '../run/repository-coordinator.js';
 import { runGitCommand } from '../worktree/git-command.js';
+import type { driveRepositories } from '../run/repository-coordinator.js';
+import {
+  driveScheduler,
+  isUsableCycleBound,
+  MAX_SCHEDULER_CYCLES,
+  MAX_WAIT_MS_CEILING,
+  type SchedulerRegistryRead,
+  type SchedulerWaitPolicy,
+  type ShutdownSeam,
+} from '../schedule/scheduler.js';
+import { isUsableWaitBound } from '../run/unattended-resume.js';
 import { DEFAULT_MAX_INVOCATIONS, DEFAULT_MAX_STEPS, onceOnlyPreflight } from './run-command.js';
+import { renderScheduler } from './render-schedule.js';
 import {
   EXIT_RUN_INPUT_UNUSABLE,
   EXIT_RUN_UNEXPECTED,
   exitCodeForCrossRepositoryPlan,
-  exitCodeForCrossRepositoryRun,
   exitCodeForRegistryResolution,
   exitCodeForRepositoryRegistry,
+  exitCodeForScheduler,
 } from './run-exit-codes.js';
 import {
   renderCrossRepositoryPlan,
@@ -153,6 +187,40 @@ const DESCRIPTION = [
   'destructive departure and stay bound to a repository named on the command line with',
   '`agent-loop run --repository <path>`: a selector may choose what starts and may not choose',
   'the subject of one of those.',
+  '',
+  'With --wait-for-reset it keeps going across quota resets. After every pass — whatever that',
+  'pass came to — it reads every enlisted repository’s durable task states, takes the soonest',
+  'reported quota reset still ahead, waits until just past it and plans again. A reset that',
+  'matured while the pass was running is not waited for: the pass decided that task too early, so',
+  'another pass runs at once. While it waits it holds no',
+  'execution lease, runs no agent, prepares no workspace and writes no task state — the wait sits',
+  'entirely between passes, and nothing sleeps until every repository the pass drove has been',
+  'shown to have given its lease back. An admission that threw, or that ends unable to say it',
+  'released, stops the invocation rather than being slept through.',
+  '',
+  'The wait is not stored anywhere. It is re-read from each task’s own state file before every',
+  'sleep, so stopping this process loses nothing and invoking it again reconstructs the same wait',
+  'without being told which task or which instant. Nothing else is carried across a sleep either:',
+  'the registry is read again, and the auth preflight is proven again.',
+  '',
+  'It waits for one thing only — a reset an agent CLI reported and this build recorded. A quota',
+  'block that records NO reset time has no machine-understandable wake, is never waited for here,',
+  'and stays the operator’s decision through `agent-loop run --repository <path> --task <id>',
+  '--attended --continue-usage-limit`. Nothing here invents an interval, and there is no',
+  'recurring job, no schedule anyone can author, no notification and no daemon.',
+  '',
+  'Both bounds are required and neither has a default: --max-wait-ms bounds one sleep, and',
+  '--max-cycles bounds how many passes the invocation makes in total. A reset further away than',
+  'the first ends the invocation instead of sleeping, and the wait is left on disk untouched.',
+  '',
+  'For the whole of a waiting invocation — including its first pass, because the handler is',
+  'installed before it — one interrupt asks the scheduler not to plan another pass, and a second',
+  'hands the signal back to the operating system. A pass already running is not reached by',
+  'either: neither the coordinator nor the lifecycle has a shutdown notion, and what a console',
+  'interrupt does to the agent processes a pass has started is the operating system’s affair',
+  'and is not claimed here. Stopping is safe at any moment for a reason that is this build’s:',
+  'a wait holds nothing, and a death mid-pass is the ordinary crash every lease recovery in',
+  'this build already exists for.',
 ].join('\n');
 
 /** Test seam. Production registers the command with no seams at all. */
@@ -161,18 +229,49 @@ export interface RepositoriesCommandSeams {
   readonly resolveRegisteredRepositories?: typeof resolveRegisteredRepositories;
   readonly repositoryRegistryPath?: typeof repositoryRegistryPath;
   readonly write?: (text: string) => void;
-  /** The coordinator. Production passes nothing. */
+  /**
+   * The coordinator. Production passes nothing.
+   *
+   * Kept exactly as it was and forwarded into the scheduler, which drives one
+   * of these per cycle. A test that substitutes it substitutes every cycle's
+   * pass, which is what it has always meant.
+   */
   readonly driveRepositories?: typeof driveRepositories;
-  /** Forwarded to the coordinator, and only reached under `--attended`. */
+  /**
+   * The scheduler — the loop **above** the coordinator, added by M3-01.
+   *
+   * A second seam rather than a replacement for the one above: they answer
+   * different questions, and a test that wants to pin what one pass does must
+   * not have to reimplement waiting to get at it.
+   */
+  readonly driveScheduler?: typeof driveScheduler;
+  /** Forwarded to the scheduler, and only reached under `--attended`. */
   readonly authPreflight?: () => Promise<AuthPreflightEvidence | null>;
   readonly agent?: AgentRunner;
   readonly verify?: VerificationRunner;
+  /**
+   * A shutdown request the scheduler may observe while it waits.
+   *
+   * Only ever supplied by the Commander action, and only when `--wait-for-reset`
+   * was given. Passing it unconditionally would install signal handlers on an
+   * invocation that cannot sleep, which changes what `Ctrl-C` does to a run that
+   * has always died at once — see `shutdownRequest`.
+   */
+  readonly shutdown?: ShutdownSeam;
 }
 
 /** What the operator asked for. Parsed and refused before anything is resolved. */
 export interface RepositoriesRunGrant {
   readonly maxSteps: number;
   readonly maxInvocations: number;
+  /**
+   * Whether this invocation may wait between coordinator passes.
+   *
+   * `{ wait: false }` reproduces every earlier build exactly: one pass, no scan
+   * of any runtime directory, and the same report and exit code the command has
+   * always produced.
+   */
+  readonly wait: SchedulerWaitPolicy;
 }
 
 /**
@@ -232,36 +331,202 @@ export async function reportRepositories(
   // and deliberately: how many writer agents this machine runs at once is a
   // property of the machine its operator wrote down, not of one invocation — and
   // an option would let a scheduler raise it without anybody editing anything.
-  const run = await (seams.driveRepositories ?? driveRepositories)(
+  //
+  // Read again after every wait, through the seam below, for the reason the
+  // scheduler states: a repository can be enlisted, withdrawn or moved while
+  // this process is asleep, and a set resolved before a five-hour sleep would
+  // have it driving a repository its operator has since taken away.
+  const resolveRegistry = async (): Promise<SchedulerRegistryRead> => {
+    const again = load();
+    if (again.state !== 'REGISTERED') {
+      return {
+        ok: false,
+        code: again.state === 'NOT_REGISTERED' ? 'NOT_REGISTERED' : again.code,
+      };
+    }
+    const resolvedAgain = await resolveAll(again.entries);
+    if (!resolvedAgain.ok) return { ok: false, code: resolvedAgain.code };
+    return {
+      ok: true,
+      repositories: resolvedAgain.repositories,
+      maxConcurrentRepositories: again.maxConcurrentRepositories,
+    };
+  };
+
+  const scheduled = await (seams.driveScheduler ?? driveScheduler)(
     {
       repositories: resolved.repositories,
       maxConcurrentRepositories: registry.maxConcurrentRepositories,
       maxSteps: grant.maxSteps,
       maxInvocations: grant.maxInvocations,
+      wait: grant.wait,
     },
     {
       now: () => new Date().toISOString(),
       git: runGitCommand,
-      // One preflight for every repository in this run: `onceOnlyPreflight`
-      // memoises it, so the subscription CLIs start once however many
-      // repositories follow. `run-command.ts` states the rule this obeys —
-      // "Two memoising preflights in one binary are two chances for one
-      // invocation to start the subscription CLIs twice" — and several
-      // repositories in one process is that hazard multiplied by the capacity.
-      authPreflight: onceOnlyPreflight(seams.authPreflight),
+      // A **factory**, so each cycle gets its own memo. One preflight for every
+      // repository within a cycle: `onceOnlyPreflight` memoises it, so the
+      // subscription CLIs start once however many repositories follow.
+      // `run-command.ts` states the rule this obeys — "Two memoising preflights
+      // in one binary are two chances for one invocation to start the
+      // subscription CLIs twice" — and several repositories in one pass is that
+      // hazard multiplied by the capacity. What the factory adds is the other
+      // half, which V3-08 established: the memo may not cross a sleep, because
+      // the artefact carries no freshness and a login proven before a six-hour
+      // wait must not authorise the work after it.
+      authPreflight: () => onceOnlyPreflight(seams.authPreflight),
+      resolveRegistry,
+      ...(seams.driveRepositories !== undefined
+        ? { driveRepositories: seams.driveRepositories }
+        : {}),
       ...(seams.agent !== undefined ? { agent: seams.agent } : {}),
       ...(seams.verify !== undefined ? { verify: seams.verify } : {}),
+      ...(seams.shutdown !== undefined ? { shutdown: seams.shutdown } : {}),
     },
   );
 
-  write(`${head}\n${renderCrossRepositoryRun(run)}\n`);
-  return exitCodeForCrossRepositoryRun(run);
+  // Two reports, and the first is unchanged down to the byte. An invocation that
+  // did not ask to wait made exactly one pass and has exactly one thing to say
+  // about it, which is what `repositories --attended` has always printed; adding
+  // a cycle header and an `Ending` row to it would be this slice rewriting a
+  // report nobody asked it to touch.
+  //
+  // The first cycle always exists — the loop drives before it decides anything —
+  // so the guard below is never the reason a scheduler report is printed. It is
+  // written as a guard rather than an assertion because a report that cannot be
+  // produced must not become an exception.
+  const first = scheduled.cycles[0];
+  if (!grant.wait.wait && first !== undefined) {
+    write(`${head}\n${renderCrossRepositoryRun(first.run)}\n`);
+    return exitCodeForScheduler(scheduled);
+  }
+
+  write(`${head}\n${renderScheduler(scheduled)}\n`);
+  return exitCodeForScheduler(scheduled);
 }
 
 interface RepositoriesOptions {
   readonly attended?: boolean;
   readonly maxSteps?: string;
   readonly maxInvocations?: string;
+  readonly waitForReset?: boolean;
+  readonly maxWaitMs?: string;
+  readonly maxCycles?: string;
+}
+
+/**
+ * A shutdown request, installed for the duration of a waiting run and removed
+ * afterwards.
+ *
+ * ── Why the handlers are conditional ───────────────────────────────────────
+ *
+ * `src/` has no process-level signal handler anywhere, and that is not an
+ * oversight: every command in this build dies at once on `Ctrl-C`, and every
+ * durable guarantee it makes is written to survive exactly that. Installing a
+ * handler changes what an interrupt *does*, so it is installed only for an
+ * invocation that asked to wait — `repositories --attended` on its own keeps
+ * dying at once, byte for byte the behaviour it has always had.
+ *
+ * ── What the first signal buys, and what the second does ───────────────────
+ *
+ * The first asks the scheduler to stop: it settles `cancel`, so a sleep in
+ * progress returns immediately, and sets `stopped`, so the loop ends rather than
+ * planning again. That flag is read at every point where this loop would
+ * otherwise commit to more work — before the sleep, between its chunks, after
+ * it, either side of the registry re-read, and at the top of the next cycle's
+ * refusals.
+ *
+ * What it does **not** do is reach into a coordinator pass. `driveRepositories`
+ * and `driveLifecycle` have no shutdown notion, so a signal that arrives while a
+ * pass is running does not end that pass. A second signal therefore removes
+ * these handlers and hands the signal back to the operating system, which is the
+ * operator's escape from a run they cannot otherwise stop.
+ *
+ * Deliberately **not** claimed here: what a console interrupt does to the agent
+ * processes a pass has already started. On Windows a console `Ctrl-C` is
+ * delivered to every process attached to the console, and this build starts
+ * agents through a boundary that does not create a new process group — so an
+ * interrupt very likely reaches them too. That is a statement about the
+ * operating system rather than about this code, it has not been measured here,
+ * and an earlier version of this comment asserted the opposite ("an agent that
+ * is running keeps running") on no evidence at all.
+ *
+ * What is safe either way, and is a property of this build: the sleep holds no
+ * execution lease and has written nothing, so a death during it leaves correctly
+ * parked tasks; and a death during a pass is the ordinary crash that every lease
+ * recovery in this build already exists for.
+ */
+interface ShutdownRequest extends ShutdownSeam {
+  /** Removes the handlers. Must run on every path out, including a throw. */
+  readonly dispose: () => void;
+}
+
+/** The signals this build will treat as a shutdown request. */
+const SHUTDOWN_SIGNALS: readonly NodeJS.Signals[] = Object.freeze([
+  'SIGINT',
+  'SIGTERM',
+  'SIGBREAK',
+]);
+
+function shutdownRequest(): ShutdownRequest {
+  let requested = false;
+  let settle: () => void = () => {
+    /* replaced below, before any handler can run */
+  };
+  const cancel = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  const dispose = (): void => {
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    handlers.clear();
+  };
+
+  for (const signal of SHUTDOWN_SIGNALS) {
+    const handler = (): void => {
+      if (requested) {
+        // The second one. Restore the default and let it act: an operator who
+        // asks twice is telling this process to stop being clever.
+        dispose();
+        // ── Why re-raising is not enough on its own ─────────────────────────
+        //
+        // Measured on Windows 10 with this build's Node:
+        //
+        //   process.kill(process.pid, 'SIGBREAK')  → throws ENOSYS, and the
+        //                                            process keeps running
+        //   process.kill(process.pid, 'SIGTERM')   → terminates
+        //   process.kill(process.pid, 'SIGINT')    → terminates
+        //
+        // libuv's Windows self-kill handles `SIGTERM`, `SIGKILL` and `SIGINT`
+        // and answers `ENOSYS` for the rest — so on the platform this build
+        // supports, re-raising `SIGBREAK` would throw *out of a signal handler*,
+        // bypassing the CLI's own `catch` and the safe error formatter with it,
+        // and leave the process alive with its handlers gone. The operator's
+        // second press would appear to do nothing.
+        //
+        // So the re-raise is attempted and the exit is guaranteed: whatever the
+        // platform does with the signal, an operator who asked twice gets a
+        // process that stops.
+        try {
+          process.kill(process.pid, signal);
+        } catch {
+          /* the exit below is the answer; the signal was only the polite one */
+        }
+        process.exit(EXIT_RUN_UNEXPECTED);
+      }
+      requested = true;
+      settle();
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+
+  return Object.freeze({
+    stopped: (): boolean => requested,
+    cancel,
+    dispose,
+  });
 }
 
 /**
@@ -282,12 +547,29 @@ function grantFor(
   options: RepositoriesOptions,
 ): { readonly grant: RepositoriesRunGrant | null } | { readonly refusal: string } {
   const attended = options.attended === true;
+  const waiting = options.waitForReset === true;
+
   if (!attended) {
-    if (options.maxSteps !== undefined || options.maxInvocations !== undefined) {
+    if (
+      options.maxSteps !== undefined ||
+      options.maxInvocations !== undefined ||
+      options.maxWaitMs !== undefined ||
+      options.maxCycles !== undefined
+    ) {
       return {
         refusal:
-          'BOUND_WITHOUT_GRANT — --max-steps and --max-invocations bound a run, and without ' +
-          '--attended there is no run to bound.',
+          'BOUND_WITHOUT_GRANT — --max-steps, --max-invocations, --max-wait-ms and --max-cycles ' +
+          'bound a run, and without --attended there is no run to bound.',
+      };
+    }
+    // Its own refusal rather than a fifth item in the sentence above, because
+    // the two are different mistakes: those are bounds on a run that is not
+    // happening, and this is a request to wait between passes there are none of.
+    if (waiting) {
+      return {
+        refusal:
+          'WAIT_WITHOUT_GRANT — --wait-for-reset waits between execution passes, and without ' +
+          '--attended there are none. Add --attended, or drop it.',
       };
     }
     return { grant: null };
@@ -308,7 +590,62 @@ function grantFor(
     };
   }
 
-  return { grant: { maxSteps, maxInvocations } };
+  // ── The wait, and its two bounds ─────────────────────────────────────────
+  //
+  // Both are required with `--wait-for-reset` and neither has a default, for the
+  // reason `run --wait-for-reset` gives about its own: a multi-hour sleep
+  // invented by a default is a multi-hour sleep nobody asked for, and a cycle
+  // count invented by a default is a machine kept busy on nobody's instruction.
+  //
+  // The bound given without the wait is refused rather than ignored, exactly as
+  // a bound without `--attended` is, and for the same reason: accepting it
+  // silently would let an operator believe an invocation was bounded when it was
+  // never going to wait at all.
+  if (!waiting) {
+    if (options.maxWaitMs !== undefined || options.maxCycles !== undefined) {
+      return {
+        refusal:
+          'WAIT_BOUND_WITHOUT_WAIT — --max-wait-ms and --max-cycles bound a wait, and without ' +
+          '--wait-for-reset this invocation makes one pass and stops.',
+      };
+    }
+    return { grant: { maxSteps, maxInvocations, wait: { wait: false } } };
+  }
+
+  if (options.maxWaitMs === undefined) {
+    return {
+      refusal:
+        'MAX_WAIT_MS_REQUIRED — --wait-for-reset needs --max-wait-ms. There is no default: this ' +
+        'build never invents how long it may sleep.',
+    };
+  }
+  const maxWaitMs = Number(options.maxWaitMs);
+  if (!isUsableWaitBound(maxWaitMs)) {
+    return {
+      refusal:
+        `MAX_WAIT_MS_INVALID — --max-wait-ms must be a whole number of milliseconds from 1 to ` +
+        `${String(MAX_WAIT_MS_CEILING)} (24 hours).`,
+    };
+  }
+
+  if (options.maxCycles === undefined) {
+    return {
+      refusal:
+        'MAX_CYCLES_REQUIRED — --wait-for-reset needs --max-cycles. There is no default: how ' +
+        'many times this invocation may wake and plan again is the operator’s decision.',
+    };
+  }
+  const maxCycles = Number(options.maxCycles);
+  if (!isUsableCycleBound(maxCycles)) {
+    return {
+      refusal:
+        `MAX_CYCLES_INVALID — --max-cycles must be a whole number from 2 to ` +
+        `${String(MAX_SCHEDULER_CYCLES)}. The first cycle is the pass that meets the block, so a ` +
+        `wait needs at least two.`,
+    };
+  }
+
+  return { grant: { maxSteps, maxInvocations, wait: { wait: true, maxWaitMs, maxCycles } } };
 }
 
 export function registerRepositoriesCommand(
@@ -327,13 +664,45 @@ export function registerRepositoriesCommand(
     )
     .option(
       '--max-steps <n>',
-      `Step budget handed to each admitted task. Default ${String(DEFAULT_MAX_STEPS)}. Needs --attended.`,
+      `Step budget handed to each admitted task, per planning pass. Default ` +
+        `${String(DEFAULT_MAX_STEPS)}. Needs --attended. With --wait-for-reset there is a pass ` +
+        `per cycle, so a task re-admitted after a wait gets this budget again.`,
     )
     .option(
       '--max-invocations <n>',
-      `How many times each admitted task may be driven. Default ${String(DEFAULT_MAX_INVOCATIONS)}. Needs --attended.`,
+      `How many times each admitted task may be driven within one planning pass. Default ` +
+        `${String(DEFAULT_MAX_INVOCATIONS)}. Needs --attended. With --wait-for-reset this is ` +
+        `NOT a total for the invocation: each cycle re-admits with a fresh budget, so the ` +
+        `ceiling for one task is this times --max-cycles.`,
+    )
+    .option(
+      '--wait-for-reset',
+      'Between passes, wait out the soonest quota reset any enlisted repository has durably ' +
+        'recorded, then plan again — holding no execution lease, running no agent and writing ' +
+        'no task state while it waits. The wait is read from each task’s own state file before ' +
+        'every sleep and is stored nowhere else, so stopping this process loses nothing and ' +
+        'invoking it again reconstructs the same wait without being told which task or which ' +
+        'instant. A quota block that records NO reset time is never waited for and stays the ' +
+        'operator’s. Needs --attended, --max-wait-ms and --max-cycles.',
+    )
+    .option(
+      '--max-wait-ms <n>',
+      `Bound on each single wait, in milliseconds. Required with --wait-for-reset — there is no ` +
+        `default — and at most ${String(MAX_WAIT_MS_CEILING)} (24 hours). A reset further away ` +
+        `than this ends the invocation instead of sleeping.`,
+    )
+    .option(
+      '--max-cycles <n>',
+      `How many planning passes this invocation may make in total, counting the first. Required ` +
+        `with --wait-for-reset — there is no default — at least 2, and at most ` +
+        `${String(MAX_SCHEDULER_CYCLES)}.`,
     )
     .action(async (options: RepositoriesOptions) => {
+      // Installed only for an invocation that can sleep, and removed on every
+      // path out. See `shutdownRequest`: every other command in this build dies
+      // at once on an interrupt, and this slice does not change that for any
+      // invocation that did not ask to wait.
+      let shutdown: ShutdownRequest | null = null;
       try {
         // Before the registry is read and before a single `git` child: a
         // combination this command refuses is refused while nothing has
@@ -345,13 +714,22 @@ export function registerRepositoriesCommand(
           process.exitCode = EXIT_RUN_INPUT_UNUSABLE;
           return;
         }
-        process.exitCode = await reportRepositories(seams, asked.grant);
+        if (asked.grant?.wait.wait === true) shutdown = shutdownRequest();
+        process.exitCode = await reportRepositories(
+          shutdown === null ? seams : { ...seams, shutdown },
+          asked.grant,
+        );
       } catch (error: unknown) {
         // Never `error.message`: an exception's text routinely embeds untrusted
         // file contents and full paths. Everything goes through the central safe
         // formatter (AO-002), exactly as `main()` does.
         process.stderr.write(`agent-loop: ${formatSafeError(error)}\n`);
         process.exitCode = EXIT_RUN_UNEXPECTED;
+      } finally {
+        // On every path out, including the throw above. A listener left behind
+        // would keep this process from dying on the interrupt that follows, and
+        // would hold a reference to a promise nothing is waiting for.
+        shutdown?.dispose();
       }
     });
 }
