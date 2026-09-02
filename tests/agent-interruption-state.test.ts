@@ -36,7 +36,7 @@ import {
   type AgentInterruption,
 } from '../src/agent/record-interruption.js';
 import type { AgentBlockEvidence } from '../src/agent/agent-outcome.js';
-import { phaseMutatesRepository, withdrawnCheckpointFor } from '../src/core/agent-phases.js';
+import { phaseRunsAnAgent, withdrawnCheckpointFor } from '../src/core/agent-phases.js';
 import { evaluateAutomaticResume } from '../src/core/automatic-resume.js';
 import { allowedResumePhases } from '../src/core/resume-policy.js';
 import { parseTaskState, type TaskStateInput } from '../src/core/task-state.js';
@@ -760,15 +760,35 @@ describe('an interrupted writer stops claiming checkpoint facts it may have inva
   );
 
   /**
-   * The reviewer is contractually read-only — a write attempt by it is a scope
-   * violation, not ordinary work — so its interruption invalidates nothing. The
-   * asymmetry is the point: invalidating on every interruption would throw away
-   * true evidence for a run that could not have changed it.
+   * This asserted the opposite until M2 slice 6, and the reversal is the fix
+   * for a defect that slice would otherwise have shipped.
+   *
+   * It read: *the reviewer is contractually read-only — a write attempt by it
+   * is a scope violation, not ordinary work — so its interruption invalidates
+   * nothing.* Read-only is a **request** to the CLI, not a fact this process
+   * enforces, which is exactly why `transitions.ts` declares `REVIEWING →
+   * SCOPE_VIOLATION`. And the asymmetry cost nothing only while `REVIEWING`
+   * could not carry a checkpoint: every producer of it arrived with `null` /
+   * `false`, so this case had to *synthesise* the state it was about.
+   *
+   * M2 slice 6 gave `REVIEWING` a checkpoint of its own, and with it a second
+   * producer — `BLOCKED_USAGE_LIMIT → REVIEWING`, which arrives carrying one.
+   * From there an interruption that measured nothing would have re-asserted a
+   * clean tree at an exact commit over a tree the reviewer may have dirtied,
+   * and `reconcile.ts` turns that into divergence. `run-driver.ts` stops on a
+   * non-`RECONCILED` reconciliation *before* it computes the operator's
+   * continuation gate, so the flag that clears `HUMAN_DECISION_REQUIRED` would
+   * not even be reachable.
+   *
+   * So an interruption withdraws for every agent phase, and a review that can
+   * prove otherwise re-establishes the facts instead — `loop-step.ts`'s
+   * `settledReviewCheckpoint` measures the tree either side of the reviewer.
    */
-  it('leaves the checkpoint intact when the read-only reviewer was interrupted', () => {
+  it('withdraws the checkpoint when the reviewer was interrupted without measuring one', () => {
     const root = repoRoot();
     const before = inFlightState(root, { state: 'REVIEWING', worktreeCleanAtCheckpoint: true });
     const current = persisted(root, before);
+    expect(before.currentCommit).toBe(SHA_B);
 
     record(
       current,
@@ -782,8 +802,11 @@ describe('an interrupted writer stops claiming checkpoint facts it may have inva
 
     const reloaded = loadTaskState(root, TASK_ID);
     if (reloaded.classification !== 'STATE_VALID') expect.unreachable();
-    expect(reloaded.state.worktreeCleanAtCheckpoint).toBe(true);
-    expect(reloaded.state.currentCommit).toBe(SHA_B);
+    expect(reloaded.state.worktreeCleanAtCheckpoint).toBe(false);
+    expect(reloaded.state.currentCommit).toBeNull();
+    // The durable evidence that did not become stale is untouched, exactly as
+    // for the writer's phases.
+    expect(reloaded.state.basePinnedCommit).toBe(SHA_A);
   });
 
   /**
@@ -846,36 +869,40 @@ describe('an interrupted writer stops claiming checkpoint facts it may have inva
  * Asserted directly, so the rule is pinned once rather than only inferred from
  * whichever caller happens to exercise it.
  */
-describe('the mutating-phase rule is stated once and is total', () => {
-  it('names the writer’s phases as mutating and the reviewer’s as not', () => {
-    expect(phaseMutatesRepository('IMPLEMENTING')).toBe(true);
-    expect(phaseMutatesRepository('REMEDIATING')).toBe(true);
-    expect(phaseMutatesRepository('REVIEWING')).toBe(false);
+describe('the agent-phase rule is stated once and is total', () => {
+  it('names all three agent phases, the reviewer’s included', () => {
+    expect(phaseRunsAnAgent('IMPLEMENTING')).toBe(true);
+    expect(phaseRunsAnAgent('REMEDIATING')).toBe(true);
+    // `false` until M2 slice 6, when it was the reviewer's phase that had to
+    // start withdrawing. See `withdrawnCheckpointFor`'s header.
+    expect(phaseRunsAnAgent('REVIEWING')).toBe(true);
   });
 
   /**
    * `VERIFYING` runs the project's own commands and no agent at all, which is
-   * why it is absent from the table — and absence must answer "does not
-   * mutate" rather than throwing or returning `undefined`, because both
-   * callers spread the result into a state object.
+   * why it is absent from the table — and absence must answer "no agent"
+   * rather than throwing or returning `undefined`, because both callers spread
+   * the result into a state object.
    */
   it.each(['VERIFYING', 'WORKTREE_READY', 'BLOCKED_USAGE_LIMIT', 'READY_FOR_PR'] as const)(
-    'treats %s, which runs no agent, as mutating nothing',
+    'treats %s, which runs no agent, as withdrawing nothing',
     (state) => {
-      expect(phaseMutatesRepository(state)).toBe(false);
+      expect(phaseRunsAnAgent(state)).toBe(false);
       expect(withdrawnCheckpointFor(state)).toEqual({});
     },
   );
 
-  it('withdraws exactly the two checkpoint claims, and only for a mutating phase', () => {
-    for (const phase of ['IMPLEMENTING', 'REMEDIATING'] as const) {
+  it('withdraws exactly the two checkpoint claims, for every agent phase', () => {
+    // `REVIEWING` is in this list since M2 slice 6, and the reason is that the
+    // read-only contract is a request to the CLI rather than a fact this
+    // process enforces: `transitions.ts` declares `REVIEWING → SCOPE_VIOLATION`
+    // exactly because the request can be refused. A review interruption that
+    // measured nothing must therefore withdraw, like any other.
+    for (const phase of ['IMPLEMENTING', 'REMEDIATING', 'REVIEWING'] as const) {
       expect(withdrawnCheckpointFor(phase)).toEqual({
         worktreeCleanAtCheckpoint: false,
         currentCommit: null,
       });
     }
-    // Not a weaker claim in the other direction: nothing is asserted about the
-    // reviewer's worktree, so the spread contributes no field at all.
-    expect(withdrawnCheckpointFor('REVIEWING')).toEqual({});
   });
 });

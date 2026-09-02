@@ -216,9 +216,14 @@ UsageErrorBody   { type, plan_type, resets_at }
 So Codex does carry a structured `resets_at`. It is **not** ingested, and not
 because of scope discipline alone:
 
-1. AO has no positive Codex quota classifier at all. `runCodexReviewer` has no
+1. ~~AO has no positive Codex quota classifier at all. `runCodexReviewer` has no
    `USAGE_LIMIT` arm; an exhausted Codex allowance lands in
-   `AGENT_NEEDS_ATTENTION` — a human decision. Building that classifier is a new
+   `AGENT_NEEDS_ATTENTION` — a human decision.~~ **Closed by M2 slice 6** —
+   `src/agent/internal/codex-quota-signal.ts` reads the refusal off a
+   `turn.failed` message and derives the instant from the time of day it names.
+   Bullet 2 below is likewise superseded: `resets_at` was measured as unix
+   seconds, and is not on the `codex exec --json` wire at all, which is why the
+   message is read instead. Building that classifier is a new
    blocking classification for another agent, which is a different product
    change with its own review.
 2. The **units of Codex's `resets_at` are not established** by the installed
@@ -246,12 +251,19 @@ when the denial list is **exactly** `[RESET_TIME_NOT_REACHED]`:
 if (denials.length !== 1 || denials[0] !== RESET_TIME_NOT_REACHED) { ... refuse ... }
 ```
 
-Since the writer is the only agent that can produce a usage limit, the
-intersection of "has a reset time" and "denial list is exactly
-`[RESET_TIME_NOT_REACHED]`" is empty for every block production can create. This
-is F-10, already carried in the README and deliberately not remediated. It is
-recorded here so that a future reader does not mistake L-V3-08-1 for the last
-thing standing between V3-08 and a real run.
+Since the writer was, at the time of this measurement, the only agent that could
+produce a usage limit, the intersection of "has a reset time" and "denial list is
+exactly `[RESET_TIME_NOT_REACHED]`" was empty for every block production could
+then create. That was F-10, and it is recorded here so that a future reader does
+not mistake L-V3-08-1 for the last thing standing between V3-08 and a real run.
+
+**Both halves have since closed, and the intersection is no longer empty.** V3-10
+settles a quota-interrupted writer to a measured checkpoint; M2 slice 6 does the
+same for the reviewer and gives it a quota classifier of its own. On both paths
+the denial list is now exactly `[RESET_TIME_NOT_REACHED]`, which is the list the
+wait sleeps on. The `mutatesRepository` field this paragraph cites no longer
+exists: the checkpoint rule asks whether an *agent* ran, not whether it wrote —
+see `core/agent-phases.ts`.
 
 ## Limits of this measurement
 

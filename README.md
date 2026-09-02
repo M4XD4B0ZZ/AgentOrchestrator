@@ -79,6 +79,13 @@ What *is* implemented:
     thing in this build that holds more than one execution lease at once, and
     the accounting seam had to gain a subject before it could. See
     [Several repositories at once](#several-repositories-at-once-m2-slice-5).
+14. **A reviewer quota block is a pause** (M2 slice 6): an exhausted Codex
+    allowance is recognised from what the CLI prints, parked at
+    `BLOCKED_USAGE_LIMIT` with a derived reset instant and a measured worktree
+    checkpoint, and not re-learned by a second repository sharing the same
+    login. It ends no task and wakes nothing up — resuming by itself after a
+    restart is M3's. See
+    [A reviewer quota block is a pause](#a-reviewer-quota-block-is-a-pause-m2-slice-6).
 
 ## Status, and where to start
 
@@ -996,11 +1003,13 @@ commit and current commit all still match; the worktree exists and is clean; and
 no divergence was reported.
 Without a reliable reset timestamp, no unattended resume is ever granted.
 
-> **In this build no unattended resume is ever granted at all.** The table above
-> describes the decision function, not an operating capability: three
-> independent locks — no CLI reports a reset time, the writing phases withdraw
-> the checkpoint claims the function demands, and Codex has no quota recogniser
-> — each deny it on their own. See
+> **All three locks that made this inert are now open.** The table above
+> described a decision function nothing could satisfy: no CLI reported a reset
+> time (closed by V3-11), the writing phases withdrew the checkpoint claims the
+> function demands (closed by V3-10), and Codex had no quota recogniser (closed
+> by M2 slice 6, which also supplies the review phase's checkpoint). A grant is
+> now reachable on both agents' quota blocks. It is still only a grant: acting
+> on it requires `--automatic-resume-only`, which nothing here implies. See
 > [Unattended resume is inert in this build](#unattended-resume-is-inert-in-this-build-and-that-is-now-stated).
 >
 > Since V3-08 there is an *invocation authority* that would act on a grant if
@@ -2670,9 +2679,11 @@ Deliberately not wired, and left to the slices that own them:
   command exposes it.
 - **Scope enforcement.** `scope.allowedPaths` remains declared, not enforced;
   the reviewer's read-only sandbox is asked of the CLI, not verified afterwards.
-- **A Codex usage-limit signal.** No evidence of one exists, so none is
-  recognised, and an exhausted Codex allowance reaches a human rather than a
-  pause. Adding one means capturing a dated, version-pinned observation first.
+- ~~**A Codex usage-limit signal.**~~ **Closed in M2 slice 6**, on exactly the
+  terms this paragraph set: a dated, version-pinned observation was captured
+  first — 51 recorded refusals from `codex exec` at `cli_version 0.146.0`,
+  cross-checked against the structured `resets_at` beside them. See
+  [A reviewer quota block is a pause](#a-reviewer-quota-block-is-a-pause-m2-slice-6).
 
 Review item **RR-F6** is untouched and remains open: it is about
 `repo/git-query.ts` having no injection point, and adding an agent seam does
@@ -3172,8 +3183,12 @@ reads as though unattended resume operates. It does not, and cannot:
    below. Entering a writing phase still sets `currentCommit: null` and
    `worktreeCleanAtCheckpoint: false`, and that is still correct; what changed is
    that a quota interruption now *re-establishes* both before it is written down.
-3. **Codex has no quota recogniser at all**, so `blockedAgent: 'codex'` is
-   unreachable.
+3. ~~**Codex has no quota recogniser at all**, so `blockedAgent: 'codex'` is
+   unreachable.~~ **Closed in M2 slice 6** — see
+   [A reviewer quota block is a pause](#a-reviewer-quota-block-is-a-pause-m2-slice-6).
+   The recogniser reads a `turn.failed` message, the reset is derived from the
+   time of day it names, and the review phase gained the checkpoint half of
+   F-10, which it had never had.
 
 Each lock was sufficient alone. **V3-08 changed none of them.** It added the
 missing *invocation* authority — `--automatic-resume-only`, and a bounded wait
@@ -3189,8 +3204,10 @@ checkpoint, V3-11 supplies the instant, and the denial list is then exactly
 `[RESET_TIME_NOT_REACHED]`, which is the list the wait sleeps on. It still
 requires the operator to pass `--automatic-resume-only`; that grant is not
 implied by anything here, and no unattended execution happens without it.
-Lock 3 stands and is unrelated: an exhausted Codex allowance still reaches a
-human.
+Lock 3 stood here until M2 slice 6, which closed it on the same shape: an
+exhausted Codex allowance is now a pause with a derived reset and a measured
+checkpoint, and the denial list for it is likewise exactly
+`[RESET_TIME_NOT_REACHED]`.
 
 F-10 was **not remediated in V1-08**, and the reason it was not is worth keeping:
 weakening `evaluateAutomaticResume` to accept freshly observed facts in place of
@@ -3434,9 +3451,12 @@ What this deliberately did **not** do:
   a stale lease. What changed is that the grant is now reachable on a real run.
 - **No durable schema change.** `reportedResetAt` already existed and is already
   `z.iso.datetime({ offset: true })`. `TASK_STATE_SCHEMA_VERSION` is unchanged.
-- **No Codex reset ingestion.** Codex does carry a `resets_at`, and its units are
-  still not established by the installed binary, and AO still has no positive
-  Codex quota classifier. Both gates are unchanged.
+- **No Codex reset ingestion** *(true of V3-11; closed by M2 slice 6)*. Codex
+  does carry a `resets_at`, in unix seconds — measured since — but not on the
+  `codex exec --json` wire, which carries only a failure message. M2 slice 6
+  therefore reads the time of day that message names and derives the instant; it
+  ingests no `resets_at`, and this sentence stays true of the mechanism if not of
+  the capability.
 - **No estimation, anywhere.** A relative "retry in 2h" is still inadmissible.
   The only arithmetic in the reader is `resetsAt * 1000`, and it reads no clock.
 - **The `init` message is not enforced.** Verifying the granted tool set against
@@ -4389,11 +4409,14 @@ and because the failure mode it describes — a command that cannot start is
 
   Two things the closure does **not** claim. It is not general unattended
   execution: the grant passes the run driver's gate only on `AUTOMATIC_ALLOWED`,
-  cannot start a task, and cannot recover a stale lease. And it is not an
-  operating capability yet — the three independent locks in
+  cannot start a task, and cannot recover a stale lease. And it was not an
+  operating capability *at the time of that slice* — the three independent locks
+  in
   [Unattended resume is inert in this build](#unattended-resume-is-inert-in-this-build-and-that-is-now-stated)
-  are untouched, so the situation the authority authorises still cannot arise on
-  a real run. What changed is that the authority is no longer the missing piece.
+  were untouched by it, so the situation the authority authorises could not
+  arise on a real run. What that slice changed is that the authority was no
+  longer the missing piece. The locks themselves were closed afterwards, by
+  V3-10, V3-11 and M2 slice 6.
   **Scope:** `run/invocation-grant.ts`, `run/unattended-resume.ts`,
   `run/run-driver.ts`, `run/lifecycle-driver.ts`, `cli/run-command.ts`,
   `cli/render-lifecycle.ts`, `cli/run-exit-codes.ts`.
@@ -12517,9 +12540,12 @@ remains terminal.
 ### The costs, stated rather than discovered later
 
 - **the shared subscription window.** Two concurrent repositories mean two writer
-  agents and two reviewers against one operator's quota. Quota resilience is a
-  later M2 slice; until it lands, capacity above 1 spends a shared budget faster.
-  The default of 1 is what keeps that a choice;
+  agents and two reviewers against one operator's quota. **M2 slice 6 closed the
+  reviewer half**: reviewer calls are serialised per provider and a known
+  exhaustion is not re-learned, so capacity above 1 no longer multiplies the
+  reviewer spend. The writer half is unchanged — nothing coordinates two writing
+  agents against the Claude window — and the default of 1 is still what keeps
+  that a choice;
 - **fixed wall-clock budgets.** The 20-second default for `git` and owned
   commands, and the 30-minute budgets for agents and verification, were
   calibrated for one repository per machine and are unchanged;
@@ -12534,6 +12560,240 @@ remains terminal.
   fail closed — the delivery is refused — and neither is silent.
 
 See [the ADR](docs/decisions/2026-09-01-adr-bounded-cross-repository-concurrency.md).
+
+## A reviewer quota block is a pause (M2 slice 6)
+
+A ChatGPT subscription's Codex window is five hours long and, measured on this
+machine, pays for about two and a half reviews. This repository's profile allows
+three review rounds, so **one task can consume one whole window**. That is a
+cost, not a defect. The defect was what AO did when the window ran out.
+
+It ended the task. `codex-reviewer.ts` recognised no quota signal, so an
+exhausted allowance arrived as `AGENT_NONZERO_EXIT` → `AGENT_NEEDS_ATTENTION` →
+`HUMAN_DECISION_REQUIRED`, with `reportedResetAt: null`. A condition that clears
+itself in a few hours was recorded as work needing a person, and the reset the
+provider had just named was thrown away.
+
+This slice is answerable for one sentence:
+
+> Temporary reviewer resource exhaustion must not be misclassified as a human
+> decision, must retain enough structured information for later resumption, and
+> must not cause avoidable duplicate reviewer consumption.
+
+### The edge existed; nothing could reach it
+
+Almost none of the state machine needed to change, and that is the shape of the
+finding. `transitions.ts` has always declared `REVIEWING → BLOCKED_USAGE_LIMIT`
+and `BLOCKED_USAGE_LIMIT → REVIEWING`; `resume-policy.ts` has always listed
+`allowedBlockedAgents: ['claude', 'codex']` on that state, with
+`automaticResumeEligible: true`; `record-interruption.ts` has always mapped
+`AGENT_BLOCKED_USAGE_LIMIT` onto it. What was missing was a **producer**. A
+declared edge with no producer is a claim, not a contract — the same lesson
+`HUMAN_DECISION_REQUIRED`'s missing operator half taught in M1.
+
+So the slice adds a recogniser, a derivation, a checkpoint and a gate, and
+changes no state, no schema and no transition.
+
+### What the wire actually carries, measured
+
+Three measurements, all on `codex-cli 0.146.0`, the installed build:
+
+1. **`codex exec --json` prints `turn.failed` on stdout, with an `error`
+   object.** Forced with `-m definitely-not-a-real-model-xyz`; the run exited 1
+   and ended with `{"type":"turn.failed","error":{"message":…}}`.
+2. **The structured error category is not on that wire.** The same run's rollout
+   recorded `codex_error_info: "other"` beside the message internally; stdout
+   printed the message alone. `codex.exe`'s string table carries the closed
+   vocabulary — `usage_limit_exceeded`, `unauthorized`, `bad_request` and the
+   rest — and none of it is serialised to `exec --json`. **The message text is
+   the only quota signal a boundary can read.**
+3. **The message is one stable template.** All 51 recorded refusals across
+   `~/.codex/sessions/**`, every one from an `originator: codex_exec` session
+   carrying `codex_error_info: "usage_limit_exceeded"`, read:
+
+   > You've hit your usage limit. Upgrade to Pro (…), visit … to purchase more
+   > credits or try again at 5:35 PM.
+
+`internal/codex-quota-signal.ts` therefore classifies from prose, and its header
+says why at length. It is not the only such reader —
+`deliver/forge-observation.ts` matches GitHub's "No commit found for SHA"
+sentence for exactly the same reason — but it is the only one on an *agent*
+boundary, where every other verdict in this build comes from a structured
+field. The recognition
+is a **prefix** match on that sentence, not a search: a substring test would
+recognise a quota block in any failure that quoted one — including the reviewer's
+own prose about this very file, which is a file the reviewer reads. The reset is
+read from an **end-anchored** suffix, for the same reason.
+
+### The reset is derived, and the derivation is measured against the provider
+
+`try again at 5:35 PM` is a bare time of day: no date, no zone. Turning it into
+the absolute instant `reportedResetAt` must hold is a derivation, and the
+provider itself supplied the answer key. Each recorded refusal was cross-checked
+against the last `token_count` event in its own rollout, which carries
+`rate_limits.primary { used_percent, window_minutes, resets_at }`:
+
+```
+msg='10:33 PM' resets_at=1787949208 -> 2026-08-28T20:33:28Z  local 10:33 PM  window 300 min
+msg='10:33 PM' resets_at=1787949209 -> 2026-08-28T20:33:29Z  local 10:33 PM  window 300 min
+msg='5:25 PM'  resets_at=1787930737 -> 2026-08-28T15:25:37Z  local  5:25 PM  window 300 min
+msg='5:35 PM'  resets_at=1788017730 -> 2026-08-29T15:35:30Z  local  5:35 PM  window 300 min
+msg='9:25 PM'  resets_at=1788204324 -> 2026-08-31T19:25:24Z  local  9:25 PM  window 300 min
+```
+
+Five out of five, and three rules follow from them rather than from taste:
+
+- **the zone is the process's own.** The CLI renders in local time, so resolving
+  the named time locally reads the provider's units instead of guessing at them;
+- **seconds are truncated** — `…:30` renders as `5:35 PM` — so the derived
+  instant is rounded **up** to the end of the named minute. Waiting a minute
+  longer costs nothing; resuming a moment early costs a reviewer call;
+- **every observed exhaustion was the 300-minute primary window**, so a named
+  time is at most five hours out, which is why a bare `H:MM` is a complete answer
+  at all.
+
+Daylight saving is handled explicitly rather than hoped past. An ambiguous wall
+clock — the hour that happens twice when a fold ends summer time — resolves to
+the **later** instant, because the earlier one is before the reset. A wall clock
+that does not exist, inside a spring-forward gap, is simply never matched and the
+search continues past it. Both are pinned against a *stated* zone through an
+injected offset function, not against whichever zone the test host sits in.
+
+`reportedResetAt` is written as an absolute UTC instant. No local wall-clock
+rendering reaches the durable contract.
+
+**Reading `~/.codex/sessions` for the structured `resets_at` was considered and
+rejected.** It is another tool's private state directory, correlated to a run
+only through a filename, and it would buy an exactness the derivation already
+reaches to within one minute.
+
+### The half that would otherwise have made this cosmetic
+
+Classifying correctly is not enough, and this is the part an adversarial pass
+found before the code was written. `evaluateAutomaticResume` grants a resume only
+against an exact `currentCommit` and `worktreeCleanAtCheckpoint === true`. A task
+arriving at `REVIEWING` carries **neither**: the writing phase withdrew both,
+correctly, and the hop into `REVIEWING` restores nothing. A codex quota block
+recorded without a checkpoint would have been a correctly classified pause that
+could never resume — F-10 exactly, on the phase F-10 did not cover, because at
+the time no codex quota block could be produced at all.
+
+So `runReviewStep` observes the worktree **before** the reviewer starts and again
+after a recognised refusal, and mints a checkpoint only when the two agree on a
+clean tree at one HEAD. The pair is the point: `--sandbox read-only` is a request
+to the CLI, and `REVIEWING → SCOPE_VIOLATION` exists in the transition table
+because the request can be refused. A reviewer that committed would leave a clean
+tree at a *different* HEAD, and a single after-the-fact observation would settle
+it. This measures the read-only contract instead of assuming the flag enforced
+it.
+
+`record-interruption.ts` lost a condition to make room. `settledCheckpointFor`
+required the phase to mutate the repository, arguing that for `REVIEWING` a
+checkpoint could only overwrite a true one the reviewer could not have
+invalidated. There was no such true checkpoint, and there never had been — the
+values it protected were the two withdrawals. What keeps a checkpoint honest is
+that it cannot be written down, only minted from an observation, and that gate is
+untouched.
+
+**The withdrawal widened with it, and review caught that before it shipped.**
+Once `REVIEWING` can *carry* a checkpoint — which a resumed quota pause does —
+a second interruption that measured nothing would have re-asserted `clean: true`
+at an exact commit over a tree the reviewer may have dirtied, and `reconcile.ts`
+turns that into `RESUME_STATE_DIVERGED`: a state nothing resumes and no operator
+command clears, strictly worse than the `HUMAN_DECISION_REQUIRED` it replaced.
+So `withdrawnCheckpointFor` now asks **"did an agent run here"** rather than
+"did a writer run here", and the `mutatesRepository` field is gone. The old
+premise was a claim about a sandbox this process does not enforce; the new one
+is a fact about the durable state. Phases that run no agent — `VERIFYING` — are
+unaffected.
+
+### One machine, one login, one reviewer call at a time
+
+Slice 5's bound is the Git common directory, because that is what the execution
+lease keys on. The reviewer's quota is not scoped that way: `codex` reads its
+login from the operator's home, so every repository on the machine reviews
+against **one** subscription window. `repository-registry.ts` already said so
+where it bounds concurrency at 8 — "each concurrent repository is a writer
+agent, a reviewer and a verification run on one machine against one operator's
+subscription window" — it simply had nothing to enforce it with. With capacity 8 and no gate,
+eight repositories could each burn a review against an exhausted window, each
+rediscover the exhaustion independently, and each park a different task.
+
+`loop/reviewer-provider-gate.ts` is two rules and nothing else:
+
+1. one in-flight reviewer call per provider;
+2. a provider known exhausted is not called again before its reset — the caller
+   is handed the instant instead and parks without spending anything.
+
+Both are answered **inside** the exclusion, because asked outside it two callers
+can both read "available" before either has run.
+
+The exclusion is a promise chain, not a flag and a wait loop: each caller awaits
+the previous *result*, so there is nothing to poll and nothing to time out, and
+the tail is advanced through a promise that cannot reject, so one failure does
+not strand everyone behind it. The slot is released when the call settles —
+which, on the Windows launch boundary this build targets, is when the helper
+reports an ending, and `boundary/owned-command.ts` guarantees the streams have
+closed on every ending that can name a verdict. The one that cannot,
+`BOUNDARY_TERMINATION_UNCONFIRMED`, is a kill that failed after a timeout; there
+the gate releases rather than deadlocking behind a survivor, and the module
+comment says so.
+
+The state is **process-scoped and deliberately volatile**. Nothing is persisted,
+nothing wakes anything up, and a fresh process knows nothing — which is the
+correct default, because the durable record of what a run learned is the task
+state it wrote. Restart-safe scheduling is M3's.
+
+### What survives a restart, and what M3 gets
+
+Everything a later invocation needs is already in the durable contract, and no
+schema changed: `state: BLOCKED_USAGE_LIMIT`, `blockedAgent: 'codex'`,
+`resumeFrom: { phase: 'REVIEW', round }`, `reportedResetAt` as a UTC instant, and
+the checkpoint pair `currentCommit` / `worktreeCleanAtCheckpoint: true`. Loaded
+fresh, `evaluateAutomaticResume` denies it with exactly
+`[RESET_TIME_NOT_REACHED]` before the reset and allows it after — which is the
+list `--automatic-resume-only --wait-for-reset` already sleeps on.
+
+**This slice does not wake anything up.** It has no scheduler, no daemon, no
+cron, no timer, no persistence of its own and no notification. Making the pause
+resume by itself after a process restart is M3 slice 1.
+
+### The costs, stated
+
+- **an interrupted review spends a call and no round.** `reviewRound` advances
+  only on the write that *leaves* `REVIEWING`, which is correct — an interrupted
+  review reviewed nothing — and means a quota block costs one reviewer call for
+  no progress;
+- **completed reviewer work inside a round is not reused.** Findings already
+  reach `findingHistory` per round and a completed round is never repeated, but a
+  round interrupted mid-flight is redone from the start. Caching a partial review
+  would mean trusting a transcript that never completed, which is the one thing
+  `codex-review-transcript.ts` exists to refuse;
+- **the gate is one process's.** Two `agent-loop` processes on one machine share
+  the subscription and not the gate. Nothing in this build starts a second one,
+  and the execution lease refuses two drivers on one repository, but two
+  operators driving two registries would not coordinate;
+- **a weekly-window exhaustion would derive too early.** Every recorded refusal
+  named the 300-minute primary window. If the 7-day secondary window ever
+  produces the same bare `H:MM` rendering, the derived instant would be the next
+  occurrence of that time rather than days out, and each resume attempt would
+  spend one call and re-park with a fresh instant a day later. Bounded and
+  self-correcting, but not free — and not fixable without a fixture nobody has
+  yet;
+- **a recognised refusal that names no time has no operator lever.** It parks at
+  `BLOCKED_USAGE_LIMIT` with `reportedResetAt: null`, which
+  `evaluateAutomaticResume` denies with `RESET_TIME_MISSING` for ever, while
+  `run-driver.ts`'s two operator escapes are pinned to `BLOCKED_VERIFY` and
+  `HUMAN_DECISION_REQUIRED`. This is **not new** — the Claude writer has
+  produced that exact shape since V3-11, for a refusal whose stream reported no
+  instant — but the reviewer path used to land in the continuable
+  `HUMAN_DECISION_REQUIRED`, so this slice adds a producer to an existing dead
+  end. No recorded Codex message reaches it: all 51 carry a time. Giving
+  `BLOCKED_USAGE_LIMIT` the operator half `HUMAN_DECISION_REQUIRED` got in M1
+  is the fix, and it is a decision of its own rather than a line in this slice.
+
+See the decision record:
+[Reviewer quota resilience](docs/decisions/2026-09-02-adr-reviewer-quota-resilience.md).
 
 ## Not implemented yet
 

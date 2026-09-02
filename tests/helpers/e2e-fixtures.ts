@@ -61,7 +61,9 @@ import { resolveFixture, taskWithId, trackWorkspacesOf } from './worktree-fixtur
 import {
   agentCommandResult,
   claudeResultStream,
+  codexFailedTurn,
   codexTranscript,
+  CODEX_USAGE_LIMIT_MESSAGE,
   rejectedRateLimit,
 } from '../fixtures.js';
 import { leaseFor } from './lease.js';
@@ -500,6 +502,21 @@ export function usageLimitResult(
   });
 }
 
+/**
+ * A Codex run refused for quota, exactly as production printed one.
+ *
+ * The message is the recorded 51-occurrence template; the stream shape is the
+ * measured `turn.failed` envelope; the exit status is the measured 1. Nothing
+ * about this fixture is composed — see `tests/fixtures.ts` for both provenances.
+ */
+export function codexUsageLimitResult(
+  options: { readonly message?: string } = {},
+): AgentCommandResult {
+  return agentCommandResult({
+    exitCode: 1,
+    stdout: codexFailedTurn(options.message ?? CODEX_USAGE_LIMIT_MESSAGE),
+  });
+}
 /** HEAD of a worktree, read with real Git. */
 export function headOf(worktreePath: string): string {
   return git(worktreePath, ['rev-parse', 'HEAD']).trim();

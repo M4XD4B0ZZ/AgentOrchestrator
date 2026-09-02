@@ -62,12 +62,27 @@ Einschränkung liegt am *Eingang*, nicht auf dem, was danach passiert. (Ein
 Review hat hier ursprünglich "normale laufende Arbeit fortsetzen" gefunden,
 was schlicht falsch war.)
 
-**Und heute kann er ohnehin nicht auslösen.** Keine der beiden Agent-CLIs meldet
-eine Quota-Reset-Zeit, also ist `reportedResetAt` immer `null`, und
-`evaluateAutomaticResume` verweigert mit `RESET_TIME_MISSING`. Der Slice liefert
-die fehlende *Autorität*, nicht den fehlenden *Nachweis*. Praktisch heißt das:
-Ein Run, der auf `BLOCKED_USAGE_LIMIT` stoppt, wird auch mit diesen Flags nicht
-von selbst weiterlaufen — du startest ihn nach dem Reset weiterhin selbst.
+**Das galt einmal, und gilt seit M2 Slice 6 nicht mehr.** Hier stand: keine der
+beiden Agent-CLIs melde eine Quota-Reset-Zeit, `reportedResetAt` sei immer
+`null`, und ein Run auf `BLOCKED_USAGE_LIMIT` laufe auch mit diesen Flags nicht
+von selbst weiter. Für den Writer wurde das mit V3-11 falsch, für den Reviewer
+mit M2 Slice 6.
+
+**Heute:** beide Agenten können eine Reset-Zeit liefern. Der Writer liest sie
+aus einem `rate_limit_event` seines Streams; der Reviewer leitet sie aus der
+Uhrzeit ab, die Codex in seiner Absage nennt (`try again at 5:35 PM`) — als
+absoluter UTC-Zeitpunkt, nicht als lokale Uhrzeit. Beide Fälle schreiben dazu
+einen gemessenen Worktree-Checkpoint, und `evaluateAutomaticResume` verweigert
+dann nur noch mit `RESET_TIME_NOT_REACHED` — genau die Bedingung, auf die
+`--wait-for-reset` wartet.
+
+**Was weiterhin nicht von selbst weiterläuft:** ein Block ohne gemeldete
+Reset-Zeit. Dann bleibt `reportedResetAt: null`, `evaluateAutomaticResume`
+verweigert mit `RESET_TIME_MISSING`, und es gibt für `BLOCKED_USAGE_LIMIT`
+**kein** Operator-Flag — anders als bei `BLOCKED_VERIFY` und
+`HUMAN_DECISION_REQUIRED`. Ein solcher Task wartet auf eine spätere Slice.
+Und: nach einem *Prozess-Neustart* weckt sich nichts selbst auf — der Wartezustand
+steht auf der Platte, aber den nächsten Run startest du. Das ist M3.
 
 AgentOrchestrator kann heute:
 
@@ -728,10 +743,17 @@ Repository gebunden, das der Operator auf der Kommandozeile benennt
 startet — er darf nicht das Subjekt eines destruktiven Akts auswählen.
 
 **Kosten, die man vorher wissen sollte.** Zwei gleichzeitige Repositories heißen
-zwei Writer-Agents und zwei Reviewer gegen **ein** Abo-Kontingent. Quota-Resilienz
-ist eine spätere Slice; bis dahin verbraucht eine Kapazität über 1 das gemeinsame
-Budget schneller. Deshalb ist der Default 1 und keine Zahl, die Parallelität
-vorführt.
+zwei Writer-Agents und zwei Reviewer gegen **ein** Abo-Kontingent.
+
+**Die Reviewer-Hälfte davon hat M2 Slice 6 geschlossen:** Reviewer-Aufrufe sind
+pro Anbieter serialisiert, und ein bereits erkanntes Kontingent-Ende wird nicht
+noch einmal erlernt — das zweite Repository parkt sofort mit derselben
+Reset-Zeit, ohne einen Aufruf zu verbrauchen. Eine Kapazität über 1
+vervielfacht den Reviewer-Verbrauch also nicht mehr.
+
+**Die Writer-Hälfte steht unverändert:** nichts koordiniert zwei schreibende
+Agenten gegen das Claude-Kontingent. Deshalb ist der Default weiterhin 1 und
+keine Zahl, die Parallelität vorführt.
 
 ---
 

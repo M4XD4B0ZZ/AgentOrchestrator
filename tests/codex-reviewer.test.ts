@@ -31,9 +31,24 @@ import {
 } from '../src/agent/codex-reviewer.js';
 import { FINDING_SEVERITIES } from '../src/core/states.js';
 import { isShellInertArgument } from '../src/doctor/exec.js';
-import { agentCommandResult, codexTranscript, passingReview } from './fixtures.js';
+import {
+  agentCommandResult,
+  codexFailedTurn,
+  codexTranscript,
+  CODEX_USAGE_LIMIT_MESSAGE,
+  passingReview,
+} from './fixtures.js';
 
 const WORKTREE = '/srv/worktrees/alpha/task-0001';
+
+/**
+ * The instant every review in this file is judged at.
+ *
+ * `2026-08-29T11:29:57Z` is the exact second the recorded production quota
+ * refusal was written — see `tests/fixtures.ts` — so a derived reset in this
+ * file is measured against the clock the real message was rendered under.
+ */
+const REVIEW_NOW = '2026-08-29T11:29:57.000Z';
 
 interface Recorder {
   readonly runner: AgentRunner;
@@ -50,7 +65,13 @@ function scriptedAgent(result: AgentCommandResult): Recorder {
 }
 
 function request(overrides: Partial<CodexReviewRequest> = {}): CodexReviewRequest {
-  return { worktreePath: WORKTREE, round: 1, payload: 'review the diff', ...overrides };
+  return {
+    worktreePath: WORKTREE,
+    round: 1,
+    payload: 'review the diff',
+    now: REVIEW_NOW,
+    ...overrides,
+  };
 }
 
 async function reviewWith(
@@ -598,14 +619,18 @@ describe('a reviewer that could not run is not a reviewer that found nothing', (
   });
 
   /**
-   * No usage-limit signal has been observed from this CLI, so there is nothing
-   * to recognise and nothing is guessed. An exhausted Codex allowance reaches
-   * a human rather than a pause — a documented consequence of missing
-   * evidence, and the fail-closed direction to be wrong in.
+   * The recogniser reads a `turn.failed` event on **stdout** and nothing else.
+   * stderr is not a verdict channel here — the CLI writes a models-cache
+   * warning there on runs that succeed — so a quota sentence appearing on it
+   * is still an unclassifiable failure, and still reaches a human.
+   *
+   * This case predates the recogniser and is deliberately kept rather than
+   * deleted: it was the pin on "nothing is guessed", and the guess it forbids
+   * is exactly the one a text-matching recogniser could start making.
    */
-  it('does not invent a usage limit for a Codex failure it cannot classify', async () => {
+  it('does not read a usage limit off stderr', async () => {
     const { outcome } = await reviewWith(
-      agentCommandResult({ exitCode: 1, stderr: 'You have hit your usage limit.' }),
+      agentCommandResult({ exitCode: 1, stderr: CODEX_USAGE_LIMIT_MESSAGE }),
     );
 
     if (outcome.ok) expect.unreachable();

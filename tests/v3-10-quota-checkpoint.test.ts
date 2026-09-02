@@ -890,22 +890,40 @@ describe('checkpoint evidence can only be produced, never asserted', () => {
     expect(blocked.worktreeCleanAtCheckpoint).toBe(false);
   });
 
-  it('refuses a genuine checkpoint for a phase that could not have changed the tree', async () => {
+  /**
+   * This case pinned the opposite behaviour until M2 slice 6, and the reason it
+   * changed is worth keeping.
+   *
+   * It read: *a checkpoint offered for `REVIEWING` could only overwrite a true
+   * checkpoint the read-only reviewer could not have invalidated, so refuse it.*
+   * Its own sharpening assertion is what refuted it — `carried` is `null`,
+   * because the write into `VERIFYING` withdrew it and `REVIEWING` restores
+   * nothing. There was no true checkpoint to protect. What the refusal actually
+   * did was leave every codex quota block denied by `evaluateAutomaticResume`
+   * with `CURRENT_COMMIT_MISMATCH` and `WORKTREE_NOT_CLEAN` — F-10, on the phase
+   * F-10 could not reach, because no codex quota block could be produced at all
+   * until slice 6 produced one.
+   *
+   * **No safety moved with it.** The property this suite is about is that a
+   * checkpoint cannot be *written down*, only minted from an observation, and
+   * that the mint has exactly one importer in `src/` — the case below still
+   * pins both. `phaseMutatesRepository` was never what made the artefact
+   * trustworthy; it only decided which phases were allowed to offer one.
+   */
+  it('records a genuine checkpoint for a read-only phase that measured one', async () => {
     const { repository, root } = await implementing();
-    // A real `REVIEWING` state, reached by the same producer path, so the gate
-    // is asked the question it exists for rather than a fabricated one. Codex
-    // is contractually read-only and AO makes no commit for it, so a checkpoint
-    // offered here is a claim about a phase that could not have changed the
-    // tree — and `withdrawnCheckpointFor` correspondingly withdraws nothing.
-    // What must not happen is the caller's artefact being written over whatever
-    // the state carries.
     const reviewing = await driveTo(repository, root, 'REVIEWING');
+    const observed = headOf(reviewing.state.worktreePath);
     const genuine = mintInterruptionCheckpoint({
-      observedCommit: reviewing.state.currentCommit ?? reviewing.state.basePinnedCommit,
+      observedCommit: observed,
       worktreeClean: true,
     });
     expect(genuine).not.toBeNull();
-    const carried = reviewing.state.currentCommit;
+
+    // The shape the slice inherits, restated here so the case cannot silently
+    // become weak: both checkpoint facts are already withdrawn on arrival.
+    expect(reviewing.state.currentCommit).toBeNull();
+    expect(reviewing.state.worktreeCleanAtCheckpoint).toBe(false);
 
     const record = recordAgentInterruption(
       reviewing,
@@ -922,19 +940,39 @@ describe('checkpoint evidence can only be produced, never asserted', () => {
     );
     expect(record.outcome).toBe('PAUSED_USAGE_LIMIT');
 
-    // Nothing was withdrawn — a read-only phase invalidates nothing — and
-    // nothing was written over it either: the recorded value is still the one
-    // the state carried, not the one the caller handed in.
-    //
-    // Here `carried` is `null`, because the write into `VERIFYING` withdrew it
-    // and `REVIEWING` did not restore it. That makes the assertion sharp rather
-    // than weak: the artefact offered is minted over the base pin, which is not
-    // null, so dropping `phaseMutatesRepository` from the gate would write that
-    // commit here and this would fail.
-    expect(carried).toBeNull();
     const blocked = reload(root).state;
     expect(blocked.state).toBe('BLOCKED_USAGE_LIMIT');
-    expect(blocked.currentCommit).toBe(carried);
+    expect(blocked.currentCommit).toBe(observed);
+    expect(blocked.worktreeCleanAtCheckpoint).toBe(true);
+  });
+
+  it('still refuses a forged checkpoint for that same read-only phase', async () => {
+    const { repository, root } = await implementing();
+    const reviewing = await driveTo(repository, root, 'REVIEWING');
+    const observed = headOf(reviewing.state.worktreePath);
+
+    // Shaped exactly like a genuine one and never minted. Widening the gate to
+    // read-only phases must not have widened what counts as evidence for them.
+    const forged = { commit: observed, clean: true } as unknown as InterruptionCheckpoint;
+
+    recordAgentInterruption(
+      reviewing,
+      {
+        disposition: 'AGENT_BLOCKED_USAGE_LIMIT',
+        block: { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 1 }, reportedResetAt: null },
+      },
+      {
+        now: '2026-08-22T11:00:00.000Z',
+        fallback: { blockedAgent: 'codex', resumeFrom: { phase: 'REVIEW', round: 1 }, reportedResetAt: null },
+        checkpoint: forged,
+        lease: leaseAuthorityFor(repository),
+      },
+    );
+
+    const blocked = reload(root).state;
+    expect(blocked.state).toBe('BLOCKED_USAGE_LIMIT');
+    expect(blocked.currentCommit).toBeNull();
+    expect(blocked.worktreeCleanAtCheckpoint).toBe(false);
   });
 
   /**

@@ -105,7 +105,15 @@
  */
 
 import { runClaudeWriter, type ClaudeWriterFailed } from '../agent/claude-writer.js';
-import { codexReviewResumePoint, runCodexReviewer } from '../agent/codex-reviewer.js';
+import {
+  codexReviewResumePoint,
+  runCodexReviewer,
+  type CodexReviewResult,
+} from '../agent/codex-reviewer.js';
+import {
+  REVIEWER_PROVIDER_GATE,
+  type ReviewerProviderGate,
+} from './reviewer-provider-gate.js';
 import {
   interruptedResumePoint,
   type AgentBlockEvidence,
@@ -322,6 +330,16 @@ export interface LoopDependencies extends AdvanceOptions {
   readonly verify?: VerificationRunner;
   readonly agent?: AgentRunner;
   readonly observe?: CompletionObserver;
+  /**
+   * The gate that keeps two repositories from calling one reviewer
+   * subscription at once. Defaults to the process-wide one, which is the whole
+   * point of it — see `reviewer-provider-gate.ts`.
+   *
+   * A seam only so that a test can hold a gate nobody else shares. A test that
+   * used the production instance would be measuring what every other test in
+   * its file had already done to it.
+   */
+  readonly reviewerProviderGate?: ReviewerProviderGate;
   /**
    * The Git seam the scope guard observes through. Defaults to the real one.
    *
@@ -819,9 +837,15 @@ async function settleQuotaInterruption(
  * diagnosis for a run that did **not** end under its own control, and observing
  * a worktree whose writer may still be alive and writing would record a
  * checkpoint about a repository that was changing while it was measured. A
- * usage limit is the only refusal this build recognises *positively*, from a
- * `429` in a structured envelope that could only have been printed by a process
- * `endedUnderOwnControl` already vouched for.
+ * usage limit is the only refusal this build recognises *positively* — here,
+ * from a `429` in a structured envelope that could only have been printed by a
+ * process `endedUnderOwnControl` already vouched for.
+ *
+ * The reviewer's recogniser (M2 slice 6) reaches the same conclusion through a
+ * different channel, because `codex exec --json` offers no structured category
+ * to read. It sits behind the same `endedUnderOwnControl` gate, for this exact
+ * reason, and `runReviewStep` settles its interruption separately — the two
+ * phases withdraw different things, so they cannot share one settlement.
  *
  * Widening this set is a decision with its own evidence to gather, not a
  * generalisation to make in passing.
@@ -867,10 +891,10 @@ async function recordInterruption(
 function leaseAdvanceOptions(deps: LoopDependencies): AdvanceOptions {
   const {
     now, authorisedWorktreePath, agent, verify, observe, git, brief, verification,
-    remediationPayload, ...advance
+    remediationPayload, reviewerProviderGate, ...advance
   } = deps;
   void now; void authorisedWorktreePath; void agent; void verify; void observe; void git;
-  void brief; void verification; void remediationPayload;
+  void brief; void verification; void remediationPayload; void reviewerProviderGate;
   return advance;
 }
 
@@ -1265,6 +1289,60 @@ const EVIDENCE_NOT_APPLICABLE: VerificationEvidenceOutcome = Object.freeze({
 });
 
 /**
+ * What one pass through the provider gate produced.
+ *
+ * `WITHHELD` is not a reviewer result and is deliberately not shaped like one:
+ * no process ran, so there is no process evidence, no transcript and no
+ * disposition to read. Folding it into a synthetic `CodexReviewFailed` would
+ * put fabricated process facts on the one member callers are allowed to read
+ * them from.
+ */
+type ReviewAttempt =
+  | { readonly kind: 'WITHHELD'; readonly resetAt: string }
+  | { readonly kind: 'RAN'; readonly review: CodexReviewResult };
+
+/**
+ * A checkpoint for a review that was interrupted, or `null` (M2-06).
+ *
+ * The reviewer is contractually read-only, so a settled checkpoint here is the
+ * claim *the tree is exactly as it was before the reviewer opened it*. Three
+ * conditions carry that claim, and each closes a different way it could be
+ * false:
+ *
+ *  - **the tree was clean before, and is clean now.** `null` — Git was not
+ *    asked — is treated as dirty by the mint itself, so an unanswered question
+ *    can never read as a clean tree;
+ *  - **HEAD is the same object in both observations.** This is the conjunct the
+ *    sandbox flag does not give: `--sandbox read-only` is a request to the CLI,
+ *    and `REVIEWING → SCOPE_VIOLATION` exists in the transition table because
+ *    the request can be refused. A reviewer that committed would leave a clean
+ *    tree at a *different* HEAD, and the clean-tree test alone would settle it;
+ *  - **the artefact is minted**, so the value that reaches
+ *    `recordAgentInterruption` is one this function established rather than one
+ *    a caller wrote down.
+ *
+ * Why any of it is needed: `evaluateAutomaticResume` grants an unattended
+ * resume only against an exact `currentCommit` and `worktreeCleanAtCheckpoint
+ * === true`. A task entering `REVIEWING` carries neither — the writing phase
+ * withdrew both, and the hop into `REVIEWING` restores nothing — so a codex
+ * quota block recorded without this would be a correctly *classified* pause
+ * that could never actually resume. That is F-10's defect exactly, on the phase
+ * F-10 left out because, at the time, no codex quota block could be produced at
+ * all.
+ */
+function settledReviewCheckpoint(
+  before: CompletionCheckpoint,
+  after: CompletionCheckpoint,
+): InterruptionCheckpoint | null {
+  if (before.worktreeClean !== true) return null;
+  if (before.currentCommit === null || before.currentCommit !== after.currentCommit) return null;
+  return mintInterruptionCheckpoint({
+    observedCommit: after.currentCommit,
+    worktreeClean: after.worktreeClean,
+  });
+}
+
+/**
  * Runs the reviewer and routes on what it said.
  *
  * Three outcomes, and the boundary between the first two is the whole point:
@@ -1280,7 +1358,8 @@ export async function runReviewStep(
   const state = current.state;
   if (state.state !== 'REVIEWING') return NOT_APPLICABLE;
 
-  const { now, authorisedWorktreePath, brief, agent, observe, ...rest } = deps;
+  const { now, authorisedWorktreePath, brief, agent, observe, reviewerProviderGate, ...rest } =
+    deps;
   const { verification, verify, git, remediationPayload, ...advance } = rest;
   void verification;
   void verify;
@@ -1333,22 +1412,94 @@ export async function runReviewStep(
     return saved(save, 'HUMAN_DECISION_REQUIRED', 'BLOCKED');
   }
 
-  const review = await runCodexReviewer(
-    {
-      worktreePath: authorisedWorktreePath,
-      round,
-      payload: buildReviewPayload(brief.brief, round),
-    },
-    { agent: leasedAgent(deps) },
-  );
+  // Observed **before** the reviewer starts, and kept (M2-06).
+  //
+  // Two different jobs, and only the second is new. A quota-blocked review has
+  // to record a checkpoint or it can never be resumed unattended — that is
+  // F-10's finding, applied to the phase F-10 did not cover. But a checkpoint
+  // observed only *after* the reviewer would settle whatever tree the reviewer
+  // left behind, and `transitions.ts` makes `REVIEWING → SCOPE_VIOLATION` a
+  // legal edge precisely because a reviewer that writes has broken its
+  // contract. Comparing the two observations makes "the reviewer changed
+  // nothing" a measurement instead of a restatement of the sandbox flag.
+  const beforeReview = await (observe ?? observeCompletion)(state);
+
+  // One reviewer call at a time, per machine, and the quota question answered
+  // *inside* the exclusion. Asked outside it, two repositories both read
+  // "available" before either had run, and the second would spend the call the
+  // first had already proved was not there. See `reviewer-provider-gate.ts`.
+  const gate = reviewerProviderGate ?? REVIEWER_PROVIDER_GATE;
+  const attempt = await gate.runExclusively('codex', async (): Promise<ReviewAttempt> => {
+    const availability = gate.availability('codex', now);
+    if (!availability.available) {
+      return Object.freeze({ kind: 'WITHHELD' as const, resetAt: availability.resetAt });
+    }
+
+    const ran = await runCodexReviewer(
+      {
+        worktreePath: authorisedWorktreePath,
+        round,
+        payload: buildReviewPayload(brief.brief, round),
+        now,
+      },
+      { agent: leasedAgent(deps) },
+    );
+
+    // Only a positively recognised refusal teaches the gate anything. Every
+    // other failure is a fact about this run, not about the subscription.
+    if (!ran.ok && ran.code === 'AGENT_USAGE_LIMIT') {
+      gate.noteExhausted('codex', ran.block?.reportedResetAt ?? null);
+    }
+    return Object.freeze({ kind: 'RAN' as const, review: ran });
+  });
+
+  // The provider was already known exhausted, so no reviewer was started and no
+  // quota was spent. The task is still a quota pause and is recorded as one:
+  // that is what is true of it. The checkpoint is the pre-review observation
+  // unchanged — nothing ran between taking it and this write.
+  if (attempt.kind === 'WITHHELD') {
+    const record = recordAgentInterruption(
+      current,
+      {
+        disposition: 'AGENT_BLOCKED_USAGE_LIMIT',
+        block: {
+          blockedAgent: 'codex',
+          resumeFrom: interruptedResumePoint('REVIEW', round),
+          reportedResetAt: attempt.resetAt,
+        },
+      },
+      {
+        now,
+        fallback: codexReviewResumePoint(round),
+        checkpoint: settledReviewCheckpoint(beforeReview, beforeReview),
+        ...advance,
+      },
+    );
+    if (record.outcome === 'STATE_NOT_RECORDED') {
+      return result({ outcome: 'STATE_NOT_RECORDED', save: record.save });
+    }
+    return result({ outcome: 'BLOCKED', state: record.state, save: record.save });
+  }
+
+  const review = attempt.review;
 
   // Not a review. Every failure code lands here, and none of them may be read
   // as an empty finding list — `findings` does not exist on this member.
   if (!review.ok) {
+    // Settled for a recognised quota refusal alone, and for the reason
+    // `record-interruption.ts` gives for the writer's: it is the only failure
+    // whose process is proven to have ended under its own control, so it is the
+    // only one whose worktree may be declared settled. A run that may still be
+    // alive must never have a checkpoint written about it.
+    const checkpoint =
+      review.code === 'AGENT_USAGE_LIMIT'
+        ? settledReviewCheckpoint(beforeReview, await (observe ?? observeCompletion)(state))
+        : null;
+
     const record = recordAgentInterruption(
       current,
       { disposition: review.disposition, block: review.block },
-      { now, fallback: codexReviewResumePoint(round), ...advance },
+      { now, fallback: codexReviewResumePoint(round), checkpoint, ...advance },
     );
     if (record.outcome === 'STATE_NOT_RECORDED') {
       return result({ outcome: 'STATE_NOT_RECORDED', save: record.save });

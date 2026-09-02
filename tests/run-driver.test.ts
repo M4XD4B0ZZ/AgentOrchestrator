@@ -1206,12 +1206,19 @@ describe('a blocked task is never moved by a run that may not continue it', () =
  * The resume write lands in a phase, and the phase decides what the checkpoint
  * still means. `currentCommit` and `worktreeCleanAtCheckpoint` are exactly the
  * evidence `evaluateAutomaticResume` demanded before allowing the resume — and
- * exactly the evidence a writing agent is about to invalidate. Carrying them
- * into `IMPLEMENTING` or `REMEDIATING` makes `reconcile.ts` read the writer's
- * own work as divergence, which is `RESUME_STATE_DIVERGED`: not resumable at
- * all, for the mutation this driver itself authorised.
+ * exactly the evidence the agent about to run may invalidate. Carrying them
+ * into a phase that runs one makes `reconcile.ts` read that agent's own work as
+ * divergence, which is `RESUME_STATE_DIVERGED`: not resumable at all, for a
+ * mutation this driver itself authorised.
+ *
+ * Until M2 slice 6 the rule was narrower — only the *writing* phases withdrew,
+ * on the argument that the reviewer could not have changed anything. That is a
+ * claim about a sandbox this process does not enforce, and it became reachable
+ * once the review phase gained a checkpoint of its own. The rule is now every
+ * phase that runs an agent; the case below records what it used to say and why
+ * it changed.
  */
-describe('a resume into a writing phase withdraws the checkpoint it will invalidate', () => {
+describe('a resume into a phase that runs an agent withdraws the checkpoint', () => {
   const RESET_PASSED = '2026-08-10T08:00:00.000Z';
 
   function blockedOn(root: string, phase: 'IMPLEMENT' | 'REMEDIATE' | 'REVIEW') {
@@ -1321,8 +1328,8 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
 
     // The block's evidence was spent, which is now the correct outcome: the
     // resume reached a step. `resumeBlockedTask` clears the pause and, because
-    // `IMPLEMENTING` mutates, withdraws the checkpoint claims — so the record
-    // that survives describes a task under way, not one still waiting.
+    // `IMPLEMENTING` runs an agent, withdraws the checkpoint claims — so the
+    // record that survives describes a task under way, not one still waiting.
     const after = reload(root);
     expect(after.state.blockedAgent).toBeNull();
     expect(after.state.reportedResetAt).toBeNull();
@@ -1333,12 +1340,27 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
   });
 
   /**
-   * The other half, and the reason the rule is an `iff`. The reviewer is
-   * contractually read-only, so nothing it does can invalidate the checkpoint —
-   * and discarding it would deny a later block the `currentCommit` and clean
-   * checkpoint `evaluateAutomaticResume` requires.
+   * This asserted the opposite until M2 slice 6, and the reversal is not a
+   * relaxation — it is what closed a defect that slice would have shipped.
+   *
+   * It read: *the reviewer is contractually read-only, so nothing it does can
+   * invalidate the checkpoint — and discarding it would deny a later block the
+   * `currentCommit` and clean checkpoint `evaluateAutomaticResume` requires.*
+   *
+   * Read-only is a **request** to the CLI, which is why `transitions.ts`
+   * declares `REVIEWING → SCOPE_VIOLATION`. And the second clause stopped being
+   * the trade the moment M2 slice 6 gave the review phase a checkpoint of its
+   * own: a later block no longer has to inherit one, it *measures* one, either
+   * side of the reviewer. What the old rule bought instead was a `REVIEWING`
+   * state carrying `{SHA_B, true}` across a run that could contradict it — and
+   * an interruption that measured nothing would then have re-asserted both over
+   * a tree the reviewer may have dirtied, which `reconcile.ts` answers with
+   * divergence and no operator flag can clear.
+   *
+   * So the rule is now "an agent runs here", not "a writer runs here", and the
+   * resume into `REVIEWING` withdraws exactly as the writing phases do.
    */
-  it('keeps both claims resuming REVIEW, which cannot invalidate them', async () => {
+  it('withdraws both claims resuming REVIEW, because an agent is about to run', async () => {
     const root = repoRoot();
     blockedOn(root, 'REVIEW');
 
@@ -1350,8 +1372,8 @@ describe('a resume into a writing phase withdraws the checkpoint it will invalid
     expect(run.steps).toBe(1);
     const after = reload(root).state;
     expect(after.state).toBe('REVIEWING');
-    expect(after.currentCommit).toBe(SHA_B);
-    expect(after.worktreeCleanAtCheckpoint).toBe(true);
+    expect(after.currentCommit).toBeNull();
+    expect(after.worktreeCleanAtCheckpoint).toBe(false);
   });
 
   /**

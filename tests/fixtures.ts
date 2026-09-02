@@ -250,6 +250,48 @@ export function codexTranscript(review: unknown, options: { completed?: boolean 
   return `${lines.join('\n')}\n`;
 }
 
+/**
+ * The Codex usage-limit message, byte for byte as production printed it.
+ *
+ * Recovered from `~/.codex/sessions/**` on this machine on 2026-09-02: 51
+ * occurrences across sessions whose `originator` is `codex_exec` at
+ * `cli_version 0.146.0` — the installed build — every one of them carrying
+ * `codex_error_info: "usage_limit_exceeded"` internally. One template, four
+ * different times (10:33 PM, 5:25 PM, 5:35 PM, 9:25 PM); this is the 2026-08-29
+ * incident, whose structured `rate_limits.primary.resets_at` was 1788017730 =
+ * `2026-08-29T15:35:30Z` — 5:35 PM in the machine's own zone.
+ *
+ * Not paraphrased and not reconstructed. A parser tested against a summary of a
+ * message is tested against the summariser.
+ */
+export const CODEX_USAGE_LIMIT_MESSAGE =
+  "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), " +
+  'visit https://chatgpt.com/codex/settings/usage to purchase more credits or ' +
+  'try again at 5:35 PM.';
+
+/**
+ * The stdout `codex exec --json` prints for a failed turn.
+ *
+ * Measured on 2026-09-02 by forcing a failure (`-m
+ * definitely-not-a-real-model-xyz`): the stream is `thread.started`,
+ * `turn.started`, a top-level `{"type":"error","message":…}` and finally
+ * `{"type":"turn.failed","error":{"message":…}}`, with exit status 1.
+ *
+ * The `error` object carries **only** `message`. The same run's rollout
+ * recorded `codex_error_info: "other"` alongside it internally, so the
+ * structured category is not on this wire — which is why the message is the
+ * only quota signal a boundary can read.
+ */
+export function codexFailedTurn(message: string): string {
+  return (
+    [
+      JSON.stringify({ type: 'thread.started', thread_id: 'thread_0' }),
+      JSON.stringify({ type: 'turn.started' }),
+      JSON.stringify({ type: 'error', message }),
+      JSON.stringify({ type: 'turn.failed', error: { message } }),
+    ].join('\n') + '\n'
+  );
+}
 /** A review document that positively passes. */
 export function passingReview(): Record<string, unknown> {
   return { reviewVersion: 1, verdict: 'PASS', findings: [] };
