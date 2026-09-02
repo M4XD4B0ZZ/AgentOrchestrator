@@ -27,9 +27,16 @@
  * backward one: a clock stepped back by a week makes the deadline a week away
  * again, and a loop that only ever asks "have we arrived?" would keep sleeping
  * long past the bound the operator gave. So the loop also counts chunks, which
- * is a monotone quantity no clock can move. When the count exceeds what the
- * bound could possibly need, the wait ends as {@link CHUNK_BUDGET_SPENT} rather
- * than continuing on a clock that is no longer describing the same world.
+ * is a monotone quantity no clock can move. When the count exceeds what the wait
+ * could possibly need, it ends as {@link CHUNK_BUDGET_SPENT} rather than
+ * continuing on a clock that is no longer describing the same world.
+ *
+ * A backward *step* is the loudest way to reach that, and not the only one: any
+ * clock advancing more slowly than the sleeps it was asked for — stopped,
+ * slewed, throttled by a stalled hypervisor time source — gets there too. An
+ * earlier version of this comment said "only when the wall clock moved
+ * backwards", and this file's own test refuted it with a clock that merely
+ * stopped.
  *
  * That ending is deliberately not a failure: nothing is held, nothing was
  * written, and the caller's next act is to look at durable state again.
@@ -38,8 +45,16 @@
  *
  * The sleep takes a `cancel` promise and the production sleep clears its timer
  * when that promise settles, so an interrupted wait returns at once and leaves
- * no timer holding the event loop open. A caller that never cancels passes a
- * promise that never settles, which costs one registered continuation.
+ * no timer holding the event loop open.
+ *
+ * A caller that never cancels passes a promise that never settles, and a
+ * reaction is registered on it **per chunk** — so a 24-hour wait retains 1 440
+ * of them, each holding an expired timer handle and a resolved promise's
+ * `resolve`, until the promise itself is unreachable. An earlier version of this
+ * sentence said "one registered continuation", singular, which was wrong by
+ * three orders of magnitude. It is still negligible at every bound this build
+ * accepts, and it is bounded: the production cancel promise lives exactly as
+ * long as the invocation.
  *
  * Nothing here is authority. A wait that ends early, late, or on the chunk
  * budget produces the same next step: read the durable state again and decide
@@ -64,12 +79,13 @@ export const BOUNDED_SLEEP_OUTCOMES = [
   /** A shutdown was requested. Nothing was waited for further. */
   'STOP_REQUESTED',
   /**
-   * More chunks elapsed than the operator's bound could account for.
+   * More chunks elapsed than the wait could account for.
    *
-   * Reachable only when the wall clock moved backwards during the wait; see the
-   * module header. Its own member rather than folded into `DEADLINE_REACHED`,
-   * because the deadline was **not** reached and a caller that reported it as
-   * reached would be asserting an instant had passed on no evidence.
+   * Reached whenever the clock advances more slowly than the sleeps this module
+   * asked for — stopped, slewed, or stepped backwards; see the module header.
+   * Its own member rather than folded into `DEADLINE_REACHED`, because the
+   * deadline was **not** reached and a caller that reported it as reached would
+   * be asserting an instant had passed on no evidence.
    */
   'CHUNK_BUDGET_SPENT',
   /** A clock reading during the wait was not a timestamp. Nothing further slept. */
@@ -83,12 +99,21 @@ export interface BoundedSleepResult {
   /** How many timers were started. Zero when the deadline had already passed. */
   readonly chunks: number;
   /**
-   * What the clock says elapsed, in milliseconds, or `null` when a reading
-   * during the wait was unusable.
+   * The difference between two readings of the wall clock, in milliseconds, or
+   * `null` when a reading during the wait was unusable.
    *
-   * Measured from the same clock the deadline is expressed in, so a clock step
-   * shows up here rather than being hidden — which is the honest reading, since
-   * there is no monotonic source in this build that survives the process.
+   * **Not elapsed time, and not a lower bound on it.** A clock that moved during
+   * the wait moves this number with it: a backward step deflates it, and on a
+   * refused wait it can be negative. An earlier version of this comment said a
+   * step "shows up here rather than being hidden", which is false in the
+   * direction that matters — a wait that reaches its deadline after a backward
+   * step reports the deficit as though it were the whole wait.
+   *
+   * It is reported anyway, and labelled as wall clock where it is printed,
+   * because there is no monotonic source in this build that survives a process
+   * and a number nobody can check is worse than one that says what it is.
+   * Nothing decides on it: trace every use in `scheduler.ts` and it reaches the
+   * report and nothing else.
    */
   readonly elapsedMs: number | null;
 }
@@ -148,11 +173,19 @@ export async function sleepUntilInstant(
     return Object.freeze({ outcome: 'CURRENT_TIME_UNPARSEABLE' as const, chunks: 0, elapsedMs: null });
   }
 
-  // One extra chunk beyond what the bound needs, so that an ordinary wait whose
-  // final chunk is a partial one is never cut short by its own budget. The
-  // budget is a guard against a clock that stopped describing the world, not a
-  // second expression of the bound.
-  const maxChunks = Math.ceil(maxWaitMs / SLEEP_CHUNK_MS) + 1;
+  // Sized from the wait actually being performed, and capped by the operator's
+  // bound — not from the bound alone.
+  //
+  // From the bound alone the margin was one chunk in absolute terms, however
+  // short the wait: a five-minute wait under a 24-hour bound had 1 441 chunks of
+  // slack, and a wait landing in the top 60-second bucket of its bound had one.
+  // A review measured that: a clock 100 ppm slow — an ordinary unsynchronised
+  // RTC — spends the residue of the final partial chunk and the budget fires,
+  // ending a completed 24-hour wait as though the world had stopped describing
+  // itself. Two chunks of slack over the real distance is two minutes, which no
+  // ordinary clock drift crosses and no clock *step* survives.
+  const required = Math.max(0, deadlineMs - startedMs);
+  const maxChunks = Math.ceil(Math.min(required, maxWaitMs) / SLEEP_CHUNK_MS) + 2;
 
   let chunks = 0;
   for (;;) {

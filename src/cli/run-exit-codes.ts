@@ -1173,7 +1173,22 @@ const SCHEDULER_EXIT_CODES = Object.freeze({
   // The registry stopped being readable during the wait: a document to fix,
   // which is code 2 for the same reason every other registry refusal is.
   REGISTRY_UNUSABLE_AFTER_WAIT: EXIT_RUN_INPUT_UNUSABLE,
+  // A repository may still be held by this process, and a person has to look:
+  // `EXIT_RUN_NEEDS_OPERATOR`, the same answer `LEASE_RELEASE_FAILED` itself
+  // gets from `exitCodeForLifecycle`. Not `EXIT_RUN_CALL_AGAIN` — invoking again
+  // meets the lease this run could not give back, and calling that "call again"
+  // would send a scheduler round a loop that cannot clear itself.
+  LEASE_RELEASE_UNPROVEN: EXIT_RUN_NEEDS_OPERATOR,
+  // Two bounds this build will not act on. Nothing was planned and nothing ran,
+  // so they are code 2 for the reason every argument refusal in this build is:
+  // invoking again with the same value repeats exactly.
+  WAIT_BOUND_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
+  CYCLE_BOUND_UNUSABLE: EXIT_RUN_INPUT_UNUSABLE,
+  // Neither is reachable as an ending — each is a cycle that continued — and
+  // both are graded as defects rather than given a benign code, for the reason
+  // the table's header gives.
   WAITED: EXIT_RUN_UNEXPECTED,
+  MATURED_DURING_PASS: EXIT_RUN_UNEXPECTED,
 }) satisfies Record<SchedulerDisposition, CliExitCode>;
 
 /**

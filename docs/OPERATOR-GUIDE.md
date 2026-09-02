@@ -895,16 +895,40 @@ Am Ende steht eine `Ending`-Zeile. Die wichtigsten:
 | `CYCLE_BUDGET_SPENT` | `--max-cycles` aufgebraucht, es wartet noch etwas. Erneut aufrufen. |
 | `SHUTDOWN_REQUESTED` | Du hast abgebrochen. |
 | `REGISTRY_UNUSABLE_AFTER_WAIT` | Nach dem Warten war `repositories.yaml` nicht mehr lesbar. |
+| `LEASE_RELEASE_UNPROVEN` | Ein Durchlauf konnte nicht zeigen, dass er jedes Repository zurückgegeben hat. Es wird **nicht** geschlafen. Exit-Code 3: schau mit `agent-loop lease status` in dem genannten Repository nach. |
+| `WAIT_BOUND_UNUSABLE` / `CYCLE_BOUND_UNUSABLE` | Eine deiner Schranken ist keine, auf die dieser Build wartet bzw. plant. Es lief nichts. Exit-Code 2. |
 
 `BOUND_EXCEEDED`, `CYCLE_BUDGET_SPENT` und `SHUTDOWN_REQUESTED` liefern Exit-Code
 **5** („ruf nochmal auf"). Es ist nichts verbraucht und nichts verloren.
+`LEASE_RELEASE_UNPROVEN` liefert **3** — da muss ein Mensch hinschauen, und
+nochmal aufrufen hilft nicht, solange die Lease steht.
+
+
+### Wenn ein Reset mitten im Durchlauf fällig wird
+
+Ein Durchlauf dauert Minuten — er fährt echte Agenten. Und `reportedResetAt` ist
+das **Ende** eines Provider-Fensters, also kann ein Block, der kurz vor Schluss
+auftritt, einen Zeitpunkt wenige Minuten später nennen. Fällt dieser Zeitpunkt
+**in den laufenden Durchlauf**, dann hat der Durchlauf den Task zu früh
+beurteilt.
+
+AO wartet darauf nicht — es gibt nichts mehr zu warten — sondern **plant sofort
+neu**. Im Bericht steht dann `Scheduler       : MATURED_DURING_PASS` ohne
+`Waited`-Zeile. Das passiert höchstens einmal pro Zeitpunkt: der nächste
+Durchlauf beginnt nach ihm, und damit fällt er aus dem Fenster.
 
 ### Abbrechen
 
-Während gewartet wird, bittet **ein** `Strg+C` den Scheduler, nach der gerade
-laufenden Arbeit aufzuhören — er beendet den Bericht ordentlich. **Ein zweites**
-`Strg+C` beendet den Prozess sofort, wie bei jedem anderen Befehl auch. Beides ist
-sicher: beim Warten wird nichts gehalten, und ein Abbruch mitten in einem
+Während gewartet wird, bittet **ein** `Strg+C` den Scheduler, **keinen weiteren
+Durchlauf mehr zu planen** — er beendet den Bericht ordentlich. **Ein zweites**
+`Strg+C` gibt das Signal ans Betriebssystem zurück und beendet den Prozess.
+
+Einen **bereits laufenden Durchlauf** erreicht keines von beidem: weder der
+Coordinator noch der Lifecycle kennen ein Shutdown. Was ein Konsolen-`Strg+C` mit
+den Agent-Prozessen macht, die ein Durchlauf schon gestartet hat, ist Sache des
+Betriebssystems — auf Windows geht ein Konsolen-Abbruch an *alle* Prozesse an
+dieser Konsole — und wird hier **nicht** behauptet. Was sicher ist und diesem
+Build gehört: beim Warten wird nichts gehalten, und ein Abbruch mitten in einem
 Durchlauf ist derselbe Absturz, für den die Stale-Lease-Recovery ohnehin da ist.
 
 Wichtig: **ohne** `--wait-for-reset` verhält sich `Strg+C` genau wie bisher — der

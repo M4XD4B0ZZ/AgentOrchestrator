@@ -188,12 +188,15 @@ const DESCRIPTION = [
   '`agent-loop run --repository <path>`: a selector may choose what starts and may not choose',
   'the subject of one of those.',
   '',
-  'With --wait-for-reset it keeps going across quota resets. When a pass leaves nothing further',
-  'to admit, it reads every enlisted repository’s durable task states, takes the soonest reported',
-  'quota reset still ahead, waits until just past it and plans again. While it waits it holds no',
+  'With --wait-for-reset it keeps going across quota resets. After every pass — whatever that',
+  'pass came to — it reads every enlisted repository’s durable task states, takes the soonest',
+  'reported quota reset still ahead, waits until just past it and plans again. A reset that',
+  'matured while the pass was running is not waited for: the pass decided that task too early, so',
+  'another pass runs at once. While it waits it holds no',
   'execution lease, runs no agent, prepares no workspace and writes no task state — the wait sits',
-  'entirely between passes, and a pass returns only once every repository it drove has given its',
-  'lease back.',
+  'entirely between passes, and nothing sleeps until every repository the pass drove has been',
+  'shown to have given its lease back. An admission that threw, or that ends unable to say it',
+  'released, stops the invocation rather than being slept through.',
   '',
   'The wait is not stored anywhere. It is re-read from each task’s own state file before every',
   'sleep, so stopping this process loses nothing and invoking it again reconstructs the same wait',
@@ -210,9 +213,14 @@ const DESCRIPTION = [
   '--max-cycles bounds how many passes the invocation makes in total. A reset further away than',
   'the first ends the invocation instead of sleeping, and the wait is left on disk untouched.',
   '',
-  'While it is waiting, an interrupt asks it to stop after what is already running; a second',
-  'interrupt kills it. That is safe at any moment: a wait holds nothing, and a death mid-pass is',
-  'the ordinary crash every lease recovery in this build already exists for.',
+  'For the whole of a waiting invocation — including its first pass, because the handler is',
+  'installed before it — one interrupt asks the scheduler not to plan another pass, and a second',
+  'hands the signal back to the operating system. A pass already running is not reached by',
+  'either: neither the coordinator nor the lifecycle has a shutdown notion, and what a console',
+  'interrupt does to the agent processes a pass has started is the operating system’s affair',
+  'and is not claimed here. Stopping is safe at any moment for a reason that is this build’s:',
+  'a wait holds nothing, and a death mid-pass is the ordinary crash every lease recovery in',
+  'this build already exists for.',
 ].join('\n');
 
 /** Test seam. Production registers the command with no seams at all. */
@@ -423,14 +431,30 @@ interface RepositoriesOptions {
  *
  * The first asks the scheduler to stop: it settles `cancel`, so a sleep in
  * progress returns immediately, and sets `stopped`, so the loop ends rather than
- * planning again. It does **not** interrupt work already in flight — an agent
- * that is running keeps running — so a second signal removes these handlers and
- * re-raises, which restores the default and kills the process.
+ * planning again. That flag is read at every point where this loop would
+ * otherwise commit to more work — before the sleep, between its chunks, after
+ * it, either side of the registry re-read, and at the top of the next cycle's
+ * refusals.
  *
- * That escape matters because the alternative is an operator who cannot stop a
- * run. It is safe to take: while the scheduler sleeps it holds no execution
- * lease and has written nothing, and while it drives, a death is the ordinary
- * crash every lease recovery in this build already exists for.
+ * What it does **not** do is reach into a coordinator pass. `driveRepositories`
+ * and `driveLifecycle` have no shutdown notion, so a signal that arrives while a
+ * pass is running does not end that pass. A second signal therefore removes
+ * these handlers and hands the signal back to the operating system, which is the
+ * operator's escape from a run they cannot otherwise stop.
+ *
+ * Deliberately **not** claimed here: what a console interrupt does to the agent
+ * processes a pass has already started. On Windows a console `Ctrl-C` is
+ * delivered to every process attached to the console, and this build starts
+ * agents through a boundary that does not create a new process group — so an
+ * interrupt very likely reaches them too. That is a statement about the
+ * operating system rather than about this code, it has not been measured here,
+ * and an earlier version of this comment asserted the opposite ("an agent that
+ * is running keeps running") on no evidence at all.
+ *
+ * What is safe either way, and is a property of this build: the sleep holds no
+ * execution lease and has written nothing, so a death during it leaves correctly
+ * parked tasks; and a death during a pass is the ordinary crash that every lease
+ * recovery in this build already exists for.
  */
 interface ShutdownRequest extends ShutdownSeam {
   /** Removes the handlers. Must run on every path out, including a throw. */
@@ -465,8 +489,31 @@ function shutdownRequest(): ShutdownRequest {
         // The second one. Restore the default and let it act: an operator who
         // asks twice is telling this process to stop being clever.
         dispose();
-        process.kill(process.pid, signal);
-        return;
+        // ── Why re-raising is not enough on its own ─────────────────────────
+        //
+        // Measured on Windows 10 with this build's Node:
+        //
+        //   process.kill(process.pid, 'SIGBREAK')  → throws ENOSYS, and the
+        //                                            process keeps running
+        //   process.kill(process.pid, 'SIGTERM')   → terminates
+        //   process.kill(process.pid, 'SIGINT')    → terminates
+        //
+        // libuv's Windows self-kill handles `SIGTERM`, `SIGKILL` and `SIGINT`
+        // and answers `ENOSYS` for the rest — so on the platform this build
+        // supports, re-raising `SIGBREAK` would throw *out of a signal handler*,
+        // bypassing the CLI's own `catch` and the safe error formatter with it,
+        // and leave the process alive with its handlers gone. The operator's
+        // second press would appear to do nothing.
+        //
+        // So the re-raise is attempted and the exit is guaranteed: whatever the
+        // platform does with the signal, an operator who asked twice gets a
+        // process that stops.
+        try {
+          process.kill(process.pid, signal);
+        } catch {
+          /* the exit below is the answer; the signal was only the polite one */
+        }
+        process.exit(EXIT_RUN_UNEXPECTED);
       }
       requested = true;
       settle();
@@ -617,11 +664,16 @@ export function registerRepositoriesCommand(
     )
     .option(
       '--max-steps <n>',
-      `Step budget handed to each admitted task. Default ${String(DEFAULT_MAX_STEPS)}. Needs --attended.`,
+      `Step budget handed to each admitted task, per planning pass. Default ` +
+        `${String(DEFAULT_MAX_STEPS)}. Needs --attended. With --wait-for-reset there is a pass ` +
+        `per cycle, so a task re-admitted after a wait gets this budget again.`,
     )
     .option(
       '--max-invocations <n>',
-      `How many times each admitted task may be driven. Default ${String(DEFAULT_MAX_INVOCATIONS)}. Needs --attended.`,
+      `How many times each admitted task may be driven within one planning pass. Default ` +
+        `${String(DEFAULT_MAX_INVOCATIONS)}. Needs --attended. With --wait-for-reset this is ` +
+        `NOT a total for the invocation: each cycle re-admits with a fresh budget, so the ` +
+        `ceiling for one task is this times --max-cycles.`,
     )
     .option(
       '--wait-for-reset',

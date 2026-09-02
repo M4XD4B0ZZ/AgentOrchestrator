@@ -36,9 +36,16 @@
  * ── The three members ──────────────────────────────────────────────────────
  *
  *  - `NO_CONTINUATION` — nothing productive may continue. What `false` meant.
- *  - `ATTENDED` — a human is present for this invocation of the command. What
+ *  - `ATTENDED` — an operator started this invocation and can stop it. What
  *    `true` meant, unchanged in every observable way, including the reason code
  *    a refusal carries.
+ *
+ *    It used to be spelled "a human is present for this invocation", and M3-01
+ *    made that reading too strong rather than the permission wrong:
+ *    `repositories --attended --wait-for-reset` may drive a pass — and start a
+ *    task that did not exist when the command was typed — up to a day after the
+ *    operator walked away. What the grant asserts is authorisation and
+ *    reachability, not attention.
  *  - `AUTOMATIC_RESUME_ONLY` — no human presence is claimed. It permits exactly
  *    one thing: continuing a task whose canonical resume decision *freshly*
  *    answered `AUTOMATIC_ALLOWED`.
@@ -203,8 +210,8 @@ export function mayStartTask(grant: InvocationGrant): boolean {
  * remediating-a-verify-failure" is not a fourth mode — it is `ATTENDED` plus one
  * decision.
  *
- * The distinction it draws is the one `--attended` cannot. `ATTENDED` says a
- * human is *present for this invocation*; it says nothing about what they
+ * The distinction it draws is the one `--attended` cannot. `ATTENDED` says an
+ * operator *authorised this invocation*; it says nothing about what they
  * decided, and it is deliberately unconditional at {@link permitsContinuation}
  * for exactly that reason. Continuing a `BLOCKED_VERIFY` task is a **decision**
  * — the block's own rationale calls it one — so it needs its own request, and an

@@ -74,12 +74,31 @@ two would be free to disagree — the failure shape this build has paid for befo
 where a gate proves one document and the effect lands against another. The scan
 indexes nothing and caches nothing; every call is a fresh read.
 
-**Strictly future is load-bearing.** An instant that has already passed is not a
-wake: the coordinator pass that just ran has already had its chance to act on it,
-and reporting it would produce a sleep of zero followed by a pass that admits the
-same nothing — a hot loop dressed as a schedule. Requiring the future is also the
-termination argument: every wake moves the clock past at least one recorded
-instant, and a passed instant is never reported again.
+**Three bands, not two.** The scan takes a *window* — `now`, and `since`, the
+moment the caller's last pass began — and sorts every recorded reset into one of
+three:
+
+- **future** (`resetAt > now`) — something to wait for;
+- **matured** (`since < resetAt <= now`) — something to look at again, now;
+- **neither** (`resetAt <= since`) — already behind when the pass began.
+
+The third band is where the caller has genuinely had its chance, and offering it
+again would produce a sleep of zero followed by a pass that admits the same
+nothing — a hot loop dressed as a schedule.
+
+The middle band was missing from the first version of this design, and a review
+found what that cost. A pass drives real agents and runs for many minutes;
+`reportedResetAt` is the *end* of a provider window, so a block met near the end
+of one records an instant minutes away. A reset falling inside the pass was still
+ahead when its task was admitted — the pass decided too early — and with only two
+bands the scheduler saw nothing future, answered "nothing to wait for", and
+stopped with its cycle budget unspent while the work sat resumable. That is the
+headline sentence being false in the window the scheduler was working in.
+
+Exactly one further pass is warranted and exactly one is produced: by the time it
+runs, `since` has moved past the instant and the band is empty. The termination
+argument is unchanged in shape — every cycle moves past at least one recorded
+instant, and no instant is offered twice.
 
 **Fail-closed means fewer wakes, never more.** An unreadable runtime directory,
 a state this build cannot parse, a reset `Date.parse` will not take, a clock
@@ -116,10 +135,28 @@ may decide.
 plans again. `run/repository-coordinator.ts` is untouched: it is still not
 persistent, still has no queue, still has no timers and still polls nothing.
 
-**No execution lease is held across a sleep, and that is structural rather than
-asserted.** `driveRepositories` returns only after every admission it made has
-settled, and a settled admission has released. The sleep sits strictly between
-two passes, so there is no code path on which this loop could be holding one.
+**No execution lease is held across a sleep, and the structural half is not the
+whole of it.** `driveRepositories` returns only after every admission it made has
+settled, and a settled admission has *attempted* its release. The sleep sits
+strictly between two passes, so there is no code path on which this loop could be
+holding one *by construction* — but a release can fail, and the build models that
+as `LEASE_RELEASE_FAILED` precisely because it happens.
+
+Two reviewers reached the same path independently: on that outcome the lease file
+stays on disk naming a **live** pid, and a sleep then makes it unreachable for up
+to a day — refusing every other invocation and refusing stale recovery too,
+because a sleeping owner really is alive. Before this loop existed the process
+exited within the pass and the pid died, so the lease became recoverable in
+seconds; the sleep is what converts a rare failure into a lockout.
+
+So the sleep carries the same gate `unattended-resume.ts` already applies to one
+task, lifted to a whole pass: **nothing sleeps until every admission has been
+shown to have given its repository back.** An admission that threw, that carries
+no lifecycle report, or that reports `LEASE_RELEASE_FAILED` or a release record
+that is not `RELEASED` ends the invocation as `LEASE_RELEASE_UNPROVEN`, graded
+`EXIT_RUN_NEEDS_OPERATOR` — the same code `LEASE_RELEASE_FAILED` itself gets.
+Fail-closed on absence as well as on failure: "no report" may not be read as
+"nothing to report".
 
 **Three things are re-established at every cycle boundary**, each a rule rather
 than an optimisation:
@@ -150,9 +187,17 @@ orders of magnitude below the edge.
 
 Re-reading the clock creates the opposite trap — a clock stepped *backwards*
 makes the deadline recede — so the loop also counts chunks, a monotone quantity
-no clock can move. Exceeding what the operator's bound could account for ends the
-wait as `CHUNK_BUDGET_SPENT`, which is not a failure: nothing was held and
-nothing was written, and the next act is to read durable state again.
+no clock can move. Any clock advancing more slowly than the sleeps it was asked
+for reaches it: stopped, slewed, or stepped back. (A backward step is only the
+loudest way; an earlier draft of this section, three code comments and the
+printed operator sentence all said "only when the clock moved backwards", and the
+branch's own test refuted them with a clock that merely stopped.) The budget is
+sized from the wait actually being performed rather than from the bound, so the
+margin is the same two chunks whatever the bound — sized from the bound it was
+1441 chunks for a short wait and one for a wait landing in the top minute of its
+bound. Exceeding it ends the wait as `SLEEP_BUDGET_SPENT`, which is not a
+failure: nothing was held and nothing was written, and the next act is to read
+durable state again.
 
 The sleep takes a cancellation promise and clears its timer on it, so an
 interrupted wait returns at once and leaves nothing holding the event loop.
@@ -168,9 +213,19 @@ default is a multi-hour sleep nobody asked for, and a cycle count invented by a
 default is a machine kept busy on nobody's instruction. `--max-cycles` is at
 least 2, because the first cycle is the pass that meets the block.
 
-**No authority was added.** Every admission still runs under the ordinary
-attended grant with all four destructive permissions `false`. The wait changes
-*when* passes happen and nothing about what a pass may do.
+**No permission was added, and the grant's reach in time did change.** Every
+admission still runs under the ordinary attended grant with all four destructive
+permissions `false`. But `--attended` used to be spelled "a human is present for
+this invocation", and *when* a pass happens is exactly the presence question —
+which is the thing this slice moved. A post-wake pass may run a day after the
+operator walked away, and under `ATTENDED` it may **start a task that did not
+exist when the command was typed**: a worktree, a branch, the first durable state
+and the writing agent.
+
+That is the most surprising consequence of the slice, so it is stated in the
+top-level help rather than left to be discovered, and the grant's own definition
+in `run/invocation-grant.ts` is narrowed to what it actually asserts — *an
+operator started this invocation and can stop it* — rather than attention.
 
 **The invocation without the flags is unchanged, down to what it opens.** The
 scheduler refuses the wait *before* it scans, so an ordinary
@@ -185,6 +240,20 @@ first interrupt asks the scheduler to stop after what is already running; a
 second removes the handler and re-raises, restoring the default. A hard kill at
 any moment is safe: a wait holds nothing, and a death mid-pass is the ordinary
 crash every lease recovery in this build already exists for.
+
+## What is measured, and what is inherited
+
+The **wait** is measured end to end in real processes: a CLI is started, put to
+sleep by its own scheduler, killed with `taskkill /F` while the reset is still
+ahead, and a separate process is required to print the same instant verbatim,
+wait it out, and re-enter the lifecycle under a real lease.
+
+The **resume after the wake** is not, and saying so is the honest half of the
+claim. Every dist fixture records `worktreeCleanAtCheckpoint: false` so no agent
+can start, which is what keeps the harness deterministic on a machine with no
+subscription login. The resume itself is V3-08's already-measured path, reached
+here through the ordinary `runTask`; this slice adds no step to it and changes
+none of its gates.
 
 ## Competing schedulers
 
@@ -226,6 +295,14 @@ concurrency, owned-launch accounting, lease and recovery, and the
   behind. One wasted pass, never a loop.
 - **Idle waiting wakes once a minute** to compare two numbers. It opens no file,
   starts no process and takes no lease.
+- **A cycle costs an auth preflight.** One is shared by every repository within a
+  cycle, and a fresh one is minted per cycle because the evidence carries no
+  freshness. So `--max-cycles n` authorises up to *n* startups of the
+  subscription CLIs. They read login state and spend no model quota.
+- **`--max-steps` and `--max-invocations` are per pass, not per invocation.** A
+  task re-admitted after a wait gets its budget again, so the ceiling for one
+  task is `--max-invocations` times `--max-cycles`. The help text says so; it did
+  not, and a review caught it.
 - **The longest wait this build will perform is 24 hours**, inherited unchanged
   from `MAX_WAIT_MS_CEILING`. Anything longer is a bound this build refuses
   rather than a sleep it attempts.

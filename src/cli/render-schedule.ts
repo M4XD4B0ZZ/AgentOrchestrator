@@ -46,8 +46,11 @@ export const SCHEDULER_DISPOSITION_SENTENCES = {
     'reset and plan again.',
   NO_FUTURE_WAKE:
     'No enlisted repository records a quota reset still ahead, so there was nothing to wait ' +
-    'for and nothing slept. That covers three cases the scan notes tell apart: nothing is ' +
-    'blocked, a block records no reset time, and a recorded reset has already passed.',
+    'for and nothing slept. That covers three cases this report does NOT tell apart, because ' +
+    'each is an ordinary record rather than a problem and none produces a note: nothing is ' +
+    'blocked, a block records no reset time, and a recorded reset has already passed. ' +
+    '`agent-loop repositories` names the blocked tasks. A note above, if there is one, is a ' +
+    'fourth possibility — a scan that could not read everything may have missed a nearer wake.',
   BOUND_EXCEEDED:
     'The earliest recorded reset is further away than --max-wait-ms permitted, so nothing ' +
     'slept. Invoke again nearer the time, or raise the bound. The wait itself is unchanged and ' +
@@ -63,16 +66,33 @@ export const SCHEDULER_DISPOSITION_SENTENCES = {
     'The system clock produced something this build could not read as a timestamp, so no wait ' +
     'was computed. Nothing was held and nothing was written.',
   SLEEP_BUDGET_SPENT:
-    'The wait outlived the number of intervals its bound could account for, which happens when ' +
-    'the system clock moves backwards during it. Nothing was held and nothing was written; ' +
-    'invoking again re-reads the same durable state.',
+    'The wait outlived the number of intervals it was budgeted, which happens when the system ' +
+    'clock advances more slowly than the sleeps this build asked for — stopped, slewed, or ' +
+    'stepped backwards. Nothing was held and nothing was written; invoking again re-reads the ' +
+    'same durable state.',
   REGISTRY_UNUSABLE_AFTER_WAIT:
     'The wait completed and the repository registry could not be read again afterwards, so no ' +
     'further pass was made. The registry is read fresh after every wait on purpose: a ' +
     'repository may be enlisted, withdrawn or moved while this process is asleep.',
+  LEASE_RELEASE_UNPROVEN:
+    'A pass ended without showing that every repository it drove had been given back, so ' +
+    'nothing slept. Sleeping on that would make this process a possible writer of that ' +
+    'repository for as long as the wait lasts, with a living owner in its lease document — ' +
+    'which refuses every other invocation and refuses stale recovery too. The admission that ' +
+    'could not be shown to have released is named above; `agent-loop lease status` in that ' +
+    'repository says what is there.',
   WAITED:
     'The scheduler was still waiting when this report was produced, which it should never be. ' +
     'Treat it as a defect in the scheduler rather than as a statement about the work.',
+  MATURED_DURING_PASS:
+    'The scheduler was still mid-cycle when this report was produced, which it should never be. ' +
+    'Treat it as a defect in the scheduler rather than as a statement about the work.',
+  WAIT_BOUND_UNUSABLE:
+    '--max-wait-ms is not a bound this build will sleep on, so nothing was planned and nothing ' +
+    'ran. Invoking again with the same value repeats exactly.',
+  CYCLE_BOUND_UNUSABLE:
+    '--max-cycles is not a bound this build will schedule on, so nothing was planned and ' +
+    'nothing ran. Invoking again with the same value repeats exactly.',
 } as const satisfies Record<SchedulerDisposition, string>;
 
 /** One sentence per scan note. Total; pinned by test. */
@@ -138,7 +158,13 @@ function renderCycle(entry: SchedulerCycle, total: number): string {
     rows.push(line('Earliest wake', `${entry.wake.resetAt}  (${entry.wake.taskId})`));
   }
   if (entry.waitedMs !== null) {
-    rows.push(line('Waited', `${String(entry.waitedMs)} ms`));
+    // "wall clock" is not decoration. This is the difference between two
+    // readings of the same clock, so a clock that moved during the wait moves
+    // this number with it — a backward step deflates it and can make it
+    // negative. An earlier comment claimed a step "shows up here rather than
+    // being hidden"; on the successful path it is hidden, which is why the
+    // number now says what it is rather than being read as elapsed time.
+    rows.push(line('Waited', `${String(entry.waitedMs)} ms of wall clock`));
   }
   return rows.join('\n');
 }
@@ -172,7 +198,9 @@ export function renderScheduler(result: SchedulerResult): string {
 export const SCHEDULER_TRAILER =
   'While it waits, this invocation holds no execution lease, runs no agent, prepares no ' +
   'workspace and writes no task state: the wait sits entirely between coordinator passes, and ' +
-  'a pass returns only once every repository it drove has given its lease back. The wait ' +
+  'nothing sleeps until every repository the pass drove has been SHOWN to have given its ' +
+  'lease back — an admission that threw, or that ends unable to say it released, stops the ' +
+  'invocation instead. The wait ' +
   'itself is not stored anywhere — it is re-read from each task’s own durable state before ' +
   'every sleep — so stopping this process loses nothing, and invoking it again reconstructs ' +
   'the same wait without being told which task or which instant. A quota block that records NO ' +

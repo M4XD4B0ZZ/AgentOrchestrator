@@ -362,7 +362,7 @@ describe('M3 slice 1 — the durable wake horizon', () => {
     const resetAt = new Date(NOW_MS + 3 * 60 * 60 * 1000).toISOString();
     writeBlockedState(root, 'T-1', resetAt);
 
-    const scan = scanDurableWakes([root], NOW);
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
 
     expect(scan.earliest).not.toBeNull();
     expect(scan.earliest?.taskId).toBe('T-1');
@@ -382,7 +382,7 @@ describe('M3 slice 1 — the durable wake horizon', () => {
     const root = makeRepository('wake-past', ['T-1']);
     writeBlockedState(root, 'T-1', new Date(NOW_MS - 1).toISOString());
 
-    const scan = scanDurableWakes([root], NOW);
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
 
     expect(scan.earliest).toBeNull();
     expect(scan.future).toEqual([]);
@@ -399,14 +399,14 @@ describe('M3 slice 1 — the durable wake horizon', () => {
     const root = makeRepository('wake-equal', ['T-1']);
     writeBlockedState(root, 'T-1', NOW);
 
-    expect(scanDurableWakes([root], NOW).earliest).toBeNull();
+    expect(scanDurableWakes([root], { now: NOW, since: NOW }).earliest).toBeNull();
   });
 
   it('never reports a block that records no reset time', () => {
     const root = makeRepository('wake-null', ['T-1']);
     writeBlockedState(root, 'T-1', null);
 
-    const scan = scanDurableWakes([root], NOW);
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
 
     expect(scan.earliest).toBeNull();
     expect(scan.statesRead).toBe(1);
@@ -428,7 +428,7 @@ describe('M3 slice 1 — the durable wake horizon', () => {
       resumeFrom: null,
     });
 
-    const scan = scanDurableWakes([root], NOW);
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
     expect(scan.earliest).toBeNull();
     expect(scan.statesRead).toBe(1);
   });
@@ -443,7 +443,7 @@ describe('M3 slice 1 — the durable wake horizon', () => {
 
     // Deliberately fed in the WRONG order — the later repository first — so the
     // answer cannot be produced by input order alone.
-    const scan = scanDurableWakes([late, early], NOW);
+    const scan = scanDurableWakes([late, early], { now: NOW, since: NOW });
 
     expect(scan.earliest?.resetAt).toBe(soon);
     expect(scan.future.map((wake) => wake.resetAt)).toEqual([soon, later]);
@@ -465,7 +465,7 @@ describe('M3 slice 1 — the durable wake horizon', () => {
 
     // And fed HIGH first, so input order is the third wrong answer this rules
     // out.
-    const scan = scanDurableWakes([high, low], NOW);
+    const scan = scanDurableWakes([high, low], { now: NOW, since: NOW });
 
     expect(scan.future.map((wake) => wake.repositoryRoot)).toEqual([low, high]);
     expect(scan.future.map((wake) => wake.taskId)).toEqual(['T-2', 'T-1']);
@@ -492,18 +492,18 @@ describe('M3 slice 1 — the durable wake horizon', () => {
     // passing while measuring nothing, and this line is what turns red instead.
     expect(['X.json', 'X-1.json'].sort()).toEqual(['X-1.json', 'X.json']);
 
-    const scan = scanDurableWakes([root], NOW);
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
     expect(scan.future.map((wake) => wake.taskId)).toEqual(['X', 'X-1']);
     expect(scan.earliest?.taskId).toBe('X');
   });
 
   it('reports an absent runtime directory as ordinary, and an unreadable one as a note', () => {
     const bare = makeRepository('wake-bare', ['T-1']);
-    const absent = scanDurableWakes([bare], NOW);
+    const absent = scanDurableWakes([bare], { now: NOW, since: NOW });
     expect(absent.notes).toEqual(['RUNTIME_DIRECTORY_ABSENT']);
     expect(absent.earliest).toBeNull();
 
-    const unreadable = scanDurableWakes([bare], NOW, {
+    const unreadable = scanDurableWakes([bare], { now: NOW, since: NOW }, {
       readDirectory: () => {
         const error: NodeJS.ErrnoException = new Error('denied');
         error.code = 'EACCES';
@@ -520,7 +520,7 @@ describe('M3 slice 1 — the durable wake horizon', () => {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, '{ not json', 'utf8');
 
-    const scan = scanDurableWakes([root], NOW);
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
     expect(scan.notes).toEqual(['STATE_UNREADABLE']);
     expect(scan.earliest).toBeNull();
     expect(scan.statesRead).toBe(0);
@@ -531,7 +531,7 @@ describe('M3 slice 1 — the durable wake horizon', () => {
     writeBlockedState(root, 'T-1', new Date(NOW_MS + 60_000).toISOString());
 
     let looked = false;
-    const scan = scanDurableWakes([root], 'not-a-timestamp', {
+    const scan = scanDurableWakes([root], { now: 'not-a-timestamp', since: 'not-a-timestamp' }, {
       readDirectory: () => {
         looked = true;
         return [];
@@ -552,7 +552,7 @@ describe('M3 slice 1 — the durable wake horizon', () => {
     writeFileSync(join(dir, 'notes.txt'), 'ignore me', 'utf8');
     writeFileSync(join(dir, 'T-1.json.bak'), '{}', 'utf8');
 
-    const scan = scanDurableWakes([root], NOW);
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW });
     expect(scan.statesRead).toBe(1);
     expect(scan.earliest?.resetAt).toBe(at);
     expect(scan.notes).toEqual([]);
@@ -564,11 +564,49 @@ describe('M3 slice 1 — the durable wake horizon', () => {
       { length: MAX_SCANNED_STATE_FILES_PER_REPOSITORY + 1 },
       (_unused, index) => `T-${String(index).padStart(6, '0')}.json`,
     );
-    const scan = scanDurableWakes([root], NOW, {
+    const scan = scanDurableWakes([root], { now: NOW, since: NOW }, {
       readDirectory: () => names,
       loadTaskState: () => ({ ok: false, code: 'NO_STATE' }) as never,
     });
     expect(scan.notes).toContain('SCAN_TRUNCATED');
+  });
+
+  it('reports a reset that matured DURING the pass as matured, not as nothing', () => {
+    // The band a review found missing. `reportedResetAt` is the END of a
+    // provider window, so a block met near the end of one records an instant
+    // minutes away — and a coordinator pass drives real agents for many minutes.
+    const root = makeRepository('wake-matured', ['T-1']);
+    const resetAt = new Date(NOW_MS - 60_000).toISOString();
+    writeBlockedState(root, 'T-1', resetAt);
+
+    // The pass began two minutes ago; the reset fell one minute ago, inside it.
+    const inside = scanDurableWakes([root], {
+      now: NOW,
+      since: new Date(NOW_MS - 120_000).toISOString(),
+    });
+    expect(inside.matured.map((wake) => wake.resetAt)).toEqual([resetAt]);
+    expect(inside.earliest).toBeNull();
+
+    // The same disk, one cycle later: the pass began after the instant, so the
+    // caller HAS had its chance and the band is empty. This is what makes the
+    // extra cycle exactly one.
+    const after = scanDurableWakes([root], {
+      now: NOW,
+      since: new Date(NOW_MS - 30_000).toISOString(),
+    });
+    expect(after.matured).toEqual([]);
+    expect(after.earliest).toBeNull();
+  });
+
+  it('a future reset is future, never matured', () => {
+    const root = makeRepository('wake-band', ['T-1']);
+    writeBlockedState(root, 'T-1', new Date(NOW_MS + 60_000).toISOString());
+    const scan = scanDurableWakes([root], {
+      now: NOW,
+      since: new Date(NOW_MS - 600_000).toISOString(),
+    });
+    expect(scan.future).toHaveLength(1);
+    expect(scan.matured).toEqual([]);
   });
 
   it('every note has a sentence', () => {
@@ -661,7 +699,7 @@ describe('M3 slice 1 — the scheduler loop', () => {
       ...test.deps,
       scanDurableWakes: () => {
         scanned = true;
-        return { earliest: null, future: [], statesRead: 0, notes: [] };
+        return { earliest: null, future: [], matured: [], statesRead: 0, notes: [] };
       },
     });
 
@@ -1002,6 +1040,226 @@ describe('M3 slice 1 — the scheduler loop', () => {
     expect(result.cycles[0]?.wake?.repositoryRoot).toBe(waiting);
   });
 
+  it('plans again at once, without sleeping, for a reset that matured during the pass', async () => {
+    // The whole failure this closes: a task resumable for eighteen minutes, nine
+    // cycles left, and the scheduler stopping because nothing was *future*.
+    const root = makeRepository('loop-matured', ['T-1']);
+    const statePath = writeBlockedState(root, 'T-1', new Date(NOW_MS + 60_000).toISOString());
+    const entry = await registered(root);
+
+    let clock = NOW_MS;
+    const passes: number[] = [];
+    const sleeps: number[] = [];
+
+    const result = await driveScheduler(
+      request({
+        repositories: [entry],
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+      }),
+      {
+        now: () => new Date(clock).toISOString(),
+        git: runGitCommand,
+        authPreflight: () => async () => provenAuthEvidence(),
+        resolveRegistry: async () => ({
+          ok: true,
+          repositories: [entry],
+          maxConcurrentRepositories: 1,
+        }),
+        driveRepositories: async () => {
+          passes.push(passes.length + 1);
+          // The pass takes ten minutes, and the reset falls inside it.
+          clock += 600_000;
+          return runResult();
+        },
+        sleep: async (ms: number): Promise<void> => {
+          sleeps.push(ms);
+          clock += ms;
+        },
+        shutdown: { stopped: () => false, cancel: new Promise<void>(() => {}) },
+      },
+    );
+
+    // Two passes, and NOT a sleep between them: the instant is already behind,
+    // so waiting for it would be waiting for nothing.
+    expect(passes).toEqual([1, 2]);
+    expect(sleeps).toEqual([]);
+    expect(result.cycles.map((entry_) => entry_.disposition)).toEqual([
+      'MATURED_DURING_PASS',
+      'NO_FUTURE_WAKE',
+    ]);
+    expect(result.cycles[0]?.wake?.taskId).toBe('T-1');
+    // And exactly two: cycle 2's pass began after the instant, so nothing
+    // matures again and the loop stops rather than spinning to the budget.
+    expect(readFileSync(statePath).length).toBeGreaterThan(0);
+  });
+
+  it('a stop asked for while the registry is being re-read buys no further pass', async () => {
+    // The window a review found: the sleep ends, `resolveRegistry` walks the
+    // enlisted repositories one at a time starting real `git` children, and an
+    // interrupt landing in there used to be seen only at the top of the NEXT
+    // cycle's refusals — after that cycle's pass had already been driven, agents
+    // included, at a moment when nothing was in flight and nothing was held.
+    const root = makeRepository('loop-stop-registry', ['T-1']);
+    writeBlockedState(root, 'T-1', new Date(NOW_MS + 60_000).toISOString());
+    const entry = await registered(root);
+
+    let stopped = false;
+    let clock = NOW_MS;
+    const passes: number[] = [];
+
+    const result = await driveScheduler(
+      request({
+        repositories: [entry],
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+      }),
+      {
+        now: () => new Date(clock).toISOString(),
+        git: runGitCommand,
+        authPreflight: () => async () => provenAuthEvidence(),
+        // The interrupt arrives here, in the window between the sleep ending and
+        // the next pass being decided on.
+        resolveRegistry: async () => {
+          stopped = true;
+          return { ok: true, repositories: [entry], maxConcurrentRepositories: 1 };
+        },
+        driveRepositories: async () => {
+          passes.push(passes.length + 1);
+          return runResult();
+        },
+        sleep: async (ms: number): Promise<void> => {
+          clock += ms;
+        },
+        shutdown: { stopped: () => stopped, cancel: new Promise<void>(() => {}) },
+      },
+    );
+
+    expect(passes).toEqual([1]);
+    expect(result.ending).toBe('SHUTDOWN_REQUESTED');
+  });
+
+  it('a stop asked for during the last pass is not reported as a clean finish', async () => {
+    // Nothing is left to wait for AND a stop was requested. Answering
+    // `NO_FUTURE_WAKE` would grade the run `EXIT_RUN_OK` — "I stopped it and it
+    // told me everything was fine" — so the shutdown is asked first.
+    const root = makeRepository('loop-stop-last', ['T-1']);
+    const entry = await registered(root);
+    let stopped = false;
+
+    const result = await driveScheduler(
+      request({
+        repositories: [entry],
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+      }),
+      {
+        now: () => NOW,
+        git: runGitCommand,
+        authPreflight: () => async () => provenAuthEvidence(),
+        resolveRegistry: async () => ({ ok: false, code: 'unreachable' }),
+        driveRepositories: async () => {
+          stopped = true;
+          return runResult();
+        },
+        sleep: async () => {
+          throw new Error('must not sleep');
+        },
+        shutdown: { stopped: () => stopped, cancel: new Promise<void>(() => {}) },
+      },
+    );
+
+    expect(result.ending).toBe('SHUTDOWN_REQUESTED');
+    // And the fixture really has nothing to wait for, so the arm this displaces
+    // is reachable: without the stop it answers NO_FUTURE_WAKE.
+    expect(result.cycles[0]?.scan.earliest).toBeNull();
+  });
+
+  it('does not sleep when a pass could not be shown to have released', async () => {
+    // `unattended-resume.ts`'s rule, lifted to a whole pass. Sleeping on an
+    // unproven release makes this process a possible writer of that repository
+    // for up to a day, with a LIVING pid in the lease document — which refuses
+    // every other invocation and refuses stale recovery too. Before this loop
+    // existed the process exited within the pass and the pid died.
+    const root = makeRepository('loop-release', ['T-1']);
+    writeBlockedState(root, 'T-1', new Date(NOW_MS + 60_000).toISOString());
+    const entry = await registered(root);
+
+    for (const admission of [
+      { threw: false, lifecycle: lifecycleResult('LEASE_RELEASE_FAILED') },
+      { threw: true, lifecycle: lifecycleResult('COMPLETED') },
+      { threw: false, lifecycle: null },
+    ]) {
+      const test = harness({
+        runs: [
+          runResult({
+            outcome: 'RUN_COMPLETE',
+            planCode: 'TASK_SELECTED',
+            admissions: [
+              {
+                sequence: 1,
+                repositoryId: 'r',
+                repositoryRoot: root,
+                taskId: 'T-1',
+                concurrencyAtAdmission: 1,
+                ...admission,
+              },
+            ],
+          } as never),
+        ],
+      });
+
+      const result = await driveScheduler(
+        request({
+          repositories: [entry],
+          wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+        }),
+        test.deps,
+      );
+
+      expect(result.ending).toBe('LEASE_RELEASE_UNPROVEN');
+      expect(test.sleeps).toEqual([]);
+      // The wake was found — this is a refusal to sleep on it, not a failure to
+      // see it.
+      expect(result.cycles[0]?.wake).not.toBeNull();
+    }
+  });
+
+  it('does sleep when every admission released', async () => {
+    // The control for the case above: the same shape, with the one field that
+    // decides it flipped.
+    const root = makeRepository('loop-release-ok', ['T-1']);
+    writeBlockedState(root, 'T-1', new Date(NOW_MS + 60_000).toISOString());
+    const entry = await registered(root);
+    const released = runResult({
+      outcome: 'RUN_COMPLETE',
+      planCode: 'TASK_SELECTED',
+      admissions: [
+        {
+          sequence: 1,
+          repositoryId: 'r',
+          repositoryRoot: root,
+          taskId: 'T-1',
+          concurrencyAtAdmission: 1,
+          threw: false,
+          lifecycle: lifecycleResult('BLOCKED_USAGE_LIMIT'),
+        },
+      ],
+    } as never);
+    const test = harness({
+      runs: [released, released],
+      registry: async () => ({ ok: true, repositories: [entry], maxConcurrentRepositories: 1 }),
+    });
+
+    const result = await driveScheduler(
+      request({
+        repositories: [entry],
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+      }),
+      test.deps,
+    );
+
+    expect(result.cycles[0]?.disposition).toBe('WAITED');
+    expect(test.sleeps.length).toBeGreaterThan(0);
+  });
+
   it('every disposition has a sentence', () => {
     for (const disposition of SCHEDULER_DISPOSITIONS) {
       expect(SCHEDULER_DISPOSITION_SENTENCES[disposition].length).toBeGreaterThan(40);
@@ -1012,12 +1270,17 @@ describe('M3 slice 1 — the scheduler loop', () => {
 /* ═════════════════════════ 4. the bounded sleep ══════════════════════════ */
 
 describe('M3 slice 1 — the bounded sleep', () => {
-  const clockAt = (start: number): { now: () => string; advance: (ms: number) => void } => {
+  const clockAt = (
+    start: number,
+  ): { now: () => string; advance: (ms: number) => void; set: (ms: number) => void } => {
     let clock = start;
     return {
       now: () => new Date(clock).toISOString(),
       advance: (ms) => {
         clock += ms;
+      },
+      set: (ms) => {
+        clock = ms;
       },
     };
   };
@@ -1062,20 +1325,102 @@ describe('M3 slice 1 — the bounded sleep', () => {
     expect(slept).toBe(1);
   });
 
-  it('ends on the chunk budget when the clock runs backwards', async () => {
+  it('ends on the chunk budget when the clock STOPS, not only when it steps back', async () => {
+    // The title matters. An earlier version of this case was called "when the
+    // clock runs backwards" while advancing the clock by zero, and three
+    // comments plus the printed operator sentence claimed the ending was
+    // reachable only by a backward step. A stopped clock reaches it too — a
+    // stalled hypervisor time source is the ordinary way — so the case is named
+    // for what it drives and the sentences now say what it shows.
     const clock = clockAt(NOW_MS);
     const outcome = await sleepUntilInstant(NOW_MS + 120_000, 120_000, {
       now: clock.now,
-      sleep: async (ms) => {
-        // Every chunk is undone: the deadline never arrives.
-        clock.advance(ms - ms);
+      sleep: async () => {
+        /* the clock does not move: the deadline never arrives */
       },
       shouldStop: () => false,
       cancel: new Promise<void>(() => {}),
     });
 
     expect(outcome.outcome).toBe('CHUNK_BUDGET_SPENT');
-    expect(outcome.chunks).toBe(Math.ceil(120_000 / SLEEP_CHUNK_MS) + 1);
+    expect(outcome.chunks).toBe(Math.ceil(120_000 / SLEEP_CHUNK_MS) + 2);
+  });
+
+  it('ends on the chunk budget when the clock steps backwards', async () => {
+    const clock = clockAt(NOW_MS);
+    let chunks = 0;
+    const outcome = await sleepUntilInstant(NOW_MS + 120_000, 120_000, {
+      now: clock.now,
+      sleep: async (ms) => {
+        chunks += 1;
+        // Two minutes of real sleeping, and a clock stepped back an hour during
+        // the first chunk: the deadline recedes and the loop would never arrive.
+        clock.advance(chunks === 1 ? -3_600_000 : ms);
+      },
+      shouldStop: () => false,
+      cancel: new Promise<void>(() => {}),
+    });
+
+    expect(outcome.outcome).toBe('CHUNK_BUDGET_SPENT');
+    // And the wall-clock difference it reports is negative, which is why the
+    // report labels it wall clock rather than elapsed time.
+    expect(outcome.elapsedMs).toBeLessThan(0);
+  });
+
+  it('a wait that arrives after a backward step reports a wall clock that hides it', async () => {
+    // The other direction, and the one the comment used to get wrong: on the
+    // SUCCESS path a backward step is not shown, it is subtracted. Pinned so the
+    // sentence describing `elapsedMs` cannot drift back to "a clock step shows
+    // up here".
+    const clock = clockAt(NOW_MS);
+    let chunks = 0;
+    const outcome = await sleepUntilInstant(NOW_MS + 300_000, 3_600_000, {
+      now: clock.now,
+      sleep: async (ms) => {
+        chunks += 1;
+        // One chunk's worth of backward step — inside the budget's margin, so
+        // the wait still arrives. A larger step trips the budget instead, which
+        // is the guard doing its job and is pinned by the case above.
+        clock.advance(chunks === 1 ? -60_000 : ms);
+      },
+      shouldStop: () => false,
+      cancel: new Promise<void>(() => {}),
+    });
+
+    expect(outcome.outcome).toBe('DEADLINE_REACHED');
+    // Seven chunks were really slept; the report says five minutes.
+    expect(outcome.chunks).toBe(7);
+    expect(outcome.elapsedMs).toBe(300_000);
+  });
+
+  it('the chunk budget is sized from the wait, not from the bound', async () => {
+    // Sized from the bound alone, a five-minute wait under a 24-hour bound
+    // carried 1 441 chunks of slack while a wait landing in the top minute of
+    // its bound carried one — the margin depended on where in its bound the wait
+    // happened to fall. It is now the same two chunks either way, whatever the
+    // bound, which is what makes it a predictable guard rather than a lottery.
+    const clock = clockAt(NOW_MS);
+    const budgets: number[] = [];
+    for (const bound of [300_000, 3_600_000, MAX_WAIT_MS_CEILING]) {
+      clock.set(NOW_MS);
+      // A one-off slew of 90 seconds — under two chunks — during a five-minute
+      // wait. It must arrive under every bound, and take the same number of
+      // chunks under every bound.
+      let chunk = 0;
+      const outcome = await sleepUntilInstant(NOW_MS + 300_000, bound, {
+        now: clock.now,
+        sleep: async (ms) => {
+          chunk += 1;
+          clock.advance(chunk === 1 ? ms - 90_000 : ms);
+        },
+        shouldStop: () => false,
+        cancel: new Promise<void>(() => {}),
+      });
+      expect(outcome.outcome).toBe('DEADLINE_REACHED');
+      budgets.push(outcome.chunks);
+    }
+    expect(budgets[0]).toBe(budgets[1]);
+    expect(budgets[1]).toBe(budgets[2]);
   });
 
   it('returns at once when the deadline has already passed', async () => {
@@ -1261,6 +1606,48 @@ describe('M3 slice 1 — the CLI refuses before anything is resolved', () => {
     expect(text).toContain('MAX_CYCLES_INVALID');
   });
 
+  it('the scheduler refuses an unusable bound itself, before any pass', async () => {
+    // "Another module's reasoning says this cannot happen" is not a check, and
+    // the cost of being wrong is a loop bounded by nothing: `sequence >= NaN` is
+    // false forever. This is the same rule the loop applies to the registry's
+    // capacity after a wait, applied to its own arguments.
+    const root = makeRepository('bounds-entry', ['T-1']);
+    const entry = await registered(root);
+
+    for (const [wait, ending] of [
+      [{ wait: true, maxWaitMs: Number.NaN, maxCycles: 4 }, 'WAIT_BOUND_UNUSABLE'],
+      [{ wait: true, maxWaitMs: MAX_WAIT_MS_CEILING + 1, maxCycles: 4 }, 'WAIT_BOUND_UNUSABLE'],
+      [{ wait: true, maxWaitMs: 1000, maxCycles: Number.NaN }, 'CYCLE_BOUND_UNUSABLE'],
+      [{ wait: true, maxWaitMs: 1000, maxCycles: 1 }, 'CYCLE_BOUND_UNUSABLE'],
+      [
+        { wait: true, maxWaitMs: 1000, maxCycles: MAX_SCHEDULER_CYCLES + 1 },
+        'CYCLE_BOUND_UNUSABLE',
+      ],
+    ] as const) {
+      let drove = false;
+      const result = await driveScheduler(
+        request({ repositories: [entry], wait }),
+        {
+          now: () => NOW,
+          git: runGitCommand,
+          authPreflight: () => async () => provenAuthEvidence(),
+          resolveRegistry: async () => ({ ok: false, code: 'unreachable' }),
+          driveRepositories: async () => {
+            drove = true;
+            return runResult();
+          },
+          sleep: async () => {
+            throw new Error('must not sleep');
+          },
+        },
+      );
+      expect(result.ending).toBe(ending);
+      expect(result.cycles).toEqual([]);
+      // Before any effect: no pass, no lease, no `git` child.
+      expect(drove).toBe(false);
+    }
+  });
+
   it('the cycle bound predicate is total and fail-closed', () => {
     expect(isUsableCycleBound(2)).toBe(true);
     expect(isUsableCycleBound(MAX_SCHEDULER_CYCLES)).toBe(true);
@@ -1378,7 +1765,7 @@ describe('M3 slice 1 — the exit code', () => {
         {
           sequence: 1,
           run: runResult({ outcome: 'RUN_COMPLETE', planCode: 'TASK_SELECTED' }),
-          scan: { earliest: null, future: [], statesRead: 0, notes: [] },
+          scan: { earliest: null, future: [], matured: [], statesRead: 0, notes: [] },
           disposition: 'NO_FUTURE_WAKE',
           wake: null,
           waitedMs: null,
@@ -1410,7 +1797,7 @@ describe('M3 slice 1 — the exit code', () => {
               },
             ],
           } as never),
-          scan: { earliest: null, future: [], statesRead: 0, notes: [] },
+          scan: { earliest: null, future: [], matured: [], statesRead: 0, notes: [] },
           disposition: 'WAITED',
           wake: null,
           waitedMs: 1,
@@ -1418,7 +1805,7 @@ describe('M3 slice 1 — the exit code', () => {
         {
           sequence: 2,
           run: runResult({ outcome: 'RUN_COMPLETE', planCode: 'TASK_SELECTED' }),
-          scan: { earliest: null, future: [], statesRead: 0, notes: [] },
+          scan: { earliest: null, future: [], matured: [], statesRead: 0, notes: [] },
           disposition: 'NO_FUTURE_WAKE',
           wake: null,
           waitedMs: null,
@@ -1430,6 +1817,77 @@ describe('M3 slice 1 — the exit code', () => {
     expect(blocked).toBe(3);
   });
 
+  it('a run that did not ask to wait is graded exactly as it was before', async () => {
+    // The M2 promise, held as an equality rather than as an argument: for every
+    // coordinator ending, the scheduler's grader must answer what
+    // `exitCodeForCrossRepositoryRun` answered on its own.
+    const { exitCodeForCrossRepositoryRun, exitCodeForScheduler } = await import(
+      '../src/cli/run-exit-codes.js'
+    );
+    const runs = [
+      runResult({ outcome: 'RUN_COMPLETE', planCode: 'TASK_SELECTED' }),
+      runResult({ outcome: 'NOTHING_ADMITTED', planCode: 'ALL_TASKS_COMPLETE' }),
+      runResult({ outcome: 'NOTHING_ADMITTED', planCode: 'REPOSITORY_UNPLANNABLE' }),
+      runResult({ outcome: 'CAPACITY_INVALID', planCode: null }),
+      runResult({ outcome: 'PLANNING_REFUSED_MIDRUN', planCode: 'REPOSITORY_UNPLANNABLE' }),
+      runResult({ outcome: 'ADMISSION_BUDGET_EXHAUSTED', planCode: 'TASK_SELECTED' }),
+      runResult({
+        outcome: 'RUN_COMPLETE',
+        planCode: 'TASK_SELECTED',
+        admissions: [
+          {
+            sequence: 1,
+            repositoryId: 'a',
+            repositoryRoot: 'a',
+            taskId: 'T-1',
+            concurrencyAtAdmission: 1,
+            threw: false,
+            lifecycle: lifecycleResult('BLOCKED_AUTH'),
+          },
+        ],
+      } as never),
+    ];
+
+    for (const run of runs) {
+      expect(
+        exitCodeForScheduler({
+          cycles: [
+            {
+              sequence: 1,
+              run,
+              scan: { earliest: null, future: [], matured: [], statesRead: 0, notes: [] },
+              disposition: 'NOT_REQUESTED',
+              wake: null,
+              waitedMs: null,
+            },
+          ],
+          ending: 'NOT_REQUESTED',
+          registryRefusal: null,
+        } as never),
+      ).toBe(exitCodeForCrossRepositoryRun(run));
+    }
+  });
+
+  it('an unproven release needs an operator, not another invocation', async () => {
+    const { exitCodeForScheduler } = await import('../src/cli/run-exit-codes.js');
+    expect(
+      exitCodeForScheduler({
+        cycles: [
+          {
+            sequence: 1,
+            run: runResult({ outcome: 'RUN_COMPLETE', planCode: 'TASK_SELECTED' }),
+            scan: { earliest: null, future: [], matured: [], statesRead: 0, notes: [] },
+            disposition: 'LEASE_RELEASE_UNPROVEN',
+            wake: null,
+            waitedMs: null,
+          },
+        ],
+        ending: 'LEASE_RELEASE_UNPROVEN',
+        registryRefusal: null,
+      } as never),
+    ).toBe(3);
+  });
+
   it('a durable wait that outlived a bound says "call again"', async () => {
     const { exitCodeForScheduler } = await import('../src/cli/run-exit-codes.js');
     for (const ending of ['BOUND_EXCEEDED', 'CYCLE_BUDGET_SPENT', 'SHUTDOWN_REQUESTED'] as const) {
@@ -1439,7 +1897,7 @@ describe('M3 slice 1 — the exit code', () => {
             {
               sequence: 1,
               run: runResult({ outcome: 'RUN_COMPLETE', planCode: 'TASK_SELECTED' }),
-              scan: { earliest: null, future: [], statesRead: 0, notes: [] },
+              scan: { earliest: null, future: [], matured: [], statesRead: 0, notes: [] },
               disposition: ending,
               wake: null,
               waitedMs: null,

@@ -27,15 +27,31 @@
  * waiting?" without already knowing their names. That enumeration is here,
  * bounded and fail-closed, and it is the whole of this module's novelty.
  *
- * ── Strictly in the future, and why that word is load-bearing ──────────────
+ * ── Three bands, and the middle one is why this takes a window ─────────────
  *
- * A wake instant is reported only when it is **strictly greater** than the
- * caller's `now`. An instant that has already passed is not a wake: the
- * scheduler's own coordinator pass has just run and had its chance to act on it,
- * and reporting it would produce a sleep of zero followed by a pass that admits
- * the same nothing — a hot loop dressed as a schedule. Requiring the future
- * makes every cycle advance the clock past at least one recorded instant, which
- * is what bounds the loop.
+ * A caller hands two instants: `now`, and `since` — the moment its own last
+ * coordinator pass began. Every recorded reset falls into one of three bands:
+ *
+ *   - **future** (`resetAt > now`) — something to wait for;
+ *   - **matured** (`since < resetAt <= now`) — something to look at again, now;
+ *   - **neither** (`resetAt <= since`) — already behind when the pass began.
+ *
+ * The third band is where the caller has genuinely had its chance: the pass
+ * admitted that task with the instant already behind it, and whatever refused it
+ * refused on something time does not fix. Offering it again would produce a
+ * sleep of zero followed by a pass that admits the same nothing — a hot loop
+ * dressed as a schedule.
+ *
+ * The middle band is not that, and an earlier version of this module had no such
+ * band and was wrong for it. A pass drives real agents and can run for many
+ * minutes; `reportedResetAt` is the *end* of a provider window, so a block hit
+ * near the end of one records an instant minutes away. A reset falling inside
+ * the pass was still ahead when its task was admitted, so the pass decided too
+ * early — and with only two bands the scheduler saw nothing future, answered
+ * "nothing to wait for", and stopped with its cycle budget unspent while the
+ * work sat resumable. Exactly one further pass is warranted, and exactly one is
+ * what this produces: by the time it runs, `since` has moved past the instant
+ * and the band is empty.
  *
  * ── Fail-closed means "do not schedule a wake" ─────────────────────────────
  *
@@ -112,6 +128,28 @@ export const WAKE_SCAN_NOTES = [
 
 export type WakeScanNote = (typeof WAKE_SCAN_NOTES)[number];
 
+/**
+ * The two instants a scan is judged against.
+ *
+ * `since` is the moment the caller's own last coordinator pass **began**, and it
+ * exists to answer a question `now` alone cannot: did a recorded reset mature
+ * *while that pass was running*? A pass is not instantaneous — it drives real
+ * agents and can run for many minutes — and a reset that fell inside it was
+ * still in the future when the task was admitted, so the pass could not have
+ * acted on it and one more pass is warranted. Without that distinction the
+ * scheduler stops with cycles unspent and work sitting resumable, which is the
+ * exact failure the slice exists to prevent.
+ *
+ * A caller with no pass behind it passes `since === now`, which reports nothing
+ * as matured.
+ */
+export interface WakeWindow {
+  /** The clock now. */
+  readonly now: string;
+  /** When the pass this scan follows began. */
+  readonly since: string;
+}
+
 export interface WakeScan {
   /**
    * The soonest future wake across every repository scanned, or `null`.
@@ -123,6 +161,14 @@ export interface WakeScan {
   readonly earliest: DurableWake | null;
   /** Every future wake found, ascending by instant then repository then task. Total order. */
   readonly future: readonly DurableWake[];
+  /**
+   * Every wake whose instant fell inside the window — after the pass began and
+   * at or before now.
+   *
+   * These are not things to wait for; they are things to look at **again**, at
+   * once. Same total order as {@link future}.
+   */
+  readonly matured: readonly DurableWake[];
   /** How many state files were successfully read. Diagnostic. */
   readonly statesRead: number;
   /** Sorted, de-duplicated {@link WAKE_SCAN_NOTES}. Empty when nothing was in doubt. */
@@ -178,7 +224,7 @@ function compareWakes(a: DurableWake, b: DurableWake): number {
  */
 export function scanDurableWakes(
   repositoryRoots: readonly string[],
-  nowIso: string,
+  window: WakeWindow,
   deps: WakeScanDependencies = {},
 ): WakeScan {
   const readDirectory = deps.readDirectory ?? ((path: string): readonly string[] => readdirSync(path));
@@ -191,17 +237,20 @@ export function scanDurableWakes(
   // would be a comparison against `NaN` — which is `false` in both directions,
   // so the arm below would silently return nothing while looking like it had
   // looked. Refusing here says so.
-  const nowMs = Date.parse(nowIso);
-  if (!Number.isFinite(nowMs)) {
+  const nowMs = Date.parse(window.now);
+  const sinceMs = Date.parse(window.since);
+  if (!Number.isFinite(nowMs) || !Number.isFinite(sinceMs)) {
     return Object.freeze({
       earliest: null,
       future: Object.freeze([]),
+      matured: Object.freeze([]),
       statesRead: 0,
       notes: Object.freeze(['CURRENT_TIME_UNPARSEABLE' as const]),
     });
   }
 
   const future: DurableWake[] = [];
+  const matured: DurableWake[] = [];
   let statesRead = 0;
 
   for (const repositoryRoot of repositoryRoots) {
@@ -255,27 +304,40 @@ export function scanDurableWakes(
         continue;
       }
 
-      // Strictly in the future. See the module header: an instant that has
-      // already passed is not a wake, because the pass that just ran has
-      // already had its chance to act on it.
-      if (resetAtMs <= nowMs) continue;
+      const wake = Object.freeze({ repositoryRoot, taskId, resetAt, resetAtMs });
 
-      future.push(
-        Object.freeze({
-          repositoryRoot,
-          taskId,
-          resetAt,
-          resetAtMs,
-        }),
-      );
+      // Three bands, and the middle one is the whole reason this function takes
+      // a window rather than an instant.
+      //
+      //   resetAtMs >  nowMs                       → future: something to wait for
+      //   sinceMs   <  resetAtMs <= nowMs          → matured: something to look at again
+      //   resetAtMs <= sinceMs                     → neither
+      //
+      // The last band is where the caller has genuinely had its chance: the
+      // instant was already behind when the pass began, the pass admitted the
+      // task with it behind, and the refusal it met was about something time
+      // does not fix. Reporting it would produce a pass that admits the same
+      // nothing — a hot loop dressed as a schedule.
+      //
+      // The middle band is not that. The instant was still ahead when the pass
+      // began, so whatever the pass decided about that task it decided too
+      // early. One more pass is warranted, and exactly one: by the time it runs,
+      // `since` has moved past the instant and the band is empty.
+      if (resetAtMs > nowMs) {
+        future.push(wake);
+      } else if (resetAtMs > sinceMs) {
+        matured.push(wake);
+      }
     }
   }
 
   future.sort(compareWakes);
+  matured.sort(compareWakes);
 
   return Object.freeze({
     earliest: future[0] ?? null,
     future: Object.freeze([...future]),
+    matured: Object.freeze([...matured]),
     statesRead,
     notes: Object.freeze([...notes].sort()),
   });

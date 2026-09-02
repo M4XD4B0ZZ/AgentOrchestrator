@@ -89,7 +89,7 @@ import {
   driveRepositories as driveRepositoriesProduction,
   type CrossRepositoryRunResult,
 } from '../run/repository-coordinator.js';
-import { MAX_WAIT_MS_CEILING } from '../run/unattended-resume.js';
+import { isUsableWaitBound, MAX_WAIT_MS_CEILING } from '../run/unattended-resume.js';
 import type { AgentRunner } from '../agent/agent-command.js';
 import type { GitRunner } from '../worktree/git-command.js';
 import type { VerificationRunner } from '../verify/verify-command.js';
@@ -182,8 +182,32 @@ export const SCHEDULER_DISPOSITIONS = [
   'SLEEP_BUDGET_SPENT',
   /** Slept, woke, and could not read the registry again. Nothing further ran. */
   'REGISTRY_UNUSABLE_AFTER_WAIT',
+  /**
+   * A pass could not be shown to have given every repository back, so nothing
+   * slept.
+   *
+   * `unattended-resume.ts`'s own rule, lifted from one task to a whole pass: a
+   * waiter that cannot prove it released may still be a repository's writer, and
+   * a sleep would make that true for up to a day with a living pid in the lease
+   * document — refusing every other invocation, and refusing stale recovery too.
+   */
+  'LEASE_RELEASE_UNPROVEN',
   /** Slept and ran another coordinator pass. Never an ending. */
   'WAITED',
+  /**
+   * A recorded reset matured *while the pass was running*, so another pass ran
+   * at once without sleeping. Never an ending.
+   *
+   * Its own member rather than a silent `WAITED` with `waitedMs: 0`, because the
+   * two are different facts about the same invocation: one waited for an instant
+   * and one found an instant it had already passed through. An operator reading
+   * a report full of `WAITED` rows that never slept would be reading a lie.
+   */
+  'MATURED_DURING_PASS',
+  /** `--max-wait-ms` is not a bound this build will sleep on. Nothing ran. */
+  'WAIT_BOUND_UNUSABLE',
+  /** `--max-cycles` is not a bound this build will schedule on. Nothing ran. */
+  'CYCLE_BOUND_UNUSABLE',
 ] as const;
 
 export type SchedulerDisposition = (typeof SCHEDULER_DISPOSITIONS)[number];
@@ -256,14 +280,21 @@ export interface ShutdownSeam {
 /**
  * The horizon of a cycle that never looked.
  *
- * Distinguishable from a scan that looked and found nothing: this one reports
- * zero states read *and* an empty note list, which no real scan of a repository
- * with a runtime directory can produce. A reader that wants "did it look?"
- * should read the cycle's disposition, which says `NOT_REQUESTED`.
+ * It is **not** distinguishable from a real scan by its own value, and an
+ * earlier version of this comment claimed it was — "zero states read and an
+ * empty note list, which no real scan of a repository with a runtime directory
+ * can produce". A review produced one in a line: a repository whose runtime
+ * directory exists and holds no state file yields exactly this shape, and a
+ * crashed atomic write leaves a staging file that `isStateFileName` filters out,
+ * reproducing it.
+ *
+ * Nothing needs the distinction. The question "did it look?" is answered by the
+ * cycle's disposition, which says `NOT_REQUESTED`, and that is the only reader.
  */
 const NOT_SCANNED: WakeScan = Object.freeze({
   earliest: null,
   future: Object.freeze([]),
+  matured: Object.freeze([]),
   statesRead: 0,
   notes: Object.freeze([]),
 });
@@ -317,14 +348,19 @@ function cycle(
   return Object.freeze({ wake: null, waitedMs: null, ...from });
 }
 
-function result(cycles: readonly SchedulerCycle[], registryRefusal: string | null): SchedulerResult {
+function result(
+  cycles: readonly SchedulerCycle[],
+  registryRefusal: string | null,
+  ending?: SchedulerDisposition,
+): SchedulerResult {
   const last = cycles.at(-1);
   return Object.freeze({
     cycles: Object.freeze([...cycles]),
-    // A run always has at least one cycle, so the fallback is unreachable. It is
-    // `NOT_REQUESTED` rather than a throw because an ending is a report, and a
-    // report that cannot be produced must not become an exception.
-    ending: last?.disposition ?? 'NOT_REQUESTED',
+    // The explicit ending is for the two refusals that happen before any pass,
+    // where there is no cycle to read one from. Otherwise the last cycle's
+    // disposition is the ending; a run that got as far as a pass always has one,
+    // so the final fallback is unreachable and is a report rather than a throw.
+    ending: ending ?? last?.disposition ?? 'NOT_REQUESTED',
     registryRefusal,
   });
 }
@@ -363,12 +399,46 @@ export async function driveScheduler(
   const sleep = deps.sleep ?? realCancellableSleep;
   const shutdown = deps.shutdown ?? NEVER_STOPS;
 
+  // Refused before any effect: before a pass, before a lease, before a single
+  // `git` child. Both bounds are re-checked here even though the CLI checks
+  // them, and that is not belt and braces for its own sake — it is the rule this
+  // module applies to the registry's capacity three screens down, applied to its
+  // own arguments. "Another module's reasoning says this cannot happen" is not a
+  // check, and the cost of being wrong is a loop bounded by nothing: `sequence
+  // >= NaN` is false forever, and `maxChunks` computed from `NaN` never fires.
+  if (request.wait.wait && !isUsableWaitBound(request.wait.maxWaitMs)) {
+    return result([], 'MAX_WAIT_MS_INVALID', 'WAIT_BOUND_UNUSABLE');
+  }
+  if (request.wait.wait && !isUsableCycleBound(request.wait.maxCycles)) {
+    return result([], 'MAX_CYCLES_INVALID', 'CYCLE_BOUND_UNUSABLE');
+  }
+
   const cycles: SchedulerCycle[] = [];
+
+  /**
+   * The bound the loop actually stops on.
+   *
+   * `Math.min` rather than the operator's value alone, so that
+   * `MAX_SCHEDULER_CYCLES` is enforced **where the loop is** — which is what
+   * makes it the runaway floor its own comment calls it, and what a review
+   * correctly pointed out it was not. The entry validation above already refuses
+   * a larger value, so this changes nothing an operator can reach; it means the
+   * floor holds for every producer of a `SchedulerWaitPolicy`, not only for the
+   * one that happens to validate.
+   */
+  const cycleBudget = request.wait.wait
+    ? Math.min(request.wait.maxCycles, MAX_SCHEDULER_CYCLES)
+    : 0;
 
   let repositories = request.repositories;
   let capacity = request.maxConcurrentRepositories;
 
   for (let sequence = 1; ; sequence += 1) {
+    // The moment this pass began, kept so the scan below can tell a reset that
+    // matured *inside* the pass from one that was already behind when it
+    // started. See `WakeWindow`.
+    const passStartedAt = deps.now();
+
     const run = await drive(
       {
         repositories,
@@ -410,23 +480,100 @@ export async function driveScheduler(
     // behind: a task that just met the quota contributes its new reset here, and
     // a task the pass resumed contributes nothing.
     const nowIso = deps.now();
-    const horizon = scan(
-      repositories.map((entry) => entry.repository.root),
-      nowIso,
-    );
+    const horizon = scan(repositories.map((entry) => entry.repository.root), {
+      now: nowIso,
+      since: passStartedAt,
+    });
 
     const wake = horizon.earliest;
-    if (wake === null) {
-      cycles.push(cycle({ sequence, run, scan: horizon, disposition: 'NO_FUTURE_WAKE' }));
-      return result(cycles, null);
-    }
+    const matured = horizon.matured[0] ?? null;
 
+    // The shutdown **before** the wake question, and that order is a correction
+    // rather than a preference. Asked afterwards, an interrupt that arrived
+    // during the last pass of a run with nothing left to wait for was reported
+    // as `NO_FUTURE_WAKE` and graded `EXIT_RUN_OK` — "I stopped it and it told
+    // me everything was fine". An interrupted run did not finish on its own
+    // terms, whatever else was true, and the report has to say so.
     if (shutdown.stopped()) {
       cycles.push(cycle({ sequence, run, scan: horizon, disposition: 'SHUTDOWN_REQUESTED', wake }));
       return result(cycles, null);
     }
 
-    if (sequence >= request.wait.maxCycles) {
+    // The lease must be **provably** back before anything sleeps, and that is
+    // `unattended-resume.ts`'s rule lifted from one task to a whole pass.
+    //
+    // A sleeper that cannot say it gave every repository back may still be one
+    // of their writers, and it is about to be unreachable for up to a day — with
+    // a *living* pid in the lease document, so every other invocation on the
+    // machine is refused and stale recovery is refused too, because a sleeping
+    // owner really is alive. Before this loop existed the process exited within
+    // the pass and the pid died, making the lease recoverable in seconds; the
+    // sleep is what turns a rare release failure into a day-long lockout, so the
+    // sleep is what has to refuse.
+    //
+    // Fail-closed on absence as well as on failure: an admission that threw, or
+    // that carries no lifecycle report, has not been *shown* to have given
+    // anything back, and "no report" may not be read as "nothing to report".
+    //
+    // **Two readings of the release, and both must be clean.** The outcome is
+    // the lifecycle's own summary; the release record is the instrument
+    // `unattended-resume.ts` uses (`releaseProven`: `RELEASED` is the only proof
+    // there is). They agree today only because `finish` maps every non-`RELEASED`
+    // code onto `LEASE_RELEASE_FAILED` — one fact spelled twice — and a review
+    // pointed out that citing that module while reading the other value is how
+    // the two quietly stop meaning the same thing. So both are read. A `null`
+    // record is not a failure: it is an admission that never took a lease, which
+    // is exactly what a refused acquisition looks like.
+    const unproven = run.admissions.find((admission) => {
+      if (admission.threw || admission.lifecycle === null) return true;
+      if (admission.lifecycle.outcome === 'LEASE_RELEASE_FAILED') return true;
+      const release = admission.lifecycle.release;
+      return release !== null && release.code !== 'RELEASED';
+    });
+    if (unproven !== undefined) {
+      cycles.push(
+        cycle({ sequence, run, scan: horizon, disposition: 'LEASE_RELEASE_UNPROVEN', wake }),
+      );
+      return result(cycles, null);
+    }
+
+    // ── A reset that matured inside the pass: plan again, at once ──────────
+    //
+    // Before the wake question, because a matured instant is work that is
+    // resumable *now* and a future instant is work that is not. Sleeping past
+    // the first to reach the second would be the scheduler choosing the later of
+    // two answers it holds simultaneously.
+    //
+    // No sleep, and therefore no re-establishment: the registry is re-read after
+    // a *sleep*, because a sleep is where the world gets time to change out from
+    // under a resolved set. Nothing crossed here. The preflight is re-minted all
+    // the same, because the factory is called once per cycle and being more
+    // conservative about a login is never wrong.
+    if (matured !== null) {
+      if (sequence >= cycleBudget) {
+        cycles.push(
+          cycle({
+            sequence,
+            run,
+            scan: horizon,
+            disposition: 'CYCLE_BUDGET_SPENT',
+            wake: wake ?? matured,
+          }),
+        );
+        return result(cycles, null);
+      }
+      cycles.push(
+        cycle({ sequence, run, scan: horizon, disposition: 'MATURED_DURING_PASS', wake: matured }),
+      );
+      continue;
+    }
+
+    if (wake === null) {
+      cycles.push(cycle({ sequence, run, scan: horizon, disposition: 'NO_FUTURE_WAKE' }));
+      return result(cycles, null);
+    }
+
+    if (sequence >= cycleBudget) {
       cycles.push(cycle({ sequence, run, scan: horizon, disposition: 'CYCLE_BUDGET_SPENT', wake }));
       return result(cycles, null);
     }
@@ -480,7 +627,47 @@ export async function driveScheduler(
     }
 
     // ── Everything from here is established again ─────────────────────────
+
+    /**
+     * A stop asked for after the wait, and before this cycle commits to another
+     * pass. Checked twice, and neither is redundant.
+     *
+     * The first covers the window between the sleep returning and the registry
+     * being re-read, which is not a moment: `resolveRegistry` walks the enlisted
+     * repositories one at a time and starts real `git` children for each, so on
+     * a large registry it is seconds. The second covers the window after it.
+     *
+     * Without them a review found the whole design's promise false. The
+     * scheduler's own contract says an interrupt "sets `stopped`, so the loop
+     * ends rather than planning again", and the only other place it was asked
+     * was at the *top of the next cycle's* refusals — after the next pass had
+     * already been driven. An interrupt landing in either window bought a full
+     * coordinator pass across every enlisted repository, agents included, at a
+     * moment when nothing was in flight and the scheduler was holding nothing:
+     * exactly the state the design says an interrupt ends.
+     */
+    const stopAfterWait = (): SchedulerResult =>
+      result(
+        [
+          ...cycles,
+          cycle({
+            sequence,
+            run,
+            scan: horizon,
+            disposition: 'SHUTDOWN_REQUESTED',
+            wake,
+            waitedMs: slept.elapsedMs,
+          }),
+        ],
+        null,
+      );
+
+    if (shutdown.stopped()) return stopAfterWait();
+
     const registry = await deps.resolveRegistry();
+
+    if (shutdown.stopped()) return stopAfterWait();
+
     if (!registry.ok) {
       cycles.push(
         cycle({
