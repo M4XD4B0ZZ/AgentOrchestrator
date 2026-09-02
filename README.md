@@ -3880,6 +3880,62 @@ and because the failure mode it describes — a command that cannot start is
 
 ### Carried forward, deliberately
 
+- **L-M3-01-1** — the wake scan is **strictly weaker than
+  `evaluateAutomaticResume`**, on two facts it has already read. That authority
+  additionally requires `currentCommit !== null` and
+  `worktreeCleanAtCheckpoint === true`, both properties of the *record* rather
+  than of the world, so a `BLOCKED_USAGE_LIMIT` state carrying a reset **and** a
+  withdrawn checkpoint can never resume automatically — and is refused the
+  operator escape too, because `--continue-usage-limit` requires
+  `reportedResetAt === null`. `loop-step.ts` reaches `checkpoint: null` on four
+  production paths, so the shape is routine rather than exotic. The scheduler
+  schedules a wake for it, wakes once, plans, and then finds no future wake
+  because the instant is behind: one wasted pass, never a loop, and pinned as
+  such. What it can cost is wall clock — under the minimum `--max-cycles 2` a
+  doomed near wake spends the whole budget and a live later wake is never
+  reached, reported honestly as `CYCLE_BUDGET_SPENT`, exit 5.
+
+  Narrowing the scan by those two fields is free of I/O and would remove the
+  largest class of dead wakes. It is **not** taken, and the reason is the one
+  this build applies elsewhere: it would be a second reading of another module's
+  policy, correct only for as long as that policy keeps those two checks
+  record-only. The stuck state itself is a pre-existing M2 defect — the escape's
+  own guard excludes it — and belongs to whoever reopens that guard, not here.
+- **L-M3-01-2** — a **throw out of a coordinator pass discards every completed
+  cycle's report**. `driveScheduler` does not wrap `drive(...)`, so a planner
+  rethrow escapes to the command's `catch` and exits `EXIT_RUN_UNEXPECTED` with
+  the `cycles` array lost. Safe — the coordinator drains before it rethrows, so
+  no lease is held and no sleep follows — and a pre-existing shape, but the
+  blast radius is larger now: a run that drove five cycles over fifteen hours
+  and threw on the sixth prints nothing about the fifteen hours.
+- **L-M3-01-3** — **every cycle re-drives every already-settled task.** The
+  coordinator's `attempted` set is per call, so cycle *n+1* re-admits every
+  `(repository, task)` cycle *n* drove, terminal ones included: a lease
+  acquisition, a `startTask` and a planning pass each, per cycle. Not a
+  correctness break — the terminal state refuses inside `runTask` — and bounded
+  by `--max-cycles`; it does mean a *failing* task burns a fresh
+  `--max-invocations` budget on every wake.
+- **L-M3-01-4** — the **`elapsedMs` a report prints is a wall-clock difference**,
+  not elapsed time. A clock that moved during the wait moves it: a backward step
+  deflates it on the success path and can make it negative on a refused one. It
+  is labelled `ms of wall clock` for that reason, and nothing decides on it —
+  every use reaches the report and nothing else. There is no monotonic source in
+  this build that survives a process.
+- **L-M3-01-5** — a pass that ended in an **input refusal is still followed by a
+  wait**. `PLANNING_REFUSED_MIDRUN` grades `EXIT_RUN_INPUT_UNUSABLE`, and the
+  scheduler reads the durable horizon rather than the pass's outcome, so an
+  operator learns about an unreadable task source only when the invocation ends.
+  Deliberate: the horizon is a property of the repositories, not of the pass, and
+  making the wait conditional on a pass outcome would be a second scheduling
+  policy. Reported honestly at the end, and the exit code is the worst of every
+  cycle.
+- **L-M3-01-6** — the directory enumeration is the **first `readdir` over
+  `runtime/` in this build**, and it is called without `withFileTypes`. A
+  directory named `<taskId>.json` is refused by `state-store.ts`'s own
+  `isFile()` check and a symlink can only produce a `STATE_UNREADABLE` note; a
+  POSIX FIFO would block `openSync`, which is out of the platform contract.
+  Worth an `isFile()` filter eventually; not a defect on Windows/NTFS.
+
 - **L-M1-VR-1** — the stored verification excerpt is the **head** of the failing
   phase's stream, not its end. For a long test run that is the banner rather than
   the assertion. It comes from `agentDiagnostics()` unchanged, and repairing it

@@ -1093,6 +1093,59 @@ describe('M3 slice 1 — the scheduler loop', () => {
     expect(readFileSync(statePath).length).toBeGreaterThan(0);
   });
 
+  it('the cycle budget stops a matured re-plan too, not only a wait', async () => {
+    // There are two budget checks — one on the matured path and one on the
+    // waiting path — and a mutation campaign found only the second was covered:
+    // flipping `>=` to `>` on the first survived the whole suite, because every
+    // budget case reached the loop through a future wake. A gate nothing drives
+    // is a gate nobody has measured.
+    const root = makeRepository('loop-matured-budget', ['T-1', 'T-2']);
+    writeBlockedState(root, 'T-1', new Date(NOW_MS + 5 * 60_000).toISOString());
+    writeBlockedState(root, 'T-2', new Date(NOW_MS + 15 * 60_000).toISOString());
+    const entry = await registered(root);
+
+    let clock = NOW_MS;
+    const passes: number[] = [];
+    const sleeps: number[] = [];
+
+    const result = await driveScheduler(
+      request({
+        repositories: [entry],
+        // Two cycles. Cycle 1 matures T-1 and re-plans; cycle 2 matures T-2 and
+        // must stop rather than re-planning a third time.
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 2 },
+      }),
+      {
+        now: () => new Date(clock).toISOString(),
+        git: runGitCommand,
+        authPreflight: () => async () => provenAuthEvidence(),
+        resolveRegistry: async () => ({
+          ok: true,
+          repositories: [entry],
+          maxConcurrentRepositories: 1,
+        }),
+        driveRepositories: async () => {
+          passes.push(passes.length + 1);
+          clock += 10 * 60_000;
+          return runResult();
+        },
+        sleep: async (ms: number): Promise<void> => {
+          sleeps.push(ms);
+          clock += ms;
+        },
+        shutdown: { stopped: () => false, cancel: new Promise<void>(() => {}) },
+      },
+    );
+
+    expect(passes).toEqual([1, 2]);
+    expect(sleeps).toEqual([]);
+    expect(result.cycles.map((entry_) => entry_.disposition)).toEqual([
+      'MATURED_DURING_PASS',
+      'CYCLE_BUDGET_SPENT',
+    ]);
+    expect(result.cycles[1]?.wake?.taskId).toBe('T-2');
+  });
+
   it('a stop asked for while the registry is being re-read buys no further pass', async () => {
     // The window a review found: the sleep ends, `resolveRegistry` walks the
     // enlisted repositories one at a time starting real `git` children, and an
@@ -1220,6 +1273,56 @@ describe('M3 slice 1 — the scheduler loop', () => {
       // see it.
       expect(result.cycles[0]?.wake).not.toBeNull();
     }
+  });
+
+  it('refuses on a release RECORD that is not RELEASED, whatever the outcome says', async () => {
+    // Not a shape production can build today: `finish` maps every non-`RELEASED`
+    // release code onto the `LEASE_RELEASE_FAILED` outcome, so the two readings
+    // are one fact spelled twice, and a mutation campaign duly reported dropping
+    // the record read as an equivalent mutant.
+    //
+    // It is pinned anyway, and this comment is what the pin means: the second
+    // read exists so that a future `finish` which stops collapsing the two
+    // cannot silently disarm the gate. `unattended-resume.ts` proves a release
+    // from the record (`RELEASED` is the only proof there is), and citing that
+    // module while reading only the summary is how two spellings drift apart.
+    const root = makeRepository('loop-release-record', ['T-1']);
+    writeBlockedState(root, 'T-1', new Date(NOW_MS + 60_000).toISOString());
+    const entry = await registered(root);
+
+    const test = harness({
+      runs: [
+        runResult({
+          outcome: 'RUN_COMPLETE',
+          planCode: 'TASK_SELECTED',
+          admissions: [
+            {
+              sequence: 1,
+              repositoryId: 'r',
+              repositoryRoot: root,
+              taskId: 'T-1',
+              concurrencyAtAdmission: 1,
+              threw: false,
+              lifecycle: {
+                ...lifecycleResult('COMPLETED'),
+                release: { code: 'LEASE_REMOVE_FAILED' },
+              },
+            },
+          ],
+        } as never),
+      ],
+    });
+
+    const result = await driveScheduler(
+      request({
+        repositories: [entry],
+        wait: { wait: true, maxWaitMs: MAX_WAIT_MS_CEILING, maxCycles: 8 },
+      }),
+      test.deps,
+    );
+
+    expect(result.ending).toBe('LEASE_RELEASE_UNPROVEN');
+    expect(test.sleeps).toEqual([]);
   });
 
   it('does sleep when every admission released', async () => {

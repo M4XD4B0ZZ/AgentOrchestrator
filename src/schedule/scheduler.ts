@@ -33,13 +33,22 @@
  * refuses stale recovery too, because a sleeping owner really is alive.
  *
  * `driveRepositories` returns only after every admission it made has settled,
- * and a settled admission has released — `driveLifecycle` releases through
- * `finish` on every controlled path and through its own `catch` on the rest. So
- * the layering makes the invariant structural rather than asserted:
+ * and a settled admission has **attempted** its release — `driveLifecycle`
+ * releases through `finish` on every controlled path and through its own `catch`
+ * on the rest. So the layering makes the invariant structural:
  *
  *     cycle 1: driveRepositories → admissions → each acquires, drives, releases
  *     here   : scan durable state, holding nothing, and sleep holding nothing
  *     cycle 2: driveRepositories → acquires again, ordinarily
+ *
+ * The structural half is not the whole of it, and an earlier version of this
+ * paragraph said "has released" and stopped there. A release can **fail** —
+ * `LEASE_RELEASE_FAILED` is a modelled outcome precisely because it does — and
+ * the lease file then stays on disk naming a live pid. Sleeping on that turns a
+ * rare failure into a day-long lockout of that repository, with stale recovery
+ * refused too, because a sleeping owner really is alive. So the sleep carries a
+ * gate of its own: nothing sleeps until every admission has been **shown** to
+ * have given its repository back. See `LEASE_RELEASE_UNPROVEN`.
  *
  * This module never takes a lease, never writes task state, and never reaches
  * inside a lifecycle.
@@ -64,14 +73,21 @@
  *
  * ── Why the loop terminates ────────────────────────────────────────────────
  *
- * A cycle sleeps only for a wake that `scanDurableWakes` reported as **strictly
+ * A cycle sleeps only for a wake `scanDurableWakes` reported as **strictly
  * future**, so every sleep is positive and every wake moves the clock past at
- * least one recorded instant. An instant that has passed is never reported
- * again, so a cycle cannot repeat the previous cycle's wait. A new future
- * instant can appear — that is a task that ran and met the quota again — and it
- * cost a real agent invocation to produce, so it is progress rather than a spin.
- * Above all of that sits `--max-cycles`, which is the operator's own bound and
- * has no default.
+ * least one recorded instant. An instant already behind when a pass began is
+ * never offered at all, so a cycle cannot repeat the previous cycle's wait.
+ *
+ * The one cycle that does not sleep — a reset that matured *inside* the pass —
+ * terminates for the same reason from the other side: the next pass begins after
+ * that instant, so the instant leaves the matured band and cannot be offered
+ * twice.
+ *
+ * A new future instant can appear, and that is a task that ran and met the quota
+ * again: it cost a real agent invocation to produce, so it is progress rather
+ * than a spin. Above all of that sits `--max-cycles`, the operator's own bound,
+ * which has no default and is itself capped by `MAX_SCHEDULER_CYCLES` where the
+ * loop reads it.
  *
  * ── What this module deliberately is not ───────────────────────────────────
  *
