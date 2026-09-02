@@ -3880,6 +3880,62 @@ and because the failure mode it describes — a command that cannot start is
 
 ### Carried forward, deliberately
 
+- **L-M3-F-1 — the recurring loop cannot clear a lease its own predecessor left.**
+  `run/repository-coordinator.ts` passes `recoverStaleLease: false` on every
+  admission the cross-repository coordinator makes, and `repositories` registers
+  no recovery grant, so `run/lifecycle-driver.ts` short-circuits to
+  `STALE_LEASE_PRESENT`. That refusal is deliberate and the command says so — a
+  selector may choose *what starts* and may not become the subject of a
+  destructive act — and it is the right answer for a selector. Its consequence
+  for a long recurring invocation is what no register named: a process that dies
+  **inside** a pass leaves a lease naming a dead pid, and the successor refuses
+  that repository on every cycle for as long as its budget lasts. The repository
+  is not stuck — `agent-loop lease recover --repository <path>` takes no
+  attendance flag and no operator input — but nothing in AgentOrchestrator calls
+  it. U1's narrowing sentence, "a scheduler can now clear the ordinary crash
+  itself", is true of an *external* scheduler and not of this one. Closing it is
+  a product-contract decision about whether a selector may recover, not a bug
+  fix, which is why it is recorded rather than done.
+
+- **L-M3-F-2 — one repository's resolution failure ends the whole recurring
+  invocation.** `registry/repository-registry.ts` returns on the first entry that
+  fails to resolve and publishes nothing, so a refusal is total by design: a
+  selection made over the repositories that happened to read cleanly would turn a
+  configuration mistake into a scheduling decision. The scheduler re-resolves the
+  registry after **every** sleep, so post-wait the same read ends the invocation
+  with `REGISTRY_UNUSABLE_AFTER_WAIT` and exit 2. The failure set includes
+  `GIT_UNAVAILABLE`, which a `git` child that cannot start, or cannot complete one
+  of the resolver's read-only queries, produces — so a momentary fault in one repository can end a multi-day run
+  while every other repository's durable wake is still on disk. Measured in the
+  M3 final dogfood: with one registered repository renamed away, two healthy
+  repositories with runnable work did nothing, under `--attended`, and no lease
+  was taken anywhere. `L-M2-04-3` covers the *planner* refusing one pass; this is
+  the registry-resolution class and its M3-era consequence.
+
+- **L-M3-F-3 — the outbox is blind to every condition that is not a task state.**
+  `notify/attention-outbox.ts` scans durable task states and judges them with
+  `attentionForTaskState`, which is keyed on `state.state`. No lifecycle or run
+  outcome reaches it, so `STALE_LEASE_PRESENT`, `LEASE_ACQUISITION_REFUSED`,
+  `LEASE_RELEASE_UNPROVEN`, `REPOSITORY_UNPLANNABLE` and
+  `REPOSITORY_UNRESOLVABLE` raise no durable item and send no push. Combined with
+  `L-M3-02-10` — a long recurring run prints nothing until it ends — a repository
+  that has been unreachable since the first cycle is invisible in every channel
+  until the run terminates. This is the precise reason the durable outbox
+  mitigates **U2** and does not touch **U3**, and the M3 final dogfood measured
+  it: the repository-unresolvable injection raised nothing.
+
+- **L-M3-F-4 — the one quota record nothing can move is also the one nobody is
+  told about.** `core/task-attention.ts` derives the item for
+  `BLOCKED_USAGE_LIMIT` from `usageLimitContinuation(state, now).permitted`, so
+  every refusal is silent — including `RECORD_REFUSAL_UNRECOGNISED`, the
+  fail-closed floor for a record this build cannot read as either owner's (a
+  relative `repositoryRoot`, which `NonBlankString` admits: see `L-M3-02-7`).
+  `L-M3-02-7` records that such a record is recoverable by nothing; it does not
+  record that it also raises no attention item. The code is right — permitting it
+  would make the report name a command that would refuse — and the gap is that
+  `L-M3-02-7` understates the consequence by one sentence, which this entry is.
+  Same shape as `L-M3-02-9`, which does state its silence.
+
 - **L-M3-01-1 — half closed by M3 slice 2.** It said that a
   `BLOCKED_USAGE_LIMIT` state carrying a reset **and** a withdrawn checkpoint
   could never resume automatically — `evaluateAutomaticResume` additionally
@@ -13303,6 +13359,149 @@ resume is then denied on a fact no passage of time can change.
 
 See the decision record:
 [A persistent scheduler, and a wait that outlives the process that made it](docs/decisions/2026-09-02-adr-persistent-scheduler-and-restart-safe-wait.md).
+
+## One invocation, three repositories, no re-invocation (the M3 final dogfood)
+
+Every capability above was measured on its own. None of them had been asked the
+question the product exists to answer, which is one sentence: **can one
+AgentOrchestrator process centrally operate across several repositories for a
+meaningful interval — making progress where it owns the decision, waiting where
+the machine can resume, surfacing operator-owned conditions, and recovering
+across a restart?**
+
+This section is the run that asked it. It changed no production code.
+
+**What it is not.** Every invocation carries `--attended`, which this build
+defines as an authorisation and not as a claim that somebody is looking. What was
+demonstrated is one invocation driving three repositories across six cycles with
+no re-invocation between them, and a restart that lost nothing. It settles
+nothing about U1–U4, and a human intervened deliberately throughout: the
+orchestrator was killed, three quota records were written by hand, two fixtures
+were rebuilt after the reconciler refused them, one was retired, the attention
+store was deleted on purpose, one operator escape was run by hand, the operator's
+registry was substituted, and two failure injections were made. The decision
+record names each one.
+
+### It used the operator's real home, because there is no other production path
+
+The product resolves its home through `os.userInfo()` and consults no
+environment block. The two names that can relocate it —
+`AGENT_LOOP_TEST_PROFILE` and `AGENT_LOOP_TEST_EGRESS` — exist only under
+`tests/dist-artifact/`, where the harnesses set them and the preloads read them
+by monkey-patching `os.userInfo` under `node --require`; `grep -rn
+'AGENT_LOOP_TEST_' src/` returns nothing. A dogfood driven through that preload
+would be driving a test seam, so this one used the real
+`<user profile>\.agent-orchestrator\`, with its real registry and its real
+`notify.yaml`. No preload, no environment seam, and `src/cli/index.ts` registers
+`repositories` with no seams, so every dependency resolved to its production
+default.
+
+### Three repositories, and one task id deliberately used twice
+
+`alpha-service` carried work a writer could finish. `charlie-service` carried a
+declared verification that can never pass, so the `BLOCKED_VERIFY` it produced
+was written by AgentOrchestrator and not by a fixture — the writer really ran and
+really committed first. `bravo-service` carried a quota block **written by hand**
+into the shipped durable shape, because a real allowance cannot be exhausted on
+demand, against a real worktree on the real derived branch. **`alpha` and
+`charlie` both name their task `SHARED-1`.**
+
+One command, and no re-invocation between cycles:
+
+```powershell
+node .\dist\cli\index.js repositories --attended --max-steps 12 --max-invocations 1 `
+  --wait-for-reset --max-wait-ms 900000 --max-cycles 6 --idle-poll-ms 20000
+```
+
+**The pass that did the work printed nothing**, because it was killed before it
+returned — residual `L-M3-02-10` behaving exactly as recorded, and the most
+useful thing this run learned about it. What is known of that pass was observed
+while it ran: at `18:36:11Z` `alpha` held its lease in `REVIEWING` with a live
+`codex.exe` under the native `ao-launch.exe` boundary, `charlie` had already
+reached `BLOCKED_VERIFY`, and `bravo` was untouched; by `18:37:53Z` `alpha` was
+`READY_FOR_PR` with its lease released and the outbox held one item. Two
+repositories were driven in one pass, and a real reviewer process was seen
+running.
+
+`Peak concurrency: 3` against `Capacity: 3` comes from the **restarted**
+process's first cycle over the same three repositories, whose three admissions
+were a terminal re-read, an unchanged block and a refusal. In it `bravo/WAIT-1`
+**was admitted** — admission #3 — took and gave back its lease, and its resume
+was then refused `RESET_TIME_NOT_REACHED`. There is no quota-aware admission
+filter: eligibility is a property of the task definition, so the refusal arrives
+from the resume policy inside the run. What it raised was nothing at all, and
+that is the interesting half: a wait the machine owns is not a person's
+problem.
+
+The two `SHARED-1` tasks got their own worktree under their own repository root,
+on a branch of the same name in two different object stores, at different
+commits. Reversing the registry file did not move the binding.
+
+### The restart happened where the contract says it is safe
+
+The process was terminated with `taskkill /F` while it slept between passes —
+all three leases free, no lease file anywhere. It wrote zero bytes, and two
+seconds later no `claude`, `codex` or `ao-launch` process it had started was
+still running. Four durable documents
+were byte-identical across the kill. A second process, given the same arguments
+and told no task and no instant, re-read the wake from the same record:
+
+```text
+Scheduler       : WAITED
+Waited          : 132460 ms of wall clock
+```
+
+and then drove `WAIT-1` to `READY_FOR_PR` in the next cycle, without repeating
+`alpha`'s finished work or duplicating `charlie`'s item. **This is a restart
+between passes, where the invocation holds nothing.** A kill *inside* a pass
+leaves a lease this command may not recover — `L-M3-F-1`, in *Carried forward,
+deliberately* above.
+
+### The ownership split, isolated inside one state name
+
+`BLOCKED_USAGE_LIMIT` is the only state whose owner is a function of the record
+and the clock. Two records in one repository, differing in one field; both were
+admitted, and the difference is what the resume decision and the outbox made of
+them:
+
+| Task | `reportedResetAt` | Resume decision | Outbox |
+| --- | --- | --- | --- |
+| `WAIT-2` | `null` | `RESET_TIME_MISSING` | `QUOTA_CONTINUATION_REQUIRED` |
+| `WAIT-3` | an hour ahead | `RESET_TIME_NOT_REACHED` | **nothing**, and it is the wake |
+
+Running the operator escape the notification named then moved `WAIT-2` out of the
+block and into `HUMAN_DECISION_REQUIRED` — the machine recorded a decision rather
+than inventing one — and the next pass reported `Raised now : 1, Resolved : 1`,
+removing the old item, raising one for the new condition, and leaving the other
+repository's item alone.
+
+Delivery was proven from outside the machine: polling the configured ntfy topic
+returned the message, timestamped to the second against the record's
+`observedAt`, carrying no filesystem path. It was sent **once** per condition; a
+later duplicate exists in the topic only because the store was deliberately
+deleted to prove reconstruction. The whole mechanism is conditional on
+`--wait-for-reset`: without it no store is touched and no configuration is read.
+
+### Two things this run may not be read as saying
+
+**`Ending : CYCLE_BUDGET_SPENT` is not "the work finished".** With
+`--idle-poll-ms` given, `NO_FUTURE_WAKE` is unreachable, so that is the only
+normal ending. A separate invocation without the flag reached the legitimate one
+— but only after a fixture was retired by hand to empty the wake horizon, and
+every admission in that pass ended `AUTH_PREFLIGHT_FAILED`, so the ending is a
+property of the durable scan and not of the work. And `outcome : COMPLETED` on
+later cycles is a re-admission the terminal state refuses, not repeated work.
+
+**U1–U4 are untouched, and unattended operation stays unsupported.** The
+interrupt landed between passes, where no lease is held, so U1's
+pre-establishment window was never entered. U2 is mitigated but not closed by the
+durable outbox, which is written whether or not an endpoint is configured. **U3
+is untouched** — an above-runner refusal produces no task state and therefore no
+item, which this run measured directly when a registered repository was renamed
+away. U4 is about `block` run ids, which this path does not use.
+
+See the decision record:
+[The final multi-project dogfood, and what it settles](docs/decisions/2026-09-02-adr-m3-final-unattended-dogfood.md).
 
 ## Not implemented yet
 
