@@ -6,11 +6,13 @@
  * workspace lifecycle, durable state, reconciliation, the agent runners and
  * the verify/review/remediate loop — plus `doctor` and `run`.
  *
- * `doctor` is read-only, and so is `run` by default. Execution exists behind one
- * explicit grant, `run --attended`, which is the only way any command here
- * starts an agent, writes task state or prepares a workspace. See
- * `run-command.ts` for why the grant is a new flag rather than a new meaning for
- * an existing verb.
+ * `doctor` is read-only, and every command that can execute is read-only until
+ * it is granted otherwise. That is the rule, and it is stated as a rule rather
+ * than as a list of which commands have the flag today: the list has been wrong
+ * before, and a reader needs to know that no verb here changes meaning without
+ * a grant, not which verbs currently have one. See `run-command.ts` for why the
+ * grant is a new flag rather than a new meaning for an existing verb, and each
+ * command's own `--help` for what its grant covers.
  */
 
 import { Command } from 'commander';
@@ -52,12 +54,14 @@ const DESCRIPTION = [
   '    `--attended` is a grant for all three; `--automatic-publish-head-only`',
   '    is a second one, for the publication alone, and only where this',
   '    machine’s operator declared that repository publishable that way',
-  '  - `repositories`: the read-only listing of the repositories this machine’s',
-  '    operator has enlisted for orchestration, and which single task is next',
-  '    across all of them. It reads one file under this OS user’s profile, takes',
-  '    no `--repository`, and acts on nothing — no execution lease, no agent, no',
-  '    workspace, no task state, no remote. It is the only command that selects',
-  '    work across more than one repository',
+  '  - `repositories`: the repositories this machine’s operator has enlisted for',
+  '    orchestration, and which single task is next across all of them. It reads',
+  '    one file under this OS user’s profile and takes no `--repository`. It is',
+  '    the only command that selects work across more than one repository, and',
+  '    the only one that executes more than one at a time: read-only by default,',
+  '    and with `--attended` it drives several concurrently — at most one task',
+  '    per repository, bounded by that same file. The three grants that',
+  '    authorise a destructive departure are not offered there',
   '  - `publication authorisations`: the read-only listing of what this build',
   '    recorded it was permitted to attempt with nobody present. It reads one',
   '    directory under this OS user’s profile, opens no repository and starts no',
@@ -94,9 +98,13 @@ const DESCRIPTION = [
   '    written by this build. This is the only request any command here makes',
   '    that can change anything',
   '  - `doctor` starts the agent CLIs to read their login state',
-  '  - `run --attended`, `run --automatic-resume-only` and `block --attended`',
-  '    start the agent CLIs, and run whatever verification commands the',
-  '    repository’s own profile declares',
+  '  - every invocation that executes a task starts the agent CLIs and runs',
+  '    whatever verification commands that repository’s own profile declares.',
+  '    Today that is `run --attended`, `run --automatic-resume-only`,',
+  '    `block --attended` and `repositories --attended`; the rule is the grant,',
+  '    not the list, because a list here has gone stale before. The last of the',
+  '    four does it for several repositories at once, so it is the one that can',
+  '    have several agent CLIs in flight together',
   '',
   'Given none of the flags named above, the `delivery` command starts no client',
   'and contacts no forge.',

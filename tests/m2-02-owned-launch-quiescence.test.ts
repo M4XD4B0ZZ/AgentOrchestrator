@@ -955,10 +955,10 @@ describe('the execution seam accounts for every launch it starts', () => {
         opening: 'RECORDED',
         record: { established: () => {}, ended: () => closed.push('first') },
       }),
-    });
+    }, null);
     const disposeSecond = installOwnedLaunchAccountant({
       open: (): OwnedLaunchOpening => ({ opening: 'LAUNCH_MUST_NOT_START', detail: 'NO_ROOM' }),
-    });
+    }, null);
     const opened = openOwnedLaunch();
     expect(opened.refusal).toBe('NO_ROOM');
     expect(opened.records).toEqual([]);
@@ -971,7 +971,7 @@ describe('the execution seam accounts for every launch it starts', () => {
     const before = installedOwnedLaunchAccountants();
     const disposeEnded = installOwnedLaunchAccountant({
       open: (): OwnedLaunchOpening => ({ opening: 'EPOCH_ENDED' }),
-    });
+    }, null);
     expect(installedOwnedLaunchAccountants()).toBe(before + 1);
     // It does not stop the launch, and it is gone afterwards: there is no
     // document of that epoch for a later recovery to read this launch out of.
@@ -999,12 +999,12 @@ describe('the execution seam accounts for every launch it starts', () => {
         opening: 'RECORDED',
         record: { established: () => {}, ended: () => closed.push('first') },
       }),
-    });
+    }, null);
     const disposeThrower = installOwnedLaunchAccountant({
       open: (): OwnedLaunchOpening => {
         throw new Error('an accountant is somebody else’s code');
       },
-    });
+    }, null);
     const opened = openOwnedLaunch();
     expect(opened.refusal).toBe('ACCOUNTANT_THREW');
     expect(opened.records).toEqual([]);

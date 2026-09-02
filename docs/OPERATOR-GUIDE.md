@@ -679,6 +679,62 @@ Execution Lease dieses Repositories, die höchstens eine Invocation zum Writer m
 
 ---
 
+## 12a. Mehrere Repositories nebeneinander (M2 Slice 5)
+
+`agent-loop repositories` ist ohne Grant weiterhin **read-only**. Mit
+`--attended` treibt es die registrierten Repositories — mehrere gleichzeitig.
+
+```powershell
+node .\dist\cli\index.js repositories --attended
+```
+
+Es gibt hier **kein** `--repository`. Das Subjekt ist die Registry unter
+`%USERPROFILE%\.agent-orchestrator\repositories.yaml`.
+
+**Die Obergrenze steht in dieser Datei, nicht in der Kommandozeile:**
+
+```yaml
+schemaVersion: 1
+maxConcurrentRepositories: 2
+repositories:
+  - path: D:\Pfad\Zum\Projekt-A
+  - path: D:\Pfad\Zum\Projekt-B
+```
+
+Ganze Zahl von `1` bis `8`. Fehlt das Feld, gilt **1** — genau das Verhalten
+jedes früheren Builds. `0`, negative Werte und Kommazahlen sind **Refusals**
+(`REGISTRY_CONTRACT_VIOLATION`), keine stillen Korrekturen: `0` heißt *nichts
+ausführen*, und das als `1` zu lesen wäre das Gegenteil des Geschriebenen.
+
+Was der Lauf tut, in vier Sätzen:
+
+```text
+pro Repository höchstens eine Task gleichzeitig — immer, nicht konfigurierbar
+über die ganze Invocation so viele Tasks eines Repositories nacheinander,
+  wie zulässig werden
+Slots werden aus derselben Rangfolge gefüllt, die der read-only Report druckt
+ein Slot wird erst frei, wenn die Ausführung wirklich zu Ende ist
+```
+
+Ein Repository, dessen nächste Task global zuerst rangiert, blockiert die
+anderen also **nicht**: rangiert seine Task vorn und läuft es bereits, geht der
+freie Slot an das nächste Repository. Innerhalb eines Repositories ändert sich
+an der Reihenfolge nichts.
+
+**Drei Grants gibt es hier bewusst nicht:** `--recover-stale-lease`,
+`--remediate-verify-failure` und `--continue-human-decision`. Die bleiben an ein
+Repository gebunden, das der Operator auf der Kommandozeile benennt
+(`agent-loop run --repository <pfad> …`). Ein Selektor darf auswählen, *was*
+startet — er darf nicht das Subjekt eines destruktiven Akts auswählen.
+
+**Kosten, die man vorher wissen sollte.** Zwei gleichzeitige Repositories heißen
+zwei Writer-Agents und zwei Reviewer gegen **ein** Abo-Kontingent. Quota-Resilienz
+ist eine spätere Slice; bis dahin verbraucht eine Kapazität über 1 das gemeinsame
+Budget schneller. Deshalb ist der Default 1 und keine Zahl, die Parallelität
+vorführt.
+
+---
+
 ## 13. Die Run-ID
 
 Die Run-ID muss der Operator vergeben. Sie wird nie generiert: eine erfundene

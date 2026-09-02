@@ -146,14 +146,25 @@ const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{
  * Largest number of owned launches this build will hold open at once.
  *
  * Not "a number a run cannot reach", which is the claim
- * `MAX_WRITER_LAUNCH_ENTRIES` had to retract. It is a number this build's own
- * topology says nothing reaches: `grep -rn 'Promise.all' src/` finds nothing, so
- * every spawn in this product is awaited before the next begins and the register
- * holds at most one entry. Sixty-four is room for a shape that does not exist
- * yet, and reaching it is a **stated outcome** — the announcement discards the
- * document and answers `REGISTER_DISCARDED` with `REGISTER_FULL` as its reason —
- * rather than a silent state. There is no `REGISTER_FULL` *code*: this sentence
- * named one for a while, and the closed set the tests pin proves it absent.
+ * `MAX_WRITER_LAUNCH_ENTRIES` had to retract.
+ *
+ * The bound is **per epoch**, and it has to be stated that way since M2 slice 5.
+ * This paragraph used to derive it from a whole-process property — that
+ * `grep -rn 'Promise.all' src/` found nothing, so every spawn in this product
+ * was awaited before the next began — and that derivation is now false:
+ * `run/repository-coordinator.ts` drives several repositories at once. The
+ * conclusion survives, and it survives for a different reason: a register
+ * belongs to one execution lease, one lease belongs to one Git common
+ * directory, and the coordinator admits at most one execution per common
+ * directory at a time — so within *one* register the spawns are still awaited
+ * one after another and it still holds at most one entry. Concurrency in this
+ * build is across registers, never inside one.
+ *
+ * Sixty-four is room for a shape that does not exist yet, and reaching it is a
+ * **stated outcome** — the announcement discards the document and answers
+ * `REGISTER_DISCARDED` with `REGISTER_FULL` as its reason — rather than a silent
+ * state. There is no `REGISTER_FULL` *code*: this sentence named one for a
+ * while, and the closed set the tests pin proves it absent.
  */
 export const MAX_OPEN_OWNED_LAUNCHES = 64;
 

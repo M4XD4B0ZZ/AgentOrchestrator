@@ -42,6 +42,7 @@ import type { LeaseReleaseResult } from '../lease/execution-lease.js';
 import type { LifecycleOutcome } from '../run/lifecycle-driver.js';
 import type { RunOutcome } from '../run/run-driver.js';
 import type { CrossRepositoryPlanCode } from '../plan/plan-across-repositories.js';
+import type { CrossRepositoryRunOutcome } from '../run/repository-coordinator.js';
 import type {
   RegistryResolutionRefusal,
   RepositoryRegistryRefusal,
@@ -994,4 +995,143 @@ const REGISTRY_RESOLUTION_EXIT_CODES = Object.freeze({
 
 export function exitCodeForRegistryResolution(code: RegistryResolutionRefusal): CliExitCode {
   return REGISTRY_RESOLUTION_EXIT_CODES[code];
+}
+
+/**
+ * How the six exit codes rank when one report has to carry several answers
+ * (M2 slice 5).
+ *
+ * A cross-repository run drives many repositories and gets many codes, and the
+ * shell gets one. This is the order of *how much attention the ending demands*,
+ * worst first, and every code is ranked so that no pair is undecided:
+ *
+ *  1. `EXIT_RUN_UNEXPECTED` — something threw. A defect outranks every answer,
+ *     because the other answers were produced by code that was working;
+ *  2. `EXIT_RUN_NEEDS_OPERATOR` — a durable record a human has to look at. It
+ *     outranks bad input because the record is already on disk;
+ *  3. `EXIT_RUN_INPUT_UNUSABLE` — a file to edit, nothing durable wrong;
+ *  4. `EXIT_RUN_REFUSED` — somebody else is working. It clears itself, so it
+ *     outranks only the endings that need nothing at all;
+ *  5. `EXIT_RUN_CALL_AGAIN` — progress was made and more remains;
+ *  6. `EXIT_RUN_OK`.
+ *
+ * `EXIT_RUNTIME_UNSUPPORTED` is deliberately absent: the runtime gate terminates
+ * the process at the CLI entry before any command is dispatched, so no run can
+ * produce it beside another code.
+ *
+ * Exported so a test can pin the **set**, which is the only way the fail-closed
+ * floor in {@link worseExitCode} stays unreachable. A mutation campaign inverted
+ * that floor and survived, which is the honest verdict on a branch no run can
+ * reach — so what is measured is the property that makes it unreachable, rather
+ * than a behaviour that does not exist.
+ */
+export const EXIT_CODE_SEVERITY: readonly CliExitCode[] = Object.freeze([
+  EXIT_RUN_UNEXPECTED,
+  EXIT_RUN_NEEDS_OPERATOR,
+  EXIT_RUN_INPUT_UNUSABLE,
+  EXIT_RUN_REFUSED,
+  EXIT_RUN_CALL_AGAIN,
+  EXIT_RUN_OK,
+]);
+
+/**
+ * The more demanding of two exit codes, by {@link EXIT_CODE_SEVERITY}.
+ *
+ * A code the ranking does not know ranks worst rather than best. That is the
+ * fail-closed reading: an unrankable answer must not be able to make a run look
+ * finished, and the only way to reach it is for somebody to add a seventh code
+ * without adding it above.
+ */
+function worseExitCode(a: CliExitCode, b: CliExitCode): CliExitCode {
+  const rankA = EXIT_CODE_SEVERITY.indexOf(a);
+  const rankB = EXIT_CODE_SEVERITY.indexOf(b);
+  if (rankA < 0) return a;
+  if (rankB < 0) return b;
+  return rankA <= rankB ? a : b;
+}
+
+/**
+ * The coordinator's own endings. Total; pinned by test.
+ *
+ * Only the endings this layer decides. `RUN_COMPLETE` and `NOTHING_ADMITTED`
+ * are absent because neither has an answer of its own: the first is the worst of
+ * its admissions and the second is the planner's, and a code written here for
+ * either would be a second, weaker copy of a decision another table already
+ * makes.
+ */
+const CROSS_REPOSITORY_RUN_EXIT_CODES = Object.freeze({
+  // Nothing was planned and nothing ran: a bound to edit, which is code 2 for
+  // the same reason every registry refusal is.
+  CAPACITY_INVALID: EXIT_RUN_INPUT_UNUSABLE,
+  // Work was admitted and awaited, and the configuration then stopped being
+  // readable. The planner's refusal is `EXIT_RUN_INPUT_UNUSABLE` and stays it —
+  // what changed is that there are now results to read as well, and those are
+  // folded in below rather than overridden here.
+  PLANNING_REFUSED_MIDRUN: EXIT_RUN_INPUT_UNUSABLE,
+  // Progress was made and more may remain: `EXIT_RUN_CALL_AGAIN`, the same
+  // answer `INVOCATION_BUDGET_EXHAUSTED` gives for the same shape of ending.
+  // Reaching it means 4096 distinct tasks were driven in one invocation, which
+  // is a legitimate very large run as readily as it is a defect, and this build
+  // cannot tell those apart from here.
+  ADMISSION_BUDGET_EXHAUSTED: EXIT_RUN_CALL_AGAIN,
+}) satisfies Record<
+  Exclude<CrossRepositoryRunOutcome, 'RUN_COMPLETE' | 'NOTHING_ADMITTED'>,
+  CliExitCode
+>;
+
+/**
+ * Exit code for a whole cross-repository run (M2 slice 5).
+ *
+ * Three inputs, folded in one direction — worse wins:
+ *
+ *  - the coordinator's own ending, where it has one;
+ *  - the planner's code, for a run that admitted nothing;
+ *  - every admission's own `exitCodeForLifecycleRun`, unchanged. A task that
+ *    ended `BLOCKED_VERIFY` did not end differently for having run beside
+ *    another repository, which is the same rule the lifecycle table states about
+ *    an outer loop.
+ *
+ * An admission that **threw** contributes `EXIT_RUN_UNEXPECTED`, which by the
+ * ranking wins outright. It has no `LifecycleResult` to grade, and an ending
+ * with no report may not be graded as the absence of a problem.
+ */
+export function exitCodeForCrossRepositoryRun(result: {
+  readonly outcome: CrossRepositoryRunOutcome;
+  readonly planCode: CrossRepositoryPlanCode | null;
+  readonly admissions: readonly {
+    readonly threw: boolean;
+    readonly lifecycle: { readonly outcome: LifecycleOutcome; readonly start: { readonly outcome: StartTaskOutcome } | null } | null;
+  }[];
+}): CliExitCode {
+  if (result.outcome === 'CAPACITY_INVALID') {
+    return CROSS_REPOSITORY_RUN_EXIT_CODES.CAPACITY_INVALID;
+  }
+
+  let code: CliExitCode =
+    result.outcome === 'NOTHING_ADMITTED'
+      ? // The planner's own answer. `null` is not reachable — a run that planned
+        // at all records the code — and is graded as a defect rather than as a
+        // success, because a coordinator that admitted nothing and cannot say
+        // why has not answered the question.
+        result.planCode === null
+        ? EXIT_RUN_UNEXPECTED
+        : exitCodeForCrossRepositoryPlan(result.planCode)
+      : EXIT_RUN_OK;
+
+  if (result.outcome === 'PLANNING_REFUSED_MIDRUN') {
+    code = worseExitCode(code, CROSS_REPOSITORY_RUN_EXIT_CODES.PLANNING_REFUSED_MIDRUN);
+  }
+  if (result.outcome === 'ADMISSION_BUDGET_EXHAUSTED') {
+    code = worseExitCode(code, CROSS_REPOSITORY_RUN_EXIT_CODES.ADMISSION_BUDGET_EXHAUSTED);
+  }
+
+  for (const admission of result.admissions) {
+    code = worseExitCode(
+      code,
+      admission.threw || admission.lifecycle === null
+        ? EXIT_RUN_UNEXPECTED
+        : exitCodeForLifecycleRun(admission.lifecycle),
+    );
+  }
+  return code;
 }

@@ -1318,12 +1318,28 @@ describe('the slice added no new authority', () => {
     return readFileSync(join(PACKAGE_ROOT, relativePath), 'utf8');
   }
 
+  /**
+   * The three modules that decide *what is next* and never act on the answer.
+   *
+   * `repositories-command.ts` was in this list until M2 slice 5 and is not any
+   * more, and the reason is a real change rather than a carve-out: with
+   * `--attended` that command reaches `run/repository-coordinator.ts`, which
+   * takes leases and starts agents. Leaving it here would have kept two green
+   * assertions whose comments had become false — the pin would have guarded a
+   * lie. What it is still answerable for is below, stated narrowly.
+   */
+  const DECIDING_MODULES = [
+    join('src', 'registry', 'repository-registry.ts'),
+    join('src', 'plan', 'plan-across-repositories.ts'),
+    join('src', 'cli', 'render-repositories.ts'),
+  ];
+
   it('starts no process of its own', () => {
     // The build-wide pin — exactly two modules import `node:child_process` — is
     // in `tests/v2-07l-execution-lease.test.ts` and sweeps all of `src/`, so it
     // already covers these files. This is the narrower statement, made where the
-    // slice lives: none of the four names a process-starting facility at all.
-    for (const module of SLICE_MODULES) {
+    // slice lives: none of the three names a process-starting facility at all.
+    for (const module of DECIDING_MODULES) {
       const text = source(module);
       expect(text).not.toContain('child_process');
       expect(text).not.toContain('start-owned-process');
@@ -1332,16 +1348,30 @@ describe('the slice added no new authority', () => {
   });
 
   it('acquires no execution lease', () => {
-    // `owned-launch-accounting.ts` justifies its shape on "nothing in this build
-    // holds two leases in one process". This slice puts several repositories in
-    // one process, so that sentence is now this slice's to keep true — and the
-    // way it keeps it is by taking no lease at all.
-    for (const module of SLICE_MODULES) {
+    // Of the deciding modules, still true and still worth pinning: a planner
+    // that took a lease to find out what is next would take one for a
+    // repository it then did not choose.
+    for (const module of DECIDING_MODULES) {
       const text = source(module);
       expect(text).not.toContain('acquireRepositoryExecutionLease');
       expect(text).not.toContain('installOwnedLaunchAccountant');
       expect(text).not.toContain('recoverStaleLease');
     }
+  });
+
+  it('reaches execution only through the coordinator, and takes no lease itself', () => {
+    // What `repositories-command.ts` is answerable for after M2 slice 5. It may
+    // cause leases to be taken — that is what `--attended` is — and it may not
+    // take, release or recover one itself, because every gate that decides who
+    // may write lives behind `driveLifecycle` and a command reaching around it
+    // would be a second authority.
+    const command = source(join('src', 'cli', 'repositories-command.ts'));
+    expect(command).not.toContain('acquireRepositoryExecutionLease');
+    expect(command).not.toContain('releaseRepositoryExecutionLease');
+    expect(command).not.toContain('installOwnedLaunchAccountant');
+    expect(command).not.toContain('recoverStaleLease');
+    expect(command).not.toContain('child_process');
+    expect(command).toContain("from '../run/repository-coordinator.js'");
   });
 
   it('leaves every grant on `run` bound to a repository the operator named', () => {
